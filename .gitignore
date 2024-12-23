@@ -1,0 +1,13 @@
+Homer/
+input/
+LOGS/
+output/
+reference_genome/
+*.png
+*.csv
+*.tsv
+*.motifs
+*.log
+*.err
+*.txt
+*.html
