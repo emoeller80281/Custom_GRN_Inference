@@ -2,7 +2,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
 
-df = pd.read_csv(f'./output/total_motif_regulatory_scores.tsv', sep='\t')
+df = pd.read_csv(f'./output/inferred_grn.tsv', sep='\t')
 
 df['Source'] = df['Source'].apply(lambda x: x.split('(')[0])
 

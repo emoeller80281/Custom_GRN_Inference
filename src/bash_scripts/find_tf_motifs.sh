@@ -54,3 +54,5 @@ export input_file genome output_dir  # Export variables to make them accessible 
 find "$motif_dir" -name "*.motif" | parallel -j 32 process_motif_file {} "$input_file" "$genome" "$output_dir"
 
 echo "All motifs processed in parallel. Individual results saved in $output_dir"
+
+
