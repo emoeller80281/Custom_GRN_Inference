@@ -23,6 +23,33 @@ print(f'\tTGs: {len(TF_motif_binding_df["Target"])}')
 
 genes = set(RNA_dataset["Genes"])
 
+with open(f'RNA_genes.txt', 'w') as gene_file:
+    gene_file.write('Genes\n')
+    for gene in genes:
+        gene_file.write(f'{gene}\n')
+
+
+tf_motif_dataset_genes = TF_motif_binding_df["Source"].unique()
+# Print the unique genes
+print(f'Unique genes: {tf_motif_dataset_genes}')
+
+# Print the number of unique genes
+print(f'tf_motif_dataset_genes: {len(tf_motif_dataset_genes)}')
+
+# Open the file and write
+with open('TF_motif_genes2.txt', 'w') as motif_file:
+    motif_file.write('Genes\n')  # Header
+    count = 0  # Track how many lines are written
+    for gene in tf_motif_dataset_genes:
+        count += 1
+        motif_file.write(f'{gene}\t{count}\n')
+        if count < 10:  # Debugging: Print first 10 writes
+            print(f'Writing gene: {gene}')
+    motif_file.flush()
+    print(f'Total lines written: {count}')
+        
+TF_motif_binding_df["Source"].to_csv("TF_motif_genes.txt", index=False)
+
 overlapping_TF_motif_binding_df = TF_motif_binding_df[
     (TF_motif_binding_df["Source"].apply(lambda x: x in genes)) &
     (TF_motif_binding_df["Target"].apply(lambda x: x in genes))
