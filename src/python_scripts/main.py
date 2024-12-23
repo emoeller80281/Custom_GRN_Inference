@@ -86,13 +86,13 @@ def convert_to_homer_peak_format(atac_data):
 
 # ----- Input -----
 # Read in the ATAC data
-atac_data = pd.read_csv("input/macrophage_buffer1_filtered_ATAC.csv")
+atac_data = pd.read_csv("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/macrophage_buffer1_filtered_ATAC.csv")
 homer_df = convert_to_homer_peak_format(atac_data)
 
 homer_peak_file = homer_df.to_csv("input/Homer_peaks.txt", sep='\t', header=False, index=False)
 
 # Read in the RNA data
-rna_data = pd.read_csv("input/macrophage_buffer1_filtered_RNA.csv")
+rna_data = pd.read_csv("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/macrophage_buffer1_filtered_RNA.csv")
 
 # Read in the reference genome
 genome = read_genome(hg38_file)
