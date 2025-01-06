@@ -1,7 +1,7 @@
 Homer/
-input/
+input/*
 LOGS/
-output/
+output/*
 reference_genome/
 *.png
 *.csv
@@ -11,3 +11,6 @@ reference_genome/
 *.err
 *.txt
 *.html
+*.tar
+*.tar.gz
+*.zip
