@@ -3,7 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from matplotlib import rcParams
-
+import argparse
 
 # Set font to Arial and adjust font sizes
 rcParams.update({
@@ -16,12 +16,33 @@ rcParams.update({
     'legend.fontsize': 14  # Legend font size
 })
 
-RNA_file = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/macrophage_buffer1_filtered_RNA.csv"
-TF_motif_binding_file = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output/total_motif_regulatory_scores.tsv"
+def parse_args():
+    parser = argparse.ArgumentParser(description="Process TF motif binding potential.")
+    parser.add_argument(
+        "--rna_data_file",
+        type=str,
+        required=True,
+        help="Path to the scRNA-seq data file"
+    )
+
+    parser.add_argument(
+        "--tf_motif_binding_score_file",
+        type=str,
+        required=True,
+        help="Path to the processed TF motif binding score"
+    )
+    
+    args = parser.parse_args()
+
+    return args 
+
+args = parse_args()
+RNA_file = args.rna_data_file
+TF_motif_binding_score_file = args.tf_motif_binding_score_file
 
 print(f'Loading datasets')
 RNA_dataset = pd.read_csv(RNA_file)
-TF_motif_binding_df = pd.read_csv(TF_motif_binding_file, header=0, sep="\t", index_col=None)
+TF_motif_binding_df = pd.read_csv(TF_motif_binding_score_file, header=0, sep="\t", index_col=None)
 
 # Find overlapping TFs
 RNA_dataset = RNA_dataset.rename(columns={RNA_dataset.columns[0]: "Genes"})

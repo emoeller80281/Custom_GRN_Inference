@@ -5,7 +5,7 @@ from multiprocessing import Pool
 import argparse
 import logging
 
-homer_tf_motif_score_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output/homer_tf_motif_scores"
+homer_tf_motif_score_dir = "./output/homer_tf_motif_scores"
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Process TF motif binding potential.")
