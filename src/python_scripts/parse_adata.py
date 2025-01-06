@@ -130,12 +130,13 @@ rna_filtered = adata_RNA[adata_RNA.obs['label'] == 'classical monocytes']
 # Extract the expression matrix (X) and convert it to a gene x cell DataFrame
 RNA_expression_matrix = pd.DataFrame(
     data=rna_filtered.X.T.toarray(),  # Convert sparse matrix to dense
-    index=rna_filtered.var_names,    # Gene IDs as rows
-    columns=rna_filtered.obs_names   # Cell barcodes as columns
+    index=rna_filtered.var['gene_ids'],    # Gene IDs as rows
+    columns=rna_filtered.obs['barcode']  # Cell barcodes as columns
 )
+print(RNA_expression_matrix.head())
 
 # Export the filtered RNA expression matrix to a CSV file
-print('Exporting filtered RNA data for classical monocytes')
+print(f'\tExporting filtered RNA data for classical monocytes')
 RNA_output_file = "/home/emoeller/github/Custom_GRN_Inference/input/PBMC_RNA.csv"
 RNA_expression_matrix.to_csv(RNA_output_file)
 
@@ -145,11 +146,12 @@ atac_filtered = adata_ATAC[adata_ATAC.obs['label'] == 'classical monocytes']
 # Extract the expression matrix (X) and convert it to a gene x cell DataFrame
 ATAC_expression_matrix = pd.DataFrame(
     data=atac_filtered.X.T.toarray(),  # Convert sparse matrix to dense
-    index=atac_filtered.var_names,    # Gene IDs as rows
-    columns=atac_filtered.obs_names   # Cell barcodes as columns
+    index=atac_filtered.var['gene_ids'],    # Gene IDs as rows
+    columns=atac_filtered.obs['barcode']   # Cell barcodes as columns
 )
+print(ATAC_expression_matrix.head())
 
 # Export the filtered ATAC expression matrix to a CSV file
-print('Exporting filtered ATAC data for classical monocytes')
+print(f'\tExporting filtered ATAC data for classical monocytes')
 ATAC_output_file = "/home/emoeller/github/Custom_GRN_Inference/input/PBMC_ATAC.csv"
 ATAC_expression_matrix.to_csv(ATAC_output_file)

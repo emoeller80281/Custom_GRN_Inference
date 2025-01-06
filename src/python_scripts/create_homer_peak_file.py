@@ -55,7 +55,10 @@ args = parse_args()
 atac_data_file = args.atac_data_file
 print(f'Reading scATACseq data')
 atac_data = pd.read_csv(atac_data_file)
+print(atac_data.head())
+
 print(f'Converting scATACseq peaks to Homer peak format')
 homer_df = convert_to_homer_peak_format(atac_data)
+print(homer_df.head())
 
-homer_peak_file = homer_df.to_csv("input/Homer_peaks.txt", sep='\t', header=False, index=False)
+homer_peak_file = homer_df.to_csv("/home/emoeller/github/Custom_GRN_Inference/input/Homer_peaks.txt", sep='\t', header=False, index=False)
