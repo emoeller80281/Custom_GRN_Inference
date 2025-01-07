@@ -56,11 +56,11 @@ print(f'\nSize of unfiltered TF motif dataset:')
 print(f'\tTFs: {len(set(TF_motif_binding_df["Source"]))}')
 print(f'\tTGs: {len(TF_motif_binding_df["Target"])}')
 
-print(f'RNA_dataset')
-print(RNA_dataset.head())
+# print(f'RNA_dataset')
+# print(RNA_dataset.head())
 
-print(f'\nTF_motif_binding_df')
-print(TF_motif_binding_df.head())
+# print(f'\nTF_motif_binding_df')
+# print(TF_motif_binding_df.head())
 
 genes = set(RNA_dataset["Genes"])
 
@@ -117,13 +117,19 @@ TF_motif_binding_df['Expression'] = TF_motif_binding_df['Source'].map(gene_expre
 
 # Weigh the TF-TG motif binding score by the TF expression
 TF_motif_binding_df["Weighted_Score"] = TF_motif_binding_df["Expression"] * TF_motif_binding_df["Score"]
-TF_motif_binding_df.dropna(inplace=True)
+TF_motif_binding_df.fillna(1e-6, inplace=True)
 TF_motif_binding_df.reset_index(drop=True, inplace=True)
-print(TF_motif_binding_df.head())
+# print(TF_motif_binding_df.head())
 
-TF_motif_binding_df.to_csv('/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output/inferred_grn.tsv', sep='\t')
-print(TF_motif_binding_df.describe())
+TF_motif_binding_df.to_csv('/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output/inferred_grn.tsv', sep='\t', index=False)
 
+# Plot a histogram of the weighted score
+plt.figure(figsize=(10,6))
+plt.hist(np.log10(TF_motif_binding_df["Weighted_Score"]), bins=150, color="blue", alpha=0.7, log=True)
+plt.title("Distribution of weighted TF-TG binding scores")
+plt.xlabel("log10 TF-TG binding score")
+plt.ylabel("Frequency")
+plt.savefig("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output/inferred_grn_score_histogram.png", dpi=200)
 
 
 # RNA_expression_matrix = RNA_dataset.iloc[1:, 1:].values
