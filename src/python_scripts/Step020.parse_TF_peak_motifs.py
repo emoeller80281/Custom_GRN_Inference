@@ -64,10 +64,10 @@ def process_file(path_to_file) -> pd.DataFrame:
     filtered_df["Target"] = filtered_df["Target"].apply(lambda x: x.upper())
 
     # Calculate the score for the TG based on the total number of motifs for the TF
-    filtered_df["Score"] = filtered_df["Motif Count"] / total_motifs
+    filtered_df["Motif_Score"] = filtered_df["Motif Count"] / total_motifs
 
     # Save the final results
-    final_df = filtered_df[["Source", "Target", "Score"]]
+    final_df = filtered_df[["Source", "Target", "Motif_Score"]]
     
     return final_df
     
@@ -88,10 +88,10 @@ def main(input_dir, output_file, cpu_count):
     combined_df = pd.concat(results, ignore_index=True)
     
     logging.info(f'TF motif scores combined, normalizing')
-    max_score = max(combined_df['Score'])
+    max_score = max(combined_df['Motif_Score'])
     
     # Clamps the scores between 0-1 
-    combined_df['Score'] = combined_df['Score'].apply(lambda x: x / max_score)
+    combined_df['Motif_Score'] = combined_df['Motif_Score'].apply(lambda x: x / max_score)
 
     logging.info(f'Finished normalization, writing combined dataset to {output_file}')
     # print(combined_df.head())
