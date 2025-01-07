@@ -25,7 +25,7 @@ ATAC_DATA_FILE="$INPUT_DIR/macrophage_buffer1_filtered_ATAC.csv"
 RNA_DATA_FILE="$INPUT_DIR/macrophage_buffer1_filtered_RNA.csv"
 RDS_DATA_FILE="$INPUT_DIR/Macrophase_buffer1_filtered.rds"
 CONDA_ENV_NAME="my_env"
-PARALLEL_JOBS=32
+PARALLEL_JOBS=${SLURM_CPUS_ON_NODE:-32}
 
 # Other paths
 PYTHON_SCRIPT_DIR="$BASE_DIR/src/python_scripts"
@@ -38,6 +38,8 @@ TF_MOTIF_BINDING_SCORE_FILE="$OUTPUT_DIR/total_motif_regulatory_scores.tsv"
 PROCESSED_MOTIF_DIR="$OUTPUT_DIR/homer_tf_motif_scores"
 
 # =================== FUNCTIONS ============================
+
+# -------------- VALIDATION FUNCTIONS ----------------------
 # Function to check if at least one process is selected
 check_pipeline_steps() {
     if ! $CICERO_MAP_PEAKS_TO_TG && ! $CREATE_HOMER_PEAK_FILE && ! $HOMER_FIND_MOTIFS_GENOME && \
@@ -87,7 +89,56 @@ setup_directories() {
     touch "$TF_MOTIF_BINDING_SCORE_FILE"
 }
 
+# -------------- MAIN PIPELINE FUNCTIONS --------------
+run_cicero() {
+    echo "Cicero: Mapping scATACseq peaks to target genes"
+    module load rstudio
+    Rscript "$R_SCRIPT_DIR/cicero.r" "$RDS_DATA_FILE" "$OUTPUT_DIR"
+}
+
+create_homer_peak_file() {
+    echo "Python: Creating Homer peak file"
+    python3 "$PYTHON_SCRIPT_DIR/Step010.create_homer_peak_file.py" --atac_data_file "$ATAC_DATA_FILE"
+}
+
+find_motifs_genome() {
+    echo "Homer: Running findMotifsGenome.pl"
+    perl "$HOMER_DIR/findMotifsGenome.pl" "$HOMER_PEAK_FILE" "hg38" "$OUTPUT_DIR" -size 200
+}
+
+annotate_peaks() {
+    echo "Homer: Running annotatePeaks.pl"
+    perl "$HOMER_DIR/annotatePeaks.pl" "$HOMER_PEAK_FILE" "hg38" -m "$MOTIF_DIR/known1.motif" > "$OUTPUT_DIR/known_motif_1_motif_to_peak.txt"
+}
+
+process_motif_files() {
+    echo "Python: Processing motif files in parallel"
+    module load parallel
+    find "$MOTIF_DIR" -name "*.motif" | parallel -j "$PARALLEL_JOBS" \
+        "perl $HOMER_DIR/annotatePeaks.pl {} 'hg38' -m {} > $PROCESSED_MOTIF_DIR/{/.}_tf_motifs.txt"
+}
+
+parse_tf_peak_motifs() {
+    echo "Python: Parsing TF binding motif results from Homer"
+    python3 "$PYTHON_SCRIPT_DIR/Step020.parse_TF_peak_motifs.py" \
+        --input_dir "$PROCESSED_MOTIF_DIR" --output_file "$TF_MOTIF_BINDING_SCORE_FILE" --cpu_count "$PARALLEL_JOBS"
+}
+
+calculate_tf_regulation_score() {
+    echo "Python: Calculating TF-TG regulatory potential"
+    python3 "$PYTHON_SCRIPT_DIR/Step030.find_overlapping_TFs.py" \
+        --rna_data_file "$RNA_DATA_FILE" --tf_motif_binding_score_file "$TF_MOTIF_BINDING_SCORE_FILE"
+}
+
 # ================= MAIN PIPELINE ==========================
+# Help option
+if [[ "$1" == "--help" ]]; then
+    echo "Usage: bash main_pipeline.sh"
+    echo "This script executes a single-cell GRN inference pipeline."
+    echo "Modify the flags at the top of the script to enable/disable steps."
+    exit 0
+fi
+
 # Perform validation
 check_pipeline_steps
 check_tools
@@ -95,43 +146,11 @@ check_input_files
 activate_conda_env
 setup_directories
 
-# Execute pipeline steps
-if [ "$CICERO_MAP_PEAKS_TO_TG" = true ]; then
-    module load rstudio
-    echo "Cicero: Mapping scATACseq peaks to target genes"
-    Rscript "$R_SCRIPT_DIR/cicero.r" "$RDS_DATA_FILE" "$OUTPUT_DIR"
-fi
-
-if [ "$CREATE_HOMER_PEAK_FILE" = true ]; then
-    echo "Python: Creating Homer peak file"
-    python3 "$PYTHON_SCRIPT_DIR/Step010.create_homer_peak_file.py" --atac_data_file "$ATAC_DATA_FILE"
-fi
-
-if [ "$HOMER_FIND_MOTIFS_GENOME" = true ]; then
-    echo "Homer: Running findMotifsGenome.pl"
-    perl "$HOMER_DIR/findMotifsGenome.pl" "$HOMER_PEAK_FILE" "hg38" "$OUTPUT_DIR" -size 200
-fi
-
-if [ "$HOMER_ANNOTATE_PEAKS" = true ]; then
-    echo "Homer: Running annotatePeaks.pl"
-    perl "$HOMER_DIR/annotatePeaks.pl" "$HOMER_PEAK_FILE" "hg38" -m "$MOTIF_DIR/known1.motif" > "$OUTPUT_DIR/known_motif_1_motif_to_peak.txt"
-fi
-
-if [ "$PROCESS_MOTIF_FILES" = true ]; then
-    echo "Python: Processing motif files in parallel"
-    module load parallel
-    find "$MOTIF_DIR" -name "*.motif" | parallel -j "$PARALLEL_JOBS" \
-        "perl $HOMER_DIR/annotatePeaks.pl {} 'hg38' -m {} > $PROCESSED_MOTIF_DIR/{/.}_tf_motifs.txt"
-fi
-
-if [ "$PARSE_TF_PEAK_MOTIFS" = true ]; then
-    echo "Python: Parsing TF binding motif results from Homer"
-    python3 "$PYTHON_SCRIPT_DIR/Step020.parse_TF_peak_motifs.py" \
-        --input_dir "$PROCESSED_MOTIF_DIR" --output_file "$TF_MOTIF_BINDING_SCORE_FILE" --cpu_count "$PARALLEL_JOBS"
-fi
-
-if [ "$CALCULATE_TF_REGULATION_SCORE" = true ]; then
-    echo "Python: Calculating TF-TG regulatory potential"
-    python3 "$PYTHON_SCRIPT_DIR/Step030.find_overlapping_TFs.py" \
-        --rna_data_file "$RNA_DATA_FILE" --tf_motif_binding_score_file "$TF_MOTIF_BINDING_SCORE_FILE"
-fi
+# Execute selected pipeline steps
+if [ "$CICERO_MAP_PEAKS_TO_TG" = true ]; then run_cicero; fi
+if [ "$CREATE_HOMER_PEAK_FILE" = true ]; then create_homer_peak_file; fi
+if [ "$HOMER_FIND_MOTIFS_GENOME" = true ]; then find_motifs_genome; fi
+if [ "$HOMER_ANNOTATE_PEAKS" = true ]; then annotate_peaks; fi
+if [ "$PROCESS_MOTIF_FILES" = true ]; then process_motif_files; fi
+if [ "$PARSE_TF_PEAK_MOTIFS" = true ]; then parse_tf_peak_motifs; fi
+if [ "$CALCULATE_TF_REGULATION_SCORE" = true ]; then calculate_tf_regulation_score; fi
