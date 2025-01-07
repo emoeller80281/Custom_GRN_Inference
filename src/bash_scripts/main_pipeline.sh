@@ -6,89 +6,106 @@
 #SBATCH --mem-per-cpu=16G
 #SBATCH -o LOGS/find_tf_motifs.log
 #SBATCH -e LOGS/find_tf_motifs.err
-#srun source /gpfs/Home/esm5360/miniconda3/envs/my_env
 
-# source /gpfs/Home/esm5360/miniconda3/bin/activate my_env
-cd /home/emoeller/github/Custom_GRN_Inference/Homer/bin
+# Activate conda environment
+source /gpfs/Home/esm5360/miniconda3/bin/activate my_env
 
-# module load parallel
-export PATH="/home/emoeller/github/Custom_GRN_Inference/Homer/bin:$PATH"
+set -e  # Exit script if any command fails
 
-# Define directories and input file
-homer_peak_file="/home/emoeller/github/Custom_GRN_Inference/input/Homer_peaks.txt"
-genome="hg38"
-atac_data_file="/home/emoeller/github/Custom_GRN_Inference/input/PBMC_ATAC.csv"
-rna_data_file="/home/emoeller/github/Custom_GRN_Inference/input/PBMC_RNA.csv"
-motif_dir="/home/emoeller/github/Custom_GRN_Inference/output/knownResults/"
-output_dir="/home/emoeller/github/Custom_GRN_Inference/output/homer_tf_motif_scores/"
-tf_motif_binding_score_file="/home/emoeller/github/Custom_GRN_Inference/output/total_motif_regulatory_scores.tsv"
-touch $tf_motif_binding_score_file
-
-# Ensure the output directory exists
-mkdir -p "$output_dir"
-
-# Format the scATAC-seq peaks into Homer format
-echo "Creating Homer peak file"
-python3 /home/emoeller/github/Custom_GRN_Inference/src/python_scripts/create_homer_peak_file.py \
-    --atac_data_file "${atac_data_file}"
-
-# Find TF binding motifs in the scATACseq peaks using the Homer genome
-echo "Running Homer findMotifsGenome.pl"
-touch $homer_peak_file
-perl /home/emoeller/github/Custom_GRN_Inference/Homer/bin/findMotifsGenome.pl \
-    "$homer_peak_file" \
-    "$genome" \
-    /home/emoeller/github/Custom_GRN_Inference/output \
-    -size 200
-
-# Create a table of TF binding motifs in ATAC-seq peaks
-echo "Running Homer annotatePeaks.pl"
-perl /home/emoeller/github/Custom_GRN_Inference/Homer/bin/annotatePeaks.pl \
-    /home/emoeller/github/Custom_GRN_Inference/input/Homer_peaks.txt \
-    hg38 \
-    -m /home/emoeller/github/Custom_GRN_Inference/output/knownResults/known1.motif > /home/emoeller/github/Custom_GRN_Inference/output/known_motif_1_motif_to_peak.txt
-
-# Function to process each motif file
-process_motif_file() {
-    motif_file=$1
-    input_file=$2
-    genome=$3
-    output_dir=$4
-
-    # Extract the motif file name (e.g., known<number>)
-    motif_basename=$(basename "$motif_file" .motif)
-
-    # Define the specific output file for this motif
-    output_file="$output_dir/${motif_basename}_tf_motifs.txt"
-
-    echo "Processing $motif_basename"
-    
-    # Run annotatePeaks.pl and save output to the specific file
-    if annotatePeaks.pl "$input_file" "$genome" -m "$motif_file" > "$output_file"; then
-        echo "Done!"
-    else
-        echo "Error processing $motif_file" >&2
-    fi
-}
-
-export -f process_motif_file  # Export the function to make it accessible to parallel
-export homer_peak_file genome output_dir  # Export variables to make them accessible to parallel
-
-# Run the function in parallel for each .motif file
-find "$motif_dir" -name "*.motif" | parallel -j 32 process_motif_file {} "$homer_peak_file" "$genome" "$output_dir"
-
-echo "All motifs processed in parallel. Individual results saved in $output_dir"
-
-# Parse the motifs in each peak for each TF
-python3 /home/emoeller/github/Custom_GRN_Inference/src/python_scripts/parse_TF_peak_motifs.py \
-    --input_dir "${output_dir}" \
-    --output_file "${tf_motif_binding_score_file}" \
-    --cpu_count 32
-
-# Calculate a final trans-regulatory potential by scaling the motif
-# binding score by the scRNA-seq expression for each TF
-python3 /home/emoeller/github/Custom_GRN_Inference/src/python_scripts/find_overlapping_TFs.py \
-    --rna_data_file "${rna_data_file}" \
-    --tf_motif_binding_score_file "${tf_motif_binding_score_file}"
+# =========== SELECT WHICH PROCESSES TO RUN ================
+CREATE_HOMER_PEAK_FILE=false
+HOMER_FIND_MOTIFS_GENOME=false
+HOMER_ANNOTATE_PEAKS=false
+PROCESS_MOTIF_FILES=false
+PARSE_TF_PEAK_MOTIFS=false
+CALCULATE_TF_REGULATION_SCORE=true
 
 
+# ================= USER PATH VARIABLES ====================
+# Base directory
+BASE_DIR="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
+
+SRC_DIR="$BASE_DIR/src/python_scripts"
+INPUT_DIR="$BASE_DIR/input"
+OUTPUT_DIR="$BASE_DIR/output"
+HOMER_DIR="$BASE_DIR/Homer/bin"
+MOTIF_DIR="$OUTPUT_DIR/knownResults"
+
+# Paths to input files
+ATAC_DATA_FILE="$INPUT_DIR/macrophage_buffer1_filtered_ATAC.csv"
+RNA_DATA_FILE="$INPUT_DIR/macrophage_buffer1_filtered_RNA.csv"
+HOMER_PEAK_FILE="$INPUT_DIR/Homer_peaks.txt"
+
+# Paths to output files
+TF_MOTIF_BINDING_SCORE_FILE="$OUTPUT_DIR/total_motif_regulatory_scores.tsv"
+PROCESSED_MOTIF_DIR="$OUTPUT_DIR/homer_tf_motif_scores"
+
+
+# ===================== PIPELINE ============================
+# Export necessary paths
+export PATH="$HOMER_DIR:$PATH"
+
+# Ensure required directories exist
+mkdir -p "$PROCESSED_MOTIF_DIR"
+mkdir -p "$OUTPUT_DIR"
+touch "$TF_MOTIF_BINDING_SCORE_FILE"
+
+cd "$HOMER_DIR"
+
+if [ "$CREATE_HOMER_PEAK_FILE" = true ]; then
+    echo "Creating Homer peak file"
+    python3 "$SRC_DIR/Step010.create_homer_peak_file.py" \
+        --atac_data_file "$ATAC_DATA_FILE"
+fi
+
+if [ "$HOMER_FIND_MOTIFS_GENOME" = true ]; then
+    echo "Running Homer findMotifsGenome.pl"
+    touch "$HOMER_PEAK_FILE"
+    perl findMotifsGenome.pl "$HOMER_PEAK_FILE" "hg38" "$OUTPUT_DIR" -size 200
+fi
+
+if [ "$HOMER_ANNOTATE_PEAKS" = true ]; then
+    echo "Running Homer annotatePeaks.pl"
+    perl annotatePeaks.pl "$HOMER_PEAK_FILE" "hg38" \
+        -m "$MOTIF_DIR/known1.motif" \
+        > "$OUTPUT_DIR/known_motif_1_motif_to_peak.txt"
+fi
+
+if [ "$PROCESS_MOTIF_FILES" = true ]; then
+    echo "Processing motif files in parallel"
+
+    process_motif_file() {
+        motif_file=$1
+        input_file=$2
+        genome=$3
+        output_dir=$4
+
+        motif_basename=$(basename "$motif_file" .motif)
+        output_file="$output_dir/${motif_basename}_tf_motifs.txt"
+
+        echo "Processing $motif_basename"
+        annotatePeaks.pl "$input_file" "$genome" -m "$motif_file" > "$output_file"
+    }
+
+    export -f process_motif_file
+    export HOMER_PEAK_FILE
+    export MOTIF_DIR
+    export PROCESSED_MOTIF_DIR
+
+    find "$MOTIF_DIR" -name "*.motif" | parallel -j 32 process_motif_file {} "$HOMER_PEAK_FILE" "hg38" "$PROCESSED_MOTIF_DIR"
+
+    echo "All motifs processed in parallel. Results saved in $PROCESSED_MOTIF_DIR"
+fi
+
+if [ "$PARSE_TF_PEAK_MOTIFS" = true ]; then
+    python3 "$SRC_DIR/Step020.parse_TF_peak_motifs.py" \
+        --input_dir "$PROCESSED_MOTIF_DIR" \
+        --output_file "$TF_MOTIF_BINDING_SCORE_FILE" \
+        --cpu_count 32
+fi
+
+if [ "$CALCULATE_TF_REGULATION_SCORE" = true ]; then
+    python3 "$SRC_DIR/Step030.find_overlapping_TFs.py" \
+        --rna_data_file "$RNA_DATA_FILE" \
+        --tf_motif_binding_score_file "$TF_MOTIF_BINDING_SCORE_FILE"
+fi
