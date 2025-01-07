@@ -46,9 +46,20 @@ download.file("https://ftp.ensembl.org/pub/release-113/gtf/homo_sapiens/Homo_sap
 gene_anno <- rtracklayer::readGFF(temp)
 unlink(temp)
 
-gene_anno$chromosome <- paste0("chr", gene_anno$seqid)
-gene_anno$gene <- gene_anno$gene_id
-gene_anno$symbol <- gene_anno$gene_name
+# Ensure required columns are present and formatted
+gene_anno <- gene_anno[, c("seqid", "start", "end", "gene_id")]
+gene_anno$chromosome <- paste0("chr", gene_anno$seqid)  # Add "chr" prefix to chromosome names
+gene_anno$gene <- gene_anno$gene_id  # Use `gene_id` as the "gene" column
+
+# Subset to necessary columns
+gene_anno <- gene_anno[, c("chromosome", "start", "end", "gene")]
+
+# Clean up the data
+gene_anno <- gene_anno[!is.na(gene_anno$start) & !is.na(gene_anno$end), ]
+gene_anno$start <- as.numeric(gene_anno$start)
+gene_anno$end <- as.numeric(gene_anno$end)
+gene_anno$chromosome <- as.character(gene_anno$chromosome)
+gene_anno$gene <- as.character(gene_anno$gene)
 
 # Annotate CDS and calculate gene activities
 cds <- annotate_cds_by_site(cds, gene_anno)
