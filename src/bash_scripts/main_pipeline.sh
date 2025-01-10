@@ -28,7 +28,6 @@ BASE_DIR="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLE
 INPUT_DIR="$BASE_DIR/input"
 ATAC_DATA_FILE="$INPUT_DIR/macrophage_buffer1_filtered_ATAC.csv"
 RNA_DATA_FILE="$INPUT_DIR/macrophage_buffer1_filtered_RNA.csv"
-RDS_DATA_FILE="$INPUT_DIR/Macrophase_buffer1_filtered.rds"
 CONDA_ENV_NAME="my_env"
 PARALLEL_JOBS=${SLURM_CPUS_ON_NODE:-32}
 
@@ -75,7 +74,6 @@ check_tools() {
 check_input_files() {
     if [ ! -f "$ATAC_DATA_FILE" ]; then echo "Error: ATAC data file not found at $ATAC_DATA_FILE"; exit 1; fi
     if [ ! -f "$RNA_DATA_FILE" ]; then echo "Error: RNA data file not found at $RNA_DATA_FILE"; exit 1; fi
-    if [ ! -f "$RDS_DATA_FILE" ]; then echo "Error: RDS data file not found at $RDS_DATA_FILE"; exit 1; fi
 }
 
 # Function to activate Conda environment

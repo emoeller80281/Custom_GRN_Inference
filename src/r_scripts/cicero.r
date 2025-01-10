@@ -24,8 +24,11 @@ if (length(args) < 2) {
   stop("Usage: Rscript script.R <atac_file_path> <output_dir>")
 }
 
-atac_file_path <- args[1]
-output_dir <- args[2]
+atac_file_path <- "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/macrophage_buffer1_filtered_ATAC.csv"
+output_dir <- "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output"
+
+#atac_file_path <- args[1]
+#output_dir <- args[2]
 
 # Ensure the output directory exists
 if (!dir.exists(output_dir)) {
@@ -88,20 +91,113 @@ gene_anno <- rtracklayer::readGFF(temp)
 unlink(temp)
 
 log_message("Filtering and formatting gene annotations...")
-gene_anno <- gene_anno[, c("seqid", "start", "end", "strand", "gene_id", "gene_name")]
+gene_anno <- gene_anno[, c("seqid", "start", "end", "strand", "gene_id", "gene_name", "transcript_id")]
 gene_anno$chromosome <- paste0("chr", gene_anno$seqid)
-gene_anno <- gene_anno[!duplicated(gene_anno$gene_id), ]
+gene_anno$gene <- gene_anno$gene_id
+gene_anno$transcript <- gene_anno$transcript_id
+gene_anno$symbol <- gene_anno$gene_name
+head(gene_anno)
 
 # =============================================
 # Annotate and Calculate Gene Activities
 # =============================================
+pos <- subset(gene_anno, strand == "+")
+pos <- pos[order(pos$start),] 
+# remove all but the first exons per transcript
+pos <- pos[!duplicated(pos$gene_id),] 
+# make a 1 base pair marker of the TSS
+pos$end <- pos$start + 1 
+
+neg <- subset(gene_anno, strand == "-")
+neg <- neg[order(neg$start, decreasing = TRUE),] 
+# remove all but the first exons per transcript
+neg <- neg[!duplicated(neg$gene_id),] 
+neg$start <- neg$end - 1
+gene_annotation_sub <- rbind(pos, neg)
+
+# Make a subset of the TSS annotation columns containing just the coordinates 
+# and the gene name
+gene_annotation_sub <- gene_annotation_sub[,c("chromosome", "start", "end", "symbol")]
+head(gene_annotation_sub)
+# Rename the gene symbol column to "gene"
+names(gene_annotation_sub)[4] <- "gene"
 
 log_message("Annotating CDS with gene annotations...")
-cds <- annotate_cds_by_site(cds, gene_anno)
+colnames(gene_annotation_sub)
+
+cds <- annotate_cds_by_site(cds, gene_annotation_sub)
+
+tail(fData(cds))
+tail(conns)
+
+peak_to_gene <- fData(cds)[,c("site_name", "gene")]
+peak_to_gene <- subset(peak_to_gene, gene != "NA")
+peak_to_gene <- as.data.frame(peak_to_gene)
+head(peak_to_gene)
+head(conns)
+
+library(dplyr)
+library(tidyr)
+
+conns_gene <- conns %>%
+  left_join(peak_to_gene, by = c("Peak1" = "site_name")) %>%
+  rename(gene1 = gene)
+conns_gene <- conns_gene %>%
+  left_join(peak_to_gene, by = c("Peak2" = "site_name")) %>%
+  rename(gene2 = gene)
+
+# Prepare Peak1 associations
+peak1_assoc <- conns_gene %>%
+  filter(!is.na(gene1)) %>%
+  transmute(
+    peak = Peak1,
+    gene = gene1,
+    score = 1
+  )
+
+# Prepare Peak2 associations
+peak2_assoc <- conns_gene %>%
+  filter(!is.na(gene2)) %>%
+  transmute(
+    peak = Peak2,
+    gene = gene2,
+    score = 1
+  )
+
+# Prepare Coaccessibility associations
+cross_assoc <- conns_gene %>%
+  filter(!is.na(gene1) & !is.na(gene2)) %>%
+  transmute(
+    peak = ifelse(is.na(gene1), Peak1, Peak2),
+    gene = ifelse(is.na(gene1), gene2, gene1),
+    score = coaccess
+  )
+
+# Combine all associations
+final_peak_gene <- bind_rows(peak1_assoc, peak2_assoc, cross_assoc) %>%
+  distinct()
+
+  
+final_peak_gene <- bind_rows(
+  peak_gene_associations$peak1_assoc,
+  peak_gene_associations$peak2_assoc,
+  peak_gene_associations$cross_assoc
+  ) %>%
+  distinct()
+
+head(final_peak_gene)
+write.csv(final_peak_gene, "peak_gene_associations.csv", row.names = FALSE)
+
+
 
 log_message("Building gene activity matrix...")
+head(conns)
+head(gene_annotation_sub)
+
 unnorm_ga <- build_gene_activity_matrix(cds, conns)
-unnorm_ga <- unnorm_ga[rowSums(unnorm_ga) > 0, colSums(unnorm_ga) > 0]
+
+unnorm_ga <- unnorm_ga[!Matrix::rowSums(unnorm_ga) == 0, 
+                       !Matrix::colSums(unnorm_ga) == 0]
 
 log_message("Normalizing gene activities...")
 num_genes <- pData(cds)$num_genes_expressed
@@ -110,6 +206,7 @@ cicero_gene_activities <- normalize_gene_activities(unnorm_ga, num_genes)
 
 log_message("Saving gene activity scores...")
 write.csv(cicero_gene_activities, file.path(output_dir, "cicero_gene_activity_scores.csv"), row.names = TRUE)
+
 
 # =============================================
 # Map Peaks to Genes
