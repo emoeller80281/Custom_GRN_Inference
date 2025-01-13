@@ -24,11 +24,8 @@ if (length(args) < 2) {
   stop("Usage: Rscript script.R <atac_file_path> <output_dir>")
 }
 
-atac_file_path <- "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/macrophage_buffer1_filtered_ATAC.csv"
-output_dir <- "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output"
-
-#atac_file_path <- args[1]
-#output_dir <- args[2]
+atac_file_path <- args[1]
+output_dir <- args[2]
 
 # Ensure the output directory exists
 if (!dir.exists(output_dir)) {
@@ -177,16 +174,31 @@ cross_assoc <- conns_gene %>%
 final_peak_gene <- bind_rows(peak1_assoc, peak2_assoc, cross_assoc) %>%
   distinct()
 
-  
-final_peak_gene <- bind_rows(
-  peak_gene_associations$peak1_assoc,
-  peak_gene_associations$peak2_assoc,
-  peak_gene_associations$cross_assoc
-  ) %>%
-  distinct()
+final_peak_gene <- final_peak_gene %>%
+  mutate(score = ifelse(is.na(gene), -1, score))
+
+final_peak_gene$score <- (final_peak_gene$score + 1) / 2
 
 head(final_peak_gene)
-write.csv(final_peak_gene, "peak_gene_associations.csv", row.names = FALSE)
+
+# Plot a histogram of the scores
+hist(
+  final_peak_gene$score,
+  breaks = 20,                 # Number of bins
+  col = "blue",                # Fill color
+  border = "black",            # Border color
+  main = "Histogram of Scores", # Title of the plot
+  xlab = "Score",              # Label for the x-axis
+  ylab = "Frequency",          # Label for the y-axis
+  xlim = c(0, 1),              # Limit for the x-axis
+  ylim = NULL                  # Automatically adjust y-axis
+)
+
+# Add grid lines for better readability
+grid(nx = NA, ny = NULL, lty = "dotted", col = "gray")
+
+
+write.csv(final_peak_gene, file.path(output_dir, "peak_gene_associations.csv"), row.names = FALSE)
 
 
 

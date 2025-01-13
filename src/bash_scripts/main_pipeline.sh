@@ -8,7 +8,11 @@
 #SBATCH --output=/dev/null
 #SBATCH --error=/dev/null
 
-set -euo pipefail  # Strict error handling
+set -euo pipefail
+
+NUM_CPU=${SLURM_CPUS_PER_TASK}
+echo "Number of CPUs allocated: ${NUM_CPU}"
+echo ""
 
 # =============================================
 # SELECT WHICH PROCESSES TO RUN
@@ -26,10 +30,10 @@ CALCULATE_TF_REGULATION_SCORE=false
 # =============================================
 BASE_DIR="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
 INPUT_DIR="$BASE_DIR/input"
-ATAC_DATA_FILE="$INPUT_DIR/macrophage_buffer1_filtered_ATAC.csv"
-RNA_DATA_FILE="$INPUT_DIR/macrophage_buffer1_filtered_RNA.csv"
+ATAC_DATA_FILE="$INPUT_DIR/multiomic_data_filtered_L2_E7.5_rep1_ATAC.csv"
+RNA_DATA_FILE="$INPUT_DIR/multiomic_data_filtered_L2_E7.5_rep1_RNA.csv"
+HOMER_ORGANISM_CODE="mm10"
 CONDA_ENV_NAME="my_env"
-PARALLEL_JOBS=${SLURM_CPUS_ON_NODE:-32}
 
 # Other paths
 PYTHON_SCRIPT_DIR="$BASE_DIR/src/python_scripts"
@@ -117,22 +121,22 @@ create_homer_peak_file() {
 find_motifs_genome() {
     echo "Homer: Running findMotifsGenome.pl"
     /usr/bin/time -v \
-    perl "$HOMER_DIR/findMotifsGenome.pl" "$HOMER_PEAK_FILE" "hg38" "$OUTPUT_DIR" -size 200 \
+    perl "$HOMER_DIR/findMotifsGenome.pl" "$HOMER_PEAK_FILE" "$HOMER_ORGANISM_CODE" "$OUTPUT_DIR" -size 200 \
     > "$LOG_DIR/step03_homer_findMotifsGenome.log"
 }
 
 annotate_peaks() {
     echo "Homer: Running annotatePeaks.pl"
     /usr/bin/time -v \
-    perl "$HOMER_DIR/annotatePeaks.pl" "$HOMER_PEAK_FILE" "hg38" -m "$MOTIF_DIR/known1.motif" > "$OUTPUT_DIR/known_motif_1_motif_to_peak.txt" \
+    perl "$HOMER_DIR/annotatePeaks.pl" "$HOMER_PEAK_FILE" "$HOMER_ORGANISM_CODE" -m "$MOTIF_DIR/known1.motif" > "$OUTPUT_DIR/known_motif_1_motif_to_peak.txt" \
     "$LOG_DIR/step04_homer_annotatePeaks.log"
 }
 
 process_motif_files() {
     echo "Python: Processing motif files in parallel"
     module load parallel
-    find "$MOTIF_DIR" -name "*.motif" | /usr/bin/time -v parallel -j "$PARALLEL_JOBS" \
-        "perl $HOMER_DIR/annotatePeaks.pl {} 'hg38' -m {} > $PROCESSED_MOTIF_DIR/{/.}_tf_motifs.txt" \
+    find "$MOTIF_DIR" -name "*.motif" | /usr/bin/time -v parallel -j "$NUM_CPU" \
+        "perl $HOMER_DIR/annotatePeaks.pl {} '$HOMER_ORGANISM_CODE' -m {} > $PROCESSED_MOTIF_DIR/{/.}_tf_motifs.txt" \
     > "$LOG_DIR/step05_processing_homer_tf_motifs.log"
 }
 
@@ -140,7 +144,7 @@ parse_tf_peak_motifs() {
     echo "Python: Parsing TF binding motif results from Homer"
     /usr/bin/time -v \
     python3 "$PYTHON_SCRIPT_DIR/Step020.parse_TF_peak_motifs.py" \
-        --input_dir "$PROCESSED_MOTIF_DIR" --output_file "$TF_MOTIF_BINDING_SCORE_FILE" --cpu_count "$PARALLEL_JOBS" \
+        --input_dir "$PROCESSED_MOTIF_DIR" --output_file "$TF_MOTIF_BINDING_SCORE_FILE" --cpu_count "$NUM_CPU" \
     > "$LOG_DIR/step06_parse_tf_binding_motifs.log"
 }
 

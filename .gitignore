@@ -2,6 +2,7 @@ Homer/*
 input/*
 LOGS/
 output/*
+macrophage_output/
 reference_genome/
 *.png
 *.csv
