@@ -213,7 +213,9 @@ run_cicero() {
 create_homer_peak_file() {
     echo "Python: Creating Homer peak file"
     /usr/bin/time -v \
-    python3 "$PYTHON_SCRIPT_DIR/Step010.create_homer_peak_file.py" --atac_data_file "$ATAC_DATA_FILE" \
+    python3 "$PYTHON_SCRIPT_DIR/Step010.create_homer_peak_file.py" \
+        --atac_data_file "$ATAC_DATA_FILE" \
+        --homer_peak_file "$HOMER_PEAK_FILE" \
     > "$LOG_DIR/step02_create_homer_peaks.log"
 }
 

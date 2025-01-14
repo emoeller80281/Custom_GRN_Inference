@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 from matplotlib import rcParams
 import argparse
 from tqdm import tqdm
+import logging
 
 def filter_overlapping_genes(TF_df, RNA_df):
     genes = set(RNA_df["Genes"])
@@ -27,69 +28,76 @@ def parse_args():
     parser.add_argument("--tf_motif_binding_score_file", type=str, required=True, help="Path to the processed TF motif binding score")
     return parser.parse_args()
 
-args = parse_args()
+def main():
+    # Configure logging
+    logging.basicConfig(level=logging.INFO, format='%(message)s')
 
-# Load data
-RNA_dataset = pd.read_csv(args.rna_data_file)
-TF_motif_binding_df = pd.read_csv(args.tf_motif_binding_score_file, sep="\t")
+    args = parse_args()
 
-# Rename the first column as "Genes"
-RNA_dataset.rename(columns={RNA_dataset.columns[0]: "Genes"}, inplace=True)
+    # Load data
+    RNA_dataset = pd.read_csv(args.rna_data_file)
+    TF_motif_binding_df = pd.read_csv(args.tf_motif_binding_score_file, sep="\t")
 
-# Filter overlapping genes
-overlapping_TF_motif_binding_df = filter_overlapping_genes(TF_motif_binding_df, RNA_dataset)
+    # Rename the first column as "Genes"
+    RNA_dataset.rename(columns={RNA_dataset.columns[0]: "Genes"}, inplace=True)
 
-# Align RNA data
-aligned_RNA = RNA_dataset[RNA_dataset["Genes"].isin(overlapping_TF_motif_binding_df["Source"])]
+    # Filter overlapping genes
+    overlapping_TF_motif_binding_df = filter_overlapping_genes(TF_motif_binding_df, RNA_dataset)
 
-# Transpose RNA dataset for easier access
-gene_expression_matrix = RNA_dataset.set_index("Genes").T  # Rows = cells, Columns = genes
+    # Align RNA data
+    aligned_RNA = RNA_dataset[RNA_dataset["Genes"].isin(overlapping_TF_motif_binding_df["Source"])]
 
-# Filter genes present in both Source and Target
-filtered_genes = pd.concat([TF_motif_binding_df['Source'], TF_motif_binding_df['Target']]).unique()
-filtered_expression_matrix = gene_expression_matrix.loc[:, gene_expression_matrix.columns.intersection(filtered_genes)]
+    # Transpose RNA dataset for easier access
+    gene_expression_matrix = RNA_dataset.set_index("Genes").T  # Rows = cells, Columns = genes
 
-# Compute gene-specific metrics across cells
-gene_stats = filtered_expression_matrix.agg(['mean', 'std', 'max', 'sum']).T  # Rows = genes, Columns = stats
+    # Filter genes present in both Source and Target
+    filtered_genes = pd.concat([TF_motif_binding_df['Source'], TF_motif_binding_df['Target']]).unique()
+    filtered_expression_matrix = gene_expression_matrix.loc[:, gene_expression_matrix.columns.intersection(filtered_genes)]
 
-# Map TF-specific metrics
-TF_motif_binding_df['TF_Mean_Expression'] = TF_motif_binding_df['Source'].map(gene_stats['mean'])
-TF_motif_binding_df['TF_Std_Expression'] = TF_motif_binding_df['Source'].map(gene_stats['std'])
-TF_motif_binding_df['TF_Max_Expression'] = TF_motif_binding_df['Source'].map(gene_stats['max'])
+    # Compute gene-specific metrics across cells
+    gene_stats = filtered_expression_matrix.agg(['mean', 'std', 'max', 'sum']).T  # Rows = genes, Columns = stats
 
-# Map TG-specific metrics
-TF_motif_binding_df['TG_Mean_Expression'] = TF_motif_binding_df['Target'].map(gene_stats['mean'])
-TF_motif_binding_df['TG_Std_Expression'] = TF_motif_binding_df['Target'].map(gene_stats['std'])
-TF_motif_binding_df['TG_Max_Expression'] = TF_motif_binding_df['Target'].map(gene_stats['max'])
+    # Map TF-specific metrics
+    TF_motif_binding_df['TF_Mean_Expression'] = TF_motif_binding_df['Source'].map(gene_stats['mean'])
+    TF_motif_binding_df['TF_Std_Expression'] = TF_motif_binding_df['Source'].map(gene_stats['std'])
+    TF_motif_binding_df['TF_Max_Expression'] = TF_motif_binding_df['Source'].map(gene_stats['max'])
 
-# Fill NaN values (e.g., for genes not present in RNA dataset)
-# TF_motif_binding_df.fillna({'TF_Mean_Expression': 0, 'TG_Mean_Expression': 0, 'TG_Std_Expression': 0, 'TG_Max_Expression': 0}, inplace=True)
-TF_motif_binding_df = TF_motif_binding_df.dropna()
+    # Map TG-specific metrics
+    TF_motif_binding_df['TG_Mean_Expression'] = TF_motif_binding_df['Target'].map(gene_stats['mean'])
+    TF_motif_binding_df['TG_Std_Expression'] = TF_motif_binding_df['Target'].map(gene_stats['std'])
+    TF_motif_binding_df['TG_Max_Expression'] = TF_motif_binding_df['Target'].map(gene_stats['max'])
 
-# Generate a weighted score, taking into account the TF-TG motif score, TF mean expression, and TG mean expression
-TF_motif_binding_df['Weighted_Score'] = (
-    TF_motif_binding_df['TF_Mean_Expression'] *
-    TF_motif_binding_df['TG_Mean_Expression'] *
-    TF_motif_binding_df['Motif_Score']
-)
+    # Fill NaN values (e.g., for genes not present in RNA dataset)
+    # TF_motif_binding_df.fillna({'TF_Mean_Expression': 0, 'TG_Mean_Expression': 0, 'TG_Std_Expression': 0, 'TG_Max_Expression': 0}, inplace=True)
+    TF_motif_binding_df = TF_motif_binding_df.dropna()
 
-# Normalize the Weighted_Score
-TF_motif_binding_df['Normalized_Score'] = TF_motif_binding_df['Weighted_Score'] / TF_motif_binding_df['Weighted_Score'].max()
+    # Generate a weighted score, taking into account the TF-TG motif score, TF mean expression, and TG mean expression
+    TF_motif_binding_df['Weighted_Score'] = (
+        TF_motif_binding_df['TF_Mean_Expression'] *
+        TF_motif_binding_df['TG_Mean_Expression'] *
+        TF_motif_binding_df['Motif_Score']
+    )
 
-# Save results (optional)
-# TF_motif_binding_df.to_csv('/path/to/weighted_scores_with_nuance.tsv', sep='\t', index=False)
+    # Normalize the Weighted_Score
+    TF_motif_binding_df['Normalized_Score'] = TF_motif_binding_df['Weighted_Score'] / TF_motif_binding_df['Weighted_Score'].max()
 
-# Preview results
-print(TF_motif_binding_df[['Source', 'Target', 'TF_Mean_Expression', 'TG_Mean_Expression', 'Weighted_Score', 'Normalized_Score']].head())
+    # Save results (optional)
+    # TF_motif_binding_df.to_csv('/path/to/weighted_scores_with_nuance.tsv', sep='\t', index=False)
 
-# Save results
-TF_motif_binding_df.to_csv("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output/inferred_grn.tsv", sep="\t", index=False)
+    # Preview results
+    print(TF_motif_binding_df[['Source', 'Target', 'TF_Mean_Expression', 'TG_Mean_Expression', 'Weighted_Score', 'Normalized_Score']].head())
 
-# Plot histogram of scores
-plot_histogram(
-    data=TF_motif_binding_df["Weighted_Score"],
-    title="Weighted TF-TG Binding Score Distribution",
-    xlabel="Weighted Score",
-    ylabel="Frequency",
-    save_path="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output/weighted_score_histogram.png"
-)
+    # Save results
+    TF_motif_binding_df.to_csv("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output/inferred_grn.tsv", sep="\t", index=False)
+
+    # Plot histogram of scores
+    plot_histogram(
+        data=TF_motif_binding_df["Weighted_Score"],
+        title="Weighted TF-TG Binding Score Distribution",
+        xlabel="Weighted Score",
+        ylabel="Frequency",
+        save_path="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output/weighted_score_histogram.png"
+    )
+
+if __name__ == "__main__":
+    main()
