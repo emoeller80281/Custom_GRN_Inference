@@ -10,8 +10,13 @@
 
 set -euo pipefail
 
-NUM_CPU=${SLURM_CPUS_PER_TASK}
-echo "Number of CPUs allocated: ${NUM_CPU}"
+if [ -z "${SLURM_CPUS_PER_TASK:-}" ]; then
+    echo "[INFO] Running locally. Defaulting to 1 CPU."
+    NUM_CPU=1
+else
+    NUM_CPU=${SLURM_CPUS_PER_TASK}
+    echo "Number of CPUs allocated: ${NUM_CPU}"
+fi
 echo ""
 
 # =============================================
@@ -28,7 +33,9 @@ CALCULATE_TF_REGULATION_SCORE=false
 # =============================================
 # USER PATH VARIABLES
 # =============================================
-BASE_DIR="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
+BASE_DIR=$(readlink -f \
+    "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
+    )
 INPUT_DIR="$BASE_DIR/input"
 ATAC_DATA_FILE="$INPUT_DIR/multiomic_data_filtered_L2_E7.5_rep1_ATAC.csv"
 RNA_DATA_FILE="$INPUT_DIR/multiomic_data_filtered_L2_E7.5_rep1_RNA.csv"
@@ -45,6 +52,9 @@ HOMER_PEAK_FILE="$INPUT_DIR/Homer_peaks.txt"
 TF_MOTIF_BINDING_SCORE_FILE="$OUTPUT_DIR/total_motif_regulatory_scores.tsv"
 PROCESSED_MOTIF_DIR="$OUTPUT_DIR/homer_tf_motif_scores"
 LOG_DIR="$BASE_DIR/LOGS"
+
+# Make directories if they dont exist
+mkdir -p "$INPUT_DIR" "$OUTPUT_DIR" "$LOG_DIR" "$PROCESSED_MOTIF_DIR"
 
 # Set output and error files dynamically
 exec > "${LOG_DIR}/main_pipeline.log" 2> "${LOG_DIR}/main_pipeline.err"
@@ -153,7 +163,6 @@ setup_directories() {
 
 check_r_environment() {
     REQUIRED_R_VERSION="4.1.0"  # Replace with your required version
-    REQUIRED_PACKAGES=("cicero" " monocle3" "Signac" "" "Seurat" "tidyverse")  # Add your R packages here
 
     echo "Checking R environment..."
 
@@ -163,6 +172,7 @@ check_r_environment() {
         exit 1
     fi
 
+    # Check if the installed version of R is different
     INSTALLED_R_VERSION=$(R --version | grep -oP "(?<=R version )\d+\.\d+\.\d+" | head -1)
     if [[ "$(printf '%s\n' "$REQUIRED_R_VERSION" "$INSTALLED_R_VERSION" | sort -V | head -1)" != "$REQUIRED_R_VERSION" ]]; then
         echo "[ERROR] Installed R version ($INSTALLED_R_VERSION) is older than required ($REQUIRED_R_VERSION). Please update R."
@@ -171,31 +181,30 @@ check_r_environment() {
     echo "R version $INSTALLED_R_VERSION is installed."
 
     # Check for required R packages
-    for PACKAGE in "${REQUIRED_PACKAGES[@]}"; do
-        Rscript -e "if (!requireNamespace('$PACKAGE', quietly = TRUE)) { quit(status = 1) }" 2>/dev/null
-        if [ $? -ne 0 ]; then
-            echo "[WARNING] R package '$PACKAGE' is not installed. Installing..."
-            Rscript -e "install.packages('$PACKAGE', repos='http://cran.r-project.org')"
-            if [ $? -ne 0 ]; then
-                echo "[ERROR] Failed to install R package '$PACKAGE'. Please check your R configuration."
-                exit 1
-            fi
-        else
-            echo "R package '$PACKAGE' is installed."
-        fi
-    done
-
-    echo "R environment is set up correctly."
+    Rscript $R_SCRIPT_DIR/check_dependencies.R
 }
 
 # -------------- MAIN PIPELINE FUNCTIONS --------------
 run_cicero() {
     echo "Cicero: Mapping scATACseq peaks to target genes"
 
+    # Validate variables
+    if [[ -z "$R_SCRIPT_DIR" || -z "$ATAC_DATA_FILE" || -z "$OUTPUT_DIR" || -z "$LOG_DIR" ]]; then
+        echo "[ERROR] One or more required variables (R_SCRIPT_DIR, ATAC_DATA_FILE, OUTPUT_DIR, LOG_DIR) are not set."
+        exit 1
+    fi
+
+    # Ensure log directory exists
+    mkdir -p "$LOG_DIR"
+
     # Check R environment
     check_r_environment
 
-    module load rstudio  # This is for HPC, can be skipped locally
+    # Load R module (optional, for HPC systems)
+    if command -v module &> /dev/null; then
+        module load rstudio
+    fi
+
     /usr/bin/time -v \
     Rscript "$R_SCRIPT_DIR/cicero.r" "$ATAC_DATA_FILE" "$OUTPUT_DIR" \
     > "$LOG_DIR/step01_run_cicero.log" 2>"$LOG_DIR/cicero_R_output.log"
