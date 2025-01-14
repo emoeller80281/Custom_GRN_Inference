@@ -44,9 +44,6 @@ TF_MOTIF_BINDING_SCORE_FILE="$OUTPUT_DIR/total_motif_regulatory_scores.tsv"
 PROCESSED_MOTIF_DIR="$OUTPUT_DIR/homer_tf_motif_scores"
 LOG_DIR="$BASE_DIR/LOGS"
 
-# Make directories if they dont exist
-mkdir -p "$INPUT_DIR" "$OUTPUT_DIR" "$LOG_DIR" "$PROCESSED_MOTIF_DIR"
-
 # Set output and error files dynamically
 exec > "${LOG_DIR}/main_pipeline.log" 2> "${LOG_DIR}/main_pipeline.err"
 
@@ -65,6 +62,7 @@ validate_critical_variables() {
         fi
     done
 }
+
 validate_critical_variables
 
 # Function to check if at least one process is selected
@@ -79,34 +77,48 @@ check_pipeline_steps() {
 # Function to validate required tools
 check_tools() {
     local required_tools=(perl python3 conda)
+
+    echo "[INFO] Validating required tools."
     for tool in "${required_tools[@]}"; do
         if ! command -v $tool &> /dev/null; then
-            echo "Error: $tool is not installed or not in the PATH."
+            echo "[ERROR] $tool is not installed or not in the PATH."
             exit 1
+        else
+            echo "[INFO] $tool is available."
         fi
     done
+
+    # Handle GNU parallel
+    if ! command -v parallel &> /dev/null; then
+        echo "[INFO] GNU parallel not found in PATH. Attempting to load module..."
+        if command -v module &> /dev/null; then
+            module load parallel || {
+                echo "[ERROR] Failed to load GNU parallel using module."
+                exit 1
+            }
+            echo "[INFO] GNU parallel module loaded successfully."
+        else
+            echo "[ERROR] Module command not available. GNU parallel is required."
+            exit 1
+        fi
+    else
+        echo "[INFO] GNU parallel is available."
+    fi
 }
 
 determine_num_cpus() {
     if [ -z "${SLURM_CPUS_PER_TASK:-}" ]; then
         if command -v nproc &> /dev/null; then
             TOTAL_CPUS=$(nproc --all)
-            # By default, leave 1 core available
-            IGNORED_CPUS=1
-
-            # If there are more than 16 cores, ignore 2
-            if [ "$TOTAL_CPUS" -ge 16 ]; then
-                IGNORED_CPUS=2
-
-            # If there are more than 32 cores, ignore 4
-            elif [ "$TOTAL_CPUS" -ge 32 ]; then
-                IGNORED_CPUS=4
-            fi
-            
+            case $TOTAL_CPUS in
+                [1-15]) IGNORED_CPUS=1 ;;  # Reserve 1 CPU for <=15 cores
+                [16-31]) IGNORED_CPUS=2 ;; # Reserve 2 CPUs for <=31 cores
+                *) IGNORED_CPUS=4 ;;       # Reserve 4 CPUs for >=32 cores
+            esac
             NUM_CPU=$((TOTAL_CPUS - IGNORED_CPUS))
             echo "[INFO] Running locally. Detected $TOTAL_CPUS CPUs, reserving $IGNORED_CPUS for system tasks. Using $NUM_CPU CPUs."
         else
-            NUM_CPU=1  # Fallback to 1 CPU if `nproc` is unavailable
+            NUM_CPU=1  # Fallback
             echo "[INFO] Running locally. Unable to detect CPUs, defaulting to $NUM_CPU CPU."
         fi
     else
@@ -153,18 +165,18 @@ install_homer() {
 
 # Function to validate input files
 check_input_files() {
-    if [ ! -f "$ATAC_DATA_FILE" ]; then
-        echo "[ERROR] ATAC data file not found at $ATAC_DATA_FILE"
-        exit 1
-    fi
-    if [ ! -f "$RNA_DATA_FILE" ]; then
-        echo "[ERROR] RNA data file not found at $RNA_DATA_FILE"
-        exit 1
-    fi
-    if [ ! -d "$BASE_DIR/Homer" ]; then
-        echo "$BASE_DIR/Homer not found, installing..."
-        install_homer
-    fi
+    echo "[INFO] Validating input files."
+    local files=("$ATAC_DATA_FILE" "$RNA_DATA_FILE")
+    for file in "${files[@]}"; do
+        if [ ! -f "$file" ]; then
+            echo "[ERROR] File not found: $file"
+            exit 1
+        elif [ ! -r "$file" ]; then
+            echo "[ERROR] File is not readable: $file"
+            exit 1
+        fi
+    done
+    echo "[INFO] Input files validated successfully."
 }
 
 # Function to activate Conda environment
@@ -187,8 +199,12 @@ activate_conda_env() {
 
 # Function to ensure required directories exist
 setup_directories() {
-    mkdir -p "$PROCESSED_MOTIF_DIR" "$OUTPUT_DIR" "$LOG_DIR"
-    touch "$TF_MOTIF_BINDING_SCORE_FILE"
+    echo "[INFO] Ensuring required directories exist."
+    local dirs=("$INPUT_DIR" "$OUTPUT_DIR" "$LOG_DIR" "$PROCESSED_MOTIF_DIR")
+    for dir in "${dirs[@]}"; do
+        mkdir -p "$dir"
+    done
+    echo "[INFO] Required directories created."
 }
 
 check_r_environment() {
@@ -322,10 +338,13 @@ annotate_peaks() {
 process_motif_files() {
     echo "Python: Processing motif files in parallel"
 
-    # Validate that `parallel` is installed
+    # Check for GNU parallel
     if ! command -v parallel &> /dev/null; then
-        echo "[ERROR] GNU parallel is not installed or not in PATH. Please install it before running this step."
-        exit 1
+        echo "[INFO] GNU parallel not found. Falling back to sequential processing."
+        use_parallel=false
+    else
+        use_parallel=true
+        echo "[INFO] GNU parallel detected."
     fi
 
     # Detect files to process
@@ -339,10 +358,17 @@ process_motif_files() {
     file_count=$(echo "$motif_files" | wc -l)
     echo "Processing $file_count motif files using $NUM_CPU CPUs."
 
-    # Run motif file processing in parallel
-    echo "$motif_files" | /usr/bin/time -v parallel -j "$NUM_CPU" \
-        "perl $HOMER_DIR/annotatePeaks.pl {} '$HOMER_ORGANISM_CODE' -m {} > $PROCESSED_MOTIF_DIR/{/.}_tf_motifs.txt" \
-    > "$LOG_DIR/step05_processing_homer_tf_motifs.log" 2>"$LOG_DIR/step05_processing_homer_tf_motifs.err"
+    # Process files
+    if [ "$use_parallel" = true ]; then
+        echo "$motif_files" | /usr/bin/time -v parallel -j "$NUM_CPU" \
+            "perl $HOMER_DIR/annotatePeaks.pl {} '$HOMER_ORGANISM_CODE' -m {} > $PROCESSED_MOTIF_DIR/{/.}_tf_motifs.txt" \
+            > "$LOG_DIR/step05_parallel.log" 2>"$LOG_DIR/step05_parallel.err"
+    else
+        for file in $motif_files; do
+            perl "$HOMER_DIR/annotatePeaks.pl" "$file" "$HOMER_ORGANISM_CODE" -m "$file" \
+                > "$PROCESSED_MOTIF_DIR/$(basename "$file" .motif)_tf_motifs.txt" 2>> "$LOG_DIR/step05_sequential.err"
+        done
+    fi
 
     # Check for errors
     if [ $? -ne 0 ]; then
