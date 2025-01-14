@@ -33,11 +33,12 @@ def parse_args():
     return args   
 
 def process_file(path_to_file) -> pd.DataFrame:
-    motif_to_peak = pd.read_csv(path_to_file, sep='\t', header=[0], index_col=None)
+    # Read in the motif file as a pandas DataFrame
+    motif_to_peak: pd.DataFrame = pd.read_csv(path_to_file, sep='\t', header=[0], index_col=None)
 
     # Count the number of motifs found for the peak
-    motif_column = motif_to_peak.columns[-1]
-    TF_name = motif_column.split('/')[0]
+    motif_column: object = motif_to_peak.columns[-1]
+    TF_name: list[str] = motif_column.split('/')[0]
     
     # Set the columns    
     motif_to_peak['Motif Count'] = motif_to_peak[motif_column].apply(lambda x: len(x.split(',')) / 3 if pd.notnull(x) else 0)
@@ -45,21 +46,21 @@ def process_file(path_to_file) -> pd.DataFrame:
     motif_to_peak["Target"] = motif_to_peak["Gene Name"]
 
     # Sum the total number of motifs for the TF
-    total_motifs = motif_to_peak["Motif Count"].sum()
+    total_motifs: int = motif_to_peak["Motif Count"].sum()
 
     # peak_binding_column = motif_to_peak[motif_to_peak.columns[-1]]
-    cols_of_interest = ["Source", "Target", "Motif Count"]
+    cols_of_interest: list = ["Source", "Target", "Motif Count"]
     
     # Remove any rows with NA values
-    df = motif_to_peak[cols_of_interest].dropna()
+    df: pd.DataFrame = motif_to_peak[cols_of_interest].dropna()
 
     # Filter out rows with no motifs
     filtered_df = df[df["Motif Count"] > 0]
-    # print(filtered_df.head())
 
     # Sum the total motifs for each TG
     filtered_df = filtered_df.groupby(["Source", "Target"])["Motif Count"].sum().reset_index()
     
+    # Standardize all gene names to uppercase
     filtered_df["Source"] = filtered_df["Source"].apply(lambda x: x.upper())
     filtered_df["Target"] = filtered_df["Target"].apply(lambda x: x.upper())
 

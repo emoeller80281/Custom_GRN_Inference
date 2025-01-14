@@ -74,11 +74,58 @@ check_tools() {
     done
 }
 
+install_homer() {
+    # Double check if Homer directory already exists
+    if [ -d "$BASE_DIR/Homer" ]; then
+        echo "Homer directory already exists. Skipping installation."
+        return
+    fi
+
+    echo "    Creating Homer directory"
+    mkdir -p "$BASE_DIR/Homer"
+    
+    echo "    Downloading Homer..."
+    curl -s -o "$BASE_DIR/Homer/configureHomer.pl" \
+        http://homer.ucsd.edu/homer/configureHomer.pl
+    if [ $? -ne 0 ]; then
+        echo "[ERROR] Failed to download Homer."
+        exit 1
+    fi
+    echo "        Done!"
+
+    echo "    Installing Homer..."
+    perl "$BASE_DIR/Homer/configureHomer.pl" -install
+    if [ $? -ne 0 ]; then
+        echo "[ERROR] Failed to install Homer."
+        exit 1
+    fi
+    echo "        Done!"
+
+    echo "    Downloading $HOMER_ORGANISM_CODE genome fasta"
+    perl "$BASE_DIR/Homer/configureHomer.pl" -install "$HOMER_ORGANISM_CODE"
+    if [ $? -ne 0 ]; then
+        echo "[ERROR] Failed to download genome fasta for $HOMER_ORGANISM_CODE."
+        exit 1
+    fi
+    echo "        Done!"
+}
+
 # Function to validate input files
 check_input_files() {
-    if [ ! -f "$ATAC_DATA_FILE" ]; then echo "Error: ATAC data file not found at $ATAC_DATA_FILE"; exit 1; fi
-    if [ ! -f "$RNA_DATA_FILE" ]; then echo "Error: RNA data file not found at $RNA_DATA_FILE"; exit 1; fi
+    if [ ! -f "$ATAC_DATA_FILE" ]; then
+        echo "[ERROR] ATAC data file not found at $ATAC_DATA_FILE"
+        exit 1
+    fi
+    if [ ! -f "$RNA_DATA_FILE" ]; then
+        echo "[ERROR] RNA data file not found at $RNA_DATA_FILE"
+        exit 1
+    fi
+    if [ ! -d "$BASE_DIR/Homer" ]; then
+        echo "$BASE_DIR/Homer not found, installing..."
+        install_homer
+    fi
 }
+
 
 # Function to activate Conda environment
 activate_conda_env() {
@@ -87,11 +134,13 @@ activate_conda_env() {
         echo "Error: Conda base could not be determined. Is Conda installed and in your PATH?"
         exit 1
     fi
+
     source "$CONDA_BASE/bin/activate"
     if ! conda env list | grep -q "^$CONDA_ENV_NAME "; then
         echo "Error: Conda environment '$CONDA_ENV_NAME' does not exist."
         exit 1
     fi
+
     conda activate "$CONDA_ENV_NAME" || { echo "Error: Failed to activate Conda environment '$CONDA_ENV_NAME'."; exit 1; }
     echo "Activated Conda environment: $CONDA_ENV_NAME"
 }
@@ -102,10 +151,51 @@ setup_directories() {
     touch "$TF_MOTIF_BINDING_SCORE_FILE"
 }
 
+check_r_environment() {
+    REQUIRED_R_VERSION="4.1.0"  # Replace with your required version
+    REQUIRED_PACKAGES=("cicero" " monocle3" "Signac" "" "Seurat" "tidyverse")  # Add your R packages here
+
+    echo "Checking R environment..."
+
+    # Check R version
+    if ! command -v R &> /dev/null; then
+        echo "[ERROR] R is not installed. Please install R version $REQUIRED_R_VERSION or later."
+        exit 1
+    fi
+
+    INSTALLED_R_VERSION=$(R --version | grep -oP "(?<=R version )\d+\.\d+\.\d+" | head -1)
+    if [[ "$(printf '%s\n' "$REQUIRED_R_VERSION" "$INSTALLED_R_VERSION" | sort -V | head -1)" != "$REQUIRED_R_VERSION" ]]; then
+        echo "[ERROR] Installed R version ($INSTALLED_R_VERSION) is older than required ($REQUIRED_R_VERSION). Please update R."
+        exit 1
+    fi
+    echo "R version $INSTALLED_R_VERSION is installed."
+
+    # Check for required R packages
+    for PACKAGE in "${REQUIRED_PACKAGES[@]}"; do
+        Rscript -e "if (!requireNamespace('$PACKAGE', quietly = TRUE)) { quit(status = 1) }" 2>/dev/null
+        if [ $? -ne 0 ]; then
+            echo "[WARNING] R package '$PACKAGE' is not installed. Installing..."
+            Rscript -e "install.packages('$PACKAGE', repos='http://cran.r-project.org')"
+            if [ $? -ne 0 ]; then
+                echo "[ERROR] Failed to install R package '$PACKAGE'. Please check your R configuration."
+                exit 1
+            fi
+        else
+            echo "R package '$PACKAGE' is installed."
+        fi
+    done
+
+    echo "R environment is set up correctly."
+}
+
 # -------------- MAIN PIPELINE FUNCTIONS --------------
 run_cicero() {
     echo "Cicero: Mapping scATACseq peaks to target genes"
-    module load rstudio
+
+    # Check R environment
+    check_r_environment
+
+    module load rstudio  # This is for HPC, can be skipped locally
     /usr/bin/time -v \
     Rscript "$R_SCRIPT_DIR/cicero.r" "$ATAC_DATA_FILE" "$OUTPUT_DIR" \
     > "$LOG_DIR/step01_run_cicero.log" 2>"$LOG_DIR/cicero_R_output.log"

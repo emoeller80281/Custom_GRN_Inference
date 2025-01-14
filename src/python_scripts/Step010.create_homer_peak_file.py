@@ -48,7 +48,6 @@ def convert_to_homer_peak_format(atac_data):
 
     return homer_df
     
-
 # ----- Input -----
 # Read in the ATAC data
 args = parse_args()
