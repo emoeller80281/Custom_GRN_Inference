@@ -10,15 +10,6 @@
 
 set -euo pipefail
 
-if [ -z "${SLURM_CPUS_PER_TASK:-}" ]; then
-    echo "[INFO] Running locally. Defaulting to 1 CPU."
-    NUM_CPU=1
-else
-    NUM_CPU=${SLURM_CPUS_PER_TASK}
-    echo "Number of CPUs allocated: ${NUM_CPU}"
-fi
-echo ""
-
 # =============================================
 # SELECT WHICH PROCESSES TO RUN
 # =============================================
@@ -64,6 +55,18 @@ exec > "${LOG_DIR}/main_pipeline.log" 2> "${LOG_DIR}/main_pipeline.err"
 # =============================================
 
 # -------------- VALIDATION FUNCTIONS ----------------------
+validate_critical_variables() {
+    # Make sure that all of the required user variables are set
+    local critical_vars=(R_SCRIPT_DIR ATAC_DATA_FILE OUTPUT_DIR LOG_DIR HOMER_PEAK_FILE HOMER_ORGANISM_CODE)
+    for var in "${critical_vars[@]}"; do
+        if [ -z "${!var:-}" ]; then
+            echo "[ERROR] Required variable $var is not set."
+            exit 1
+        fi
+    done
+}
+validate_critical_variables
+
 # Function to check if at least one process is selected
 check_pipeline_steps() {
     if ! $CICERO_MAP_PEAKS_TO_TG && ! $CREATE_HOMER_PEAK_FILE && ! $HOMER_FIND_MOTIFS_GENOME && \
@@ -82,6 +85,34 @@ check_tools() {
             exit 1
         fi
     done
+}
+
+determine_num_cpus() {
+    if [ -z "${SLURM_CPUS_PER_TASK:-}" ]; then
+        if command -v nproc &> /dev/null; then
+            TOTAL_CPUS=$(nproc --all)
+            # By default, leave 1 core available
+            IGNORED_CPUS=1
+
+            # If there are more than 16 cores, ignore 2
+            if [ "$TOTAL_CPUS" -ge 16 ]; then
+                IGNORED_CPUS=2
+
+            # If there are more than 32 cores, ignore 4
+            elif [ "$TOTAL_CPUS" -ge 32 ]; then
+                IGNORED_CPUS=4
+            fi
+            
+            NUM_CPU=$((TOTAL_CPUS - IGNORED_CPUS))
+            echo "[INFO] Running locally. Detected $TOTAL_CPUS CPUs, reserving $IGNORED_CPUS for system tasks. Using $NUM_CPU CPUs."
+        else
+            NUM_CPU=1  # Fallback to 1 CPU if `nproc` is unavailable
+            echo "[INFO] Running locally. Unable to detect CPUs, defaulting to $NUM_CPU CPU."
+        fi
+    else
+        NUM_CPU=${SLURM_CPUS_PER_TASK}
+        echo "[INFO] Running on SLURM. Number of CPUs allocated: ${NUM_CPU}"
+    fi
 }
 
 install_homer() {
@@ -136,7 +167,6 @@ check_input_files() {
     fi
 }
 
-
 # Function to activate Conda environment
 activate_conda_env() {
     CONDA_BASE=$(conda info --base)
@@ -184,6 +214,55 @@ check_r_environment() {
     Rscript $R_SCRIPT_DIR/check_dependencies.R
 }
 
+download_file_if_missing() {
+    local file_path=$1
+    local file_url=$2
+    local file_description=$3
+
+    if [ ! -f "$file_path" ]; then
+        echo "    $file_description not found, downloading..."
+        curl -s -o "$file_path" "$file_url"
+
+        if [ $? -ne 0 ] || [ ! -s "$file_path" ]; then
+            echo "[ERROR] Failed to download or validate $file_description from $file_url."
+            exit 1
+        else
+            echo "    Successfully downloaded $file_description"
+        fi
+    else
+        echo "    Using existing $file_description"
+    fi
+}
+
+check_cicero_genome_files_exist() {
+    if [ "$HOMER_ORGANISM_CODE" == "mm10" ]; then
+        echo "$HOMER_ORGANISM_CODE detected, using mouse genome"
+
+        CHROM_SIZES="$INPUT_DIR/mm10.chrom.sizes"
+        CHROM_SIZES_URL="https://hgdownload.soe.ucsc.edu/goldenPath/mm10/bigZips/mm10.chrom.sizes"
+
+        GENE_ANNOT="$INPUT_DIR/Mus_musculus.GRCm39.113.gtf.gz"
+        GENE_ANNOT_URL="https://ftp.ensembl.org/pub/release-113/gtf/mus_musculus/Mus_musculus.GRCm39.113.gtf.gz"
+    
+    elif [ "$HOMER_ORGANISM_CODE" == "hg38" ]; then
+        echo "$HOMER_ORGANISM_CODE detected, using human genome"
+
+        CHROM_SIZES="$INPUT_DIR/hg38.chrom.sizes"
+        CHROM_SIZES_URL="https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/hg38.chrom.sizes"
+
+        GENE_ANNOT="$INPUT_DIR/Homo_sapiens.GRCh38.113.gtf.gz"
+        GENE_ANNOT_URL="https://ftp.ensembl.org/pub/release-113/gtf/homo_sapiens/Homo_sapiens.GRCh38.113.gtf.gz"
+
+    else
+        echo "[ERROR] Unsupported HOMER_ORGANISM_CODE: $HOMER_ORGANISM_CODE"
+        exit 1
+    fi
+
+    # Check chromosome sizes and gene annotation files
+    download_file_if_missing "$CHROM_SIZES" "$CHROM_SIZES_URL" "$HOMER_ORGANISM_CODE chromosome sizes file"
+    download_file_if_missing "$GENE_ANNOT" "$GENE_ANNOT_URL" "$HOMER_ORGANISM_CODE gene annotation file"
+}
+
 # -------------- MAIN PIPELINE FUNCTIONS --------------
 run_cicero() {
     echo "Cicero: Mapping scATACseq peaks to target genes"
@@ -200,13 +279,20 @@ run_cicero() {
     # Check R environment
     check_r_environment
 
+    # Check for the chomosome size and gene annotation files in INPUT_DIR
+    check_cicero_genome_files_exist
+
     # Load R module (optional, for HPC systems)
     if command -v module &> /dev/null; then
         module load rstudio
     fi
 
     /usr/bin/time -v \
-    Rscript "$R_SCRIPT_DIR/cicero.r" "$ATAC_DATA_FILE" "$OUTPUT_DIR" \
+    Rscript "$R_SCRIPT_DIR/cicero.r" \
+        "$ATAC_DATA_FILE" \
+        "$OUTPUT_DIR" \
+        "$CHROM_SIZES" \
+        "$GENE_ANNOT" \
     > "$LOG_DIR/step01_run_cicero.log" 2>"$LOG_DIR/cicero_R_output.log"
 }
 
@@ -235,10 +321,36 @@ annotate_peaks() {
 
 process_motif_files() {
     echo "Python: Processing motif files in parallel"
-    module load parallel
-    find "$MOTIF_DIR" -name "*.motif" | /usr/bin/time -v parallel -j "$NUM_CPU" \
+
+    # Validate that `parallel` is installed
+    if ! command -v parallel &> /dev/null; then
+        echo "[ERROR] GNU parallel is not installed or not in PATH. Please install it before running this step."
+        exit 1
+    fi
+
+    # Detect files to process
+    motif_files=$(find "$MOTIF_DIR" -name "*.motif")
+    if [ -z "$motif_files" ]; then
+        echo "[ERROR] No motif files found in $MOTIF_DIR."
+        exit 1
+    fi
+
+     # Log number of files to process
+    file_count=$(echo "$motif_files" | wc -l)
+    echo "Processing $file_count motif files using $NUM_CPU CPUs."
+
+    # Run motif file processing in parallel
+    echo "$motif_files" | /usr/bin/time -v parallel -j "$NUM_CPU" \
         "perl $HOMER_DIR/annotatePeaks.pl {} '$HOMER_ORGANISM_CODE' -m {} > $PROCESSED_MOTIF_DIR/{/.}_tf_motifs.txt" \
-    > "$LOG_DIR/step05_processing_homer_tf_motifs.log"
+    > "$LOG_DIR/step05_processing_homer_tf_motifs.log" 2>"$LOG_DIR/step05_processing_homer_tf_motifs.err"
+
+    # Check for errors
+    if [ $? -ne 0 ]; then
+        echo "[ERROR] Motif file processing failed. Check logs in $LOG_DIR for details."
+        exit 1
+    fi
+
+    echo "Motif file processing completed successfully."
 }
 
 parse_tf_peak_motifs() {
@@ -276,6 +388,7 @@ fi
 # Perform validation
 check_pipeline_steps
 check_tools
+determine_num_cpus
 check_input_files
 activate_conda_env
 setup_directories

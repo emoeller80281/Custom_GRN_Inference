@@ -24,12 +24,14 @@ log_message <- function(message) {
 
 args <- commandArgs(trailingOnly = TRUE)
 
-if (length(args) < 2) {
-  stop("Usage: Rscript script.R <atac_file_path> <output_dir>")
+if (length(args) < 4) {
+  stop("Usage: Rscript script.R <atac_file_path> <output_dir> <chromsize_file_path> <gene_annot_file_path>")
 }
 
 atac_file_path <- args[1]
 output_dir <- args[2]
+chrom_sizes <- args[3]
+gene_annot <- args[4]
 
 if (!dir.exists(output_dir)) {
   dir.create(output_dir, recursive = TRUE)
@@ -64,24 +66,21 @@ cicero_obj <- make_cicero_cds(cds, reduced_coordinates = umap_coords)
 # =============================================
 
 log_message("Running Cicero...")
-data("human.hg19.genome")
-conns <- run_cicero(cicero_obj, human.hg19.genome, sample_num = 500, silent = FALSE)
+conns <- run_cicero(cicero_obj, chrom_sizes, sample_num = 500, silent = FALSE)
 
 # =============================================
 # Process Gene Annotations
 # =============================================
 
-log_message("Downloading and processing gene annotations...")
-temp <- tempfile()
-download.file("https://ftp.ensembl.org/pub/release-113/gtf/homo_sapiens/Homo_sapiens.GRCh38.113.gtf.gz", temp)
-gene_anno <- rtracklayer::readGFF(temp) %>%
+log_message("Processing gene annotations...")
+gene_anno <- rtracklayer::import(gene_annot) %>% 
+  as.data.frame() %>%
   select(seqid, start, end, strand, gene_id, gene_name, transcript_id) %>%
   mutate(
     chromosome = paste0("chr", seqid),
     gene = gene_id,
     symbol = gene_name
   )
-unlink(temp)
 
 # Prepare TSS annotations
 log_message("Preparing TSS annotations...")
