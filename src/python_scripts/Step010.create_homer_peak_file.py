@@ -1,8 +1,15 @@
 import pandas as pd
 import argparse
 import logging
+from typing import Any
 
-def parse_args():
+def parse_args() -> argparse.Namespace:
+    """
+    Parses command-line arguments.
+
+    Returns:
+    argparse.Namespace: Parsed arguments containing paths for input and output files.
+    """
     parser = argparse.ArgumentParser(description="Process TF motif binding potential.")
     parser.add_argument(
         "--atac_data_file",
@@ -17,13 +24,11 @@ def parse_args():
         help="Output file path for the formatted Homer peak file"
     )
     
-    args = parser.parse_args()
+    args: argparse.Namespace = parser.parse_args()
 
-    return args   
+    return args
 
-import pandas as pd
-
-def convert_to_homer_peak_format(atac_data):
+def convert_to_homer_peak_format(atac_data: pd.DataFrame) -> pd.DataFrame:
     """
     Converts an ATAC-seq dataset into HOMER-compatible peak format.
 
@@ -33,7 +38,6 @@ def convert_to_homer_peak_format(atac_data):
     Returns:
     pd.DataFrame: A DataFrame in HOMER-compatible format.
     """
-
     # Validate that the input DataFrame has the expected structure
     if atac_data.empty:
         raise ValueError("Input ATAC-seq data is empty.")
@@ -41,13 +45,13 @@ def convert_to_homer_peak_format(atac_data):
         raise ValueError("Input DataFrame must contain a 'peak_id' column with formatted peak IDs (e.g., 'chr:start-end').")
 
     # Extract the peak ID column
-    peak_ids = atac_data['peak_id']
+    peak_ids: pd.Series = atac_data['peak_id']
 
     # Split peak IDs into chromosome, start, and end
     try:
-        chromosomes = peak_ids.str.extract(r'([^:]+):')[0]
-        starts = peak_ids.str.extract(r':(\d+)-')[0]
-        ends = peak_ids.str.extract(r'-(\d+)$')[0]
+        chromosomes: pd.Series = peak_ids.str.extract(r'([^:]+):')[0]
+        starts: pd.Series = peak_ids.str.extract(r':(\d+)-')[0]
+        ends: pd.Series = peak_ids.str.extract(r'-(\d+)$')[0]
     except Exception as e:
         raise ValueError(f"Error parsing 'peak_id' values: {e}")
 
@@ -56,7 +60,7 @@ def convert_to_homer_peak_format(atac_data):
         raise ValueError("One or more peak IDs are malformed. Ensure all peak IDs are formatted as 'chr:start-end'.")
 
     # Create a dictionary for constructing the HOMER-compatible DataFrame
-    homer_dict = {
+    homer_dict: dict[str, Any] = {
         "peak_id": [f"peak{i + 1}" for i in range(len(peak_ids))],  # Generate unique peak IDs
         "chromosome": chromosomes,
         "start": pd.to_numeric(starts, errors='coerce'),  # Convert to numeric and handle errors
@@ -65,7 +69,7 @@ def convert_to_homer_peak_format(atac_data):
     }
 
     # Construct the DataFrame
-    homer_df = pd.DataFrame(homer_dict)
+    homer_df: pd.DataFrame = pd.DataFrame(homer_dict)
 
     # Final validation: Ensure no NaN values in the critical columns
     if homer_df[['chromosome', 'start', 'end']].isnull().any().any():
@@ -73,22 +77,24 @@ def convert_to_homer_peak_format(atac_data):
 
     return homer_df
 
-
 # ----- Input -----
-def main():
-    # Read in the ATAC data
-    args = parse_args()
-    atac_data_file = args.atac_data_file
-    homer_peak_file = args.homer_peak_file
+def main() -> None:
+    """
+    Main function to read scATACseq data, convert it to HOMER peak format, and save the results.
+    """
+    # Parse arguments
+    args: argparse.Namespace = parse_args()
+    atac_data_file: str = args.atac_data_file
+    homer_peak_file: str = args.homer_peak_file
 
-    logging.info(f'Reading scATACseq data')
-    atac_data = pd.read_csv(atac_data_file)
+    logging.info('Reading scATACseq data')
+    atac_data: pd.DataFrame = pd.read_csv(atac_data_file)
     logging.info(atac_data.head())
 
-    logging.info(f'Converting scATACseq peaks to Homer peak format')
-    homer_df = convert_to_homer_peak_format(atac_data)
+    logging.info('Converting scATACseq peaks to Homer peak format')
+    homer_df: pd.DataFrame = convert_to_homer_peak_format(atac_data)
 
-    logging.info(f'Saving Homer peak file')
+    logging.info('Saving Homer peak file')
     homer_df.to_csv(homer_peak_file, sep='\t', header=False, index=False)
 
 if __name__ == "__main__":

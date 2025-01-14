@@ -253,7 +253,7 @@ calculate_tf_regulation_score() {
     echo "Python: Calculating TF-TG regulatory potential"
     /usr/bin/time -v \
     python3 "$PYTHON_SCRIPT_DIR/Step030.find_overlapping_TFs.py" \
-        --rna_data_file "$RNA_DATA_FILE" --tf_motif_binding_score_file "$TF_MOTIF_BINDING_SCORE_FILE" \
+        --rna_data_file "$RNA_DATA_FILE" --tf_motif_binding_score_file "$TF_MOTIF_BINDING_SCORE_FILE" --output_dir "$OUTPUT_DIR" \
         > "$LOG_DIR/step07_calculate_tf_tg_regulatory_potential.log"
 }
 

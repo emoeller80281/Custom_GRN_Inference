@@ -1,13 +1,18 @@
 import pandas as pd
 import os
-from tqdm import tqdm  # or thread_map
+from tqdm import tqdm
 from multiprocessing import Pool
 import argparse
 import logging
+from typing import List
 
-homer_tf_motif_score_dir = "./output/homer_tf_motif_scores"
+def parse_args() -> argparse.Namespace:
+    """
+    Parses command-line arguments.
 
-def parse_args():
+    Returns:
+        argparse.Namespace: Parsed arguments containing paths for input and output files and CPU count.
+    """
     parser = argparse.ArgumentParser(description="Process TF motif binding potential.")
     parser.add_argument(
         "--input_dir",
@@ -19,7 +24,7 @@ def parse_args():
         "--output_file",
         type=str,
         required=True,
-        help="Path for the merged TF TG motif binding score tsv file"
+        help="Path for the merged TF TG motif binding score TSV file"
     )
     parser.add_argument(
         "--cpu_count",
@@ -28,85 +33,101 @@ def parse_args():
         help="The number of CPUs to utilize for multiprocessing"
     )
     
-    args = parser.parse_args()
+    args: argparse.Namespace = parser.parse_args()
+    return args
 
-    return args   
+def process_file(path_to_file: str) -> pd.DataFrame:
+    """
+    Processes a single Homer TF motif file and extracts TF-TG relationships and motif scores.
 
-def process_file(path_to_file) -> pd.DataFrame:
+    Args:
+        path_to_file (str): Path to the motif file.
+
+    Returns:
+        pd.DataFrame: DataFrame containing Source (TF), Target (TG), and Motif_Score.
+    """
     # Read in the motif file as a pandas DataFrame
     motif_to_peak: pd.DataFrame = pd.read_csv(path_to_file, sep='\t', header=[0], index_col=None)
 
-    # Count the number of motifs found for the peak
-    motif_column: object = motif_to_peak.columns[-1]
-    TF_name: list[str] = motif_column.split('/')[0]
-    
+    # Extract motif-related data
+    motif_column: str = motif_to_peak.columns[-1]
+    TF_name: str = motif_column.split('/')[0]
+
     # Set the columns    
     motif_to_peak['Motif Count'] = motif_to_peak[motif_column].apply(lambda x: len(x.split(',')) / 3 if pd.notnull(x) else 0)
     motif_to_peak["Source"] = TF_name.split('(')[0]
     motif_to_peak["Target"] = motif_to_peak["Gene Name"]
 
-    # Sum the total number of motifs for the TF
-    total_motifs: int = motif_to_peak["Motif Count"].sum()
+    # Calculate total motifs for the TF
+    total_motifs: float = motif_to_peak["Motif Count"].sum()
 
-    # peak_binding_column = motif_to_peak[motif_to_peak.columns[-1]]
-    cols_of_interest: list = ["Source", "Target", "Motif Count"]
-    
-    # Remove any rows with NA values
+    # Columns of interest
+    cols_of_interest: List[str] = ["Source", "Target", "Motif Count"]
+
+    # Remove rows with NA values
     df: pd.DataFrame = motif_to_peak[cols_of_interest].dropna()
 
-    # Filter out rows with no motifs
-    filtered_df = df[df["Motif Count"] > 0]
+    # Filter rows with no motifs
+    filtered_df: pd.DataFrame = df[df["Motif Count"] > 0]
 
-    # Sum the total motifs for each TG
+    # Group by Source and Target and sum the motifs
     filtered_df = filtered_df.groupby(["Source", "Target"])["Motif Count"].sum().reset_index()
-    
-    # Standardize all gene names to uppercase
+
+    # Standardize gene names to uppercase
     filtered_df["Source"] = filtered_df["Source"].apply(lambda x: x.upper())
     filtered_df["Target"] = filtered_df["Target"].apply(lambda x: x.upper())
 
-    # Calculate the score for the TG based on the total number of motifs for the TF
+    # Calculate Motif Score
     filtered_df["Motif_Score"] = filtered_df["Motif Count"] / total_motifs
 
-    # Save the final results
-    final_df = filtered_df[["Source", "Target", "Motif_Score"]]
-    
+    # Return final DataFrame
+    final_df: pd.DataFrame = filtered_df[["Source", "Target", "Motif_Score"]]
     return final_df
-    
-def main(input_dir, output_file, cpu_count):
-    file_paths = [os.path.join(input_dir, f) for f in os.listdir(input_dir) if os.path.isfile(os.path.join(input_dir, f))]
-    
-    results = []
 
-    # Combine progress bar with result collection
+def main(input_dir: str, output_file: str, cpu_count: int) -> None:
+    """
+    Main function to process all files in a directory and output combined results.
+
+    Args:
+        input_dir (str): Path to the directory containing input files.
+        output_file (str): Path to the output file.
+        cpu_count (int): Number of CPUs to use for multiprocessing.
+    """
+    # List all files in the input directory
+    file_paths: List[str] = [os.path.join(input_dir, f) for f in os.listdir(input_dir) if os.path.isfile(os.path.join(input_dir, f))]
+    
+    results: List[pd.DataFrame] = []
+
+    # Use multiprocessing pool to process files
     with Pool(processes=cpu_count) as pool:
         with tqdm(total=len(file_paths), desc="Processing files") as pbar:
             for result in pool.imap_unordered(process_file, file_paths):
                 results.append(result)
                 pbar.update(1)
 
-    logging.info(f'Finished formatting all TF motif binding sites for downstream target genes, combining')
-        
-    combined_df = pd.concat(results, ignore_index=True)
-    
-    logging.info(f'TF motif scores combined, normalizing')
-    max_score = max(combined_df['Motif_Score'])
-    
-    # Clamps the scores between 0-1 
+    logging.info("Finished formatting all TF motif binding sites for downstream target genes, combining")
+
+    # Combine all results
+    combined_df: pd.DataFrame = pd.concat(results, ignore_index=True)
+
+    logging.info("TF motif scores combined, normalizing")
+    max_score: float = max(combined_df['Motif_Score'])
+
+    # Normalize scores between 0-1
     combined_df['Motif_Score'] = combined_df['Motif_Score'].apply(lambda x: x / max_score)
 
-    logging.info(f'Finished normalization, writing combined dataset to {output_file}')
-    # print(combined_df.head())
+    logging.info(f"Finished normalization, writing combined dataset to {output_file}")
     combined_df.to_csv(output_file, sep='\t', index=False)
 
 if __name__ == "__main__":
-    
     # Configure logging
     logging.basicConfig(level=logging.INFO, format='%(message)s')
-    
-    args = parse_args()
-    input_dir = args.input_dir
-    output_file = args.output_file
-    cpu_count = int(args.cpu_count)
-    
-    main(input_dir, output_file, cpu_count)
 
+    # Parse command-line arguments
+    args: argparse.Namespace = parse_args()
+    input_dir: str = args.input_dir
+    output_file: str = args.output_file
+    cpu_count: int = int(args.cpu_count)
+
+    # Run the main function
+    main(input_dir, output_file, cpu_count)
