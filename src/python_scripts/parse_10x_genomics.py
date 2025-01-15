@@ -32,8 +32,6 @@ def get_adata(matrix: csc_matrix, features: pd.DataFrame, barcodes: pd.DataFrame
             2. `adata_ATAC`: The processed ATAC-seq data.
     """
 
-
-
     # Ensure matrix data is in float32 format for memory efficiency and consistency
     matrix.data = matrix.data.astype(np.float32)
 

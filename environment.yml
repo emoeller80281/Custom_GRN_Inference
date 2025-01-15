@@ -1,0 +1,38 @@
+name: single_cell_grn
+channels:
+  - anaconda
+  - conda-forge
+  - bioconda
+dependencies:
+  # Python dependencies
+  - python>=3.10
+  - numpy
+  - pandas
+  - matplotlib
+  - scikit-learn
+  - scipy
+  - pyyaml
+  - parallel
+  - scanpy
+  - tqdm
+
+  # R dependencies
+  - r-base=4.1
+  - r-cicero
+  - r-monocle3
+  - r-signac
+  - r-seurat
+  - r-tidyverse
+  - r-genomicranges
+  - r-matrix
+  - r-rtracklayer
+  - r-devtools
+
+  # System utilities
+  - perl
+  - curl
+  - hdf5
+  - libxml2
+  - libcurl
+  - openssl
+  - zlib
