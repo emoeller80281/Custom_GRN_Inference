@@ -52,6 +52,32 @@ exec > "${LOG_DIR}/main_pipeline.log" 2> "${LOG_DIR}/main_pipeline.err"
 # =============================================
 
 # -------------- VALIDATION FUNCTIONS ----------------------
+
+check_for_running_jobs() {
+    echo "[INFO] Checking for running jobs with the same name..."
+    if [ -z "${SLURM_JOB_NAME:-}" ]; then
+        echo "    Not running in a SLURM environment, not checking for running tasks"
+        return 0
+    fi
+
+    # Use the SLURM job name for comparison
+    JOB_NAME="${SLURM_JOB_NAME:-custom_grn_inference}"  # Dynamically retrieve the job name from SLURM
+
+    # Check for running jobs with the same name, excluding the current job
+    RUNNING_COUNT=$(squeue --name="$JOB_NAME" --noheader | wc -l)
+
+    # If other jobs with the same name are running, exit
+    if [ "$RUNNING_COUNT" -gt 1 ]; then
+        echo "[WARNING] A job with the name '"$JOB_NAME"' is already running:"
+        echo "    Exiting to avoid conflicts."
+        exit 1
+    
+    # If no other jobs are running, pass
+    else
+        echo "    No other jobs with the name '"$JOB_NAME"'"
+    fi
+}
+
 validate_critical_variables() {
     # Make sure that all of the required user variables are set
     local critical_vars=(R_SCRIPT_DIR ATAC_DATA_FILE OUTPUT_DIR LOG_DIR HOMER_PEAK_FILE HOMER_ORGANISM_CODE)
@@ -204,30 +230,30 @@ setup_directories() {
     for dir in "${dirs[@]}"; do
         mkdir -p "$dir"
     done
-    echo "[INFO] Required directories created."
+    echo "    Required directories created."
 }
 
 check_r_environment() {
-    REQUIRED_R_VERSION="4.1.0"  # Replace with your required version
+    REQUIRED_R_VERSION="4.3.2"  # Replace with your required version
 
     echo "Checking R environment..."
 
     # Check R version
     if ! command -v R &> /dev/null; then
-        echo "[ERROR] R is not installed. Please install R version $REQUIRED_R_VERSION or later."
+        echo "    [ERROR] R is not installed. Please install R version $REQUIRED_R_VERSION or later."
         exit 1
     fi
 
     # Check if the installed version of R is different
     INSTALLED_R_VERSION=$(R --version | grep -oP "(?<=R version )\d+\.\d+\.\d+" | head -1)
     if [[ "$(printf '%s\n' "$REQUIRED_R_VERSION" "$INSTALLED_R_VERSION" | sort -V | head -1)" != "$REQUIRED_R_VERSION" ]]; then
-        echo "[ERROR] Installed R version ($INSTALLED_R_VERSION) is older than required ($REQUIRED_R_VERSION). Please update R."
+        echo "    [ERROR] Installed R version ($INSTALLED_R_VERSION) is older than required ($REQUIRED_R_VERSION). Please update R."
         exit 1
     fi
-    echo "R version $INSTALLED_R_VERSION is installed."
+    echo "    R version $INSTALLED_R_VERSION is installed."
 
     # Check for required R packages
-    Rscript $R_SCRIPT_DIR/check_dependencies.R
+    Rscript $R_SCRIPT_DIR/check_dependencies.r
 }
 
 download_file_if_missing() {
@@ -243,10 +269,10 @@ download_file_if_missing() {
             echo "[ERROR] Failed to download or validate $file_description from $file_url."
             exit 1
         else
-            echo "    Successfully downloaded $file_description"
+            echo "        Successfully downloaded $file_description"
         fi
     else
-        echo "    Using existing $file_description"
+        echo "        Using existing $file_description"
     fi
 }
 
@@ -281,6 +307,7 @@ check_cicero_genome_files_exist() {
 
 # -------------- MAIN PIPELINE FUNCTIONS --------------
 run_cicero() {
+    echo ""
     echo "Cicero: Mapping scATACseq peaks to target genes"
 
     # Validate variables
@@ -309,10 +336,12 @@ run_cicero() {
         "$OUTPUT_DIR" \
         "$CHROM_SIZES" \
         "$GENE_ANNOT" \
+        "$NUM_CPU" \
     > "$LOG_DIR/step01_run_cicero.log" 2>"$LOG_DIR/cicero_R_output.log"
 }
 
 create_homer_peak_file() {
+    echo ""
     echo "Python: Creating Homer peak file"
     /usr/bin/time -v \
     python3 "$PYTHON_SCRIPT_DIR/Step010.create_homer_peak_file.py" \
@@ -322,6 +351,7 @@ create_homer_peak_file() {
 }
 
 find_motifs_genome() {
+    echo ""
     echo "Homer: Running findMotifsGenome.pl"
     /usr/bin/time -v \
     perl "$HOMER_DIR/findMotifsGenome.pl" "$HOMER_PEAK_FILE" "$HOMER_ORGANISM_CODE" "$OUTPUT_DIR" -size 200 \
@@ -329,6 +359,7 @@ find_motifs_genome() {
 }
 
 annotate_peaks() {
+    echo ""
     echo "Homer: Running annotatePeaks.pl"
     /usr/bin/time -v \
     perl "$HOMER_DIR/annotatePeaks.pl" "$HOMER_PEAK_FILE" "$HOMER_ORGANISM_CODE" -m "$MOTIF_DIR/known1.motif" > "$OUTPUT_DIR/known_motif_1_motif_to_peak.txt" \
@@ -336,6 +367,7 @@ annotate_peaks() {
 }
 
 process_motif_files() {
+    echo ""
     echo "Python: Processing motif files in parallel"
 
     # Check for GNU parallel
@@ -380,6 +412,7 @@ process_motif_files() {
 }
 
 parse_tf_peak_motifs() {
+    echo ""
     echo "Python: Parsing TF binding motif results from Homer"
     /usr/bin/time -v \
     python3 "$PYTHON_SCRIPT_DIR/Step020.parse_TF_peak_motifs.py" \
@@ -390,6 +423,7 @@ parse_tf_peak_motifs() {
 }
 
 calculate_tf_regulation_score() {
+    echo ""
     echo "Python: Calculating TF-TG regulatory potential"
     /usr/bin/time -v \
     python3 "$PYTHON_SCRIPT_DIR/Step030.find_overlapping_TFs.py" \
@@ -412,6 +446,7 @@ if [[ "${1:-}" == "--help" ]]; then
 fi
 
 # Perform validation
+check_for_running_jobs
 check_pipeline_steps
 check_tools
 determine_num_cpus

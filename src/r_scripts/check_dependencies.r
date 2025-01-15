@@ -1,7 +1,7 @@
 # Handle installing missing packages
 required_packages <- c(
   "cicero", "monocle3", "Signac", "Seurat", "GenomicRanges",
-  "Matrix", "rtracklayer", "reshape2", "dplyr", "tidyr"
+  "Matrix", "rtracklayer", "reshape2", "dplyr", "tidyr", "parallel"
 )
 
 install_missing_packages <- function(packages) {
@@ -33,4 +33,4 @@ install_missing_packages(cran_packages)
 bioc_packages <- intersect(required_packages, c("cicero", "monocle3", "Signac", "GenomicRanges", "rtracklayer"))
 install_missing_bioc_packages(bioc_packages)
 
-cat("All R dependencies are installed.\n")
+cat("    All R dependencies are installed.\n")

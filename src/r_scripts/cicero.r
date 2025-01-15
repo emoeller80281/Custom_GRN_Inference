@@ -9,6 +9,8 @@ library(rtracklayer)
 library(reshape2)
 library(dplyr)
 library(tidyr)
+library(parallel)
+
 
 # =============================================
 # Utility Functions
@@ -24,7 +26,7 @@ log_message <- function(message) {
 
 args <- commandArgs(trailingOnly = TRUE)
 
-if (length(args) < 4) {
+if (length(args) < 5) {
   stop("Usage: Rscript script.R <atac_file_path> <output_dir> <chromsize_file_path> <gene_annot_file_path>")
 }
 
@@ -32,6 +34,7 @@ atac_file_path <- args[1]
 output_dir <- args[2]
 chrom_sizes <- args[3]
 gene_annot <- args[4]
+num_cpu <- args[5]
 
 if (!dir.exists(output_dir)) {
   dir.create(output_dir, recursive = TRUE)
@@ -52,6 +55,8 @@ atac_long <- reshape2::melt(as.matrix(atac_data), varnames = c("peak_position", 
   filter(reads > 0) %>%
   mutate(peak_position = gsub("[:\\-]", "_", peak_position))
 
+log_message("Creating a Cicero cell_data_set (CDS) from ATAC data...")
+log_message("    Running dimensionality reduction")
 cds <- make_atac_cds(atac_long, binarize = TRUE) %>%
   detect_genes() %>%
   estimate_size_factors() %>%
@@ -59,6 +64,8 @@ cds <- make_atac_cds(atac_long, binarize = TRUE) %>%
   reduce_dimension(reduction_method = "UMAP", preprocess_method = "LSI")
 
 umap_coords <- reducedDims(cds)$UMAP
+
+log_message("    Making Cicero CDS object")
 cicero_obj <- make_cicero_cds(cds, reduced_coordinates = umap_coords)
 
 # =============================================
@@ -66,7 +73,21 @@ cicero_obj <- make_cicero_cds(cds, reduced_coordinates = umap_coords)
 # =============================================
 
 log_message("Running Cicero...")
-conns <- run_cicero(cicero_obj, chrom_sizes, sample_num = 500, silent = FALSE)
+Parallelized Cicero Execution (without profiling subprocesses)
+conns <- mclapply(1:length(chrom_sizes), function(i) {
+  run_cicero(cicero_obj, chrom_sizes[i], sample_num = 50, window = 1000000)
+}, mc.cores = num_cpu)
+
+# # Profile only the main workflow (sequential for profiling clarity)
+# prof <- profvis({
+#   # Sequential run for profiling
+#   conns <- lapply(1:length(chrom_sizes), function(i) {
+#     run_cicero(cicero_obj, chrom_sizes[i], sample_num = 50, window = 1000000)
+#   })
+# })
+
+# # Save profiling results to an HTML file
+# htmlwidgets::saveWidget(prof, "cicero_profiling.html")
 
 # =============================================
 # Process Gene Annotations
