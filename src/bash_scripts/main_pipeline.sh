@@ -32,7 +32,7 @@ BASE_DIR="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLE
 INPUT_DIR="$BASE_DIR/input"
 ATAC_DATA_FILE="$INPUT_DIR/multiomic_data_filtered_L2_E7.5_rep1_ATAC.csv"
 RNA_DATA_FILE="$INPUT_DIR/multiomic_data_filtered_L2_E7.5_rep1_RNA.csv"
-HOMER_ORGANISM_CODE="mm10"
+HOMER_ORGANISM_CODE="mm10" # Make sure you download the correct homer genome e.g. `perl Homer/configureHomer.pl -install mm10`
 CONDA_ENV_NAME="my_env"
 
 # Other paths
