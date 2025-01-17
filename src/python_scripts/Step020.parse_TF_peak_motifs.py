@@ -21,6 +21,12 @@ def parse_args() -> argparse.Namespace:
         help="Path to the directory containing Homer TF motif scores from Homer 'annotatePeaks.pl'"
     )
     parser.add_argument(
+        "--cicero_cis_reg_file",
+        type=str,
+        required=True,
+        help="Path to the inferred cis-regulatory network from Cicero"
+    )
+    parser.add_argument(
         "--output_file",
         type=str,
         required=True,
@@ -36,12 +42,13 @@ def parse_args() -> argparse.Namespace:
     args: argparse.Namespace = parser.parse_args()
     return args
 
-def process_file(path_to_file: str) -> pd.DataFrame:
+def process_file(path_to_file: str, peak_gene_assoc: pd.DataFrame) -> pd.DataFrame:
     """
     Processes a single Homer TF motif file and extracts TF-TG relationships and motif scores.
 
     Args:
         path_to_file (str): Path to the motif file.
+        peak_gene_assoc (pd.DataFrame): Dataframe of Cicero peak to gene inference results.
 
     Returns:
         pd.DataFrame: DataFrame containing Source (TF), Target (TG), and Motif_Score.
@@ -49,10 +56,21 @@ def process_file(path_to_file: str) -> pd.DataFrame:
     # Read in the motif file as a pandas DataFrame
     motif_to_peak: pd.DataFrame = pd.read_csv(path_to_file, sep='\t', header=[0], index_col=None)
 
+    motif_to_peak["Start"] = motif_to_peak["Start"].astype(str)
+    motif_to_peak["End"] = motif_to_peak["End"].astype(str)
+    
+    # Reconstruct the peak
+    motif_to_peak["peak"] = motif_to_peak["Chr"] + "_" + motif_to_peak["Start"] + "_" + motif_to_peak["End"]
+    
+    # Merge the peaks that match with the peaks in the peak to gene association output from Cicero 
+    merged_df = pd.merge(motif_to_peak, peak_gene_assoc, how='right', on='peak')
+    
+    print(merged_df.head())
+    
     # Extract motif-related data
     motif_column: str = motif_to_peak.columns[-1]
     TF_name: str = motif_column.split('/')[0]
-
+    
     # Set the columns    
     motif_to_peak['Motif Count'] = motif_to_peak[motif_column].apply(lambda x: len(x.split(',')) / 3 if pd.notnull(x) else 0)
     motif_to_peak["Source"] = TF_name.split('(')[0]
@@ -84,7 +102,7 @@ def process_file(path_to_file: str) -> pd.DataFrame:
     final_df: pd.DataFrame = filtered_df[["Source", "Target", "Motif_Score"]]
     return final_df
 
-def main(input_dir: str, output_file: str, cpu_count: int) -> None:
+def main(input_dir: str, cicero_cis_reg_file: str, output_file: str, cpu_count: int) -> None:
     """
     Main function to process all files in a directory and output combined results.
 
@@ -96,12 +114,13 @@ def main(input_dir: str, output_file: str, cpu_count: int) -> None:
     # List all files in the input directory
     file_paths: List[str] = [os.path.join(input_dir, f) for f in os.listdir(input_dir) if os.path.isfile(os.path.join(input_dir, f))]
     
+    peak_gene_assoc: pd.DataFrame = pd.read_csv(cicero_cis_reg_file, sep=",", header=0)
+    
     results: List[pd.DataFrame] = []
-
     # Use multiprocessing pool to process files
     with Pool(processes=cpu_count) as pool:
         with tqdm(total=len(file_paths), desc="Processing files") as pbar:
-            for result in pool.imap_unordered(process_file, file_paths):
+            for result in pool.imap_unordered(process_file, file_paths, peak_gene_assoc):
                 results.append(result)
                 pbar.update(1)
 
@@ -126,8 +145,10 @@ if __name__ == "__main__":
     # Parse command-line arguments
     args: argparse.Namespace = parse_args()
     input_dir: str = args.input_dir
+    cicero_cis_reg_file: str = args.cicero_cis_reg_file
+    homer_peak_file: str = args.homer_peak_file
     output_file: str = args.output_file
     cpu_count: int = int(args.cpu_count)
 
     # Run the main function
-    main(input_dir, output_file, cpu_count)
+    main(input_dir, cicero_cis_reg_file, output_file, cpu_count)

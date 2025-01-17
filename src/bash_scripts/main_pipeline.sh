@@ -13,7 +13,7 @@ set -euo pipefail
 # =============================================
 # SELECT WHICH PROCESSES TO RUN
 # =============================================
-CICERO_MAP_PEAKS_TO_TG=true
+CICERO_MAP_PEAKS_TO_TG=false
 CREATE_HOMER_PEAK_FILE=false
 HOMER_FIND_MOTIFS_GENOME=false
 HOMER_ANNOTATE_PEAKS=false
@@ -40,6 +40,7 @@ OUTPUT_DIR="$BASE_DIR/output"
 HOMER_DIR="$BASE_DIR/Homer/bin"
 MOTIF_DIR="$OUTPUT_DIR/knownResults"
 HOMER_PEAK_FILE="$INPUT_DIR/Homer_peaks.txt"
+CICERO_OUTPUT_FILE="$OUTPUT_DIR/peak_gene_associations.csv"
 TF_MOTIF_BINDING_SCORE_FILE="$OUTPUT_DIR/total_motif_regulatory_scores.tsv"
 PROCESSED_MOTIF_DIR="$OUTPUT_DIR/homer_tf_motif_scores"
 LOG_DIR="$BASE_DIR/LOGS"
@@ -336,7 +337,6 @@ run_cicero() {
         "$OUTPUT_DIR" \
         "$CHROM_SIZES" \
         "$GENE_ANNOT" \
-        "$NUM_CPU" \
     > "$LOG_DIR/step01_run_cicero.log" 2>"$LOG_DIR/cicero_R_output.log"
 }
 
@@ -417,6 +417,7 @@ parse_tf_peak_motifs() {
     /usr/bin/time -v \
     python3 "$PYTHON_SCRIPT_DIR/Step020.parse_TF_peak_motifs.py" \
         --input_dir "$PROCESSED_MOTIF_DIR" \
+        --cicero_cis_reg_file "$CICERO_OUTPUT_FILE" \
         --output_file "$TF_MOTIF_BINDING_SCORE_FILE" \
         --cpu_count "$NUM_CPU" \
     > "$LOG_DIR/step06_parse_tf_binding_motifs.log"

@@ -10,7 +10,8 @@ library(reshape2)
 library(dplyr)
 library(tidyr)
 library(parallel)
-
+library(htmlwidgets)
+library(profvis)
 
 # =============================================
 # Utility Functions
@@ -24,17 +25,23 @@ log_message <- function(message) {
 # Command-Line Arguments
 # =============================================
 
-args <- commandArgs(trailingOnly = TRUE)
+# args <- commandArgs(trailingOnly = TRUE)
 
-if (length(args) < 5) {
-  stop("Usage: Rscript script.R <atac_file_path> <output_dir> <chromsize_file_path> <gene_annot_file_path>")
-}
+# if (length(args) < 5) {
+#   stop("Usage: Rscript script.R <atac_file_path> <output_dir> <chromsize_file_path> <gene_annot_file_path>")
+# }
 
-atac_file_path <- args[1]
-output_dir <- args[2]
-chrom_sizes <- args[3]
-gene_annot <- args[4]
-num_cpu <- args[5]
+# atac_file_path <- args[1]
+# output_dir <- args[2]
+# chrom_sizes_path <- args[3]
+# gene_annot <- args[4]
+# num_cpu <- args[5]
+
+atac_file_path <- "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/multiomic_data_filtered_L2_E7.5_rep1_ATAC.csv"
+output_dir <- "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output"
+chrom_sizes <- "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/mm10.chrom.sizes"
+gene_annot <- "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/Mus_musculus.GRCm39.113.gtf.gz"
+num_cpu <- 16
 
 if (!dir.exists(output_dir)) {
   dir.create(output_dir, recursive = TRUE)
@@ -51,6 +58,14 @@ log_message(sprintf("Output directory: %s", output_dir))
 log_message("Loading and preprocessing ATAC data...")
 atac_data <- read.csv(atac_file_path, row.names = 1, check.names = FALSE)
 
+log_message("Subsetting peaks...")
+
+# Subset to a random sample of 10,000 peaks (adjust as needed)
+subset_peaks <- sample(rownames(atac_data), size = 1000, replace = FALSE)
+atac_data <- atac_data[subset_peaks, ]
+
+log_message(sprintf("Subset to %d peaks", nrow(atac_data)))
+
 atac_long <- reshape2::melt(as.matrix(atac_data), varnames = c("peak_position", "cell"), value.name = "reads") %>%
   filter(reads > 0) %>%
   mutate(peak_position = gsub("[:\\-]", "_", peak_position))
@@ -64,31 +79,28 @@ cds <- make_atac_cds(atac_long, binarize = TRUE) %>%
   reduce_dimension(reduction_method = "UMAP", preprocess_method = "LSI")
 
 umap_coords <- reducedDims(cds)$UMAP
+log_message("        Done!")
 
 log_message("    Making Cicero CDS object")
 cicero_obj <- make_cicero_cds(cds, reduced_coordinates = umap_coords)
+log_message("        Done!")
 
 # =============================================
 # Run Cicero
 # =============================================
 
 log_message("Running Cicero...")
-Parallelized Cicero Execution (without profiling subprocesses)
-conns <- mclapply(1:length(chrom_sizes), function(i) {
-  run_cicero(cicero_obj, chrom_sizes[i], sample_num = 50, window = 1000000)
-}, mc.cores = num_cpu)
 
-# # Profile only the main workflow (sequential for profiling clarity)
-# prof <- profvis({
-#   # Sequential run for profiling
-#   conns <- lapply(1:length(chrom_sizes), function(i) {
-#     run_cicero(cicero_obj, chrom_sizes[i], sample_num = 50, window = 1000000)
-#   })
-# })
+# Profile the 
+prof <- profvis({
+  conns <- lapply(1:length(chrom_sizes), function(i) {
+    run_cicero(cicero_obj, chrom_sizes[i], sample_num = 50, window = 1000000)
+  })
+})
 
-# # Save profiling results to an HTML file
-# htmlwidgets::saveWidget(prof, "cicero_profiling.html")
-
+# Save profiling results to an HTML file
+htmlwidgets::saveWidget(prof, "cicero_profiling.html")
+log_message("    Done!")
 # =============================================
 # Process Gene Annotations
 # =============================================
@@ -96,9 +108,9 @@ conns <- mclapply(1:length(chrom_sizes), function(i) {
 log_message("Processing gene annotations...")
 gene_anno <- rtracklayer::import(gene_annot) %>% 
   as.data.frame() %>%
-  select(seqid, start, end, strand, gene_id, gene_name, transcript_id) %>%
+  select(seqnames, start, end, strand, gene_id, gene_name, transcript_id) %>%
   mutate(
-    chromosome = paste0("chr", seqid),
+    chromosome = paste0("chr", seqnames),
     gene = gene_id,
     symbol = gene_name
   )
@@ -127,10 +139,9 @@ cds <- annotate_cds_by_site(cds, gene_annotation_sub)
 # =============================================
 
 log_message("Generating peak-gene associations...")
-peak_to_gene <- fData(cds) %>%
+peak_to_gene <- as.data.frame(fData(cds)) %>%
   select(site_name, gene) %>%
-  filter(!is.na(gene)) %>%
-  as.data.frame()
+  filter(!is.na(gene)) 
 
 conns_gene <- conns %>%
   left_join(peak_to_gene, by = c("Peak1" = "site_name")) %>%
