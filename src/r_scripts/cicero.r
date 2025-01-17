@@ -58,9 +58,9 @@ atac_data <- read.csv(atac_file_path, row.names = 1, check.names = FALSE)
 
 log_message("Subsetting peaks...")
 
-# Subset to a random sample of 10,000 peaks (adjust as needed)
-subset_peaks <- sample(rownames(atac_data), size = 10000, replace = FALSE)
-atac_data <- atac_data[subset_peaks, ]
+# # Subset to a random sample of 10,000 peaks (adjust as needed)
+# subset_peaks <- sample(rownames(atac_data), size = 10000, replace = FALSE)
+# atac_data <- atac_data[subset_peaks, ]
 
 log_message(sprintf("Subset to %d peaks", nrow(atac_data)))
 

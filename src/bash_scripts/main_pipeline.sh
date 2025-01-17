@@ -3,7 +3,7 @@
 #SBATCH --job-name custom_grn_method
 #SBATCH --partition compute
 #SBATCH --nodes=1
-#SBATCH --cpus-per-task 32
+#SBATCH --cpus-per-task 8
 #SBATCH --mem-per-cpu=16G
 #SBATCH --output=/dev/null
 #SBATCH --error=/dev/null
@@ -14,9 +14,9 @@ set -euo pipefail
 # SELECT WHICH PROCESSES TO RUN
 # =============================================
 CICERO_MAP_PEAKS_TO_TG=false
-CREATE_HOMER_PEAK_FILE=false
-HOMER_FIND_MOTIFS_GENOME=false
-HOMER_ANNOTATE_PEAKS=false
+CREATE_HOMER_PEAK_FILE=true
+HOMER_FIND_MOTIFS_GENOME=true
+HOMER_ANNOTATE_PEAKS=true
 PROCESS_MOTIF_FILES=false
 PARSE_TF_PEAK_MOTIFS=false
 CALCULATE_TF_REGULATION_SCORE=false
@@ -155,18 +155,21 @@ determine_num_cpus() {
 }
 
 install_homer() {
-    # Double check if Homer directory already exists
+    # Set the Homer directory path
+    HOMER_DIR="$BASE_DIR/Homer/bin"
+
+    # Double-check if Homer directory already exists
     if [ -d "$BASE_DIR/Homer" ]; then
-        echo "Homer directory already exists. Skipping installation."
+        echo "Homer directory found, adding to PATH"
+        export PATH=$HOMER_DIR:$PATH
         return
     fi
 
     echo "    Creating Homer directory"
     mkdir -p "$BASE_DIR/Homer"
-    
+
     echo "    Downloading Homer..."
-    curl -s -o "$BASE_DIR/Homer/configureHomer.pl" \
-        http://homer.ucsd.edu/homer/configureHomer.pl
+    curl -s -o "$BASE_DIR/Homer/configureHomer.pl" http://homer.ucsd.edu/homer/configureHomer.pl
     if [ $? -ne 0 ]; then
         echo "[ERROR] Failed to download Homer."
         exit 1
@@ -188,7 +191,12 @@ install_homer() {
         exit 1
     fi
     echo "        Done!"
+
+    # Export Homer bin directory to PATH
+    export PATH=$HOMER_DIR:$PATH
+    echo "    Added Homer to PATH: $HOMER_DIR"
 }
+
 
 # Function to validate input files
 check_input_files() {
@@ -355,7 +363,7 @@ find_motifs_genome() {
     echo "Homer: Running findMotifsGenome.pl"
     /usr/bin/time -v \
     perl "$HOMER_DIR/findMotifsGenome.pl" "$HOMER_PEAK_FILE" "$HOMER_ORGANISM_CODE" "$OUTPUT_DIR" -size 200 \
-    > "$LOG_DIR/step03_homer_findMotifsGenome.log"
+    1> "$LOG_DIR/step03_homer_findMotifsGenome.log"
 }
 
 annotate_peaks() {
@@ -363,7 +371,7 @@ annotate_peaks() {
     echo "Homer: Running annotatePeaks.pl"
     /usr/bin/time -v \
     perl "$HOMER_DIR/annotatePeaks.pl" "$HOMER_PEAK_FILE" "$HOMER_ORGANISM_CODE" -m "$MOTIF_DIR/known1.motif" > "$OUTPUT_DIR/known_motif_1_motif_to_peak.txt" \
-    "$LOG_DIR/step04_homer_annotatePeaks.log"
+    1> "$LOG_DIR/step04_homer_annotatePeaks.log"
 }
 
 process_motif_files() {
@@ -454,6 +462,7 @@ determine_num_cpus
 check_input_files
 activate_conda_env
 setup_directories
+install_homer
 
 # Execute selected pipeline steps
 if [ "$CICERO_MAP_PEAKS_TO_TG" = true ]; then run_cicero; fi

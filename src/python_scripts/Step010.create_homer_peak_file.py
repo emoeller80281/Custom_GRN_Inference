@@ -41,11 +41,9 @@ def convert_to_homer_peak_format(atac_data: pd.DataFrame) -> pd.DataFrame:
     # Validate that the input DataFrame has the expected structure
     if atac_data.empty:
         raise ValueError("Input ATAC-seq data is empty.")
-    if 'peak_id' not in atac_data.columns:
-        raise ValueError("Input DataFrame must contain a 'peak_id' column with formatted peak IDs (e.g., 'chr:start-end').")
-
+    
     # Extract the peak ID column
-    peak_ids: pd.Series = atac_data['peak_id']
+    peak_ids: pd.Series = atac_data.iloc[:, 0]
 
     # Split peak IDs into chromosome, start, and end
     try:
