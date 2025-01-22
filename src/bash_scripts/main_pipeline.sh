@@ -3,8 +3,8 @@
 #SBATCH --job-name custom_grn_method
 #SBATCH --partition compute
 #SBATCH --nodes=1
-#SBATCH --cpus-per-task 8
-#SBATCH --mem-per-cpu=16G
+#SBATCH --cpus-per-task 1
+#SBATCH --mem-per-cpu=128G
 #SBATCH --output=/dev/null
 #SBATCH --error=/dev/null
 
@@ -13,10 +13,9 @@ set -euo pipefail
 # =============================================
 # SELECT WHICH PROCESSES TO RUN
 # =============================================
-CICERO_MAP_PEAKS_TO_TG=false
-CREATE_HOMER_PEAK_FILE=true
-HOMER_FIND_MOTIFS_GENOME=true
-HOMER_ANNOTATE_PEAKS=true
+CICERO_MAP_PEAKS_TO_TG=true
+CREATE_HOMER_PEAK_FILE=false
+HOMER_FIND_MOTIFS_GENOME=false
 PROCESS_MOTIF_FILES=false
 PARSE_TF_PEAK_MOTIFS=false
 CALCULATE_TF_REGULATION_SCORE=false
@@ -95,7 +94,7 @@ validate_critical_variables
 # Function to check if at least one process is selected
 check_pipeline_steps() {
     if ! $CICERO_MAP_PEAKS_TO_TG && ! $CREATE_HOMER_PEAK_FILE && ! $HOMER_FIND_MOTIFS_GENOME && \
-       ! $HOMER_ANNOTATE_PEAKS && ! $PROCESS_MOTIF_FILES && ! $PARSE_TF_PEAK_MOTIFS && ! $CALCULATE_TF_REGULATION_SCORE; then
+       ! $PROCESS_MOTIF_FILES && ! $PARSE_TF_PEAK_MOTIFS && ! $CALCULATE_TF_REGULATION_SCORE; then
         echo "Error: At least one process must be enabled to run the pipeline."
         exit 1
     fi
@@ -244,25 +243,46 @@ setup_directories() {
 
 check_r_environment() {
     REQUIRED_R_VERSION="4.3.2"  # Replace with your required version
+    echo "    Checking R environment..."
 
-    echo "Checking R environment..."
+    # Check if the 'module' command exists
+    if ! command -v module &> /dev/null; then
+        echo "        [ERROR] 'module' command is not available. Ensure the environment module system is installed."
+        exit 1
+    fi
+
+    # Check if the 'rstudio' module is available
+    if ! module avail rstudio &> /dev/null; then
+        echo "        [ERROR] 'rstudio' module is not available. Check your module system."
+        exit 1
+    fi
+
+    # Load the 'rstudio' module
+    module load rstudio
+    if [ $? -ne 0 ]; then
+        echo "        [ERROR] Failed to load 'rstudio' module."
+        exit 1
+    else
+        echo "        [INFO] Successfully loaded 'rstudio' module."
+    fi
 
     # Check R version
     if ! command -v R &> /dev/null; then
-        echo "    [ERROR] R is not installed. Please install R version $REQUIRED_R_VERSION or later."
+        echo "        [ERROR] R is not installed. Please install R version $REQUIRED_R_VERSION or later."
         exit 1
     fi
 
     # Check if the installed version of R is different
     INSTALLED_R_VERSION=$(R --version | grep -oP "(?<=R version )\d+\.\d+\.\d+" | head -1)
     if [[ "$(printf '%s\n' "$REQUIRED_R_VERSION" "$INSTALLED_R_VERSION" | sort -V | head -1)" != "$REQUIRED_R_VERSION" ]]; then
-        echo "    [ERROR] Installed R version ($INSTALLED_R_VERSION) is older than required ($REQUIRED_R_VERSION). Please update R."
+        echo "        [ERROR] Installed R version ($INSTALLED_R_VERSION) is older than required ($REQUIRED_R_VERSION). Please update R."
         exit 1
     fi
-    echo "    R version $INSTALLED_R_VERSION is installed."
+    echo "        R version $INSTALLED_R_VERSION is installed."
 
     # Check for required R packages
     Rscript $R_SCRIPT_DIR/check_dependencies.r
+    echo ""
 }
 
 download_file_if_missing() {
@@ -286,8 +306,9 @@ download_file_if_missing() {
 }
 
 check_cicero_genome_files_exist() {
+
     if [ "$HOMER_ORGANISM_CODE" == "mm10" ]; then
-        echo "$HOMER_ORGANISM_CODE detected, using mouse genome"
+        echo "    $HOMER_ORGANISM_CODE detected, using mouse genome"
 
         CHROM_SIZES="$INPUT_DIR/mm10.chrom.sizes"
         CHROM_SIZES_URL="https://hgdownload.soe.ucsc.edu/goldenPath/mm10/bigZips/mm10.chrom.sizes"
@@ -296,7 +317,7 @@ check_cicero_genome_files_exist() {
         GENE_ANNOT_URL="https://ftp.ensembl.org/pub/release-113/gtf/mus_musculus/Mus_musculus.GRCm39.113.gtf.gz"
     
     elif [ "$HOMER_ORGANISM_CODE" == "hg38" ]; then
-        echo "$HOMER_ORGANISM_CODE detected, using human genome"
+        echo "    $HOMER_ORGANISM_CODE detected, using human genome"
 
         CHROM_SIZES="$INPUT_DIR/hg38.chrom.sizes"
         CHROM_SIZES_URL="https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/hg38.chrom.sizes"
@@ -305,7 +326,7 @@ check_cicero_genome_files_exist() {
         GENE_ANNOT_URL="https://ftp.ensembl.org/pub/release-113/gtf/homo_sapiens/Homo_sapiens.GRCh38.113.gtf.gz"
 
     else
-        echo "[ERROR] Unsupported HOMER_ORGANISM_CODE: $HOMER_ORGANISM_CODE"
+        echo "    [ERROR] Unsupported HOMER_ORGANISM_CODE: $HOMER_ORGANISM_CODE"
         exit 1
     fi
 
@@ -339,6 +360,8 @@ run_cicero() {
         module load rstudio
     fi
 
+    echo "    Checks complete, running Cicero"
+
     /usr/bin/time -v \
     Rscript "$R_SCRIPT_DIR/cicero.r" \
         "$ATAC_DATA_FILE" \
@@ -363,20 +386,11 @@ find_motifs_genome() {
     echo "Homer: Running findMotifsGenome.pl"
     /usr/bin/time -v \
     perl "$HOMER_DIR/findMotifsGenome.pl" "$HOMER_PEAK_FILE" "$HOMER_ORGANISM_CODE" "$OUTPUT_DIR" -size 200 \
-    1> "$LOG_DIR/step03_homer_findMotifsGenome.log"
-}
-
-annotate_peaks() {
-    echo ""
-    echo "Homer: Running annotatePeaks.pl"
-    /usr/bin/time -v \
-    perl "$HOMER_DIR/annotatePeaks.pl" "$HOMER_PEAK_FILE" "$HOMER_ORGANISM_CODE" -m "$MOTIF_DIR/known1.motif" > "$OUTPUT_DIR/known_motif_1_motif_to_peak.txt" \
-    1> "$LOG_DIR/step04_homer_annotatePeaks.log"
+    2> "$LOG_DIR/step03_homer_findMotifsGenome.log"
 }
 
 process_motif_files() {
-    echo ""
-    echo "Python: Processing motif files in parallel"
+    echo "[INFO] Starting motif file processing"
 
     # Check for GNU parallel
     if ! command -v parallel &> /dev/null; then
@@ -394,19 +408,32 @@ process_motif_files() {
         exit 1
     fi
 
-     # Log number of files to process
+    # Log number of files to process
     file_count=$(echo "$motif_files" | wc -l)
-    echo "Processing $file_count motif files using $NUM_CPU CPUs."
+    echo "[INFO] Found $file_count motif files to process."
 
-    # Process files
+    # Create output directory if it doesn't exist
+    mkdir -p "$PROCESSED_MOTIF_DIR"
+
+    # Process files in parallel
     if [ "$use_parallel" = true ]; then
         echo "$motif_files" | /usr/bin/time -v parallel -j "$NUM_CPU" \
-            "perl $HOMER_DIR/annotatePeaks.pl {} '$HOMER_ORGANISM_CODE' -m {} > $PROCESSED_MOTIF_DIR/{/.}_tf_motifs.txt" \
-            > "$LOG_DIR/step05_parallel.log" 2>"$LOG_DIR/step05_parallel.err"
+            "annotatePeaks.pl $HOMER_PEAK_FILE '$HOMER_ORGANISM_CODE' -m {} > $PROCESSED_MOTIF_DIR/{/}_tf_motifs.txt" \
+            >> "$LOG_DIR/step05_parallel.log" 2>>"$LOG_DIR/step05_parallel.err"
+    
+    # Process files sequentially
     else
         for file in $motif_files; do
-            perl "$HOMER_DIR/annotatePeaks.pl" "$file" "$HOMER_ORGANISM_CODE" -m "$file" \
-                > "$PROCESSED_MOTIF_DIR/$(basename "$file" .motif)_tf_motifs.txt" 2>> "$LOG_DIR/step05_sequential.err"
+            local output_file="$PROCESSED_MOTIF_DIR/$(basename "$file" .motif)_tf_motifs.txt"
+            /usr/bin/time -v \
+            perl "$HOMER_DIR/annotatePeaks.pl" "$HOMER_PEAK_FILE" "$HOMER_ORGANISM_CODE" -m "$file" > "$output_file" \
+            2>> "$LOG_DIR/step05_sequential.err"
+
+            if [ $? -ne 0 ]; then
+                echo "[ERROR] Failed to process motif file: $file" >> "$LOG_DIR/step05_sequential.err"
+            else
+                echo "[INFO] Successfully processed: $file"
+            fi
         done
     fi
 
@@ -416,7 +443,7 @@ process_motif_files() {
         exit 1
     fi
 
-    echo "Motif file processing completed successfully."
+    echo "[INFO] Motif file processing completed successfully."
 }
 
 parse_tf_peak_motifs() {
@@ -426,6 +453,7 @@ parse_tf_peak_motifs() {
     python3 "$PYTHON_SCRIPT_DIR/Step020.parse_TF_peak_motifs.py" \
         --input_dir "$PROCESSED_MOTIF_DIR" \
         --cicero_cis_reg_file "$CICERO_OUTPUT_FILE" \
+        --homer_peak_file "$HOMER_PEAK_FILE" \
         --output_file "$TF_MOTIF_BINDING_SCORE_FILE" \
         --cpu_count "$NUM_CPU" \
     > "$LOG_DIR/step06_parse_tf_binding_motifs.log"
@@ -468,7 +496,6 @@ install_homer
 if [ "$CICERO_MAP_PEAKS_TO_TG" = true ]; then run_cicero; fi
 if [ "$CREATE_HOMER_PEAK_FILE" = true ]; then create_homer_peak_file; fi
 if [ "$HOMER_FIND_MOTIFS_GENOME" = true ]; then find_motifs_genome; fi
-if [ "$HOMER_ANNOTATE_PEAKS" = true ]; then annotate_peaks; fi
 if [ "$PROCESS_MOTIF_FILES" = true ]; then process_motif_files; fi
 if [ "$PARSE_TF_PEAK_MOTIFS" = true ]; then parse_tf_peak_motifs; fi
 if [ "$CALCULATE_TF_REGULATION_SCORE" = true ]; then calculate_tf_regulation_score; fi

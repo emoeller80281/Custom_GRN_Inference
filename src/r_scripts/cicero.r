@@ -27,13 +27,13 @@ log_message <- function(message) {
 
 args <- commandArgs(trailingOnly = TRUE)
 
-if (length(args) < 5) {
+if (length(args) < 4) {
   stop("Usage: Rscript script.R <atac_file_path> <output_dir> <chromsize_file_path> <gene_annot_file_path>")
 }
 
 atac_file_path <- args[1]
 output_dir <- args[2]
-chrom_sizes_path <- args[3]
+chrom_sizes <- args[3]
 gene_annot <- args[4]
 
 # atac_file_path <- "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/multiomic_data_filtered_L2_E7.5_rep1_ATAC.csv"
@@ -53,20 +53,22 @@ log_message(sprintf("Output directory: %s", output_dir))
 # Load and Preprocess Data
 # =============================================
 
-log_message("Loading and preprocessing ATAC data...")
+log_message("Loading ATACseq data...")
 atac_data <- read.csv(atac_file_path, row.names = 1, check.names = FALSE)
+log_message("    Done!")
 
-log_message("Subsetting peaks...")
+# log_message("Subsetting peaks...")
 
 # # Subset to a random sample of 10,000 peaks (adjust as needed)
 # subset_peaks <- sample(rownames(atac_data), size = 10000, replace = FALSE)
 # atac_data <- atac_data[subset_peaks, ]
 
-log_message(sprintf("Subset to %d peaks", nrow(atac_data)))
-
+# log_message(sprintf("Subset to %d peaks", nrow(atac_data)))
+log_message("Reshaping ATACseq datset to a matrix...")
 atac_long <- reshape2::melt(as.matrix(atac_data), varnames = c("peak_position", "cell"), value.name = "reads") %>%
   filter(reads > 0) %>%
   mutate(peak_position = gsub("[:\\-]", "_", peak_position))
+log_message("    Done!")
 
 log_message("Creating a Cicero cell_data_set (CDS) from ATAC data...")
 log_message("    Running dimensionality reduction")
@@ -94,6 +96,7 @@ s_val <- 0.75
 
 # Calculate distance penalty parameter for random genomic windows 
 # (used to calculate distance_parameter in generate_cicero_models)
+log_message("    Estimating distance parameter")
 dist_penalty <- estimate_distance_parameter(
   cicero_obj,
   window = window_size, # How many base pairs used to calculate each individual model, furthest distance to compare sites
@@ -104,6 +107,7 @@ dist_penalty <- estimate_distance_parameter(
 )
 
 # Generate graphical LASSO models on all sites in a CDS object within overlapping genomic windows
+log_message("    Generating Cicero graphical LASSO models")
 cicero_models <- generate_cicero_models(
   cicero_obj,
   window = window_size, 
@@ -113,6 +117,7 @@ cicero_models <- generate_cicero_models(
 )
 
 # Assembles the connections into a dataframe with cicero co-accessibility scores
+log_message("    Assembling co-accessibility scores into a dataframe")
 conns <- assemble_connections(
   cicero_models,
   silent = FALSE

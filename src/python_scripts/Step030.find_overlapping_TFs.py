@@ -73,9 +73,14 @@ def main() -> None:
 
     # Rename the first column as "Genes"
     RNA_dataset.rename(columns={RNA_dataset.columns[0]: "Genes"}, inplace=True)
+    RNA_dataset["Genes"] = RNA_dataset["Genes"].apply(lambda x: x.upper())
+    print(RNA_dataset.head())
+    print(TF_motif_binding_df.head())
 
     # Filter overlapping genes
     overlapping_TF_motif_binding_df: pd.DataFrame = filter_overlapping_genes(TF_motif_binding_df, RNA_dataset)
+    
+    print(overlapping_TF_motif_binding_df.head())
 
     # Align RNA data
     aligned_RNA: pd.DataFrame = RNA_dataset[RNA_dataset["Genes"].isin(overlapping_TF_motif_binding_df["Source"])]
@@ -107,18 +112,24 @@ def main() -> None:
     TF_motif_binding_df['Weighted_Score'] = (
         TF_motif_binding_df['TF_Mean_Expression'] *
         TF_motif_binding_df['TG_Mean_Expression'] *
-        TF_motif_binding_df['Motif_Score']
+        TF_motif_binding_df['Motif_Score'] *
+        TF_motif_binding_df['Peak Gene Score']
     )
+    
+    TF_motif_binding_df = TF_motif_binding_df[TF_motif_binding_df["Weighted_Score"] > 0]
 
     # Normalize the Weighted_Score
     TF_motif_binding_df['Normalized_Score'] = TF_motif_binding_df['Weighted_Score'] / TF_motif_binding_df['Weighted_Score'].max()
-
+    
+    cols_of_interest = ["Source", "Target", "Peak Gene Score", "TF_Mean_Expression", "TG_Mean_Expression", "Motif_Score", "Normalized_Score"]
+    TF_motif_binding_df = TF_motif_binding_df[cols_of_interest]
+    
     # Save results
     TF_motif_binding_df.to_csv(f'{output_dir}/inferred_grn.tsv', sep="\t", index=False)
 
     # Plot histogram of scores
     plot_histogram(
-        data=TF_motif_binding_df["Weighted_Score"],
+        data=np.log2(TF_motif_binding_df["Normalized_Score"]),
         title="Weighted TF-TG Binding Score Distribution",
         xlabel="Weighted Score",
         ylabel="Frequency",
