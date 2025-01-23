@@ -162,7 +162,7 @@ def main(input_dir: str, cicero_cis_reg_file: str, output_file: str, cpu_count: 
         if 0 != x != 1 else x  # Retain scores of 0 and 1 as they are
     )
     
-    print(peak_gene_assoc.head())
+    # print(peak_gene_assoc.head())
     
     # Preload the additional argument using functools.partial
     process_file_partial = partial(process_file, peak_gene_assoc=peak_gene_assoc)

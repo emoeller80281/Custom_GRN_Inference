@@ -13,12 +13,12 @@ set -euo pipefail
 # =============================================
 # SELECT WHICH PROCESSES TO RUN
 # =============================================
-CICERO_MAP_PEAKS_TO_TG=true
+CICERO_MAP_PEAKS_TO_TG=false
 CREATE_HOMER_PEAK_FILE=false
 HOMER_FIND_MOTIFS_GENOME=false
 PROCESS_MOTIF_FILES=false
 PARSE_TF_PEAK_MOTIFS=false
-CALCULATE_TF_REGULATION_SCORE=false
+CALCULATE_TF_REGULATION_SCORE=true
 
 # =============================================
 # USER PATH VARIABLES

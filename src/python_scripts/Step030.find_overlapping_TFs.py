@@ -114,7 +114,7 @@ def main() -> None:
         TF_motif_binding_df['TG_Mean_Expression'] *
         TF_motif_binding_df['Motif_Score'] *
         TF_motif_binding_df['Peak Gene Score']
-    )
+    ) # Add a Spearman or Pearson correlation?
     
     TF_motif_binding_df = TF_motif_binding_df[TF_motif_binding_df["Weighted_Score"] > 0]
 
