@@ -13,8 +13,8 @@ df['score_normalized'] = df['score'].apply(
 )
 
 plt.figure(figsize=(10, 7))
-plt.hist(df['score_normalized'], bins=20, color='blue')
-plt.title("Normalized Peak to Gene Association Score Distribution", fontsize=16)
+plt.hist(df['score_normalized'], bins=50, color='blue')
+plt.title("Normalized Cicero Peak to Gene Association Score Distribution", fontsize=16)
 plt.xlabel("Normalized Peak to Gene Association Score")
 plt.ylabel("Frequency")
 plt.savefig("hist_peak_gene_association.png", dpi=300)

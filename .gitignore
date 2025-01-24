@@ -4,6 +4,7 @@ LOGS/
 output/*
 macrophage_output/
 reference_genome/
+reference_networks/
 *.png
 *.csv
 *.tsv

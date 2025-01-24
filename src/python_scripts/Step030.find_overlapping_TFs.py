@@ -6,6 +6,7 @@ import argparse
 from tqdm import tqdm
 import logging
 from typing import Any
+from scipy.stats import spearmanr
 
 def filter_overlapping_genes(TF_df: pd.DataFrame, RNA_df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -36,7 +37,7 @@ def plot_histogram(data: pd.Series, title: str, xlabel: str, ylabel: str, save_p
         save_path (str): Path to save the plot.
     """
     plt.figure(figsize=(10, 6))
-    plt.hist(data, bins=50, color="blue", alpha=0.7, log=True)
+    plt.hist(data, bins=150, color="blue", alpha=0.7, log=False)
     plt.title(title)
     plt.xlabel(xlabel)
     plt.ylabel(ylabel)
@@ -68,30 +69,56 @@ def main() -> None:
     output_dir: str = args.output_dir
 
     # Load data
+    logging.info(f'Loading scRNAseq dataset')
     RNA_dataset: pd.DataFrame = pd.read_csv(args.rna_data_file)
+    logging.info(f'Loading TF motif binding dataset')
     TF_motif_binding_df: pd.DataFrame = pd.read_csv(args.tf_motif_binding_score_file, sep="\t")
 
     # Rename the first column as "Genes"
     RNA_dataset.rename(columns={RNA_dataset.columns[0]: "Genes"}, inplace=True)
     RNA_dataset["Genes"] = RNA_dataset["Genes"].apply(lambda x: x.upper())
-    print(RNA_dataset.head())
-    print(TF_motif_binding_df.head())
 
     # Filter overlapping genes
+    logging.info(f'Filtering to only keep genes in both the TF motif bindidng df and the RNA dataset')
     overlapping_TF_motif_binding_df: pd.DataFrame = filter_overlapping_genes(TF_motif_binding_df, RNA_dataset)
     
-    print(overlapping_TF_motif_binding_df.head())
-
     # Align RNA data
     aligned_RNA: pd.DataFrame = RNA_dataset[RNA_dataset["Genes"].isin(overlapping_TF_motif_binding_df["Source"])]
 
     # Transpose RNA dataset for easier access
     gene_expression_matrix: pd.DataFrame = RNA_dataset.set_index("Genes").T  # Rows = cells, Columns = genes
-
+    
     # Filter genes present in both Source and Target
     filtered_genes: np.ndarray = pd.concat([TF_motif_binding_df['Source'], TF_motif_binding_df['Target']]).unique()
     filtered_expression_matrix: pd.DataFrame = gene_expression_matrix.loc[:, gene_expression_matrix.columns.intersection(filtered_genes)]
 
+    logging.info(f'Calculating TF-TG expression Spearman correlation')
+    
+    # Create a dictionary of filtered expression data for faster access
+    gene_expression_dict = filtered_expression_matrix.to_dict(orient="list")
+
+    # Prepare results as a DataFrame
+    def compute_spearman(pair):
+        source_gene = pair['Source']
+        target_gene = pair['Target']
+
+        if source_gene in gene_expression_dict and target_gene in gene_expression_dict:
+            source_expression = gene_expression_dict[source_gene]
+            target_expression = gene_expression_dict[target_gene]
+            # Compute Spearman correlation
+            correlation, _ = spearmanr(source_expression, target_expression)
+            return correlation
+        return np.nan
+
+    TF_motif_binding_df['Correlation'] = TF_motif_binding_df[['Source', 'Target']].apply(
+        compute_spearman, axis=1
+    )
+    
+    # Drop NaN values to keep only valid pairs
+    TF_motif_binding_df.dropna(subset=['Correlation'], inplace=True)
+    logging.info(f'\tDone!')
+
+    logging.info(f'Calculating summary statistics')
     # Compute gene-specific metrics across cells
     gene_stats: pd.DataFrame = filtered_expression_matrix.agg(['mean', 'std', 'max', 'sum']).T  # Rows = genes, Columns = stats
 
@@ -107,13 +134,16 @@ def main() -> None:
 
     # Drop NaN values
     TF_motif_binding_df.dropna(inplace=True)
-
+    logging.info(f'\tDone!')
+    
+    logging.info(f'Generating weighted score')
     # Generate a weighted score
     TF_motif_binding_df['Weighted_Score'] = (
         TF_motif_binding_df['TF_Mean_Expression'] *
         TF_motif_binding_df['TG_Mean_Expression'] *
         TF_motif_binding_df['Motif_Score'] *
-        TF_motif_binding_df['Peak Gene Score']
+        TF_motif_binding_df['Peak Gene Score'] *
+        TF_motif_binding_df['Correlation']
     ) # Add a Spearman or Pearson correlation?
     
     TF_motif_binding_df = TF_motif_binding_df[TF_motif_binding_df["Weighted_Score"] > 0]
@@ -121,17 +151,19 @@ def main() -> None:
     # Normalize the Weighted_Score
     TF_motif_binding_df['Normalized_Score'] = TF_motif_binding_df['Weighted_Score'] / TF_motif_binding_df['Weighted_Score'].max()
     
-    cols_of_interest = ["Source", "Target", "Peak Gene Score", "TF_Mean_Expression", "TG_Mean_Expression", "Motif_Score", "Normalized_Score"]
+    cols_of_interest = ["Source", "Target", "Peak Gene Score", "TF_Mean_Expression", "TG_Mean_Expression", "Motif_Score", "Correlation", "Normalized_Score"]
     TF_motif_binding_df = TF_motif_binding_df[cols_of_interest]
     
+    logging.info(f'Writing final inferred GRN to the output directory as "inferred_grn.tsv"')
     # Save results
     TF_motif_binding_df.to_csv(f'{output_dir}/inferred_grn.tsv', sep="\t", index=False)
 
     # Plot histogram of scores
+    logging.info(f'Plotting normalized log2 TF-TG binding score histogram')
     plot_histogram(
         data=np.log2(TF_motif_binding_df["Normalized_Score"]),
-        title="Weighted TF-TG Binding Score Distribution",
-        xlabel="Weighted Score",
+        title="Normalized log2 TF-TG Binding Score Distribution",
+        xlabel="Normalized log2 Score",
         ylabel="Frequency",
         save_path=f"{output_dir}/weighted_score_histogram.png"
     )
