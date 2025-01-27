@@ -90,45 +90,15 @@ def main() -> None:
     filtered_genes: np.ndarray = pd.concat([TF_motif_binding_df['Source'], TF_motif_binding_df['Target']]).unique()
     filtered_expression_matrix: pd.DataFrame = gene_expression_matrix.loc[:, gene_expression_matrix.columns.intersection(filtered_genes)]
 
-    # logging.info(f'Calculating TF-TG expression Spearman correlation')
-    
-    # # Create a dictionary of filtered expression data for faster access
-    # gene_expression_dict = filtered_expression_matrix.to_dict(orient="list")
-
-    # # Prepare results as a DataFrame
-    # def compute_spearman(pair):
-    #     source_gene = pair['Source']
-    #     target_gene = pair['Target']
-
-    #     if source_gene in gene_expression_dict and target_gene in gene_expression_dict:
-    #         source_expression = gene_expression_dict[source_gene]
-    #         target_expression = gene_expression_dict[target_gene]
-    #         # Compute Spearman correlation
-    #         correlation, _ = spearmanr(source_expression, target_expression)
-    #         return correlation
-    #     return np.nan
-
-    # TF_motif_binding_df['Correlation'] = TF_motif_binding_df[['Source', 'Target']].apply(
-    #     compute_spearman, axis=1
-    # )
-    
-    # # Drop NaN values to keep only valid pairs
-    # TF_motif_binding_df.dropna(subset=['Correlation'], inplace=True)
-    # logging.info(f'\tDone!')
-
     logging.info(f'Calculating summary statistics')
     # Compute gene-specific metrics across cells
     gene_stats: pd.DataFrame = filtered_expression_matrix.agg(['mean', 'std', 'max', 'sum']).T  # Rows = genes, Columns = stats
 
     # Map TF-specific metrics
     TF_motif_binding_df['TF_Mean_Expression'] = TF_motif_binding_df['Source'].map(gene_stats['mean'])
-    TF_motif_binding_df['TF_Std_Expression'] = TF_motif_binding_df['Source'].map(gene_stats['std'])
-    TF_motif_binding_df['TF_Max_Expression'] = TF_motif_binding_df['Source'].map(gene_stats['max'])
 
     # Map TG-specific metrics
     TF_motif_binding_df['TG_Mean_Expression'] = TF_motif_binding_df['Target'].map(gene_stats['mean'])
-    TF_motif_binding_df['TG_Std_Expression'] = TF_motif_binding_df['Target'].map(gene_stats['std'])
-    TF_motif_binding_df['TG_Max_Expression'] = TF_motif_binding_df['Target'].map(gene_stats['max'])
 
     # Drop NaN values
     TF_motif_binding_df.dropna(inplace=True)

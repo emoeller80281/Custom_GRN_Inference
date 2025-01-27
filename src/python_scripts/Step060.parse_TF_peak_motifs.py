@@ -55,6 +55,33 @@ def is_file_empty(file_path: str) -> bool:
     """
     return os.stat(file_path).st_size == 0
 
+def normalize_peak_to_peak_scores(df):
+    # Identify scores that are not 0 or 1
+    mask = (df['score'] != 0) & (df['score'] != 1)
+    filtered_scores = df.loc[mask, 'score']
+
+    if not filtered_scores.empty:
+        # Compute min and max of non-0/1 scores
+        score_min = filtered_scores.min()
+        score_max = filtered_scores.max()
+        
+        # Handle edge case where all non-0/1 scores are the same
+        if score_max == score_min:
+            # Set all non-0/1 scores to 0 (or another default value)
+            score_normalized = np.where(mask, 0, df['score'])
+        else:
+            # Normalize non-0/1 scores and retain 0/1 values
+            score_normalized = np.where(
+                mask,
+                (df['score'] - score_min) / (score_max - score_min),
+                df['score']
+            )
+    else:
+        # All scores are 0 or 1; no normalization needed
+        score_normalized = df['score']
+    
+    return score_normalized
+
 def process_TF_motif_file(path_to_file: str, peak_gene_assoc: pd.DataFrame) -> pd.DataFrame:
     """
     Processes a single Homer TF motif file and extracts TF-TG relationships and motif scores.
@@ -156,10 +183,7 @@ def main(input_dir: str, cicero_cis_reg_file: str, output_file: str, cpu_count: 
     peak_gene_assoc: pd.DataFrame = pd.read_csv(cicero_cis_reg_file, sep=",", header=0)
     
     # Normalize the cicero peak to gene scores (excluding 0 and 1)
-    peak_gene_assoc['Peak Gene Score'] = peak_gene_assoc['score'].apply(
-        lambda x: (x - peak_gene_assoc['score'].min()) / (peak_gene_assoc['score'].max() - peak_gene_assoc['score'].min())
-        if 0 != x != 1 else x  # Retain scores of 0 and 1 as they are
-    )
+    peak_gene_assoc['Peak Gene Score'] = normalize_peak_to_peak_scores(peak_gene_assoc)
     
     # Process each of the files
     # Preload the additional argument using functools.partial
