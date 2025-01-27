@@ -3,8 +3,8 @@
 #SBATCH --job-name custom_grn_method
 #SBATCH --partition compute
 #SBATCH --nodes=1
-#SBATCH --cpus-per-task 1
-#SBATCH --mem-per-cpu=128G
+#SBATCH --cpus-per-task 16
+#SBATCH --mem-per-cpu=16G
 #SBATCH --output=/dev/null
 #SBATCH --error=/dev/null
 
@@ -16,8 +16,8 @@ set -euo pipefail
 CICERO_MAP_PEAKS_TO_TG=false
 CREATE_HOMER_PEAK_FILE=false
 HOMER_FIND_MOTIFS_GENOME=false
-PROCESS_MOTIF_FILES=false
-PARSE_TF_PEAK_MOTIFS=false
+HOMER_PROCESS_MOTIF_FILES=false
+PARSE_TF_PEAK_MOTIFS=true
 CALCULATE_TF_REGULATION_SCORE=true
 
 # =============================================
@@ -43,6 +43,7 @@ CICERO_OUTPUT_FILE="$OUTPUT_DIR/peak_gene_associations.csv"
 TF_MOTIF_BINDING_SCORE_FILE="$OUTPUT_DIR/total_motif_regulatory_scores.tsv"
 PROCESSED_MOTIF_DIR="$OUTPUT_DIR/homer_tf_motif_scores"
 LOG_DIR="$BASE_DIR/LOGS"
+FIG_DIR="$BASE_DIR/figures"
 
 # Set output and error files dynamically
 exec > "${LOG_DIR}/main_pipeline.log" 2> "${LOG_DIR}/main_pipeline.err"
@@ -94,7 +95,7 @@ validate_critical_variables
 # Function to check if at least one process is selected
 check_pipeline_steps() {
     if ! $CICERO_MAP_PEAKS_TO_TG && ! $CREATE_HOMER_PEAK_FILE && ! $HOMER_FIND_MOTIFS_GENOME && \
-       ! $PROCESS_MOTIF_FILES && ! $PARSE_TF_PEAK_MOTIFS && ! $CALCULATE_TF_REGULATION_SCORE; then
+       ! $HOMER_PROCESS_MOTIF_FILES && ! $PARSE_TF_PEAK_MOTIFS && ! $CALCULATE_TF_REGULATION_SCORE; then
         echo "Error: At least one process must be enabled to run the pipeline."
         exit 1
     fi
@@ -389,7 +390,7 @@ find_motifs_genome() {
     2> "$LOG_DIR/step03_homer_findMotifsGenome.log"
 }
 
-process_motif_files() {
+homer_process_motif_files() {
     echo "[INFO] Starting motif file processing"
 
     # Check for GNU parallel
@@ -450,7 +451,7 @@ parse_tf_peak_motifs() {
     echo ""
     echo "Python: Parsing TF binding motif results from Homer"
     /usr/bin/time -v \
-    python3 "$PYTHON_SCRIPT_DIR/Step020.parse_TF_peak_motifs.py" \
+    python3 "$PYTHON_SCRIPT_DIR/Step060.parse_TF_peak_motifs.py" \
         --input_dir "$PROCESSED_MOTIF_DIR" \
         --cicero_cis_reg_file "$CICERO_OUTPUT_FILE" \
         --homer_peak_file "$HOMER_PEAK_FILE" \
@@ -463,10 +464,11 @@ calculate_tf_regulation_score() {
     echo ""
     echo "Python: Calculating TF-TG regulatory potential"
     /usr/bin/time -v \
-    python3 "$PYTHON_SCRIPT_DIR/Step030.find_overlapping_TFs.py" \
+    python3 "$PYTHON_SCRIPT_DIR/Step070.find_overlapping_TFs.py" \
         --rna_data_file "$RNA_DATA_FILE" \
         --tf_motif_binding_score_file "$TF_MOTIF_BINDING_SCORE_FILE" \
         --output_dir "$OUTPUT_DIR" \
+        --fig_dir "$FIG_DIR"
         2> "$LOG_DIR/step07_calculate_tf_tg_regulatory_potential.log"
 }
 
@@ -496,6 +498,6 @@ install_homer
 if [ "$CICERO_MAP_PEAKS_TO_TG" = true ]; then run_cicero; fi
 if [ "$CREATE_HOMER_PEAK_FILE" = true ]; then create_homer_peak_file; fi
 if [ "$HOMER_FIND_MOTIFS_GENOME" = true ]; then find_motifs_genome; fi
-if [ "$PROCESS_MOTIF_FILES" = true ]; then process_motif_files; fi
+if [ "$HOMER_PROCESS_MOTIF_FILES" = true ]; then homer_process_motif_files; fi
 if [ "$PARSE_TF_PEAK_MOTIFS" = true ]; then parse_tf_peak_motifs; fi
 if [ "$CALCULATE_TF_REGULATION_SCORE" = true ]; then calculate_tf_regulation_score; fi

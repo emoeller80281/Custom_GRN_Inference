@@ -17,3 +17,6 @@ reference_networks/
 *.tar.gz
 *.zip
 *.ls
+*.pos
+*.seq
+*.tmp
