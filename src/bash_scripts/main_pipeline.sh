@@ -36,12 +36,16 @@ CONDA_ENV_NAME="my_env"
 PYTHON_SCRIPT_DIR="$BASE_DIR/src/python_scripts"
 R_SCRIPT_DIR="$BASE_DIR/src/r_scripts"
 OUTPUT_DIR="$BASE_DIR/output"
-HOMER_DIR="$BASE_DIR/Homer/bin"
-MOTIF_DIR="$OUTPUT_DIR/knownResults"
-HOMER_PEAK_FILE="$INPUT_DIR/Homer_peaks.txt"
+
 CICERO_OUTPUT_FILE="$OUTPUT_DIR/peak_gene_associations.csv"
+
+HOMER_DIR="$BASE_DIR/Homer/bin"
+HOMER_PEAK_FILE="$INPUT_DIR/Homer_peaks.txt"
+HOMER_KNOWN_MOTIF_DIR="$OUTPUT_DIR/homer_findMotifsGenome_output/knownResults"
+HOMER_ANNOTATE_PEAKS_OUTPUT_DIR="$OUTPUT_DIR/homer_annotatePeaks_output"
+
 TF_MOTIF_BINDING_SCORE_FILE="$OUTPUT_DIR/total_motif_regulatory_scores.tsv"
-PROCESSED_MOTIF_DIR="$OUTPUT_DIR/homer_tf_motif_scores"
+
 LOG_DIR="$BASE_DIR/LOGS"
 FIG_DIR="$BASE_DIR/figures"
 
@@ -235,7 +239,7 @@ activate_conda_env() {
 # Function to ensure required directories exist
 setup_directories() {
     echo "[INFO] Ensuring required directories exist."
-    local dirs=("$INPUT_DIR" "$OUTPUT_DIR" "$LOG_DIR" "$PROCESSED_MOTIF_DIR")
+    local dirs=("$INPUT_DIR" "$OUTPUT_DIR" "$LOG_DIR" "$HOMER_ANNOTATE_PEAKS_OUTPUT_DIR")
     for dir in "${dirs[@]}"; do
         mkdir -p "$dir"
     done
@@ -385,8 +389,11 @@ create_homer_peak_file() {
 find_motifs_genome() {
     echo ""
     echo "Homer: Running findMotifsGenome.pl"
+
+    mkdir -p "$OUTPUT_DIR/homer_findMotifsGenome_output"
+
     /usr/bin/time -v \
-    perl "$HOMER_DIR/findMotifsGenome.pl" "$HOMER_PEAK_FILE" "$HOMER_ORGANISM_CODE" "$OUTPUT_DIR" -size 200 \
+    perl "$HOMER_DIR/findMotifsGenome.pl" "$HOMER_PEAK_FILE" "$HOMER_ORGANISM_CODE" "$OUTPUT_DIR/homer_findMotifsGenome_output" -size 200 \
     2> "$LOG_DIR/step03_homer_findMotifsGenome.log"
 }
 
@@ -403,9 +410,9 @@ homer_process_motif_files() {
     fi
 
     # Detect files to process
-    motif_files=$(find "$MOTIF_DIR" -name "*.motif")
+    motif_files=$(find "$HOMER_KNOWN_MOTIF_DIR" -name "*.motif")
     if [ -z "$motif_files" ]; then
-        echo "[ERROR] No motif files found in $MOTIF_DIR."
+        echo "[ERROR] No motif files found in $HOMER_KNOWN_MOTIF_DIR."
         exit 1
     fi
 
@@ -414,18 +421,18 @@ homer_process_motif_files() {
     echo "[INFO] Found $file_count motif files to process."
 
     # Create output directory if it doesn't exist
-    mkdir -p "$PROCESSED_MOTIF_DIR"
+    mkdir -p "$HOMER_ANNOTATE_PEAKS_OUTPUT_DIR"
 
     # Process files in parallel
     if [ "$use_parallel" = true ]; then
         echo "$motif_files" | /usr/bin/time -v parallel -j "$NUM_CPU" \
-            "annotatePeaks.pl $HOMER_PEAK_FILE '$HOMER_ORGANISM_CODE' -m {} > $PROCESSED_MOTIF_DIR/{/}_tf_motifs.txt" \
+            "annotatePeaks.pl $HOMER_PEAK_FILE '$HOMER_ORGANISM_CODE' -m {} > $HOMER_ANNOTATE_PEAKS_OUTPUT_DIR/{/}_tf_motifs.txt" \
             >> "$LOG_DIR/step05_parallel.log" 2>>"$LOG_DIR/step05_parallel.err"
     
     # Process files sequentially
     else
         for file in $motif_files; do
-            local output_file="$PROCESSED_MOTIF_DIR/$(basename "$file" .motif)_tf_motifs.txt"
+            local output_file="$HOMER_ANNOTATE_PEAKS_OUTPUT_DIR/$(basename "$file" .motif)_tf_motifs.txt"
             /usr/bin/time -v \
             perl "$HOMER_DIR/annotatePeaks.pl" "$HOMER_PEAK_FILE" "$HOMER_ORGANISM_CODE" -m "$file" > "$output_file" \
             2>> "$LOG_DIR/step05_sequential.err"
@@ -452,7 +459,7 @@ parse_tf_peak_motifs() {
     echo "Python: Parsing TF binding motif results from Homer"
     /usr/bin/time -v \
     python3 "$PYTHON_SCRIPT_DIR/Step060.parse_TF_peak_motifs.py" \
-        --input_dir "$PROCESSED_MOTIF_DIR" \
+        --input_dir "$HOMER_ANNOTATE_PEAKS_OUTPUT_DIR" \
         --cicero_cis_reg_file "$CICERO_OUTPUT_FILE" \
         --homer_peak_file "$HOMER_PEAK_FILE" \
         --output_file "$TF_MOTIF_BINDING_SCORE_FILE" \
