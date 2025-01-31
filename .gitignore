@@ -20,3 +20,6 @@ reference_networks/
 *.pos
 *.seq
 *.tmp
+motif_pwms/*
+other_method_grns
+figures

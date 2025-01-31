@@ -475,7 +475,7 @@ calculate_tf_regulation_score() {
         --rna_data_file "$RNA_DATA_FILE" \
         --tf_motif_binding_score_file "$TF_MOTIF_BINDING_SCORE_FILE" \
         --output_dir "$OUTPUT_DIR" \
-        --fig_dir "$FIG_DIR"
+        --fig_dir "$FIG_DIR" 
         2> "$LOG_DIR/step07_calculate_tf_tg_regulatory_potential.log"
 }
 

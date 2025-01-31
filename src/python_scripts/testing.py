@@ -41,6 +41,7 @@ input_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOE
 cell_oracle_grn_file = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/other_method_grns/cell_oracle_mESC_E7.5_rep1_inferred_grn.csv"
 linger_grn_file = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/other_method_grns/linger_mESC_E7.5_rep1_inferred_grn.tsv"
 tripod_grn_file = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/other_method_grns/tripod_mESC_E7.5_rep1_inferred_grn.csv"
+scenic_plus_file = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/other_method_grns/scenic_plus_mESC_E7.5_rep1_inferred_grn.tsv"
 
 def combine_mesc_samples_1_and_2(rna_dataset_sample1_file, rna_dataset_sample2_file, atac_dataset_sample1_file, atac_dataset_sample2_file):
     sample_1_rna = pd.read_csv(rna_dataset_sample1_file)
@@ -186,7 +187,13 @@ def load_custom_grn(inferred_grn_file):
     custom_grn["Target"] = custom_grn["Target"].str.upper()
     return custom_grn
 
-def combine_method_grns(cell_oracle_grn_file, linger_grn_file, tripod_grn_file, custom_grn_file):
+def load_scenic_plus_grn(scenic_plus_file):
+    scenic_plus_grn = pd.read_csv(scenic_plus_file, sep='\t')
+    scenic_plus_grn["Source"] = scenic_plus_grn["Source"].str.upper()
+    scenic_plus_grn["Target"] = scenic_plus_grn["Target"].str.upper()
+    return scenic_plus_grn
+
+def combine_method_grns(cell_oracle_grn_file, linger_grn_file, tripod_grn_file, scenic_plus_grn, custom_grn_file):
     cell_oracle_grn = load_cell_oracle_grn(cell_oracle_grn_file)
     print("Cell oracle GRN")
     print(cell_oracle_grn.head())
@@ -205,6 +212,12 @@ def combine_method_grns(cell_oracle_grn_file, linger_grn_file, tripod_grn_file, 
     print(tripod_grn.shape)
     print()
 
+    scenic_plus_grn = load_scenic_plus_grn(scenic_plus_file)
+    print("SCENIC+ GRN")
+    print(scenic_plus_grn.head())
+    print(scenic_plus_grn.shape)
+    print()
+    
     custom_grn = load_custom_grn(custom_grn_file)
     print("Custom GRN")
     print(custom_grn.head())
@@ -215,6 +228,7 @@ def combine_method_grns(cell_oracle_grn_file, linger_grn_file, tripod_grn_file, 
     cell_oracle_grn = cell_oracle_grn.rename(columns={"Score": "CellOracle Score"})
     linger_grn = linger_grn.rename(columns={"Score": "Linger Score"})
     tripod_grn = tripod_grn.rename(columns={"Score": "Tripod Score"})
+    scenic_plus_grn = scenic_plus_grn.rename(columns={"Score": "SCENIC+ Score"})
     custom_grn = custom_grn.rename(columns={"Score": "Custom Score"})  # Ensure custom_grn has "Score" column
 
     # Merge all DataFrames using outer joins
@@ -223,19 +237,22 @@ def combine_method_grns(cell_oracle_grn_file, linger_grn_file, tripod_grn_file, 
     ).merge(
         tripod_grn, on=["Source", "Target"], how="outer"
     ).merge(
+        scenic_plus_grn, on=["Source", "Target"], how="outer"
+    ).merge(
         custom_grn, on=["Source", "Target"], how="outer"
     )
 
     combined_df.fillna(0, inplace=True)
-
+    
     def normalize(scores):
         return scores / max(scores)
 
     combined_df["Score"] = \
-        normalize(combined_df["CellOracle Score"]) + \
+        (normalize(combined_df["CellOracle Score"]) + \
         normalize(combined_df["Linger Score"]) + \
         normalize(combined_df["Tripod Score"]) + \
-        normalize(combined_df["Custom Score"])
+        normalize(combined_df["SCENIC+ Score"]) + \
+        normalize(combined_df["Custom Score"])) / 5
 
     print("Combined GRN")
     print(combined_df.head())
@@ -243,7 +260,7 @@ def combine_method_grns(cell_oracle_grn_file, linger_grn_file, tripod_grn_file, 
     
     return combined_df
 
-combined_df = combine_method_grns(cell_oracle_grn_file, linger_grn_file, tripod_grn_file, inferred_grn_file)
+combined_df = combine_method_grns(cell_oracle_grn_file, linger_grn_file, tripod_grn_file, scenic_plus_file, inferred_grn_file)
 
 ground_truth = pd.read_csv(ground_truth_file, sep='\t', quoting=csv.QUOTE_NONE, on_bad_lines='skip', header=0)
 print("Ground truth:")
@@ -276,6 +293,7 @@ features = [
     "CellOracle Score",
     "Linger Score",
     "Tripod Score",
+    "SCENIC+ Score",
     "Custom Score",
 ]
 X = combined_labeled_df[features]
@@ -307,6 +325,7 @@ xgb.plot_importance(model, importance_type="weight")
 non_ground_truth_db["XGBoost Prediction"] = model.predict_proba(non_ground_truth_db[features])[:, 1]
 ground_truth_db["XGBoost Prediction"] = model.predict_proba(ground_truth_db[features])[:, 1]
 plot_histogram(non_ground_truth_db, ground_truth_db, "XGBoost Prediction", log2=False)
+
 
 plt.figure(figsize=(8, 6))
 plt.hist(y_proba, bins=50)
@@ -377,6 +396,11 @@ def plot_auroc_auprc(y_true, y_pred, filename):
     plt.close()
 
 plot_auroc_auprc(y_test, y_proba, "multiple_method_xg_boost_auroc_auprc.png")
+
+prediction_scores = combined_labeled_df["Score"]
+prediction_labels = combined_labeled_df["Label"]
+plot_auroc_auprc(prediction_labels, prediction_scores, "multiple_method_average_score_auroc_auprc_with_custom.png")
+plot_histogram(non_ground_truth_db, ground_truth_db, "Score", log2=True)
 
 explainer = shap.TreeExplainer(model)
 shap_values = explainer.shap_values(X_train)
