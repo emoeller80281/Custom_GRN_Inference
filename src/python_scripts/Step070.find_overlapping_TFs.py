@@ -164,7 +164,7 @@ def main() -> None:
 
         # Loop over each cell in filtered_expression_df (excluding "Genes" column)
         print('Processing cells')
-        for i, cell in enumerate(filtered_expression_df.columns[1:100]):  
+        for i, cell in enumerate(filtered_expression_df.columns[1:200]):  
             # print(f"Processing cell: {i+1}", flush=True)
 
             # Get the expression data for the current cell
@@ -181,9 +181,9 @@ def main() -> None:
             cell_TF_motif_binding_df = cell_TF_motif_binding_df.merge(first_cell_expression_TG, on="Target", how="left")
 
             cell_TF_motif_binding_df[cell] = (
-                cell_TF_motif_binding_df["TF_expression"].astype(np.float32) * 
-                cell_TF_motif_binding_df["TG_expression"].astype(np.float32) * 
-                cell_TF_motif_binding_df["TF_TG_Motif_Binding_Score"].astype(np.float32)
+                cell_TF_motif_binding_df["TF_expression"].astype(np.float16) * 
+                cell_TF_motif_binding_df["TG_expression"].astype(np.float16) * 
+                cell_TF_motif_binding_df["TF_TG_Motif_Binding_Score"].astype(np.float16)
             )
             
             cell_TF_motif_binding_df = cell_TF_motif_binding_df[["Source", "Target", cell]]
