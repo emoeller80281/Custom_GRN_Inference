@@ -164,8 +164,9 @@ def main() -> None:
 
         # Loop over each cell in filtered_expression_df (excluding "Genes" column)
         print('Processing cells')
-        for i, cell in enumerate(filtered_expression_df.columns[1:200]):  
-            # print(f"Processing cell: {i+1}", flush=True)
+        num_cells = 500
+        for i, cell in enumerate(filtered_expression_df.columns[1:num_cells]):  
+            print(f"Processing cell: {i+1}", flush=True)
 
             # Get the expression data for the current cell
             first_cell_expression = filtered_expression_df[["Genes", cell]].rename(columns={cell: "Expression"})
@@ -197,7 +198,7 @@ def main() -> None:
         final_df = pd.concat(cell_results, ignore_index=True)
 
         # Pivot table to get a wide format (cells as columns)
-        final_df = final_df.pivot_table(index=["Source", "Target"], columns=[], values=list(filtered_expression_df.columns[1:100]), aggfunc="first")
+        final_df = final_df.pivot_table(index=["Source", "Target"], columns=[], values=list(filtered_expression_df.columns[1:num_cells]), aggfunc="first")
 
         # Reset index so that "Source" and "Target" remain as regular columns
         final_df.reset_index(inplace=True)
@@ -216,7 +217,7 @@ def main() -> None:
         log_values_normalized = (log_transformed - log_transformed.min().min()) / (log_transformed.max().max() - log_transformed.min().min())
         
         print(final_df.head())
-        print(final_df.shape)
+        print(f'Final df shape: {final_df.shape}')
 
         # Plot overlapping histograms
         plt.figure(figsize=(10, 6))
@@ -232,6 +233,7 @@ def main() -> None:
         plt.title("Overlapping Histograms of TF-TG Interaction Scores")
         plt.savefig(f'{output_dir}/cell_level_overlapping_histogram.png', dpi=200)
         
+        logging.info("Saving inferred GRN")
         final_df.to_csv(f"{output_dir}/cell_level_inferred_grn.csv", sep='\t', index=False)
 
     
