@@ -40,14 +40,6 @@ print(f'Number of False predictions: {len(inferred_network[inferred_network["Lab
 
 cell_columns = inferred_network.columns[2:-1]
 
-
-def set_colnames_to_col_index(df: pd.DataFrame):
-    df = df.copy()
-    df.columns = [f"agg_{i}" for i in range(df.shape[1])]
-    return df
-
-
-
 def compute_aggregated_features(df: pd.DataFrame, desired_n=5000):
     """
     For each row in df, resample (with replacement) the cell-level values in cell_cols 
@@ -60,15 +52,13 @@ def compute_aggregated_features(df: pd.DataFrame, desired_n=5000):
     df_copy = df.copy()
     data_cols = df_copy.drop(["Source", "Target", "Label"], axis=1)
     sampled_columns = data_cols.sample(n=desired_n, axis='columns', replace=True)
-    
-    sampled_columns = set_colnames_to_col_index(sampled_columns)
 
-    # # Compute aggregated statistics
-    # sampled_columns["mean_score"]   = sampled_columns.mean(axis=1)
-    # sampled_columns["std_score"]    = sampled_columns.std(axis=1)
-    # sampled_columns["min_score"]    = sampled_columns.min(axis=1)
-    # sampled_columns["max_score"]   = sampled_columns.max(axis=1)
-    # sampled_columns["median_score"] = sampled_columns.median(axis=1)
+    # Compute aggregated statistics
+    sampled_columns["mean_score"]   = sampled_columns.mean(axis=1)
+    sampled_columns["std_score"]    = sampled_columns.std(axis=1)
+    sampled_columns["min_score"]    = sampled_columns.min(axis=1)
+    sampled_columns["max_score"]   = sampled_columns.max(axis=1)
+    sampled_columns["median_score"] = sampled_columns.median(axis=1)
 
     return sampled_columns
 
@@ -76,15 +66,13 @@ def compute_aggregated_features(df: pd.DataFrame, desired_n=5000):
 print("Randomly resampling to create 5000 randomly permuted cell columns")
 agg_features = compute_aggregated_features(inferred_network, desired_n=5000)
 # Append the new aggregated features to the original DataFrame
-# inferred_network = pd.concat([inferred_network, agg_features], axis=1)
+inferred_network = pd.concat([inferred_network, agg_features], axis=1)
 
 # Define the list of aggregated features for training
-# aggregated_features_new = ["mean_score", "std_score", "min_score", "max_score", "median_score"]
-cell_col_features = agg_features.columns.tolist()
+aggregated_features_new = ["mean_score", "std_score", "min_score", "max_score", "median_score"]
 
 # Define X (features) and y (target)
-# X = inferred_network[aggregated_features_new]
-X = agg_features
+X = inferred_network[aggregated_features_new]
 y = inferred_network["Label"]
 
 # Split into training and testing sets (80-20 split)
@@ -102,15 +90,14 @@ neg_train = train_data[train_data["Label"] == 0]
 neg_train_sampled = neg_train.sample(n=len(pos_train), random_state=42)
 train_data_balanced = pd.concat([pos_train, neg_train_sampled])
 
-# X_train_balanced = train_data_balanced[aggregated_features_new]
-X_train_balanced = train_data_balanced[cell_col_features]
+X_train_balanced = train_data_balanced[aggregated_features_new]
 y_train_balanced = train_data_balanced["Label"]
 
 print(f"Balanced training set: {len(pos_train)} positives and {len(neg_train_sampled)} negatives.")
 
 # === Step 3: Train the Random Forest Classifier ===
 rf = RandomForestClassifier(random_state=42, n_estimators=100, max_depth=10)
-rf.fit(X_train, y_train)
+rf.fit(X_train_balanced, y_train_balanced)
 
 # Evaluate on the (imbalanced) test set
 y_pred = rf.predict(X_test)
@@ -133,12 +120,9 @@ print(classification_report(y_test, y_pred))
 roc_auc = roc_auc_score(y_test, y_pred_prob)
 print(f"ROC-AUC Score: {roc_auc:.3f}")
 
-print(f"Num features: {len(cell_col_features)}")
-print(f"Num importance score: {len(rf.feature_importances_)}")
-
 # Step 4: Feature Importance Analysis
 feature_importances = pd.DataFrame({
-    "Feature": cell_col_features,
+    "Feature": aggregated_features_new,
     "Importance": rf.feature_importances_
 }).sort_values(by="Importance", ascending=False)
 
@@ -147,7 +131,6 @@ plt.figure(figsize=(8, 6))
 plt.barh(feature_importances["Feature"], feature_importances["Importance"], color="skyblue")
 plt.xlabel("Importance")
 plt.ylabel("Feature")
-plt.yticks([])
 plt.title("Feature Importance")
 plt.gca().invert_yaxis()  # Highest importance at the top
 plt.tight_layout()
@@ -158,22 +141,17 @@ new_data = pd.read_csv("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_IN
 # Identify the cell columns; for example, assume everything after "Target" is cell data:
 cell_columns_new = new_data.columns[2:]  # if there's no "Label" yet
 
-# # Compute the aggregated features
-# new_data["mean_score"]   = new_data[cell_columns_new].mean(axis=1)
-# new_data["std_score"]    = new_data[cell_columns_new].std(axis=1)
-# new_data["min_score"]    = new_data[cell_columns_new].min(axis=1)
-# new_data["max_score"]    = new_data[cell_columns_new].max(axis=1)
-# new_data["median_score"] = new_data[cell_columns_new].median(axis=1)
+# Compute the aggregated features
+new_data["mean_score"]   = new_data[cell_columns_new].mean(axis=1)
+new_data["std_score"]    = new_data[cell_columns_new].std(axis=1)
+new_data["min_score"]    = new_data[cell_columns_new].min(axis=1)
+new_data["max_score"]    = new_data[cell_columns_new].max(axis=1)
+new_data["median_score"] = new_data[cell_columns_new].median(axis=1)
 
-# aggregated_features = ["mean_score", "std_score", "min_score", "max_score", "median_score"]
-# Add a Label column so the .drop function in compute_aggregated_features works
-new_data["Label"] = np.ones(new_data.shape[0])
-
-agg_features = compute_aggregated_features(new_data, desired_n=5000)
-
+aggregated_features = ["mean_score", "std_score", "min_score", "max_score", "median_score"]
 
 # Extract the aggregated feature vector
-X_new = agg_features
+X_new = new_data[aggregated_features]
 
 # Make predictions with your trained model
 new_data["Score"] = rf.predict_proba(X_new)[:, 1]
