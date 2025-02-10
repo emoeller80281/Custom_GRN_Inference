@@ -40,40 +40,36 @@ print(f'Number of False predictions: {len(inferred_network[inferred_network["Lab
 
 cell_columns = inferred_network.columns[2:-1]
 
-def compute_aggregated_features(df, cell_cols, desired_n=5000):
+def compute_aggregated_features(df: pd.DataFrame, desired_n=5000):
     """
     For each row in df, resample (with replacement) the cell-level values in cell_cols 
     until we have desired_n values. Then compute aggregated statistics (mean, std, min, max, median).
     
     Returns a new DataFrame with these aggregated features.
-    """
-    aggregated_features_list = []
-    for idx, row in df.iterrows():
-        # Convert values to float in case they aren’t already
-        values = row[cell_cols].values.astype(float)
-        # Sample desired_n values with replacement
-        sampled_vals = np.random.choice(values, size=desired_n, replace=True)
-        # Compute aggregated statistics
-        mean_val   = np.mean(sampled_vals)
-        std_val    = np.std(sampled_vals)
-        min_val    = np.min(sampled_vals)
-        max_val    = np.max(sampled_vals)
-        median_val = np.median(sampled_vals)
-        aggregated_features_list.append([mean_val, std_val, min_val, max_val, median_val])
+    """    
     
-    features_df = pd.DataFrame(aggregated_features_list, 
-                               columns=["mean_score_5000", "std_score_5000", "min_score_5000", "max_score_5000", "median_score_5000"],
-                               index=df.index)
-    return features_df
+    # Randomly sample desired_n columns with replacement
+    df_copy = df.copy()
+    data_cols = df_copy.drop(["Source", "Target", "Label"], axis=1)
+    sampled_columns = data_cols.sample(n=desired_n, axis='columns', replace=True)
+
+    # Compute aggregated statistics
+    sampled_columns["mean_score"]   = sampled_columns.mean(axis=1)
+    sampled_columns["std_score"]    = sampled_columns.std(axis=1)
+    sampled_columns["min_score"]    = sampled_columns.min(axis=1)
+    sampled_columns["max_score"]   = sampled_columns.max(axis=1)
+    sampled_columns["median_score"] = sampled_columns.median(axis=1)
+
+    return sampled_columns
 
 # Compute the aggregated features from a resampled set of 5000 cell-level values per row
 print("Randomly resampling to create 5000 randomly permuted cell columns")
-agg_features = compute_aggregated_features(inferred_network, cell_columns, desired_n=5000)
+agg_features = compute_aggregated_features(inferred_network, desired_n=5000)
 # Append the new aggregated features to the original DataFrame
 inferred_network = pd.concat([inferred_network, agg_features], axis=1)
 
 # Define the list of aggregated features for training
-aggregated_features_new = ["mean_score_5000", "std_score_5000", "min_score_5000", "max_score_5000", "median_score_5000"]
+aggregated_features_new = ["mean_score", "std_score", "min_score", "max_score", "median_score"]
 
 # Define X (features) and y (target)
 X = inferred_network[aggregated_features_new]
@@ -105,8 +101,40 @@ rf.fit(X_train_balanced, y_train_balanced)
 
 # Evaluate on the (imbalanced) test set
 y_pred = rf.predict(X_test)
+y_pred_prob = rf.predict_proba(X_test)[:, 1]
 print(classification_report(y_test, y_pred))
 print("ROC AUC:", roc_auc_score(y_test, rf.predict_proba(X_test)[:, 1]))
+
+plt.figure(figsize=(8, 6))
+plt.hist(y_pred_prob, bins=50)
+plt.title("Histogram of Random Forest Prediction Probabilities")
+plt.xlabel("Prediction Probability")
+plt.ylabel("Frequency")
+plt.tight_layout()
+plt.savefig("random_forest_prediction_probability_histogram.png", dpi=200)
+
+# Classification report
+print(classification_report(y_test, y_pred))
+
+# ROC-AUC score
+roc_auc = roc_auc_score(y_test, y_pred_prob)
+print(f"ROC-AUC Score: {roc_auc:.3f}")
+
+# Step 4: Feature Importance Analysis
+feature_importances = pd.DataFrame({
+    "Feature": aggregated_features_new,
+    "Importance": rf.feature_importances_
+}).sort_values(by="Importance", ascending=False)
+
+# Plot feature importance
+plt.figure(figsize=(8, 6))
+plt.barh(feature_importances["Feature"], feature_importances["Importance"], color="skyblue")
+plt.xlabel("Importance")
+plt.ylabel("Feature")
+plt.title("Feature Importance")
+plt.gca().invert_yaxis()  # Highest importance at the top
+plt.tight_layout()
+plt.savefig("random_forest_feature_importance.png", dpi=200)
 
 new_data = pd.read_csv("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output/cell_level_inferred_grn_testing.csv", sep="\t")
 
@@ -133,8 +161,6 @@ new_data = new_data[["Source", "Target", "Score"]]
 new_data.to_csv(f'{output_dir}/rf_inferred_grn.tsv', sep='\t', index=False)
 
 # ------ old code below -----
-
-
 
 # # Select features and target
 # num_cols = 500
