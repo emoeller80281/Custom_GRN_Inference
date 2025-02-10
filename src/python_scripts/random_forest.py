@@ -113,9 +113,6 @@ plt.ylabel("Frequency")
 plt.tight_layout()
 plt.savefig("random_forest_prediction_probability_histogram.png", dpi=200)
 
-# Classification report
-print(classification_report(y_test, y_pred))
-
 # ROC-AUC score
 roc_auc = roc_auc_score(y_test, y_pred_prob)
 print(f"ROC-AUC Score: {roc_auc:.3f}")

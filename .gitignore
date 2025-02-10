@@ -23,4 +23,5 @@ reference_networks/
 motif_pwms/*
 other_method_grns
 figures
-yasin_motif_binding_code/
+MEME_ALL_MOTIFS/
+motif_binding_output/
