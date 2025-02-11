@@ -25,3 +25,4 @@ other_method_grns
 figures
 MEME_ALL_MOTIFS/
 motif_binding_output/
+*.pkl
