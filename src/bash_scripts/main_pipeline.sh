@@ -3,7 +3,7 @@
 #SBATCH --job-name custom_grn_method
 #SBATCH --partition compute
 #SBATCH --nodes=1
-#SBATCH --cpus-per-task 16
+#SBATCH --cpus-per-task 32
 #SBATCH --mem-per-cpu=16G
 #SBATCH --output=/dev/null
 #SBATCH --error=/dev/null
@@ -18,7 +18,8 @@ CREATE_HOMER_PEAK_FILE=false
 HOMER_FIND_MOTIFS_GENOME=false
 HOMER_PROCESS_MOTIF_FILES=false
 PARSE_TF_PEAK_MOTIFS=false
-CALCULATE_TF_REGULATION_SCORE=true
+CALCULATE_TF_REGULATION_SCORE=false
+PROCESS_MOTIFS=true
 
 # =============================================
 # USER PATH VARIABLES
@@ -99,7 +100,8 @@ validate_critical_variables
 # Function to check if at least one process is selected
 check_pipeline_steps() {
     if ! $CICERO_MAP_PEAKS_TO_TG && ! $CREATE_HOMER_PEAK_FILE && ! $HOMER_FIND_MOTIFS_GENOME && \
-       ! $HOMER_PROCESS_MOTIF_FILES && ! $PARSE_TF_PEAK_MOTIFS && ! $CALCULATE_TF_REGULATION_SCORE; then
+       ! $HOMER_PROCESS_MOTIF_FILES && ! $PARSE_TF_PEAK_MOTIFS && ! $CALCULATE_TF_REGULATION_SCORE \
+       && ! $PROCESS_MOTIFS; then
         echo "Error: At least one process must be enabled to run the pipeline."
         exit 1
     fi
@@ -475,8 +477,16 @@ calculate_tf_regulation_score() {
         --rna_data_file "$RNA_DATA_FILE" \
         --tf_motif_binding_score_file "$TF_MOTIF_BINDING_SCORE_FILE" \
         --output_dir "$OUTPUT_DIR" \
-        --fig_dir "$FIG_DIR" 
-        2> "$LOG_DIR/step07_calculate_tf_tg_regulatory_potential.log"
+        --fig_dir "$FIG_DIR" \
+        > "$LOG_DIR/step07_calculate_tf_tg_regulatory_potential.log"
+}
+
+process_motifs() {
+    echo ""
+    echo "Python: Processing Motifs"
+    /usr/bin/time -v \
+    python3 "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/yasin_motif_binding_code/sliding_window_tf_binding.py" \
+    > "$LOG_DIR/sliding_window_tf_binding.log"
 }
 
 # =============================================
@@ -508,3 +518,4 @@ if [ "$HOMER_FIND_MOTIFS_GENOME" = true ]; then find_motifs_genome; fi
 if [ "$HOMER_PROCESS_MOTIF_FILES" = true ]; then homer_process_motif_files; fi
 if [ "$PARSE_TF_PEAK_MOTIFS" = true ]; then parse_tf_peak_motifs; fi
 if [ "$CALCULATE_TF_REGULATION_SCORE" = true ]; then calculate_tf_regulation_score; fi
+if [ "$PROCESS_MOTIFS" = true ]; then process_motifs; fi

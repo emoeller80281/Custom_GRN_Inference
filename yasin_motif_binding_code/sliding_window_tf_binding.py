@@ -8,6 +8,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.ticker import FuncFormatter
 from numba import njit
+from concurrent.futures import ProcessPoolExecutor, as_completed
+
 
 
 @njit
@@ -30,8 +32,40 @@ def calculate_strand_score(sequence, pwm_values, window_size):
         score_total += window_score
     return score_total
 
-def associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq):
-    mm10_bacground_freq = pd.Series({
+def process_motif_file(file, meme_dir, chr_pos_to_seq, mm10_background_freq, tf_df):
+    # Read in the motif PWM file.
+    motif_df = pd.read_csv(os.path.join(meme_dir, file), sep="\t", header=0, index_col=0)
+    motif_name = file.replace('.txt', '')
+    
+    # Calculate the log2-transformed PWM (with background correction)
+    log2_motif_df_freq = np.log2(motif_df.T.div(mm10_background_freq, axis=0) + 1).T
+    # Set scores for ambiguous base 'N' to 0.
+    log2_motif_df_freq["N"] = [0] * log2_motif_df_freq.shape[0]
+    
+    pwm_values = log2_motif_df_freq.to_numpy()
+    window_size = log2_motif_df_freq.shape[0]
+    
+    n_peaks = chr_pos_to_seq.shape[0]
+    total_peak_score = np.zeros(n_peaks)
+    
+    # Loop over each peak to compute binding scores for both strands.
+    # (Assume that the sequences stored in chr_pos_to_seq["+ seq"] and ["- seq"]
+    # are NumPy arrays of integers.)
+    for peak_num in range(n_peaks):
+        peak = chr_pos_to_seq.iloc[peak_num, :]
+        pos_seq = peak["+ seq"]  # already a NumPy array of ints
+        neg_seq = peak["- seq"]
+        
+        pos_strand_score = calculate_strand_score(pos_seq, pwm_values, window_size)
+        neg_strand_score = calculate_strand_score(neg_seq, pwm_values, window_size)
+        total_peak_score[peak_num] = pos_strand_score + neg_strand_score
+
+    # Get the list of TF names that correspond to this motif.
+    tf_names = tf_df.loc[tf_df["Motif_ID"] == motif_name, "TF_Name"].values
+    return motif_name, tf_names, total_peak_score
+
+def associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, rna_data_genes):
+    mm10_background_freq = pd.Series({
         "A": 0.2917,
         "C": 0.2083,
         "G": 0.2083,
@@ -41,6 +75,9 @@ def associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq):
     # Read in the list of TFs to extract their name and matching motif ID
     tf_df = pd.read_csv(tf_names_file, sep="\t", header=0, index_col=None)
     
+    tf_df = tf_df[tf_df["TF_Name"].isin(rna_data_genes)]
+    print(f'Number of TFs matching RNA dataset = {tf_df.shape[0]}')
+    
     tf_to_peak_score_df = pd.DataFrame()
     tf_to_peak_score_df["peak"] = chr_pos_to_seq.apply(
         lambda row: f'{row["chr"]}:{row["start"]}-{row["end"]}', axis=1
@@ -48,50 +85,25 @@ def associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq):
     
     tf_motif_names = tf_df["Motif_ID"].unique()
     
-    # Find motif files matching the motifs for the TFs
-    matching_motif_files = set()
-    for file in tqdm(os.listdir(meme_dir)):
-        motif_name = file.replace('.txt', '')
-        if motif_name in tf_motif_names:
-            matching_motif_files.add(file)
+    # Identify motif files that match the TF motifs.
+    matching_motif_files = [file for file in os.listdir(meme_dir)
+                            if file.replace('.txt', '') in tf_motif_names]
     
-    # Read in each of the matching motifs anc calculate the TF binding score
-    for file in tqdm(matching_motif_files):
-        # Read in the motif pwm file
-        motif_df = pd.read_csv(os.path.join(meme_dir, file), sep="\t", header=0, index_col=0)
-        motif_name = file.replace('.txt', '')
+    # Use ProcessPoolExecutor to parallelize processing of motif files.
+    with ProcessPoolExecutor() as executor:
+        futures = {
+            executor.submit(process_motif_file, file, meme_dir, chr_pos_to_seq,
+                            mm10_background_freq, tf_df): file
+            for file in matching_motif_files
+        }
         
-        # Calculate the position weight matrix from the position probability matrix
-        log2_motif_df_freq = np.log2(motif_df.T.div(mm10_bacground_freq, axis=0) + 1).T
-        
-        # Add in a score of 0 if the position is N
-        log2_motif_df_freq["N"] = [0] * log2_motif_df_freq.shape[0]
-        
-        # Calculate the binding scores for each peak for the current motif
-        pwm_values = log2_motif_df_freq.to_numpy()
-        window_size = log2_motif_df_freq.shape[0]
-        
-        total_peak_score = np.zeros(chr_pos_to_seq.shape[0])
-        
-        # Loop over each peak and compute the binding potential for both strands
-        for peak_num in tqdm(range(chr_pos_to_seq.shape[0])):
-            peak = chr_pos_to_seq.iloc[peak_num, :]
-            pos_seq = peak["+ seq"]
-            neg_seq = peak["- seq"]
-            
-            pos_strand_score = calculate_strand_score(pos_seq, pwm_values, window_size)
-            neg_strand_score = calculate_strand_score(neg_seq, pwm_values, window_size)
-            
-            total_peak_score[peak_num] = pos_strand_score + neg_strand_score
-        
-        # Find the TF name that corresponds to the motif ID
-        tf_names = tf_df.loc[tf_df["Motif_ID"] == motif_name, "TF_Name"]
-
-        for tf_name in tf_names:
-            # Save the results in a new column for the TF
-            tf_to_peak_score_df[tf_name] = total_peak_score
-    print(tf_to_peak_score_df)
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Processing motifs"):
+            motif_name, tf_names, total_peak_score = future.result()
+            # For each TF associated with this motif, add a new column.
+            for tf_name in tf_names:
+                tf_to_peak_score_df[tf_name] = total_peak_score
     
+    print(tf_to_peak_score_df.head())
     return tf_to_peak_score_df
 
 def find_ATAC_peak_sequence(peak_file, reference_genome_dir, parsed_peak_file):
@@ -201,13 +213,17 @@ def calculate_single_peak_scores(chr_pos_to_seq, tf_pwm_dict, peak_num, tf_name,
     plt.tight_layout()
     plt.savefig("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/yasin_motif_binding_code/peak_scores.png", dpi=500)
 
-
-
 def main():
     tf_names_file = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/motif_pwms/TF_Information_all_motifs.txt"
     meme_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/motif_pwms/pwms_all_motifs"
     reference_genome_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/Homer/data/genomes/mm10"
     peak_file = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/Homer_peaks.txt"
+    rna_data_file = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/mESC_filtered_L2_E7.5_merged_RNA.csv"
+    
+    # Read in the RNAseq data file and extract the gene names to find matching TFs
+    rna_data = pd.read_csv(rna_data_file, index_col=0)
+    rna_data.rename(columns={rna_data.columns[0]: "Genes"}, inplace=True)
+    rna_data_genes = set(rna_data["Genes"])
     
     # Read in the peak dataframe containing genomic sequences
     parsed_peak_file = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/yasin_motif_binding_code/peak_sequences.pkl"
@@ -220,13 +236,11 @@ def main():
         chr_pos_to_seq = find_ATAC_peak_sequence(peak_file, reference_genome_dir, parsed_peak_file)
 
     # Associate the TFs from TF_Information_all_motifs.txt to the motif with the matching motifID
-    chr_pos_to_seq = associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq)
+    tf_to_peak_score_df = associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, rna_data_genes)
+    
+    tf_to_peak_score_df.to_csv("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/yasin_motif_binding_code/tf_to_peak_binding_score.tsv", sep='\t', header=True, index=False)
     
     # calculate_single_peak_scores(chr_pos_to_seq, tf_pwm_dict, peak_num=0, tf_name="Hoxb1", num_nucleotides=100)
     
-
-    
-      
-
 if __name__ == "__main__":
     main()
