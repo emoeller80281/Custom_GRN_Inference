@@ -163,56 +163,6 @@ def find_ATAC_peak_sequence(peak_file, reference_genome_dir, parsed_peak_file):
     
     return chr_pos_to_seq
 
-def calculate_single_peak_scores(chr_pos_to_seq, tf_pwm_dict, peak_num, tf_name, num_nucleotides):
-    first_row = chr_pos_to_seq.iloc[peak_num, :]
-    peak_name = f'{first_row["chr"]}:{first_row["start"]}-{first_row["start"] + num_nucleotides}'
-    
-    pos_seq = first_row["+ seq"]
-    neg_seq = first_row["- seq"]
-    
-    tf_motif = tf_pwm_dict[tf_name]
-    
-    def calculate_partial_strand_score(sequence, tf_motif, num_nucleotides):
-        window_size = tf_motif.shape[0]
-        num_peak_nucleotides = len(sequence[0:num_nucleotides])
-        
-        peak_scores = []
-        for i in range(num_peak_nucleotides):
-            window = [i for i in sequence[i:i+window_size]]
-            score = np.sum([tf_motif.loc[i+1, letter] for i, letter in enumerate(window)])
-            peak_scores.append(score)
-        
-        min_score = abs(min(peak_scores))
-        peak_scores = [i + min_score for i in peak_scores]
-        return peak_scores
-    
-    pos_peak_scores = calculate_partial_strand_score(pos_seq, tf_motif, num_nucleotides)
-    neg_peak_scores = calculate_partial_strand_score(neg_seq, tf_motif, num_nucleotides)
-    
-    total_score = sum(pos_peak_scores) + sum(neg_peak_scores)
-    
-    neg_peak_scores = [-1 * i for i in neg_peak_scores]
-    x = range(len(pos_peak_scores))
-    
-    # Plot a barplot of the positive and negative strands
-    fig, (ax1, ax2) = plt.subplots(2, 1)
-    fig.set_figheight(8)
-    fig.set_figwidth(18)
-    fig.suptitle(f"{tf_name} binding score along peak {peak_name}", fontsize=18)
-    
-    ax1.bar(x, pos_peak_scores, width=1, color='b')
-    ax1.set_xticks(ticks=[i for i in range(len(pos_seq[0:num_nucleotides]))], labels=[i for i in pos_seq[0:num_nucleotides]], fontsize=11)
-    ax1.set_ylabel("Coding strand binding potential")
-    
-    ax2.bar(x, neg_peak_scores, width=1, color='b')
-    ax2.set_xticks(ticks=[i for i in range(len(neg_seq[0:num_nucleotides]))], labels=[i for i in neg_seq[0:num_nucleotides]], fontsize=11)
-    ax2.tick_params(labelbottom=False, labeltop=True, top=True, bottom=False)
-    ax2.set_ylabel("Template strand binding potential")
-
-    ax2.yaxis.set_major_formatter(FuncFormatter(lambda y, pos: str(abs(y))))
-    
-    plt.tight_layout()
-    plt.savefig("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/yasin_motif_binding_code/peak_scores.png", dpi=500)
 
 def main():
     tf_names_file = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/motif_pwms/TF_Information_all_motifs.txt"
@@ -240,8 +190,6 @@ def main():
     tf_to_peak_score_df = associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, rna_data_genes)
     
     tf_to_peak_score_df.to_csv("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/yasin_motif_binding_code/tf_to_peak_binding_score.tsv", sep='\t', header=True, index=False)
-    
-    # calculate_single_peak_scores(chr_pos_to_seq, tf_pwm_dict, peak_num=0, tf_name="Hoxb1", num_nucleotides=100)
-    
+        
 if __name__ == "__main__":
     main()
