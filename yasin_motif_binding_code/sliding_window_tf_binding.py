@@ -141,7 +141,7 @@ def find_ATAC_peak_sequence(peak_file, reference_genome_dir, parsed_peak_file):
         for chr in fasta_sequences:
             if chr.id in peak_chr_ids:
                 chr_seq_plus = str(chr.seq).upper()
-                chr_seq_neg = str(chr.seq.reverse_complement()).upper()
+                chr_seq_neg = str(chr.seq.complement()).upper()
                 chr_peaks = peaks[peaks["chr"] == chr.id][["chr", "start", "end"]]
                 starts = chr_peaks["start"].to_numpy()
                 ends = chr_peaks["end"].to_numpy()
