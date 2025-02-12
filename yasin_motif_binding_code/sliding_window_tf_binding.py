@@ -39,6 +39,7 @@ def process_motif_file(file, meme_dir, chr_pos_to_seq, mm10_background_freq, tf_
     
     # Calculate the log2-transformed PWM (with background correction)
     log2_motif_df_freq = np.log2(motif_df.T.div(mm10_background_freq, axis=0) + 1).T
+    
     # Set scores for ambiguous base 'N' to 0.
     log2_motif_df_freq["N"] = [0] * log2_motif_df_freq.shape[0]
     
