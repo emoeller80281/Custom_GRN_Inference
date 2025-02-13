@@ -99,7 +99,7 @@ def calculate_single_peak_scores(chr_pos_to_seq, tf_pwm_dict, peak_num, tf_name,
     def calculate_partial_strand_score(sequence, tf_motif):
         window_size = tf_motif.shape[0]
         num_peak_nucleotides = len(sequence)
-        print(f'\t{sequence}')
+        # print(f'\t{sequence}')
         
         peak_scores = []
         for i in range(num_peak_nucleotides-window_size+1):
@@ -124,11 +124,13 @@ def calculate_single_peak_scores(chr_pos_to_seq, tf_pwm_dict, peak_num, tf_name,
     # for score in neg_peak_scores:
     #     print(score)
     
-    print(f'\tCoding Strand = {sum(pos_peak_scores)}')
-    print(f'\tTemplate Strand = {sum(neg_peak_scores)}')
+    # print(f'\tCoding Strand = {sum(pos_peak_scores)}')
+    # print(f'\tTemplate Strand = {sum(neg_peak_scores)}')
     
     total_score = sum(pos_peak_scores) + sum(neg_peak_scores)
-    print(f'\tTotal = {total_score}')
+    # print(f'\tTotal = {total_score}')
+    
+    return total_score
     
     # neg_peak_scores = [-1 * i for i in neg_peak_scores]
     # x = range(len(pos_peak_scores))
@@ -160,6 +162,7 @@ def main():
     pwm_output_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/yasin_motif_binding_code/motif_binding_output"
     reference_genome_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/Homer/data/genomes/mm10"
     peak_file = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/Homer_peaks.txt"
+    rna_data_file = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/mESC_filtered_L2_E7.5_merged_RNA.csv" 
     
     # Get the genomic sequence from the reference genome to each ATACseq peak
     # Read in the peak dataframe containing genomic sequences
@@ -175,14 +178,27 @@ def main():
 
     tf_pwm_dict = associate_tf_with_motif_pwm(tf_names_file, meme_dir, pwm_output_dir)    
     
+    tf_name = "Hoxb1"
+    num_nucleotides=21
+    
+    tf_to_peak_scores = []
     for i in range(20):
         peak_num=i
-        tf_name = "Hoxb1"
-        num_nucleotides=21
-        print(f'Peak {i+1}')
-        calculate_single_peak_scores(chr_pos_to_seq, tf_pwm_dict, peak_num, tf_name, num_nucleotides)
+        # print(f'Peak {i+1}')
+        peak_score = calculate_single_peak_scores(chr_pos_to_seq, tf_pwm_dict, peak_num, tf_name, num_nucleotides)
+        tf_to_peak_scores.append(peak_score)
+    
+    # Read in the RNAseq data file and extract the gene names to find matching TFs
+    rna_data = pd.read_csv(rna_data_file, index_col=0)
+    rna_data = rna_data.rename(columns={rna_data.columns[0]: "gene"}).set_index("gene")  
+    
+    rna_data["mean_expression"] = np.log2(rna_data.values.mean(axis=1))
+    print(rna_data.loc["Hoxb1", "mean_expression"])
+    
+    rna_data["norm_mean_expression"] = (rna_data["mean_expression"] - rna_data["mean_expression"].min()) / (rna_data["mean_expression"].max() - rna_data["mean_expression"].min())
     
     
+    print(rna_data.loc["Hoxb1", "norm_mean_expression"])
       
 
 if __name__ == "__main__":
