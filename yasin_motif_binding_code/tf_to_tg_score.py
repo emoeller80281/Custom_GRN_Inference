@@ -166,17 +166,7 @@ def calculate_population_grn(rna_data, tf_to_peak_score, peak_to_tg_score):
 
     merged_peaks.to_csv("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output/raw_scores_tf_to_tg_inferred_network.tsv", sep="\t", header=True, index=False)
 
-def calculate_cell_level_grn(rna_data, tf_to_peak_score, peak_to_tg_score):
-    
-    
-    # Calculate the final score column
-    merged_peaks["Score"] = merged_peaks["tf_to_peak_binding_score"] * merged_peaks["peak_to_target_score"] * merged_peaks["TF_mean_expression"] * merged_peaks["TG_mean_expression"]
-    merged_peaks["Score"] = minmax_normalize_column(merged_peaks["Score"])
 
-    merged_peaks = merged_peaks[merged_peaks["Score"] != 0]
-
-
-
-
+merged_peaks = calculate_population_grn(rna_data, tf_to_peak_score, peak_to_tg_score)
 
 merged_peaks.to_csv("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output/tf_to_tg_inferred_network.tsv", sep="\t", header=True, index=False)
