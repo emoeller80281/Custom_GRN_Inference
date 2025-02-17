@@ -3,9 +3,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 peak_gene_assoc_file = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output/peak_gene_associations.csv"
+peak_gene_assoc_output_file = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output/peak_gene_association_output.csv"
 fig_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/figures"
 
-df = pd.read_csv(peak_gene_assoc_file)
+df = pd.read_csv(peak_gene_assoc_file).sort_values("gene")
 print(df.head())
 
 def normalize_peak_to_peak_scores(df):
@@ -36,6 +37,7 @@ def normalize_peak_to_peak_scores(df):
     return score_normalized
 
 df['score_normalized'] = normalize_peak_to_peak_scores(df)
+print(df.sort_values("gene").head())
 
 plt.figure(figsize=(10, 7))
 plt.hist(df['score'], bins=50, color='blue')
@@ -51,4 +53,4 @@ plt.xlabel("Normalized Peak to Gene Association Score")
 plt.ylabel("Frequency")
 plt.savefig(f"{fig_dir}/cicero_hist_peak_gene_association_norm.png", dpi=300)
 
-df.to_csv(peak_gene_assoc_file, index=False)
+df.to_csv(peak_gene_assoc_output_file, index=False)

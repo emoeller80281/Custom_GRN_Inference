@@ -42,14 +42,19 @@ def load_tf_to_peak_scores(tf_to_peak_score_file):
 
 def load_peak_to_tg_scores(peak_to_tg_score_file):
     print("Reading and formatting peak to TG scores")
-    peak_to_tg_score = pd.read_csv(peak_to_tg_score_file, header=0, index_col=None)
-    # print(peak_to_tg_score.head())
+    peak_to_tg_score = pd.read_csv(peak_to_tg_score_file, header=0, index_col=None).sort_values('gene')
+    print(peak_to_tg_score.head())
 
     # Format the peaks to match the tf_to_peak_score dataframe
     peak_to_tg_score = peak_to_tg_score[["peak", "gene", "score_normalized"]]
     peak_to_tg_score["peak"] = peak_to_tg_score["peak"].str.replace("_", "-")
     peak_to_tg_score["peak"] = peak_to_tg_score["peak"].str.replace("-", ":", 1)
     peak_to_tg_score = peak_to_tg_score.rename(columns={"score_normalized": "peak_to_target_score"})
+    
+    print(peak_to_tg_score.head())
+    peak_subset = peak_to_tg_score[peak_to_tg_score["gene"] == "Airn"]
+    # peak_subset = peak_subset[peak_subset["Target"] == "Airn"]
+    print(peak_subset.head())
     
     return peak_to_tg_score
 
@@ -62,7 +67,7 @@ def plot_subscore_histogram(merged_peaks):
     axes = axes.flatten()
 
     # Loop through each column and plot a histogram
-    selected_cols = ["TF_mean_expression", "tf_to_peak_binding_score", "peak_to_target_score", "TG_mean_expression"]
+    selected_cols = ["TF_mean_expression", "TG_mean_expression", "tf_to_peak_binding_score", "peak_to_target_score"]
     for i, column in enumerate(selected_cols):
         
         # Add the histogram
@@ -108,7 +113,7 @@ def plot_population_score_histogram(merged_peaks):
     plt.close()
 
 tf_to_peak_score_file = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/yasin_motif_binding_code/tf_to_peak_binding_score.tsv"
-peak_to_tg_score_file = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output/peak_gene_associations.csv"
+peak_to_tg_score_file = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output/peak_gene_association_output.csv"
 rna_data_file = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/mESC_filtered_L2_E7.5_merged_RNA.csv"
 
 # Load in and format the required files
@@ -146,6 +151,7 @@ def calculate_population_grn(rna_data, tf_to_peak_score, peak_to_tg_score):
 
     print("Combining peak to TG scores with TG expression")
     peak_to_tg_score_and_expr = pd.merge(peak_to_tg_score, rna_data, on="gene", how="inner")
+    
     peak_to_tg_score_and_expr = peak_to_tg_score_and_expr.rename(
         columns={
             "mean_expression": "TG_mean_expression",
@@ -155,18 +161,29 @@ def calculate_population_grn(rna_data, tf_to_peak_score, peak_to_tg_score):
             "median_expression": "TG_median_expression"
             }
         )
+    
+
+    
 
     print("Calculating final TF to TG score")
     merged_peaks = pd.merge(tf_to_peak_score_and_expr, peak_to_tg_score_and_expr, on=["peak"], how="inner")
 
     merged_peaks["pearson_correlation"] = merged_peaks["TF_mean_expression"].corr(merged_peaks["TG_mean_expression"], method="pearson")
-    print(merged_peaks.head())
+    # print(merged_peaks.head())
     
-    plot_subscore_histogram(merged_peaks)
+    # plot_subscore_histogram(merged_peaks)
 
-    merged_peaks.to_csv("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output/raw_scores_tf_to_tg_inferred_network.tsv", sep="\t", header=True, index=False)
+    # merged_peaks.to_csv("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output/raw_scores_tf_to_tg_inferred_network.tsv", sep="\t", header=True, index=False)
 
+    return merged_peaks
 
 merged_peaks = calculate_population_grn(rna_data, tf_to_peak_score, peak_to_tg_score)
+
+
+peak_subset = merged_peaks[merged_peaks["Source"] == "Sp8"]
+peak_subset = peak_subset[peak_subset["Target"] == "Airn"]
+
+
+print(peak_subset[["peak", "Source", "Target", "TF_mean_expression", "tf_to_peak_binding_score", "peak_to_target_score", "TG_mean_expression"]])
 
 merged_peaks.to_csv("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output/tf_to_tg_inferred_network.tsv", sep="\t", header=True, index=False)
