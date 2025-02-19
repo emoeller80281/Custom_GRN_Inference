@@ -5,12 +5,62 @@ import pandas as pd
 from tqdm import tqdm
 from Bio import SeqIO
 import numpy as np
+from typing import Any
 import matplotlib.pyplot as plt
 from matplotlib.ticker import FuncFormatter
 from numba import njit
 from concurrent.futures import ProcessPoolExecutor, as_completed
+import logging
+import argparse
 
+def parse_args() -> argparse.Namespace:
+    """
+    Parses command-line arguments.
 
+    Returns:
+    argparse.Namespace: Parsed arguments containing paths for input and output files.
+    """
+    parser = argparse.ArgumentParser(description="Process TF motif binding potential.")
+    parser.add_argument(
+        "--tf_names_file",
+        type=str,
+        required=True,
+        help="Path to the tab-separated TF_Information_all_motifs.txt file containing TF name to binding motif association"
+    )
+    parser.add_argument(
+        "--meme_dir",
+        type=str,
+        required=True,
+        help="Path to the directory containing the motif .meme files for the organism"
+    )
+    parser.add_argument(
+        "--reference_genome_dir",
+        type=str,
+        required=True,
+        help="Path to the directory containing the chromosome fasta files for an organism"
+    )
+    parser.add_argument(
+        "--atac_data_file",
+        type=str,
+        required=True,
+        help="Path to the scATACseq data file"
+    )
+    parser.add_argument(
+        "--rna_data_file",
+        type=str,
+        required=True,
+        help="Path to the scRNAseq data file"
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        required=True,
+        help="Path to the output directory for the sample"
+    )
+    
+    args: argparse.Namespace = parser.parse_args()
+
+    return args
 
 @njit
 def calculate_strand_score(sequence, pwm_values, window_size):
@@ -77,7 +127,7 @@ def associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, rna_dat
     tf_df = pd.read_csv(tf_names_file, sep="\t", header=0, index_col=None)
     
     tf_df = tf_df[tf_df["TF_Name"].isin(rna_data_genes)]
-    print(f'Number of TFs matching RNA dataset = {tf_df.shape[0]}')
+    logging.info(f'Number of TFs matching RNA dataset = {tf_df.shape[0]}')
     
     tf_to_peak_score_df = pd.DataFrame()
     tf_to_peak_score_df["peak"] = chr_pos_to_seq.apply(
@@ -104,18 +154,49 @@ def associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, rna_dat
             for tf_name in tf_names:
                 tf_to_peak_score_df[tf_name] = total_peak_score
     
-    print(tf_to_peak_score_df.head())
+    logging.info(tf_to_peak_score_df.head())
     return tf_to_peak_score_df
 
-def find_ATAC_peak_sequence(peak_file, reference_genome_dir, parsed_peak_file):
-    print("Reading in ATACseq peak file")
+def format_peaks(atac_df: pd.DataFrame):
+        # Validate that the input DataFrame has the expected structure
+    if atac_df.empty:
+        raise ValueError("Input ATAC-seq data is empty.")
+    
+    # Extract the peak ID column
+    peak_ids: pd.Series = atac_df.iloc[:, 0]
+
+    # Split peak IDs into chromosome, start, and end
+    try:
+        chromosomes: pd.Series = peak_ids.str.extract(r'([^:]+):')[0]
+        starts: pd.Series = peak_ids.str.extract(r':(\d+)-')[0]
+        ends: pd.Series = peak_ids.str.extract(r'-(\d+)$')[0]
+    except Exception as e:
+        raise ValueError(f"Error parsing 'peak_id' values: {e}")
+
+    # Check for missing or invalid values
+    if chromosomes.isnull().any() or starts.isnull().any() or ends.isnull().any():
+        raise ValueError("One or more peak IDs are malformed. Ensure all peak IDs are formatted as 'chr:start-end'.")
+
+    # Create a dictionary for constructing the HOMER-compatible DataFrame
+    peak_dict: dict[str, Any] = {
+        "PeakID": [f"peak{i + 1}" for i in range(len(peak_ids))],  # Generate unique peak IDs
+        "chr": chromosomes,
+        "start": pd.to_numeric(starts, errors='coerce'),  # Convert to numeric and handle errors
+        "end": pd.to_numeric(ends, errors='coerce'),      # Convert to numeric and handle errors
+        "strand": ["."] * len(peak_ids),                 # Set strand as "."
+    }
+    
+    peak_df = pd.DataFrame(peak_dict)
+    
+    return peak_df
+
+def find_ATAC_peak_sequence(peak_df, reference_genome_dir, parsed_peak_file):
+    logging.info("Reading in ATACseq peak file")
     # Read in the Homer peaks dataframe
-    peaks = pd.read_csv(peak_file, sep="\t", header=None, index_col=None)
-    peaks.columns = ["PeakID", "chr", "start", "end", "strand"]    
-    peak_chromosomes = set(peaks["chr"])
+    peak_chromosomes = set(peak_df["chr"])
     chr_seq_list = []
-    print("Finding DNA sequence for each ATAC peak")
-    print("Reading in mm10 chromosome fasta files")
+    logging.info("Finding DNA sequence for each ATAC peak")
+    logging.info("Reading in mm10 chromosome fasta files")
     files_to_open = []
     for file in os.listdir(reference_genome_dir):
         if ".fa" in file:
@@ -124,7 +205,7 @@ def find_ATAC_peak_sequence(peak_file, reference_genome_dir, parsed_peak_file):
                 file_path = os.path.join(reference_genome_dir, file)
                 # Read in the mm10 genome from Homer
                 files_to_open.append(file_path)
-    print(f'Found {len(files_to_open)} chromosome fasta files matching the peak locations')
+    logging.info(f'Found {len(files_to_open)} chromosome fasta files matching the peak locations')
     
     lookup = np.full(256, -1, dtype=np.int8)  # Default: ambiguous characters get -1.
     lookup[ord('A')] = 0
@@ -133,8 +214,8 @@ def find_ATAC_peak_sequence(peak_file, reference_genome_dir, parsed_peak_file):
     lookup[ord('T')] = 3
     lookup[ord('N')] = 4
     
-    print(f'Extracting the peak sequences...')
-    peak_chr_ids = set(peaks["chr"].unique())
+    logging.info(f'Extracting the peak sequences...')
+    peak_chr_ids = set(peak_df["chr"].unique())
     for file in tqdm(files_to_open):
         fasta_sequences = SeqIO.parse(open(file), 'fasta')
         # Find the sequence for each peak in the ATACseq data
@@ -142,7 +223,7 @@ def find_ATAC_peak_sequence(peak_file, reference_genome_dir, parsed_peak_file):
             if chr.id in peak_chr_ids:
                 chr_seq_plus = str(chr.seq).upper()
                 chr_seq_neg = str(chr.seq.complement()).upper()
-                chr_peaks = peaks[peaks["chr"] == chr.id][["chr", "start", "end"]]
+                chr_peaks = peak_df[peak_df["chr"] == chr.id][["chr", "start", "end"]]
                 starts = chr_peaks["start"].to_numpy()
                 ends = chr_peaks["end"].to_numpy()
                 
@@ -156,40 +237,60 @@ def find_ATAC_peak_sequence(peak_file, reference_genome_dir, parsed_peak_file):
                 chr_seq_list.append(chr_peaks)
             
     chr_pos_to_seq = pd.concat(chr_seq_list)
-    print(f'\tFound sequence for {chr_pos_to_seq.shape[0] / peaks.shape[0] * 100}% of peaks ({chr_pos_to_seq.shape[0]} / {peaks.shape[0]})')
-    print('Writing to pickle file')
+    logging.info(f'\tFound sequence for {chr_pos_to_seq.shape[0] / peak_df.shape[0] * 100}% of peaks ({chr_pos_to_seq.shape[0]} / {peak_df.shape[0]})')
+    logging.info('Writing to pickle file')
     chr_pos_to_seq.to_pickle(parsed_peak_file)
-    print(f'\tDone!')
+    logging.info(f'\tDone!')
     
     return chr_pos_to_seq
 
-
 def main():
+    # Parse arguments
+    args: argparse.Namespace = parse_args()
+    tf_names_file: str = args.tf_names_file
+    meme_dir: str = args.meme_dir
+    reference_genome_dir: str = args.reference_genome_dir
+    atac_data_file: str = args.atac_data_file
+    rna_data_file: str = args.rna_data_file
+    output_dir: str = args.output_dir
+    
+    # Alternative: Set file names manually
     tf_names_file = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/motif_pwms/TF_Information_all_motifs.txt"
     meme_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/motif_pwms/pwms_all_motifs"
     reference_genome_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/Homer/data/genomes/mm10"
-    peak_file = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/Homer_peaks.txt"
+    atac_data_file = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/mESC_filtered_L2_E7.5_merged_ATAC.txt"
     rna_data_file = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/mESC_filtered_L2_E7.5_merged_RNA.csv"
     
+    logging.info('Reading scATACseq data')
+    atac_df: pd.DataFrame = pd.read_csv(atac_data_file)
+    logging.info(atac_df.head())
+    
     # Read in the RNAseq data file and extract the gene names to find matching TFs
+    logging.info('Reading gene names from scATACseq data')
     rna_data = pd.read_csv(rna_data_file, index_col=0)
     rna_data.rename(columns={rna_data.columns[0]: "Genes"}, inplace=True)
     rna_data_genes = set(rna_data["Genes"])
     
     # Read in the peak dataframe containing genomic sequences
-    parsed_peak_file = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/yasin_motif_binding_code/peak_sequences.pkl"
+    parsed_peak_file = f'{output_dir}/peak_sequences.pkl'
     if os.path.exists(parsed_peak_file):
         chr_pos_to_seq = pd.read_pickle(parsed_peak_file)
         
     # Create the peak dataframe containing genomic sequences if it doesn't exist
     else:
+        # Read in the ATACseq dataframe and parse the peak locations into a dataframe of genomic locations and peak IDs
+        peak_df = format_peaks(atac_df)
+        
         # Get the genomic sequence from the reference genome to each ATACseq peak
-        chr_pos_to_seq = find_ATAC_peak_sequence(peak_file, reference_genome_dir, parsed_peak_file)
+        chr_pos_to_seq = find_ATAC_peak_sequence(peak_df, reference_genome_dir, parsed_peak_file, output_dir)
 
     # Associate the TFs from TF_Information_all_motifs.txt to the motif with the matching motifID
     tf_to_peak_score_df = associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, rna_data_genes)
     
-    tf_to_peak_score_df.to_csv("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/yasin_motif_binding_code/tf_to_peak_binding_score.tsv", sep='\t', header=True, index=False)
+    tf_to_peak_score_df.to_csv(f'{output_dir}/tf_to_peak_binding_score.tsv', sep='\t', header=True, index=False)
         
 if __name__ == "__main__":
+    # Configure logging
+    logging.basicConfig(level=logging.INFO, format='%(message)s')
+    
     main()

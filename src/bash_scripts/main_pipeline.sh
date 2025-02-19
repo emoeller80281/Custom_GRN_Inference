@@ -13,45 +13,42 @@ set -euo pipefail
 # =============================================
 # SELECT WHICH PROCESSES TO RUN
 # =============================================
-CICERO_MAP_PEAKS_TO_TG=true
-CREATE_HOMER_PEAK_FILE=false
-HOMER_FIND_MOTIFS_GENOME=false
-HOMER_PROCESS_MOTIF_FILES=false
-PARSE_TF_PEAK_MOTIFS=false
-CALCULATE_TF_REGULATION_SCORE=false
-PROCESS_MOTIFS=false
+STEP010_CICERO_MAP_PEAKS_TO_TG=true
+STEP020_CICERO_PEAK_TO_TG_SCORE=true
+STEP030_TF_TO_PEAK_BINDING=true
+STEP040_TF_TO_TG_SCORE=true
 
 # =============================================
 # USER PATH VARIABLES
 # =============================================
-BASE_DIR=$(readlink -f \
-    "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
-    )
+SAMPLE_NAME="mESC"
+ORGANISM="mm10"
+CONDA_ENV_NAME="my_env"
+
+BASE_DIR=$(readlink -f "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER")
+
 INPUT_DIR="$BASE_DIR/input"
 ATAC_DATA_FILE="$INPUT_DIR/multiomic_data_filtered_L2_E7.5_rep1_ATAC.csv"
 RNA_DATA_FILE="$INPUT_DIR/multiomic_data_filtered_L2_E7.5_rep1_RNA.csv"
-HOMER_ORGANISM_CODE="mm10" # Make sure you download the correct homer genome e.g. `perl Homer/configureHomer.pl -install mm10`
-CONDA_ENV_NAME="my_env"
+
 
 # Other paths
 PYTHON_SCRIPT_DIR="$BASE_DIR/src/python_scripts"
 R_SCRIPT_DIR="$BASE_DIR/src/r_scripts"
-OUTPUT_DIR="$BASE_DIR/output"
+OUTPUT_DIR="$BASE_DIR/output/$SAMPLE_NAME"
+REFERENCE_GENOME_DIR="$BASE_DIR/reference_genome/$ORGANISM"
 
-CICERO_OUTPUT_FILE="$OUTPUT_DIR/peak_gene_associations.csv"
+TF_NAMES_FILE="$BASE_DIR/motif_information/$ORGANISM/TF_Information_all_motifs.txt"
+MEME_DIR="$BASE_DIR/motif_information/$ORGANISM/${ORGANISM}_motif_meme_files"
 
-HOMER_DIR="$BASE_DIR/Homer/bin"
-HOMER_PEAK_FILE="$INPUT_DIR/Homer_peaks.txt"
-HOMER_KNOWN_MOTIF_DIR="$OUTPUT_DIR/homer_findMotifsGenome_output/knownResults"
-HOMER_ANNOTATE_PEAKS_OUTPUT_DIR="$OUTPUT_DIR/homer_annotatePeaks_output"
+# Sample-specific paths
+CICERO_OUTPUT_FILE="$OUTPUT_DIR/$SAMPLE_NAME/peak_gene_associations.csv"
 
-TF_MOTIF_BINDING_SCORE_FILE="$OUTPUT_DIR/total_motif_regulatory_scores.tsv"
-
-LOG_DIR="$BASE_DIR/LOGS"
-FIG_DIR="$BASE_DIR/figures"
+LOG_DIR="$BASE_DIR/LOGS/$SAMPLE_NAME"
+FIG_DIR="$BASE_DIR/figures/$SAMPLE_NAME"
 
 # Set output and error files dynamically
-exec > "${LOG_DIR}/main_pipeline.log" 2> "${LOG_DIR}/main_pipeline.err"
+exec > "${LOG_DIR}/${SAMPLE_NAME}/main_pipeline.log" 2> "${LOG_DIR}/${SAMPLE_NAME}/main_pipeline.err"
 
 # =============================================
 # FUNCTIONS
@@ -86,7 +83,17 @@ check_for_running_jobs() {
 
 validate_critical_variables() {
     # Make sure that all of the required user variables are set
-    local critical_vars=(R_SCRIPT_DIR ATAC_DATA_FILE OUTPUT_DIR LOG_DIR HOMER_PEAK_FILE HOMER_ORGANISM_CODE)
+    local critical_vars=(
+        SAMPLE_NAME \
+        ORGANISM \
+        BASE_DIR \
+        RNA_DATA_FILE \
+        ATAC_DATA_FILE \
+        OUTPUT_DIR \
+        LOG_DIR \
+        TF_NAMES_FILE \
+        CONDA_ENV_NAME
+        )
     for var in "${critical_vars[@]}"; do
         if [ -z "${!var:-}" ]; then
             echo "[ERROR] Required variable $var is not set."
@@ -99,9 +106,10 @@ validate_critical_variables
 
 # Function to check if at least one process is selected
 check_pipeline_steps() {
-    if ! $CICERO_MAP_PEAKS_TO_TG && ! $CREATE_HOMER_PEAK_FILE && ! $HOMER_FIND_MOTIFS_GENOME && \
-       ! $HOMER_PROCESS_MOTIF_FILES && ! $PARSE_TF_PEAK_MOTIFS && ! $CALCULATE_TF_REGULATION_SCORE \
-       && ! $PROCESS_MOTIFS; then
+    if ! $STEP010_CICERO_MAP_PEAKS_TO_TG \
+    && ! $STEP020_CICERO_PEAK_TO_TG_SCORE \
+    && ! $STEP030_TF_TO_PEAK_BINDING \
+    && ! $STEP040_TF_TO_TG_SCORE; then \
         echo "Error: At least one process must be enabled to run the pipeline."
         exit 1
     fi
@@ -109,7 +117,7 @@ check_pipeline_steps() {
 
 # Function to validate required tools
 check_tools() {
-    local required_tools=(perl python3 conda)
+    local required_tools=(python3 conda)
 
     echo "[INFO] Validating required tools."
     for tool in "${required_tools[@]}"; do
@@ -160,50 +168,6 @@ determine_num_cpus() {
     fi
 }
 
-install_homer() {
-    # Set the Homer directory path
-    HOMER_DIR="$BASE_DIR/Homer/bin"
-
-    # Double-check if Homer directory already exists
-    if [ -d "$BASE_DIR/Homer" ]; then
-        echo "Homer directory found, adding to PATH"
-        export PATH=$HOMER_DIR:$PATH
-        return
-    fi
-
-    echo "    Creating Homer directory"
-    mkdir -p "$BASE_DIR/Homer"
-
-    echo "    Downloading Homer..."
-    curl -s -o "$BASE_DIR/Homer/configureHomer.pl" http://homer.ucsd.edu/homer/configureHomer.pl
-    if [ $? -ne 0 ]; then
-        echo "[ERROR] Failed to download Homer."
-        exit 1
-    fi
-    echo "        Done!"
-
-    echo "    Installing Homer..."
-    perl "$BASE_DIR/Homer/configureHomer.pl" -install
-    if [ $? -ne 0 ]; then
-        echo "[ERROR] Failed to install Homer."
-        exit 1
-    fi
-    echo "        Done!"
-
-    echo "    Downloading $HOMER_ORGANISM_CODE genome fasta"
-    perl "$BASE_DIR/Homer/configureHomer.pl" -install "$HOMER_ORGANISM_CODE"
-    if [ $? -ne 0 ]; then
-        echo "[ERROR] Failed to download genome fasta for $HOMER_ORGANISM_CODE."
-        exit 1
-    fi
-    echo "        Done!"
-
-    # Export Homer bin directory to PATH
-    export PATH=$HOMER_DIR:$PATH
-    echo "    Added Homer to PATH: $HOMER_DIR"
-}
-
-
 # Function to validate input files
 check_input_files() {
     echo "[INFO] Validating input files."
@@ -241,7 +205,14 @@ activate_conda_env() {
 # Function to ensure required directories exist
 setup_directories() {
     echo "[INFO] Ensuring required directories exist."
-    local dirs=("$INPUT_DIR" "$OUTPUT_DIR" "$LOG_DIR" "$HOMER_ANNOTATE_PEAKS_OUTPUT_DIR")
+    local dirs=( 
+        "$INPUT_DIR" \
+        "$OUTPUT_DIR" \
+        "$LOG_DIR" \
+        "$FIG_DIR" \
+        "$HOMER_ANNOTATE_PEAKS_OUTPUT_DIR"
+        )
+
     for dir in "${dirs[@]}"; do
         mkdir -p "$dir"
     done
@@ -314,8 +285,8 @@ download_file_if_missing() {
 
 check_cicero_genome_files_exist() {
 
-    if [ "$HOMER_ORGANISM_CODE" == "mm10" ]; then
-        echo "    $HOMER_ORGANISM_CODE detected, using mouse genome"
+    if [ "$ORGANISM" == "mm10" ]; then
+        echo "    $ORGANISM detected, using mouse genome"
 
         CHROM_SIZES="$INPUT_DIR/mm10.chrom.sizes"
         CHROM_SIZES_URL="https://hgdownload.soe.ucsc.edu/goldenPath/mm10/bigZips/mm10.chrom.sizes"
@@ -323,8 +294,8 @@ check_cicero_genome_files_exist() {
         GENE_ANNOT="$INPUT_DIR/Mus_musculus.GRCm39.113.gtf.gz"
         GENE_ANNOT_URL="https://ftp.ensembl.org/pub/release-113/gtf/mus_musculus/Mus_musculus.GRCm39.113.gtf.gz"
     
-    elif [ "$HOMER_ORGANISM_CODE" == "hg38" ]; then
-        echo "    $HOMER_ORGANISM_CODE detected, using human genome"
+    elif [ "$ORGANISM" == "hg38" ]; then
+        echo "    $ORGANISM detected, using human genome"
 
         CHROM_SIZES="$INPUT_DIR/hg38.chrom.sizes"
         CHROM_SIZES_URL="https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/hg38.chrom.sizes"
@@ -333,13 +304,13 @@ check_cicero_genome_files_exist() {
         GENE_ANNOT_URL="https://ftp.ensembl.org/pub/release-113/gtf/homo_sapiens/Homo_sapiens.GRCh38.113.gtf.gz"
 
     else
-        echo "    [ERROR] Unsupported HOMER_ORGANISM_CODE: $HOMER_ORGANISM_CODE"
+        echo "    [ERROR] Unsupported ORGANISM: $ORGANISM"
         exit 1
     fi
 
     # Check chromosome sizes and gene annotation files
-    download_file_if_missing "$CHROM_SIZES" "$CHROM_SIZES_URL" "$HOMER_ORGANISM_CODE chromosome sizes file"
-    download_file_if_missing "$GENE_ANNOT" "$GENE_ANNOT_URL" "$HOMER_ORGANISM_CODE gene annotation file"
+    download_file_if_missing "$CHROM_SIZES" "$CHROM_SIZES_URL" "$ORGANISM chromosome sizes file"
+    download_file_if_missing "$GENE_ANNOT" "$GENE_ANNOT_URL" "$ORGANISM gene annotation file"
 }
 
 # -------------- MAIN PIPELINE FUNCTIONS --------------
@@ -375,119 +346,45 @@ run_cicero() {
         "$OUTPUT_DIR" \
         "$CHROM_SIZES" \
         "$GENE_ANNOT" \
-    > "$LOG_DIR/step01_run_cicero.log" 2>"$LOG_DIR/cicero_R_output.log"
+    > "$LOG_DIR/Step010.cicero.log"
 }
 
-create_homer_peak_file() {
+run_cicero_peak_to_tg_score() {
     echo ""
-    echo "Python: Creating Homer peak file"
+    echo "Python: Parsing Cicero peak to TG scores"
     /usr/bin/time -v \
-    python3 "$PYTHON_SCRIPT_DIR/Step010.create_homer_peak_file.py" \
+    python3 "$PYTHON_SCRIPT_DIR/Step020.cicero_peak_to_tg_score.py" \
+        --cicero_peak_to_gene_file "$CICERO_OUTPUT_FILE" \
+        --fig_dir "$FIG_DIR" \
+        --output_dir "$OUTPUT_DIR" \
+    > "$LOG_DIR/Step020.cicero_peak_to_tg_score.log"
+}
+
+run_tf_to_peak_binding() {
+    echo ""
+    echo "Python: Calculating TF to peak scores"
+    /usr/bin/time -v \
+    python3 "$PYTHON_SCRIPT_DIR/Step030.tf_to_peak_binding.py" \
+        --tf_names_file "$TF_NAMES_FILE"\
+        --meme_dir "$MEME_DIR"\
+        --reference_genome_dir "$REFERENCE_GENOME_DIR"\
         --atac_data_file "$ATAC_DATA_FILE" \
-        --homer_peak_file "$HOMER_PEAK_FILE" \
-    > "$LOG_DIR/step02_create_homer_peaks.log"
-}
-
-find_motifs_genome() {
-    echo ""
-    echo "Homer: Running findMotifsGenome.pl"
-
-    mkdir -p "$OUTPUT_DIR/homer_findMotifsGenome_output"
-
-    /usr/bin/time -v \
-    perl "$HOMER_DIR/findMotifsGenome.pl" "$HOMER_PEAK_FILE" "$HOMER_ORGANISM_CODE" "$OUTPUT_DIR/homer_findMotifsGenome_output" -size 200 \
-    2> "$LOG_DIR/step03_homer_findMotifsGenome.log"
-}
-
-homer_process_motif_files() {
-    echo "[INFO] Starting motif file processing"
-
-    # Check for GNU parallel
-    if ! command -v parallel &> /dev/null; then
-        echo "[INFO] GNU parallel not found. Falling back to sequential processing."
-        use_parallel=false
-    else
-        use_parallel=true
-        echo "[INFO] GNU parallel detected."
-    fi
-
-    # Detect files to process
-    motif_files=$(find "$HOMER_KNOWN_MOTIF_DIR" -name "*.motif")
-    if [ -z "$motif_files" ]; then
-        echo "[ERROR] No motif files found in $HOMER_KNOWN_MOTIF_DIR."
-        exit 1
-    fi
-
-    # Log number of files to process
-    file_count=$(echo "$motif_files" | wc -l)
-    echo "[INFO] Found $file_count motif files to process."
-
-    # Create output directory if it doesn't exist
-    mkdir -p "$HOMER_ANNOTATE_PEAKS_OUTPUT_DIR"
-
-    # Process files in parallel
-    if [ "$use_parallel" = true ]; then
-        echo "$motif_files" | /usr/bin/time -v parallel -j "$NUM_CPU" \
-            "annotatePeaks.pl $HOMER_PEAK_FILE '$HOMER_ORGANISM_CODE' -m {} > $HOMER_ANNOTATE_PEAKS_OUTPUT_DIR/{/}_tf_motifs.txt" \
-            >> "$LOG_DIR/step05_parallel.log" 2>>"$LOG_DIR/step05_parallel.err"
-    
-    # Process files sequentially
-    else
-        for file in $motif_files; do
-            local output_file="$HOMER_ANNOTATE_PEAKS_OUTPUT_DIR/$(basename "$file" .motif)_tf_motifs.txt"
-            /usr/bin/time -v \
-            perl "$HOMER_DIR/annotatePeaks.pl" "$HOMER_PEAK_FILE" "$HOMER_ORGANISM_CODE" -m "$file" > "$output_file" \
-            2>> "$LOG_DIR/step05_sequential.err"
-
-            if [ $? -ne 0 ]; then
-                echo "[ERROR] Failed to process motif file: $file" >> "$LOG_DIR/step05_sequential.err"
-            else
-                echo "[INFO] Successfully processed: $file"
-            fi
-        done
-    fi
-
-    # Check for errors
-    if [ $? -ne 0 ]; then
-        echo "[ERROR] Motif file processing failed. Check logs in $LOG_DIR for details."
-        exit 1
-    fi
-
-    echo "[INFO] Motif file processing completed successfully."
-}
-
-parse_tf_peak_motifs() {
-    echo ""
-    echo "Python: Parsing TF binding motif results from Homer"
-    /usr/bin/time -v \
-    python3 "$PYTHON_SCRIPT_DIR/Step060.parse_TF_peak_motifs.py" \
-        --input_dir "$HOMER_ANNOTATE_PEAKS_OUTPUT_DIR" \
-        --cicero_cis_reg_file "$CICERO_OUTPUT_FILE" \
-        --homer_peak_file "$HOMER_PEAK_FILE" \
-        --output_file "$TF_MOTIF_BINDING_SCORE_FILE" \
-        --cpu_count "$NUM_CPU" \
-    > "$LOG_DIR/step06_parse_tf_binding_motifs.log"
-}
-
-calculate_tf_regulation_score() {
-    echo ""
-    echo "Python: Calculating TF-TG regulatory potential"
-    /usr/bin/time -v \
-    python3 "$PYTHON_SCRIPT_DIR/Step070.find_overlapping_TFs.py" \
         --rna_data_file "$RNA_DATA_FILE" \
-        --tf_motif_binding_score_file "$TF_MOTIF_BINDING_SCORE_FILE" \
+        --output_dir "$OUTPUT_DIR" \
+    > "$LOG_DIR/Step030.tf_to_peak_binding.log"
+}
+
+run_tf_to_tg_score() {
+    echo ""
+    echo "Python: Calculating TF to TG scores"
+    /usr/bin/time -v \
+    python3 "$PYTHON_SCRIPT_DIR/Step040.tf_to_tg_score.py" \
+        --rna_data_file "$RNA_DATA_FILE" \
         --output_dir "$OUTPUT_DIR" \
         --fig_dir "$FIG_DIR" \
-        > "$LOG_DIR/step07_calculate_tf_tg_regulatory_potential.log"
+    > "$LOG_DIR/Step040.tf_to_tg_score.log"
 }
 
-process_motifs() {
-    echo ""
-    echo "Python: Processing Motifs"
-    /usr/bin/time -v \
-    python3 "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/yasin_motif_binding_code/sliding_window_tf_binding.py" \
-    > "$LOG_DIR/sliding_window_tf_binding.log"
-}
 
 # =============================================
 # MAIN PIPELINE
@@ -509,13 +406,10 @@ determine_num_cpus
 check_input_files
 activate_conda_env
 setup_directories
-install_homer
 
 # Execute selected pipeline steps
-if [ "$CICERO_MAP_PEAKS_TO_TG" = true ]; then run_cicero; fi
-if [ "$CREATE_HOMER_PEAK_FILE" = true ]; then create_homer_peak_file; fi
-if [ "$HOMER_FIND_MOTIFS_GENOME" = true ]; then find_motifs_genome; fi
-if [ "$HOMER_PROCESS_MOTIF_FILES" = true ]; then homer_process_motif_files; fi
-if [ "$PARSE_TF_PEAK_MOTIFS" = true ]; then parse_tf_peak_motifs; fi
-if [ "$CALCULATE_TF_REGULATION_SCORE" = true ]; then calculate_tf_regulation_score; fi
-if [ "$PROCESS_MOTIFS" = true ]; then process_motifs; fi
+if [ "$STEP010_CICERO_MAP_PEAKS_TO_TG" = true ]; then run_cicero; fi
+if [ "$STEP020_CICERO_PEAK_TO_TG_SCORE" = true ]; then run_cicero_peak_to_tg_score; fi
+if [ "$STEP030_TF_TO_PEAK_BINDING" = true ]; then run_tf_to_peak_binding; fi
+if [ "$STEP040_TF_TO_TG_SCORE" = true ]; then run_tf_to_tg_score; fi
+

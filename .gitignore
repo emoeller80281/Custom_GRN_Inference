@@ -26,3 +26,4 @@ figures
 MEME_ALL_MOTIFS/
 motif_binding_output/
 *.pkl
+motif_information/*
