@@ -3,8 +3,8 @@
 #SBATCH --job-name custom_grn_method
 #SBATCH --partition compute
 #SBATCH --nodes=1
-#SBATCH --cpus-per-task 32
-#SBATCH --mem-per-cpu=16G
+#SBATCH --cpus-per-task 10
+#SBATCH --mem 64G
 #SBATCH --output=/dev/null
 #SBATCH --error=/dev/null
 
@@ -14,9 +14,9 @@ set -euo pipefail
 # SELECT WHICH PROCESSES TO RUN
 # =============================================
 STEP010_CICERO_MAP_PEAKS_TO_TG=true
-STEP020_CICERO_PEAK_TO_TG_SCORE=true
-STEP030_TF_TO_PEAK_BINDING=true
-STEP040_TF_TO_TG_SCORE=true
+STEP020_CICERO_PEAK_TO_TG_SCORE=false
+STEP030_TF_TO_PEAK_SCORE=false
+STEP040_TF_TO_TG_SCORE=false
 
 # =============================================
 # USER PATH VARIABLES
@@ -28,9 +28,8 @@ CONDA_ENV_NAME="my_env"
 BASE_DIR=$(readlink -f "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER")
 
 INPUT_DIR="$BASE_DIR/input"
-ATAC_DATA_FILE="$INPUT_DIR/multiomic_data_filtered_L2_E7.5_rep1_ATAC.csv"
-RNA_DATA_FILE="$INPUT_DIR/multiomic_data_filtered_L2_E7.5_rep1_RNA.csv"
-
+ATAC_DATA_FILE="$INPUT_DIR/mESC_filtered_L2_E7.5_merged_ATAC.csv"
+RNA_DATA_FILE="$INPUT_DIR/mESC_filtered_L2_E7.5_merged_RNA.csv"
 
 # Other paths
 PYTHON_SCRIPT_DIR="$BASE_DIR/src/python_scripts"
@@ -42,13 +41,15 @@ TF_NAMES_FILE="$BASE_DIR/motif_information/$ORGANISM/TF_Information_all_motifs.t
 MEME_DIR="$BASE_DIR/motif_information/$ORGANISM/${ORGANISM}_motif_meme_files"
 
 # Sample-specific paths
-CICERO_OUTPUT_FILE="$OUTPUT_DIR/$SAMPLE_NAME/peak_gene_associations.csv"
+CICERO_OUTPUT_FILE="$OUTPUT_DIR/peak_gene_associations.csv"
 
-LOG_DIR="$BASE_DIR/LOGS/$SAMPLE_NAME"
+LOG_DIR="$BASE_DIR/LOGS/${SAMPLE_NAME}/"
 FIG_DIR="$BASE_DIR/figures/$SAMPLE_NAME"
 
+mkdir -p "${LOG_DIR}"
+
 # Set output and error files dynamically
-exec > "${LOG_DIR}/${SAMPLE_NAME}/main_pipeline.log" 2> "${LOG_DIR}/${SAMPLE_NAME}/main_pipeline.err"
+exec > "${LOG_DIR}/main_pipeline.log" 2> "${LOG_DIR}/main_pipeline.err"
 
 # =============================================
 # FUNCTIONS
@@ -108,7 +109,7 @@ validate_critical_variables
 check_pipeline_steps() {
     if ! $STEP010_CICERO_MAP_PEAKS_TO_TG \
     && ! $STEP020_CICERO_PEAK_TO_TG_SCORE \
-    && ! $STEP030_TF_TO_PEAK_BINDING \
+    && ! $STEP030_TF_TO_PEAK_SCORE \
     && ! $STEP040_TF_TO_TG_SCORE; then \
         echo "Error: At least one process must be enabled to run the pipeline."
         exit 1
@@ -210,7 +211,6 @@ setup_directories() {
         "$OUTPUT_DIR" \
         "$LOG_DIR" \
         "$FIG_DIR" \
-        "$HOMER_ANNOTATE_PEAKS_OUTPUT_DIR"
         )
 
     for dir in "${dirs[@]}"; do
@@ -341,13 +341,13 @@ run_cicero() {
     echo "    Checks complete, running Cicero"
 
     /usr/bin/time -v \
-    Rscript "$R_SCRIPT_DIR/cicero.r" \
+    Rscript "$R_SCRIPT_DIR/Step010.run_cicero.r" \
         "$ATAC_DATA_FILE" \
         "$OUTPUT_DIR" \
         "$CHROM_SIZES" \
         "$GENE_ANNOT" \
-    > "$LOG_DIR/Step010.cicero.log"
-}
+    
+} 2> "$LOG_DIR/Step010.run_cicero.log"
 
 run_cicero_peak_to_tg_score() {
     echo ""
@@ -357,22 +357,23 @@ run_cicero_peak_to_tg_score() {
         --cicero_peak_to_gene_file "$CICERO_OUTPUT_FILE" \
         --fig_dir "$FIG_DIR" \
         --output_dir "$OUTPUT_DIR" \
-    > "$LOG_DIR/Step020.cicero_peak_to_tg_score.log"
-}
+    
+} 2> "$LOG_DIR/Step020.cicero_peak_to_tg_score.log"
 
-run_tf_to_peak_binding() {
+run_tf_to_peak_score() {
     echo ""
     echo "Python: Calculating TF to peak scores"
     /usr/bin/time -v \
-    python3 "$PYTHON_SCRIPT_DIR/Step030.tf_to_peak_binding.py" \
+    python3 "$PYTHON_SCRIPT_DIR/Step030.tf_to_peak_score.py" \
         --tf_names_file "$TF_NAMES_FILE"\
         --meme_dir "$MEME_DIR"\
         --reference_genome_dir "$REFERENCE_GENOME_DIR"\
         --atac_data_file "$ATAC_DATA_FILE" \
         --rna_data_file "$RNA_DATA_FILE" \
         --output_dir "$OUTPUT_DIR" \
-    > "$LOG_DIR/Step030.tf_to_peak_binding.log"
-}
+        --num_cpu "$NUM_CPU" \
+    
+} 2> "$LOG_DIR/Step030.tf_to_peak_score.log"
 
 run_tf_to_tg_score() {
     echo ""
@@ -382,8 +383,8 @@ run_tf_to_tg_score() {
         --rna_data_file "$RNA_DATA_FILE" \
         --output_dir "$OUTPUT_DIR" \
         --fig_dir "$FIG_DIR" \
-    > "$LOG_DIR/Step040.tf_to_tg_score.log"
-}
+    
+} 2> "$LOG_DIR/Step040.tf_to_tg_score.log"
 
 
 # =============================================
@@ -410,6 +411,6 @@ setup_directories
 # Execute selected pipeline steps
 if [ "$STEP010_CICERO_MAP_PEAKS_TO_TG" = true ]; then run_cicero; fi
 if [ "$STEP020_CICERO_PEAK_TO_TG_SCORE" = true ]; then run_cicero_peak_to_tg_score; fi
-if [ "$STEP030_TF_TO_PEAK_BINDING" = true ]; then run_tf_to_peak_binding; fi
+if [ "$STEP030_TF_TO_PEAK_SCORE" = true ]; then run_tf_to_peak_score; fi
 if [ "$STEP040_TF_TO_TG_SCORE" = true ]; then run_tf_to_tg_score; fi
 

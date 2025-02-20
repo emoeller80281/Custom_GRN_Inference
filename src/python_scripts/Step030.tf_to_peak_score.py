@@ -57,6 +57,12 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="Path to the output directory for the sample"
     )
+    parser.add_argument(
+        "--num_cpu",
+        type=str,
+        required=True,
+        help="Number of processors to run multithreading with"
+    )
     
     args: argparse.Namespace = parser.parse_args()
 
@@ -115,7 +121,7 @@ def process_motif_file(file, meme_dir, chr_pos_to_seq, mm10_background_freq, tf_
     tf_names = tf_df.loc[tf_df["Motif_ID"] == motif_name, "TF_Name"].values
     return motif_name, tf_names, total_peak_score
 
-def associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, rna_data_genes):
+def associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, rna_data_genes, num_cpu):
     mm10_background_freq = pd.Series({
         "A": 0.2917,
         "C": 0.2083,
@@ -129,19 +135,39 @@ def associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, rna_dat
     tf_df = tf_df[tf_df["TF_Name"].isin(rna_data_genes)]
     logging.info(f'Number of TFs matching RNA dataset = {tf_df.shape[0]}')
     
+    
     tf_to_peak_score_df = pd.DataFrame()
     tf_to_peak_score_df["peak"] = chr_pos_to_seq.apply(
         lambda row: f'{row["chr"]}:{row["start"]}-{row["end"]}', axis=1
     )
     
     tf_motif_names = tf_df["Motif_ID"].unique()
+    logging.info(f'Number of motifs: {len(tf_motif_names)}')
+    logging.info(f'Number of peaks: {chr_pos_to_seq.shape[0]}')
     
     # Identify motif files that match the TF motifs.
     matching_motif_files = [file for file in os.listdir(meme_dir)
                             if file.replace('.txt', '') in tf_motif_names]
+    logging.info(f'Number of files matching thsese motifs: {len(matching_motif_files)}')
+    
+    logging.info(f'\nCalclating motif binding scores for each ATACseq peak and matching TFs to motifs')
+    logging.info(f'\tUsing {num_cpu} processors')
+    logging.info(f'\tSize of calculation:') 
+    logging.info(f'\t\t{len(tf_motif_names)} motifs x {chr_pos_to_seq.shape[0]} peaks = {len(tf_motif_names) * chr_pos_to_seq.shape[0]} computations')
+    
+    window_len_set = set()
+    for file in matching_motif_files:
+        motif_df = pd.read_csv(os.path.join(meme_dir, file), sep="\t", header=0, index_col=0)
+        window_len = motif_df.shape[0]
+        window_len_set.add(window_len)
+        
+    logging.info(f"Number of window lengths: {len(window_len_set)}")
+    logging.info(window_len_set)
+    
+    
     
     # Use ProcessPoolExecutor to parallelize processing of motif files.
-    with ProcessPoolExecutor() as executor:
+    with ProcessPoolExecutor(max_workers=num_cpu) as executor:
         futures = {
             executor.submit(process_motif_file, file, meme_dir, chr_pos_to_seq,
                             mm10_background_freq, tf_df): file
@@ -253,17 +279,17 @@ def main():
     atac_data_file: str = args.atac_data_file
     rna_data_file: str = args.rna_data_file
     output_dir: str = args.output_dir
+    num_cpu: int = int(args.num_cpu)
     
     # Alternative: Set file names manually
-    tf_names_file = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/motif_pwms/TF_Information_all_motifs.txt"
-    meme_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/motif_pwms/pwms_all_motifs"
-    reference_genome_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/Homer/data/genomes/mm10"
-    atac_data_file = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/mESC_filtered_L2_E7.5_merged_ATAC.txt"
-    rna_data_file = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/mESC_filtered_L2_E7.5_merged_RNA.csv"
-    
+    # tf_names_file = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/motif_pwms/TF_Information_all_motifs.txt"
+    # meme_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/motif_pwms/pwms_all_motifs"
+    # reference_genome_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/Homer/data/genomes/mm10"
+    # atac_data_file = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/mESC_filtered_L2_E7.5_merged_ATAC.txt"
+    # rna_data_file = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/mESC_filtered_L2_E7.5_merged_RNA.csv"
+        
     logging.info('Reading scATACseq data')
     atac_df: pd.DataFrame = pd.read_csv(atac_data_file)
-    logging.info(atac_df.head())
     
     # Read in the RNAseq data file and extract the gene names to find matching TFs
     logging.info('Reading gene names from scATACseq data')
@@ -282,10 +308,10 @@ def main():
         peak_df = format_peaks(atac_df)
         
         # Get the genomic sequence from the reference genome to each ATACseq peak
-        chr_pos_to_seq = find_ATAC_peak_sequence(peak_df, reference_genome_dir, parsed_peak_file, output_dir)
+        chr_pos_to_seq = find_ATAC_peak_sequence(peak_df, reference_genome_dir, parsed_peak_file)
 
     # Associate the TFs from TF_Information_all_motifs.txt to the motif with the matching motifID
-    tf_to_peak_score_df = associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, rna_data_genes)
+    tf_to_peak_score_df = associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, rna_data_genes, num_cpu)
     
     tf_to_peak_score_df.to_csv(f'{output_dir}/tf_to_peak_binding_score.tsv', sep='\t', header=True, index=False)
         

@@ -125,8 +125,6 @@ conns <- assemble_connections(
 
 write.csv(conns, file.path(output_dir, "cicero_peak_to_peak.csv"), row.names = FALSE)
 
-
-
 # =============================================
 # Process Gene Annotations
 # =============================================
@@ -160,14 +158,6 @@ gene_annotation_sub <- bind_rows(pos, neg) %>%
 log_message("Annotating CDS...")
 cds <- annotate_cds_by_site(cds, gene_annotation_sub)
 
-
-
-unnorm_ga <- build_gene_activity_matrix(cds, conns)
-num_genes <- pData(cds)$num_genes_expressed
-cicero_gene_activities <- normalize_gene_activities(unnorm_ga, num_genes)
-
-write.csv(cicero_gene_activities, file.path(output_dir, "cicero_promoter_peaks.csv"), row.names = TRUE)
-
 # =============================================
 # Generate Peak-Gene Associations
 # =============================================
@@ -175,6 +165,8 @@ log_message("Generating peak-gene associations...")
 peak_to_gene <- as.data.frame(fData(cds)) %>%
   select(site_name, gene) %>%
   filter(!is.na(gene)) 
+
+write.csv(peak_to_gene, file.path(output_dir, "cicero_peak_to_gene.csv"), row.names = TRUE)
 
 conns_gene <- as.data.frame(conns) %>%
   left_join(peak_to_gene, by = c("Peak1" = "site_name")) %>%
