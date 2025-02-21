@@ -68,25 +68,22 @@ def parse_args() -> argparse.Namespace:
 
     return args
 
-@njit
-def calculate_strand_score(sequence, pwm_values, window_size):
-    """
-    Calculate the cumulative PWM score over all sliding windows
-    for a given strand sequence. Windows containing an ambiguous base (not in mapping)
-    are assigned a neutral contribution (score of 0 for that position).
-    """
-    # Map the sequence to indices; use -1 for ambiguous nucleotides (e.g., 'N')
-    score_total = 0
-    L = sequence.shape[0]
+def calculate_strand_score_vectorized(sequence, pwm_values, window_size):
+    # Create a sliding window view of the sequence.
+    # This yields an array of shape (num_windows, window_size)
+    windows = np.lib.stride_tricks.sliding_window_view(sequence, window_shape=window_size)
     
-    # Slide over the sequence with the window size
-    for i in range(L - window_size):
-        window_score = 0.0
-        # Sum over the PWM positions.
-        for j in range(window_size):
-            window_score += pwm_values[j, sequence[i + j]]
-        score_total += window_score
-    return score_total
+    # Create an array of positions [0, 1, 2, ..., window_size-1]
+    positions = np.arange(window_size)
+    
+    # Use advanced indexing: for each window, get the PWM value at the appropriate position.
+    # windows.T has shape (window_size, num_windows), so pwm_values[positions, windows.T]
+    # is an array of shape (window_size, num_windows). Summing over the rows (axis=0)
+    # gives the score for each window.
+    window_scores = np.sum(pwm_values[positions, windows.T], axis=0)
+    
+    # The cumulative score is then the sum over all windows.
+    return np.sum(window_scores)
 
 def process_motif_file(file, meme_dir, chr_pos_to_seq, mm10_background_freq, tf_df):
     # Read in the motif PWM file.
@@ -113,8 +110,8 @@ def process_motif_file(file, meme_dir, chr_pos_to_seq, mm10_background_freq, tf_
         pos_seq = peak["+ seq"]  # already a NumPy array of ints
         neg_seq = peak["- seq"]
         
-        pos_strand_score = calculate_strand_score(pos_seq, pwm_values, window_size)
-        neg_strand_score = calculate_strand_score(neg_seq, pwm_values, window_size)
+        pos_strand_score = calculate_strand_score_vectorized(pos_seq, pwm_values, window_size)
+        neg_strand_score = calculate_strand_score_vectorized(neg_seq, pwm_values, window_size)
         total_peak_score[peak_num] = pos_strand_score + neg_strand_score
 
     # Get the list of TF names that correspond to this motif.

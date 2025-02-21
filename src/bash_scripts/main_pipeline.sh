@@ -13,9 +13,9 @@ set -euo pipefail
 # =============================================
 # SELECT WHICH PROCESSES TO RUN
 # =============================================
-STEP010_CICERO_MAP_PEAKS_TO_TG=true
+STEP010_CICERO_MAP_PEAKS_TO_TG=false
 STEP020_CICERO_PEAK_TO_TG_SCORE=false
-STEP030_TF_TO_PEAK_SCORE=false
+STEP030_TF_TO_PEAK_SCORE=true
 STEP040_TF_TO_TG_SCORE=false
 
 # =============================================
@@ -354,7 +354,6 @@ run_cicero_peak_to_tg_score() {
     echo "Python: Parsing Cicero peak to TG scores"
     /usr/bin/time -v \
     python3 "$PYTHON_SCRIPT_DIR/Step020.cicero_peak_to_tg_score.py" \
-        --cicero_peak_to_gene_file "$CICERO_OUTPUT_FILE" \
         --fig_dir "$FIG_DIR" \
         --output_dir "$OUTPUT_DIR" \
     

@@ -168,46 +168,4 @@ peak_to_gene <- as.data.frame(fData(cds)) %>%
 
 write.csv(peak_to_gene, file.path(output_dir, "cicero_peak_to_gene.csv"), row.names = TRUE)
 
-conns_gene <- as.data.frame(conns) %>%
-  left_join(peak_to_gene, by = c("Peak1" = "site_name")) %>%
-  rename(gene1 = gene) %>%
-  left_join(peak_to_gene, by = c("Peak2" = "site_name")) %>%
-  rename(gene2 = gene)
-
-# Prepare Peak1 associations
-peak1_assoc <- conns_gene %>%
-  filter(!is.na(gene1)) %>%
-  transmute(
-    peak = Peak1,
-    gene = gene1,
-    score = 1
-  )
-
-# Prepare Peak2 associations
-peak2_assoc <- conns_gene %>%
-  filter(!is.na(gene2)) %>%
-  transmute(
-    peak = Peak2,
-    gene = gene2,
-    score = 1
-  )
-
-# Prepare Coaccessibility associations
-cross_assoc <- conns_gene %>%
-  filter(!is.na(gene1) & !is.na(gene2)) %>%
-  transmute(
-    peak = Peak1,
-    gene = gene1,
-    score = coaccess
-  )
-
-# Combine all associations
-final_peak_gene <- bind_rows(peak1_assoc, peak2_assoc, cross_assoc) %>%
-  distinct()
-
-
-head(final_peak_gene)
-
-write.csv(final_peak_gene, file.path(output_dir, "peak_gene_associations.csv"), row.names = FALSE)
-
 log_message("Cicero pipeline completed.")
