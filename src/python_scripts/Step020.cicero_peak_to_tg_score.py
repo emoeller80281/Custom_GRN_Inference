@@ -67,13 +67,13 @@ def plot_normalized_peak_to_tg_scores(score_col, fig_dir):
 
 def main():
     # Parse arguments
-    args: argparse.Namespace = parse_args()
-    output_dir: str = args.output_dir
-    fig_dir: str = args.fig_dir
+    # args: argparse.Namespace = parse_args()
+    # output_dir: str = args.output_dir
+    # fig_dir: str = args.fig_dir
     
     # Alternatively: if you want to pass arguments manually
-    # output_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output/mESC"
-    # fig_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/figures"
+    output_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output/mESC"
+    fig_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/figures"
     
     cicero_peak_to_peak_file = f"{output_dir}/cicero_peak_to_peak.csv"
     cicero_peak_to_gene_file = f"{output_dir}/cicero_peak_to_gene.csv"
@@ -110,9 +110,13 @@ def main():
     
     # Normalize the Cicero scores to be between 0-1
     merged_with_promoter_genes["score"] = normalize_peak_to_peak_scores(merged_with_promoter_genes)
+    
+    # Format the peaks to chr:start-stop rather than chr_start_stop to match the ATACseq peaks
+    merged_with_promoter_genes["peak"] = merged_with_promoter_genes["peak"].str.replace("_", "-")
+    merged_with_promoter_genes["peak"] = merged_with_promoter_genes["peak"].str.replace("-", ":", 1)
 
     # Write the final merged peaks to a csv file
-    merged_with_promoter_genes.to_csv(f"{output_dir}/merged_peaks.csv", header=True, index=False, sep="\t")
+    merged_with_promoter_genes.to_csv(f"{output_dir}/peak_gene_associations.csv", header=True, index=False, sep="\t")
 
     # Plot the non-normalized peak scores as a histogram
     plot_normalized_peak_to_tg_scores(merged_with_promoter_genes['score'], fig_dir)

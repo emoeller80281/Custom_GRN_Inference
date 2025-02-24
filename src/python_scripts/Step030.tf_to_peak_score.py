@@ -12,6 +12,7 @@ from numba import njit
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import logging
 import argparse
+import re
 
 def parse_args() -> argparse.Namespace:
     """
@@ -68,22 +69,25 @@ def parse_args() -> argparse.Namespace:
 
     return args
 
-def calculate_strand_score_vectorized(sequence, pwm_values, window_size):
-    # Create a sliding window view of the sequence.
-    # This yields an array of shape (num_windows, window_size)
-    windows = np.lib.stride_tricks.sliding_window_view(sequence, window_shape=window_size)
+@njit
+def calculate_strand_score(sequence, pwm_values, window_size):
+    """
+    Calculate the cumulative PWM score over all sliding windows
+    for a given strand sequence. Windows containing an ambiguous base (not in mapping)
+    are assigned a neutral contribution (score of 0 for that position).
+    """
+    # Map the sequence to indices; use -1 for ambiguous nucleotides (e.g., 'N')
+    score_total = 0
+    L = sequence.shape[0]
     
-    # Create an array of positions [0, 1, 2, ..., window_size-1]
-    positions = np.arange(window_size)
-    
-    # Use advanced indexing: for each window, get the PWM value at the appropriate position.
-    # windows.T has shape (window_size, num_windows), so pwm_values[positions, windows.T]
-    # is an array of shape (window_size, num_windows). Summing over the rows (axis=0)
-    # gives the score for each window.
-    window_scores = np.sum(pwm_values[positions, windows.T], axis=0)
-    
-    # The cumulative score is then the sum over all windows.
-    return np.sum(window_scores)
+    # Slide over the sequence with the window size
+    for i in range(L - window_size):
+        window_score = 0.0
+        # Sum over the PWM positions.
+        for j in range(window_size):
+            window_score += pwm_values[j, sequence[i + j]]
+        score_total += window_score
+    return score_total
 
 def process_motif_file(file, meme_dir, chr_pos_to_seq, mm10_background_freq, tf_df):
     # Read in the motif PWM file.
@@ -110,8 +114,8 @@ def process_motif_file(file, meme_dir, chr_pos_to_seq, mm10_background_freq, tf_
         pos_seq = peak["+ seq"]  # already a NumPy array of ints
         neg_seq = peak["- seq"]
         
-        pos_strand_score = calculate_strand_score_vectorized(pos_seq, pwm_values, window_size)
-        neg_strand_score = calculate_strand_score_vectorized(neg_seq, pwm_values, window_size)
+        pos_strand_score = calculate_strand_score(pos_seq, pwm_values, window_size)
+        neg_strand_score = calculate_strand_score(neg_seq, pwm_values, window_size)
         total_peak_score[peak_num] = pos_strand_score + neg_strand_score
 
     # Get the list of TF names that correspond to this motif.
@@ -157,11 +161,6 @@ def associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, rna_dat
         motif_df = pd.read_csv(os.path.join(meme_dir, file), sep="\t", header=0, index_col=0)
         window_len = motif_df.shape[0]
         window_len_set.add(window_len)
-        
-    logging.info(f"Number of window lengths: {len(window_len_set)}")
-    logging.info(window_len_set)
-    
-    
     
     # Use ProcessPoolExecutor to parallelize processing of motif files.
     with ProcessPoolExecutor(max_workers=num_cpu) as executor:
@@ -171,23 +170,33 @@ def associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, rna_dat
             for file in matching_motif_files
         }
         
+        new_columns = {}
+
         for future in tqdm(as_completed(futures), total=len(futures), desc="Processing motifs"):
             motif_name, tf_names, total_peak_score = future.result()
-            # For each TF associated with this motif, add a new column.
             for tf_name in tf_names:
-                tf_to_peak_score_df[tf_name] = total_peak_score
+                new_columns[tf_name] = total_peak_score
+
+        new_columns_df = pd.DataFrame(new_columns, index=tf_to_peak_score_df.index)
+        tf_to_peak_score_df = pd.concat([tf_to_peak_score_df, new_columns_df], axis=1)
     
     logging.info(tf_to_peak_score_df.head())
     return tf_to_peak_score_df
 
-def format_peaks(atac_df: pd.DataFrame):
+def format_peaks(atac_df: pd.DataFrame, cicero_peak_names: list):
         # Validate that the input DataFrame has the expected structure
     if atac_df.empty:
         raise ValueError("Input ATAC-seq data is empty.")
     
     # Extract the peak ID column
-    peak_ids: pd.Series = atac_df.iloc[:, 0]
-
+    logging.info(atac_df.iloc[:, 0].head())  # Check first column
+    logging.info(list(cicero_peak_names)[:5])  # Check first few peak names
+    logging.info(atac_df.iloc[:, 0].dtype)  # Check data type
+    peak_ids = atac_df[atac_df.iloc[:, 0].astype(str).isin(map(str, cicero_peak_names))].iloc[:, 0]
+    
+    logging.info(f'Formatting {peak_ids.shape} peaks')
+    logging.info(peak_ids)
+    
     # Split peak IDs into chromosome, start, and end
     try:
         chromosomes: pd.Series = peak_ids.str.extract(r'([^:]+):')[0]
@@ -279,14 +288,23 @@ def main():
     num_cpu: int = int(args.num_cpu)
     
     # Alternative: Set file names manually
-    # tf_names_file = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/motif_pwms/TF_Information_all_motifs.txt"
-    # meme_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/motif_pwms/pwms_all_motifs"
-    # reference_genome_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/Homer/data/genomes/mm10"
-    # atac_data_file = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/mESC_filtered_L2_E7.5_merged_ATAC.txt"
+    # tf_names_file = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/motif_information/mm10/TF_Information_all_motifs.txt"
+    # meme_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/motif_information/mm10/mm10_motif_meme_files"
+    # reference_genome_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/reference_genome/mm10"
+    # atac_data_file = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/mESC_filtered_L2_E7.5_merged_ATAC.csv"
     # rna_data_file = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/mESC_filtered_L2_E7.5_merged_RNA.csv"
-        
+    # output_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output/mESC"
+    # num_cpu = 4
+    
+    logging.info("Reading in parsed Cicero peak_gene_associations.csv file to find associated peaks")
+    cicero_peak_file = f"{output_dir}/peak_gene_associations.csv"
+    cicero_peaks = pd.read_csv(cicero_peak_file, sep="\t", header=0, index_col=None)
+    cicero_peak_names = cicero_peaks["peak"].to_list()
+    logging.info(f'{len(cicero_peak_names)} Cicero peaks')
+    
+    
     logging.info('Reading scATACseq data')
-    atac_df: pd.DataFrame = pd.read_csv(atac_data_file)
+    atac_df: pd.DataFrame = pd.read_csv(atac_data_file, header=0, index_col=0)
     
     # Read in the RNAseq data file and extract the gene names to find matching TFs
     logging.info('Reading gene names from scATACseq data')
@@ -295,21 +313,24 @@ def main():
     rna_data_genes = set(rna_data["Genes"])
     
     # Read in the peak dataframe containing genomic sequences
+    
     parsed_peak_file = f'{output_dir}/peak_sequences.pkl'
     if os.path.exists(parsed_peak_file):
+        logging.info('Reading ATACseq peaks from pickle file')
         chr_pos_to_seq = pd.read_pickle(parsed_peak_file)
         
     # Create the peak dataframe containing genomic sequences if it doesn't exist
     else:
         # Read in the ATACseq dataframe and parse the peak locations into a dataframe of genomic locations and peak IDs
-        peak_df = format_peaks(atac_df)
+        logging.info(f'Identifying ATACseq peak sequences')
+        peak_df = format_peaks(atac_df, cicero_peak_names)
         
         # Get the genomic sequence from the reference genome to each ATACseq peak
         chr_pos_to_seq = find_ATAC_peak_sequence(peak_df, reference_genome_dir, parsed_peak_file)
-
+        
     # Associate the TFs from TF_Information_all_motifs.txt to the motif with the matching motifID
     tf_to_peak_score_df = associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, rna_data_genes, num_cpu)
-    
+        
     tf_to_peak_score_df.to_csv(f'{output_dir}/tf_to_peak_binding_score.tsv', sep='\t', header=True, index=False)
         
 if __name__ == "__main__":

@@ -65,7 +65,7 @@ check_for_running_jobs() {
     fi
 
     # Use the SLURM job name for comparison
-    JOB_NAME="${SLURM_JOB_NAME:-custom_grn_inference}"  # Dynamically retrieve the job name from SLURM
+    JOB_NAME="${SLURM_JOB_NAME:-custom_grn_method}"  # Dynamically retrieve the job name from SLURM
 
     # Check for running jobs with the same name, excluding the current job
     RUNNING_COUNT=$(squeue --name="$JOB_NAME" --noheader | wc -l)

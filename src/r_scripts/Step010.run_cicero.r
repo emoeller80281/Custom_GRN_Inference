@@ -31,15 +31,15 @@ if (length(args) < 4) {
   stop("Usage: Rscript script.R <atac_file_path> <output_dir> <chromsize_file_path> <gene_annot_file_path>")
 }
 
-#atac_file_path <- args[1]
-#output_dir <- args[2]
-#chrom_sizes <- args[3]
-#gene_annot <- args[4]
+atac_file_path <- args[1]
+output_dir <- args[2]
+chrom_sizes <- args[3]
+gene_annot <- args[4]
 
-atac_file_path <- "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/multiomic_data_filtered_L2_E7.5_rep1_ATAC.csv"
-output_dir <- "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output"
-chrom_sizes <- "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/mm10.chrom.sizes"
-gene_annot <- "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/Mus_musculus.GRCm39.113.gtf.gz"
+# atac_file_path <- "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/multiomic_data_filtered_L2_E7.5_rep1_ATAC.csv"
+# output_dir <- "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output"
+# chrom_sizes <- "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/mm10.chrom.sizes"
+# gene_annot <- "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/Mus_musculus.GRCm39.113.gtf.gz"
 
 if (!dir.exists(output_dir)) {
   dir.create(output_dir, recursive = TRUE)
@@ -57,18 +57,18 @@ log_message("Loading ATACseq data...")
 atac_data <- read.csv(atac_file_path, row.names = 1, check.names = FALSE)
 log_message("    Done!")
 
-log_message("Subsetting peaks...")
+# log_message("Subsetting peaks...")
 
-# Subset to a random sample of 10,000 peaks (adjust as needed)
-subset_peaks <- sample(rownames(atac_data), size = 10000, replace = FALSE)
-atac_data <- atac_data[subset_peaks, ]
+# # Subset to a random sample of 10,000 peaks (adjust as needed)
+# subset_peaks <- sample(rownames(atac_data), size = 10000, replace = FALSE)
+# atac_data <- atac_data[subset_peaks, ]
 
-# log_message(sprintf("Subset to %d peaks", nrow(atac_data)))
-log_message("Reshaping ATACseq datset to a matrix...")
-atac_long <- reshape2::melt(as.matrix(atac_data), varnames = c("peak_position", "cell"), value.name = "reads") %>%
-  filter(reads > 0) %>%
-  mutate(peak_position = gsub("[:\\-]", "_", peak_position))
-log_message("    Done!")
+# # log_message(sprintf("Subset to %d peaks", nrow(atac_data)))
+# log_message("Reshaping ATACseq datset to a matrix...")
+# atac_long <- reshape2::melt(as.matrix(atac_data), varnames = c("peak_position", "cell"), value.name = "reads") %>%
+#   filter(reads > 0) %>%
+#   mutate(peak_position = gsub("[:\\-]", "_", peak_position))
+# log_message("    Done!")
 
 log_message("Creating a Cicero cell_data_set (CDS) from ATAC data...")
 log_message("    Running dimensionality reduction")
