@@ -227,7 +227,7 @@ def main():
 
         tf_to_tg_w_scores = tf_to_tg_w_scores[["Source", "Target", "Score"]]
         
-        return merged_peaks
+        return tf_to_tg_w_scores
 
     merged_peaks = calculate_population_grn(rna_data, tf_to_peak_score, peak_to_tg_score)
     
