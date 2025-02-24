@@ -15,8 +15,8 @@ set -euo pipefail
 # =============================================
 STEP010_CICERO_MAP_PEAKS_TO_TG=false
 STEP020_CICERO_PEAK_TO_TG_SCORE=false
-STEP030_TF_TO_PEAK_SCORE=true
-STEP040_TF_TO_TG_SCORE=false
+STEP030_TF_TO_PEAK_SCORE=false
+STEP040_TF_TO_TG_SCORE=true
 
 # =============================================
 # USER PATH VARIABLES

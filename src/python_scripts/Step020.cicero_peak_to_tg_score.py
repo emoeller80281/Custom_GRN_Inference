@@ -116,7 +116,7 @@ def main():
     merged_with_promoter_genes["peak"] = merged_with_promoter_genes["peak"].str.replace("-", ":", 1)
 
     # Write the final merged peaks to a csv file
-    merged_with_promoter_genes.to_csv(f"{output_dir}/peak_gene_associations.csv", header=True, index=False, sep="\t")
+    merged_with_promoter_genes.to_csv(f"{output_dir}/peak_to_tg_scores.csv", header=True, index=False, sep="\t")
 
     # Plot the non-normalized peak scores as a histogram
     plot_normalized_peak_to_tg_scores(merged_with_promoter_genes['score'], fig_dir)

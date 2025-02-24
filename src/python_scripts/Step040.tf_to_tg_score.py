@@ -76,20 +76,13 @@ def load_tf_to_peak_scores(tf_to_peak_score_file):
 
 def load_peak_to_tg_scores(peak_to_tg_score_file):
     logging.info("Reading and formatting peak to TG scores")
-    peak_to_tg_score = pd.read_csv(peak_to_tg_score_file, header=0, index_col=None).sort_values('gene')
-    logging.info(peak_to_tg_score.head())
+    peak_to_tg_score = pd.read_csv(peak_to_tg_score_file, sep="\t", header=0, index_col=None)
 
     # Format the peaks to match the tf_to_peak_score dataframe
-    peak_to_tg_score = peak_to_tg_score[["peak", "gene", "score_normalized"]]
-    peak_to_tg_score["peak"] = peak_to_tg_score["peak"].str.replace("_", "-")
-    peak_to_tg_score["peak"] = peak_to_tg_score["peak"].str.replace("-", ":", 1)
-    peak_to_tg_score = peak_to_tg_score.rename(columns={"score_normalized": "peak_to_target_score"})
-    
-    logging.info(peak_to_tg_score.head())
-    peak_subset = peak_to_tg_score[peak_to_tg_score["gene"] == "Airn"]
-    # peak_subset = peak_subset[peak_subset["Target"] == "Airn"]
-    logging.info(peak_subset.head())
-    
+    peak_to_tg_score = peak_to_tg_score[["peak", "gene", "score"]]
+
+    peak_to_tg_score = peak_to_tg_score.rename(columns={"score": "peak_to_target_score"})
+        
     return peak_to_tg_score
 
 def plot_subscore_histogram(merged_peaks, fig_dir):
@@ -166,6 +159,10 @@ def main():
     rna_data = load_rna_dataset(rna_data_file)
     tf_to_peak_score = load_tf_to_peak_scores(tf_to_peak_score_file)
     peak_to_tg_score = load_peak_to_tg_scores(peak_to_tg_score_file)
+    
+    # logging.info(f'rna_data\n{rna_data}\n')
+    # logging.info(f'tf_to_peak_score\n{tf_to_peak_score}\n')
+    # logging.info(f'peak_to_tg_score\n{peak_to_tg_score}\n')
 
     def calculate_population_grn(rna_data, tf_to_peak_score, peak_to_tg_score):
         # Calculate the normalized mean gene expression
@@ -177,12 +174,13 @@ def main():
         rna_data["median_expression"] = rna_data.median(axis=1)
 
         rna_data = rna_data.reset_index()
-        rna_data = rna_data[["gene", "mean_expression", "std_expression", "min_expression", "median_expression"]]
-        # logging.info(rna_data.head())
+        # rna_data = rna_data[["gene", "mean_expression", "std_expression", "min_expression", "median_expression"]]
+        rna_data = rna_data[["gene", "mean_expression"]]
+        logging.info(rna_data.head())
 
         logging.info("Combining TF to peak binding scores with TF expression")
         tf_to_peak_score_and_expr = pd.merge(tf_to_peak_score, rna_data, on="gene", how="inner")
-        # logging.info(tf_to_peak_score_and_expr.head())
+        logging.info(tf_to_peak_score_and_expr.head())
 
         tf_to_peak_score_and_expr = tf_to_peak_score_and_expr.rename(
             columns={
@@ -193,7 +191,7 @@ def main():
                 "median_expression": "TF_median_expression"
                 }
             )
-        # logging.info(tf_to_peak_score_and_expr.head())
+        logging.info(tf_to_peak_score_and_expr.head())
 
         logging.info("Combining peak to TG scores with TG expression")
         peak_to_tg_score_and_expr = pd.merge(peak_to_tg_score, rna_data, on="gene", how="inner")
@@ -212,17 +210,28 @@ def main():
         merged_peaks = pd.merge(tf_to_peak_score_and_expr, peak_to_tg_score_and_expr, on=["peak"], how="inner")
 
         merged_peaks["pearson_correlation"] = merged_peaks["TF_mean_expression"].corr(merged_peaks["TG_mean_expression"], method="pearson")
+        
+        # Subset to only have the columns that will go into the final score calculation
+        cols_of_interest = ["Source", "Target", "TF_mean_expression", "tf_to_peak_binding_score", "peak_to_target_score", "TG_mean_expression"]
+        merged_peaks = merged_peaks[cols_of_interest]
+        
+        # Sums the product of all peak scores between each unique TF to TG pair
+        score_df = merged_peaks.groupby(["Source", "Target"]).apply(
+            lambda x: (x["tf_to_peak_binding_score"] * x["peak_to_target_score"]).sum()
+        ).reset_index(name="tf_to_tg_score")
+
+        tf_to_tg_w_scores = pd.merge(merged_peaks, score_df, how="right", on=["Source", "Target"])
+        tf_to_tg_w_scores = tf_to_tg_w_scores[["Source", "Target", "TF_mean_expression", "tf_to_tg_score", "TG_mean_expression"]]
+        
+        tf_to_tg_w_scores["Score"] = tf_to_tg_w_scores["TF_mean_expression"] * tf_to_tg_w_scores["tf_to_tg_score"] * tf_to_tg_w_scores["TG_mean_expression"]
+
+        tf_to_tg_w_scores = tf_to_tg_w_scores[["Source", "Target", "Score"]]
+        
         return merged_peaks
 
     merged_peaks = calculate_population_grn(rna_data, tf_to_peak_score, peak_to_tg_score)
-
-
-    peak_subset = merged_peaks[merged_peaks["Source"] == "Sp8"]
-    peak_subset = peak_subset[peak_subset["Target"] == "Airn"]
-
-
-    logging.info(peak_subset[["peak", "Source", "Target", "TF_mean_expression", "tf_to_peak_binding_score", "peak_to_target_score", "TG_mean_expression"]])
-
+    
+    logging.info(merged_peaks.head())
     merged_peaks.to_csv(f'{output_dir}/tf_to_tg_inferred_network.tsv', sep="\t", header=True, index=False)
     
 if __name__ == "__main__":
