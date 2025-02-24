@@ -225,7 +225,7 @@ def main():
         
         tf_to_tg_w_scores["Score"] = tf_to_tg_w_scores["TF_mean_expression"] * tf_to_tg_w_scores["tf_to_tg_score"] * tf_to_tg_w_scores["TG_mean_expression"]
 
-        tf_to_tg_w_scores = tf_to_tg_w_scores[["Source", "Target", "Score"]]
+        tf_to_tg_w_scores = tf_to_tg_w_scores[["Source", "Target", "Score"]].drop_duplicates()
         
         return tf_to_tg_w_scores
 
