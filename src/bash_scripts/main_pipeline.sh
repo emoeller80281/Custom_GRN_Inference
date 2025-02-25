@@ -30,8 +30,8 @@ BASE_DIR=$(readlink -f "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_IN
 
 # Input file paths
 INPUT_DIR="$BASE_DIR/input/mESC"
-ATAC_DATA_FILE="$INPUT_DIR/mESC_filtered_L2_E7.5_merged_ATAC.csv"
-RNA_DATA_FILE="$INPUT_DIR/mESC_filtered_L2_E7.5_merged_RNA.csv"
+ATAC_DATA_FILE="$INPUT_DIR/mESC_filtered_L2_E7.5_rep2_ATAC.csv"
+RNA_DATA_FILE="$INPUT_DIR/mESC_filtered_L2_E7.5_rep2_RNA.csv"
 GROUND_TRUTH_FILE="$INPUT_DIR/RN111.tsv"
 
 # Other paths

@@ -25,21 +25,21 @@ log_message <- function(message) {
 # Command-Line Arguments
 # =============================================
 
-args <- commandArgs(trailingOnly = TRUE)
+# args <- commandArgs(trailingOnly = TRUE)
 
 if (length(args) < 4) {
   stop("Usage: Rscript script.R <atac_file_path> <output_dir> <chromsize_file_path> <gene_annot_file_path>")
 }
 
-atac_file_path <- args[1]
-output_dir <- args[2]
-chrom_sizes <- args[3]
-gene_annot <- args[4]
+# atac_file_path <- args[1]
+# output_dir <- args[2]
+# chrom_sizes <- args[3]
+# gene_annot <- args[4]
 
-# atac_file_path <- "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/multiomic_data_filtered_L2_E7.5_rep1_ATAC.csv"
-# output_dir <- "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output"
-# chrom_sizes <- "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/mm10.chrom.sizes"
-# gene_annot <- "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/Mus_musculus.GRCm39.113.gtf.gz"
+atac_file_path <- "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/mESC/multiomic_data_filtered_L2_E7.5_rep1_ATAC.csv"
+output_dir <- "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output/mESC_full_test"
+chrom_sizes <- "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/mESC/mm10.chrom.sizes"
+gene_annot <- "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/mESC/Mus_musculus.GRCm39.113.gtf.gz"
 
 if (!dir.exists(output_dir)) {
   dir.create(output_dir, recursive = TRUE)

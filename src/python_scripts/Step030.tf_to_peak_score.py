@@ -228,16 +228,15 @@ def find_ATAC_peak_sequence(peak_df, reference_genome_dir, parsed_peak_file):
     peak_chromosomes = set(peak_df["chr"])
     chr_seq_list = []
     logging.info("Finding DNA sequence for each ATAC peak")
-    logging.info("Reading in mm10 chromosome fasta files")
+    
+    logging.info("Reading in genome fasta files")
     files_to_open = []
     for file in os.listdir(reference_genome_dir):
         if ".fa" in file:
             file_chr_name = file.replace(".fa", "")
             if file_chr_name in peak_chromosomes:
                 file_path = os.path.join(reference_genome_dir, file)
-                # Read in the mm10 genome from Homer
                 files_to_open.append(file_path)
-    logging.info(f'Found {len(files_to_open)} chromosome fasta files matching the peak locations')
     
     lookup = np.full(256, -1, dtype=np.int8)  # Default: ambiguous characters get -1.
     lookup[ord('A')] = 0
@@ -247,9 +246,15 @@ def find_ATAC_peak_sequence(peak_df, reference_genome_dir, parsed_peak_file):
     lookup[ord('N')] = 4
     
     logging.info(f'Extracting the peak sequences...')
+    # Find the unique chromosomes in the peaks
     peak_chr_ids = set(peak_df["chr"].unique())
+    
+    # Iterate through each fasta file (chromosome fastas for mouse, entire genome fasta for human)
     for file in tqdm(files_to_open):
+        
+        # Read in the fasta
         fasta_sequences = SeqIO.parse(open(file), 'fasta')
+        
         # Find the sequence for each peak in the ATACseq data
         for chr in fasta_sequences:
             if chr.id in peak_chr_ids:
