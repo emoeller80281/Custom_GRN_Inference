@@ -16,7 +16,8 @@ set -euo pipefail
 STEP010_CICERO_MAP_PEAKS_TO_TG=false
 STEP020_CICERO_PEAK_TO_TG_SCORE=false
 STEP030_TF_TO_PEAK_SCORE=false
-STEP040_TF_TO_TG_SCORE=true
+STEP040_TF_TO_TG_SCORE=false
+STEP050_TRAIN_RANDOM_FOREST=true
 
 # =============================================
 # USER PATH VARIABLES
@@ -30,6 +31,7 @@ BASE_DIR=$(readlink -f "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_IN
 INPUT_DIR="$BASE_DIR/input"
 ATAC_DATA_FILE="$INPUT_DIR/mESC_filtered_L2_E7.5_merged_ATAC.csv"
 RNA_DATA_FILE="$INPUT_DIR/mESC_filtered_L2_E7.5_merged_RNA.csv"
+GROUND_TRUTH_FILE="$INPUT_DIR/RN111.tsv"
 
 # Other paths
 PYTHON_SCRIPT_DIR="$BASE_DIR/src/python_scripts"
@@ -110,7 +112,8 @@ check_pipeline_steps() {
     if ! $STEP010_CICERO_MAP_PEAKS_TO_TG \
     && ! $STEP020_CICERO_PEAK_TO_TG_SCORE \
     && ! $STEP030_TF_TO_PEAK_SCORE \
-    && ! $STEP040_TF_TO_TG_SCORE; then \
+    && ! $STEP040_TF_TO_TG_SCORE \
+    && ! $STEP050_TRAIN_RANDOM_FOREST; then \
         echo "Error: At least one process must be enabled to run the pipeline."
         exit 1
     fi
@@ -345,7 +348,7 @@ run_cicero() {
         "$ATAC_DATA_FILE" \
         "$OUTPUT_DIR" \
         "$CHROM_SIZES" \
-        "$GENE_ANNOT" \
+        "$GENE_ANNOT" 
     
 } 2> "$LOG_DIR/Step010.run_cicero.log"
 
@@ -355,7 +358,7 @@ run_cicero_peak_to_tg_score() {
     /usr/bin/time -v \
     python3 "$PYTHON_SCRIPT_DIR/Step020.cicero_peak_to_tg_score.py" \
         --fig_dir "$FIG_DIR" \
-        --output_dir "$OUTPUT_DIR" \
+        --output_dir "$OUTPUT_DIR" 
     
 } 2> "$LOG_DIR/Step020.cicero_peak_to_tg_score.log"
 
@@ -370,7 +373,7 @@ run_tf_to_peak_score() {
         --atac_data_file "$ATAC_DATA_FILE" \
         --rna_data_file "$RNA_DATA_FILE" \
         --output_dir "$OUTPUT_DIR" \
-        --num_cpu "$NUM_CPU" \
+        --num_cpu "$NUM_CPU" 
     
 } 2> "$LOG_DIR/Step030.tf_to_peak_score.log"
 
@@ -381,9 +384,20 @@ run_tf_to_tg_score() {
     python3 "$PYTHON_SCRIPT_DIR/Step040.tf_to_tg_score.py" \
         --rna_data_file "$RNA_DATA_FILE" \
         --output_dir "$OUTPUT_DIR" \
-        --fig_dir "$FIG_DIR" \
+        --fig_dir "$FIG_DIR" 
     
 } 2> "$LOG_DIR/Step040.tf_to_tg_score.log"
+
+run_random_forest_training() {
+    echo ""
+    echo "Python: Training Random Forest"
+    /usr/bin/time -v \
+    python3 "$PYTHON_SCRIPT_DIR/Step050.train_random_forest.py" \
+        --ground_truth_file "$GROUND_TRUTH_FILE" \
+        --output_dir "$OUTPUT_DIR" \
+        --fig_dir "$FIG_DIR" 
+        
+} 2> "$LOG_DIR/Step050.train_random_forest.log"
 
 
 # =============================================
@@ -412,4 +426,4 @@ if [ "$STEP010_CICERO_MAP_PEAKS_TO_TG" = true ]; then run_cicero; fi
 if [ "$STEP020_CICERO_PEAK_TO_TG_SCORE" = true ]; then run_cicero_peak_to_tg_score; fi
 if [ "$STEP030_TF_TO_PEAK_SCORE" = true ]; then run_tf_to_peak_score; fi
 if [ "$STEP040_TF_TO_TG_SCORE" = true ]; then run_tf_to_tg_score; fi
-
+if [ "$STEP050_TRAIN_RANDOM_FOREST" = true ]; then run_random_forest_training; fi

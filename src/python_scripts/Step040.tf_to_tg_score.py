@@ -174,8 +174,8 @@ def main():
         rna_data["median_expression"] = rna_data.median(axis=1)
 
         rna_data = rna_data.reset_index()
-        # rna_data = rna_data[["gene", "mean_expression", "std_expression", "min_expression", "median_expression"]]
-        rna_data = rna_data[["gene", "mean_expression"]]
+        rna_data = rna_data[["gene", "mean_expression", "std_expression", "min_expression", "median_expression"]]
+        # rna_data = rna_data[["gene", "mean_expression"]]
         logging.info(rna_data.head())
 
         logging.info("Combining TF to peak binding scores with TF expression")
@@ -208,31 +208,32 @@ def main():
 
         logging.info("Calculating final TF to TG score")
         merged_peaks = pd.merge(tf_to_peak_score_and_expr, peak_to_tg_score_and_expr, on=["peak"], how="inner")
+        
 
         merged_peaks["pearson_correlation"] = merged_peaks["TF_mean_expression"].corr(merged_peaks["TG_mean_expression"], method="pearson")
-        
-        # Subset to only have the columns that will go into the final score calculation
-        cols_of_interest = ["Source", "Target", "TF_mean_expression", "tf_to_peak_binding_score", "peak_to_target_score", "TG_mean_expression"]
-        merged_peaks = merged_peaks[cols_of_interest]
+        logging.info(merged_peaks.columns)
         
         # Sums the product of all peak scores between each unique TF to TG pair
         score_df = merged_peaks.groupby(["Source", "Target"]).apply(
             lambda x: (x["tf_to_peak_binding_score"] * x["peak_to_target_score"]).sum()
         ).reset_index(name="tf_to_tg_score")
 
-        tf_to_tg_w_scores = pd.merge(merged_peaks, score_df, how="right", on=["Source", "Target"])
-        tf_to_tg_w_scores = tf_to_tg_w_scores[["Source", "Target", "TF_mean_expression", "tf_to_tg_score", "TG_mean_expression"]]
+        inferred_network_raw = pd.merge(merged_peaks, score_df, how="right", on=["Source", "Target"]).drop(columns=["tf_to_peak_binding_score", "peak_to_target_score"])
+        logging.info(inferred_network_raw.columns)
         
-        tf_to_tg_w_scores["Score"] = tf_to_tg_w_scores["TF_mean_expression"] * tf_to_tg_w_scores["tf_to_tg_score"] * tf_to_tg_w_scores["TG_mean_expression"]
+        inferred_network_raw["Score"] = inferred_network_raw["TF_mean_expression"] * inferred_network_raw["tf_to_tg_score"] * inferred_network_raw["TG_mean_expression"]
 
-        tf_to_tg_w_scores = tf_to_tg_w_scores[["Source", "Target", "Score"]].drop_duplicates()
+        inferred_network = inferred_network_raw[["Source", "Target", "Score"]].drop_duplicates()
         
-        return tf_to_tg_w_scores
+        return inferred_network_raw, inferred_network
 
-    merged_peaks = calculate_population_grn(rna_data, tf_to_peak_score, peak_to_tg_score)
+    inferred_network_raw, inferred_network = calculate_population_grn(rna_data, tf_to_peak_score, peak_to_tg_score)
     
-    logging.info(merged_peaks.head())
-    merged_peaks.to_csv(f'{output_dir}/tf_to_tg_inferred_network.tsv', sep="\t", header=True, index=False)
+    logging.info(inferred_network.head())
+    inferred_network.to_csv(f'{output_dir}/inferred_network.tsv', sep="\t", header=True, index=False)
+    
+    inferred_network_raw.to_csv(f'{output_dir}/inferred_network_raw.tsv', sep="\t", header=True, index=False)
+    
     
 if __name__ == "__main__":
     # Configure logging
