@@ -62,13 +62,13 @@ log_message("    Done!")
 # # Subset to a random sample of 10,000 peaks (adjust as needed)
 # subset_peaks <- sample(rownames(atac_data), size = 10000, replace = FALSE)
 # atac_data <- atac_data[subset_peaks, ]
-
 # # log_message(sprintf("Subset to %d peaks", nrow(atac_data)))
-# log_message("Reshaping ATACseq datset to a matrix...")
-# atac_long <- reshape2::melt(as.matrix(atac_data), varnames = c("peak_position", "cell"), value.name = "reads") %>%
-#   filter(reads > 0) %>%
-#   mutate(peak_position = gsub("[:\\-]", "_", peak_position))
-# log_message("    Done!")
+
+log_message("Reshaping ATACseq datset to a matrix...")
+atac_long <- reshape2::melt(as.matrix(atac_data), varnames = c("peak_position", "cell"), value.name = "reads") %>%
+  filter(reads > 0) %>%
+  mutate(peak_position = gsub("[:\\-]", "_", peak_position))
+log_message("    Done!")
 
 log_message("Creating a Cicero cell_data_set (CDS) from ATAC data...")
 log_message("    Running dimensionality reduction")

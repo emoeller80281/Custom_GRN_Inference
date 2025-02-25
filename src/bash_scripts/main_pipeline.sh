@@ -13,22 +13,23 @@ set -euo pipefail
 # =============================================
 # SELECT WHICH PROCESSES TO RUN
 # =============================================
-STEP010_CICERO_MAP_PEAKS_TO_TG=false
-STEP020_CICERO_PEAK_TO_TG_SCORE=false
-STEP030_TF_TO_PEAK_SCORE=false
-STEP040_TF_TO_TG_SCORE=false
+STEP010_CICERO_MAP_PEAKS_TO_TG=true
+STEP020_CICERO_PEAK_TO_TG_SCORE=true
+STEP030_TF_TO_PEAK_SCORE=true
+STEP040_TF_TO_TG_SCORE=true
 STEP050_TRAIN_RANDOM_FOREST=true
 
 # =============================================
 # USER PATH VARIABLES
 # =============================================
-SAMPLE_NAME="mESC"
+SAMPLE_NAME="mESC_full_test"
 ORGANISM="mm10"
 CONDA_ENV_NAME="my_env"
 
 BASE_DIR=$(readlink -f "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER")
 
-INPUT_DIR="$BASE_DIR/input"
+# Input file paths
+INPUT_DIR="$BASE_DIR/input/mESC"
 ATAC_DATA_FILE="$INPUT_DIR/mESC_filtered_L2_E7.5_merged_ATAC.csv"
 RNA_DATA_FILE="$INPUT_DIR/mESC_filtered_L2_E7.5_merged_RNA.csv"
 GROUND_TRUTH_FILE="$INPUT_DIR/RN111.tsv"
@@ -396,7 +397,7 @@ run_random_forest_training() {
         --ground_truth_file "$GROUND_TRUTH_FILE" \
         --output_dir "$OUTPUT_DIR" \
         --fig_dir "$FIG_DIR" 
-        
+
 } 2> "$LOG_DIR/Step050.train_random_forest.log"
 
 
