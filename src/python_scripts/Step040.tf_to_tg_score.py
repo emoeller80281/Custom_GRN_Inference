@@ -214,7 +214,8 @@ def main():
         # logging.info(merged_peaks.columns)
         
         # Sums the product of all peak scores between each unique TF to TG pair
-        score_df = merged_peaks.groupby(["Source", "Target"]).apply(
+        score_df = merged_peaks.groupby(["Source", "Target"])
+        score_df = score_df.apply(
             lambda x: (x["tf_to_peak_binding_score"] * x["peak_to_target_score"]).sum()
         ).reset_index(name="tf_to_tg_score")
 
@@ -232,8 +233,12 @@ def main():
     logging.info("Writing inferred network to output directory")
     inferred_network.to_csv(f'{output_dir}/inferred_network.tsv', sep="\t", header=True, index=False)
     
+    # Convert all float columns to float32
+    float_cols = inferred_network_raw.select_dtypes(include=['float']).columns
+    inferred_network_raw[float_cols] = inferred_network_raw[float_cols].astype(np.float32)
+    
     logging.info("Writing raw inferred network scores to output directory")
-    inferred_network_raw.to_csv(f'{output_dir}/inferred_network_raw.tsv', sep="\t", header=True, index=False)
+    inferred_network_raw.to_pickle(f'{output_dir}/inferred_network_raw.pkl')
     
     
 if __name__ == "__main__":

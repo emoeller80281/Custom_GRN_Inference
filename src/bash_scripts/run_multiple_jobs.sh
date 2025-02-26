@@ -179,6 +179,6 @@ run_K562(){
     done
 }
 
-# run_mESC
+run_mESC
 run_K562
-# run_macrophage
+run_macrophage

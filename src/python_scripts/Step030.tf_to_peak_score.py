@@ -255,7 +255,6 @@ def format_peaks(atac_df: pd.DataFrame, cicero_peak_names: list):
 def find_ATAC_peak_sequence(peak_df, reference_genome_dir, parsed_peak_file):
     logging.info("Reading in ATACseq peak file")
     # Read in the Homer peaks dataframe
-    peak_chromosomes = set(peak_df["chr"])
     chr_seq_list = []
     logging.info("Finding DNA sequence for each ATAC peak")
     
@@ -263,10 +262,9 @@ def find_ATAC_peak_sequence(peak_df, reference_genome_dir, parsed_peak_file):
     files_to_open = []
     for file in os.listdir(reference_genome_dir):
         if ".fa" in file:
-            file_chr_name = file.replace(".fa", "")
-            if file_chr_name in peak_chromosomes:
-                file_path = os.path.join(reference_genome_dir, file)
-                files_to_open.append(file_path)
+            
+            file_path = os.path.join(reference_genome_dir, file)
+            files_to_open.append(file_path)
     
     lookup = np.full(256, -1, dtype=np.int8)  # Default: ambiguous characters get -1.
     lookup[ord('A')] = 0
@@ -302,8 +300,15 @@ def find_ATAC_peak_sequence(peak_df, reference_genome_dir, parsed_peak_file):
                 chr_peaks["- seq"] = [chr_seq_neg_mapped[start:end] for start, end in zip(starts, ends)]
                 chr_peaks = chr_peaks.dropna()
                 chr_seq_list.append(chr_peaks)
-            
-    chr_pos_to_seq = pd.concat(chr_seq_list)
+
+    # Mouse has separate fasta for each chromosome
+    if len(chr_seq_list) > 1:
+        chr_pos_to_seq = pd.concat(chr_seq_list)
+    
+    # Human fasta is one file with all chromosomes
+    else:
+        chr_pos_to_seq = chr_seq_list[0]
+        
     logging.info(f'\tFound sequence for {chr_pos_to_seq.shape[0] / peak_df.shape[0] * 100}% of peaks ({chr_pos_to_seq.shape[0]} / {peak_df.shape[0]})')
     logging.info('Writing to pickle file')
     chr_pos_to_seq.to_pickle(parsed_peak_file)
@@ -360,6 +365,7 @@ def main():
         # Read in the ATACseq dataframe and parse the peak locations into a dataframe of genomic locations and peak IDs
         logging.info(f'Identifying ATACseq peak sequences')
         peak_df = format_peaks(atac_df, cicero_peak_names)
+        logging.info(peak_df.head())
         
         # Get the genomic sequence from the reference genome to each ATACseq peak
         chr_pos_to_seq = find_ATAC_peak_sequence(peak_df, reference_genome_dir, parsed_peak_file)

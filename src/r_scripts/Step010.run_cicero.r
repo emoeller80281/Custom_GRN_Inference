@@ -139,11 +139,6 @@ gene_anno <- rtracklayer::import(gene_annot) %>%
     symbol = gene_name
   )
 
-log_message("Gene annotation sequence names:")
-log_message(unique(gene_annotation_sub$chromosome))
-
-log_message("CDS sequence names:")
-log_message(unique(seqnames(cds)))
 
 # Prepare TSS annotations
 log_message("Preparing TSS annotations...")

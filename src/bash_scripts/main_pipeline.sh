@@ -10,9 +10,9 @@ set -euo pipefail
 # =============================================
 # SELECT WHICH PROCESSES TO RUN
 # =============================================
-STEP010_CICERO_MAP_PEAKS_TO_TG=true
-STEP020_CICERO_PEAK_TO_TG_SCORE=true
-STEP030_TF_TO_PEAK_SCORE=true
+STEP010_CICERO_MAP_PEAKS_TO_TG=false
+STEP020_CICERO_PEAK_TO_TG_SCORE=false
+STEP030_TF_TO_PEAK_SCORE=false
 STEP040_TF_TO_TG_SCORE=true
 STEP050_TRAIN_RANDOM_FOREST=true
 
@@ -31,7 +31,7 @@ ATAC_FILE_NAME="$INPUT_DIR/$ATAC_FILE_NAME"
 # Other paths
 PYTHON_SCRIPT_DIR="$BASE_DIR/src/python_scripts"
 R_SCRIPT_DIR="$BASE_DIR/src/r_scripts"
-OUTPUT_DIR="$BASE_DIR/output/$SPECIES/$SAMPLE_NAME"
+OUTPUT_DIR="$BASE_DIR/output/$CELL_TYPE/$SAMPLE_NAME"
 REFERENCE_GENOME_DIR="$BASE_DIR/reference_genome/$SPECIES"
 
 
@@ -381,8 +381,8 @@ run_tf_to_peak_score() {
         --tf_names_file "$TF_NAMES_FILE"\
         --meme_dir "$MEME_DIR"\
         --reference_genome_dir "$REFERENCE_GENOME_DIR"\
-        --ATAC_FILE_NAME "$ATAC_FILE_NAME" \
-        --RNA_FILE_NAME "$RNA_FILE_NAME" \
+        --atac_data_file "$ATAC_FILE_NAME" \
+        --rna_data_file "$RNA_FILE_NAME" \
         --output_dir "$OUTPUT_DIR" \
         --species "$SPECIES" \
         --num_cpu "$NUM_CPU" 
@@ -394,7 +394,7 @@ run_tf_to_tg_score() {
     echo "Python: Calculating TF to TG scores"
     /usr/bin/time -v \
     python3 "$PYTHON_SCRIPT_DIR/Step040.tf_to_tg_score.py" \
-        --RNA_FILE_NAME "$RNA_FILE_NAME" \
+        --rna_data_file "$RNA_FILE_NAME" \
         --output_dir "$OUTPUT_DIR" \
         --fig_dir "$FIG_DIR" 
     

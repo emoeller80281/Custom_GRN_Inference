@@ -44,7 +44,7 @@ def parse_args() -> argparse.Namespace:
     return args
 
 def read_inferred_network(inferred_network_file):
-    inferred_network = pd.read_csv(inferred_network_file, sep="\t")
+    inferred_network = pd.read_pickle(inferred_network_file)
     logging.info(inferred_network.head())
     inferred_network["Source"] = inferred_network["Source"].str.upper()
     inferred_network["Target"] = inferred_network["Target"].str.upper()
@@ -223,7 +223,7 @@ def main():
     # ground_truth_file = "/gpfs/Labs/Uzun/DATA/PROJECTS/2024.GRN_BENCHMARKING.MOELLER/LINGER/LINGER_MESC_SC_DATA/RN111.tsv"
     # output_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output/mESC"
     
-    inferred_network_file = f"{output_dir}/inferred_network_raw.tsv"
+    inferred_network_file = f"{output_dir}/inferred_network_raw.pkl"
 
     inferred_network = read_inferred_network(inferred_network_file)
     ground_truth = read_ground_truth(ground_truth_file)
