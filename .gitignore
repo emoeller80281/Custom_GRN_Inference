@@ -27,3 +27,4 @@ MEME_ALL_MOTIFS/
 motif_binding_output/
 *.pkl
 motif_information/*
+ground_truth_files/*

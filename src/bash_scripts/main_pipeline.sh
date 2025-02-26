@@ -1,58 +1,60 @@
 #!/bin/bash -l
 
-#SBATCH --job-name custom_grn_method
 #SBATCH --partition compute
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task 10
 #SBATCH --mem 64G
-#SBATCH --output=/dev/null
-#SBATCH --error=/dev/null
 
 set -euo pipefail
 
 # =============================================
 # SELECT WHICH PROCESSES TO RUN
 # =============================================
-STEP010_CICERO_MAP_PEAKS_TO_TG=false
-STEP020_CICERO_PEAK_TO_TG_SCORE=false
-STEP030_TF_TO_PEAK_SCORE=false
+STEP010_CICERO_MAP_PEAKS_TO_TG=true
+STEP020_CICERO_PEAK_TO_TG_SCORE=true
+STEP030_TF_TO_PEAK_SCORE=true
 STEP040_TF_TO_TG_SCORE=true
 STEP050_TRAIN_RANDOM_FOREST=true
 
 # =============================================
 # USER PATH VARIABLES
 # =============================================
-SAMPLE_NAME="mESC_full_test"
-ORGANISM="mm10"
 CONDA_ENV_NAME="my_env"
 
 BASE_DIR=$(readlink -f "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER")
 
 # Input file paths
-INPUT_DIR="$BASE_DIR/input/mESC"
-ATAC_DATA_FILE="$INPUT_DIR/mESC_filtered_L2_E7.5_rep2_ATAC.csv"
-RNA_DATA_FILE="$INPUT_DIR/mESC_filtered_L2_E7.5_rep2_RNA.csv"
-GROUND_TRUTH_FILE="$INPUT_DIR/RN111.tsv"
+INPUT_DIR="${BASE_DIR}/input/${CELL_TYPE}/${SAMPLE_NAME}"
+RNA_FILE_NAME="$INPUT_DIR/$RNA_FILE_NAME"
+ATAC_FILE_NAME="$INPUT_DIR/$ATAC_FILE_NAME"
 
 # Other paths
 PYTHON_SCRIPT_DIR="$BASE_DIR/src/python_scripts"
 R_SCRIPT_DIR="$BASE_DIR/src/r_scripts"
-OUTPUT_DIR="$BASE_DIR/output/$SAMPLE_NAME"
-REFERENCE_GENOME_DIR="$BASE_DIR/reference_genome/$ORGANISM"
+OUTPUT_DIR="$BASE_DIR/output/$SPECIES/$SAMPLE_NAME"
+REFERENCE_GENOME_DIR="$BASE_DIR/reference_genome/$SPECIES"
 
-TF_NAMES_FILE="$BASE_DIR/motif_information/$ORGANISM/TF_Information_all_motifs.txt"
-MEME_DIR="$BASE_DIR/motif_information/$ORGANISM/${ORGANISM}_motif_meme_files"
 
-# Sample-specific paths
-CICERO_OUTPUT_FILE="$OUTPUT_DIR/peak_gene_associations.csv"
+TF_NAMES_FILE="$BASE_DIR/motif_information/$SPECIES/TF_Information_all_motifs.txt"
+MEME_DIR="$BASE_DIR/motif_information/$SPECIES/${SPECIES}_motif_meme_files"
 
-LOG_DIR="$BASE_DIR/LOGS/${SAMPLE_NAME}/"
-FIG_DIR="$BASE_DIR/figures/$SAMPLE_NAME"
+# LOG_DIR="$BASE_DIR/LOGS/${SAMPLE_NAME}/"
+FIG_DIR="$BASE_DIR/figures/$SPECIES/$SAMPLE_NAME"
 
-mkdir -p "${LOG_DIR}"
+# mkdir -p "${LOG_DIR}"
+mkdir -p "${FIG_DIR}"
+LOG_DIR="${BASE_DIR}/LOGS/${CELL_TYPE}_logs/${SAMPLE_NAME}_logs/"
 
-# Set output and error files dynamically
-exec > "${LOG_DIR}/main_pipeline.log" 2> "${LOG_DIR}/main_pipeline.err"
+echo "Input files:"
+echo "    RNA Data File: $RNA_FILE_NAME"
+echo "    ATAC Data File: $ATAC_FILE_NAME"
+echo "    Cell Type: $CELL_TYPE"
+echo "    Sample: $SAMPLE_NAME"
+echo "    Species: $SPECIES"
+echo ""
+
+# # Set output and error files dynamically
+# exec > "${LOG_DIR}/main_pipeline.log" 2> "${LOG_DIR}/main_pipeline.err"
 
 # =============================================
 # FUNCTIONS
@@ -89,10 +91,10 @@ validate_critical_variables() {
     # Make sure that all of the required user variables are set
     local critical_vars=(
         SAMPLE_NAME \
-        ORGANISM \
+        SPECIES \
         BASE_DIR \
-        RNA_DATA_FILE \
-        ATAC_DATA_FILE \
+        RNA_FILE_NAME \
+        ATAC_FILE_NAME \
         OUTPUT_DIR \
         LOG_DIR \
         TF_NAMES_FILE \
@@ -176,7 +178,7 @@ determine_num_cpus() {
 # Function to validate input files
 check_input_files() {
     echo "[INFO] Validating input files."
-    local files=("$ATAC_DATA_FILE" "$RNA_DATA_FILE")
+    local files=("$ATAC_FILE_NAME" "$RNA_FILE_NAME")
     for file in "${files[@]}"; do
         if [ ! -f "$file" ]; then
             echo "[ERROR] File not found: $file"
@@ -289,32 +291,32 @@ download_file_if_missing() {
 
 check_cicero_genome_files_exist() {
 
-    if [ "$ORGANISM" == "mm10" ]; then
-        echo "    $ORGANISM detected, using mouse genome"
+    if [ "$SPECIES" == "mm10" ]; then
+        echo "    $SPECIES detected, using mouse genome"
 
-        CHROM_SIZES="$INPUT_DIR/mm10.chrom.sizes"
+        CHROM_SIZES="$REFERENCE_GENOME_DIR/mm10.chrom.sizes"
         CHROM_SIZES_URL="https://hgdownload.soe.ucsc.edu/goldenPath/mm10/bigZips/mm10.chrom.sizes"
 
-        GENE_ANNOT="$INPUT_DIR/Mus_musculus.GRCm39.113.gtf.gz"
+        GENE_ANNOT="$REFERENCE_GENOME_DIR/Mus_musculus.GRCm39.113.gtf.gz"
         GENE_ANNOT_URL="https://ftp.ensembl.org/pub/release-113/gtf/mus_musculus/Mus_musculus.GRCm39.113.gtf.gz"
     
-    elif [ "$ORGANISM" == "hg38" ]; then
-        echo "    $ORGANISM detected, using human genome"
+    elif [ "$SPECIES" == "hg38" ]; then
+        echo "    $SPECIES detected, using human genome"
 
-        CHROM_SIZES="$INPUT_DIR/hg38.chrom.sizes"
+        CHROM_SIZES="$REFERENCE_GENOME_DIR/hg38.chrom.sizes"
         CHROM_SIZES_URL="https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/hg38.chrom.sizes"
 
-        GENE_ANNOT="$INPUT_DIR/Homo_sapiens.GRCh38.113.gtf.gz"
+        GENE_ANNOT="$REFERENCE_GENOME_DIR/Homo_sapiens.GRCh38.113.gtf.gz"
         GENE_ANNOT_URL="https://ftp.ensembl.org/pub/release-113/gtf/homo_sapiens/Homo_sapiens.GRCh38.113.gtf.gz"
 
     else
-        echo "    [ERROR] Unsupported ORGANISM: $ORGANISM"
+        echo "    [ERROR] Unsupported SPECIES: $SPECIES"
         exit 1
     fi
 
     # Check chromosome sizes and gene annotation files
-    download_file_if_missing "$CHROM_SIZES" "$CHROM_SIZES_URL" "$ORGANISM chromosome sizes file"
-    download_file_if_missing "$GENE_ANNOT" "$GENE_ANNOT_URL" "$ORGANISM gene annotation file"
+    download_file_if_missing "$CHROM_SIZES" "$CHROM_SIZES_URL" "$SPECIES chromosome sizes file"
+    download_file_if_missing "$GENE_ANNOT" "$GENE_ANNOT_URL" "$SPECIES gene annotation file"
 }
 
 # -------------- MAIN PIPELINE FUNCTIONS --------------
@@ -323,8 +325,8 @@ run_cicero() {
     echo "Cicero: Mapping scATACseq peaks to target genes"
 
     # Validate variables
-    if [[ -z "$R_SCRIPT_DIR" || -z "$ATAC_DATA_FILE" || -z "$OUTPUT_DIR" || -z "$LOG_DIR" ]]; then
-        echo "[ERROR] One or more required variables (R_SCRIPT_DIR, ATAC_DATA_FILE, OUTPUT_DIR, LOG_DIR) are not set."
+    if [[ -z "$R_SCRIPT_DIR" || -z "$ATAC_FILE_NAME" || -z "$OUTPUT_DIR" || -z "$LOG_DIR" ]]; then
+        echo "[ERROR] One or more required variables (R_SCRIPT_DIR, ATAC_FILE_NAME, OUTPUT_DIR, LOG_DIR) are not set."
         exit 1
     fi
 
@@ -346,10 +348,15 @@ run_cicero() {
 
     /usr/bin/time -v \
     Rscript "$R_SCRIPT_DIR/Step010.run_cicero.r" \
-        "$ATAC_DATA_FILE" \
+        "$ATAC_FILE_NAME" \
         "$OUTPUT_DIR" \
         "$CHROM_SIZES" \
         "$GENE_ANNOT" 
+    
+    # Unload the rstudio module and re-activate the conda environment after running the first step
+    module unload rstudio
+    activate_conda_env
+
     
 } 2> "$LOG_DIR/Step010.run_cicero.log"
 
@@ -371,8 +378,8 @@ run_tf_to_peak_score() {
         --tf_names_file "$TF_NAMES_FILE"\
         --meme_dir "$MEME_DIR"\
         --reference_genome_dir "$REFERENCE_GENOME_DIR"\
-        --atac_data_file "$ATAC_DATA_FILE" \
-        --rna_data_file "$RNA_DATA_FILE" \
+        --ATAC_FILE_NAME "$ATAC_FILE_NAME" \
+        --RNA_FILE_NAME "$RNA_FILE_NAME" \
         --output_dir "$OUTPUT_DIR" \
         --num_cpu "$NUM_CPU" 
     
@@ -383,7 +390,7 @@ run_tf_to_tg_score() {
     echo "Python: Calculating TF to TG scores"
     /usr/bin/time -v \
     python3 "$PYTHON_SCRIPT_DIR/Step040.tf_to_tg_score.py" \
-        --rna_data_file "$RNA_DATA_FILE" \
+        --RNA_FILE_NAME "$RNA_FILE_NAME" \
         --output_dir "$OUTPUT_DIR" \
         --fig_dir "$FIG_DIR" 
     
