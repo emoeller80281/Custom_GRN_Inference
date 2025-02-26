@@ -44,7 +44,7 @@ def minmax_normalize_column(column: pd.DataFrame):
 def load_rna_dataset(rna_data_file):
     # Read in the RNAseq data file and extract the gene names to find matching TFs
     logging.info("Reading and formatting expression data")
-    rna_data = pd.read_csv(rna_data_file, index_col=0, header=0)
+    rna_data = pd.read_csv(rna_data_file, index_col=None, header=0)
 
     rna_data.rename(columns={rna_data.columns[0]: "gene"}, inplace=True)
 
@@ -176,11 +176,11 @@ def main():
         rna_data = rna_data.reset_index()
         rna_data = rna_data[["gene", "mean_expression", "std_expression", "min_expression", "median_expression"]]
         # rna_data = rna_data[["gene", "mean_expression"]]
-        logging.info(rna_data.head())
+        # logging.info(rna_data.head())
 
         logging.info("Combining TF to peak binding scores with TF expression")
         tf_to_peak_score_and_expr = pd.merge(tf_to_peak_score, rna_data, on="gene", how="inner")
-        logging.info(tf_to_peak_score_and_expr.head())
+        # logging.info(tf_to_peak_score_and_expr.head())
 
         tf_to_peak_score_and_expr = tf_to_peak_score_and_expr.rename(
             columns={
@@ -191,7 +191,7 @@ def main():
                 "median_expression": "TF_median_expression"
                 }
             )
-        logging.info(tf_to_peak_score_and_expr.head())
+        # logging.info(tf_to_peak_score_and_expr.head())
 
         logging.info("Combining peak to TG scores with TG expression")
         peak_to_tg_score_and_expr = pd.merge(peak_to_tg_score, rna_data, on="gene", how="inner")
@@ -211,7 +211,7 @@ def main():
         
 
         merged_peaks["pearson_correlation"] = merged_peaks["TF_mean_expression"].corr(merged_peaks["TG_mean_expression"], method="pearson")
-        logging.info(merged_peaks.columns)
+        # logging.info(merged_peaks.columns)
         
         # Sums the product of all peak scores between each unique TF to TG pair
         score_df = merged_peaks.groupby(["Source", "Target"]).apply(
@@ -219,7 +219,7 @@ def main():
         ).reset_index(name="tf_to_tg_score")
 
         inferred_network_raw = pd.merge(merged_peaks, score_df, how="right", on=["Source", "Target"]).drop(columns=["tf_to_peak_binding_score", "peak_to_target_score"])
-        logging.info(inferred_network_raw.columns)
+        # logging.info(inferred_network_raw.columns)
         
         inferred_network_raw["Score"] = inferred_network_raw["TF_mean_expression"] * inferred_network_raw["tf_to_tg_score"] * inferred_network_raw["TG_mean_expression"]
 
@@ -229,9 +229,10 @@ def main():
 
     inferred_network_raw, inferred_network = calculate_population_grn(rna_data, tf_to_peak_score, peak_to_tg_score)
     
-    logging.info(inferred_network.head())
+    logging.info("Writing inferred network to output directory")
     inferred_network.to_csv(f'{output_dir}/inferred_network.tsv', sep="\t", header=True, index=False)
     
+    logging.info("Writing raw inferred network scores to output directory")
     inferred_network_raw.to_csv(f'{output_dir}/inferred_network_raw.tsv', sep="\t", header=True, index=False)
     
     
