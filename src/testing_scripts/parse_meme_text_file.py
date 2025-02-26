@@ -55,3 +55,9 @@ for motif, motif_lines in motif_dict.items():
     df.index.name = "Pos"
     
     df.to_csv(f'/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/motif_information/hg38/hg38_motif_meme_files/{motif}.txt', sep="\t", header=True, index=True)
+
+TF_names = [motif for motif in motif_dict.keys()]
+
+tf_df = pd.DataFrame({"TF_Name": TF_names, "Motif_ID": TF_names})
+tf_df.to_csv(f'/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/motif_information/hg38/TF_Information_all_motifs.txt', sep='\t', header=True, index=False)
+    

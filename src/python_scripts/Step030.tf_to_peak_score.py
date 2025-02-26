@@ -165,15 +165,16 @@ def associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, rna_dat
     tf_df = tf_df[tf_df["TF_Name"].isin(rna_data_genes)]
     logging.info(f'Number of TFs matching RNA dataset = {tf_df.shape[0]}')
     
+    tf_motif_names = tf_df["Motif_ID"].unique()
+    logging.info(f'Number of motifs: {len(tf_motif_names)}')
+    logging.info(f'Number of peaks: {chr_pos_to_seq.shape[0]}')
     
     tf_to_peak_score_df = pd.DataFrame()
     tf_to_peak_score_df["peak"] = chr_pos_to_seq.apply(
         lambda row: f'{row["chr"]}:{row["start"]}-{row["end"]}', axis=1
     )
     
-    tf_motif_names = tf_df["Motif_ID"].unique()
-    logging.info(f'Number of motifs: {len(tf_motif_names)}')
-    logging.info(f'Number of peaks: {chr_pos_to_seq.shape[0]}')
+    
     
     # Identify motif files that match the TF motifs.
     matching_motif_files = [file for file in os.listdir(meme_dir)
