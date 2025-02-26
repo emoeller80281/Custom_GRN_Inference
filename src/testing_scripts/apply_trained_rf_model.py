@@ -27,7 +27,19 @@ def parse_args() -> argparse.Namespace:
         help="Path to the output directory for the sample"
     )
     parser.add_argument(
-        "--sample_name",
+        "--model",
+        type=str,
+        required=True,
+        help="Name of the sample to apply the model to"
+    )
+    parser.add_argument(
+        "--target",
+        type=str,
+        required=True,
+        help="Name of the sample to apply the model to"
+    )
+    parser.add_argument(
+        "--save_name",
         type=str,
         required=True,
         help="Name of the sample to apply the model to"
@@ -38,8 +50,7 @@ def parse_args() -> argparse.Namespace:
     return args
 
 def read_inferred_network(inferred_network_file):
-    inferred_network = pd.read_csv(inferred_network_file, sep="\t")
-    print(inferred_network.head())
+    inferred_network = pd.read_pickle(inferred_network_file)
     inferred_network["Source"] = inferred_network["Source"].str.upper()
     inferred_network["Target"] = inferred_network["Target"].str.upper()
     
@@ -55,20 +66,27 @@ def main():
     args: argparse.Namespace = parse_args()
 
     output_dir: str = args.output_dir
-    sample_name: str = args.dataset_name
+    model: str = args.model
+    target: str = args.target
+    save_name: str = args.save_name
     
-    inferred_network_file = f"{output_dir}/inferred_network_raw.tsv"
-
-    inferred_network = read_inferred_network(inferred_network_file)
+    logging.info("Reading inferred network")
+    inferred_network = read_inferred_network(target)
+    logging.info("    Done!")
     
-    rf = joblib.load(f"{output_dir}/trained_random_forest_model.pkl")
+    logging.info("Loading trained Random Forest model")
+    rf = joblib.load(model)
     X = inferred_network[rf.feature_names]
+    logging.info("    Done!")
     
+    logging.info("Making predictions")
     inferred_network["Score"] = rf.predict_proba(X)[:, 1]
     inferred_network = inferred_network[["Source", "Target", "Score"]]
+    logging.info("    Done!")
 
-    inferred_network.to_csv(f'{output_dir}/{sample_name}_rf_inferred_grn.tsv', sep='\t', index=False)
-    logging.info(inferred_network.head())
+    logging.info("Saving inferred GRN")
+    inferred_network.to_csv(f'{output_dir}/{save_name}_rf_inferred_grn.tsv', sep='\t', index=False)
+    logging.info("    Done!")
     
 if __name__ == "__main__":
     # Configure logging

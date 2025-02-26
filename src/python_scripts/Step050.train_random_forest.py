@@ -45,7 +45,7 @@ def parse_args() -> argparse.Namespace:
 
 def read_inferred_network(inferred_network_file):
     inferred_network = pd.read_pickle(inferred_network_file)
-    logging.info(inferred_network.head())
+    logging.info("Read in inferred network")
     inferred_network["Source"] = inferred_network["Source"].str.upper()
     inferred_network["Target"] = inferred_network["Target"].str.upper()
     
@@ -53,7 +53,7 @@ def read_inferred_network(inferred_network_file):
 
 def read_ground_truth(ground_truth_file):
     ground_truth = pd.read_csv(ground_truth_file, sep='\t', quoting=csv.QUOTE_NONE, on_bad_lines='skip', header=0)
-    logging.info(ground_truth.head())
+    logging.info("Read in ground truth")
     
     return ground_truth
 
@@ -88,6 +88,7 @@ def compute_aggregated_cell_level_features(df: pd.DataFrame, desired_n=5000):
     return df_with_agg_feature_cols
 
 def train_random_forest(X_train, y_train, features):
+    logging.info("Training Random Forest Model")
     # Combine training features and labels for resampling
     train_data = X_train.copy()
     train_data["Label"] = y_train
@@ -229,8 +230,10 @@ def main():
     ground_truth = read_ground_truth(ground_truth_file)
 
     # Create a set of tuples from ground_truth for faster lookup
+    logging.info("Creating set of TF-TG pairs for ground truth")
     ground_truth_pairs = set(zip(ground_truth["Source"], ground_truth["Target"]))
 
+    logging.info("Adding labels to inferred network, 1 if predicted edge is in ground truth else 0")
     # Add the "Label" column to inferred_network
     inferred_network["Label"] = inferred_network.apply(
         lambda row: 1 if (row["Source"], row["Target"]) in ground_truth_pairs else 0,
@@ -264,11 +267,12 @@ def main():
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
     rf = train_random_forest(X_train, y_train, aggregated_features_new)
-
+    
     # Save the feature names of the trained model
     rf.feature_names = list(X_train.columns.values)
 
     # Save the trained model as a pickle file
+    logging.info("Saving trained model")
     joblib.dump(rf, f"{output_dir}/trained_random_forest_model.pkl")
     
 if __name__ == "__main__":
