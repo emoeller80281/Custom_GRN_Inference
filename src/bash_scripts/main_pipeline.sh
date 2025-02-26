@@ -45,6 +45,9 @@ FIG_DIR="$BASE_DIR/figures/$SPECIES/$SAMPLE_NAME"
 mkdir -p "${FIG_DIR}"
 LOG_DIR="${BASE_DIR}/LOGS/${CELL_TYPE}_logs/${SAMPLE_NAME}_logs/"
 
+if [ "$SPECIES" == "human" ]; then $SPECIES == "hg38"; fi
+if [ "$SPECIES" == "mouse" ]; then $SPECIES == "mm10"; fi
+
 echo "Input files:"
 echo "    RNA Data File: $RNA_FILE_NAME"
 echo "    ATAC Data File: $ATAC_FILE_NAME"
@@ -381,6 +384,7 @@ run_tf_to_peak_score() {
         --ATAC_FILE_NAME "$ATAC_FILE_NAME" \
         --RNA_FILE_NAME "$RNA_FILE_NAME" \
         --output_dir "$OUTPUT_DIR" \
+        --species "$SPECIES" \
         --num_cpu "$NUM_CPU" 
     
 } 2> "$LOG_DIR/Step030.tf_to_peak_score.log"

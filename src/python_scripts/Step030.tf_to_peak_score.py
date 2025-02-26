@@ -59,6 +59,12 @@ def parse_args() -> argparse.Namespace:
         help="Path to the output directory for the sample"
     )
     parser.add_argument(
+        "--species",
+        type=str,
+        required=True,
+        help="Species of the sample, either 'mouse', 'human', 'hg38', or 'mm10'"
+    )
+    parser.add_argument(
         "--num_cpu",
         type=str,
         required=True,
@@ -89,13 +95,13 @@ def calculate_strand_score(sequence, pwm_values, window_size):
         score_total += window_score
     return score_total
 
-def process_motif_file(file, meme_dir, chr_pos_to_seq, mm10_background_freq, tf_df):
+def process_motif_file(file, meme_dir, chr_pos_to_seq, background_freq, tf_df):
     # Read in the motif PWM file.
     motif_df = pd.read_csv(os.path.join(meme_dir, file), sep="\t", header=0, index_col=0)
     motif_name = file.replace('.txt', '')
     
     # Calculate the log2-transformed PWM (with background correction)
-    log2_motif_df_freq = np.log2(motif_df.T.div(mm10_background_freq, axis=0) + 1).T
+    log2_motif_df_freq = np.log2(motif_df.T.div(background_freq, axis=0) + 1).T
     
     # Set scores for ambiguous base 'N' to 0.
     log2_motif_df_freq["N"] = [0] * log2_motif_df_freq.shape[0]
@@ -122,13 +128,32 @@ def process_motif_file(file, meme_dir, chr_pos_to_seq, mm10_background_freq, tf_
     tf_names = tf_df.loc[tf_df["Motif_ID"] == motif_name, "TF_Name"].values
     return motif_name, tf_names, total_peak_score
 
-def associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, rna_data_genes, num_cpu):
-    mm10_background_freq = pd.Series({
+def get_background_freq(species):
+    if species == "human" or species == "hg38":
+        background_freq = pd.Series({
+            "A": 0.29182,
+            "C": 0.20818,
+            "G": 0.20818,
+            "T": 0.29182
+        })
+    
+    elif species == "mouse" or species == "mm10":
+        background_freq = pd.Series({
         "A": 0.2917,
         "C": 0.2083,
         "G": 0.2083,
         "T": 0.2917
     })
+        
+    else:
+        raise Exception(f"Species {species} is not 'human', 'mouse', 'hg38', or 'mm10'")
+
+    return background_freq
+    
+
+def associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, rna_data_genes, species, num_cpu):
+
+    background_freq = get_background_freq(species)
     
     # Read in the list of TFs to extract their name and matching motif ID
     tf_df = pd.read_csv(tf_names_file, sep="\t", header=0, index_col=None)
@@ -170,7 +195,7 @@ def associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, rna_dat
     with ProcessPoolExecutor(max_workers=num_cpu) as executor:
         futures = {
             executor.submit(process_motif_file, file, meme_dir, chr_pos_to_seq,
-                            mm10_background_freq, tf_df): file
+                            background_freq, tf_df): file
             for file in matching_motif_files
         }
         
@@ -294,6 +319,7 @@ def main():
     atac_data_file: str = args.atac_data_file
     rna_data_file: str = args.rna_data_file
     output_dir: str = args.output_dir
+    species: str = args.species
     num_cpu: int = int(args.num_cpu)
     
     # Alternative: Set file names manually
@@ -338,7 +364,7 @@ def main():
         chr_pos_to_seq = find_ATAC_peak_sequence(peak_df, reference_genome_dir, parsed_peak_file)
         
     # Associate the TFs from TF_Information_all_motifs.txt to the motif with the matching motifID
-    tf_to_peak_score_df = associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, rna_data_genes, num_cpu)
+    tf_to_peak_score_df = associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, rna_data_genes, species, num_cpu)
         
     tf_to_peak_score_df.to_csv(f'{output_dir}/tf_to_peak_binding_score.tsv', sep='\t', header=True, index=False)
         
