@@ -67,13 +67,13 @@ def plot_normalized_peak_to_tg_scores(score_col, fig_dir):
 
 def main():
     # Parse arguments
-    # args: argparse.Namespace = parse_args()
-    # output_dir: str = args.output_dir
-    # fig_dir: str = args.fig_dir
+    args: argparse.Namespace = parse_args()
+    output_dir: str = args.output_dir
+    fig_dir: str = args.fig_dir
     
-    # Alternatively: if you want to pass arguments manually
-    output_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output/mESC"
-    fig_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/figures"
+    # # Alternatively: if you want to pass arguments manually
+    # output_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output/mESC"
+    # fig_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/figures"
     
     cicero_peak_to_peak_file = f"{output_dir}/cicero_peak_to_peak.csv"
     cicero_peak_to_gene_file = f"{output_dir}/cicero_peak_to_gene.csv"

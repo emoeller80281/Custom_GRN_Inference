@@ -13,8 +13,8 @@ set -euo pipefail
 # =============================================
 # SELECT WHICH PROCESSES TO RUN
 # =============================================
-STEP010_CICERO_MAP_PEAKS_TO_TG=true
-STEP020_CICERO_PEAK_TO_TG_SCORE=true
+STEP010_CICERO_MAP_PEAKS_TO_TG=false
+STEP020_CICERO_PEAK_TO_TG_SCORE=false
 STEP030_TF_TO_PEAK_SCORE=true
 STEP040_TF_TO_TG_SCORE=true
 STEP050_TRAIN_RANDOM_FOREST=true

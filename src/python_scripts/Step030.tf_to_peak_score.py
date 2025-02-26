@@ -133,6 +133,10 @@ def associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, rna_dat
     # Read in the list of TFs to extract their name and matching motif ID
     tf_df = pd.read_csv(tf_names_file, sep="\t", header=0, index_col=None)
     
+    # logging.info(f'tf_df TFs: {tf_df["TF_Name"][0:5]}')
+    # logging.info(f'RNA dataset TFs: {rna_data_genes}')
+    
+    
     tf_df = tf_df[tf_df["TF_Name"].isin(rna_data_genes)]
     logging.info(f'Number of TFs matching RNA dataset = {tf_df.shape[0]}')
     
@@ -149,7 +153,7 @@ def associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, rna_dat
     # Identify motif files that match the TF motifs.
     matching_motif_files = [file for file in os.listdir(meme_dir)
                             if file.replace('.txt', '') in tf_motif_names]
-    logging.info(f'Number of files matching thsese motifs: {len(matching_motif_files)}')
+    logging.info(f'Number of TF meme files matching motifs: {len(matching_motif_files)}')
     
     logging.info(f'\nCalclating motif binding scores for each ATACseq peak and matching TFs to motifs')
     logging.info(f'\tUsing {num_cpu} processors')
@@ -189,13 +193,13 @@ def format_peaks(atac_df: pd.DataFrame, cicero_peak_names: list):
         raise ValueError("Input ATAC-seq data is empty.")
     
     # Extract the peak ID column
-    logging.info(atac_df.iloc[:, 0].head())  # Check first column
-    logging.info(list(cicero_peak_names)[:5])  # Check first few peak names
-    logging.info(atac_df.iloc[:, 0].dtype)  # Check data type
-    peak_ids = atac_df[atac_df.iloc[:, 0].astype(str).isin(map(str, cicero_peak_names))].iloc[:, 0]
+    # logging.info(f'First column of atac_df:\n{atac_df.iloc[:, 0].head()}')  # Check first column
+    # logging.info(f'First few peak names:\n{list(cicero_peak_names)[:5]}')  # Check first few peak names
+    # logging.info(f'Data Type:\n{atac_df.iloc[:, 0].dtype}')  # Check data type
+    peak_ids = atac_df[atac_df.iloc[:, 0].astype(str).isin(map(str, cicero_peak_names))].iloc[:, 0].astype(str)
     
-    logging.info(f'Formatting {peak_ids.shape} peaks')
-    logging.info(peak_ids)
+    logging.info(f'Formatting {peak_ids.shape[0]} peaks')
+    # logging.info(peak_ids)
     
     # Split peak IDs into chromosome, start, and end
     try:
@@ -301,19 +305,19 @@ def main():
     # output_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output/mESC"
     # num_cpu = 4
     
-    logging.info("Reading in parsed Cicero peak_gene_associations.csv file to find associated peaks")
-    cicero_peak_file = f"{output_dir}/peak_gene_associations.csv"
+    logging.info("Reading in parsed Cicero peak to TG file to find associated peaks")
+    cicero_peak_file = f"{output_dir}/peak_to_tg_scores.csv"
     cicero_peaks = pd.read_csv(cicero_peak_file, sep="\t", header=0, index_col=None)
     cicero_peak_names = cicero_peaks["peak"].to_list()
     logging.info(f'{len(cicero_peak_names)} Cicero peaks')
     
     
     logging.info('Reading scATACseq data')
-    atac_df: pd.DataFrame = pd.read_csv(atac_data_file, header=0, index_col=0)
+    atac_df: pd.DataFrame = pd.read_csv(atac_data_file, header=0, index_col=None)
     
     # Read in the RNAseq data file and extract the gene names to find matching TFs
     logging.info('Reading gene names from scATACseq data')
-    rna_data = pd.read_csv(rna_data_file, index_col=0)
+    rna_data = pd.read_csv(rna_data_file, index_col=None)
     rna_data.rename(columns={rna_data.columns[0]: "Genes"}, inplace=True)
     rna_data_genes = set(rna_data["Genes"])
     
