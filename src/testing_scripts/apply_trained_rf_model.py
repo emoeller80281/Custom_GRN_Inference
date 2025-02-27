@@ -70,23 +70,32 @@ def main():
     target: str = args.target
     save_name: str = args.save_name
     
+    logging.info(f'Running random forest predictions for {save_name}')
+    
     logging.info("Reading inferred network")
     inferred_network = read_inferred_network(target)
     logging.info("    Done!")
     
     logging.info("Loading trained Random Forest model")
     rf = joblib.load(model)
+    logging.info(f'Feature Names')
+    for feature in rf.feature_names:
+        logging.info(f"\t{feature}")
     X = inferred_network[rf.feature_names]
     logging.info("    Done!")
     
     logging.info("Making predictions")
     inferred_network["Score"] = rf.predict_proba(X)[:, 1]
     inferred_network = inferred_network[["Source", "Target", "Score"]]
+    logging.info(inferred_network.head())
+    logging.info(f'Num unique TFs: {len(inferred_network["Source"].unique())}')
+    logging.info(f'Num unique TGs: {len(inferred_network["Target"].unique())}')
+    
     logging.info("    Done!")
 
     logging.info("Saving inferred GRN")
     inferred_network.to_csv(f'{output_dir}/{save_name}_rf_inferred_grn.tsv', sep='\t', index=False)
-    logging.info("    Done!")
+    logging.info("    Done!\n")
     
 if __name__ == "__main__":
     # Configure logging
