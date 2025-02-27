@@ -224,6 +224,10 @@ def main():
         
         inferred_network_raw["Score"] = inferred_network_raw["TF_mean_expression"] * inferred_network_raw["tf_to_tg_score"] * inferred_network_raw["TG_mean_expression"]
 
+        inferred_network_raw = inferred_network_raw.drop(columns=["peak"]).drop_duplicates()
+        logging.info(f'Inferred network raw with dropped duplicate rows')
+        logging.info(inferred_network_raw.head())
+        
         inferred_network = inferred_network_raw[["Source", "Target", "Score"]].drop_duplicates()
         
         return inferred_network_raw, inferred_network

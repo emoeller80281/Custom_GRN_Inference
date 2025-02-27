@@ -51,6 +51,7 @@ def parse_args() -> argparse.Namespace:
 
 def read_inferred_network(inferred_network_file):
     inferred_network = pd.read_pickle(inferred_network_file)
+    logging.info(inferred_network.head())
     inferred_network["Source"] = inferred_network["Source"].str.upper()
     inferred_network["Target"] = inferred_network["Target"].str.upper()
     
@@ -87,6 +88,9 @@ def main():
     logging.info("Making predictions")
     inferred_network["Score"] = rf.predict_proba(X)[:, 1]
     inferred_network = inferred_network[["Source", "Target", "Score"]]
+    logging.info(inferred_network.head())
+    
+    inferred_network = inferred_network.drop_duplicates()
     logging.info(inferred_network.head())
     logging.info(f'Num unique TFs: {len(inferred_network["Source"].unique())}')
     logging.info(f'Num unique TGs: {len(inferred_network["Target"].unique())}')
