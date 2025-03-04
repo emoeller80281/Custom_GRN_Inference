@@ -141,76 +141,23 @@ def plot_feature_importance(features: list, rf: RandomForestClassifier, fig_dir:
     plt.tight_layout()
     plt.savefig(f"{fig_dir}/random_forest_feature_importance.png", dpi=200)
     plt.close()
-
-# def cell_level_grn_test_summary_stat_features(rf: RandomForestClassifier):
-#     new_data = pd.read_csv("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output/cell_level_inferred_grn_testing.csv", sep="\t")
-
-#     # Identify the cell columns; for example, assume everything after "Target" is cell data:
-#     cell_columns_new = new_data.columns[2:]  # if there's no "Label" yet
-
-#     # Compute the aggregated features
-#     new_data["mean_score"]   = new_data[cell_columns_new].mean(axis=1)
-#     new_data["std_score"]    = new_data[cell_columns_new].std(axis=1)
-#     new_data["min_score"]    = new_data[cell_columns_new].min(axis=1)
-#     new_data["max_score"]    = new_data[cell_columns_new].max(axis=1)
-#     new_data["median_score"] = new_data[cell_columns_new].median(axis=1)
-
-#     aggregated_features = ["mean_score", "std_score", "min_score", "max_score", "median_score"]
-
-#     # Extract the aggregated feature vector
-#     X_new = new_data[aggregated_features]
-
-#     # Make predictions with your trained model
-#     new_data["Score"] = rf.predict_proba(X_new)[:, 1]
-
-#     new_data = new_data[["Source", "Target", "Score"]]
-
-#     new_data.to_csv(f'{output_dir}/summary_stat_rf_inferred_grn.tsv', sep='\t', index=False)
-
-# def calculate_randomly_permuted_subsamples(rf: RandomForestClassifier, subsamples: int, num_cols: int, inferred_network: pd.DataFrame, features: list):
-#     """Calculates n subsamples of num_cols cell-level GRNs for stability analysis"""
     
-#     subsamples = 10
-#     num_cols = 500
-#     for i in range(subsamples):
-#         # Set the features as the randomly permuted 100 columns to match the size of the training data
-#         features = [
-#             "tf_to_peak_binding_score",
-#             "TF_mean_expression",
-#             "TF_std_expression",
-#             "TF_min_expression",
-#             "TF_median_expression",
-#             "peak_to_target_score",
-#             "TG_mean_expression",
-#             "TG_std_expression",
-#             "TG_min_expression",
-#             "TG_median_expression",
-#             "pearson_correlation"
-#         ]
-        
-#         # Randomly reindex all columns containing cell data
-#         inferred_network_permuted = inferred_network.reindex(np.random.permutation(inferred_network[features]), axis='columns')
-#         logging.info(f'Permuted inferred network shape: {inferred_network_permuted.shape}')
-        
-#         # Take a 90% subsample of the cell data
+def plot_feature_score_histograms(features, inferred_network, fig_dir):
+    # Create a figure and axes with a suitable size
+    plt.figure(figsize=(15, 10))
 
-#         inferred_network_subsample = inferred_network_permuted.iloc[:, 0:num_cols+1]
-#         logging.info(f'Randomized inferred network shape: {inferred_network_subsample.shape}')
-            
+    # Loop through each feature and create a subplot
+    for i, feature in enumerate(features, 1):
+        plt.subplot(3, 4, i)  # 3 rows, 4 columns, index = i
+        plt.hist(inferred_network[feature], bins=50, alpha=0.7, edgecolor='black')
+        plt.title(f"{feature} distribution")
+        plt.xlabel(feature)
+        plt.ylabel("Frequency")
+        # plt.xlim((0,1))
 
-        
-#         logging.info(f'Num features: {len(features)}')
-#         X = inferred_network_subsample[features]
-#         inferred_network_subsample["Score"] = rf.predict_proba(X)[:, 1]
-
-#         inferred_network_subsample = inferred_network[["Source", "Target", "Score"]]
-#         logging.info(inferred_network_subsample.head())
-        
-#         sample_dir_path = f'{output_dir}/rf_stability_analysis/inferred_network_subsample_{i+1}'
-#         if not os.path.exists(sample_dir_path):
-#             os.makedirs(sample_dir_path)
-
-#         inferred_network_subsample.to_csv(f'{sample_dir_path}/rf_inferred_grn.tsv', sep='\t', index=False)
+    plt.tight_layout()
+    plt.savefig(f'{fig_dir}/rf_feature_score_hist.png', dpi=300)
+    plt.close()
 
 def main():
     # Parse arguments
@@ -267,6 +214,13 @@ def main():
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
     rf = train_random_forest(X_train, y_train, aggregated_features_new)
+    
+    if not os.path.exists(fig_dir):
+        os.makedirs(fig_dir)
+    
+    plot_feature_importance(aggregated_features_new, rf, fig_dir)
+    
+    plot_feature_score_histograms(aggregated_features_new, inferred_network, fig_dir)
     
     # Save the feature names of the trained model
     rf.feature_names = list(X_train.columns.values)

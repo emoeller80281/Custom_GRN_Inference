@@ -51,10 +51,16 @@ def load_rna_dataset(rna_data_file):
     def calculate_rna_cpm(rna_data):  
         # Calculate the normalized log2 counts/million for each gene in each cell
         RNA_dataset = rna_data.astype({col: float for col in rna_data.columns[1:]})
+        
+        # Find the total number of reads for the cell
         column_sum = np.array(RNA_dataset.iloc[:, 1:].sum(axis=1, numeric_only=True))
         expression_matrix = RNA_dataset.iloc[:, 1:].values
+        
+        # Scale the counts for each gene by the total number of read counts for the cell * 1e6 to get CPM
         rna_cpm = np.log2(((expression_matrix.T / column_sum).T * 1e6) + 1)
-        rna_cpm = rna_cpm / np.max(rna_cpm, axis=0)
+        
+        # 
+        # rna_cpm = minmax_normalize_column(rna_cpm)
         rna_cpm_df = pd.DataFrame(rna_cpm, index=RNA_dataset.index, columns=RNA_dataset.columns[1:])
 
         RNA_dataset.iloc[:, 1:] = rna_cpm_df
@@ -165,13 +171,13 @@ def main():
     # logging.info(f'peak_to_tg_score\n{peak_to_tg_score}\n')
 
     def calculate_population_grn(rna_data, tf_to_peak_score, peak_to_tg_score):
+        
         # Calculate the normalized mean gene expression
-        rna_data["mean_expression"] = np.log2(rna_data.values.mean(axis=1))
-        rna_data["mean_expression"] = minmax_normalize_column(rna_data["mean_expression"])
-        rna_data["std_expression"]    = rna_data.std(axis=1)
-        rna_data["min_expression"]    = rna_data.min(axis=1)
-        rna_data["max_expression"]   = rna_data.max(axis=1)
-        rna_data["median_expression"] = rna_data.median(axis=1)
+        rna_data["mean_expression"] = minmax_normalize_column(rna_data.values.mean(axis=1))
+        rna_data["std_expression"]    = minmax_normalize_column(rna_data.std(axis=1))
+        rna_data["min_expression"]    = minmax_normalize_column(rna_data.min(axis=1))
+        rna_data["max_expression"]   = minmax_normalize_column(rna_data.max(axis=1))
+        rna_data["median_expression"] = minmax_normalize_column(rna_data.median(axis=1))
 
         rna_data = rna_data.reset_index()
         rna_data = rna_data[["gene", "mean_expression", "std_expression", "min_expression", "median_expression"]]

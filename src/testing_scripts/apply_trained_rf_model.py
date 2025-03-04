@@ -51,7 +51,7 @@ def parse_args() -> argparse.Namespace:
 
 def read_inferred_network(inferred_network_file):
     inferred_network = pd.read_pickle(inferred_network_file)
-    logging.info(inferred_network.head())
+    # logging.info(inferred_network.head())
     inferred_network["Source"] = inferred_network["Source"].str.upper()
     inferred_network["Target"] = inferred_network["Target"].str.upper()
     
@@ -79,19 +79,19 @@ def main():
     
     logging.info("Loading trained Random Forest model")
     rf = joblib.load(model)
-    logging.info(f'Feature Names')
-    for feature in rf.feature_names:
-        logging.info(f"\t{feature}")
+    # logging.info(f'Feature Names')
+    # for feature in rf.feature_names:
+    #     logging.info(f"\t{feature}")
     X = inferred_network[rf.feature_names]
     logging.info("    Done!")
     
     logging.info("Making predictions")
     inferred_network["Score"] = rf.predict_proba(X)[:, 1]
     inferred_network = inferred_network[["Source", "Target", "Score"]]
-    logging.info(inferred_network.head())
+    # logging.info(inferred_network.head())
     
     inferred_network = inferred_network.drop_duplicates()
-    logging.info(inferred_network.head())
+    # logging.info(inferred_network.head())
     logging.info(f'Num unique TFs: {len(inferred_network["Source"].unique())}')
     logging.info(f'Num unique TGs: {len(inferred_network["Target"].unique())}')
     
