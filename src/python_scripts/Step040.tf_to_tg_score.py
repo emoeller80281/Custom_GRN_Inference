@@ -216,7 +216,7 @@ def main():
         merged_peaks = pd.merge(tf_to_peak_score_and_expr, peak_to_tg_score_and_expr, on=["peak"], how="inner")
         
         # Calculate the TF to TG mean expression correlation, minmax values between 0-1
-        merged_peaks["pearson_correlation"] = minmax_normalize_column(merged_peaks["TF_mean_expression"].corr(merged_peaks["TG_mean_expression"], method="pearson"))
+        merged_peaks["pearson_correlation"] = merged_peaks["TF_mean_expression"].corr(merged_peaks["TG_mean_expression"], method="pearson")
         # logging.info(merged_peaks.columns)
         
         # Sums the product of all peak scores between each unique TF to TG pair
