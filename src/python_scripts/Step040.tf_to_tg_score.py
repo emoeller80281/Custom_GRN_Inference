@@ -215,8 +215,8 @@ def main():
         logging.info("Calculating final TF to TG score")
         merged_peaks = pd.merge(tf_to_peak_score_and_expr, peak_to_tg_score_and_expr, on=["peak"], how="inner")
         
-
-        merged_peaks["pearson_correlation"] = merged_peaks["TF_mean_expression"].corr(merged_peaks["TG_mean_expression"], method="pearson")
+        # Calculate the TF to TG mean expression correlation, minmax values between 0-1
+        merged_peaks["pearson_correlation"] = minmax_normalize_column(merged_peaks["TF_mean_expression"].corr(merged_peaks["TG_mean_expression"], method="pearson"))
         # logging.info(merged_peaks.columns)
         
         # Sums the product of all peak scores between each unique TF to TG pair
@@ -228,6 +228,10 @@ def main():
         inferred_network_raw = pd.merge(merged_peaks, score_df, how="right", on=["Source", "Target"]).drop(columns=["tf_to_peak_binding_score", "peak_to_target_score"])
         # logging.info(inferred_network_raw.columns)
         
+        # Normalize the TF to TG score between 0-1
+        inferred_network_raw["tf_to_tg_score"] = minmax_normalize_column(inferred_network_raw["tf_to_tg_score"])
+        
+        # Calculate the final score, which is the TF expression * TF to TG interaction scores through thea peaks * TG expression
         inferred_network_raw["Score"] = inferred_network_raw["TF_mean_expression"] * inferred_network_raw["tf_to_tg_score"] * inferred_network_raw["TG_mean_expression"]
 
         inferred_network_raw = inferred_network_raw.drop(columns=["peak"]).drop_duplicates()

@@ -153,7 +153,7 @@ def plot_feature_score_histograms(features, inferred_network, fig_dir):
         plt.title(f"{feature} distribution")
         plt.xlabel(feature)
         plt.ylabel("Frequency")
-        # plt.xlim((0,1))
+        plt.xlim((0,1))
 
     plt.tight_layout()
     plt.savefig(f'{fig_dir}/rf_feature_score_hist.png', dpi=300)
