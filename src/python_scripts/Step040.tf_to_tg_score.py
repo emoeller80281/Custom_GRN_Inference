@@ -5,6 +5,7 @@ import numpy as np
 from sklearn.preprocessing import normalize
 import logging
 import argparse
+import concurrent.futures
 
 def parse_args() -> argparse.Namespace:
     """
@@ -31,6 +32,18 @@ def parse_args() -> argparse.Namespace:
         type=str,
         required=True,
         help="Path to the figure directory for the sample"
+    )
+    parser.add_argument(
+        "--num_cpu",
+        type=str,
+        required=True,
+        help="Number of processors to run multithreading with"
+    )
+    parser.add_argument(
+        "--num_cells",
+        type=str,
+        required=True,
+        help="Number of cells to generate cell-level grn score dataframes for"
     )
     
     
@@ -144,6 +157,69 @@ def plot_population_score_histogram(merged_peaks, fig_dir):
     plt.tight_layout()
     plt.savefig(f'{fig_dir}/tf_to_tg_binding_score_hist.png', dpi=500)
     plt.close()
+    
+def process_cell(cell, rna_data, tf_to_peak_score, peak_to_tg_score, output_dir):
+    # Filter data for the specific cell
+    logging.info(f"Processing cell {cell}")
+    rna_data_cell = rna_data[rna_data["cell"] == cell]
+
+    # Merge for TF scores and rename columns accordingly
+    tf_to_peak_score_and_expr = pd.merge(tf_to_peak_score, rna_data_cell, on=["gene"], how="inner")
+    tf_to_peak_score_and_expr = tf_to_peak_score_and_expr.rename(
+        columns={"expression": "TF_expression", "gene": "Source"}
+    )
+
+    # Merge for target gene scores and rename columns accordingly
+    peak_to_tg_score_and_expr = pd.merge(peak_to_tg_score, rna_data_cell, on=["gene"], how="inner")
+    peak_to_tg_score_and_expr = peak_to_tg_score_and_expr.rename(
+        columns={"expression": "TG_expression", "gene": "Target"}
+    )
+
+    # Merge the two score datasets on "cell" and "peak"
+    merged_peaks = pd.merge(tf_to_peak_score_and_expr, peak_to_tg_score_and_expr, on=["cell", "peak"], how="inner")
+
+    merged_peaks["prod"] = merged_peaks["tf_to_peak_binding_score"] * merged_peaks["peak_to_target_score"]
+    score_df = merged_peaks.groupby(["Source", "Target"], as_index=False)["prod"].sum()
+    score_df = score_df.rename(columns={"prod": "tf_to_tg_score"})
+
+    # Merge back with the original merged_peaks to get additional information if needed
+    inferred_network_raw = pd.merge(merged_peaks, score_df, how="right", on=["Source", "Target"])
+    inferred_network_raw = inferred_network_raw.drop(columns=["tf_to_peak_binding_score", "peak_to_target_score"])
+
+    # Normalize the TF to TG score to range [0, 1]
+    inferred_network_raw["tf_to_tg_score"] = minmax_normalize_column(inferred_network_raw["tf_to_tg_score"])
+
+    # Save the result as a pickle file
+    output_path = os.path.join(output_dir, "cell_networks_raw", f"{cell}.pkl")
+    inferred_network_raw.to_pickle(output_path)
+    print(f"Finished processing cell: {cell}")
+
+def calculate_cell_level_grn_parallel(rna_data, tf_to_peak_score, peak_to_tg_score, output_dir, num_cpu, num_cells):
+    # Reset index and melt the rna_data into "gene", "cell", "expression" format
+    rna_data = rna_data.reset_index()
+    rna_data = pd.melt(rna_data, id_vars=["gene"], var_name="cell", value_name="expression")
+    rna_data = rna_data.astype({"expression": "float16"})
+
+    # Create the output directory if it doesn't exist
+    cell_networks_dir = os.path.join(output_dir, "cell_networks_raw")
+    if not os.path.exists(cell_networks_dir):
+        os.makedirs(cell_networks_dir)
+
+    # Get the unique cell names
+    cells = rna_data["cell"].unique()
+
+    # Use ProcessPoolExecutor to process each cell in parallel, skips cells with dataframes in the output_dir.
+    with concurrent.futures.ProcessPoolExecutor(max_workers=num_cpu) as executor:
+        futures = [
+            executor.submit(process_cell, cell, rna_data, tf_to_peak_score, peak_to_tg_score, output_dir)
+            for cell in cells[0:num_cells] if cell not in os.listdir(cell_networks_dir)
+        ]
+        # Optionally, you can iterate over the futures to handle exceptions or log progress.
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                future.result()
+            except Exception as exc:
+                print(f"A cell processing task generated an exception: {exc}")
 
 def main():
     # Parse arguments
@@ -152,36 +228,38 @@ def main():
     rna_data_file: str = args.rna_data_file
     output_dir: str = args.output_dir
     fig_dir: str = args.fig_dir
+    num_cpu: int = int(args.num_cpu)
+    num_cells: int = int(args.num_cells)
+    
+    # # Alternatively: Pass in specific file paths
+    # rna_data_file = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/mESC/filtered_L2_E7.5_rep1/mESC_filtered_L2_E7.5_rep1_RNA.csv"
+    # output_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output/mESC/filtered_L2_E7.5_rep1"
+    # num_cpu = 4
+    # num_cells=50
     
     tf_to_peak_score_file = f'{output_dir}/tf_to_peak_binding_score.tsv'
     peak_to_tg_score_file = f'{output_dir}/peak_to_tg_scores.csv'
-    
-    # # Alternatively: Pass in specific file paths
-    # tf_to_peak_score_file = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/yasin_motif_binding_code/tf_to_peak_binding_score.tsv"
-    # peak_to_tg_score_file = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output/peak_gene_association_output.csv"
-    # rna_data_file = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/mESC_filtered_L2_E7.5_merged_RNA.csv"
 
     # Load in and format the required files
     rna_data = load_rna_dataset(rna_data_file)
     tf_to_peak_score = load_tf_to_peak_scores(tf_to_peak_score_file)
     peak_to_tg_score = load_peak_to_tg_scores(peak_to_tg_score_file)
-    
-    # logging.info(f'rna_data\n{rna_data}\n')
-    # logging.info(f'tf_to_peak_score\n{tf_to_peak_score}\n')
-    # logging.info(f'peak_to_tg_score\n{peak_to_tg_score}\n')
+
+    logging.info("Calculating cell-level score dataframes in parallel")
+    calculate_cell_level_grn_parallel(rna_data, tf_to_peak_score, peak_to_tg_score, output_dir, num_cpu, num_cells)
 
     def calculate_population_grn(rna_data, tf_to_peak_score, peak_to_tg_score):
         
         # Calculate the normalized mean gene expression
         rna_data["mean_expression"] = minmax_normalize_column(rna_data.values.mean(axis=1))
-        rna_data["std_expression"]    = minmax_normalize_column(rna_data.std(axis=1))
-        rna_data["min_expression"]    = minmax_normalize_column(rna_data.min(axis=1))
-        rna_data["max_expression"]   = minmax_normalize_column(rna_data.max(axis=1))
-        rna_data["median_expression"] = minmax_normalize_column(rna_data.median(axis=1))
+        # rna_data["std_expression"]    = minmax_normalize_column(rna_data.std(axis=1))
+        # rna_data["min_expression"]    = minmax_normalize_column(rna_data.min(axis=1))
+        # rna_data["max_expression"]   = minmax_normalize_column(rna_data.max(axis=1))
+        # rna_data["median_expression"] = minmax_normalize_column(rna_data.median(axis=1))
 
         rna_data = rna_data.reset_index()
-        rna_data = rna_data[["gene", "mean_expression", "std_expression", "min_expression", "median_expression"]]
-        # rna_data = rna_data[["gene", "mean_expression"]]
+        # rna_data = rna_data[["gene", "mean_expression", "std_expression", "min_expression", "median_expression"]]
+        rna_data = rna_data[["gene", "mean_expression"]]
         # logging.info(rna_data.head())
 
         logging.info("Combining TF to peak binding scores with TF expression")
@@ -190,11 +268,11 @@ def main():
 
         tf_to_peak_score_and_expr = tf_to_peak_score_and_expr.rename(
             columns={
-                "mean_expression": "TF_mean_expression",
+                "mean_expression": "TF_expression",
                 "gene": "Source",
-                "std_expression": "TF_std_expression",
-                "min_expression": "TF_min_expression",
-                "median_expression": "TF_median_expression"
+                # "std_expression": "TF_std_expression",
+                # "min_expression": "TF_min_expression",
+                # "median_expression": "TF_median_expression"
                 }
             )
         # logging.info(tf_to_peak_score_and_expr.head())
@@ -204,11 +282,11 @@ def main():
         
         peak_to_tg_score_and_expr = peak_to_tg_score_and_expr.rename(
             columns={
-                "mean_expression": "TG_mean_expression",
+                "mean_expression": "TG_expression",
                 "gene": "Target",
-                "std_expression": "TG_std_expression",
-                "min_expression": "TG_min_expression",
-                "median_expression": "TG_median_expression"
+                # "std_expression": "TG_std_expression",
+                # "min_expression": "TG_min_expression",
+                # "median_expression": "TG_median_expression"
                 }
             )
 
@@ -216,7 +294,7 @@ def main():
         merged_peaks = pd.merge(tf_to_peak_score_and_expr, peak_to_tg_score_and_expr, on=["peak"], how="inner")
         
         # Calculate the TF to TG mean expression correlation, minmax values between 0-1
-        merged_peaks["pearson_correlation"] = merged_peaks["TF_mean_expression"].corr(merged_peaks["TG_mean_expression"], method="pearson")
+        # merged_peaks["pearson_correlation"] = merged_peaks["TF_mean_expression"].corr(merged_peaks["TG_mean_expression"], method="pearson")
         # logging.info(merged_peaks.columns)
         
         # Sums the product of all peak scores between each unique TF to TG pair
@@ -232,7 +310,7 @@ def main():
         inferred_network_raw["tf_to_tg_score"] = minmax_normalize_column(inferred_network_raw["tf_to_tg_score"])
         
         # Calculate the final score, which is the TF expression * TF to TG interaction scores through thea peaks * TG expression
-        inferred_network_raw["Score"] = inferred_network_raw["TF_mean_expression"] * inferred_network_raw["tf_to_tg_score"] * inferred_network_raw["TG_mean_expression"]
+        inferred_network_raw["Score"] = inferred_network_raw["TF_expression"] * inferred_network_raw["tf_to_tg_score"] * inferred_network_raw["TG_expression"]
 
         inferred_network_raw = inferred_network_raw.drop(columns=["peak"]).drop_duplicates()
         logging.info(f'Inferred network raw with dropped duplicate rows')
@@ -240,19 +318,20 @@ def main():
         
         inferred_network = inferred_network_raw[["Source", "Target", "Score"]].drop_duplicates()
         
-        return inferred_network_raw, inferred_network
+        logging.info("Writing inferred network to output directory")
+        inferred_network.to_csv(f'{output_dir}/inferred_network.tsv', sep="\t", header=True, index=False)
 
-    inferred_network_raw, inferred_network = calculate_population_grn(rna_data, tf_to_peak_score, peak_to_tg_score)
-    
-    logging.info("Writing inferred network to output directory")
-    inferred_network.to_csv(f'{output_dir}/inferred_network.tsv', sep="\t", header=True, index=False)
-    
-    # Convert all float columns to float32
-    float_cols = inferred_network_raw.select_dtypes(include=['float']).columns
-    inferred_network_raw[float_cols] = inferred_network_raw[float_cols].astype(np.float32)
-    
-    logging.info("Writing raw inferred network scores to output directory")
-    inferred_network_raw.to_pickle(f'{output_dir}/inferred_network_raw.pkl')
+        # # Convert all float columns to float32
+        # float_cols = inferred_network_raw.select_dtypes(include=['float']).columns
+        # inferred_network_raw[float_cols] = inferred_network_raw[float_cols].astype(np.float32)
+
+        logging.info("Writing raw inferred network scores to output directory")
+        inferred_network_raw.to_pickle(f'{output_dir}/inferred_network_raw.pkl')
+        
+
+    # calculate_population_grn(rna_data, tf_to_peak_score, peak_to_tg_score)
+
+
     
     
 if __name__ == "__main__":

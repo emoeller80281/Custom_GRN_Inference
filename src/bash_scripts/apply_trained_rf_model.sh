@@ -11,7 +11,7 @@ source activate my_env
 
 PROJECT_DIR="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/"
 
-MESC_OUTPUT="$PROJECT_DIR/output/mESC/filtered_L2_E7.5_rep1"
+MESC_OUTPUT="$PROJECT_DIR/output/mESC/"
 MACROPHAGE_OUTPUT="$PROJECT_DIR/output/macrophage"
 K562_OUTPUT="$PROJECT_DIR/output/K562/K562_human_filtered"
 
@@ -57,19 +57,40 @@ K562_OUTPUT="$PROJECT_DIR/output/K562/K562_human_filtered"
 #     --target "$MESC_OUTPUT/filtered_L2_E7.5_rep1/inferred_network_raw.pkl" \
 #     --save_name "K562_vs_mESC"
 
-# mESC sample vs sample
-python3 "$PROJECT_DIR/src/testing_scripts/apply_trained_rf_model.py" \
-    --output_dir "$MESC_OUTPUT/filtered_L2_E7.5_rep1" \
-    --model "$MESC_OUTPUT/filtered_L2_E7.5_rep1/trained_random_forest_model.pkl" \
-    --target  "$MESC_OUTPUT/filtered_L2_E7.5_rep2/inferred_network_raw.pkl" \
-    --save_name "mESC1_vs_mESC2"
+# # mESC sample vs sample
+# python3 "$PROJECT_DIR/src/testing_scripts/apply_trained_rf_model.py" \
+#     --output_dir "$MESC_OUTPUT/filtered_L2_E7.5_rep1" \
+#     --model "$MESC_OUTPUT/filtered_L2_E7.5_rep1/trained_random_forest_model.pkl" \
+#     --target  "$MESC_OUTPUT/filtered_L2_E7.5_rep2/inferred_network_raw.pkl" \
+#     --save_name "mESC1_vs_mESC2"
 
-# Macrophage sample vs sample
-python3 "$PROJECT_DIR/src/testing_scripts/apply_trained_rf_model.py" \
-    --output_dir "$MACROPHAGE_OUTPUT/macrophage_buffer1_filtered" \
-    --model "$MACROPHAGE_OUTPUT/macrophage_buffer1_filtered/trained_random_forest_model.pkl" \
-    --target  "$MACROPHAGE_OUTPUT/macrophage_buffer2_filtered/inferred_network_raw.pkl" \
-    --save_name "macrophage1_vs_macrophage2"
+# # Macrophage sample vs sample
+# python3 "$PROJECT_DIR/src/testing_scripts/apply_trained_rf_model.py" \
+#     --output_dir "$MACROPHAGE_OUTPUT/macrophage_buffer1_filtered" \
+#     --model "$MACROPHAGE_OUTPUT/macrophage_buffer1_filtered/trained_random_forest_model.pkl" \
+#     --target  "$MACROPHAGE_OUTPUT/macrophage_buffer2_filtered/inferred_network_raw.pkl" \
+#     --save_name "macrophage1_vs_macrophage2"
+
+# # mESC vs self inferred network
+# python3 "$PROJECT_DIR/src/testing_scripts/apply_trained_rf_model.py" \
+#     --output_dir "$MESC_OUTPUT/filtered_L2_E7.5_rep1" \
+#     --model "$MESC_OUTPUT/filtered_L2_E7.5_rep1/trained_random_forest_model.pkl" \
+#     --target  "$MESC_OUTPUT/filtered_L2_E7.5_rep1/inferred_network_raw.pkl" \
+#     --save_name "mESC1"
+
+# # Macrophage vs self inferred network
+# python3 "$PROJECT_DIR/src/testing_scripts/apply_trained_rf_model.py" \
+#     --output_dir "$MACROPHAGE_OUTPUT/macrophage_buffer1_filtered" \
+#     --model "$MACROPHAGE_OUTPUT/macrophage_buffer1_filtered/trained_random_forest_model.pkl" \
+#     --target  "$MACROPHAGE_OUTPUT/macrophage_buffer1_filtered/inferred_network_raw.pkl" \
+#     --save_name "macrophage1"
+
+# # K562 vs self inferred network
+# python3 "$PROJECT_DIR/src/testing_scripts/apply_trained_rf_model.py" \
+#     --output_dir "$K562_OUTPUT" \
+#     --model "$K562_OUTPUT/trained_random_forest_model.pkl" \
+#     --target  "$K562_OUTPUT/inferred_network_raw.pkl" \
+#     --save_name "K5621"
 
 
 

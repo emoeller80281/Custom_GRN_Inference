@@ -396,7 +396,9 @@ run_tf_to_tg_score() {
     python3 "$PYTHON_SCRIPT_DIR/Step040.tf_to_tg_score.py" \
         --rna_data_file "$RNA_FILE_NAME" \
         --output_dir "$OUTPUT_DIR" \
-        --fig_dir "$FIG_DIR" 
+        --fig_dir "$FIG_DIR" \
+        --num_cpu "$NUM_CPU" \
+        --num_cells 50
     
 } 2> "$LOG_DIR/Step040.tf_to_tg_score.log"
 
