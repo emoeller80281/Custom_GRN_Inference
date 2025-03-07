@@ -148,7 +148,7 @@ def plot_feature_score_histograms(features, inferred_network, fig_dir):
 
     # Loop through each feature and create a subplot
     for i, feature in enumerate(features, 1):
-        plt.subplot(nrows=1, ncols=3, index=i)  # 2 rows, 4 columns, index = i
+        plt.subplot(2, 3, i)  # 2 rows, 4 columns, index = i
         plt.hist(inferred_network[feature], bins=50, alpha=0.7, edgecolor='black')
         plt.title(f"{feature} distribution")
         plt.xlabel(feature)
@@ -172,7 +172,7 @@ def plot_feature_boxplots(features, inferred_network, fig_dir):
         upper_bound = Q3 + 1.5 * IQR
         return series[(series >= lower_bound) & (series <= upper_bound)]
     
-    fig, axes = plt.subplots(nrows=1, ncols=3, figsize=(15, 8))
+    fig, axes = plt.subplots(nrows=2, ncols=3, figsize=(15, 8))
     axes = axes.flatten()  # Flatten in case of multi-dimensional array of axes
     
     for i, feature in enumerate(features):
@@ -233,15 +233,10 @@ def main():
     # Define the list of aggregated features for training
     aggregated_features_new = [
         "TF_expression",
-        # "TF_std_expression",
-        # "TF_min_expression",
-        # "TF_median_expression",
-        "tf_to_tg_score",
+        "tf_to_peak_binding_score",
+        "atac_expression",
+        "peak_to_target_score",
         "TG_expression",
-        # "TG_std_expression",
-        # "TG_min_expression",
-        # "TG_median_expression",
-        # "pearson_correlation"
     ]
 
     # Define X (features) and y (target)
@@ -253,19 +248,20 @@ def main():
 
     rf = train_random_forest(X_train, y_train, aggregated_features_new)
     
-    if not os.path.exists(fig_dir):
-        os.makedirs(fig_dir)
-    
-    plot_feature_importance(aggregated_features_new, rf, fig_dir)
-    plot_feature_score_histograms(aggregated_features_new, inferred_network, fig_dir)
-    plot_feature_boxplots(aggregated_features_new, inferred_network, fig_dir)
-    
     # Save the feature names of the trained model
     rf.feature_names = list(X_train.columns.values)
 
     # Save the trained model as a pickle file
     logging.info("Saving trained model")
     joblib.dump(rf, f"{output_dir}/trained_random_forest_model.pkl")
+    logging.info("\tDone! Model saved.")
+    
+    if not os.path.exists(fig_dir):
+        os.makedirs(fig_dir)
+    
+    plot_feature_importance(aggregated_features_new, rf, fig_dir)
+    plot_feature_score_histograms(aggregated_features_new, inferred_network, fig_dir)
+    plot_feature_boxplots(aggregated_features_new, inferred_network, fig_dir)
     
 if __name__ == "__main__":
     # Configure logging
