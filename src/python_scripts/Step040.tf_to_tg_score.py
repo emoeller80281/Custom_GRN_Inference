@@ -5,6 +5,7 @@ import numpy as np
 from sklearn.preprocessing import normalize
 import logging
 import argparse
+import gc
 import concurrent.futures
 
 def parse_args() -> argparse.Namespace:
@@ -32,6 +33,12 @@ def parse_args() -> argparse.Namespace:
         type=str,
         required=True,
         help="Path to the output directory for the sample"
+    )
+    parser.add_argument(
+        "--cell_level_net_dir",
+        type=str,
+        required=False,
+        help="Path to the directory with the cell-level inferred network score pickle files"
     )
     parser.add_argument(
         "--fig_dir",
@@ -85,7 +92,6 @@ def load_rna_dataset(rna_data_file):
         # Scale the counts for each gene by the total number of read counts for the cell * 1e6 to get CPM
         rna_cpm = np.log2(((expression_matrix.T / column_sum).T * 1e6) + 1)
         
-        # 
         # rna_cpm = minmax_normalize_column(rna_cpm)
         rna_cpm_df = pd.DataFrame(rna_cpm, index=RNA_dataset.index, columns=RNA_dataset.columns[1:])
 
@@ -100,37 +106,18 @@ def load_rna_dataset(rna_data_file):
 
 def load_atac_dataset(atac_data_file):
     # Read in the RNAseq data file and extract the gene names to find matching TFs
-    logging.info("Reading and formatting scATAC-seq expression data")
+    # logging.info("Reading and formatting scATAC-seq expression data")
     atac_data = pd.read_csv(atac_data_file, index_col=None, header=0)
 
     atac_data.rename(columns={atac_data.columns[0]: "peak"}, inplace=True)
 
-    def calculate_atac_cpm(atac_data: pd.DataFrame):  
-        # Calculate the normalized log2 counts/million for each gene in each cell
-        atac_data_float = atac_data.astype({col: float for col in atac_data.columns[1:]})
-        
-        # Find the total number of reads for the cell
-        column_sum = np.array(atac_data_float.iloc[:, 1:].sum(axis=1, numeric_only=True))
-        expression_matrix = atac_data_float.iloc[:, 1:].values
-        
-        # Scale the counts for each gene by the total number of read counts for the cell * 1e6 to get CPM
-        atac_cpm = np.log2(((expression_matrix.T / column_sum).T * 1e6) + 1)
-        
-        # 
-        # rna_cpm = minmax_normalize_column(rna_cpm)
-        atac_cpm_df = pd.DataFrame(atac_cpm, index=atac_data_float.index, columns=atac_data_float.columns[1:])
+    atac_data = atac_data.set_index("peak")
+    logging.info(atac_data.head())
 
-        atac_data_float.iloc[:, 1:] = atac_cpm_df
-
-        # Transpose RNA dataset for easier access
-        atac_data = atac_data_float.set_index("peak")
-
-        return atac_data
-
-    return calculate_atac_cpm(atac_data)
+    return atac_data
 
 def load_tf_to_peak_scores(tf_to_peak_score_file):
-    logging.info("Reading and formatting TF to peak binding scores")
+    # logging.info("Reading and formatting TF to peak binding scores")
     tf_to_peak_score = pd.read_csv(tf_to_peak_score_file, sep="\t", header=0, index_col=None).rename(columns={"binding_score":"tf_to_peak_binding_score"})
     tf_to_peak_score = tf_to_peak_score.melt(id_vars="peak", var_name="gene", value_name="tf_to_peak_binding_score")
     tf_to_peak_score["tf_to_peak_binding_score"] = minmax_normalize_column(tf_to_peak_score["tf_to_peak_binding_score"]) # Normalize binding score values
@@ -138,7 +125,7 @@ def load_tf_to_peak_scores(tf_to_peak_score_file):
     return tf_to_peak_score
 
 def load_peak_to_tg_scores(peak_to_tg_score_file):
-    logging.info("Reading and formatting peak to TG scores")
+    # logging.info("Reading and formatting peak to TG scores")
     peak_to_tg_score = pd.read_csv(peak_to_tg_score_file, sep="\t", header=0, index_col=None)
 
     # Format the peaks to match the tf_to_peak_score dataframe
@@ -202,7 +189,7 @@ def plot_population_score_histogram(merged_peaks, fig_dir):
     plt.savefig(f'{fig_dir}/tf_to_tg_binding_score_hist.png', dpi=500)
     plt.close()
     
-def process_cell(cell, rna_data_file, atac_data_file, tf_to_peak_score, peak_to_tg_score, output_dir):
+def process_cell(cell, rna_data_file, atac_data_file, tf_to_peak_score, peak_to_tg_score, output_dir, cell_level_net_dir):
     logging.info(f"Processing cell {cell}")
     # Load the raw RNA and ATAC datasets for the current process
     rna_data = load_rna_dataset(rna_data_file).reset_index()
@@ -251,11 +238,16 @@ def process_cell(cell, rna_data_file, atac_data_file, tf_to_peak_score, peak_to_
     # print(inferred_network_raw.columns)  # Fixed: removed parentheses
 
     # Save the result as a pickle file
-    output_path = os.path.join(output_dir, f"{cell}.pkl")
+    output_path = os.path.join(output_dir, cell_level_net_dir, f"{cell}.pkl")
     inferred_network_raw.to_pickle(output_path)
+    
+    # Delete the DataFrame and run garbage collection
+    del inferred_network_raw
+    
+    gc.collect()
     print(f"Finished processing cell: {cell}")
 
-def calculate_cell_level_grn_parallel(rna_data_file, atac_data_file, tf_to_peak_score, peak_to_tg_score, output_dir, num_cpu, num_cells):
+def calculate_cell_level_grn_parallel(rna_data_file, atac_data_file, tf_to_peak_score, peak_to_tg_score, output_dir, cell_level_net_dir, num_cpu, num_cells):
     # Load a list of cells you want to process from the raw RNA file header
     rna_data = load_rna_dataset(rna_data_file).reset_index()
     cells = [col for col in rna_data.columns if col != "gene"]
@@ -264,20 +256,21 @@ def calculate_cell_level_grn_parallel(rna_data_file, atac_data_file, tf_to_peak_
     cells_to_process = cells[:num_cells]
     
     # Create the output directory if it doesn't exist
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-
+    if not os.path.exists(f'{output_dir}/cell_level_net_dir'):
+        os.makedirs(f'{output_dir}/cell_level_net_dir')
+    
     # Use ProcessPoolExecutor to process each cell in parallel, skipping cells with output already present.
     with concurrent.futures.ProcessPoolExecutor(max_workers=num_cpu) as executor:
         futures = [
-            executor.submit(process_cell, cell, rna_data_file, atac_data_file, tf_to_peak_score, peak_to_tg_score, output_dir)
-            for cell in cells_to_process if f"{cell}.pkl" not in os.listdir(output_dir)
+            executor.submit(process_cell, cell, rna_data_file, atac_data_file, tf_to_peak_score, peak_to_tg_score, output_dir, cell_level_net_dir)
+            for cell in cells_to_process if f"{cell}.pkl" not in os.listdir(cell_level_net_dir)
         ]
         for future in concurrent.futures.as_completed(futures):
             try:
                 future.result()
             except Exception as exc:
                 print(f"A cell processing task generated an exception: {exc}")
+    logging.info(f'Finished calculating cell-level dataframes')
 
 def main():
     # Parse arguments
@@ -294,6 +287,9 @@ def main():
     
     if args.num_cells:
         num_cells: int = int(args.num_cells)
+        
+    if args.cell_level_net_dir:
+        cell_level_net_dir: str = args.cell_level_net_dir
     
     
     # # Alternatively: Pass in specific file paths
@@ -323,10 +319,10 @@ def main():
         
         # Calculate the normalized mean gene expression
         rna_data["rna_expression"] = minmax_normalize_column(rna_data.values.mean(axis=1))
-        atac_data["atac_expression"] = minmax_normalize_column(atac_data.values.mean(axis=1))
-
+        atac_data["atac_expression"] = atac_data.values.mean(axis=1)
+        
         rna_data = rna_data.reset_index()
-        rna_data = rna_data[["gene", "rna_expression"]]
+        rna_data = rna_data[["gene", "rna_expression"]].dropna()
         
         atac_data = atac_data.reset_index()
         atac_data = atac_data[["peak", "atac_expression"]]
@@ -354,6 +350,9 @@ def main():
         logging.info("Calculating final TF to TG score")
         merged_peaks = pd.merge(tf_to_peak_score_and_expr, peak_to_tg_score_and_expr, on=["peak"], how="inner")
         
+        # print(merged_peaks["peak"][0:10])
+        # print(atac_data["peak"][0:10])
+        
         inferred_network_raw = pd.merge(merged_peaks, atac_data, on="peak", how="inner")
         print("Inferred network with ATACseq expression")
         print(inferred_network_raw.head())
@@ -374,9 +373,10 @@ def main():
     elif bulk_or_cell == "cell":
         assert num_cpu != None
         assert num_cells != None
+        assert cell_level_net_dir != None
         
         logging.info("Calculating cell-level score dataframes in parallel")
-        calculate_cell_level_grn_parallel(rna_data_file, atac_data_file, tf_to_peak_score, peak_to_tg_score, output_dir, num_cpu, num_cells)
+        calculate_cell_level_grn_parallel(rna_data_file, atac_data_file, tf_to_peak_score, peak_to_tg_score, output_dir, cell_level_net_dir, num_cpu, num_cells)
 
 
 if __name__ == "__main__":

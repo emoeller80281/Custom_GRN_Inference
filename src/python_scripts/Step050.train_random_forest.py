@@ -197,17 +197,17 @@ def plot_feature_boxplots(features, inferred_network, fig_dir):
 
 
 def main():
-    # # Parse arguments
-    # args: argparse.Namespace = parse_args()
+    # Parse arguments
+    args: argparse.Namespace = parse_args()
 
-    # ground_truth_file: str = args.ground_truth_file
-    # output_dir: str = args.output_dir
-    # fig_dir: str = args.fig_dir
+    ground_truth_file: str = args.ground_truth_file
+    output_dir: str = args.output_dir
+    fig_dir: str = args.fig_dir
     
-    # Alternatively: Set the input file paths directly
-    ground_truth_file = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/ground_truth_files/RN111.tsv"
-    output_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output/mESC/filtered_L2_E7.5_rep1"
-    fig_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/figures/mm10/filtered_L2_E7.5_rep1"
+    # # Alternatively: Set the input file paths directly
+    # ground_truth_file = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/ground_truth_files/RN111.tsv"
+    # output_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output/mESC/filtered_L2_E7.5_rep1"
+    # fig_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/figures/mm10/filtered_L2_E7.5_rep1"
     
     inferred_network_file = f"{output_dir}/inferred_network_raw.pkl"
 
@@ -253,8 +253,6 @@ def main():
 
     # Save the trained model as a pickle file
     logging.info("Saving trained model")
-    joblib.dump(rf, f"{output_dir}/trained_random_forest_model.pkl")
-    logging.info("\tDone! Model saved.")
     
     if not os.path.exists(fig_dir):
         os.makedirs(fig_dir)
@@ -262,6 +260,9 @@ def main():
     plot_feature_importance(aggregated_features_new, rf, fig_dir)
     plot_feature_score_histograms(aggregated_features_new, inferred_network, fig_dir)
     plot_feature_boxplots(aggregated_features_new, inferred_network, fig_dir)
+    logging.info("\tDone! Model saved.")
+    joblib.dump(rf, f"{output_dir}/trained_random_forest_model.pkl")
+    
     
 if __name__ == "__main__":
     # Configure logging

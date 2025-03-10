@@ -25,7 +25,7 @@ run_macrophage() {
     local SAMPLE_NAMES=(
         "macrophage_buffer1_filtered"
         "macrophage_buffer2_filtered"
-        # "macrophage_buffer3_filtered"
+        "macrophage_buffer3_filtered"
         # "macrophage_buffer4_filtered"
         # "macrophage_buffer1_stability1"
         # "macrophage_buffer1_stability2"
