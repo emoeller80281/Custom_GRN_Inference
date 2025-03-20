@@ -3,46 +3,53 @@ import numpy as np
 import os
 from tqdm import tqdm
 
+import requests ## python -m pip install requests
+response = requests.get("https://string-db.org/api/image/network?identifiers=PTCH1%0dSHH%0dGLI1%0dSMO%0dGLI3")
+with open('string_network.png', 'wb') as fh:
+    fh.write(response.content)
+
+string_dataset = pd.read_csv(
+    "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/string_protein_links.txt",
+    sep=" ",
+    header=0,
+    index_col=None
+    )
+
+string_dataset["protein1"] = string_dataset["protein1"].str.replace("9606.", "")
+string_dataset["protein2"] = string_dataset["protein2"].str.replace("9606.", "")
+
+print(string_dataset.head())
+
 tf_to_tg = pd.read_csv(
-    "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output/mESC/tf_to_tg_inferred_network.tsv",
+    "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output/K562/K562_human_filtered/inferred_network.tsv",
     sep="\t",
     header=0,
     index_col=None
     )
 
-score_df = tf_to_tg.groupby(["Source", "Target"]).apply(
-    lambda x: (x["tf_to_peak_binding_score"] * x["peak_to_target_score"]).sum()
-).reset_index(name="tf_to_tg_score")
-print(score_df.head())
+print(tf_to_tg.head())
 
-tf_to_tg_w_scores = pd.merge(tf_to_tg, score_df, how="right", on=["Source", "Target"])
-print(tf_to_tg_w_scores.head())
+print(string_dataset["protein1"].isin(tf_to_tg["Source"]).sum())
+print(string_dataset["protein2"].isin(tf_to_tg["Target"]).sum())
 
-tf_to_tg_w_scores["Score"] = tf_to_tg_w_scores["TF_mean_expression"] * tf_to_tg_w_scores["tf_to_tg_score"] * tf_to_tg_w_scores["TG_mean_expression"]
+# Gets the protein interaction partners for the TFs
+import stringdb
+genes = tf_to_tg["Source"].to_list()[:10] + tf_to_tg["Target"].to_list()[:500]
+string_ids = stringdb.get_string_ids(genes)
+interaction_df = stringdb.get_interaction_partners(string_ids.queryItem)
+functional_annot_df = stringdb.get_functional_annotation(string_ids.queryItem)
+functional_annot_df = functional_annot_df[functional_annot_df["description"] == "Transcription regulator complex"]["inputGenes"]
+gene_str_list = functional_annot_df.tolist()
+tf_complex_genes = [gene for item in gene_str_list for gene in item.split(",")]
 
-tf_to_tg_w_scores = tf_to_tg_w_scores[["Source", "Target", "Score"]]
-print(tf_to_tg_w_scores.head())
+interaction_df = interaction_df[["preferredName_A", "preferredName_B"]].rename(columns={"preferredName_A": "Source", "preferredName_B": "Target"})
+interaction_df = interaction_df[interaction_df["Target"].isin(tf_complex_genes)]
 
-# edges = tf_to_tg[["Source", "Target"]].drop_duplicates()
-# tf_col_list = edges["Source"].to_list()
-# tg_col_list = edges["Target"].to_list()
+print(interaction_df.head())
 
-# # Iterate through each unique edge pair
-# score_dict = {"Source": [], "Target": [], "score": []}
-# for tf, tg in tqdm(zip(tf_col_list, tg_col_list), total=len(tf_col_list)):
-#     # Extract rows with just these pairs
-#     current_edge_subset = tf_to_tg.loc[(tf_to_tg["Source"] == tf) & (tf_to_tg["Target"] == tg)]
-#     # print(current_edge_subset)
-#     current_edge_score = sum(current_edge_subset["tf_to_peak_binding_score"] * current_edge_subset["peak_to_target_score"])
-#     # print(f'\t{current_edge_score}\n')
-#     score_dict["Source"].append(tf)
-#     score_dict["Target"].append(tg)
-#     score_dict["score"].append(current_edge_score)
+merged_df = pd.merge(interaction_df, tf_to_tg, how='right')
+merged_df = merged_df.fillna(0)
+print(merged_df.head())
 
-# score_df = pd.DataFrame(score_dict)
-# print(score_df.head())
 
-# tf_to_tg_w_scores = pd.merge(tf_to_tg, score_df, how="left", on=["Source", "Target"])
-    
-    
-    
+# score_df = tf_to_tg.groupby(["Source", "Target"]).apply(
