@@ -113,6 +113,38 @@ def load_atac_dataset(atac_data_file):
 
     atac_data = atac_data.set_index("peak")
     logging.info(atac_data.head())
+    
+    def log2_cpm_normalize(atac_df):
+        """
+        Log2 CPM normalize the values in atac_df.
+        Assumes:
+        - atac_df's first column is a non-numeric peak identifier (e.g., "chr1:100-200"),
+        - columns 1..end are numeric count data for samples or cells.
+        """
+        # Separate the non-numeric first column
+        peak_ids = atac_df.iloc[:, 0]
+        # Numeric counts
+        counts = atac_df.iloc[:, 1:]
+        
+        # 1. Compute library sizes (sum of each column)
+        library_sizes = counts.sum(axis=0)
+        
+        # 2. Convert counts to CPM
+        # Divide each column by its library size, multiply by 1e6
+        # Add 1 to avoid log(0) issues in the next step
+        cpm = (counts.div(library_sizes, axis=1) * 1e6).add(1)
+        
+        # 3. Log2 transform
+        log2_cpm = np.log2(cpm)
+        
+        # Reassemble into a single DataFrame
+        normalized_df = pd.concat([peak_ids, log2_cpm], axis=1)
+        # Optionally rename columns if needed
+        # normalized_df.columns = ...
+        
+        return normalized_df
+    
+    atac_data = log2_cpm_normalize(atac_data)
 
     return atac_data
 
