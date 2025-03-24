@@ -32,3 +32,4 @@ yasin_motif_binding_code
 string_protein_links.txt
 Hi-C_data/
 .pybiomart.sqlite
+enhancer_db/
