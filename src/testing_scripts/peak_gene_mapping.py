@@ -8,6 +8,9 @@ from scipy.spatial import cKDTree
 from statsmodels.stats.multitest import multipletests
 from collections import defaultdict
 from tqdm import tqdm
+import ensembl
+import normalization
+import enhancerdb
 
 organism = "hsapiens"
 atac_data_file = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/K562/K562_human_filtered/K562_human_filtered_ATAC.csv"
@@ -15,49 +18,6 @@ rna_data_file = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE
 
 enhancer_db_file = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/enhancer_db/enhancer"
 peak_dist_limit = 1000000
-
-def retrieve_ensembl_gene_positions(organism):
-    # Connect to the Ensembl BioMart server
-    server = Server(host='http://www.ensembl.org')
-
-    gene_ensembl_name = f'{organism}_gene_ensembl'
-    
-    # Select the Ensembl Mart and the human dataset
-    mart = server['ENSEMBL_MART_ENSEMBL']
-    dataset: pd.DataFrame = mart[gene_ensembl_name]
-
-    # Query for attributes: Ensembl gene ID, gene name, strand, and transcription start site (TSS)
-    result_df = dataset.query(attributes=[
-        'external_gene_name', 
-        'strand', 
-        'chromosome_name',
-        'transcription_start_site'
-    ])
-
-    return result_df
-
-def load_enhancer_database(enhancer_db_file):
-    enhancer_db = pd.read_csv(enhancer_db_file, sep="\t", header=None, index_col=None)
-    enhancer_db = enhancer_db.rename(columns={
-        0 : "chr",
-        1 : "start",
-        2 : "end",
-        3 : "num_enh",
-        4 : "tissue",
-        5 : "R1_value",
-        6 : "R2_value",
-        7 : "R3_value",
-        8 : "score"
-    })
-    
-    # Average the score of an enhancer across all tissues / cell types
-    enhancer_db = enhancer_db.groupby(["chr", "start", "end", "num_enh"], as_index=False)["score"].mean()
-    
-    enhancer_db["chr"] = enhancer_db["chr"].str.replace("chr", "")
-    enhancer_db["start"] = enhancer_db["start"].astype(int)
-    enhancer_db["end"] = enhancer_db["end"].astype(int)
-
-    return enhancer_db
 
 def load_and_parse_atac_peaks(atac_data_file):
     atac_df = pd.read_csv(atac_data_file, sep=",", header=0, index_col=None)
@@ -73,36 +33,6 @@ def load_and_parse_atac_peaks(atac_data_file):
     peak_df["center"] = peak_df["end"] - ((peak_df["end"] - peak_df["start"]) / 2)
     
     return atac_df, peak_df
-
-def log2_cpm_normalize(atac_df):
-    """
-    Log2 CPM normalize the values in atac_df.
-    Assumes:
-      - atac_df's first column is a non-numeric peak identifier (e.g., "chr1:100-200"),
-      - columns 1..end are numeric count data for samples or cells.
-    """
-    # Separate the non-numeric first column
-    peak_ids = atac_df.iloc[:, 0]
-    # Numeric counts
-    counts = atac_df.iloc[:, 1:]
-    
-    # 1. Compute library sizes (sum of each column)
-    library_sizes = counts.sum(axis=0)
-    
-    # 2. Convert counts to CPM
-    # Divide each column by its library size, multiply by 1e6
-    # Add 1 to avoid log(0) issues in the next step
-    cpm = (counts.div(library_sizes, axis=1) * 1e6).add(1)
-    
-    # 3. Log2 transform
-    log2_cpm = np.log2(cpm)
-    
-    # Reassemble into a single DataFrame
-    normalized_df = pd.concat([peak_ids, log2_cpm], axis=1)
-    # Optionally rename columns if needed
-    # normalized_df.columns = ...
-    
-    return normalized_df
 
 def plot_column_histogram(df, colname, title):
     plt.figure(figsize=(5,5))
@@ -154,6 +84,40 @@ def find_peaks_in_enhancer(enhancer, tree_dict):
     # Query the KDTree for all peaks within the enhancer's interval
     indices = tree.query_ball_point(np.array([[enhancer_center]]), r=enhancer_radius)[0]
     return [idx_list[i] for i in indices]
+
+def find_matching_peaks(peak_df, ensembl_gene_matching_chr, enhancer_db):
+    # Build a dictionary mapping each chromosome to a KDTree and the corresponding index list
+    tree_dict = {}
+    for chrom, group in peak_df.groupby("chr"):
+        # Reshape the center positions into a 2D array (required by cKDTree)
+        centers = group["center"].values.reshape(-1, 1)
+        tree = cKDTree(centers)
+        tree_dict[chrom] = (tree, group.index.tolist())
+
+    print(f"Identifying ATACseq peaks within {peak_dist_limit} of gene TSS using KDTree")
+    # Apply the KDTree function row-wise
+    ensembl_gene_matching_chr["peaks_in_range"] = ensembl_gene_matching_chr.apply(
+        lambda row: find_matching_peaks_kdtree(row["Transcription start site (TSS)"],
+                                            row["Chromosome/scaffold name"],
+                                            tree_dict,
+                                            threshold=peak_dist_limit),
+        axis=1
+    )
+
+    # Filter out any genes that dont have any peaks within range
+    ensembl_genes_within_range = ensembl_gene_matching_chr[ensembl_gene_matching_chr["peaks_in_range"].apply(lambda lst: len(lst) > 1)]
+
+    # Find peaks within known enhancer regions
+    enhancer_db["peaks_in_range"] = enhancer_db.apply(lambda row: find_peaks_in_enhancer(row, tree_dict), axis=1)
+
+    # Remove enhancers with no peaks in range or that have a NaN score
+    enhancer_db = enhancer_db[enhancer_db["peaks_in_range"].map(len) > 0].dropna()
+
+    print("Num enhancers with mapped peaks by chromosome:")
+    for chr, peaks in enhancer_db.groupby("chr"):
+        print(f'\t{chr} = {peaks.shape[0]} mapped enhancers')
+        
+    return ensembl_genes_within_range, enhancer_db
 
 def calculate_correlations(gene_row, rna_df_indexed, atac_df):
     """
@@ -294,6 +258,7 @@ def compute_significance(df, n):
 
 def combine_peak_to_peak_with_peak_to_gene(peak_to_peak_df, peak_to_gene_df):
 
+    print("\tRemoving peak to peak interactions where neither peak is assocated with a gene")
     # Only keep peaks in peak-to-peak if one of the peaks is associated with a gene
     # in peak-to-gene df
     peak_to_peak_df = peak_to_peak_df[
@@ -302,6 +267,7 @@ def combine_peak_to_peak_with_peak_to_gene(peak_to_peak_df, peak_to_gene_df):
         ]
     
     # Assocate peak1 in peak-to-peak with a matching gene in peak-to-gene df
+    print("\tAssigning peak1 with matching genes for peak2")
     merged_peak1 = pd.merge(
         peak_to_peak_df,
         peak_to_gene_df[['peak_full', 'Gene']],
@@ -311,6 +277,7 @@ def combine_peak_to_peak_with_peak_to_gene(peak_to_peak_df, peak_to_gene_df):
     ).rename(columns={"Gene": "Gene_from_peak1"}).drop(columns=["peak_full"])
 
     # Assocate peak2 in peak-to-peak with a matching gene in peak-to-gene df
+    print("\tAssigning peak2 with matching genes for peak1")
     merged_peak2 = pd.merge(
         peak_to_peak_df,
         peak_to_gene_df[['peak_full', 'Gene']],
@@ -320,6 +287,7 @@ def combine_peak_to_peak_with_peak_to_gene(peak_to_peak_df, peak_to_gene_df):
     ).rename(columns={"Gene": "Gene_from_peak2"}).drop(columns=["peak_full"])
 
     # Combine the gene mappings for peak1 and peak2
+    print('\tCombining gene mappings for peak1 and peak2')
     combined_long = pd.concat([merged_peak1, merged_peak2], ignore_index=True)
 
     # Merge the gene mappings for peak1 and peak2  into one column
@@ -328,6 +296,7 @@ def combine_peak_to_peak_with_peak_to_gene(peak_to_peak_df, peak_to_gene_df):
     )
 
     # Explode the list so that each gene gets its own row
+    print("\tCreating list of peaks for each gene")
     combined_long = combined_long.explode("Gene_list").rename(columns={"Gene_list": "gene"})
 
     # Create a peak, score, gene dataframe for the peak1 column
@@ -340,6 +309,7 @@ def combine_peak_to_peak_with_peak_to_gene(peak_to_peak_df, peak_to_gene_df):
         columns={"peak2_full": "peak", "Correlation": "score", "Gene_from_peak2": "gene"}
     )
 
+    
     # Combine the two dataframes so that each peak can have multiple genes on different rows
     melted_df = pd.concat([df1, df2], ignore_index=True)
 
@@ -356,7 +326,6 @@ def combine_peak_to_peak_with_peak_to_gene(peak_to_peak_df, peak_to_gene_df):
 
     # Replace NaNs with the original 'score' from melted_df
     melted_df["score"] = mapped_scores.fillna(melted_df["score"])
-    
     
     return melted_df
 
@@ -387,132 +356,116 @@ def normalize_peak_to_peak_scores(df):
     
     return score_normalized
 
-def main():
-    print("Loading and parsing ATAC peak positions")
-    atac_df, peak_df = load_and_parse_atac_peaks(atac_data_file)
+# def main():
+print("Loading the scRNA-seq dataset")
+rna_df: pd.DataFrame = pd.read_csv(rna_data_file, sep=",", header=0, index_col=None)
+rna_df = rna_df.rename(columns={rna_df.columns[0]: "gene"})
 
-    print("Log2 counts per million Normalizing the ATAC-seq dataset")
-    atac_df: pd.DataFrame = log2_cpm_normalize(atac_df)
+print("Loading and parsing ATAC peak positions")
+atac_df, peak_df = load_and_parse_atac_peaks(atac_data_file)
+
+print("Log2 counts per million Normalizing the ATAC-seq dataset")
+atac_df: pd.DataFrame = normalization.log2_cpm_normalize(atac_df)
+
+print("Loading enhancer database")    
+enhancer_db: pd.DataFrame = enhancerdb.load_enhancer_database_file(enhancer_db_file)
+
+print(f"Loading ensembl genes for {organism}")
+ensembl_gene_df: pd.DataFrame = ensembl.retrieve_ensembl_gene_positions(organism)
+
+print(f"Matching ensembl genes and chromosomes to those in the data")
+# Subset to only contain genes that are in the RNA dataset
+ensembl_gene_matching_genes = ensembl_gene_df[ensembl_gene_df["Gene name"].isin(rna_df["gene"])].dropna()
+
+# Subset to only contain chromosomes and scaffolds that are present in the peak dataframe "chr" column
+ensembl_gene_matching_chr = ensembl_gene_matching_genes[ensembl_gene_matching_genes["Chromosome/scaffold name"].isin(peak_df["chr"])].dropna()
+
+ensembl_genes_within_range, enhancer_db = find_matching_peaks(peak_df, ensembl_gene_matching_chr, enhancer_db)
+
+# Isolate only the enhancer_db scores for the peaks that mapped to enhancers
+enhancer_db_peak_scores = enhancer_db[["score", "peaks_in_range"]]
+
+# Create a dictionary to collect scores for each peak index.
+peak_scores = defaultdict(list)
+
+# Iterate through each row and append all tissue scores to a list for each peak
+for _, row in enhancer_db_peak_scores.iterrows():
+    score = row['score']
+    for peak in row['peaks_in_range']:
+        peak_scores[peak].append(score)
+
+# Compute the average score for each peak (Peaks have multiple scores for diff tissues)
+peak_avg = {peak: sum(scores) / len(scores) for peak, scores in peak_scores.items()}
+
+# Convert the dictionary to a DataFrame
+enhancer_db_peak_scores = pd.DataFrame(list(peak_avg.items()), columns=['peak_index', 'score'])
+
+# Optionally, sort the DataFrame by peak_index
+enhancer_db_peak_scores = enhancer_db_peak_scores.sort_values('peak_index').reset_index(drop=True)
     
-    print("Loading enhancer database")    
-    enhancer_db: pd.DataFrame = load_enhancer_database(enhancer_db_file)
 
-    rna_df: pd.DataFrame = pd.read_csv(rna_data_file, sep=",", header=0, index_col=None)
-    rna_df = rna_df.rename(columns={rna_df.columns[0]: "gene"})
+print("Calculating peak-to-peak and peak-to-gene correlations")
+gene_indices = range(1, 5000) 
+total_gene_peak_df, total_peak_peak_df = aggregate_all_correlations(
+    ensembl_genes_within_range, rna_df, atac_df, gene_indices, n_jobs=8
+)
 
-    print(f"Loading ensembl genes for {organism}")
-    ensembl_gene_df: pd.DataFrame = retrieve_ensembl_gene_positions(organism)
-    
-    print(ensembl_gene_df)
+print("Aggregated Gene-to-Peak Correlations:")
+print(total_gene_peak_df.head())
 
-    print(f"Matching ensembl genes and chromosomes to those in the data")
-    # Subset to only contain genes that are in the RNA dataset
-    ensembl_gene_matching_genes = ensembl_gene_df[ensembl_gene_df["Gene name"].isin(rna_df["gene"])].dropna()
+print("\nAggregated Peak-to-Peak Correlations:")
+print(total_peak_peak_df.head())
 
-    # Subset to only contain chromosomes and scaffolds that are present in the peak dataframe "chr" column
-    ensembl_gene_matching_chr = ensembl_gene_matching_genes[ensembl_gene_matching_genes["Chromosome/scaffold name"].isin(peak_df["chr"])].dropna()
-    
-    # Build a dictionary mapping each chromosome to a KDTree and the corresponding index list
-    tree_dict = {}
-    for chrom, group in peak_df.groupby("chr"):
-        # Reshape the center positions into a 2D array (required by cKDTree)
-        centers = group["center"].values.reshape(-1, 1)
-        tree = cKDTree(centers)
-        tree_dict[chrom] = (tree, group.index.tolist())
+print("Calculating significance of peak to gene correlations")
+total_gene_peak_df = compute_significance(total_gene_peak_df, total_gene_peak_df.shape[0])
 
-    print(f"Identifying ATACseq peaks within {peak_dist_limit} of gene TSS using KDTree")
-    # Apply the KDTree function row-wise
-    ensembl_gene_matching_chr["peaks_in_range"] = ensembl_gene_matching_chr.apply(
-        lambda row: find_matching_peaks_kdtree(row["Transcription start site (TSS)"],
-                                            row["Chromosome/scaffold name"],
-                                            tree_dict,
-                                            threshold=peak_dist_limit),
-        axis=1
-    )
+print("\tFiltering for significant peaks")
+sig_gene_peak_df = total_gene_peak_df[total_gene_peak_df["pval"] < 0.05].copy()
+sig_gene_peak_df["log2_pval"] = np.log2(total_gene_peak_df["pval"] + 1e-10)
 
-    # Filter out any genes that dont have any peaks within range
-    ensembl_genes_within_range = ensembl_gene_matching_chr[ensembl_gene_matching_chr["peaks_in_range"].apply(lambda lst: len(lst) > 1)]
+print("Calculating significance of peak to peak correlations")
+total_peak_peak_df = compute_significance(total_peak_peak_df, total_peak_peak_df.shape[0])
 
-    # Find peaks that are within known enhancers
-    enhancer_db["peaks_in_range"] = enhancer_db.apply(lambda row: find_peaks_in_enhancer(row, tree_dict), axis=1)
-    
-    print("Num enhancers with mapped peaks by chromosome:")
-    for chr, peaks in enhancer_db.groupby("chr"):
-        print(f'\t{chr} = {peaks.shape[0]} mapped enhancers')
-    
-    # Remove enhancers with no peaks in range or that have a NaN score
-    enhancer_db = enhancer_db[enhancer_db["peaks_in_range"].map(len) > 0].dropna()
-    
-    # Isolate only the enhancer_db scores for the peaks that mapped to enhancers
-    enhancer_db_peak_scores = enhancer_db[["score", "peaks_in_range"]]
-    
-    # Create a dictionary to collect scores for each peak index.
-    peak_scores = defaultdict(list)
+print("\tFiltering for significant peaks")
+sig_peak_peak_df = total_peak_peak_df[total_peak_peak_df["pval"] < 0.05].copy()
+sig_peak_peak_df["log2_pval"] = np.log2(sig_peak_peak_df["pval"] + 1e-10)
 
-    # Iterate through each row
-    for _, row in enhancer_db_peak_scores.iterrows():
-        score = row['score']
-        for peak in row['peaks_in_range']:
-            peak_scores[peak].append(score)
+# plot_column_histogram(total_peak_peak_df, "Correlation", "Peak-to-Peak Correlation Scores")
+# plot_column_histogram(total_gene_peak_df, "Correlation", "Peak-to-Gene Correlation Scores")
+# plot_column_histogram(sig_gene_peak_df, "log2_pval", "Peak to Gene Score p-values")
+# plot_column_histogram(sig_peak_peak_df, "log2_pval", "Peak to Peak Score p-values")
 
-    # Compute the average score for each peak index
-    peak_avg = {peak: sum(scores) / len(scores) for peak, scores in peak_scores.items()}
+# Map the peak indices to their full location strings
+sig_gene_peak_df["peak_full"] = sig_gene_peak_df["Peak"].map(peak_df["peak_full"])
+sig_peak_peak_df["peak1_full"] = sig_peak_peak_df["Peak1"].map(peak_df["peak_full"])
+sig_peak_peak_df["peak2_full"] = sig_peak_peak_df["Peak2"].map(peak_df["peak_full"])
 
-    # Convert the dictionary to a DataFrame
-    enhancer_db_peak_scores = pd.DataFrame(list(peak_avg.items()), columns=['peak_index', 'score'])
+# Map the enhancer scores by peak indices (Dont add a score for enhancers with no prior scores)
+sig_gene_peak_df["enhancer_score"] = sig_gene_peak_df["Peak"].map(enhancer_db_peak_scores["score"]).fillna(0)
+sig_peak_peak_df["peak1_enhancer_score"] = sig_peak_peak_df["Peak1"].map(enhancer_db_peak_scores["score"]).fillna(0)
+sig_peak_peak_df["peak2_enhancer_score"] = sig_peak_peak_df["Peak2"].map(enhancer_db_peak_scores["score"]).fillna(0)
 
-    # Optionally, sort the DataFrame by peak_index
-    enhancer_db_peak_scores = enhancer_db_peak_scores.sort_values('peak_index').reset_index(drop=True)
-        
+print("Significant peak to gene correlations")
+print(sig_gene_peak_df.head())
+print()
+print("Significant peak to peak correlations")
+print(sig_peak_peak_df.head())
 
-    print("Calculating peak-to-peak and peak-to-gene correlations")
-    gene_indices = range(1, 5000) 
-    total_gene_peak_df, total_peak_peak_df = aggregate_all_correlations(
-        ensembl_genes_within_range, rna_df, atac_df, gene_indices, n_jobs=8
-    )
+peak_gene_format_df = sig_gene_peak_df[["peak_full", "Gene", "Correlation", "enhancer_score"]]
+peak_peak_format_df = sig_peak_peak_df[["peak1_full", "peak2_full", "Correlation", "peak1_enhancer_score", "peak2_enhancer_score"]]
 
-    print("Aggregated Gene-to-Peak Correlations:")
-    print(total_gene_peak_df.head())
+# Associate significant peak-to-peak scores with the peak-to-gene scores.
+# If a peak regulates a peak that regulates a gene, set the peak's score to the gene score instead 
+# of the peak-to-peak score
+print("Combining peak to peak with peak to gene scores")
+melted_df = combine_peak_to_peak_with_peak_to_gene(peak_peak_format_df, peak_gene_format_df)
 
-    print("\nAggregated Peak-to-Peak Correlations:")
-    print(total_peak_peak_df.head())
-    
-    total_gene_peak_df = compute_significance(total_gene_peak_df, total_gene_peak_df.shape[0])
-    total_peak_peak_df = compute_significance(total_peak_peak_df, total_peak_peak_df.shape[0])
-    
-    sig_gene_peak_df = total_gene_peak_df[total_gene_peak_df["pval"] < 0.05].copy()
-    sig_gene_peak_df["log2_pval"] = np.log2(total_gene_peak_df["pval"] + 1e-10)
-    
-    sig_peak_peak_df = total_peak_peak_df[total_peak_peak_df["pval"] < 0.05].copy()
-    sig_peak_peak_df["log2_pval"] = np.log2(sig_peak_peak_df["pval"] + 1e-10)
+print("Normalizing peak to peak scores between 0-1")
+melted_df["score"] = normalize_peak_to_peak_scores(melted_df)
 
-    plot_column_histogram(total_peak_peak_df, "Correlation", "Peak-to-Peak Correlation Scores")
-    plot_column_histogram(total_gene_peak_df, "Correlation", "Peak-to-Gene Correlation Scores")
-    plot_column_histogram(sig_gene_peak_df, "log2_pval", "Peak to Gene Score p-values")
-    plot_column_histogram(sig_peak_peak_df, "log2_pval", "Peak to Peak Score p-values")
+print(melted_df.head())
 
+# melted_df.to_csv("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output/K562/K562_human_filtered/peak_to_tg_scores.csv", sep="\t", header=True, index=False)
 
-    # Map the peak indices to their full location strings
-    sig_gene_peak_df["peak_full"] = sig_gene_peak_df["Peak"].map(peak_df["peak_full"])
-    sig_peak_peak_df["peak1_full"] = sig_peak_peak_df["Peak1"].map(peak_df["peak_full"])
-    sig_peak_peak_df["peak2_full"] = sig_peak_peak_df["Peak2"].map(peak_df["peak_full"])
-
-    print(sig_gene_peak_df.head())
-    print(sig_peak_peak_df.head())
-    
-    peak_gene_format_df = sig_gene_peak_df[["peak_full", "Gene", "Correlation"]]
-    peak_peak_format_df = sig_peak_peak_df[["peak1_full", "peak2_full", "Correlation"]]
-    
-    # Associate significant peak-to-peak scores with the peak-to-gene scores.
-    # If a peak regulates a peak that regulates a gene, set the peak's score to the gene score instead 
-    # of the peak-to-peak score
-    melted_df = combine_peak_to_peak_with_peak_to_gene(peak_peak_format_df, peak_gene_format_df)
-
-    melted_df["score"] = normalize_peak_to_peak_scores(melted_df)
-    
-    print(melted_df.head())
-    
-    melted_df.to_csv("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output/K562/K562_human_filtered/peak_to_tg_scores.csv", sep="\t", header=True, index=False)
-
-if __name__ == "__main__":
-    main()
+# if __name__ == "__main__":
+#     main()
