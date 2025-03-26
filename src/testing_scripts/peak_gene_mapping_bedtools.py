@@ -19,7 +19,8 @@ ORGANISM = "hsapiens"
 ATAC_DATA_FILE = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/K562/K562_human_filtered/K562_human_filtered_ATAC.csv"
 RNA_DATA_FILE =  "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/K562/K562_human_filtered/K562_human_filtered_RNA.csv"
 ENHANCER_DB_FILE = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/enhancer_db/enhancer"
-PEAK_DIST_LIMIT = 1_000_000
+TMP_DIR = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/tmp"
+PEAK_DIST_LIMIT = 1000
 
 # ------------------------- DATA LOADING & PREPARATION ------------------------- #
 def load_and_parse_atac_peaks(atac_data_file: str) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -165,60 +166,96 @@ def row_normalize_sparse(X):
             X_norm.data[i] = [0 for _ in X_norm.data[i]]
     return X_norm.tocsr()
 
+def filter_low_variance_features(df, min_variance=0.5):
+    """
+    Filter rows of 'df' (features) that have variance < min_variance.
+    Returns the filtered DataFrame and the mask of kept rows.
+    """
+    variances = df.var(axis=1)
+    mask = variances >= min_variance
+    return df.loc[mask]
+
 def calculate_significant_peak_to_peak_correlations(atac_df, alpha=0.05):
-    # Convert to sparse matrix and normalize as before
+    """
+    For each pair of peaks (i, j), compute correlation and p-value, return only
+    those pairs with p < alpha. Returns a DataFrame with columns:
+    [peak1, peak2, correlation].
+    """
     X = sp.csr_matrix(atac_df.values)
     num_peaks, n = X.shape
     df_degrees = n - 2
-    
+
     X_norm = row_normalize_sparse(X)
-    
+
     def process_peak(i, X_norm, df_degrees, n, alpha):
         """
-        Compute correlations for row i and return True if any non-self correlation
-        is significant (p < alpha); otherwise return False.
+        Compute correlations for row i vs. all other peaks. Return a list of
+        (i, j, correlation) for each pair (i, j) with p < alpha.
         """
-        row = X_norm.getrow(i)
-        # Compute correlations of peak i with all peaks using sparse dot product.
-        corr_row = row.dot(X_norm.T)
+        results = []
+        row_i = X_norm.getrow(i)
+        # sparse dot product => shape(1, num_peaks)
+        corr_row = row_i.dot(X_norm.T)
         indices = corr_row.indices
         correlations = corr_row.data
-        
-        # Remove self-correlation (if present)
-        mask = indices != i
-        if np.any(mask):
-            correlations = correlations[mask]
-            with np.errstate(divide='ignore', invalid='ignore'):
-                t_stat = correlations * np.sqrt(df_degrees / (1 - correlations**2))
-            p_vals = 2 * stats.t.sf(np.abs(t_stat), df=df_degrees)
-            if np.any(p_vals < alpha):
-                return True
-        return False
-    
-    # Create delayed tasks for each peak.
-    tasks = [delayed(process_peak)(i, X_norm, df_degrees, n, alpha)
-             for i in range(num_peaks)]
-    
-    # Compute all tasks in parallel
+
+        # Remove self-correlation
+        mask = (indices != i)
+        indices = indices[mask]
+        correlations = correlations[mask]
+
+        if len(indices) == 0:
+            return results  # empty list
+
+        # Compute p-values
+        with np.errstate(divide='ignore', invalid='ignore'):
+            t_stat = correlations * np.sqrt(df_degrees / (1 - correlations**2))
+        p_vals = 2 * stats.t.sf(np.abs(t_stat), df=df_degrees)
+
+        # Collect only significant pairs
+        sig_mask = (p_vals < alpha)
+        sig_indices = indices[sig_mask]
+        sig_corrs = correlations[sig_mask]
+
+        # Build tuples: (i, j, corr)
+        for j, c in zip(sig_indices, sig_corrs):
+            # We'll handle duplicates (i, j) vs. (j, i) later if desired
+            results.append((i, j, c))
+
+        return results
+
+    # Use Dask to process each peak
+    tasks = [delayed(process_peak)(i, X_norm, df_degrees, n, alpha) for i in range(num_peaks)]
+
     with ProgressBar():
         results = compute(*tasks, scheduler='threads', num_workers=4)
+
+    # Flatten list of lists
+    flat_results = [item for sublist in results for item in sublist]
+
+    # Convert to DataFrame
+    df_corr = pd.DataFrame(flat_results, columns=["peak_i", "peak_j", "correlation"])
     
-    return np.array(results)
+    # Filter to only keep highly correlated peak-to-peak connections
+    df_corr = df_corr[ abs(df_corr["correlation"]) > 0.2 ]
+    
+    # Map i,j to actual peak IDs
+    df_corr["peak1"] = atac_df.index[df_corr["peak_i"]]
+    df_corr["peak2"] = atac_df.index[df_corr["peak_j"]]
+    
+    # Drop duplicates (peakA, peakB) vs (peakB, peakA)
+    df_corr[["peak1", "peak2"]] = np.sort(df_corr[["peak1", "peak2"]], axis=1)
+    df_corr.drop_duplicates(subset=["peak1","peak2"], keep="first")
+
+    # Final subset and reorder columns
+    df_corr = df_corr[["peak1", "peak2", "correlation"]]
+    return df_corr
 
 def calculate_significant_peak_to_gene_correlations(atac_df, gene_df, alpha=0.05, chunk_size=1000):
     """
-    Given:
-      - atac_df: ATAC-seq DataFrame (peaks as rows, cells as columns; index are peak IDs).
-      - gene_df: RNA-seq DataFrame (genes as rows, cells as columns; index are gene IDs).
-      
-    Convert both DataFrames to sparse matrices, normalize them, and then compute the Pearson
-    correlations (via sparse dot products) for each peak against all genes.
-    
-    Returns:
-      A DataFrame with columns ['peak_id', 'gene_id', 'correlation', 'p_value']
-      for every significant (p < alpha) peak-to-gene pair.
+    Returns a DataFrame of [peak_id, gene_id, correlation] for p < alpha.
     """
-    # Convert ATAC data to sparse matrix and normalize rows.
+    # Convert to sparse
     X = sp.csr_matrix(atac_df.values.astype(float))
     Y = sp.csr_matrix(gene_df.values.astype(float))
     
@@ -230,8 +267,8 @@ def calculate_significant_peak_to_gene_correlations(atac_df, gene_df, alpha=0.05
     
     def process_peak_gene_chunked(i, X_norm, Y_norm, df_degrees, n, alpha, chunk_size):
         """
-        For peak i in X_norm, compute correlations with the genes in Y_norm
-        chunked by 'chunk_size'. Return list of (peak_index, gene_index, r, p).
+        For peak i, compute correlation with each gene in chunks, returning
+        (i, j, r, p) for significant pairs.
         """
         results = []
         peak_row = X_norm.getrow(i)
@@ -239,32 +276,26 @@ def calculate_significant_peak_to_gene_correlations(atac_df, gene_df, alpha=0.05
 
         for start in range(0, num_genes, chunk_size):
             end = min(start + chunk_size, num_genes)
-            Y_chunk = Y_norm[start:end]  # shape: (chunk_size, n)
+            Y_chunk = Y_norm[start:end]
 
-            # Dot product is (1, n) · (chunk_size, n).T -> (1, chunk_size)
+            # Dot product => shape(1, chunk_size)
             r_chunk = peak_row.dot(Y_chunk.T).toarray().ravel()
-
-            # For normalized data, correlation = dot / (n - 1)
             r_chunk = r_chunk / (n - 1)
 
-            # Compute t-stats + p-values
             with np.errstate(divide='ignore', invalid='ignore'):
                 t_stat_chunk = r_chunk * np.sqrt(df_degrees / (1 - r_chunk**2))
             p_chunk = 2 * stats.t.sf(np.abs(t_stat_chunk), df=df_degrees)
 
-            # Keep only significant
+            # Indices where p < alpha
             sig_indices = np.where(p_chunk < alpha)[0]
             for local_j in sig_indices:
                 global_j = start + local_j
-                results.append((i, global_j, r_chunk[local_j], p_chunk[local_j]))
+                results.append((i, global_j, r_chunk[local_j]))
 
         return results
     
-    # Delayed tasks for each peak
     tasks = [
-        delayed(process_peak_gene_chunked)(
-            i, X_norm, Y_norm, df_degrees, n, alpha, chunk_size
-        )
+        delayed(process_peak_gene_chunked)(i, X_norm, Y_norm, df_degrees, n, alpha, chunk_size)
         for i in range(num_peaks)
     ]
 
@@ -272,15 +303,14 @@ def calculate_significant_peak_to_gene_correlations(atac_df, gene_df, alpha=0.05
         results = compute(*tasks, scheduler="threads", num_workers=4)
 
     flat_results = [item for sublist in results for item in sublist]
-    res_df = pd.DataFrame(
-        flat_results, columns=["peak_index", "gene_index", "correlation", "p_value"]
-    )
+    df_corr = pd.DataFrame(flat_results, columns=["peak_i", "gene_j", "correlation"])
 
-    # Map indices back
-    res_df["peak_id"] = atac_df.index[res_df["peak_index"]]
-    res_df["gene_id"] = gene_df.index[res_df["gene_index"]]
+    # Map i->peak_id, j->gene_id
+    df_corr["peak"] = atac_df.index[df_corr["peak_i"]]
+    df_corr["gene"] = gene_df.index[df_corr["gene_j"]]
+    df_corr = df_corr[["peak", "gene", "correlation"]]
 
-    return res_df[["peak_id", "gene_id", "correlation", "p_value"]]
+    return df_corr
 
 logging.info("Loading the scRNA-seq dataset.")
 rna_df = pd.read_csv(RNA_DATA_FILE, sep=",", header=0, index_col=None)
@@ -355,26 +385,70 @@ merged_df = merged_df[merged_df["enh_score"] != "."]
 
 # Subsetting the RNA-seq dataset to only contain genes in the merged_df
 rna_df = rna_df[rna_df["gene"].isin(merged_df["gene_id"])].set_index("gene")
-# print(f'Num genes from RNA dataset in merged_df: {rna_df["gene"].nunique():,} / {merged_df["gene_id"].nunique():,} ({rna_df["gene"].nunique() / merged_df["gene_id"].nunique()*100:.2f}%)')
 
-# Subsetting the merged_df to only contain genes in the RNA-seq dataset
-# merged_df = merged_df[merged_df["gene_id"].isin(rna_df.index)]
+logging.info(f'Num ATAC-seq peaks remaining: {merged_df["peak_id"].nunique():,} / {peak_df["peak_full"].nunique():,} ({merged_df["peak_id"].nunique() / peak_df["peak_full"].nunique()*100:.2f}%)')
+logging.info(f'Num genes from Ensembl: {merged_df["gene_id"].nunique():,} / {ensembl_df["gene"].nunique():,} ({merged_df["gene_id"].nunique() / ensembl_df["gene"].nunique()*100:.2f}%)')
+logging.info(f'Num enhancers from EnhancerDB: {merged_df["enh_id"].nunique():,} / {enhancer_df["enhancer"].nunique():,} ({merged_df["enh_id"].nunique() / enhancer_df["enhancer"].nunique()*100:.2f}%)')
+logging.info("\n-----------------------------------------\n")
 
-print(f'Num ATAC-seq peaks remaining: {merged_df["peak_id"].nunique():,} / {peak_df["peak_full"].nunique():,} ({merged_df["peak_id"].nunique() / peak_df["peak_full"].nunique()*100:.2f}%)')
-print(f'Num genes from Ensembl: {merged_df["gene_id"].nunique():,} / {ensembl_df["gene"].nunique():,} ({merged_df["gene_id"].nunique() / ensembl_df["gene"].nunique()*100:.2f}%)')
-print(f'Num enhancers from EnhancerDB: {merged_df["enh_id"].nunique():,} / {enhancer_df["enhancer"].nunique():,} ({merged_df["enh_id"].nunique() / enhancer_df["enhancer"].nunique()*100:.2f}%)')
+merged_df.to_csv("")
 
 # Subset the ATAC-seq data df to only contain peaks that are in the final merged_df and set the index to the peak names
-atac_df = atac_df[atac_df["peak_full"].isin(merged_df["peak_id"])].set_index("peak_full")
+atac_df = atac_df.set_index("peak_full")
 
-print("Calculating significant ATAC-seq peak-to-peak co-accessibility correlations")
-sig_peak_to_peak_corr = calculate_significant_peak_to_peak_correlations(atac_df, alpha=0.05)
-sig_atac_df = atac_df.loc[sig_peak_to_peak_corr]
+# 1) Identify relevant peaks and genes from merged_df
+peaks_in_merged = merged_df["peak_id"].unique()
+genes_in_merged = merged_df["gene_id"].unique()
 
-sig_peak_to_gene_corr = calculate_significant_peak_to_gene_correlations(atac_df, rna_df, alpha=0.05, chunk_size=1000)
-sig_rna_df = rna_df.loc[sig_peak_to_gene_corr]
+# 2) Subset the ATAC-seq DataFrame to only contain peaks in merged_df
+atac_sub = atac_df.loc[atac_df.index.intersection(peaks_in_merged)]
+
+# 3) Subset the RNA-seq DataFrame to only contain genes in merged_df
+rna_sub = rna_df.loc[rna_df.index.intersection(genes_in_merged)]
+
+logging.info(f"Subsetting to {len(atac_sub)} peaks and {len(rna_sub)} genes from merged_df")
+
+# 4) (Optional) Filter low-variance
+atac_sub = filter_low_variance_features(atac_sub, min_variance=0.9)
+rna_sub  = filter_low_variance_features(rna_sub,  min_variance=0.9)
+logging.info(f"After filtering variance: {len(atac_sub)} peaks, {len(rna_sub)} genes")
+
+# 5) Now compute correlations only among these subsets:
+logging.info("Calculating significant ATAC-seq peak-to-peak co-accessibility correlations")
+sig_peak_to_peak_corr = calculate_significant_peak_to_peak_correlations(atac_sub, alpha=0.05)
+logging.info(sig_peak_to_peak_corr.head())
+logging.info(f'Number of significant peak to peak correlations: {sig_peak_to_peak_corr.shape[0]:,}')
+logging.info("\n-----------------------------------------\n")
+
+sig_peak_to_peak_corr.to_csv("sig_peak_to_peak_corr.csv")
+
+logging.info("Calculating significant ATAC-seq peak-to-gene correlations")
+sig_peak_to_gene_corr = calculate_significant_peak_to_gene_correlations(atac_sub, rna_sub, alpha=0.05)
+logging.info(sig_peak_to_gene_corr.head())
+logging.info(f'Number of significant peak to gene correlations: {sig_peak_to_gene_corr.shape[0]:,}')
+logging.info("\n-----------------------------------------\n")
+
+sig_peak_to_gene_corr.to_csv("sig_peak_to_gene_corr.csv")
 
 # Only keep rows in merged_df where the peak_id is 
-sig_merged_df = merged_df[(merged_df["peak_id"].isin(sig_atac_df.index)) & (merged_df["gene"].isin(sig_rna_df.index))]
-print(sig_merged_df.head())
+logging.info("Subsetting merged_df to only contain peaks and genes with a significant correlation")
+
+# Filter out rows containing peaks with no significant peak to peak or peak to gene correlations
+mask_peak = (
+    merged_df["peak_id"].isin(sig_peak_to_peak_corr["peak1"]) |
+    merged_df["peak_id"].isin(sig_peak_to_peak_corr["peak2"]) |
+    merged_df["peak_id"].isin(sig_peak_to_gene_corr["peak"])
+)
+
+# Filter out genes that dont have any significant peaks
+mask_gene = merged_df["gene_id"].isin(sig_peak_to_gene_corr["gene"])
+subset_mask = mask_peak & mask_gene
+
+sig_merged_df = merged_df[mask_peak]
+logging.info(sig_merged_df.head())
+
 print(f'Number of significant peaks: {sig_merged_df.shape[0]:,} / {merged_df["peak_id"].nunique():,} ({sig_merged_df.shape[0] / merged_df["peak_id"].nunique()*100:.2f}%)')
+
+print(f'Num ATAC-seq peaks remaining: {sig_merged_df["peak_id"].nunique():,} / {peak_df["peak_full"].nunique():,} ({sig_merged_df["peak_id"].nunique() / peak_df["peak_full"].nunique()*100:.2f}%)')
+print(f'Num genes from Ensembl: {sig_merged_df["gene_id"].nunique():,} / {ensembl_df["gene"].nunique():,} ({sig_merged_df["gene_id"].nunique() / ensembl_df["gene"].nunique()*100:.2f}%)')
+print(f'Num enhancers from EnhancerDB: {sig_merged_df["enh_id"].nunique():,} / {enhancer_df["enhancer"].nunique():,} ({sig_merged_df["enh_id"].nunique() / enhancer_df["enhancer"].nunique()*100:.2f}%)')
