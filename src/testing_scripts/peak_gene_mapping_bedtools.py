@@ -20,7 +20,7 @@ ATAC_DATA_FILE = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENC
 RNA_DATA_FILE =  "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/K562/K562_human_filtered/K562_human_filtered_RNA.csv"
 ENHANCER_DB_FILE = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/enhancer_db/enhancer"
 TMP_DIR = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/tmp"
-PEAK_DIST_LIMIT = 1000
+PEAK_DIST_LIMIT = 1_000_000
 
 # ------------------------- DATA LOADING & PREPARATION ------------------------- #
 def load_and_parse_atac_peaks(atac_data_file: str) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -45,6 +45,11 @@ def load_and_parse_atac_peaks(atac_data_file: str) -> tuple[pd.DataFrame, pd.Dat
     peak_df["start"] = [int(pos.split(":")[1].split("-")[0]) for pos in peak_pos]
     peak_df["end"] = [int(pos.split(":")[1].split("-")[1]) for pos in peak_pos]
     peak_df["peak_full"] = peak_pos
+
+    peak_df["chr"] = peak_df["chr"].astype(str)
+    peak_df["start"] = peak_df["start"].astype(int)
+    peak_df["end"] = peak_df["end"].astype(int)
+    peak_df["peak_full"] = peak_df["peak_full"].astype(str)
 
     return peak_df, atac_df
 
@@ -105,11 +110,14 @@ def load_ensembl_organism_tss(organism):
     ensembl_df["tss"] = ensembl_df["tss"].astype(int)
 
     # In a BED file, we’ll store TSS as [start, end) = [tss, tss+1)
-    ensembl_df["start"] = ensembl_df["tss"]
-    ensembl_df["end"] = ensembl_df["tss"] + 1
+    ensembl_df["start"] = ensembl_df["tss"].astype(int)
+    ensembl_df["end"] = ensembl_df["tss"].astype(int) + 1
 
     # Re-order columns for clarity: [chr, start, end, gene]
     ensembl_df = ensembl_df[["chr", "start", "end", "gene"]]
+    
+    ensembl_df["chr"] = ensembl_df["chr"].astype(str)
+    ensembl_df["gene"] = ensembl_df["gene"].astype(str)
 
     return ensembl_df
 
@@ -133,11 +141,27 @@ def load_enhancer_database_file(enhancer_db_file):
     # Average the score of an enhancer across all tissues / cell types
     enhancer_db = enhancer_db.groupby(["chr", "start", "end", "enhancer"], as_index=False)["score"].mean()
 
+    enhancer_db["chr"] = enhancer_db["chr"].astype(str)
     enhancer_db["start"] = enhancer_db["start"].astype(int)
     enhancer_db["end"] = enhancer_db["end"].astype(int)
+    enhancer_db["enhancer"] = enhancer_db["enhancer"].astype(str)
+    
     enhancer_db = enhancer_db[["chr", "start", "end", "enhancer", "score"]]
 
     return enhancer_db
+
+def set_merged_df_col_dtypes(merged_df):
+    merged_df["peak_chr"] = merged_df["peak_chr"].apply(str)
+    merged_df["gene_chr"] = merged_df["gene_chr"].apply(str)
+    merged_df["enh_chr"] = merged_df["enh_chr"].apply(str)
+
+    merged_df["gene_start"] = merged_df["gene_start"].astype(int)
+    merged_df["gene_end"] = merged_df["gene_end"].astype(int)
+    merged_df["enh_start"] = merged_df["enh_start"].astype(int)
+    merged_df["enh_end"] = merged_df["enh_end"].astype(int)
+    merged_df["enh_score"] = pd.to_numeric(merged_df["enh_score"], errors="coerce")
+    
+    return merged_df
 
 def row_normalize_sparse(X):
     """
@@ -391,7 +415,11 @@ logging.info(f'Num genes from Ensembl: {merged_df["gene_id"].nunique():,} / {ens
 logging.info(f'Num enhancers from EnhancerDB: {merged_df["enh_id"].nunique():,} / {enhancer_df["enhancer"].nunique():,} ({merged_df["enh_id"].nunique() / enhancer_df["enhancer"].nunique()*100:.2f}%)')
 logging.info("\n-----------------------------------------\n")
 
-merged_df.to_csv("")
+# Ensure the correct data types for each column
+merged_df = set_merged_df_col_dtypes(merged_df)
+print(merged_df.dtypes)
+
+merged_df.to_parquet(f"{TMP_DIR}/merged_df.parquet", compression="gzip")
 
 # Subset the ATAC-seq data df to only contain peaks that are in the final merged_df and set the index to the peak names
 atac_df = atac_df.set_index("peak_full")
@@ -408,9 +436,9 @@ rna_sub = rna_df.loc[rna_df.index.intersection(genes_in_merged)]
 
 logging.info(f"Subsetting to {len(atac_sub)} peaks and {len(rna_sub)} genes from merged_df")
 
-# 4) (Optional) Filter low-variance
-atac_sub = filter_low_variance_features(atac_sub, min_variance=0.9)
-rna_sub  = filter_low_variance_features(rna_sub,  min_variance=0.9)
+# 4) Filter out peaks / genes with low variance in expression
+atac_sub = filter_low_variance_features(atac_sub, min_variance=0.5)
+rna_sub  = filter_low_variance_features(rna_sub,  min_variance=0.5)
 logging.info(f"After filtering variance: {len(atac_sub)} peaks, {len(rna_sub)} genes")
 
 # 5) Now compute correlations only among these subsets:
@@ -420,7 +448,7 @@ logging.info(sig_peak_to_peak_corr.head())
 logging.info(f'Number of significant peak to peak correlations: {sig_peak_to_peak_corr.shape[0]:,}')
 logging.info("\n-----------------------------------------\n")
 
-sig_peak_to_peak_corr.to_csv("sig_peak_to_peak_corr.csv")
+sig_peak_to_peak_corr.to_parquet(f"{TMP_DIR}/sig_peak_to_peak_corr.parquet", compression="gzip")
 
 logging.info("Calculating significant ATAC-seq peak-to-gene correlations")
 sig_peak_to_gene_corr = calculate_significant_peak_to_gene_correlations(atac_sub, rna_sub, alpha=0.05)
@@ -428,7 +456,7 @@ logging.info(sig_peak_to_gene_corr.head())
 logging.info(f'Number of significant peak to gene correlations: {sig_peak_to_gene_corr.shape[0]:,}')
 logging.info("\n-----------------------------------------\n")
 
-sig_peak_to_gene_corr.to_csv("sig_peak_to_gene_corr.csv")
+sig_peak_to_gene_corr.to_parquet(f"{TMP_DIR}/sig_peak_to_gene_corr.parquet", compression="gzip")
 
 # Only keep rows in merged_df where the peak_id is 
 logging.info("Subsetting merged_df to only contain peaks and genes with a significant correlation")
