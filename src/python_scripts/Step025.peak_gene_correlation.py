@@ -180,36 +180,6 @@ def load_ensembl_organism_tss(organism, tmp_dir):
     # Write the peak DataFrame to a file
     ensembl_df.to_csv(f"{tmp_dir}/ensembl.bed", sep="\t", header=False, index=False)
 
-def load_enhancer_database_file(enhancer_db_file, tmp_dir):
-    enhancer_db = pd.read_csv(enhancer_db_file, sep="\t", header=None, index_col=None)
-    enhancer_db = enhancer_db.rename(columns={
-        0 : "chr",
-        1 : "start",
-        2 : "end",
-        3 : "enhancer",
-        4 : "tissue",
-        5 : "R1_value",
-        6 : "R2_value",
-        7 : "R3_value",
-        8 : "score"
-    })
-    
-    # Remove the "chr" before chromosome number
-    enhancer_db["chr"] = enhancer_db["chr"].str.replace("^chr", "", regex=True)
-    
-    # Average the score of an enhancer across all tissues / cell types
-    enhancer_db = enhancer_db.groupby(["chr", "start", "end", "enhancer"], as_index=False)["score"].mean()
-
-    enhancer_db["chr"] = enhancer_db["chr"].astype(str)
-    enhancer_db["start"] = enhancer_db["start"].astype(int)
-    enhancer_db["end"] = enhancer_db["end"].astype(int)
-    enhancer_db["enhancer"] = enhancer_db["enhancer"].astype(str)
-    
-    enhancer_db = enhancer_db[["chr", "start", "end", "enhancer", "score"]]
-    
-    # Write the peak DataFrame to a file
-    enhancer_db.to_csv(f"{tmp_dir}/enhancer.bed", sep="\t", header=False, index=False)
-
 def find_genes_near_peaks(peak_bed, tss_bed, rna_df, peak_dist_limit):
     # 3) Find peaks that are within PEAK_DIST_LIMIT bp of each gene's TSS
     logging.info(f"Locating peaks that are within {peak_dist_limit} bp of each gene's TSS")
@@ -238,21 +208,6 @@ def find_genes_near_peaks(peak_bed, tss_bed, rna_df, peak_dist_limit):
     # logging.info("\n-----------------------------------------\n")
     
     return peak_tss_subset_df, gene_list
-
-def find_peaks_in_known_enhancer_region(peak_bed, enh_bed):
-    # 4) Find peaks that overlap with known enhancer locations from EnhancerDB
-    logging.info("Locating peaks that overlap with known enhancer locations from EnhancerDB")
-    peak_enh_overlap = peak_bed.intersect(enh_bed, wa=True, wb=True)
-    peak_enh_overlap_df = peak_enh_overlap.to_dataframe(
-        names=[
-            "peak_chr", "peak_start", "peak_end", "peak_id",
-            "enh_chr", "enh_start", "enh_end", "enh_id",
-            "enh_score"  # only if you had a score column in your enhancers
-        ]
-    ).dropna()
-    peak_enh_overlap_subset_df = peak_enh_overlap_df[["peak_id", "enh_id", "enh_score"]]
-        
-    return peak_enh_overlap_subset_df
 
 def row_normalize_sparse(X):
     """
@@ -364,7 +319,6 @@ def main():
     
     ATAC_DATA_FILE = args.atac_data_file
     RNA_DATA_FILE =  args.rna_data_file
-    ENHANCER_DB_FILE = args.enhancer_db_file
     OUTPUT_DIR = args.output_dir
     TMP_DIR = f"{OUTPUT_DIR}/tmp"
     NUM_CPU = int(args.num_cpu)
@@ -377,8 +331,6 @@ def main():
     logging.info("Loading the scRNA-seq dataset.")
     rna_df = pd.read_csv(RNA_DATA_FILE, sep=",", header=0, index_col=None)
     rna_df = rna_df.rename(columns={rna_df.columns[0]: "gene"})
-    # logging.info(rna_df.head())
-    # logging.info("\n-----------------------------------------\n")
 
     logging.info("Log2 CPM normalizing the RNA-seq data")
     rna_df = log2_cpm_normalize(rna_df)
@@ -386,16 +338,12 @@ def main():
     # Downcast the values from float64 to float16
     numeric_cols = rna_df.columns.drop("gene")
     rna_df[numeric_cols] = rna_df[numeric_cols].astype('float16')
-    # logging.info(rna_df.head())
-    # logging.info("\n-----------------------------------------\n")
 
     logging.info("Loading and parsing the ATAC-seq peaks")
     atac_df = load_atac_dataset(ATAC_DATA_FILE)
 
     logging.info("Log2 CPM normalizing the ATAC-seq data")
     atac_df = log2_cpm_normalize(atac_df)
-    # logging.info(atac_df.head())
-    # logging.info("\n-----------------------------------------\n")
 
     if not os.path.exists(f"{TMP_DIR}/peak_df.bed"):
         logging.info(f"Extracting peak information and saving as a bed file")
@@ -419,24 +367,8 @@ def main():
     # Dataframe with "peak_id", "gene_id" and "TSS_dist"
     peak_gene_df, gene_list = find_genes_near_peaks(peak_bed, tss_bed, rna_df, PEAK_DIST_LIMIT)
 
-    if ORGANISM == "hsapiens":
-        # ============ MAPPING PEAKS TO KNOWN ENHANCERS ============
-        # Dataframe with "peak_id", "enh_id", and "enh_score" columns
-        if not os.path.exists(f"{TMP_DIR}/enhancer.bed"):
-            logging.info("Loading known enhancer locations from EnhancerDB and saving as a bed file")
-            load_enhancer_database_file(ENHANCER_DB_FILE, TMP_DIR)
-        else:
-            logging.info("Enhancer BED file exists, loading...")
-        enh_bed = pybedtools.BedTool(f"{TMP_DIR}/enhancer.bed")
-        peak_enh_df = find_peaks_in_known_enhancer_region(peak_bed, enh_bed)
-
-        logging.info("Merging the peak to gene mapping with the known enhancer location mapping")
-        peak_gene_df = pd.merge(peak_gene_df, peak_enh_df, how="left", on="peak_id")
-
     logging.info("Subset the ATAC-seq DataFrame to only contain peak that are in range of the genes")
     atac_sub = atac_df[atac_df["peak_id"].isin(peak_gene_df["peak_id"])].set_index("peak_id")
-    # logging.info(atac_sub.head())
-    # logging.info("\n-----------------------------------------\n")
 
     # ============ PEAK TO GENE CORRELATION CALCULATION ============
     if not os.path.exists(f"{TMP_DIR}/sig_peak_to_gene_corr.parquet"):
@@ -448,48 +380,24 @@ def main():
         rna_sub  = filter_low_variance_features(rna_sub,  min_variance=0.5)
         atac_sub  = filter_low_variance_features(atac_sub,  min_variance=0.5)
         
-        logging.info(f'rna_sub:')
-        logging.info(rna_sub.head())
-        
-        logging.info(f'atac_sub:')
-        logging.info(atac_sub.head())
-        
         logging.info("Calculating significant ATAC-seq peak-to-gene correlations")
         sig_peak_to_gene_corr = calculate_significant_peak_to_gene_correlations(atac_sub, rna_sub, alpha=0.05, num_cpu=NUM_CPU)
         logging.info(sig_peak_to_gene_corr.head())
-        # logging.info(f'Number of significant peak to gene correlations: {sig_peak_to_gene_corr.shape[0]:,}')
-        # logging.info("\n-----------------------------------------\n")
 
         sig_peak_to_gene_corr.to_parquet(f"{TMP_DIR}/sig_peak_to_gene_corr.parquet")
     else:
         logging.info("sig_peak_to_gene_corr.parquet exists, loading")
         sig_peak_to_gene_corr = pd.read_parquet(f"{TMP_DIR}/sig_peak_to_gene_corr.parquet")
-        # logging.info(sig_peak_to_gene_corr.head())
-        # logging.info("\n-----------------------------------------\n")
-
-    def subset_by_highest_correlations(df, threshold=0.9):
-        
-        # Compute the correlation threshold corresponding to the top 10%
-        cutoff = df["correlation"].quantile(threshold)
-
-        # Filter to only keep rows with correlation greater than or equal to the threshold
-        top_10_df = df[df["correlation"] >= cutoff]
-        
-        return top_10_df
 
     quantile_threshold = 0.75
-    logging.info(f"Subsetting to only retain correlations in the top {quantile_threshold}")
-    top_peak_to_gene_corr = subset_by_highest_correlations(sig_peak_to_gene_corr, quantile_threshold)
+    logging.info(f"Subsetting to only retain correlations in the top {quantile_threshold} quantile")
+    cutoff = sig_peak_to_gene_corr["correlation"].quantile(quantile_threshold)
+    top_peak_to_gene_corr = sig_peak_to_gene_corr[sig_peak_to_gene_corr["correlation"] >= cutoff]
 
     # Merge the gene and enhancer df
     final_df = pd.merge(top_peak_to_gene_corr, peak_gene_df, how="inner", left_on=["peak", "gene"], right_on=["peak_id", "gene_id"]).dropna(subset="peak_id")
     
-    # EnhancerDB only has entries for human
-    if ORGANISM == "hsapiens":
-        final_df[["enh_score"]] = final_df[["enh_score"]].fillna(value=0)
-        final_df = final_df[["peak_id", "gene_id", "correlation", "TSS_dist", "enh_score"]]
-    else:
-        final_df = final_df[["peak_id", "gene_id", "correlation", "TSS_dist"]]
+    final_df = final_df[["peak_id", "gene_id", "correlation", "TSS_dist"]]
         
     logging.info(final_df.head())
     final_df.to_csv(f"{OUTPUT_DIR}/peak_to_gene_correlation.csv", sep="\t", header=True, index=False)

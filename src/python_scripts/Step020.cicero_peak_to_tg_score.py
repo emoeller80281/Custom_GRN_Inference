@@ -30,10 +30,10 @@ def parse_args() -> argparse.Namespace:
 
     return args
 
-def normalize_peak_to_peak_scores(df):
+def normalize_peak_to_peak_scores(df, colname):
     # Identify scores that are not 0 or 1
-    mask = (df['score'] != 0) & (df['score'] != 1)
-    filtered_scores = df.loc[mask, 'score']
+    mask = (df[colname] != 0) & (df[colname] != 1)
+    filtered_scores = df.loc[mask, colname]
 
     if not filtered_scores.empty:
         # Compute min and max of non-0/1 scores
@@ -43,17 +43,17 @@ def normalize_peak_to_peak_scores(df):
         # Handle edge case where all non-0/1 scores are the same
         if score_max == score_min:
             # Set all non-0/1 scores to 0 (or another default value)
-            score_normalized = np.where(mask, 0, df['score'])
+            score_normalized = np.where(mask, 0, df[colname])
         else:
             # Normalize non-0/1 scores and retain 0/1 values
             score_normalized = np.where(
                 mask,
-                (df['score'] - score_min) / (score_max - score_min),
-                df['score']
+                (df[colname] - score_min) / (score_max - score_min),
+                df[colname]
             )
     else:
         # All scores are 0 or 1; no normalization needed
-        score_normalized = df['score']
+        score_normalized = df[colname]
     
     return score_normalized
 
@@ -105,21 +105,21 @@ def main():
 
     # Only keep Peak2 rows, as Peak1 contains promoter peaks and can have duplicates, but Peak2 does not.
     # As we set Peak2 for the peak_to_gene rows, we retain the peaks in the promoters
-    merged_with_promoter_genes = merged_with_promoter_genes.rename(columns={"Peak2": "peak"})
-    merged_with_promoter_genes = merged_with_promoter_genes[["peak","score","gene"]]
+    merged_with_promoter_genes = merged_with_promoter_genes.rename(columns={"Peak2": "peak_id", "gene": "gene_id", "score": "cicero_score"})
+    merged_with_promoter_genes = merged_with_promoter_genes[["peak_id","gene_id","cicero_score"]]
     
     # Normalize the Cicero scores to be between 0-1
-    merged_with_promoter_genes["score"] = normalize_peak_to_peak_scores(merged_with_promoter_genes)
+    merged_with_promoter_genes["cicero_score"] = normalize_peak_to_peak_scores(merged_with_promoter_genes, "cicero_score")
     
     # Format the peaks to chr:start-stop rather than chr_start_stop to match the ATACseq peaks
-    merged_with_promoter_genes["peak"] = merged_with_promoter_genes["peak"].str.replace("_", "-")
-    merged_with_promoter_genes["peak"] = merged_with_promoter_genes["peak"].str.replace("-", ":", 1)
+    merged_with_promoter_genes["peak_id"] = merged_with_promoter_genes["peak_id"].str.replace("_", "-")
+    merged_with_promoter_genes["peak_id"] = merged_with_promoter_genes["peak_id"].str.replace("-", ":", 1)
 
     # Write the final merged peaks to a csv file
-    merged_with_promoter_genes.to_csv(f"{output_dir}/peak_to_tg_scores.csv", header=True, index=False, sep="\t")
+    merged_with_promoter_genes.to_csv(f"{output_dir}/cicero_peak_to_tg_scores.csv", header=True, index=False, sep="\t")
 
     # Plot the non-normalized peak scores as a histogram
-    plot_normalized_peak_to_tg_scores(merged_with_promoter_genes['score'], fig_dir)
+    plot_normalized_peak_to_tg_scores(merged_with_promoter_genes['cicero_score'], fig_dir)
     
 if __name__ == "__main__":
     # Configure logging

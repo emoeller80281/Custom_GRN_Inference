@@ -421,7 +421,6 @@ run_correlation_peak_to_tg_score() {
     python3 "$PYTHON_SCRIPT_DIR/Step025.peak_gene_correlation.py" \
         --atac_data_file "$ATAC_FILE_NAME" \
         --rna_data_file "$RNA_FILE_NAME" \
-        --enhancer_db_file "$ENHANCERDB_FILE" \
         --tmp_dir "$OUTPUT_DIR/tmp" \
         --output_dir "$OUTPUT_DIR" \
         --species "$SPECIES" \
