@@ -355,19 +355,19 @@ def main():
     # Parse arguments
     args: argparse.Namespace = parse_args()
     
-    if args.species == "human" | "hg38":
+    if args.species == "hg38":
         ORGANISM = "hsapiens"
-    elif args.species == "mouse" | "mm10":
+    elif args.species == "mm10":
         ORGANISM = "mmusculus"
     else:
-        raise Exception(f'Organism not found, you entered {args.species} (must be one of: "human", "hg38", "mouse", or "mm10")')
+        raise Exception(f'Organism not found, you entered {args.species} (must be one of: "hg38", "mm10")')
     
     ATAC_DATA_FILE = args.atac_data_file
     RNA_DATA_FILE =  args.rna_data_file
     ENHANCER_DB_FILE = args.enhancer_db_file
     OUTPUT_DIR = args.output_dir
     TMP_DIR = f"{OUTPUT_DIR}/tmp"
-    NUM_CPU = args.num_cpu
+    NUM_CPU = int(args.num_cpu)
     PEAK_DIST_LIMIT=args.peak_dist_limit
     
     # Make the tmp dir if it does not exist
@@ -434,7 +434,7 @@ def main():
         peak_gene_df = pd.merge(peak_gene_df, peak_enh_df, how="left", on="peak_id")
 
     logging.info("Subset the ATAC-seq DataFrame to only contain peak that are in range of the genes")
-    atac_sub = atac_df[atac_df["peak_id"].isin(peak_gene_df["peak_id"])]
+    atac_sub = atac_df[atac_df["peak_id"].isin(peak_gene_df["peak_id"])].set_index("peak_id")
     # logging.info(atac_sub.head())
     # logging.info("\n-----------------------------------------\n")
 
@@ -447,6 +447,12 @@ def main():
         logging.info("Filtering out genes and peaks with low variance")
         rna_sub  = filter_low_variance_features(rna_sub,  min_variance=0.5)
         atac_sub  = filter_low_variance_features(atac_sub,  min_variance=0.5)
+        
+        logging.info(f'rna_sub:')
+        logging.info(rna_sub.head())
+        
+        logging.info(f'atac_sub:')
+        logging.info(atac_sub.head())
         
         logging.info("Calculating significant ATAC-seq peak-to-gene correlations")
         sig_peak_to_gene_corr = calculate_significant_peak_to_gene_correlations(atac_sub, rna_sub, alpha=0.05, num_cpu=NUM_CPU)
@@ -486,7 +492,7 @@ def main():
         final_df = final_df[["peak_id", "gene_id", "correlation", "TSS_dist"]]
         
     logging.info(final_df.head())
-    final_df.to_csv("peak_to_gene_correlation.csv", sep="\t", header=True, index=False)
+    final_df.to_csv(f"{OUTPUT_DIR}/peak_to_gene_correlation.csv", sep="\t", header=True, index=False)
     logging.info("\n-----------------------------------------\n")
     
 if __name__ == "__main__":

@@ -12,11 +12,11 @@ set -euo pipefail
 # =============================================
 STEP010_CICERO_MAP_PEAKS_TO_TG=false
 STEP020_CICERO_PEAK_TO_TG_SCORE=false
-STEP025_PEAK_TO_TG_CORRELATION=false
-STEP030_SLIDING_WINDOW_TF_TO_PEAK_SCORE=false
-STEP035_HOMER_TF_TO_PEAK_SCORE=false
-STEP040_TF_TO_TG_SCORE=true
-STEP050_TRAIN_RANDOM_FOREST=true
+STEP025_PEAK_TO_TG_CORRELATION=true
+STEP030_SLIDING_WINDOW_TF_TO_PEAK_SCORE=true
+STEP035_HOMER_TF_TO_PEAK_SCORE=true
+STEP040_TF_TO_TG_SCORE=false
+STEP050_TRAIN_RANDOM_FOREST=false
 
 # =============================================
 # USER PATH VARIABLES
@@ -343,7 +343,7 @@ install_homer_species_genome() {
     perl "$BASE_DIR/homer/configureHomer.pl" -install "$SPECIES"
 }
 
-create_homer_motif_file() {
+create_homer_peak_file() {
 
     echo "Creating Homer motif file"
     /usr/bin/time -v \
@@ -422,6 +422,7 @@ run_correlation_peak_to_tg_score() {
         --atac_data_file "$ATAC_FILE_NAME" \
         --rna_data_file "$RNA_FILE_NAME" \
         --enhancer_db_file "$ENHANCERDB_FILE" \
+        --tmp_dir "$OUTPUT_DIR/tmp" \
         --output_dir "$OUTPUT_DIR" \
         --species "$SPECIES" \
         --num_cpu "$NUM_CPU" \
@@ -447,6 +448,7 @@ run_homer() {
 
     # If the homer_results directory doesn't exist for the sample, run findMotifsGenome
     if [ ! -d "$OUTPUT_DIR/homer_results/" ]; then
+        create_homer_peak_file
         homer_find_motifs
     else
         echo "Homer results exist for the sample"
