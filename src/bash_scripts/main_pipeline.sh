@@ -47,8 +47,11 @@ FIG_DIR="$BASE_DIR/figures/$SPECIES/$SAMPLE_NAME"
 mkdir -p "${FIG_DIR}"
 LOG_DIR="${BASE_DIR}/LOGS/${CELL_TYPE}_logs/${SAMPLE_NAME}_logs/"
 
-if [ "$SPECIES" == "human" ]; then $SPECIES == "hg38"; fi
-if [ "$SPECIES" == "mouse" ]; then $SPECIES == "mm10"; fi
+if [ "$SPECIES" == "human" ]; then
+    SPECIES="hg38"
+elif [ "$SPECIES" == "mouse" ]; then
+    SPECIES="mm10"
+fi
 
 echo "Input files:"
 echo "    RNA Data File: $RNA_FILE_NAME"
@@ -345,7 +348,7 @@ create_homer_motif_file() {
     echo "Creating Homer motif file"
     /usr/bin/time -v \
     python3 "$PYTHON_SCRIPT_DIR/create_homer_peak_file.py" \
-        --atac_data_file "$ATAC_DATA_FILE" \
+        --atac_data_file "$ATAC_FILE_NAME" \
         --output_dir "$OUTPUT_DIR"
 }
 
@@ -405,6 +408,13 @@ run_cicero_peak_to_tg_score() {
 } 2> "$LOG_DIR/Step020.cicero_peak_to_tg_score.log"
 
 run_correlation_peak_to_tg_score() {
+    if [ ! -f $ENHANCERDB_FILE ]; then
+        echo "EnhancerDB file not found, downloading..."
+        mkdir -p "$BASE_DIR/enhancer_db"
+        wget "https://lcbb.swjtu.edu.cn/EnhancerDB/_download/enhancer.gz" -P "$BASE_DIR/enhancer_db/"
+        gunzip "$BASE_DIR/enhancer_db/enhancer.gz"
+    fi
+
     echo ""
     echo "Python: Calculating correlation peak to TG score"
     /usr/bin/time -v \
@@ -414,7 +424,8 @@ run_correlation_peak_to_tg_score() {
         --enhancer_db_file "$ENHANCERDB_FILE" \
         --output_dir "$OUTPUT_DIR" \
         --species "$SPECIES" \
-        --num_cpu "$NUM_CPU" 
+        --num_cpu "$NUM_CPU" \
+        --peak_dist_limit 1000000
 
 } 2> "$LOG_DIR/Step025.peak_to_gene_correlation.log"
 
@@ -427,7 +438,7 @@ run_homer() {
     fi
     
     # Check if the species Homer genome is installed
-    if perl ./homer/configureHomer.pl -list | grep -q "^+.*${SPECIES}"; then
+    if perl "$BASE_DIR/homer/configureHomer.pl" -list | grep -q "^+.*${SPECIES}"; then
         echo "${SPECIES} genome is installed"
     else
         echo "${SPECIES} genome is not installed"
@@ -518,6 +529,7 @@ setup_directories
 # Execute selected pipeline steps
 if [ "$STEP010_CICERO_MAP_PEAKS_TO_TG" = true ]; then run_cicero; fi
 if [ "$STEP020_CICERO_PEAK_TO_TG_SCORE" = true ]; then run_cicero_peak_to_tg_score; fi
+if [ "$STEP025_PEAK_TO_TG_CORRELATION" = true ]; then run_correlation_peak_to_tg_score; fi
 if [ "$STEP030_SLIDING_WINDOW_TF_TO_PEAK_SCORE" = true ]; then run_sliding_window_tf_to_peak_score; fi
 if [ "$STEP035_HOMER_TF_TO_PEAK_SCORE" = true ]; then run_homer; run_homer_tf_to_peak_score; fi
 if [ "$STEP040_TF_TO_TG_SCORE" = true ]; then run_tf_to_tg_score; fi
