@@ -12,7 +12,9 @@ set -euo pipefail
 # =============================================
 STEP010_CICERO_MAP_PEAKS_TO_TG=false
 STEP020_CICERO_PEAK_TO_TG_SCORE=false
-STEP030_TF_TO_PEAK_SCORE=false
+STEP025_PEAK_TO_TG_CORRELATION=false
+STEP030_SLIDING_WINDOW_TF_TO_PEAK_SCORE=false
+STEP035_HOMER_TF_TO_PEAK_SCORE=false
 STEP040_TF_TO_TG_SCORE=true
 STEP050_TRAIN_RANDOM_FOREST=true
 
@@ -33,7 +35,7 @@ PYTHON_SCRIPT_DIR="$BASE_DIR/src/python_scripts"
 R_SCRIPT_DIR="$BASE_DIR/src/r_scripts"
 OUTPUT_DIR="$BASE_DIR/output/$CELL_TYPE/$SAMPLE_NAME"
 REFERENCE_GENOME_DIR="$BASE_DIR/reference_genome/$SPECIES"
-
+ENHANCERDB_FILE="$BASE_DIR/enhancer_db/enhancer"
 
 TF_NAMES_FILE="$BASE_DIR/motif_information/$SPECIES/TF_Information_all_motifs.txt"
 MEME_DIR="$BASE_DIR/motif_information/$SPECIES/${SPECIES}_motif_meme_files"
@@ -117,7 +119,9 @@ validate_critical_variables
 check_pipeline_steps() {
     if ! $STEP010_CICERO_MAP_PEAKS_TO_TG \
     && ! $STEP020_CICERO_PEAK_TO_TG_SCORE \
-    && ! $STEP030_TF_TO_PEAK_SCORE \
+    && ! $STEP025_PEAK_TO_TG_CORRELATION \
+    && ! $STEP030_SLIDING_WINDOW_TF_TO_PEAK_SCORE \
+    && ! $STEP035_HOMER_TF_TO_PEAK_SCORE \
     && ! $STEP040_TF_TO_TG_SCORE \
     && ! $STEP050_TRAIN_RANDOM_FOREST; then \
         echo "Error: At least one process must be enabled to run the pipeline."
@@ -322,6 +326,34 @@ check_cicero_genome_files_exist() {
     download_file_if_missing "$GENE_ANNOT" "$GENE_ANNOT_URL" "$SPECIES gene annotation file"
 }
 
+install_homer() {
+    echo "    Installing Homer..."
+    mkdir -p "$BASE_DIR/homer"
+    wget "http://homer.ucsd.edu/homer/configureHomer.pl" -P "$BASE_DIR/homer"
+    perl "$BASE_DIR/homer/configureHomer.pl" -install
+    PATH="$PATH:$BASE_DIR/homer/bin"
+    export PATH
+}
+
+install_homer_species_genome() {
+    echo "    Installing Homer $SPECIES genome..."
+    perl "$BASE_DIR/homer/configureHomer.pl" -install "$SPECIES"
+}
+
+create_homer_motif_file() {
+
+    echo "Creating Homer motif file"
+    /usr/bin/time -v \
+    python3 "$PYTHON_SCRIPT_DIR/create_homer_peak_file.py" \
+        --atac_data_file "$ATAC_DATA_FILE" \
+        --output_dir "$OUTPUT_DIR"
+}
+
+homer_find_motifs() {
+    mkdir -p "$OUTPUT_DIR/homer_results"
+    perl "$BASE_DIR/homer/bin/findMotifsGenome.pl" "$OUTPUT_DIR/homer_peaks.txt" "$SPECIES" "$OUTPUT_DIR/homer_results/" -size 200
+}
+
 # -------------- MAIN PIPELINE FUNCTIONS --------------
 run_cicero() {
     echo ""
@@ -360,7 +392,6 @@ run_cicero() {
     module unload rstudio
     activate_conda_env
 
-    
 } 2> "$LOG_DIR/Step010.run_cicero.log"
 
 run_cicero_peak_to_tg_score() {
@@ -373,7 +404,56 @@ run_cicero_peak_to_tg_score() {
     
 } 2> "$LOG_DIR/Step020.cicero_peak_to_tg_score.log"
 
-run_tf_to_peak_score() {
+run_correlation_peak_to_tg_score() {
+    echo ""
+    echo "Python: Calculating correlation peak to TG score"
+    /usr/bin/time -v \
+    python3 "$PYTHON_SCRIPT_DIR/Step025.peak_gene_correlation.py" \
+        --atac_data_file "$ATAC_FILE_NAME" \
+        --rna_data_file "$RNA_FILE_NAME" \
+        --enhancer_db_file "$ENHANCERDB_FILE" \
+        --output_dir "$OUTPUT_DIR" \
+        --species "$SPECIES" \
+        --num_cpu "$NUM_CPU" 
+
+} 2> "$LOG_DIR/Step025.peak_to_gene_correlation.log"
+
+run_homer() {
+    # Check to make sure Homer is installed, else install it
+    if [ ! -d "$BASE_DIR/homer" ]; then
+        echo ""
+        echo "Homer installation not found"
+        install_homer
+    fi
+    
+    # Check if the species Homer genome is installed
+    if perl ./homer/configureHomer.pl -list | grep -q "^+.*${SPECIES}"; then
+        echo "${SPECIES} genome is installed"
+    else
+        echo "${SPECIES} genome is not installed"
+        install_homer_species_genome
+    fi
+
+    # If the homer_results directory doesn't exist for the sample, run findMotifsGenome
+    if [ ! -d "$OUTPUT_DIR/homer_results/" ]; then
+        homer_find_motifs
+    else
+        echo "Homer results exist for the sample"
+    fi
+} 2> "$LOG_DIR/Homer.log"
+
+run_homer_tf_to_peak_score() {
+    echo ""
+    echo "Python: Calculating correlation peak to TG score"
+    /usr/bin/time -v \
+    python3 src/python_scripts/parse_TF_peak_motifs.py \
+        --input_dir "${INPUT_DIR}/homer_tf_motif_scores" \
+        --output_file "${OUTPUT_DIR}/total_motif_regulatory_scores.tsv" \
+        --cpu_count $NUM_CPU
+
+} 2> "$LOG_DIR/Step030.tf_to_peak_score.log"
+
+run_sliding_window_tf_to_peak_score() {
     echo ""
     echo "Python: Calculating TF to peak scores"
     /usr/bin/time -v \
@@ -438,6 +518,7 @@ setup_directories
 # Execute selected pipeline steps
 if [ "$STEP010_CICERO_MAP_PEAKS_TO_TG" = true ]; then run_cicero; fi
 if [ "$STEP020_CICERO_PEAK_TO_TG_SCORE" = true ]; then run_cicero_peak_to_tg_score; fi
-if [ "$STEP030_TF_TO_PEAK_SCORE" = true ]; then run_tf_to_peak_score; fi
+if [ "$STEP030_SLIDING_WINDOW_TF_TO_PEAK_SCORE" = true ]; then run_sliding_window_tf_to_peak_score; fi
+if [ "$STEP035_HOMER_TF_TO_PEAK_SCORE" = true ]; then run_homer; run_homer_tf_to_peak_score; fi
 if [ "$STEP040_TF_TO_TG_SCORE" = true ]; then run_tf_to_tg_score; fi
 if [ "$STEP050_TRAIN_RANDOM_FOREST" = true ]; then run_random_forest_training; fi
