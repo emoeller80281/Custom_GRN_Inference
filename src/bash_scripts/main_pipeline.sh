@@ -15,8 +15,8 @@ STEP020_CICERO_PEAK_TO_TG_SCORE=false
 STEP025_PEAK_TO_TG_CORRELATION=false
 STEP030_SLIDING_WINDOW_TF_TO_PEAK_SCORE=false
 STEP035_HOMER_TF_TO_PEAK_SCORE=false
-STEP040_TF_TO_TG_SCORE=true
-STEP050_TRAIN_RANDOM_FOREST=false
+STEP040_TF_TO_TG_SCORE=false
+STEP050_TRAIN_CLASSIFIER=true
 
 # =============================================
 # USER PATH VARIABLES
@@ -123,7 +123,7 @@ check_pipeline_steps() {
     && ! $STEP030_SLIDING_WINDOW_TF_TO_PEAK_SCORE \
     && ! $STEP035_HOMER_TF_TO_PEAK_SCORE \
     && ! $STEP040_TF_TO_TG_SCORE \
-    && ! $STEP050_TRAIN_RANDOM_FOREST; then \
+    && ! $STEP050_TRAIN_CLASSIFIER; then \
         echo "Error: At least one process must be enabled to run the pipeline."
         exit 1
     fi
@@ -343,8 +343,6 @@ run_dataset_preprocessing() {
     ATAC_FILE_NAME="$new_atac_file"
     RNA_FILE_NAME="$new_rna_file"
     
-    echo "Updated ATAC file: $ATAC_FILE_NAME"
-    echo "Updated RNA file: $RNA_FILE_NAME"
 } 2> "$LOG_DIR/dataset_preprocessing.log"
 
 check_processed_files() {
@@ -620,16 +618,16 @@ run_tf_to_tg_score() {
     
 } 2> "$LOG_DIR/Step040.tf_to_tg_score.log"
 
-run_random_forest_training() {
+run_classifier_training() {
     echo ""
-    echo "Python: Training Random Forest"
+    echo "Python: Training XGBoost Classifier"
     /usr/bin/time -v \
-    python3 "$PYTHON_SCRIPT_DIR/Step050.train_random_forest.py" \
+    python3 "$PYTHON_SCRIPT_DIR/Step050.train_xgboost.py" \
         --ground_truth_file "$GROUND_TRUTH_FILE" \
         --output_dir "$OUTPUT_DIR" \
         --fig_dir "$FIG_DIR" 
 
-} 2> "$LOG_DIR/Step050.train_random_forest.log"
+} 2> "$LOG_DIR/Step050.train_classifier.log"
 
 
 # =============================================
@@ -661,4 +659,4 @@ if [ "$STEP025_PEAK_TO_TG_CORRELATION" = true ]; then run_correlation_peak_to_tg
 if [ "$STEP030_SLIDING_WINDOW_TF_TO_PEAK_SCORE" = true ]; then run_sliding_window_tf_to_peak_score; fi
 if [ "$STEP035_HOMER_TF_TO_PEAK_SCORE" = true ]; then run_homer; run_homer_tf_to_peak_score; fi
 if [ "$STEP040_TF_TO_TG_SCORE" = true ]; then run_tf_to_tg_score; fi
-if [ "$STEP050_TRAIN_RANDOM_FOREST" = true ]; then run_random_forest_training; fi
+if [ "$STEP050_TRAIN_CLASSIFIER" = true ]; then run_classifier_training; fi

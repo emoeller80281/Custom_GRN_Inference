@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 import argparse
 import logging
+import os
 
 def parse_args() -> argparse.Namespace:
     """
@@ -69,17 +70,30 @@ def load_rna_dataset(rna_data_file: str) -> pd.DataFrame:
     return rna_df
 
 def main(atac_data_file, rna_data_file):
+    logging.info("Loading ATACseq dataset")
     atac_df = load_atac_dataset(atac_data_file)
+    
+    logging.info("Loading RNAseq dataset")
     rna_df = load_rna_dataset(rna_data_file)
     
+    logging.info("Log2 CPM normalizing the datasets")
     atac_df_norm = log2_cpm_normalize(atac_df)
     rna_df_norm = log2_cpm_normalize(rna_df)
     
+    logging.info("Updating filenames and saving processed datasets")
     def update_name(filename):
-        return filename.split["."][0] + "_processed.csv"
+        base, ext = os.path.splitext(filename)
+        return f"{base}_processed.csv"
     
-    atac_df_norm.to_csv(update_name(atac_data_file), sep=",", header=True, index=False)
-    rna_df_norm.to_csv(update_name(rna_data_file), sep=",", header=True, index=False)
+    new_atac_file = update_name(atac_data_file)
+    new_rna_file = update_name(rna_data_file)
+    
+    print(f"Updated ATAC file: {new_atac_file}")
+    print(f"Updated RNA file: {new_rna_file}")
+    
+    atac_df_norm.to_csv(new_atac_file, sep=",", header=True, index=False)
+    rna_df_norm.to_csv(new_rna_file, sep=",", header=True, index=False)
+    logging.info("Done!")
 
 
 if __name__ == "__main__":

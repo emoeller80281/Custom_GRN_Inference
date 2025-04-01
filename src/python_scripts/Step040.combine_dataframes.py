@@ -4,8 +4,6 @@ import matplotlib.pyplot as plt
 import argparse
 import logging
 
-
-
 def parse_args() -> argparse.Namespace:
     """
     Parses command-line arguments.
@@ -32,6 +30,12 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="Path to the output directory for the sample"
     )
+    parser.add_argument(
+        "--fig_dir",
+        type=str,
+        required=True,
+        help="Path to the figure directory for the sample"
+    )
 
     args: argparse.Namespace = parser.parse_args()
     return args
@@ -48,7 +52,7 @@ def plot_column_histograms(df, fig_dir):
 
     # Loop through each feature and create a subplot
     for i, col in enumerate(cols, 1):
-        plt.subplot(2, 4, i)  # 2 rows, 4 columns, index = i
+        plt.subplot(3, 4, i)  # 2 rows, 4 columns, index = i
         plt.hist(df[col], bins=50, alpha=0.7, edgecolor='black')
         plt.title(f"{col} distribution")
         plt.xlabel(col)
@@ -81,49 +85,49 @@ def main(atac_data_file, rna_data_file, output_dir, fig_dir):
     atac_df = pd.read_csv(atac_data_file, header=0)
     atac_df['mean_peak_accessibility'] = atac_df.iloc[:, 1:].mean(axis=1)
     atac_df = atac_df[['peak_id', 'mean_peak_accessibility']]
-    logging.info("Done!")
-    logging.info("\n---------------------------\n")
+    logging.debug("Done!")
+    logging.debug("\n---------------------------\n")
 
-    logging.info(" ============== Merging DataFrames ==============")
+    logging.info("\n ============== Merging DataFrames ==============")
     logging.info("Combining the sliding window and Homer TF to peak binding scores")
     tf_to_peak_df = pd.merge(sliding_window_df, homer_df, on=["peak_id", "source_id"], how="outer")
-    logging.info("tf_to_peak_df")
-    logging.info(tf_to_peak_df.head())
-    logging.info(tf_to_peak_df.columns)
-    logging.info("\n---------------------------\n")
+    logging.debug("tf_to_peak_df")
+    logging.debug(tf_to_peak_df.head())
+    logging.debug(tf_to_peak_df.columns)
+    logging.debug("\n---------------------------\n")
 
-    logging.info("Adding RNA expression info to the TF to peak binding DataFrame")
+    logging.info("\t - Adding mean RNA expression to the TF to peak binding DataFrame")
     tf_expr_to_peak_df = pd.merge(rna_df, tf_to_peak_df, left_on="gene_id", right_on="source_id", how="outer").drop("gene_id", axis=1)
     tf_expr_to_peak_df = tf_expr_to_peak_df.rename(columns={"mean_gene_expression": "mean_TF_expression"})
-    logging.info("tf_expr_to_peak_df")
-    logging.info(tf_expr_to_peak_df.head())
-    logging.info(tf_expr_to_peak_df.columns)
-    logging.info("\n---------------------------\n")
+    logging.debug("tf_expr_to_peak_df")
+    logging.debug(tf_expr_to_peak_df.head())
+    logging.debug(tf_expr_to_peak_df.columns)
+    logging.debug("\n---------------------------\n")
 
     logging.info("Merging the correlation and cicero methods for peak to target gene")
     peak_to_tg_df = pd.merge(peak_corr_df, cicero_df, on=["peak_id", "target_id"], how="outer")
-    logging.info("peak_to_tg_df")
-    logging.info(peak_to_tg_df.head())
-    logging.info(peak_to_tg_df.columns)
-    logging.info("\n---------------------------\n")
+    logging.debug("peak_to_tg_df")
+    logging.debug(peak_to_tg_df.head())
+    logging.debug(peak_to_tg_df.columns)
+    logging.debug("\n---------------------------\n")
 
-    logging.info("Adding RNA expression info to the peak to TF DataFrame")
+    logging.info("\t - Adding mean RNA expression to the peak to TF DataFrame")
     peak_to_tg_expr_df = pd.merge(rna_df, peak_to_tg_df, left_on="gene_id", right_on="target_id", how="left").drop("gene_id", axis=1)
     peak_to_tg_expr_df = peak_to_tg_expr_df.rename(columns={"mean_gene_expression": "mean_TG_expression"})
     logging.info("peak_to_tg_expr_df")
-    logging.info(peak_to_tg_expr_df.head())
-    logging.info(peak_to_tg_expr_df.columns)
-    logging.info("\n---------------------------\n")
+    logging.debug(peak_to_tg_expr_df.head())
+    logging.debug(peak_to_tg_expr_df.columns)
+    logging.debug("\n---------------------------\n")
 
     logging.info("Merging the peak to target gene scores with the sliding window TF to peak scores")
     # For the sliding window genes, change their name to "source_id" to represent that these genes are TFs
     tf_to_tg_score_df = pd.merge(tf_expr_to_peak_df, peak_to_tg_expr_df, on=["peak_id"], how="outer")
     logging.info("tf_to_tg_score_df")
-    logging.info(tf_to_tg_score_df.head())
-    logging.info(tf_to_tg_score_df.columns)
-    logging.info("\n---------------------------\n")
+    logging.debug(tf_to_tg_score_df.head())
+    logging.debug(tf_to_tg_score_df.columns)
+    logging.debug("\n---------------------------\n")
 
-    logging.info("Merging in the ATACseq peak accessibility values")
+    logging.info("\tAdding the mean ATAC-seq peak accessibility values")
     final_df = pd.merge(atac_df, tf_to_tg_score_df, on="peak_id", how="left")
 
     # Drop columns that dont have all three of the peak, target, and source names
@@ -132,18 +136,18 @@ def main(atac_data_file, rna_data_file, output_dir, fig_dir):
         "target_id",
         "source_id",
         ])
-    logging.info("expr_atac_df")
-    logging.info(final_df.head())
-    logging.info(final_df.columns)
-    logging.info("\n---------------------------\n")
+    logging.debug("final_df")
+    logging.debug(final_df.head())
+    logging.debug(final_df.columns)
+    logging.debug("\n---------------------------\n")
 
     logging.info("Minmax normalizing all data columns to be between 0-1")
     numeric_cols = final_df.select_dtypes(include=np.number).columns.tolist()
     full_merged_df_norm: pd.DataFrame = final_df[numeric_cols].apply(lambda x: minmax_normalize_column(x),axis=0)
     full_merged_df_norm[["peak_id", "target_id", "source_id"]] = final_df[["peak_id", "target_id", "source_id"]]
 
-    # Replace NaN values with 0 for the scores
-    full_merged_df_norm = full_merged_df_norm.fillna(0)
+    # # Replace NaN values with 0 for the scores
+    # full_merged_df_norm = full_merged_df_norm.fillna(0)
 
     # Set the desired column order
     column_order = [
@@ -165,9 +169,12 @@ def main(atac_data_file, rna_data_file, output_dir, fig_dir):
     logging.info(full_merged_df_norm.columns)
 
     logging.info("Writing the final dataframe as 'inferred_network_score_df.csv'")
-    full_merged_df_norm.to_csv(f'{output_dir}/inferred_network_score_df.csv', sep="\t", header=True, index=None)
+    full_merged_df_norm.to_csv(f'{output_dir}/inferred_network_raw.csv', sep=",", header=True, index=False)
 
+    logging.info("Plotting histograms of the data columns")
     plot_column_histograms(full_merged_df_norm, fig_dir)
+    
+    logging.info("Done!")
 
 if __name__ == "__main__":
     # Configure logging

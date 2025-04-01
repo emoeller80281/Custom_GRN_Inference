@@ -34,3 +34,4 @@ Hi-C_data/
 .pybiomart.sqlite
 enhancer_db/
 tmp/
+*.bed
