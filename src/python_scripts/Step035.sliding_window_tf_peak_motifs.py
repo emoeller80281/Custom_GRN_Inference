@@ -170,7 +170,7 @@ def associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, rna_dat
     logging.info(f'Number of peaks: {chr_pos_to_seq.shape[0]}')
     
     tf_to_peak_score_df = pd.DataFrame()
-    tf_to_peak_score_df["peak"] = chr_pos_to_seq.apply(
+    tf_to_peak_score_df["peak_id"] = chr_pos_to_seq.apply(
         lambda row: f'{row["chr"]}:{row["start"]}-{row["end"]}', axis=1
     )
     
@@ -340,7 +340,7 @@ def main():
     logging.info("Reading in parsed Cicero peak to TG file to find associated peaks")
     cicero_peak_file = f"{output_dir}/peak_to_tg_scores.csv"
     cicero_peaks = pd.read_csv(cicero_peak_file, sep="\t", header=0, index_col=None)
-    cicero_peak_names = cicero_peaks["peak"].to_list()
+    cicero_peak_names = cicero_peaks["peak_id"].to_list()
     logging.info(f'{len(cicero_peak_names)} Cicero peaks')
     
     
@@ -372,8 +372,18 @@ def main():
         
     # Associate the TFs from TF_Information_all_motifs.txt to the motif with the matching motifID
     tf_to_peak_score_df = associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, rna_data_genes, species, num_cpu)
-        
-    tf_to_peak_score_df.to_csv(f'{output_dir}/tf_to_peak_binding_score.tsv', sep='\t', header=True, index=False)
+    
+    # Melt the wide-format dataframe to a three column long format, matching the other output files
+    tf_to_peak_score_df = pd.melt(
+        frame=tf_to_peak_score_df,
+        id_vars="peak",
+        value_vars=tf_to_peak_score_df.columns[1:],
+        var_name="gene_id",
+        value_name="sliding_window_score"
+        )
+
+    
+    tf_to_peak_score_df.to_csv(f'{output_dir}/sliding_window_tf_to_peak_score.tsv', sep='\t', header=True, index=False)
         
 if __name__ == "__main__":
     # Configure logging

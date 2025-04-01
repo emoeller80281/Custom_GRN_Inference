@@ -12,8 +12,8 @@ set -euo pipefail
 # =============================================
 STEP010_CICERO_MAP_PEAKS_TO_TG=false
 STEP020_CICERO_PEAK_TO_TG_SCORE=false
-STEP025_PEAK_TO_TG_CORRELATION=true
-STEP030_SLIDING_WINDOW_TF_TO_PEAK_SCORE=true
+STEP025_PEAK_TO_TG_CORRELATION=false
+STEP030_SLIDING_WINDOW_TF_TO_PEAK_SCORE=false
 STEP035_HOMER_TF_TO_PEAK_SCORE=true
 STEP040_TF_TO_TG_SCORE=false
 STEP050_TRAIN_RANDOM_FOREST=false
@@ -60,9 +60,6 @@ echo "    Cell Type: $CELL_TYPE"
 echo "    Sample: $SAMPLE_NAME"
 echo "    Species: $SPECIES"
 echo ""
-
-# # Set output and error files dynamically
-# exec > "${LOG_DIR}/main_pipeline.log" 2> "${LOG_DIR}/main_pipeline.err"
 
 # =============================================
 # FUNCTIONS
@@ -329,33 +326,98 @@ check_cicero_genome_files_exist() {
     download_file_if_missing "$GENE_ANNOT" "$GENE_ANNOT_URL" "$SPECIES gene annotation file"
 }
 
+# -------------- HOMER FUNCTIONS --------------
 install_homer() {
-    echo "    Installing Homer..."
+    echo "Installing Homer..."
     mkdir -p "$BASE_DIR/homer"
     wget "http://homer.ucsd.edu/homer/configureHomer.pl" -P "$BASE_DIR/homer"
     perl "$BASE_DIR/homer/configureHomer.pl" -install
-    PATH="$PATH:$BASE_DIR/homer/bin"
-    export PATH
-}
+    echo "    Done!"
+} 2> "$LOG_DIR/Homer_logs/01.install_homer.log"
 
 install_homer_species_genome() {
-    echo "    Installing Homer $SPECIES genome..."
+    echo "Installing Homer $SPECIES genome..."
     perl "$BASE_DIR/homer/configureHomer.pl" -install "$SPECIES"
-}
+    echo "    Done!"
+} 2> "$LOG_DIR/Homer_logs/02.install_homer_species.log"
 
 create_homer_peak_file() {
-
-    echo "Creating Homer motif file"
+    echo "Creating Homer motif file from ATAC-seq peaks"
     /usr/bin/time -v \
     python3 "$PYTHON_SCRIPT_DIR/create_homer_peak_file.py" \
         --atac_data_file "$ATAC_FILE_NAME" \
         --output_dir "$OUTPUT_DIR"
-}
+    echo "    Done!"
+} 2> "$LOG_DIR/Homer_logs/03.create_homer_peak_file.log"
 
 homer_find_motifs() {
+    echo "Running Homer findMotifsGenome"
     mkdir -p "$OUTPUT_DIR/homer_results"
     perl "$BASE_DIR/homer/bin/findMotifsGenome.pl" "$OUTPUT_DIR/homer_peaks.txt" "$SPECIES" "$OUTPUT_DIR/homer_results/" -size 200
-}
+    echo "    Done!"
+} 2> "$LOG_DIR/Homer_logs/04.homer_findMotifsGenome.log"
+
+homer_process_motif_files() {
+    echo ""
+    echo "----- Homer annotatePeaks.pl -----"
+    echo "[INFO] Starting motif file processing"
+
+    # Check for GNU parallel
+    if ! command -v parallel &> /dev/null; then
+        echo "[INFO] GNU parallel not found. Falling back to sequential processing."
+        use_parallel=false
+    else
+        use_parallel=true
+        echo "[INFO] GNU parallel detected."
+    fi
+
+    # Look through the knownResults dir of the Homer findMotifsGenome.pl output
+    MOTIF_DIR="$OUTPUT_DIR/homer_results/knownResults"
+    # Detect files to process
+    motif_files=$(find "$MOTIF_DIR" -name "*.motif")
+    if [ -z "$motif_files" ]; then
+        echo "[ERROR] No motif files found in $MOTIF_DIR."
+        exit 1
+    fi
+
+    # Log number of files to process
+    file_count=$(echo "$motif_files" | wc -l)
+    echo "[INFO] Found $file_count motif files to process."
+
+    
+    # Create output directory if it doesn't exist
+    PROCESSED_MOTIF_DIR="$OUTPUT_DIR/homer_results/homer_tf_motif_scores"
+    mkdir -p "$PROCESSED_MOTIF_DIR"
+
+    # Process files in parallel
+    if [ "$use_parallel" = true ]; then
+        echo "$motif_files" | /usr/bin/time -v parallel -j "$NUM_CPU" \
+            "perl $BASE_DIR/homer/bin/annotatePeaks.pl $OUTPUT_DIR/homer_peaks.txt '$SPECIES' -m {} > $PROCESSED_MOTIF_DIR/{/}_tf_motifs.txt"
+    
+    # Process files sequentially
+    else
+        for file in $motif_files; do
+            local output_file="$PROCESSED_MOTIF_DIR/$(basename "$file" .motif)_tf_motifs.txt"
+            /usr/bin/time -v \
+            "perl $BASE_DIR/homer/bin/annotatePeaks.pl $OUTPUT_DIR/homer_peaks.txt '$SPECIES' -m $file > $output_file" \
+
+            if [ $? -ne 0 ]; then
+                echo "[ERROR] Failed to process motif file: $file" >> "$LOG_DIR/step05_sequential.err"
+            else
+                echo "[INFO] Successfully processed: $file"
+            fi
+        done
+    fi
+
+    # Check for errors
+    if [ $? -ne 0 ]; then
+        echo "[ERROR] Motif file processing failed. Check logs in $LOG_DIR for details."
+        exit 1
+    fi
+
+    echo "[INFO] Motif file processing completed successfully."
+    echo ""
+} 2> "$LOG_DIR/Homer_logs/05.homer_annotatePeaks.log"
 
 # -------------- MAIN PIPELINE FUNCTIONS --------------
 run_cicero() {
@@ -430,12 +492,23 @@ run_correlation_peak_to_tg_score() {
 } 2> "$LOG_DIR/Step025.peak_to_gene_correlation.log"
 
 run_homer() {
+    echo ""
+    echo "===== Homer ====="
+    mkdir -p "$LOG_DIR/Homer_logs/"
+
     # Check to make sure Homer is installed, else install it
     if [ ! -d "$BASE_DIR/homer" ]; then
         echo ""
         echo "Homer installation not found"
         install_homer
+    else
+        echo "Found installation of homer"
     fi
+
+    # Make sure that the homer directory is part of the path
+    echo "Adding the 'homer/bin' directory to PATH"
+    PATH="$PATH:$BASE_DIR/homer/bin"
+    export PATH
     
     # Check if the species Homer genome is installed
     if perl "$BASE_DIR/homer/configureHomer.pl" -list | grep -q "^+.*${SPECIES}"; then
@@ -445,31 +518,46 @@ run_homer() {
         install_homer_species_genome
     fi
 
+    if [ ! -f "$OUTPUT_DIR/homer_peaks.txt" ]; then
+        echo "Homer peak file not found"
+        create_homer_peak_file
+    else
+        echo "Homer peak file found"
+    fi
+
     # If the homer_results directory doesn't exist for the sample, run findMotifsGenome
     if [ ! -d "$OUTPUT_DIR/homer_results/" ]; then
-        create_homer_peak_file
+        echo "Running Homer findMotifsGenome to identify enriched motifs in the ATAC-seq peaks"
         homer_find_motifs
     else
-        echo "Homer results exist for the sample"
+        echo "Found existing Homer findMotifsGenome results"
     fi
-} 2> "$LOG_DIR/Homer.log"
+
+    if [ ! -d "$OUTPUT_DIR/homer_tf_motif_scores/" ]; then
+        echo "Running Homer annotatePeaks to find instances of specific motifs in the ATAC-seq peaks"
+        homer_process_motif_files
+    else
+        echo "Found existing Homer annotatePeaks results"
+    fi
+    echo "Finished running Homer"
+}
 
 run_homer_tf_to_peak_score() {
     echo ""
-    echo "Python: Calculating correlation peak to TG score"
+    echo "Python: Calculating homer TF to peak scores"
     /usr/bin/time -v \
-    python3 src/python_scripts/parse_TF_peak_motifs.py \
-        --input_dir "${INPUT_DIR}/homer_tf_motif_scores" \
+    python3 src/python_scripts/Step030.homer_tf_peak_motifs.py \
+        --input_dir "${OUTPUT_DIR}/homer_results/homer_tf_motif_scores" \
         --output_file "${OUTPUT_DIR}/total_motif_regulatory_scores.tsv" \
         --cpu_count $NUM_CPU
 
-} 2> "$LOG_DIR/Step030.tf_to_peak_score.log"
+} 2> "$LOG_DIR/Step030.homer_tf_to_peak_motifs.log"
 
 run_sliding_window_tf_to_peak_score() {
     echo ""
-    echo "Python: Calculating TF to peak scores"
+    echo "Python: Calculating sliding window TF to peak scores"
     /usr/bin/time -v \
-    python3 "$PYTHON_SCRIPT_DIR/Step030.tf_to_peak_score.py" \
+    python3 "$PYTHON_SCRIPT_DIR/Step035.sliding_window_tf_peak_motifs.py" \
         --tf_names_file "$TF_NAMES_FILE"\
         --meme_dir "$MEME_DIR"\
         --reference_genome_dir "$REFERENCE_GENOME_DIR"\
@@ -479,7 +567,7 @@ run_sliding_window_tf_to_peak_score() {
         --species "$SPECIES" \
         --num_cpu "$NUM_CPU" 
     
-} 2> "$LOG_DIR/Step030.tf_to_peak_score.log"
+} 2> "$LOG_DIR/Step035.sliding_window_tf_peak_motifs.log"
 
 run_tf_to_tg_score() {
     echo ""
