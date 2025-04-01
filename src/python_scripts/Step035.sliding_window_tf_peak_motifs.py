@@ -343,18 +343,16 @@ def main():
     cicero_peak_names = cicero_peaks["peak_id"].to_list()
     logging.info(f'{len(cicero_peak_names)} Cicero peaks')
     
-    
     logging.info('Reading scATACseq data')
-    atac_df: pd.DataFrame = pd.read_csv(atac_data_file, header=0, index_col=None)
+    atac_df: pd.DataFrame = pd.read_csv(atac_data_file, header=0)
     
-    # Read in the RNAseq data file and extract the gene names to find matching TFs
     logging.info('Reading gene names from scATACseq data')
-    rna_data = pd.read_csv(rna_data_file, index_col=None)
-    rna_data.rename(columns={rna_data.columns[0]: "Genes"}, inplace=True)
-    rna_data_genes = set(rna_data["Genes"])
+    rna_data = pd.read_csv(rna_data_file, header=0)
     
-    # Read in the peak dataframe containing genomic sequences
+    # Get the set of unique gene_ids from the RNA dataset
+    rna_data_genes = set(rna_data["gene_id"])
     
+    # Read in the peak dataframe containing genomic sequences    
     parsed_peak_file = f'{output_dir}/peak_sequences.pkl'
     if os.path.exists(parsed_peak_file):
         logging.info('Reading ATACseq peaks from pickle file')

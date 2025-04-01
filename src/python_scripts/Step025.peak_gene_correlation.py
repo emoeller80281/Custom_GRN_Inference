@@ -73,7 +73,7 @@ def parse_args() -> argparse.Namespace:
     return args
 
 # ------------------------- DATA LOADING & PREPARATION ------------------------- #
-def load_atac_dataset(atac_data_file: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+def load_atac_dataset(atac_data_file: str) -> pd.DataFrame:
     """
     Load ATAC peaks from a CSV file. Parse the chromosome, start, end, and center
     for each peak.
@@ -82,13 +82,15 @@ def load_atac_dataset(atac_data_file: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     -------
     atac_df : pd.DataFrame
         The raw ATAC data with the first column containing the peak positions.
-    peak_df : pd.DataFrame
-        The chromosome, start, end, and center of each peak.
     """
-    atac_df = pd.read_csv(atac_data_file, sep=",", header=0, index_col=None)
-    atac_df = atac_df.rename(columns={atac_df.columns[0]: "peak_id"})
+    atac_df: pd.DataFrame = pd.read_csv(atac_data_file, sep="\t", header=0)
     
     return atac_df
+
+def load_rna_dataset(rna_data_file: str) -> pd.DataFrame:
+    rna_df: pd.DataFrame = pd.read_csv(rna_data_file, sep="\t", header=0)
+    
+    return rna_df
 
 def extract_atac_peaks(atac_df, tmp_dir):
     peak_pos = atac_df["peak_id"].tolist()
@@ -106,35 +108,6 @@ def extract_atac_peaks(atac_df, tmp_dir):
     
     # Write the peak DataFrame to a file
     peak_df.to_csv(f"{tmp_dir}/peak_df.bed", sep="\t", header=False, index=False)
-
-def log2_cpm_normalize(df):
-    """
-    Log2 CPM normalize the values for each gene / peak.
-    Assumes:
-      - The df's first column is a non-numeric peak / gene identifier (e.g., "chr1:100-200"),
-      - columns 1..end are numeric count data for samples or cells.
-    """
-    # Separate the non-numeric first column
-    row_ids = df.iloc[:, 0]
-    
-    # Numeric counts
-    counts = df.iloc[:, 1:]
-    
-    # 1. Compute library sizes (sum of each column)
-    library_sizes = counts.sum(axis=0)
-    
-    # 2. Convert counts to CPM
-    # Divide each column by its library size, multiply by 1e6
-    # Add 1 to avoid log(0) issues in the next step
-    cpm = (counts.div(library_sizes, axis=1) * 1e6).add(1)
-    
-    # 3. Log2 transform
-    log2_cpm = np.log2(cpm)
-    
-    # Reassemble into a single DataFrame
-    normalized_df = pd.concat([row_ids, log2_cpm], axis=1)
-    
-    return normalized_df
 
 def load_ensembl_organism_tss(organism, tmp_dir):
     # Connect to the Ensembl BioMart server
@@ -325,21 +298,10 @@ def main():
         os.makedirs(TMP_DIR)
     
     logging.info("Loading the scRNA-seq dataset.")
-    rna_df = pd.read_csv(RNA_DATA_FILE, sep=",", header=0, index_col=None)
-    rna_df = rna_df.rename(columns={rna_df.columns[0]: "gene"})
-
-    logging.info("Log2 CPM normalizing the RNA-seq data")
-    rna_df = log2_cpm_normalize(rna_df)
-
-    # Downcast the values from float64 to float16
-    numeric_cols = rna_df.columns.drop("gene")
-    rna_df[numeric_cols] = rna_df[numeric_cols].astype('float16')
+    rna_df: pd.DataFrame = pd.read_csv(RNA_DATA_FILE, header=0)
 
     logging.info("Loading and parsing the ATAC-seq peaks")
-    atac_df = load_atac_dataset(ATAC_DATA_FILE)
-
-    logging.info("Log2 CPM normalizing the ATAC-seq data")
-    atac_df = log2_cpm_normalize(atac_df)
+    atac_df: pd.DataFrame = pd.read_csv(ATAC_DATA_FILE, header=0)
 
     if not os.path.exists(f"{TMP_DIR}/peak_df.bed"):
         logging.info(f"Extracting peak information and saving as a bed file")

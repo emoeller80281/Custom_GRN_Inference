@@ -23,13 +23,7 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="Path to the scRNA-seq dataset"
     )
-    parser.add_argument(
-        "--output_dir",
-        type=str,
-        required=True,
-        help="Path for the processed RNAseq and ATACseq files"
-    )
-    
+
     args: argparse.Namespace = parser.parse_args()
     return args
 
@@ -71,16 +65,21 @@ def load_atac_dataset(atac_data_file: str) -> pd.DataFrame:
 def load_rna_dataset(rna_data_file: str) -> pd.DataFrame:
     rna_df = pd.read_csv(rna_data_file, sep=",", header=0)
     rna_df = rna_df.rename(columns={rna_df.columns[0]: "gene_id"})
+    
+    return rna_df
 
-def main(atac_data_file, rna_data_file, output_dir):
+def main(atac_data_file, rna_data_file):
     atac_df = load_atac_dataset(atac_data_file)
     rna_df = load_rna_dataset(rna_data_file)
     
     atac_df_norm = log2_cpm_normalize(atac_df)
     rna_df_norm = log2_cpm_normalize(rna_df)
     
-    atac_df_norm.to_csv(f'{output_dir}/atac_df_processed.tsv', sep="\t", header=True, index=False)
-    rna_df_norm.to_csv(f'{output_dir}/rna_df_processed.tsv', sep="\t", header=True, index=False)
+    def update_name(filename):
+        return filename.split["."][0] + "_processed.csv"
+    
+    atac_df_norm.to_csv(update_name(atac_data_file), sep=",", header=True, index=False)
+    rna_df_norm.to_csv(update_name(rna_data_file), sep=",", header=True, index=False)
 
 
 if __name__ == "__main__":
@@ -91,7 +90,6 @@ if __name__ == "__main__":
     args: argparse.Namespace = parse_args()
     atac_data_file: str = args.atac_data_file
     rna_data_file: str = args.rna_data_file
-    output_dir: str = args.output_dir
 
     # Run the main function
-    main(atac_data_file, rna_data_file, output_dir)
+    main(atac_data_file, rna_data_file)

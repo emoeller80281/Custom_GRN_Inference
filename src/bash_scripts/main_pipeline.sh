@@ -14,8 +14,8 @@ STEP010_CICERO_MAP_PEAKS_TO_TG=false
 STEP020_CICERO_PEAK_TO_TG_SCORE=false
 STEP025_PEAK_TO_TG_CORRELATION=false
 STEP030_SLIDING_WINDOW_TF_TO_PEAK_SCORE=false
-STEP035_HOMER_TF_TO_PEAK_SCORE=true
-STEP040_TF_TO_TG_SCORE=false
+STEP035_HOMER_TF_TO_PEAK_SCORE=false
+STEP040_TF_TO_TG_SCORE=true
 STEP050_TRAIN_RANDOM_FOREST=false
 
 # =============================================
@@ -326,6 +326,45 @@ check_cicero_genome_files_exist() {
     download_file_if_missing "$GENE_ANNOT" "$GENE_ANNOT_URL" "$SPECIES gene annotation file"
 }
 
+run_dataset_preprocessing() {
+    echo ""
+    echo "Python: Log2 CPM normalizing the ATAC-seq and RNA-seq datasets"
+    /usr/bin/time -v \
+    python3 "$PYTHON_SCRIPT_DIR/preprocess_datasets.py" \
+        --atac_data_file "$ATAC_FILE_NAME" \
+        --rna_data_file "$RNA_FILE_NAME"
+    
+    # After preprocessing, update the file names to the new processed files.
+    # This assumes that the processed file name is constructed by replacing
+    # the original file extension with _processed.tsv.
+    new_atac_file="$(dirname "$ATAC_FILE_NAME")/$(basename "$ATAC_FILE_NAME" | sed 's/\.[^.]*$/_processed.csv/')"
+    new_rna_file="$(dirname "$RNA_FILE_NAME")/$(basename "$RNA_FILE_NAME" | sed 's/\.[^.]*$/_processed.csv/')"
+    
+    ATAC_FILE_NAME="$new_atac_file"
+    RNA_FILE_NAME="$new_rna_file"
+    
+    echo "Updated ATAC file: $ATAC_FILE_NAME"
+    echo "Updated RNA file: $RNA_FILE_NAME"
+} 2> "$LOG_DIR/dataset_preprocessing.log"
+
+check_processed_files() {
+    # Derive the expected processed filenames from the original file names.
+    new_atac_file="$(dirname "$ATAC_FILE_NAME")/$(basename "$ATAC_FILE_NAME" | sed 's/\.[^.]*$/_processed.csv/')"
+    new_rna_file="$(dirname "$RNA_FILE_NAME")/$(basename "$RNA_FILE_NAME" | sed 's/\.[^.]*$/_processed.csv/')"
+    
+    if [ -f "$new_atac_file" ] && [ -f "$new_rna_file" ]; then
+        echo "Processed files found:"
+        echo "  ATAC: $new_atac_file"
+        echo "  RNA:  $new_rna_file"
+        # Update global variables so downstream steps use the processed files
+        ATAC_FILE_NAME="$new_atac_file"
+        RNA_FILE_NAME="$new_rna_file"
+    else
+        echo "Processed files not found. Running dataset preprocessing..."
+        run_dataset_preprocessing
+    fi
+}
+
 # -------------- HOMER FUNCTIONS --------------
 install_homer() {
     echo "Installing Homer..."
@@ -571,14 +610,13 @@ run_sliding_window_tf_to_peak_score() {
 
 run_tf_to_tg_score() {
     echo ""
-    echo "Python: Calculating TF to TG scores"
+    echo "Python: Creating TF to TG score DataFrame"
     /usr/bin/time -v \
-    python3 "$PYTHON_SCRIPT_DIR/Step040.tf_to_tg_score.py" \
+    python3 "$PYTHON_SCRIPT_DIR/Step040.combine_dataframes.py" \
         --rna_data_file "$RNA_FILE_NAME" \
         --atac_data_file "$ATAC_FILE_NAME" \
         --output_dir "$OUTPUT_DIR" \
-        --fig_dir "$FIG_DIR" \
-        --bulk_or_cell "bulk"
+        --fig_dir "$FIG_DIR"
     
 } 2> "$LOG_DIR/Step040.tf_to_tg_score.log"
 
@@ -614,6 +652,7 @@ determine_num_cpus
 check_input_files
 activate_conda_env
 setup_directories
+check_processed_files
 
 # Execute selected pipeline steps
 if [ "$STEP010_CICERO_MAP_PEAKS_TO_TG" = true ]; then run_cicero; fi

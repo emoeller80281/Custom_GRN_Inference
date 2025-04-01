@@ -15,7 +15,7 @@ def parse_args() -> argparse.Namespace:
         "--atac_data_file",
         type=str,
         required=True,
-        help="Path to the directory containing Homer TF motif scores from Homer 'annotatePeaks.pl'"
+        help="Path to the ATACseq data file"
     )
     
     parser.add_argument(
@@ -87,7 +87,7 @@ def main() -> None:
     output_dir: str = args.output_dir
 
     logging.info('Reading scATACseq data')
-    atac_data: pd.DataFrame = pd.read_csv(atac_data_file)
+    atac_data: pd.DataFrame = pd.read_csv(atac_data_file, header=0)
     logging.info(atac_data.head())
 
     logging.info('Converting scATACseq peaks to Homer peak format')
