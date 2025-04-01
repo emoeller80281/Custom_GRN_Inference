@@ -378,7 +378,7 @@ def main():
         frame=tf_to_peak_score_df,
         id_vars="peak",
         value_vars=tf_to_peak_score_df.columns[1:],
-        var_name="gene_id",
+        var_name="source_id",
         value_name="sliding_window_score"
         )
 

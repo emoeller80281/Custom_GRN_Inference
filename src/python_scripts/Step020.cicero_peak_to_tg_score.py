@@ -57,7 +57,7 @@ def normalize_peak_to_peak_scores(df, colname):
     
     return score_normalized
 
-def plot_normalized_peak_to_tg_scores(score_col, fig_dir):
+def plot_peak_to_tg_scores(score_col, fig_dir):
     plt.hist(score_col, bins=50, color='blue')
     plt.title("Normalized Cicero Peak to Gene Association Score Distribution", fontsize=16)
     plt.xlabel("Normalized Peak to Gene Association Score")
@@ -105,21 +105,18 @@ def main():
 
     # Only keep Peak2 rows, as Peak1 contains promoter peaks and can have duplicates, but Peak2 does not.
     # As we set Peak2 for the peak_to_gene rows, we retain the peaks in the promoters
-    merged_with_promoter_genes = merged_with_promoter_genes.rename(columns={"Peak2": "peak_id", "gene": "gene_id", "score": "cicero_score"})
-    merged_with_promoter_genes = merged_with_promoter_genes[["peak_id","gene_id","cicero_score"]]
-    
-    # Normalize the Cicero scores to be between 0-1
-    merged_with_promoter_genes["cicero_score"] = normalize_peak_to_peak_scores(merged_with_promoter_genes, "cicero_score")
+    merged_with_promoter_genes = merged_with_promoter_genes.rename(columns={"Peak2": "target_id", "gene": "gene_id", "score": "cicero_score"})
+    merged_with_promoter_genes = merged_with_promoter_genes[["target_id","gene_id","cicero_score"]]
     
     # Format the peaks to chr:start-stop rather than chr_start_stop to match the ATACseq peaks
-    merged_with_promoter_genes["peak_id"] = merged_with_promoter_genes["peak_id"].str.replace("_", "-")
-    merged_with_promoter_genes["peak_id"] = merged_with_promoter_genes["peak_id"].str.replace("-", ":", 1)
+    merged_with_promoter_genes["target_id"] = merged_with_promoter_genes["target_id"].str.replace("_", "-")
+    merged_with_promoter_genes["target_id"] = merged_with_promoter_genes["target_id"].str.replace("-", ":", 1)
 
     # Write the final merged peaks to a csv file
     merged_with_promoter_genes.to_csv(f"{output_dir}/cicero_peak_to_tg_scores.csv", header=True, index=False, sep="\t")
 
-    # Plot the non-normalized peak scores as a histogram
-    plot_normalized_peak_to_tg_scores(merged_with_promoter_genes['cicero_score'], fig_dir)
+    # Plot the peak scores as a histogram
+    plot_peak_to_tg_scores(merged_with_promoter_genes['cicero_score'], fig_dir)
     
 if __name__ == "__main__":
     # Configure logging

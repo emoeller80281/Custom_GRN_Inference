@@ -533,7 +533,7 @@ run_homer() {
         echo "Found existing Homer findMotifsGenome results"
     fi
 
-    if [ ! -d "$OUTPUT_DIR/homer_tf_motif_scores/" ]; then
+    if [ ! -d "$OUTPUT_DIR/homer_results/homer_tf_motif_scores/" ]; then
         echo "Running Homer annotatePeaks to find instances of specific motifs in the ATAC-seq peaks"
         homer_process_motif_files
     else
@@ -548,7 +548,7 @@ run_homer_tf_to_peak_score() {
     /usr/bin/time -v \
     python3 src/python_scripts/Step030.homer_tf_peak_motifs.py \
         --input_dir "${OUTPUT_DIR}/homer_results/homer_tf_motif_scores" \
-        --output_file "${OUTPUT_DIR}/total_motif_regulatory_scores.tsv" \
+        --output_file "${OUTPUT_DIR}/homer_tf_to_peak.tsv" \
         --cpu_count $NUM_CPU
 
 } 2> "$LOG_DIR/Step030.homer_tf_to_peak_motifs.log"

@@ -88,10 +88,6 @@ def load_atac_dataset(atac_data_file: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     atac_df = pd.read_csv(atac_data_file, sep=",", header=0, index_col=None)
     atac_df = atac_df.rename(columns={atac_df.columns[0]: "peak_id"})
     
-    # Downcast the values from float64 to float16
-    numeric_cols = atac_df.columns.drop("peak_id")
-    atac_df[numeric_cols] = atac_df[numeric_cols].astype('float16')
-    
     return atac_df
 
 def extract_atac_peaks(atac_df, tmp_dir):
@@ -190,20 +186,20 @@ def find_genes_near_peaks(peak_bed, tss_bed, rna_df, peak_dist_limit):
             "peak_chr", "peak_start", "peak_end", "peak_id",
             "gene_chr", "gene_start", "gene_end", "gene_id"
         ]
-    ).dropna()
+    ).rename(columns={"gene_id": "target_id"}).dropna()
     
     # Calculate the TSS distance for each peak - gene pair
     peak_tss_overlap_df["TSS_dist"] = np.abs(peak_tss_overlap_df["peak_end"] - peak_tss_overlap_df["gene_start"])
-    peak_tss_subset_df = peak_tss_overlap_df[["peak_id", "gene_id", "TSS_dist"]]
+    peak_tss_subset_df = peak_tss_overlap_df[["peak_id", "target_id", "TSS_dist"]]
     
     # Take the minimum peak to gene TSS distance
     peak_tss_subset_df = peak_tss_subset_df.sort_values("TSS_dist")
-    peak_tss_subset_df = peak_tss_subset_df.drop_duplicates(subset=["peak_id", "gene_id"], keep="first")
+    peak_tss_subset_df = peak_tss_subset_df.drop_duplicates(subset=["peak_id", "target_id"], keep="first")
     
     # Only keep genes that are also in the RNA-seq dataset
-    peak_tss_subset_df = peak_tss_subset_df[peak_tss_subset_df["gene_id"].isin(rna_df["gene"])]
+    peak_tss_subset_df = peak_tss_subset_df[peak_tss_subset_df["target_id"].isin(rna_df["gene"])]
     
-    gene_list = set(peak_tss_subset_df["gene_id"].drop_duplicates().to_list())
+    gene_list = set(peak_tss_subset_df["target_id"].drop_duplicates().to_list())
     
     # logging.info("\n-----------------------------------------\n")
     
@@ -247,7 +243,7 @@ def filter_low_variance_features(df, min_variance=0.5):
 
 def calculate_significant_peak_to_gene_correlations(atac_df, gene_df, alpha=0.05, chunk_size=1000, num_cpu=4):
     """
-    Returns a DataFrame of [peak_id, gene_id, correlation] for p < alpha.
+    Returns a DataFrame of [peak_id, target_id, correlation] for p < alpha.
     """
     # Convert to sparse
     X = sp.csr_matrix(atac_df.values.astype(float))
@@ -299,7 +295,7 @@ def calculate_significant_peak_to_gene_correlations(atac_df, gene_df, alpha=0.05
     flat_results = [item for sublist in results for item in sublist]
     df_corr = pd.DataFrame(flat_results, columns=["peak_i", "gene_j", "correlation"])
 
-    # Map i->peak_id, j->gene_id
+    # Map i->peak_id, j->target_id
     df_corr["peak"] = atac_df.index[df_corr["peak_i"]]
     df_corr["gene"] = gene_df.index[df_corr["gene_j"]]
     df_corr = df_corr[["peak", "gene", "correlation"]]
@@ -364,7 +360,7 @@ def main():
     tss_bed = pybedtools.BedTool(f"{TMP_DIR}/ensembl.bed")
     
     # ============ FINDING PEAKS NEAR GENES ============
-    # Dataframe with "peak_id", "gene_id" and "TSS_dist"
+    # Dataframe with "peak_id", "target_id" and "TSS_dist"
     peak_gene_df, gene_list = find_genes_near_peaks(peak_bed, tss_bed, rna_df, PEAK_DIST_LIMIT)
 
     logging.info("Subset the ATAC-seq DataFrame to only contain peak that are in range of the genes")
@@ -395,9 +391,9 @@ def main():
     top_peak_to_gene_corr = sig_peak_to_gene_corr[sig_peak_to_gene_corr["correlation"] >= cutoff]
 
     # Merge the gene and enhancer df
-    final_df = pd.merge(top_peak_to_gene_corr, peak_gene_df, how="inner", left_on=["peak", "gene"], right_on=["peak_id", "gene_id"]).dropna(subset="peak_id")
+    final_df = pd.merge(top_peak_to_gene_corr, peak_gene_df, how="inner", left_on=["peak", "gene"], right_on=["peak_id", "target_id"]).dropna(subset="peak_id")
     
-    final_df = final_df[["peak_id", "gene_id", "correlation", "TSS_dist"]]
+    final_df = final_df[["peak_id", "target_id", "correlation", "TSS_dist"]]
         
     logging.info(final_df.head())
     final_df.to_csv(f"{OUTPUT_DIR}/peak_to_gene_correlation.csv", sep="\t", header=True, index=False)

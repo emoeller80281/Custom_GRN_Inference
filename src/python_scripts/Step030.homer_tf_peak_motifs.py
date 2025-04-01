@@ -22,18 +22,6 @@ def parse_args() -> argparse.Namespace:
         help="Path to the directory containing Homer TF motif scores from Homer 'annotatePeaks.pl'"
     )
     parser.add_argument(
-        "--cicero_cis_reg_file",
-        type=str,
-        required=True,
-        help="Path to the inferred cis-regulatory network from Cicero"
-    )
-    parser.add_argument(
-        "--homer_peak_file",
-        type=str,
-        required=True,
-        help="Path to the formatted ATAC-seq peak file for Homer"
-    )
-    parser.add_argument(
         "--output_file",
         type=str,
         required=True,
@@ -55,7 +43,7 @@ def is_file_empty(file_path: str) -> bool:
     """
     return os.stat(file_path).st_size == 0
 
-def process_TF_motif_file(path_to_file: str, peak_gene_assoc: pd.DataFrame) -> pd.DataFrame:
+def process_TF_motif_file(path_to_file: str) -> pd.DataFrame:
     """
     Processes a single Homer TF motif file and extracts TF-TG relationships and motif scores.
 
@@ -73,113 +61,63 @@ def process_TF_motif_file(path_to_file: str, peak_gene_assoc: pd.DataFrame) -> p
         return pd.DataFrame()  # Return an empty DataFrame
 
     try:
-        # Read in the motif file as a pandas DataFrame
-        motif_to_peak: pd.DataFrame = pd.read_csv(path_to_file, sep='\t', header=[0], index_col=None)
-        motif_to_peak.rename(columns={motif_to_peak.columns[0]: "PeakID"}, inplace=True)
-        motif_to_peak["Start"] = motif_to_peak["Start"].astype(str)
-        motif_to_peak["End"] = motif_to_peak["End"].astype(str)
+        # Read in the motif file; force "Start" and "End" to be strings
+        motif_to_peak = pd.read_csv(path_to_file, sep='\t', header=0, dtype={'Start': str, 'End': str})
         
-        # Reconstruct the peak
-        motif_to_peak["peak"] = motif_to_peak["Chr"] + "_" + motif_to_peak["Start"] + "_" + motif_to_peak["End"]
-            
-        # Extract motif-related data
-        motif_column: str = motif_to_peak.columns[-2]
-        TF_name: str = motif_column.split('/')[0].split('(')[0]
+        # Reconstruct the peak_id
+        motif_to_peak['peak_id'] = motif_to_peak['Chr'] + ':' + motif_to_peak['Start'] + '-' + motif_to_peak['End']
         
-        if ":" in TF_name:
-            TF_name = TF_name.split(':')[0]
+        # Extract the motif column
+        motif_column = motif_to_peak.columns[-2]
         
-        # Parse the number of motifs and the name of the TF from the Homer annotatePeaks output
-        motif_to_peak['Motif Count'] = motif_to_peak[motif_column].apply(lambda x: len(x.split(',')) / 3 if pd.notnull(x) else 0)
-        motif_to_peak["Source"] = TF_name
+        # Extract the TF name from the motif column name; chain splits to remove extraneous info
+        TF_name = motif_column.split('/')[0].split('(')[0].split(':')[0].upper()
         
-        # Merge the peak with the peak to gene association score
-        motif_to_peak = pd.merge(
-            motif_to_peak,
-            peak_gene_assoc[["peak", "gene", "Peak Gene Score"]],  # Use only 'peak' and 'gene' columns from peak_gene_assoc
-            how="left",                         # Perform a left join to retain all rows in motif_to_peak
-            on="peak"                           # Join on the 'peak' column
+        # Set source_id to the TF name
+        motif_to_peak['source_id'] = TF_name
+        
+        # Calculate the number of motifs per peak.
+        # If the motif column is not null, split by comma, count tokens, divide by 3; else 0.
+        motif_to_peak['tf_motifs_in_peak'] = motif_to_peak[motif_column].apply(
+            lambda x: len(x.split(',')) / 3 if pd.notnull(x) and x != '' else 0
         )
-
-        # Rename the associated gene column for clarity
-        motif_to_peak.rename(columns={"gene": "Target"}, inplace=True)
-        motif_to_peak.dropna(subset=["Target"], inplace=True)
-
-        # Calculate total motifs for the TF
-        motif_to_peak["Total Motifs"] = motif_to_peak["Motif Count"].sum()
-
-        # Columns of interest
-        cols_of_interest: List[str] = ["Source", "Target", "Motif Count", "Total Motifs", "Peak Gene Score"]
-
-        # Remove rows with NA values
-        df: pd.DataFrame = motif_to_peak[cols_of_interest].dropna()
-
-        # Filter rows with no motifs
-        filtered_df: pd.DataFrame = df[df["Motif Count"] > 0]
-        filtered_df: pd.DataFrame = filtered_df[filtered_df["Peak Gene Score"] > 0]
-
-        # Standardize gene names to uppercase
-        filtered_df["Source"] = filtered_df["Source"].apply(lambda x: x.upper())
-        filtered_df["Target"] = filtered_df["Target"].apply(lambda x: x.upper())
-                
-        # Calculate product of Motif Count and Peak Gene Score
-        filtered_df['product'] = filtered_df['Motif Count'] * filtered_df['Peak Gene Score']
-
-        # Group by Source (TF) and Target (TG), then compute the score
-        grouped = filtered_df.groupby(['Source', 'Target'])
-        filtered_df = grouped.apply(
-            lambda x: x['product'].sum() / x['Total Motifs'].iloc[0]
-        ).reset_index(name='TF_TG_Motif_Binding_Score')
         
-        print(filtered_df.head())
+        # Remove rows with zero binding sites
+        motif_to_peak = motif_to_peak[motif_to_peak['tf_motifs_in_peak'] > 0].copy()
         
-        return filtered_df
+        # Calculate the total number of binding sites across all peaks
+        total_tf_binding_sites = motif_to_peak['tf_motifs_in_peak'].sum()
+        
+        # Calculate homer_binding_score for each peak
+        motif_to_peak['homer_binding_score'] = motif_to_peak['tf_motifs_in_peak'] / total_tf_binding_sites
+        
+        # Select only the columns of interest and drop any rows with missing values
+        df = motif_to_peak[['peak_id', 'source_id', 'homer_binding_score']].dropna()
+        
+        return df
     
     except Exception as e:
         print(f"Error processing file {path_to_file}: {e}")
         return pd.DataFrame()  # Return an empty DataFrame if there is an error
 
-def main(input_dir: str, cicero_cis_reg_file: str, output_file: str, cpu_count: int) -> None:
-    """
-    Main function to process all files in a directory and output combined results.
-
-    Args:
-        input_dir (str): Path to the directory containing input files.
-        output_file (str): Path to the output file.
-        cpu_count (int): Number of CPUs to use for multiprocessing.
-    """
+def main(input_dir: str, output_file: str, cpu_count: int) -> None:
     
     # List all files in the input directory
     file_paths: List[str] = [os.path.join(input_dir, f) for f in os.listdir(input_dir) if os.path.isfile(os.path.join(input_dir, f))]
-    
-    # Read in the peak to gene association scores from cicero
-    peak_gene_assoc: pd.DataFrame = pd.read_csv(cicero_cis_reg_file, sep=",", header=0)
-    
-    # Normalize the cicero peak to gene scores (excluding 0 and 1)
-    peak_gene_assoc['Peak Gene Score'] = peak_gene_assoc['score'].apply(
-        lambda x: (x - peak_gene_assoc['score'].min()) / (peak_gene_assoc['score'].max() - peak_gene_assoc['score'].min())
-        if 0 != x != 1 else x  # Retain scores of 0 and 1 as they are
-    )
-    
-    # Process each of the files
-    # Preload the additional argument using functools.partial
-    process_file_partial = partial(process_TF_motif_file, peak_gene_assoc=peak_gene_assoc)
 
     tf_scores_list = []
     with Pool(processes=cpu_count) as pool:
         with tqdm(total=len(file_paths), desc="Processing files") as pbar:
-            for tf_tg_scores in pool.imap_unordered(process_file_partial, file_paths):
+            for tf_tg_scores in pool.imap_unordered(process_TF_motif_file, file_paths):
                 tf_scores_list.append(tf_tg_scores)
                 pbar.update(1)
 
     logging.info("Finished formatting all TF motif binding sites for downstream target genes, combining")
     
     # Combine all results
+    logging.info("Concatenating all TF to peak binding score DataFrames")
     tf_binding_scores_df: pd.DataFrame = pd.concat(tf_scores_list, ignore_index=True)
     
-    tf_binding_scores_df["TF_TG_Motif_Binding_Score"] = tf_binding_scores_df["TF_TG_Motif_Binding_Score"] / max(tf_binding_scores_df["TF_TG_Motif_Binding_Score"])
-
-    logging.info(f"Finished normalization, writing combined dataset to {output_file}")
     tf_binding_scores_df.to_csv(output_file, sep='\t', index=False)
 
 if __name__ == "__main__":
@@ -189,10 +127,8 @@ if __name__ == "__main__":
     # Parse command-line arguments
     args: argparse.Namespace = parse_args()
     input_dir: str = args.input_dir
-    cicero_cis_reg_file: str = args.cicero_cis_reg_file
-    homer_peak_file: str = args.homer_peak_file
     output_file: str = args.output_file
     cpu_count: int = int(args.cpu_count)
 
     # Run the main function
-    main(input_dir, cicero_cis_reg_file, output_file, cpu_count)
+    main(input_dir, output_file, cpu_count)
