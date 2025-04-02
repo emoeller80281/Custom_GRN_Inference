@@ -2,9 +2,9 @@ import pandas as pd
 import numpy as np
 import math
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import classification_report, roc_auc_score
+from sklearn.metrics import roc_curve, auc, precision_recall_curve, average_precision_score, roc_auc_score
+from sklearn.inspection import permutation_importance
 import matplotlib.pyplot as plt
-import random
 import csv
 import os
 import joblib
@@ -100,6 +100,7 @@ def train_xgboost(X_train, y_train, features):
     return xgb_model
 
 def plot_xgboost_prediction_histogram(model, X_test, fig_dir):
+    logging.info("\tPlotting model prediction histogram")
     y_pred_prob = model.predict_proba(X_test)[:, 1]  # Probability for the positive class
 
     plt.figure(figsize=(8, 6))
@@ -114,6 +115,7 @@ def plot_xgboost_prediction_histogram(model, X_test, fig_dir):
     plt.close()
 
 def plot_feature_importance(features: list, model, fig_dir: str):
+    logging.info("\tPlotting feature importance barplot")
     # Feature Importance Analysis
     feature_importances = pd.DataFrame({
         "Feature": features,
@@ -133,20 +135,22 @@ def plot_feature_importance(features: list, model, fig_dir: str):
     plt.close()
     
 def plot_feature_score_histograms(features, inferred_network, fig_dir):
+    logging.info("\tPlotting feature score histograms")
     plt.figure(figsize=(15, 8))
     for i, feature in enumerate(features, 1):
         plt.subplot(3, 4, i)  # 3 rows, 4 columns, index = i
         plt.hist(inferred_network[feature], bins=50, alpha=0.7, edgecolor='black')
-        plt.title(f"{feature} distribution", fontsize=18)
+        plt.title(f"{feature} distribution", fontsize=16)
         plt.xlabel(feature, fontsize=16)
         plt.ylabel("Frequency", fontsize=16)
-        plt.xticks(fontsize=14)
-        plt.yticks(fontsize=14)
+        plt.xticks(fontsize=12)
+        plt.yticks(fontsize=12)
     plt.tight_layout()
     plt.savefig(f'{fig_dir}/xgboost_feature_score_hist.png', dpi=300)
     plt.close()
     
 def plot_feature_boxplots(features, inferred_network, fig_dir):
+    logging.info("\tPlotting feature importance boxplots")
     def remove_outliers(series):
         """
         Remove outliers from a pandas Series using the IQR method.
@@ -173,7 +177,6 @@ def plot_feature_boxplots(features, inferred_network, fig_dir):
         ax.set_title(feature, fontsize=18)
         ax.set_xticklabels(["True", "False"], fontsize=16)
         ax.set_ylabel("score", fontsize=16)
-        ax.set_yticklabels(fontsize=14)
     
     # Hide any unused subplots if they exist
     for j in range(i+1, len(axes)):
@@ -182,6 +185,122 @@ def plot_feature_boxplots(features, inferred_network, fig_dir):
     plt.tight_layout()
     plt.savefig(f'{fig_dir}/xgboost_feature_boxplots.png', dpi=300)
     plt.close()
+    
+def plot_permutation_importance_plot(xgb_model, X_test, y_test, fig_dir):
+    logging.info("\tPlotting permutation importance plot")
+    result = permutation_importance(xgb_model, X_test, y_test, 
+                                n_repeats=10, random_state=42, scoring='roc_auc')
+
+    # Extract mean importance and standard deviation for each feature
+    importances = result.importances_mean
+    std = result.importances_std
+
+    # Get the feature names (assuming X_test is a DataFrame)
+    feature_names = X_test.columns
+
+    # Sort the feature importances in ascending order for plotting
+    indices = np.argsort(importances)
+
+    plt.figure(figsize=(8, 6))
+    plt.barh(range(len(importances)), importances[indices], xerr=std[indices],
+            align='center', color='skyblue')
+    plt.yticks(range(len(importances)), feature_names[indices])
+    plt.xlabel("Decrease in ROC-AUC")
+    plt.title("Permutation Feature Importance")
+    plt.tight_layout()
+    plt.savefig(f"{fig_dir}/xgboost_permutation_importance.png", dpi=300)
+    plt.close()
+
+def plot_stability_boxplot(X, y, fig_dir):
+    logging.info("\tPlotting stability boxplot")
+    n_runs = 20
+    auroc_scores = []
+
+    for i in range(n_runs):
+        # Use different random seeds for splitting
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=i)
+        model = xgb.XGBClassifier(random_state=42, n_estimators=100, max_depth=10, eval_metric='logloss')
+        model.fit(X_train, y_train)
+        y_pred_prob = model.predict_proba(X_test)[:, 1]
+        auroc = roc_auc_score(y_test, y_pred_prob)
+        auroc_scores.append(auroc)
+
+    # Plotting the AUROC distribution
+    plt.figure(figsize=(8, 6))
+    plt.boxplot(auroc_scores, patch_artist=True, boxprops=dict(facecolor='lightblue'))
+    plt.scatter(np.ones(len(auroc_scores)), auroc_scores, color='red', label='AUROC')
+    plt.ylabel('AUROC', fontsize=16)
+    plt.title('Stability Analysis of AUROC over {} runs'.format(n_runs), fontsize=18)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(f"{fig_dir}/xgboost_stability_boxplot.png", dpi=300)
+    plt.close()
+    
+def plot_overlapping_roc_pr_curves(X, y, aggregated_features_new, fig_dir):
+    """
+    Plots overlapping ROC and Precision-Recall curves for multiple runs.
+    
+    """
+    logging.info("\tPlotting stability AUROC and AUPRC curves")
+    # --- Generate y_true_list and y_score_list over multiple runs ---
+    n_runs = 10  # Number of runs for stability analysis; adjust as needed
+
+    y_true_list = []
+    y_score_list = []
+
+    for i in range(n_runs):
+        # Split the data with a different random seed each run
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=i)
+        
+        # Train your XGBoost model; ensure your train_xgboost function is defined
+        xgb_model = train_xgboost(X_train, y_train, aggregated_features_new)
+        # Save feature names if needed for prediction
+        xgb_model.feature_names = list(X_train.columns.values)
+        
+        # Predict probabilities on the test set (for the positive class)
+        y_pred_prob = xgb_model.predict_proba(X_test)[:, 1]
+        
+        # Store the true labels and predicted probabilities
+        y_true_list.append(y_test.to_numpy())
+        y_score_list.append(y_pred_prob)
+    
+    if labels is None:
+        labels = [f"Run {i+1}" for i in range(len(y_true_list))]
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 6))
+
+    # --- ROC Curves ---
+    for i, (y_true, y_score) in enumerate(zip(y_true_list, y_score_list)):
+        fpr, tpr, _ = roc_curve(y_true, y_score)
+        roc_auc = auc(fpr, tpr)
+        axes[0].plot(fpr, tpr, lw=1, alpha=0.8, label=f"{labels[i]} (AUC={roc_auc:.2f})")
+
+    # Diagonal line for random guessing
+    axes[0].plot([0, 1], [0, 1], color="navy", lw=1, linestyle="--")
+    axes[0].set_xlim([0.0, 1.0])
+    axes[0].set_ylim([0.0, 1.0])
+    axes[0].set_xlabel("False Positive Rate", fontsize=14)
+    axes[0].set_ylabel("True Positive Rate", fontsize=14)
+    axes[0].set_title(f"ROC Curve", fontsize=16)
+    axes[0].legend(loc="lower right")
+
+    # --- Precision-Recall Curves ---
+    for i, (y_true, y_score) in enumerate(zip(y_true_list, y_score_list)):
+        precision, recall, _ = precision_recall_curve(y_true, y_score)
+        avg_prec = average_precision_score(y_true, y_score)
+        axes[1].plot(recall, precision, lw=1, alpha=0.8, label=f"{labels[i]} (AP={avg_prec:.2f})")
+
+    axes[1].set_xlim([0.0, 1.0])
+    axes[1].set_ylim([0.0, 1.05])
+    axes[1].set_xlabel("Recall", fontsize=14)
+    axes[1].set_ylabel("Precision", fontsize=14)
+    axes[1].set_title(f"Precision-Recall Curve", fontsize=16)
+    axes[1].legend(loc="lower left")
+
+    plt.tight_layout()
+    plt.savefig(f"{fig_dir}/xgboost_stability_auroc_auprc.png", dpi=300)
+    plt.close()
+
 
 def main():
     # Parse arguments
@@ -214,7 +333,7 @@ def main():
         "mean_peak_accessibility",
         "cicero_score",
         "enh_score",
-        "TSS_dist",
+        # "TSS_dist",
         "correlation",
         "sliding_window_score",
         "homer_binding_score"
@@ -236,10 +355,14 @@ def main():
     if not os.path.exists(fig_dir):
         os.makedirs(fig_dir)
     
+    logging.info("\n----- Plotting Figures -----")
+    plot_stability_boxplot(X, y, fig_dir)
+    plot_overlapping_roc_pr_curves(X, y, aggregated_features_new, fig_dir)
     plot_feature_importance(aggregated_features_new, xgb_model, fig_dir)
     plot_feature_score_histograms(aggregated_features_new, inferred_network, fig_dir)
     plot_feature_boxplots(aggregated_features_new, inferred_network, fig_dir)
     plot_xgboost_prediction_histogram(xgb_model, X_test, fig_dir)
+    plot_permutation_importance_plot(xgb_model, X_test, y_test, fig_dir)
     
     
 if __name__ == "__main__":
