@@ -121,7 +121,6 @@ peak_gene_corr_df = pd.read_csv(f'{OUTPUT_DIR}/peak_to_gene_correlation.csv', se
 # Merge the peaks overlapping the known enhancers with the peak to gene correlation dataframe
 logging.info("Merging the peak to gene mapping with the known enhancer location mapping")
 peak_gene_df = pd.merge(peak_gene_corr_df, peak_enh_df, how="left", on="peak_id")
-peak_gene_df[["enh_score"]] = peak_gene_df[["enh_score"]].fillna(value=0)
 peak_gene_df = peak_gene_df[["peak_id", "gene_id", "correlation", "TSS_dist", "enh_score"]]
 
 # Write out the final dataframe to the output directory

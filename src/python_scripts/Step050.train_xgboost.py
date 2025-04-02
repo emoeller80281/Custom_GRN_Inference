@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+import math
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, roc_auc_score
 import matplotlib.pyplot as plt
@@ -25,6 +26,12 @@ def parse_args() -> argparse.Namespace:
         type=str,
         required=True,
         help="Path to the ChIPseq ground truth file, formatted as 'source_id'\\t'target_id'"
+    )
+    parser.add_argument(
+        "--inferred_network_file",
+        type=str,
+        required=True,
+        help="Path to the inferred network file for the sample"
     )
     parser.add_argument(
         "--output_dir",
@@ -86,7 +93,6 @@ def train_xgboost(X_train, y_train, features):
         random_state=42,
         n_estimators=100,
         max_depth=10,
-        use_label_encoder=False,  # Avoids a warning; set evaluation metric explicitly
         eval_metric='logloss'
     )
     xgb_model.fit(X_train_balanced, y_train_balanced)
@@ -98,9 +104,11 @@ def plot_xgboost_prediction_histogram(model, X_test, fig_dir):
 
     plt.figure(figsize=(8, 6))
     plt.hist(y_pred_prob, bins=50)
-    plt.title("Histogram of XGBoost Prediction Probabilities")
-    plt.xlabel("Prediction Probability")
-    plt.ylabel("Frequency")
+    plt.title("Histogram of XGBoost Prediction Probabilities", fontsize=18)
+    plt.xlabel("Prediction Probability", fontsize=16)
+    plt.ylabel("Frequency", fontsize=16)
+    plt.xticks(fontsize=14)
+    plt.yticks(fontsize=14)
     plt.tight_layout()
     plt.savefig(f"{fig_dir}/xgboost_prediction_probability_histogram.png", dpi=200)
     plt.close()
@@ -114,9 +122,11 @@ def plot_feature_importance(features: list, model, fig_dir: str):
 
     plt.figure(figsize=(8, 6))
     plt.barh(feature_importances["Feature"], feature_importances["Importance"], color="skyblue")
-    plt.xlabel("Importance")
-    plt.ylabel("Feature")
-    plt.title("Feature Importance")
+    plt.xlabel("Importance", fontsize=16)
+    plt.ylabel("Feature", fontsize=16)
+    plt.title("Feature Importance", fontsize=16)
+    plt.xticks(fontsize=14)
+    plt.yticks(fontsize=14)
     plt.gca().invert_yaxis()  # Highest importance at the top
     plt.tight_layout()
     plt.savefig(f"{fig_dir}/xgboost_feature_importance.png", dpi=200)
@@ -125,11 +135,13 @@ def plot_feature_importance(features: list, model, fig_dir: str):
 def plot_feature_score_histograms(features, inferred_network, fig_dir):
     plt.figure(figsize=(15, 8))
     for i, feature in enumerate(features, 1):
-        plt.subplot(2, 3, i)  # 2 rows, 3 columns, index = i
+        plt.subplot(3, 4, i)  # 3 rows, 4 columns, index = i
         plt.hist(inferred_network[feature], bins=50, alpha=0.7, edgecolor='black')
-        plt.title(f"{feature} distribution")
-        plt.xlabel(feature)
-        plt.ylabel("Frequency")
+        plt.title(f"{feature} distribution", fontsize=18)
+        plt.xlabel(feature, fontsize=16)
+        plt.ylabel("Frequency", fontsize=16)
+        plt.xticks(fontsize=14)
+        plt.yticks(fontsize=14)
     plt.tight_layout()
     plt.savefig(f'{fig_dir}/xgboost_feature_score_hist.png', dpi=300)
     plt.close()
@@ -146,18 +158,24 @@ def plot_feature_boxplots(features, inferred_network, fig_dir):
         upper_bound = Q3 + 1.5 * IQR
         return series[(series >= lower_bound) & (series <= upper_bound)]
     
-    fig, axes = plt.subplots(nrows=2, ncols=3, figsize=(15, 8))
-    axes = axes.flatten()
+    n_features = len(features)
+    ncols = 3
+    nrows = math.ceil(n_features / ncols)
+    
+    fig, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 4 * nrows))
+    axes = axes.flatten()  # Flatten the 2D array of axes
     
     for i, feature in enumerate(features):
         ax = axes[i]
         data_label0 = remove_outliers(inferred_network.loc[inferred_network["label"] == 0, feature])
         data_label1 = remove_outliers(inferred_network.loc[inferred_network["label"] == 1, feature])
         ax.boxplot([data_label0, data_label1], patch_artist=True)
-        ax.set_title(feature)
-        ax.set_xticklabels(["label 0", "label 1"])
-        ax.set_ylabel("score")
+        ax.set_title(feature, fontsize=18)
+        ax.set_xticklabels(["True", "False"], fontsize=16)
+        ax.set_ylabel("score", fontsize=16)
+        ax.set_yticklabels(fontsize=14)
     
+    # Hide any unused subplots if they exist
     for j in range(i+1, len(axes)):
         fig.delaxes(axes[j])
     
@@ -170,10 +188,9 @@ def main():
     args: argparse.Namespace = parse_args()
 
     ground_truth_file: str = args.ground_truth_file
+    inferred_network_file: str = args.inferred_network_file
     output_dir: str = args.output_dir
     fig_dir: str = args.fig_dir
-    
-    inferred_network_file = f"{output_dir}/inferred_network_raw.csv"
 
     inferred_network = read_inferred_network(inferred_network_file)
     ground_truth = read_ground_truth(ground_truth_file)
@@ -212,6 +229,9 @@ def main():
     
     # Save feature names for reference
     xgb_model.feature_names = list(X_train.columns.values)
+    
+    logging.info("Done! Saving trained XGBoost model.")
+    joblib.dump(xgb_model, f"{output_dir}/trained_xgboost_model.pkl")
 
     if not os.path.exists(fig_dir):
         os.makedirs(fig_dir)
@@ -221,8 +241,6 @@ def main():
     plot_feature_boxplots(aggregated_features_new, inferred_network, fig_dir)
     plot_xgboost_prediction_histogram(xgb_model, X_test, fig_dir)
     
-    logging.info("Done! Saving trained XGBoost model.")
-    joblib.dump(xgb_model, f"{output_dir}/trained_xgboost_model.pkl")
     
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format='%(message)s')

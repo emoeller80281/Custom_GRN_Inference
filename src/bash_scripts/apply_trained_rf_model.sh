@@ -44,6 +44,16 @@ determine_num_cpus() {
 
 determine_num_cpus
 
+# ======== XGBOOST MODEL ========
+# mESC vs K562
+python3 "$PROJECT_DIR/src/testing_scripts/apply_trained_xgboost.py" \
+    --output_dir "$K562_OUTPUT" \
+    --model "$K562_OUTPUT/trained_xgboost_model.pkl" \
+    --target  "$K562_OUTPUT/inferred_network_raw.csv"\
+    --save_name "full_network"
+
+
+# ======== RANDOM FOREST ========
 # # mESC vs macrophage
 # python3 "$PROJECT_DIR/src/testing_scripts/apply_trained_rf_model.py" \
 #     --output_dir "$MESC_OUTPUT/filtered_L2_E7.5_rep1" \
