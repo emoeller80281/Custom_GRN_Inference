@@ -36,7 +36,7 @@ R_SCRIPT_DIR="$BASE_DIR/src/r_scripts"
 OUTPUT_DIR="$BASE_DIR/output/$CELL_TYPE/$SAMPLE_NAME"
 REFERENCE_GENOME_DIR="$BASE_DIR/reference_genome/$SPECIES"
 ENHANCERDB_FILE="$BASE_DIR/enhancer_db/enhancer"
-INFERRED_NET_FILE="$OUTPUT_DIR/sample_inferred_network_raw_agg_features.csv"
+INFERRED_NET_FILE="$OUTPUT_DIR/inferred_network_raw.csv"
 
 TF_NAMES_FILE="$BASE_DIR/motif_information/$SPECIES/TF_Information_all_motifs.txt"
 MEME_DIR="$BASE_DIR/motif_information/$SPECIES/${SPECIES}_motif_meme_files"

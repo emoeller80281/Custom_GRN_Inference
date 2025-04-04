@@ -20,6 +20,8 @@ reference_networks/
 *.pos
 *.seq
 *.tmp
+*.bed
+*.pairs
 motif_pwms/*
 other_method_grns
 figures
@@ -34,4 +36,4 @@ Hi-C_data/
 .pybiomart.sqlite
 enhancer_db/
 tmp/
-*.bed
+keypairs.json

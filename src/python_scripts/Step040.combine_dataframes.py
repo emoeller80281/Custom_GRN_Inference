@@ -191,8 +191,6 @@ def main(atac_data_file, rna_data_file, output_dir, fig_dir):
     logging.info(full_merged_df_norm.head())
     logging.info(full_merged_df_norm.columns)
 
-    
-    
     # # For testing, randomly downsample to 10% of the rows
     # logging.info("Creating and saving a 10% downsampling of the dataset for testing")
     # sampled_merged_df_norm = full_merged_df_norm.sample(frac=0.1)
