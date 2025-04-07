@@ -32,18 +32,6 @@ def parse_args() -> argparse.Namespace:
         help="Path to the scRNAseq data file"
     )
     parser.add_argument(
-        "--enhancer_db_file",
-        type=str,
-        required=True,
-        help="Path to the EnhancerDB file"
-    )
-    parser.add_argument(
-        "--tmp_dir",
-        type=str,
-        required=True,
-        help="Path to the tmp_dir for this sample"
-    )
-    parser.add_argument(
         "--output_dir",
         type=str,
         required=True,
@@ -317,7 +305,7 @@ def main():
 
     pybedtools.set_tempdir(TMP_DIR)
     
-    # Load the peak, gene TSS, and enhancer BED files
+    # Load the peak and gene TSS BED files
     peak_bed = pybedtools.BedTool(f"{TMP_DIR}/peak_df.bed")
     tss_bed = pybedtools.BedTool(f"{TMP_DIR}/ensembl.bed")
     
@@ -352,7 +340,7 @@ def main():
     cutoff = sig_peak_to_gene_corr["correlation"].quantile(quantile_threshold)
     top_peak_to_gene_corr = sig_peak_to_gene_corr[sig_peak_to_gene_corr["correlation"] >= cutoff]
 
-    # Merge the gene and enhancer df
+    # Merge the correlation and TSS distance DataFrames
     final_df = pd.merge(top_peak_to_gene_corr, peak_gene_df, how="inner", left_on=["peak", "gene"], right_on=["peak_id", "target_id"]).dropna(subset="peak_id")
     
     final_df = final_df[["peak_id", "target_id", "correlation", "TSS_dist"]]

@@ -10,13 +10,22 @@ set -euo pipefail
 # =============================================
 # SELECT WHICH PROCESSES TO RUN
 # =============================================
+# Peak to TG regulatory potential calculation methods
 STEP010_CICERO_MAP_PEAKS_TO_TG=false
-STEP020_CICERO_PEAK_TO_TG_SCORE=false
-STEP025_PEAK_TO_TG_CORRELATION=false
-STEP030_SLIDING_WINDOW_TF_TO_PEAK_SCORE=false
-STEP035_HOMER_TF_TO_PEAK_SCORE=false
-STEP040_TF_TO_TG_SCORE=true
-STEP050_TRAIN_CLASSIFIER=false
+STEP015_CICERO_PEAK_TO_TG_SCORE=false
+
+STEP020_PEAK_TO_TG_CORRELATION=true
+STEP030_PEAK_TO_ENHANCER_DB=true
+
+# TF to peak binding score calculation methods
+STEP040_SLIDING_WINDOW_TF_TO_PEAK_SCORE=false
+STEP050_HOMER_TF_TO_PEAK_SCORE=false
+
+# Combining score DataFrames
+STEP060_COMBINE_DATAFRAMES=true
+
+# Train a predictive model to infer the GRN
+STEP070_TRAIN_XGBOOST_CLASSIFIER=true
 
 # =============================================
 # USER PATH VARIABLES
@@ -119,12 +128,13 @@ validate_critical_variables
 # Function to check if at least one process is selected
 check_pipeline_steps() {
     if ! $STEP010_CICERO_MAP_PEAKS_TO_TG \
-    && ! $STEP020_CICERO_PEAK_TO_TG_SCORE \
-    && ! $STEP025_PEAK_TO_TG_CORRELATION \
-    && ! $STEP030_SLIDING_WINDOW_TF_TO_PEAK_SCORE \
-    && ! $STEP035_HOMER_TF_TO_PEAK_SCORE \
-    && ! $STEP040_TF_TO_TG_SCORE \
-    && ! $STEP050_TRAIN_CLASSIFIER; then \
+    && ! $STEP015_CICERO_PEAK_TO_TG_SCORE \
+    && ! $STEP020_PEAK_TO_TG_CORRELATION \
+    && ! $STEP030_PEAK_TO_ENHANCER_DB \
+    && ! $STEP040_SLIDING_WINDOW_TF_TO_PEAK_SCORE \
+    && ! $STEP050_HOMER_TF_TO_PEAK_SCORE \
+    && ! $STEP060_COMBINE_DATAFRAMES \
+    && ! $STEP070_TRAIN_XGBOOST_CLASSIFIER; then \
         echo "Error: At least one process must be enabled to run the pipeline."
         exit 1
     fi
@@ -501,13 +511,27 @@ run_cicero_peak_to_tg_score() {
     echo ""
     echo "Python: Parsing Cicero peak to TG scores"
     /usr/bin/time -v \
-    python3 "$PYTHON_SCRIPT_DIR/Step020.cicero_peak_to_tg_score.py" \
+    python3 "$PYTHON_SCRIPT_DIR/Step015.cicero_peak_to_tg_score.py" \
         --fig_dir "$FIG_DIR" \
         --output_dir "$OUTPUT_DIR" 
     
-} 2> "$LOG_DIR/Step020.cicero_peak_to_tg_score.log"
+} 2> "$LOG_DIR/Step015.cicero_peak_to_tg_score.log"
 
 run_correlation_peak_to_tg_score() {
+    echo ""
+    echo "Python: Calculating correlation peak to TG score"
+    /usr/bin/time -v \
+    python3 "$PYTHON_SCRIPT_DIR/Step020.peak_gene_correlation.py" \
+        --atac_data_file "$ATAC_FILE_NAME" \
+        --rna_data_file "$RNA_FILE_NAME" \
+        --output_dir "$OUTPUT_DIR" \
+        --species "$SPECIES" \
+        --num_cpu "$NUM_CPU" \
+        --peak_dist_limit 1000000
+
+} 2> "$LOG_DIR/Step020.peak_gene_correlation.log"
+
+run_peak_to_enhancer_db_score() {
     if [ ! -f $ENHANCERDB_FILE ]; then
         echo "EnhancerDB file not found, downloading..."
         mkdir -p "$BASE_DIR/enhancer_db"
@@ -516,18 +540,31 @@ run_correlation_peak_to_tg_score() {
     fi
 
     echo ""
-    echo "Python: Calculating correlation peak to TG score"
+    echo "Python: Mapping peaks to known enhancer regions from EnhancerDB"
     /usr/bin/time -v \
-    python3 "$PYTHON_SCRIPT_DIR/Step025.peak_gene_correlation.py" \
+    python3 "$PYTHON_SCRIPT_DIR/Step030.peak_to_enhancer_db.py" \
+        --atac_data_file "$ATAC_FILE_NAME" \
+        --enhancer_db_file "$ENHANCERDB_FILE" \
+        --output_dir "$OUTPUT_DIR" \
+
+} 2> "$LOG_DIR/Step030.peak_to_enhancer_db.log"
+
+run_sliding_window_tf_to_peak_score() {
+    echo ""
+    echo "Python: Calculating sliding window TF to peak scores"
+    /usr/bin/time -v \
+    python3 "$PYTHON_SCRIPT_DIR/Step040.sliding_window_tf_peak_motifs.py" \
+        --tf_names_file "$TF_NAMES_FILE"\
+        --meme_dir "$MEME_DIR"\
+        --reference_genome_dir "$REFERENCE_GENOME_DIR"\
         --atac_data_file "$ATAC_FILE_NAME" \
         --rna_data_file "$RNA_FILE_NAME" \
-        --tmp_dir "$OUTPUT_DIR/tmp" \
         --output_dir "$OUTPUT_DIR" \
         --species "$SPECIES" \
-        --num_cpu "$NUM_CPU" \
-        --peak_dist_limit 1000000
+        --num_cpu "$NUM_CPU" 
+    
+} 2> "$LOG_DIR/Step040.sliding_window_tf_peak_motifs.log"
 
-} 2> "$LOG_DIR/Step025.peak_to_gene_correlation.log"
 
 run_homer() {
     echo ""
@@ -584,52 +621,37 @@ run_homer_tf_to_peak_score() {
     echo ""
     echo "Python: Calculating homer TF to peak scores"
     /usr/bin/time -v \
-    python3 src/python_scripts/Step030.homer_tf_peak_motifs.py \
+    python3 src/python_scripts/Step050.homer_tf_peak_motifs.py \
         --input_dir "${OUTPUT_DIR}/homer_results/homer_tf_motif_scores" \
         --output_file "${OUTPUT_DIR}/homer_tf_to_peak.tsv" \
         --cpu_count $NUM_CPU
 
-} 2> "$LOG_DIR/Step030.homer_tf_to_peak_motifs.log"
+} 2> "$LOG_DIR/Step050.homer_tf_to_peak_motifs.log"
 
-run_sliding_window_tf_to_peak_score() {
-    echo ""
-    echo "Python: Calculating sliding window TF to peak scores"
-    /usr/bin/time -v \
-    python3 "$PYTHON_SCRIPT_DIR/Step035.sliding_window_tf_peak_motifs.py" \
-        --tf_names_file "$TF_NAMES_FILE"\
-        --meme_dir "$MEME_DIR"\
-        --reference_genome_dir "$REFERENCE_GENOME_DIR"\
-        --atac_data_file "$ATAC_FILE_NAME" \
-        --rna_data_file "$RNA_FILE_NAME" \
-        --output_dir "$OUTPUT_DIR" \
-        --species "$SPECIES" \
-        --num_cpu "$NUM_CPU" 
-    
-} 2> "$LOG_DIR/Step035.sliding_window_tf_peak_motifs.log"
 
-run_tf_to_tg_score() {
+run_combine_dataframes() {
     echo ""
     echo "Python: Creating TF to TG score DataFrame"
     /usr/bin/time -v \
-    python3 "$PYTHON_SCRIPT_DIR/Step040.combine_dataframes.py" \
+    python3 "$PYTHON_SCRIPT_DIR/Step060.combine_dataframes.py" \
         --rna_data_file "$RNA_FILE_NAME" \
         --atac_data_file "$ATAC_FILE_NAME" \
         --output_dir "$OUTPUT_DIR" \
         --fig_dir "$FIG_DIR"
     
-} 2> "$LOG_DIR/Step040.tf_to_tg_score.log"
+} 2> "$LOG_DIR/Step060.combine_dataframes.log"
 
 run_classifier_training() {
     echo ""
     echo "Python: Training XGBoost Classifier"
     /usr/bin/time -v \
-    python3 "$PYTHON_SCRIPT_DIR/Step050.train_xgboost.py" \
+    python3 "$PYTHON_SCRIPT_DIR/Step070.train_xgboost.py" \
         --ground_truth_file "$GROUND_TRUTH_FILE" \
         --inferred_network_file "$INFERRED_NET_FILE" \
         --output_dir "$OUTPUT_DIR" \
         --fig_dir "$FIG_DIR" 
 
-} 2> "$LOG_DIR/Step050.train_classifier.log"
+} 2> "$LOG_DIR/Step070.train_xgboost.log"
 
 
 # =============================================
@@ -656,9 +678,10 @@ check_processed_files
 
 # Execute selected pipeline steps
 if [ "$STEP010_CICERO_MAP_PEAKS_TO_TG" = true ]; then run_cicero; fi
-if [ "$STEP020_CICERO_PEAK_TO_TG_SCORE" = true ]; then run_cicero_peak_to_tg_score; fi
-if [ "$STEP025_PEAK_TO_TG_CORRELATION" = true ]; then run_correlation_peak_to_tg_score; fi
-if [ "$STEP030_SLIDING_WINDOW_TF_TO_PEAK_SCORE" = true ]; then run_sliding_window_tf_to_peak_score; fi
-if [ "$STEP035_HOMER_TF_TO_PEAK_SCORE" = true ]; then run_homer; run_homer_tf_to_peak_score; fi
-if [ "$STEP040_TF_TO_TG_SCORE" = true ]; then run_tf_to_tg_score; fi
-if [ "$STEP050_TRAIN_CLASSIFIER" = true ]; then run_classifier_training; fi
+if [ "$STEP015_CICERO_PEAK_TO_TG_SCORE" = true ]; then run_cicero_peak_to_tg_score; fi
+if [ "$STEP020_PEAK_TO_TG_CORRELATION" = true ]; then run_correlation_peak_to_tg_score; fi
+if [ "$STEP030_PEAK_TO_ENHANCER_DB" = true ]; then run_peak_to_enhancer_db_score; fi
+if [ "$STEP040_SLIDING_WINDOW_TF_TO_PEAK_SCORE" = true ]; then run_sliding_window_tf_to_peak_score; fi
+if [ "$STEP050_HOMER_TF_TO_PEAK_SCORE" = true ]; then run_homer; run_homer_tf_to_peak_score; fi
+if [ "$STEP060_COMBINE_DATAFRAMES" = true ]; then run_combine_dataframes; fi
+if [ "$STEP070_TRAIN_XGBOOST_CLASSIFIER" = true ]; then run_classifier_training; fi
