@@ -237,7 +237,7 @@ def plot_stability_boxplot(X, y, fig_dir):
     plt.savefig(f"{fig_dir}/xgboost_stability_boxplot.png", dpi=300)
     plt.close()
     
-def plot_overlapping_roc_pr_curves(X, y, aggregated_features_new, fig_dir):
+def plot_overlapping_roc_pr_curves(X, y, feature_names, fig_dir):
     """
     Plots overlapping ROC and Precision-Recall curves for multiple runs.
     
@@ -254,7 +254,7 @@ def plot_overlapping_roc_pr_curves(X, y, aggregated_features_new, fig_dir):
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, train_size=0.7, random_state=i)
         
         # Train your XGBoost model; ensure your train_xgboost function is defined
-        xgb_model = train_xgboost(X_train, y_train, aggregated_features_new)
+        xgb_model = train_xgboost(X_train, y_train, feature_names)
         # Save feature names if needed for prediction
         xgb_model.feature_names = list(X_train.columns.values)
         
@@ -301,7 +301,7 @@ def plot_overlapping_roc_pr_curves(X, y, aggregated_features_new, fig_dir):
     plt.savefig(f"{fig_dir}/xgboost_stability_auroc_auprc.png", dpi=300)
     plt.close()
 
-def plot_feature_ablation(aggregated_features_new, X_train, X_test, y_train, y_test, full_model, fig_dir):
+def plot_feature_ablation(feature_names, X_train, X_test, y_train, y_test, full_model, fig_dir):
     logging.info(f'\tPlotting feature ablation for each feature')
     y_pred_prob_full = full_model.predict_proba(X_test)[:, 1]
     full_auroc = roc_auc_score(y_test, y_pred_prob_full)
@@ -311,9 +311,9 @@ def plot_feature_ablation(aggregated_features_new, X_train, X_test, y_train, y_t
     feature_performance = {}
 
     # For each feature, remove it, retrain the model, and compute AUROC
-    for feature in aggregated_features_new:
+    for feature in feature_names:
         # Create a list of features excluding the current one
-        features_subset = [f for f in aggregated_features_new if f != feature]
+        features_subset = [f for f in feature_names if f != feature]
         
         # Subset training and test sets
         X_train_subset = X_train[features_subset]
@@ -347,7 +347,7 @@ def plot_feature_ablation(aggregated_features_new, X_train, X_test, y_train, y_t
     plt.close()
 
 def plot_combined_figure(xgb_model, X, y, X_train, X_test, y_train, y_test, 
-                           inferred_network, aggregated_features_new, fig_dir, full_model):
+                           inferred_network, feature_names, fig_dir, full_model):
     """
     Combines all individual analysis plots into a single large image.
     This function creates:
@@ -382,7 +382,7 @@ def plot_combined_figure(xgb_model, X, y, X_train, X_test, y_train, y_test,
     logging.info("\t\t2. Feature Importance Barplot")
     ax2 = fig.add_subplot(gs[0, 2])
     feature_importances = pd.DataFrame({
-        "Feature": aggregated_features_new,
+        "Feature": feature_names,
         "Importance": xgb_model.feature_importances_
     }).sort_values(by="Importance", ascending=False)
     ax2.barh(feature_importances["Feature"], feature_importances["Importance"], color="skyblue")
@@ -397,7 +397,7 @@ def plot_combined_figure(xgb_model, X, y, X_train, X_test, y_train, y_test,
     logging.info("\t\t4. Feature Score Histograms")
     # We embed a 4x3 grid inside one subplot (spanning row 1 entirely)
     gs4 = GridSpecFromSubplotSpec(4, 3, subplot_spec=gs[1:4, :], hspace=0.7, wspace=0.4)
-    for i, feature in enumerate(aggregated_features_new):
+    for i, feature in enumerate(feature_names):
         ax = fig.add_subplot(gs4[i])
         ax.hist(inferred_network[feature].dropna(), bins=50, alpha=0.7, edgecolor='black', color='lightgreen')
         ax.set_title(f"{feature} distribution", fontsize=16)
@@ -408,7 +408,7 @@ def plot_combined_figure(xgb_model, X, y, X_train, X_test, y_train, y_test,
     # -------------------------------
     # Panel 5: Feature Boxplots (multi-panel)
     logging.info("\t\t5. Feature Boxplots")
-    gs5 = GridSpecFromSubplotSpec(math.ceil(len(aggregated_features_new)/3), 3, subplot_spec=gs[4:7, :], 
+    gs5 = GridSpecFromSubplotSpec(math.ceil(len(feature_names)/3), 3, subplot_spec=gs[4:7, :], 
                                   hspace=0.5, wspace=0.4)
     def remove_outliers(series):
         Q1 = series.quantile(0.25)
@@ -418,7 +418,7 @@ def plot_combined_figure(xgb_model, X, y, X_train, X_test, y_train, y_test,
         upper_bound = Q3 + 1.5 * IQR
         return series[(series >= lower_bound) & (series <= upper_bound)]
     
-    for i, feature in enumerate(aggregated_features_new):
+    for i, feature in enumerate(feature_names):
         ax = fig.add_subplot(gs5[i])
         data_label0 = remove_outliers(inferred_network.loc[inferred_network["label"] == 0, feature])
         data_label1 = remove_outliers(inferred_network.loc[inferred_network["label"] == 1, feature])
@@ -456,7 +456,7 @@ def plot_combined_figure(xgb_model, X, y, X_train, X_test, y_train, y_test,
     y_score_list = []
     for i in range(n_runs):
         X_train_i, X_test_i, y_train_i, y_test_i = train_test_split(X, y, test_size=0.2, random_state=i)
-        model_i = train_xgboost(X_train_i, y_train_i, aggregated_features_new)
+        model_i = train_xgboost(X_train_i, y_train_i, feature_names)
         model_i.feature_names = list(X_train_i.columns.values)
         y_pred_prob_i = model_i.predict_proba(X_test_i)[:, 1]
         y_true_list.append(y_test_i.to_numpy())
@@ -497,8 +497,8 @@ def plot_combined_figure(xgb_model, X, y, X_train, X_test, y_train, y_test,
     y_pred_prob_full = full_model.predict_proba(X_test)[:, 1]
     full_auroc = roc_auc_score(y_test, y_pred_prob_full)
     feature_performance = {}
-    for feature in aggregated_features_new:
-        features_subset = [f for f in aggregated_features_new if f != feature]
+    for feature in feature_names:
+        features_subset = [f for f in feature_names if f != feature]
         X_train_subset = X_train[features_subset]
         X_test_subset = X_test[features_subset]
         model_subset = train_xgboost(X_train_subset, y_train, features_subset)
@@ -547,25 +547,19 @@ def main():
     logging.info(f'Number of False labels: {len(inferred_network[inferred_network["label"] == 0])}')
     logging.info(f'Balancing the number of True and False labels in the training set')
 
-    aggregated_features_new = [
-        "mean_TF_expression",
-        "mean_TG_expression",
-        "mean_peak_accessibility",
-        "cicero_score",
-        "enh_score",
-        "TSS_dist",
-        "correlation",
-        "sliding_window_score",
-        "homer_binding_score"
-    ]
+    drop_cols = ["source_id", "peak_id", "target_id", "label"]
+    feature_names = [col for col in inferred_network.columns if col not in drop_cols]
+    logging.info(f'Features:')
+    for feature in feature_names:
+        logging.info(f'\t{feature}')
 
-    X = inferred_network[aggregated_features_new]
+    X = inferred_network[feature_names]
     y = inferred_network["label"]
 
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
     logging.info("Training XGBoost Model")
-    xgb_model = train_xgboost(X_train, y_train, aggregated_features_new)
+    xgb_model = train_xgboost(X_train, y_train, feature_names)
     
     # Save feature names for reference
     xgb_model.feature_names = list(X_train.columns.values)
@@ -577,15 +571,15 @@ def main():
         os.makedirs(fig_dir)
     
     logging.info("\n----- Plotting Figures -----")
-    # plot_combined_figure(xgb_model, X, y, X_train, X_test, y_train, y_test, inferred_network, aggregated_features_new, fig_dir, xgb_model)
-    # plot_feature_ablation(aggregated_features_new, X_train, X_test, y_train, y_test, xgb_model, fig_dir)
-    # plot_stability_boxplot(X, y, fig_dir)
-    # plot_overlapping_roc_pr_curves(X, y, aggregated_features_new, fig_dir)
-    # plot_feature_importance(aggregated_features_new, xgb_model, fig_dir)
-    # plot_feature_score_histograms(aggregated_features_new, inferred_network, fig_dir)
-    # plot_feature_boxplots(aggregated_features_new, inferred_network, fig_dir)
-    # plot_xgboost_prediction_histogram(xgb_model, X_test, fig_dir)
-    # plot_permutation_importance_plot(xgb_model, X_test, y_test, fig_dir)
+    plot_combined_figure(xgb_model, X, y, X_train, X_test, y_train, y_test, inferred_network, feature_names, fig_dir, xgb_model)
+    plot_feature_ablation(feature_names, X_train, X_test, y_train, y_test, xgb_model, fig_dir)
+    plot_stability_boxplot(X, y, fig_dir)
+    plot_overlapping_roc_pr_curves(X, y, feature_names, fig_dir)
+    plot_feature_importance(feature_names, xgb_model, fig_dir)
+    plot_feature_score_histograms(feature_names, inferred_network, fig_dir)
+    plot_feature_boxplots(feature_names, inferred_network, fig_dir)
+    plot_xgboost_prediction_histogram(xgb_model, X_test, fig_dir)
+    plot_permutation_importance_plot(xgb_model, X_test, y_test, fig_dir)
     
     
 if __name__ == "__main__":

@@ -98,8 +98,6 @@ def find_peaks_in_known_enhancer_region(peak_bed, enh_bed):
         
     return peak_enh_overlap_subset_df
 
-
-
 # ============ MAPPING PEAKS TO KNOWN ENHANCERS ============
 # Dataframe with "peak_id", "enh_id", and "enh_score" columns
 if not os.path.exists(f"{TMP_DIR}/enhancer.bed"):
@@ -115,13 +113,5 @@ enh_bed = pybedtools.BedTool(f"{TMP_DIR}/enhancer.bed")
 # Find the peaks that are in known enhancer regions
 peak_enh_df = find_peaks_in_known_enhancer_region(peak_bed, enh_bed)
 
-# Read in the peak to gene correlation dataframe
-peak_gene_corr_df = pd.read_csv(f'{OUTPUT_DIR}/peak_to_gene_correlation.csv', sep="\t", header=0, index=None)
-
-# Merge the peaks overlapping the known enhancers with the peak to gene correlation dataframe
-logging.info("Merging the peak to gene mapping with the known enhancer location mapping")
-peak_gene_df = pd.merge(peak_gene_corr_df, peak_enh_df, how="left", on="peak_id")
-peak_gene_df = peak_gene_df[["peak_id", "gene_id", "correlation", "TSS_dist", "enh_score"]]
-
 # Write out the final dataframe to the output directory
-peak_gene_df.to_csv(f'{OUTPUT_DIR}/peak_to_gene_known_enhancer.csv', sep="\t", header=True, index=False)
+peak_enh_df.to_csv(f'{OUTPUT_DIR}/peak_to_known_enhancers.csv', sep="\t", header=True, index=False)
