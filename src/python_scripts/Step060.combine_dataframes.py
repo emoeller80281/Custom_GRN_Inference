@@ -46,7 +46,55 @@ def parse_args() -> argparse.Namespace:
 def minmax_normalize_column(column: pd.DataFrame):
     return (column - column.min()) / (column.max() - column.min())
 
-def plot_column_histograms(df, fig_dir):
+def aggregate_scores_by_method_combo(df: pd.DataFrame) -> pd.DataFrame:
+    """Aggregates DataFrame score columns into a single regulatory score by adding up
+    each combination of the peak accessibility, peak to target gene, and transcription factor
+    to peak scoring methods
+    
+    Sum of the following score combinations:
+      - Mean peak accessibility * Cicero peak to TG * sliding window TF to peak
+      - Mean peak accessibility * Cicero peak to TG * Homer TF to peak
+      - Mean peak accessibility * peak to TG correlation * sliding window TF to peak
+      - Mean peak accessibility * peak to TG correlation * Homer TF to peak
+
+    Args:
+        df (pd.DataFrame): DataFrame with all merged score columns
+
+    Returns:
+        agg_score_df (pd.DataFrame): DataFrame containing the TF, TG, expression, and regulatory score
+    """
+    logging.info("\nAggregating scoring method combinations")
+    
+    
+    peak_cicero_window = df["mean_peak_accessibility"] * df["cicero_score"] * df["sliding_window_score"]
+    peak_cicero_homer = df["mean_peak_accessibility"] * df["cicero_score"] * df["homer_binding_score"]
+    peak_corr_window = df["mean_peak_accessibility"] * df["correlation"] * df["sliding_window_score"]
+    peak_corr_homer = df["mean_peak_accessibility"] * df["correlation"] * df["homer_binding_score"]
+    
+    agg_scores = peak_cicero_window + peak_cicero_homer + peak_corr_window + peak_corr_homer
+    
+    agg_score_df = pd.DataFrame({
+        "source_id" : df["source_id"],
+        "target_id" : df["target_id"],
+        "Mean TF Expression" : df["mean_TF_expression"],
+        "Mean TG Expression" : df["mean_TG_expression"],
+        "Regulatory Score" : agg_scores
+        })
+    
+    individual_scores = pd.DataFrame({
+        "source_id" : df["source_id"],
+        "target_id" : df["target_id"],
+        "Mean TF Expression" : df["mean_TF_expression"],
+        "Mean TG Expression" : df["mean_TG_expression"],
+        "Cicero and Sliding Window" : peak_cicero_window,
+        "Cicero and Homer" : peak_cicero_homer,
+        "Correlation and Sliding Window" : peak_corr_window,
+        "Correlation and Homer" : peak_corr_homer
+        })
+    
+    return agg_score_df, individual_scores
+
+def plot_column_histograms(df, fig_dir, df_name="inferred_net"):
     # Create a figure and axes with a suitable size
     plt.figure(figsize=(15, 8))
     
@@ -62,10 +110,11 @@ def plot_column_histograms(df, fig_dir):
         plt.ylabel("Frequency")
 
     plt.tight_layout()
-    plt.savefig(f'{fig_dir}/column_histograms.png', dpi=300)
+    plt.savefig(f'{fig_dir}/{df_name}_column_histograms.png', dpi=300)
     plt.close()
 
 def write_csv_in_chunks(df, output_dir, filename):
+    logging.info(f'Writing out CSV file to {filename} in 5% chunks')
     output_file = f'{output_dir}/{filename}'
     chunksize = int(math.ceil(0.05 * df.shape[0]))
 
@@ -74,7 +123,7 @@ def write_csv_in_chunks(df, output_dir, filename):
         os.remove(output_file)
 
     # Write the DataFrame in chunks
-    for start in tqdm(range(0, len(df), chunksize)):
+    for start in tqdm(range(0, len(df), chunksize), unit="chunk"):
         chunk = df.iloc[start:start + chunksize]
         if start == 0:
             # For the first chunk, write with header in write mode
@@ -130,7 +179,7 @@ def main(atac_data_file, rna_data_file, output_dir, fig_dir):
     
     logging.info("\tMerging the peak to target gene correlation with the known enhancer location mapping")
     peak_gene_df = pd.merge(peak_corr_df, peak_enh_df, how="left", on="peak_id")
-    peak_gene_df = peak_gene_df[["peak_id", "gene_id", "correlation", "TSS_dist", "enh_score"]]
+    peak_gene_df = peak_gene_df[["peak_id", "target_id", "correlation", "TSS_dist", "enh_score"]]
 
     logging.info("\tMerging the correlation and cicero methods for peak to target gene")
     peak_to_tg_df = pd.merge(peak_gene_df, cicero_df, on=["peak_id", "target_id"], how="outer")
@@ -206,34 +255,22 @@ def main(atac_data_file, rna_data_file, output_dir, fig_dir):
     # write_csv_in_chunks(sampled_merged_df_norm, output_dir, 'sample_inferred_network_raw_all_features.csv')
     
     # ===== AGGREGATE FEATURE SCORES BY COMBINING PERMUTATIONS OF FEATURE COMBINATIONS =====
-    logging.info("\nAggregating scoring method combinations")
-    # Aggregating the features by combining scores (test each combination of the peak acc, peak to TG, and TF to peak methods)
-    #  - Peak acc * Cicero * sliding window
-    #  - Peak acc * Cicero * Homer
-    #  - Peak acc * correlation * sliding window
-    #  - Peak acc * correlation * Homer
-    # Sum all of these scores
+    sample_agg_score_df, sample_each_combo_df = aggregate_scores_by_method_combo(sampled_merged_df_norm)
+    write_csv_in_chunks(sample_agg_score_df, output_dir, 'sample_inferred_network_agg_method_combo.csv')
+    write_csv_in_chunks(sample_each_combo_df, output_dir, 'sample_inferred_network_each_method_combo.csv')
     
-    peak_cicero_window = sampled_merged_df_norm["mean_peak_accessibility"] * sampled_merged_df_norm["cicero_score"] * sampled_merged_df_norm["sliding_window_score"]
-    peak_cicero_homer = sampled_merged_df_norm["mean_peak_accessibility"] * sampled_merged_df_norm["cicero_score"] * sampled_merged_df_norm["homer_binding_score"]
-    peak_corr_window = sampled_merged_df_norm["mean_peak_accessibility"] * sampled_merged_df_norm["correlation"] * sampled_merged_df_norm["sliding_window_score"]
-    peak_corr_homer = sampled_merged_df_norm["mean_peak_accessibility"] * sampled_merged_df_norm["correlation"] * sampled_merged_df_norm["homer_binding_score"]
+    logging.info("Plotting histograms of the data columns for the 10% downsampled inferred network with aggregated regulatory score")
+    plot_column_histograms(sample_agg_score_df, fig_dir, df_name="sample_agg_method_combo")
+    plot_column_histograms(sample_each_combo_df, fig_dir, df_name="sample_each_method_combo")
     
-    agg_scores = peak_cicero_window + peak_cicero_homer + peak_corr_window + peak_corr_homer
+    full_agg_score_df, full_each_combo_df = aggregate_scores_by_method_combo(full_merged_df_norm)
+    write_csv_in_chunks(full_agg_score_df, output_dir, 'full_inferred_network_agg_method_combo.csv')
+    write_csv_in_chunks(full_each_combo_df, output_dir, 'full_inferred_network_each_method_combo.csv')
     
-    agg_score_df = pd.DataFrame({
-        "source_id" : sampled_merged_df_norm["source_id"],
-        "target_id" : sampled_merged_df_norm["target_id"],
-        "mean_TF_expression" : sampled_merged_df_norm["mean_TF_expression"],
-        "mean_TG_expression" : sampled_merged_df_norm["mean_TG_expression"],
-        "regulatory_score" : agg_scores
-        })
-    
-    write_csv_in_chunks(agg_score_df, output_dir, 'sample_inferred_network_agg_regulatory_score.csv')
-    
-    logging.info("Plotting histograms of the data columns")
-    plot_column_histograms(agg_score_df, fig_dir)
-    
+    logging.info("Plotting histograms of the data columns for the full inferred network with aggregated regulatory score")
+    plot_column_histograms(full_agg_score_df, fig_dir, df_name="full_agg_method_combo")
+    plot_column_histograms(full_each_combo_df, fig_dir, df_name="full_each_method_combo")
+
     # ===== AGGREGATE THE FEATURE SCORES FOR ALL PEAKS =====
     # # Also want to test how the model performs if we aggregate the samples across peaks to get a source target pair
     # logging.info("Aggregating features to reduce the (downsampled) dataset to TF to TG pairs")

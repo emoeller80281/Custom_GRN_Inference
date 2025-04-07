@@ -274,6 +274,8 @@ def calculate_significant_peak_to_gene_correlations(atac_df, gene_df, alpha=0.05
     df_corr["peak_id"] = atac_df.index[df_corr["peak_i"]]
     df_corr["gene_id"] = gene_df.index[df_corr["gene_j"]]
     df_corr = df_corr[["peak_id", "gene_id", "correlation"]]
+    
+    logging.info("\tDone!")
 
     return df_corr
 
@@ -355,7 +357,7 @@ def main():
     top_peak_to_gene_corr = sig_peak_to_gene_corr[sig_peak_to_gene_corr["correlation"] >= cutoff]
 
     # Merge the correlation and TSS distance DataFrames
-    final_df = pd.merge(top_peak_to_gene_corr, peak_gene_df, how="inner", left_on=["peak", "gene_id"], right_on=["peak_id", "target_id"]).dropna(subset="peak_id")
+    final_df = pd.merge(top_peak_to_gene_corr, peak_gene_df, how="inner", left_on=["peak_id", "gene_id"], right_on=["peak_id", "target_id"]).dropna(subset="peak_id")
     
     final_df = final_df[["peak_id", "target_id", "correlation", "TSS_dist"]]
         

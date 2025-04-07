@@ -8,27 +8,30 @@
 set -euo pipefail
 
 # =============================================
-# SELECT WHICH PROCESSES TO RUN
+#        SELECT PIPELINE STEPS TO RUN
 # =============================================
-# Peak to TG regulatory potential calculation methods
+# Run the peak to TG regulatory potential calculation methods
 STEP010_CICERO_MAP_PEAKS_TO_TG=false
 STEP015_CICERO_PEAK_TO_TG_SCORE=false
 
-STEP020_PEAK_TO_TG_CORRELATION=true
-STEP030_PEAK_TO_ENHANCER_DB=true
+STEP020_PEAK_TO_TG_CORRELATION=false
+STEP030_PEAK_TO_ENHANCER_DB=false
 
-# TF to peak binding score calculation methods
+# Run the TF to peak binding score calculation methods
 STEP040_SLIDING_WINDOW_TF_TO_PEAK_SCORE=false
 STEP050_HOMER_TF_TO_PEAK_SCORE=false
 
-# Combining score DataFrames
-STEP060_COMBINE_DATAFRAMES=true
+# Combine the score DataFrames
+STEP060_COMBINE_DATAFRAMES=false
+
+# Find shared edges between the inferred network and the STRING PPI database
+STEP070_FIND_EDGES_IN_STRING_DB=true
 
 # Train a predictive model to infer the GRN
-STEP070_TRAIN_XGBOOST_CLASSIFIER=true
+STEP080_TRAIN_XGBOOST_CLASSIFIER=true
 
 # =============================================
-# USER PATH VARIABLES
+#              USER PATH VARIABLES
 # =============================================
 CONDA_ENV_NAME="my_env"
 
@@ -44,9 +47,13 @@ PYTHON_SCRIPT_DIR="$BASE_DIR/src/python_scripts"
 R_SCRIPT_DIR="$BASE_DIR/src/r_scripts"
 OUTPUT_DIR="$BASE_DIR/output/$CELL_TYPE/$SAMPLE_NAME"
 REFERENCE_GENOME_DIR="$BASE_DIR/reference_genome/$SPECIES"
-ENHANCERDB_FILE="$BASE_DIR/enhancer_db/enhancer"
-INFERRED_NET_FILE="$OUTPUT_DIR/inferred_network_raw.csv"
 
+# Name of the inferred network file for training the XGBoost model
+INFERRED_NET_FILE="$OUTPUT_DIR/sample_inferred_network_all_method_combo.csv"
+
+# ----- Resource / Database files -----
+STRING_DB_DIR="$BASE_DIR"/string_database/$SPECIES/
+ENHANCERDB_FILE="$BASE_DIR/enhancer_db/enhancer"
 TF_NAMES_FILE="$BASE_DIR/motif_information/$SPECIES/TF_Information_all_motifs.txt"
 MEME_DIR="$BASE_DIR/motif_information/$SPECIES/${SPECIES}_motif_meme_files"
 
@@ -72,7 +79,7 @@ echo "    - Species: $SPECIES"
 echo ""
 
 # =============================================
-# FUNCTIONS
+#                   FUNCTIONS
 # =============================================
 
 # -------------- VALIDATION FUNCTIONS ----------------------
@@ -123,7 +130,6 @@ validate_critical_variables() {
     done
 }
 
-# Function to check if at least one process is selected
 check_pipeline_steps() {
     echo ""
     steps=(
@@ -134,7 +140,8 @@ check_pipeline_steps() {
         "STEP040_SLIDING_WINDOW_TF_TO_PEAK_SCORE"
         "STEP050_HOMER_TF_TO_PEAK_SCORE"
         "STEP060_COMBINE_DATAFRAMES"
-        "STEP070_TRAIN_XGBOOST_CLASSIFIER"
+        "STEP070_FIND_EDGES_IN_STRING_DB"
+        "STEP080_TRAIN_XGBOOST_CLASSIFIER"
     )
 
     enabled=0
@@ -143,7 +150,7 @@ check_pipeline_steps() {
     # Echo which steps are enabled
     for step in "${steps[@]}"; do
         if ${!step}; then
-            echo "    - $step enabled"
+            echo "    - $step"
             enabled=1
         fi
     done
@@ -157,7 +164,6 @@ check_pipeline_steps() {
     echo ""
 }
 
-# Function to validate required tools
 check_tools() {
     local required_tools=(python3 conda)
 
@@ -167,7 +173,7 @@ check_tools() {
             echo "[ERROR] $tool is not installed or not in the PATH."
             exit 1
         else
-            echo "[INFO] $tool is available."
+            echo "    - $tool is available."
         fi
     done
 
@@ -210,11 +216,12 @@ determine_num_cpus() {
     fi
 }
 
-# Function to validate input files
 check_input_files() {
     echo "[INFO] Validating input files."
     local files=("$ATAC_FILE_NAME" "$RNA_FILE_NAME")
     for file in "${files[@]}"; do
+        if [ -f "$file" ]; then
+            echo "    - $file exists"
         if [ ! -f "$file" ]; then
             echo "[ERROR] File not found: $file"
             exit 1
@@ -223,10 +230,9 @@ check_input_files() {
             exit 1
         fi
     done
-    echo "[INFO] Input files validated successfully."
+    echo "      Input files validated successfully."
 }
 
-# Function to activate Conda environment
 activate_conda_env() {
     CONDA_BASE=$(conda info --base)
     if [ -z "$CONDA_BASE" ]; then
@@ -244,7 +250,6 @@ activate_conda_env() {
     echo "[INFO] Activated Conda environment: $CONDA_ENV_NAME"
 }
 
-# Function to ensure required directories exist
 setup_directories() {
     echo "[INFO] Ensuring required directories exist."
     local dirs=( 
@@ -583,7 +588,6 @@ run_sliding_window_tf_to_peak_score() {
     
 } 2> "$LOG_DIR/Step040.sliding_window_tf_peak_motifs.log"
 
-
 run_homer() {
     echo ""
     echo "===== Homer ====="
@@ -646,7 +650,6 @@ run_homer_tf_to_peak_score() {
 
 } 2> "$LOG_DIR/Step050.homer_tf_to_peak_motifs.log"
 
-
 run_combine_dataframes() {
     echo ""
     echo "Python: Creating TF to TG score DataFrame"
@@ -659,21 +662,32 @@ run_combine_dataframes() {
     
 } 2> "$LOG_DIR/Step060.combine_dataframes.log"
 
+run_find_edges_in_string_db() {
+    echo ""
+    echo "Python: Finding shared edges between the inferred net and the \
+    STRING protein protein interaction database"
+    /usr/bin/time -v \
+    python3 "$PYTHON_SCRIPT_DIR/Step070.find_edges_in_string_db.py" \
+        --inferred_net_file "$INFERRED_NET_FILE" \
+        --string_dir "$STRING_DB_DIR" \
+        --output_dir "$OUTPUT_DIR" \
+
+} 2> "$LOG_DIR/Step070.find_edges_in_string_db.log"
+
 run_classifier_training() {
     echo ""
     echo "Python: Training XGBoost Classifier"
     /usr/bin/time -v \
-    python3 "$PYTHON_SCRIPT_DIR/Step070.train_xgboost.py" \
+    python3 "$PYTHON_SCRIPT_DIR/Step080.train_xgboost.py" \
         --ground_truth_file "$GROUND_TRUTH_FILE" \
         --inferred_network_file "$INFERRED_NET_FILE" \
         --output_dir "$OUTPUT_DIR" \
         --fig_dir "$FIG_DIR" 
 
-} 2> "$LOG_DIR/Step070.train_xgboost.log"
-
+} 2> "$LOG_DIR/Step080.train_xgboost.log"
 
 # =============================================
-# MAIN PIPELINE
+#               MAIN PIPELINE
 # =============================================
 
 # Help option
@@ -684,7 +698,7 @@ if [[ "${1:-}" == "--help" ]]; then
     exit 0
 fi
 
-# Perform validation
+# ----- Perform validation of pipeline requirements -----
 validate_critical_variables
 check_for_running_jobs
 check_pipeline_steps
@@ -695,7 +709,7 @@ activate_conda_env
 setup_directories
 check_processed_files
 
-# Execute selected pipeline steps
+# ----- Execute selected pipeline steps -----
 if [ "$STEP010_CICERO_MAP_PEAKS_TO_TG" = true ]; then run_cicero; fi
 if [ "$STEP015_CICERO_PEAK_TO_TG_SCORE" = true ]; then run_cicero_peak_to_tg_score; fi
 if [ "$STEP020_PEAK_TO_TG_CORRELATION" = true ]; then run_correlation_peak_to_tg_score; fi
@@ -703,4 +717,5 @@ if [ "$STEP030_PEAK_TO_ENHANCER_DB" = true ]; then run_peak_to_enhancer_db_score
 if [ "$STEP040_SLIDING_WINDOW_TF_TO_PEAK_SCORE" = true ]; then run_sliding_window_tf_to_peak_score; fi
 if [ "$STEP050_HOMER_TF_TO_PEAK_SCORE" = true ]; then run_homer; run_homer_tf_to_peak_score; fi
 if [ "$STEP060_COMBINE_DATAFRAMES" = true ]; then run_combine_dataframes; fi
-if [ "$STEP070_TRAIN_XGBOOST_CLASSIFIER" = true ]; then run_classifier_training; fi
+if [ "$STEP070_FIND_EDGES_IN_STRING_DB" = true ]; then run_find_edges_in_string_db; fi
+if [ "$STEP080_TRAIN_XGBOOST_CLASSIFIER" = true ]; then run_classifier_training; fi

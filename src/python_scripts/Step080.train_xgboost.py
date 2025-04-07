@@ -565,13 +565,13 @@ def main():
     xgb_model.feature_names = list(X_train.columns.values)
     
     logging.info("Done! Saving trained XGBoost model.")
-    joblib.dump(xgb_model, f"{output_dir}/trained_xgboost_model.pkl")
+    joblib.dump(xgb_model, f"{output_dir}/trained_xgboost_model_method_combo_sum.pkl")
 
     if not os.path.exists(fig_dir):
         os.makedirs(fig_dir)
     
     logging.info("\n----- Plotting Figures -----")
-    plot_combined_figure(xgb_model, X, y, X_train, X_test, y_train, y_test, inferred_network, feature_names, fig_dir, xgb_model)
+    # plot_combined_figure(xgb_model, X, y, X_train, X_test, y_train, y_test, inferred_network, feature_names, fig_dir, xgb_model)
     plot_feature_ablation(feature_names, X_train, X_test, y_train, y_test, xgb_model, fig_dir)
     plot_stability_boxplot(X, y, fig_dir)
     plot_overlapping_roc_pr_curves(X, y, feature_names, fig_dir)
