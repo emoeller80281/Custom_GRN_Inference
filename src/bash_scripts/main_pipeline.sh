@@ -12,17 +12,17 @@ set -euo pipefail
 # =============================================
 # Run the peak to TG regulatory potential calculation methods
 STEP010_CICERO_MAP_PEAKS_TO_TG=false
-STEP015_CICERO_PEAK_TO_TG_SCORE=false
+STEP015_CICERO_PEAK_TO_TG_SCORE=true
 
-STEP020_PEAK_TO_TG_CORRELATION=false
-STEP030_PEAK_TO_ENHANCER_DB=false
+STEP020_PEAK_TO_TG_CORRELATION=true
+STEP030_PEAK_TO_ENHANCER_DB=true
 
 # Run the TF to peak binding score calculation methods
-STEP040_SLIDING_WINDOW_TF_TO_PEAK_SCORE=false
-STEP050_HOMER_TF_TO_PEAK_SCORE=false
+STEP040_SLIDING_WINDOW_TF_TO_PEAK_SCORE=true
+STEP050_HOMER_TF_TO_PEAK_SCORE=true
 
 # Combine the score DataFrames
-STEP060_COMBINE_DATAFRAMES=false
+STEP060_COMBINE_DATAFRAMES=true
 
 # Find shared edges between the inferred network and the STRING PPI database
 STEP070_FIND_EDGES_IN_STRING_DB=true
@@ -49,7 +49,8 @@ OUTPUT_DIR="$BASE_DIR/output/$CELL_TYPE/$SAMPLE_NAME"
 REFERENCE_GENOME_DIR="$BASE_DIR/reference_genome/$SPECIES"
 
 # Name of the inferred network file for training the XGBoost model
-INFERRED_NET_FILE="$OUTPUT_DIR/sample_inferred_network_all_method_combo.csv"
+STRING_INPUT_FILE="$OUTPUT_DIR/sample_inferred_network_raw_all_features.csv"
+INFERRED_NET_FILE="$OUTPUT_DIR/inferred_network_w_string.csv"
 
 # ----- Resource / Database files -----
 STRING_DB_DIR="$BASE_DIR"/string_database/$SPECIES/
@@ -220,17 +221,17 @@ check_input_files() {
     echo "[INFO] Validating input files."
     local files=("$ATAC_FILE_NAME" "$RNA_FILE_NAME")
     for file in "${files[@]}"; do
-        if [ -f "$file" ]; then
-            echo "    - $file exists"
         if [ ! -f "$file" ]; then
             echo "[ERROR] File not found: $file"
             exit 1
-        elif [ ! -r "$file" ]; then
+        else
+            echo "    - $file exists"
+        fi
+        if [ ! -r "$file" ]; then
             echo "[ERROR] File is not readable: $file"
             exit 1
         fi
     done
-    echo "      Input files validated successfully."
 }
 
 activate_conda_env() {
@@ -664,11 +665,11 @@ run_combine_dataframes() {
 
 run_find_edges_in_string_db() {
     echo ""
-    echo "Python: Finding shared edges between the inferred net and the \
-    STRING protein protein interaction database"
+    echo "Python: Finding shared edges between the inferred net and the\
+ STRING protein protein interaction database"
     /usr/bin/time -v \
     python3 "$PYTHON_SCRIPT_DIR/Step070.find_edges_in_string_db.py" \
-        --inferred_net_file "$INFERRED_NET_FILE" \
+        --inferred_net_file "$STRING_INPUT_FILE" \
         --string_dir "$STRING_DB_DIR" \
         --output_dir "$OUTPUT_DIR" \
 

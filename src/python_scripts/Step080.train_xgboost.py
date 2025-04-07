@@ -203,7 +203,7 @@ def plot_permutation_importance_plot(xgb_model, X_test, y_test, fig_dir):
 
     plt.figure(figsize=(8, 6))
     plt.barh(range(len(importances)), importances[indices], xerr=std[indices],
-            align='center', fontsize=16)
+            align='center')
     plt.yticks(range(len(importances)), feature_names[indices], fontsize=14)
     plt.xlabel("Decrease in ROC-AUC", fontsize=16)
     plt.xticks(fontsize=14)

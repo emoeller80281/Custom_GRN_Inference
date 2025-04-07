@@ -338,7 +338,7 @@ def main():
     # num_cpu = 4
     
     logging.info("Reading in parsed Cicero peak to TG file to find associated peaks")
-    cicero_peak_file = f"{output_dir}/peak_to_tg_scores.csv"
+    cicero_peak_file = f"{output_dir}/cicero_peak_to_tg_scores.csv"
     cicero_peaks = pd.read_csv(cicero_peak_file, sep="\t", header=0, index_col=None)
     cicero_peak_names = cicero_peaks["peak_id"].to_list()
     logging.info(f'{len(cicero_peak_names)} Cicero peaks')

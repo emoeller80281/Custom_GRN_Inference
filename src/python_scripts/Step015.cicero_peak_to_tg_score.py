@@ -105,12 +105,12 @@ def main():
 
     # Only keep Peak2 rows, as Peak1 contains promoter peaks and can have duplicates, but Peak2 does not.
     # As we set Peak2 for the peak_to_gene rows, we retain the peaks in the promoters
-    merged_with_promoter_genes = merged_with_promoter_genes.rename(columns={"Peak2": "target_id", "gene": "gene_id", "score": "cicero_score"})
-    merged_with_promoter_genes = merged_with_promoter_genes[["target_id","gene_id","cicero_score"]]
+    merged_with_promoter_genes = merged_with_promoter_genes.rename(columns={"Peak2": "peak_id", "gene": "target_id", "score": "cicero_score"})
+    merged_with_promoter_genes = merged_with_promoter_genes[["peak_id","target_id","cicero_score"]]
     
     # Format the peaks to chr:start-stop rather than chr_start_stop to match the ATACseq peaks
-    merged_with_promoter_genes["target_id"] = merged_with_promoter_genes["target_id"].str.replace("_", "-")
-    merged_with_promoter_genes["target_id"] = merged_with_promoter_genes["target_id"].str.replace("-", ":", 1)
+    merged_with_promoter_genes["peak_id"] = merged_with_promoter_genes["peak_id"].str.replace("_", "-")
+    merged_with_promoter_genes["peak_id"] = merged_with_promoter_genes["peak_id"].str.replace("-", ":", 1)
 
     # Write the final merged peaks to a csv file
     merged_with_promoter_genes.to_csv(f"{output_dir}/cicero_peak_to_tg_scores.csv", header=True, index=False, sep="\t")

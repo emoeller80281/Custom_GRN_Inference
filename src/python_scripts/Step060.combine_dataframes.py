@@ -251,25 +251,25 @@ def main(atac_data_file, rna_data_file, output_dir, fig_dir):
     logging.info("Creating and saving a 10% downsampling of the dataset for testing")
     sampled_merged_df_norm = full_merged_df_norm.sample(frac=0.1)
     
-    # # Write the sampled DataFrame as a csv file
-    # write_csv_in_chunks(sampled_merged_df_norm, output_dir, 'sample_inferred_network_raw_all_features.csv')
+    # Write the sampled DataFrame as a csv file
+    write_csv_in_chunks(sampled_merged_df_norm, output_dir, 'sample_inferred_network_raw_all_features.csv')
     
-    # ===== AGGREGATE FEATURE SCORES BY COMBINING PERMUTATIONS OF FEATURE COMBINATIONS =====
-    sample_agg_score_df, sample_each_combo_df = aggregate_scores_by_method_combo(sampled_merged_df_norm)
-    write_csv_in_chunks(sample_agg_score_df, output_dir, 'sample_inferred_network_agg_method_combo.csv')
-    write_csv_in_chunks(sample_each_combo_df, output_dir, 'sample_inferred_network_each_method_combo.csv')
+    # # ===== AGGREGATE FEATURE SCORES BY COMBINING PERMUTATIONS OF FEATURE COMBINATIONS =====
+    # sample_agg_score_df, sample_each_combo_df = aggregate_scores_by_method_combo(sampled_merged_df_norm)
+    # write_csv_in_chunks(sample_agg_score_df, output_dir, 'sample_inferred_network_agg_method_combo.csv')
+    # write_csv_in_chunks(sample_each_combo_df, output_dir, 'sample_inferred_network_each_method_combo.csv')
     
-    logging.info("Plotting histograms of the data columns for the 10% downsampled inferred network with aggregated regulatory score")
-    plot_column_histograms(sample_agg_score_df, fig_dir, df_name="sample_agg_method_combo")
-    plot_column_histograms(sample_each_combo_df, fig_dir, df_name="sample_each_method_combo")
+    # logging.info("Plotting histograms of the data columns for the 10% downsampled inferred network with aggregated regulatory score")
+    # plot_column_histograms(sample_agg_score_df, fig_dir, df_name="sample_agg_method_combo")
+    # plot_column_histograms(sample_each_combo_df, fig_dir, df_name="sample_each_method_combo")
     
-    full_agg_score_df, full_each_combo_df = aggregate_scores_by_method_combo(full_merged_df_norm)
-    write_csv_in_chunks(full_agg_score_df, output_dir, 'full_inferred_network_agg_method_combo.csv')
-    write_csv_in_chunks(full_each_combo_df, output_dir, 'full_inferred_network_each_method_combo.csv')
+    # full_agg_score_df, full_each_combo_df = aggregate_scores_by_method_combo(full_merged_df_norm)
+    # write_csv_in_chunks(full_agg_score_df, output_dir, 'full_inferred_network_agg_method_combo.csv')
+    # write_csv_in_chunks(full_each_combo_df, output_dir, 'full_inferred_network_each_method_combo.csv')
     
-    logging.info("Plotting histograms of the data columns for the full inferred network with aggregated regulatory score")
-    plot_column_histograms(full_agg_score_df, fig_dir, df_name="full_agg_method_combo")
-    plot_column_histograms(full_each_combo_df, fig_dir, df_name="full_each_method_combo")
+    # logging.info("Plotting histograms of the data columns for the full inferred network with aggregated regulatory score")
+    # plot_column_histograms(full_agg_score_df, fig_dir, df_name="full_agg_method_combo")
+    # plot_column_histograms(full_each_combo_df, fig_dir, df_name="full_each_method_combo")
 
     # ===== AGGREGATE THE FEATURE SCORES FOR ALL PEAKS =====
     # # Also want to test how the model performs if we aggregate the samples across peaks to get a source target pair
