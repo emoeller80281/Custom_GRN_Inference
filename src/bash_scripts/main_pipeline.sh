@@ -63,12 +63,12 @@ elif [ "$SPECIES" == "mouse" ]; then
     SPECIES="mm10"
 fi
 
-echo "Input files:"
-echo "    RNA Data File: $RNA_FILE_NAME"
-echo "    ATAC Data File: $ATAC_FILE_NAME"
-echo "    Cell Type: $CELL_TYPE"
-echo "    Sample: $SAMPLE_NAME"
-echo "    Species: $SPECIES"
+echo "[INFO] Input files:"
+echo "    - RNA Data File: $RNA_FILE_NAME"
+echo "    - ATAC Data File: $ATAC_FILE_NAME"
+echo "    - Cell Type: $CELL_TYPE"
+echo "    - Sample: $SAMPLE_NAME"
+echo "    - Species: $SPECIES"
 echo ""
 
 # =============================================
@@ -93,12 +93,12 @@ check_for_running_jobs() {
     # If other jobs with the same name are running, exit
     if [ "$RUNNING_COUNT" -gt 1 ]; then
         echo "[WARNING] A job with the name '"$JOB_NAME"' is already running:"
-        echo "    Exiting to avoid conflicts."
+        echo "    - Exiting to avoid conflicts."
         exit 1
     
     # If no other jobs are running, pass
     else
-        echo "    No other jobs with the name '"$JOB_NAME"'"
+        echo "    - No other jobs with the name '"$JOB_NAME"'"
     fi
 }
 
@@ -123,21 +123,38 @@ validate_critical_variables() {
     done
 }
 
-validate_critical_variables
-
 # Function to check if at least one process is selected
 check_pipeline_steps() {
-    if ! $STEP010_CICERO_MAP_PEAKS_TO_TG \
-    && ! $STEP015_CICERO_PEAK_TO_TG_SCORE \
-    && ! $STEP020_PEAK_TO_TG_CORRELATION \
-    && ! $STEP030_PEAK_TO_ENHANCER_DB \
-    && ! $STEP040_SLIDING_WINDOW_TF_TO_PEAK_SCORE \
-    && ! $STEP050_HOMER_TF_TO_PEAK_SCORE \
-    && ! $STEP060_COMBINE_DATAFRAMES \
-    && ! $STEP070_TRAIN_XGBOOST_CLASSIFIER; then \
-        echo "Error: At least one process must be enabled to run the pipeline."
+    echo ""
+    steps=(
+        "STEP010_CICERO_MAP_PEAKS_TO_TG"
+        "STEP015_CICERO_PEAK_TO_TG_SCORE"
+        "STEP020_PEAK_TO_TG_CORRELATION"
+        "STEP030_PEAK_TO_ENHANCER_DB"
+        "STEP040_SLIDING_WINDOW_TF_TO_PEAK_SCORE"
+        "STEP050_HOMER_TF_TO_PEAK_SCORE"
+        "STEP060_COMBINE_DATAFRAMES"
+        "STEP070_TRAIN_XGBOOST_CLASSIFIER"
+    )
+
+    enabled=0
+    echo "[INFO] Enabled pipeline steps:"
+
+    # Echo which steps are enabled
+    for step in "${steps[@]}"; do
+        if ${!step}; then
+            echo "    - $step enabled"
+            enabled=1
+        fi
+    done
+
+    # If no steps are enabled, output an error and exit.
+    if [ $enabled -eq 0 ]; then
+        echo ""
+        echo "[ERROR] At least one process must be enabled to run the pipeline."
         exit 1
     fi
+    echo ""
 }
 
 # Function to validate required tools
@@ -213,18 +230,18 @@ check_input_files() {
 activate_conda_env() {
     CONDA_BASE=$(conda info --base)
     if [ -z "$CONDA_BASE" ]; then
-        echo "Error: Conda base could not be determined. Is Conda installed and in your PATH?"
+        echo "[ERROR] Conda base could not be determined. Is Conda installed and in your PATH?"
         exit 1
     fi
 
     source "$CONDA_BASE/bin/activate"
     if ! conda env list | grep -q "^$CONDA_ENV_NAME "; then
-        echo "Error: Conda environment '$CONDA_ENV_NAME' does not exist."
+        echo "[ERROR] Conda environment '$CONDA_ENV_NAME' does not exist."
         exit 1
     fi
 
     conda activate "$CONDA_ENV_NAME" || { echo "Error: Failed to activate Conda environment '$CONDA_ENV_NAME'."; exit 1; }
-    echo "Activated Conda environment: $CONDA_ENV_NAME"
+    echo "[INFO] Activated Conda environment: $CONDA_ENV_NAME"
 }
 
 # Function to ensure required directories exist
@@ -240,12 +257,11 @@ setup_directories() {
     for dir in "${dirs[@]}"; do
         mkdir -p "$dir"
     done
-    echo "    Required directories created."
 }
 
 check_r_environment() {
     REQUIRED_R_VERSION="4.3.2"  # Replace with your required version
-    echo "    Checking R environment..."
+    echo "    [INFO] Checking R environment..."
 
     # Check if the 'module' command exists
     if ! command -v module &> /dev/null; then
@@ -357,19 +373,21 @@ run_dataset_preprocessing() {
 } 2> "$LOG_DIR/dataset_preprocessing.log"
 
 check_processed_files() {
+    echo ""
+
     # Derive the expected processed filenames from the original file names.
     new_atac_file="$(dirname "$ATAC_FILE_NAME")/$(basename "$ATAC_FILE_NAME" | sed 's/\.[^.]*$/_processed.csv/')"
     new_rna_file="$(dirname "$RNA_FILE_NAME")/$(basename "$RNA_FILE_NAME" | sed 's/\.[^.]*$/_processed.csv/')"
-    
+
     if [ -f "$new_atac_file" ] && [ -f "$new_rna_file" ]; then
-        echo "Processed files found:"
-        echo "  ATAC: $new_atac_file"
-        echo "  RNA:  $new_rna_file"
+        echo "[INFO] Processed files found:"
+        echo "    - ATAC: $new_atac_file"
+        echo "    - RNA:  $new_rna_file"
         # Update global variables so downstream steps use the processed files
         ATAC_FILE_NAME="$new_atac_file"
         RNA_FILE_NAME="$new_rna_file"
     else
-        echo "Processed files not found. Running dataset preprocessing..."
+        echo "[INFO] Processed files not found. Running dataset preprocessing..."
         run_dataset_preprocessing
     fi
 }
@@ -667,6 +685,7 @@ if [[ "${1:-}" == "--help" ]]; then
 fi
 
 # Perform validation
+validate_critical_variables
 check_for_running_jobs
 check_pipeline_steps
 check_tools

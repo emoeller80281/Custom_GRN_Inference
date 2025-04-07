@@ -7,6 +7,7 @@ import scipy.stats as stats
 from dask import delayed, compute
 from dask.diagnostics import ProgressBar
 import os
+import sys
 import argparse
 import logging
 
@@ -118,7 +119,7 @@ def load_ensembl_organism_tss(organism, tmp_dir):
     ensembl_df.rename(columns={
         "Chromosome/scaffold name": "chr",
         "Transcription start site (TSS)": "tss",
-        "Gene name": "gene"
+        "Gene name": "gene_id"
     }, inplace=True)
     
     # Make sure TSS is integer (some might be floats).
@@ -129,10 +130,10 @@ def load_ensembl_organism_tss(organism, tmp_dir):
     ensembl_df["end"] = ensembl_df["tss"].astype(int) + 1
 
     # Re-order columns for clarity: [chr, start, end, gene]
-    ensembl_df = ensembl_df[["chr", "start", "end", "gene"]]
+    ensembl_df = ensembl_df[["chr", "start", "end", "gene_id"]]
     
     ensembl_df["chr"] = ensembl_df["chr"].astype(str)
-    ensembl_df["gene"] = ensembl_df["gene"].astype(str)
+    ensembl_df["gene_id"] = ensembl_df["gene_id"].astype(str)
     
     # Write the peak DataFrame to a file
     ensembl_df.to_csv(f"{tmp_dir}/ensembl.bed", sep="\t", header=False, index=False)
@@ -142,11 +143,24 @@ def find_genes_near_peaks(peak_bed, tss_bed, rna_df, peak_dist_limit):
     logging.info(f"Locating peaks that are within {peak_dist_limit} bp of each gene's TSS")
     peak_tss_overlap = peak_bed.window(tss_bed, w=peak_dist_limit)
     
+    dtype_dict = {
+        "peak_chr": str,
+        "peak_start": int,
+        "peak_end": int,
+        "peak_id": str,
+        "gene_chr": str,
+        "gene_start": int,
+        "gene_end": int,
+        "gene_id": str
+    }
+    
     peak_tss_overlap_df = peak_tss_overlap.to_dataframe(
         names=[
             "peak_chr", "peak_start", "peak_end", "peak_id",
             "gene_chr", "gene_start", "gene_end", "gene_id"
-        ]
+        ],
+        dtype=dtype_dict,
+        low_memory=False  # ensures the entire file is read in one go
     ).rename(columns={"gene_id": "target_id"}).dropna()
     
     # Calculate the TSS distance for each peak - gene pair
@@ -158,7 +172,7 @@ def find_genes_near_peaks(peak_bed, tss_bed, rna_df, peak_dist_limit):
     peak_tss_subset_df = peak_tss_subset_df.drop_duplicates(subset=["peak_id", "target_id"], keep="first")
     
     # Only keep genes that are also in the RNA-seq dataset
-    peak_tss_subset_df = peak_tss_subset_df[peak_tss_subset_df["target_id"].isin(rna_df["gene"])]
+    peak_tss_subset_df = peak_tss_subset_df[peak_tss_subset_df["target_id"].isin(rna_df["gene_id"])]
     
     gene_list = set(peak_tss_subset_df["target_id"].drop_duplicates().to_list())
     
@@ -250,16 +264,16 @@ def calculate_significant_peak_to_gene_correlations(atac_df, gene_df, alpha=0.05
         for i in range(num_peaks)
     ]
 
-    with ProgressBar():
+    with ProgressBar(dt=30, out=sys.stderr):
         results = compute(*tasks, scheduler="threads", num_workers=num_cpu)
 
     flat_results = [item for sublist in results for item in sublist]
     df_corr = pd.DataFrame(flat_results, columns=["peak_i", "gene_j", "correlation"])
 
     # Map i->peak_id, j->target_id
-    df_corr["peak"] = atac_df.index[df_corr["peak_i"]]
-    df_corr["gene"] = gene_df.index[df_corr["gene_j"]]
-    df_corr = df_corr[["peak", "gene", "correlation"]]
+    df_corr["peak_id"] = atac_df.index[df_corr["peak_i"]]
+    df_corr["gene_id"] = gene_df.index[df_corr["gene_j"]]
+    df_corr = df_corr[["peak_id", "gene_id", "correlation"]]
 
     return df_corr
 
@@ -319,7 +333,7 @@ def main():
     # ============ PEAK TO GENE CORRELATION CALCULATION ============
     if not os.path.exists(f"{TMP_DIR}/sig_peak_to_gene_corr.parquet"):
         # Subset the RNA-seq DataFrame to only contain the genes in the peak-to-gene dictionary
-        rna_sub = rna_df[rna_df["gene"].isin(gene_list)].set_index("gene")
+        rna_sub = rna_df[rna_df["gene_id"].isin(gene_list)].set_index("gene_id")
         
         # Filter out genes / peaks with low variance in expression / accessibility
         logging.info("Filtering out genes and peaks with low variance")
@@ -341,7 +355,7 @@ def main():
     top_peak_to_gene_corr = sig_peak_to_gene_corr[sig_peak_to_gene_corr["correlation"] >= cutoff]
 
     # Merge the correlation and TSS distance DataFrames
-    final_df = pd.merge(top_peak_to_gene_corr, peak_gene_df, how="inner", left_on=["peak", "gene"], right_on=["peak_id", "target_id"]).dropna(subset="peak_id")
+    final_df = pd.merge(top_peak_to_gene_corr, peak_gene_df, how="inner", left_on=["peak", "gene_id"], right_on=["peak_id", "target_id"]).dropna(subset="peak_id")
     
     final_df = final_df[["peak_id", "target_id", "correlation", "TSS_dist"]]
         
