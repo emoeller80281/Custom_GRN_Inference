@@ -143,8 +143,11 @@ def plot_feature_importance(features: list, model, fig_dir: str):
 def plot_feature_score_histograms(features, inferred_network, fig_dir):
     logging.info("\tPlotting feature score histograms")
     plt.figure(figsize=(18, 14))
+    num_cols = 4
+    num_rows = math.ceil(len(features) / num_cols, 0)
+    
     for i, feature in enumerate(features, 1):
-        plt.subplot(4, 3, i)  # 3 rows, 4 columns, index = i
+        plt.subplot(num_rows, num_cols, i)
         plt.hist(inferred_network[feature], bins=50, alpha=0.7, edgecolor='black')
         plt.title(f"{feature}", fontsize=14)
         plt.xlabel(feature, fontsize=14)
