@@ -46,6 +46,12 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="Path to the figure directory for the sample"
     )
+    parser.add_argument(
+        "--model_save_name",
+        type=str,
+        required=True,
+        help="Name of the output .pkl file for the trained model"
+    )
     
     args: argparse.Namespace = parser.parse_args()
     return args
@@ -529,6 +535,7 @@ def main():
     inferred_network_file: str = args.inferred_network_file
     output_dir: str = args.output_dir
     fig_dir: str = args.fig_dir
+    model_save_name: str = args.model_save_name
 
     inferred_network = read_inferred_network(inferred_network_file)
     ground_truth = read_ground_truth(ground_truth_file)
@@ -565,7 +572,7 @@ def main():
     xgb_model.feature_names = list(X_train.columns.values)
     
     logging.info("Done! Saving trained XGBoost model.")
-    joblib.dump(xgb_model, f"{output_dir}/trained_xgboost_model_method_combo_sum.pkl")
+    joblib.dump(xgb_model, f"{output_dir}/{model_save_name}.pkl")
 
     if not os.path.exists(fig_dir):
         os.makedirs(fig_dir)

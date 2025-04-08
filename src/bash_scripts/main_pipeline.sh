@@ -12,23 +12,23 @@ set -euo pipefail
 # =============================================
 # Run the peak to TG regulatory potential calculation methods
 STEP010_CICERO_MAP_PEAKS_TO_TG=false
-STEP015_CICERO_PEAK_TO_TG_SCORE=true
+STEP015_CICERO_PEAK_TO_TG_SCORE=false
 
-STEP020_PEAK_TO_TG_CORRELATION=true
-STEP030_PEAK_TO_ENHANCER_DB=true
+STEP020_PEAK_TO_TG_CORRELATION=false
+STEP030_PEAK_TO_ENHANCER_DB=false
 
 # Run the TF to peak binding score calculation methods
-STEP040_SLIDING_WINDOW_TF_TO_PEAK_SCORE=true
-STEP050_HOMER_TF_TO_PEAK_SCORE=true
+STEP040_SLIDING_WINDOW_TF_TO_PEAK_SCORE=false
+STEP050_HOMER_TF_TO_PEAK_SCORE=false
 
 # Combine the score DataFrames
-STEP060_COMBINE_DATAFRAMES=true
+STEP060_COMBINE_DATAFRAMES=false
 
 # Find shared edges between the inferred network and the STRING PPI database
 STEP070_FIND_EDGES_IN_STRING_DB=true
 
 # Train a predictive model to infer the GRN
-STEP080_TRAIN_XGBOOST_CLASSIFIER=true
+STEP080_TRAIN_XGBOOST_CLASSIFIER=false
 
 # =============================================
 #              USER PATH VARIABLES
@@ -48,9 +48,16 @@ R_SCRIPT_DIR="$BASE_DIR/src/r_scripts"
 OUTPUT_DIR="$BASE_DIR/output/$CELL_TYPE/$SAMPLE_NAME"
 REFERENCE_GENOME_DIR="$BASE_DIR/reference_genome/$SPECIES"
 
-# Name of the inferred network file for training the XGBoost model
-STRING_INPUT_FILE="$OUTPUT_DIR/sample_inferred_network_raw_all_features.csv"
+# Name of the inferred network file created from Step060.combine_dataframes.py
+STRING_INPUT_FILE="$OUTPUT_DIR/inferred_network_raw.csv"
+
+# Name of the inferrred network file with STRING PPI interaction columns
 INFERRED_NET_FILE="$OUTPUT_DIR/inferred_network_w_string.csv"
+
+# Name of the final file to train the XGBoost model
+#   This is separate from the inferred network file to allow for testing model performance
+#   using different sets of features
+FEATURE_FILE="$OUTPUT_DIR/full_inferred_network_agg_method_combo.csv"
 
 # ----- Resource / Database files -----
 STRING_DB_DIR="$BASE_DIR"/string_database/$SPECIES/
@@ -681,9 +688,10 @@ run_classifier_training() {
     /usr/bin/time -v \
     python3 "$PYTHON_SCRIPT_DIR/Step080.train_xgboost.py" \
         --ground_truth_file "$GROUND_TRUTH_FILE" \
-        --inferred_network_file "$INFERRED_NET_FILE" \
+        --inferred_network_file "$FEATURE_FILE" \
         --output_dir "$OUTPUT_DIR" \
-        --fig_dir "$FIG_DIR" 
+        --fig_dir "$FIG_DIR" \
+        --model_save_name "xgb_trained_model"
 
 } 2> "$LOG_DIR/Step080.train_xgboost.log"
 

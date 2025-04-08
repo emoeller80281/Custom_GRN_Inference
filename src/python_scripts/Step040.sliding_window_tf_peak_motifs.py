@@ -374,7 +374,7 @@ def main():
     # Melt the wide-format dataframe to a three column long format, matching the other output files
     tf_to_peak_score_df = pd.melt(
         frame=tf_to_peak_score_df,
-        id_vars="peak",
+        id_vars="peak_id",
         value_vars=tf_to_peak_score_df.columns[1:],
         var_name="source_id",
         value_name="sliding_window_score"
