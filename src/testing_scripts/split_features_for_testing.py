@@ -7,7 +7,6 @@ import math
 output_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output/K562/K562_human_filtered"
 raw_inferred_net_file = f'{output_dir}/full_network_feature_files/inferred_network_raw.csv'
 
-
 def aggregate_scores_by_method_combo(df: pd.DataFrame) -> pd.DataFrame:
     """Aggregates DataFrame score columns into a single regulatory score by adding up
     each combination of the peak accessibility, peak to target gene, and transcription factor

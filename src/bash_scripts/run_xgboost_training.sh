@@ -16,18 +16,18 @@ LOG_DIR="$BASE_DIR/LOGS"
 
 # Define array of sample names and corresponding feature files
 SAMPLES=( 
-    all_features_raw 
+    # all_features_raw 
     all_features_w_string 
-    all_method_combos_summed 
-    all_method_combos_raw 
+    # all_method_combos_summed 
+    # all_method_combos_raw 
     string_score_only
 )
 
 FILES=( 
-    "$OUTPUT_DIR/full_network_feature_files/inferred_network_raw.csv" 
+    # "$OUTPUT_DIR/full_network_feature_files/inferred_network_raw.csv" 
     "$OUTPUT_DIR/full_network_feature_files/inferred_network_w_string.csv" 
-    "$OUTPUT_DIR/full_network_feature_files/full_inferred_network_agg_method_combo.csv" 
-    "$OUTPUT_DIR/full_network_feature_files/full_inferred_network_each_method_combo.csv" 
+    # "$OUTPUT_DIR/full_network_feature_files/full_inferred_network_agg_method_combo.csv" 
+    # "$OUTPUT_DIR/full_network_feature_files/full_inferred_network_each_method_combo.csv" 
     "$OUTPUT_DIR/full_network_feature_files/string_score_only.csv" 
 )
 

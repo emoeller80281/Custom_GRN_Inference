@@ -79,7 +79,7 @@ def main():
         "combined_score" : "string_combined_score"
     })
     
-    # Merge on the canonical edge column
+    # Merge the inferred network and STRING edge scores
     logging.info("Merging the STRING edges with the inferred network edges")
     inferred_edges_in_string_df = pd.merge(
         inferred_net_df,
@@ -98,7 +98,6 @@ def main():
 
     logging.info(f'\tInferred edges in string:')
     logging.info(f'Found {len(inferred_edges_in_string_df.dropna(subset=["string_combined_score"]))} common edges between the STRING protein-protein interaction database and the inferred network.')
-
 
 if __name__ == "__main__":
     # Configure logging

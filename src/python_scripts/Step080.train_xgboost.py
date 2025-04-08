@@ -579,14 +579,18 @@ def main():
     
     logging.info("\n----- Plotting Figures -----")
     # plot_combined_figure(xgb_model, X, y, X_train, X_test, y_train, y_test, inferred_network, feature_names, fig_dir, xgb_model)
-    plot_feature_ablation(feature_names, X_train, X_test, y_train, y_test, xgb_model, fig_dir)
-    plot_stability_boxplot(X, y, fig_dir)
-    plot_overlapping_roc_pr_curves(X, y, feature_names, fig_dir)
-    plot_feature_importance(feature_names, xgb_model, fig_dir)
     plot_feature_score_histograms(feature_names, inferred_network, fig_dir)
-    plot_feature_boxplots(feature_names, inferred_network, fig_dir)
+    plot_feature_importance(feature_names, xgb_model, fig_dir)
     plot_xgboost_prediction_histogram(xgb_model, X_test, fig_dir)
-    plot_permutation_importance_plot(xgb_model, X_test, y_test, fig_dir)
+    plot_feature_boxplots(feature_names, inferred_network, fig_dir)
+    plot_feature_ablation(feature_names, X_train, X_test, y_train, y_test, xgb_model, fig_dir)
+    plot_overlapping_roc_pr_curves(X, y, feature_names, fig_dir)
+    # plot_permutation_importance_plot(xgb_model, X_test, y_test, fig_dir)
+    # plot_stability_boxplot(X, y, fig_dir)
+    
+    
+    
+    
     
     
 if __name__ == "__main__":
