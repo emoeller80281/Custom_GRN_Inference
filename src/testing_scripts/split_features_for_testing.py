@@ -75,10 +75,8 @@ def write_csv_in_chunks(df, output_dir, filename):
             # For subsequent chunks, append without header
             chunk.to_csv(output_file, mode='a', header=False, index=False)
 
-
-print("Reading in the raw inferred network")
-raw_inferred_df = pd.read_csv(raw_inferred_net_file, header=0)
-
+# print("Reading in the raw inferred network")
+# raw_inferred_df = pd.read_csv(raw_inferred_net_file, header=0)
 
 # For testing, randomly downsample to 10% of the rows
 # print("Creating and saving a 10% downsampling of the dataset for testing")
@@ -91,16 +89,16 @@ raw_inferred_df = pd.read_csv(raw_inferred_net_file, header=0)
 # write_csv_in_chunks(sample_agg_score_df, output_dir, 'sampled_network_feature_files/sample_inferred_network_agg_method_combo.csv')
 # write_csv_in_chunks(sample_each_combo_df, output_dir, 'sampled_network_feature_files/sample_inferred_network_each_method_combo.csv')
 
-# Aggregating scores for the whole raw inferred DataFrame
-full_agg_score_df, full_each_combo_df = aggregate_scores_by_method_combo(raw_inferred_df)
+# # Aggregating scores for the whole raw inferred DataFrame
+# full_agg_score_df, full_each_combo_df = aggregate_scores_by_method_combo(raw_inferred_df)
 
-# Write out the CSV files in chunks
-write_csv_in_chunks(full_agg_score_df, output_dir, 'full_network_feature_files/full_inferred_network_agg_method_combo.csv')
-write_csv_in_chunks(full_each_combo_df, output_dir, 'full_network_feature_files/full_inferred_network_each_method_combo.csv')
-gc.collect()
+# # Write out the CSV files in chunks
+# write_csv_in_chunks(full_agg_score_df, output_dir, 'full_network_feature_files/full_inferred_network_agg_method_combo.csv')
+# write_csv_in_chunks(full_each_combo_df, output_dir, 'full_network_feature_files/full_inferred_network_each_method_combo.csv')
+# gc.collect()
 
 # Subset to only have the STRING edges
 print("Reading in the inferred network with STRING edge scores")
-inferred_net_w_string_df = pd.read_csv(f'{output_dir}/full_network_feature_files/inferred_network_w_string.csv"', header=0)
-string_only_df = inferred_net_w_string_df[["source_id", "target_id", "string_experimental_score", "string_textmining_score", "string_combined_score"]].dropna("string_combined_score")
+inferred_net_w_string_df = pd.read_csv(f'{output_dir}/full_network_feature_files/inferred_network_w_string.csv', header=0)
+string_only_df = inferred_net_w_string_df[["source_id", "target_id", "string_experimental_score", "string_textmining_score", "string_combined_score"]].dropna(subset=["string_combined_score"])
 write_csv_in_chunks(string_only_df, output_dir, 'full_network_feature_files/string_score_only.csv')

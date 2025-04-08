@@ -86,9 +86,12 @@ def main():
         protein_links_df,
         left_on=["source_id", "target_id"],
         right_on=["protein1", "protein2"],
-        how="outer"
+        how="left"
     ).drop(columns={"protein1", "protein2"})
     logging.info("\tDone!")
+    
+    logging.info('\nInferred network with STRING edge scores:')
+    logging.info(inferred_edges_in_string_df.head())
     
     write_csv_in_chunks(inferred_edges_in_string_df, OUTPUT_DIR, "inferred_network_w_string.csv")
     logging.info('\tDone!')

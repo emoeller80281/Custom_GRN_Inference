@@ -3,8 +3,8 @@
 #SBATCH --nodes=1
 #SBATCH -c 2
 #SBATCH --mem-per-cpu=32G
-#SBATCH -o LOGS/xgboost_testing_%a.out
-#SBATCH -e LOGS/xgboost_testing_%a.err
+#SBATCH -o /dev/null
+#SBATCH -e /dev/null
 #SBATCH --array=0-4
 
 # Set base directories and files
@@ -17,18 +17,18 @@ LOG_DIR="$BASE_DIR/LOGS"
 # Define array of sample names and corresponding feature files
 SAMPLES=( 
     all_features_raw 
+    all_features_w_string 
     all_method_combos_summed 
     all_method_combos_raw 
-    only_string_columns 
-    all_features_w_string 
+    string_score_only
 )
 
 FILES=( 
     "$OUTPUT_DIR/full_network_feature_files/inferred_network_raw.csv" 
+    "$OUTPUT_DIR/full_network_feature_files/inferred_network_w_string.csv" 
     "$OUTPUT_DIR/full_network_feature_files/full_inferred_network_agg_method_combo.csv" 
     "$OUTPUT_DIR/full_network_feature_files/full_inferred_network_each_method_combo.csv" 
-    "$OUTPUT_DIR/full_network_feature_files/string_score_network.csv" 
-    "$OUTPUT_DIR/full_network_feature_files/inferred_network_w_string.csv" 
+    "$OUTPUT_DIR/full_network_feature_files/string_score_only.csv" 
 )
 
 # Use the SLURM_ARRAY_TASK_ID to select the corresponding sample and feature file.
@@ -36,7 +36,7 @@ SAMPLE=${SAMPLES[$SLURM_ARRAY_TASK_ID]}
 FEATURE_FILE=${FILES[$SLURM_ARRAY_TASK_ID]}
 
 # Create a directory for figures for this sample
-FIG_DIR="$BASE_DIR/figures/$SAMPLE"
+FIG_DIR="$BASE_DIR/figures/hg38/K562_human_filtered/$SAMPLE"
 mkdir -p "$FIG_DIR"
 
 # Function to run classifier training
@@ -53,4 +53,4 @@ run_classifier_training() {
 }
 
 # Run the training function and redirect any stderr output to a specific log file for this sample
-run_classifier_training 2> "$LOG_DIR/${SAMPLE}_train_xgboost.log"
+run_classifier_training 2> "$LOG_DIR/xgboost_training_${SAMPLE}.log"

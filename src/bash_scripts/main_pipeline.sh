@@ -49,10 +49,10 @@ OUTPUT_DIR="$BASE_DIR/output/$CELL_TYPE/$SAMPLE_NAME"
 REFERENCE_GENOME_DIR="$BASE_DIR/reference_genome/$SPECIES"
 
 # Name of the inferred network file created from Step060.combine_dataframes.py
-STRING_INPUT_FILE="$OUTPUT_DIR/inferred_network_raw.csv"
+STRING_INPUT_FILE="$OUTPUT_DIR/full_network_feature_files/inferred_network_raw.csv"
 
 # Name of the inferrred network file with STRING PPI interaction columns
-INFERRED_NET_FILE="$OUTPUT_DIR/inferred_network_w_string.csv"
+INFERRED_NET_FILE="$OUTPUT_DIR/full_network_feature_files/inferred_network_w_string.csv"
 
 # Name of the final file to train the XGBoost model
 #   This is separate from the inferred network file to allow for testing model performance
@@ -407,30 +407,23 @@ check_processed_files() {
 
 # -------------- HOMER FUNCTIONS --------------
 install_homer() {
-    echo "Installing Homer..."
     mkdir -p "$BASE_DIR/homer"
     wget "http://homer.ucsd.edu/homer/configureHomer.pl" -P "$BASE_DIR/homer"
     perl "$BASE_DIR/homer/configureHomer.pl" -install
-    echo "    Done!"
 } 2> "$LOG_DIR/Homer_logs/01.install_homer.log"
 
 install_homer_species_genome() {
-    echo "Installing Homer $SPECIES genome..."
     perl "$BASE_DIR/homer/configureHomer.pl" -install "$SPECIES"
-    echo "    Done!"
 } 2> "$LOG_DIR/Homer_logs/02.install_homer_species.log"
 
 create_homer_peak_file() {
-    echo "Creating Homer motif file from ATAC-seq peaks"
     /usr/bin/time -v \
     python3 "$PYTHON_SCRIPT_DIR/create_homer_peak_file.py" \
         --atac_data_file "$ATAC_FILE_NAME" \
         --output_dir "$OUTPUT_DIR"
-    echo "    Done!"
 } 2> "$LOG_DIR/Homer_logs/03.create_homer_peak_file.log"
 
 homer_find_motifs() {
-    echo "Running Homer findMotifsGenome"
     mkdir -p "$OUTPUT_DIR/homer_results"
     perl "$BASE_DIR/homer/bin/findMotifsGenome.pl" "$OUTPUT_DIR/homer_peaks.txt" "$SPECIES" "$OUTPUT_DIR/homer_results/" -size 200
     echo "    Done!"
@@ -543,7 +536,6 @@ run_cicero_peak_to_tg_score() {
     echo "Python: Parsing Cicero peak to TG scores"
     /usr/bin/time -v \
     python3 "$PYTHON_SCRIPT_DIR/Step015.cicero_peak_to_tg_score.py" \
-        --fig_dir "$FIG_DIR" \
         --output_dir "$OUTPUT_DIR" 
     
 } 2> "$LOG_DIR/Step015.cicero_peak_to_tg_score.log"
@@ -598,16 +590,19 @@ run_sliding_window_tf_to_peak_score() {
 
 run_homer() {
     echo ""
-    echo "===== Homer ====="
+    echo "===== Running Homer ====="
+    echo "[HINT] Homer log files are found under Homer_logs in the sample log directory"
     mkdir -p "$LOG_DIR/Homer_logs/"
 
+    echo "Searching for 'BASE_DIR/homer' directory..."
     # Check to make sure Homer is installed, else install it
     if [ ! -d "$BASE_DIR/homer" ]; then
         echo ""
-        echo "Homer installation not found"
+        echo "    Homer installation not found, installing..."
         install_homer
+        echo "    Done!"
     else
-        echo "Found installation of homer"
+        echo "    - Found existing installation of homer"
     fi
 
     # Make sure that the homer directory is part of the path
@@ -615,19 +610,23 @@ run_homer() {
     PATH="$PATH:$BASE_DIR/homer/bin"
     export PATH
     
+    echo "Checking for the Homer ${SPECIES} genome file..."
     # Check if the species Homer genome is installed
     if perl "$BASE_DIR/homer/configureHomer.pl" -list | grep -q "^+.*${SPECIES}"; then
-        echo "${SPECIES} genome is installed"
+        echo "    - ${SPECIES} genome is installed"
     else
-        echo "${SPECIES} genome is not installed"
+        echo "    ${SPECIES} genome is not installed, installing..."
         install_homer_species_genome
+        echo "    Done!"
     fi
 
+    echo "Checking for existing Homer peak file (created from the ATACseq dataset)"
     if [ ! -f "$OUTPUT_DIR/homer_peaks.txt" ]; then
-        echo "Homer peak file not found"
+        echo "    Homer peak file not found, creating..."
         create_homer_peak_file
+        echo "    Done!"
     else
-        echo "Homer peak file found"
+        echo "    - Existing Homer peak file found"
     fi
 
     # If the homer_results directory doesn't exist for the sample, run findMotifsGenome
