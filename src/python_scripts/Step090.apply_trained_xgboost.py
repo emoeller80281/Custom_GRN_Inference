@@ -84,7 +84,7 @@ def main():
     logging.info("    Done!")
     
     logging.info("Saving inferred GRN")
-    output_file = os.path.join(output_dir, f'{save_name}_xgb_inferred_grn.tsv')
+    output_file = os.path.join(output_dir, save_name)
     inferred_network.to_csv(output_file, sep='\t', index=False)
     logging.info("    Done!\n")
     

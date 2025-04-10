@@ -73,7 +73,7 @@ run_macrophage() {
     for SAMPLE_NAME in "${SAMPLE_NAMES[@]}"; do
         local RNA_FILE_NAME="${SAMPLE_NAME}_RNA.csv"
         local ATAC_FILE_NAME="${SAMPLE_NAME}_ATAC.csv"
-        local GROUND_TRUTH_FILE="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/ground_truth_files/RN204_macrophage_ground_truth.tsv"
+        local GROUND_TRUTH_FILE="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/REFERENCE_NETWORKS/RN204_ChIPSeq_ChIPAtlas_Human_Macrophages.tsv"
         
         # Submit the job for each sample
         submit_job \
@@ -141,7 +141,7 @@ run_mESC(){
     for SAMPLE_NAME in "${SAMPLE_NAMES[@]}"; do
         local RNA_FILE_NAME="mESC_${SAMPLE_NAME}_RNA.csv"
         local ATAC_FILE_NAME="mESC_${SAMPLE_NAME}_ATAC.csv"
-        local GROUND_TRUTH_FILE="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/ground_truth_files/RN111.tsv"
+        local GROUND_TRUTH_FILE="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/REFERENCE_NETWORKS/RN111_ChIPSeq_BEELINE_Mouse_ESC.tsv"
 
         # Submit the job for each sample
         submit_job \
@@ -166,7 +166,7 @@ run_K562(){
     for SAMPLE_NAME in "${SAMPLE_NAMES[@]}"; do
         local RNA_FILE_NAME="${SAMPLE_NAME}_RNA.csv"
         local ATAC_FILE_NAME="${SAMPLE_NAME}_ATAC.csv"
-        local GROUND_TRUTH_FILE="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/ground_truth_files/RN117_ChIPSeq_PMID37486787_Human_K562.tsv"
+        local GROUND_TRUTH_FILE="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/REFERENCE_NETWORKS/RN117_ChIPSeq_PMID37486787_Human_K562.tsv"
 
         # Submit the job for each sample
         submit_job \

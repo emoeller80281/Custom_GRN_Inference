@@ -142,9 +142,13 @@ def plot_feature_importance(features: list, model, fig_dir: str):
     
 def plot_feature_score_histograms(features, inferred_network, fig_dir):
     logging.info("\tPlotting feature score histograms")
-    plt.figure(figsize=(18, 14))
+    
     num_cols = 4
-    num_rows = math.ceil(len(features) / num_cols, 0)
+    num_rows = math.ceil(len(features) / num_cols)
+    
+    # Dynamically change the height of the figure based on the number of rows
+    height = 7 * num_rows
+    plt.figure(figsize=(18, height))
     
     for i, feature in enumerate(features, 1):
         plt.subplot(num_rows, num_cols, i)
@@ -180,8 +184,8 @@ def plot_feature_boxplots(features, inferred_network, fig_dir):
     
     for i, feature in enumerate(features):
         ax = axes[i]
-        data_label0 = remove_outliers(inferred_network.loc[inferred_network["label"] == 0, feature])
-        data_label1 = remove_outliers(inferred_network.loc[inferred_network["label"] == 1, feature])
+        data_label0 = remove_outliers(inferred_network.loc[inferred_network["label"] == 1, feature])
+        data_label1 = remove_outliers(inferred_network.loc[inferred_network["label"] == 0, feature])
         ax.boxplot([data_label0, data_label1], patch_artist=True)
         ax.set_title(feature, fontsize=18)
         ax.set_xticklabels(["True", "False"], fontsize=16)
@@ -586,8 +590,8 @@ def main():
     plot_feature_importance(feature_names, xgb_model, fig_dir)
     plot_xgboost_prediction_histogram(xgb_model, X_test, fig_dir)
     plot_feature_boxplots(feature_names, inferred_network, fig_dir)
-    plot_feature_ablation(feature_names, X_train, X_test, y_train, y_test, xgb_model, fig_dir)
-    plot_overlapping_roc_pr_curves(X, y, feature_names, fig_dir)
+    # plot_feature_ablation(feature_names, X_train, X_test, y_train, y_test, xgb_model, fig_dir)
+    # plot_overlapping_roc_pr_curves(X, y, feature_names, fig_dir)
     # plot_permutation_importance_plot(xgb_model, X_test, y_test, fig_dir)
     # plot_stability_boxplot(X, y, fig_dir)
     

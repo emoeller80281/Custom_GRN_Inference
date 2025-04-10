@@ -49,10 +49,10 @@ OUTPUT_DIR="$BASE_DIR/output/$CELL_TYPE/$SAMPLE_NAME"
 REFERENCE_GENOME_DIR="$BASE_DIR/reference_genome/$SPECIES"
 
 # Name of the inferred network file created from Step060.combine_dataframes.py
-STRING_INPUT_FILE="$OUTPUT_DIR/full_network_feature_files/inferred_network_raw.csv"
+STRING_INPUT_FILE="$OUTPUT_DIR/inferred_network_raw.csv"
 
 # Name of the inferrred network file with STRING PPI interaction columns
-INFERRED_NET_FILE="$OUTPUT_DIR/full_network_feature_files/inferred_network_w_string.csv"
+INFERRED_NET_FILE="$OUTPUT_DIR/inferred_network_w_string.csv"
 
 # Name of the final file to train the XGBoost model
 #   This is separate from the inferred network file to allow for testing model performance
