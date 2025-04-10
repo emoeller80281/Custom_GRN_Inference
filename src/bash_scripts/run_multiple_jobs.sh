@@ -123,8 +123,8 @@ run_mESC(){
         # "70_percent_subsampled_8"
         # "70_percent_subsampled_9"
         # "70_percent_subsampled_10"
-        "filtered_L2_E7.5_rep1"
-        "filtered_L2_E7.5_rep2"
+        # "filtered_L2_E7.5_rep1"
+        # "filtered_L2_E7.5_rep2"
         # "filtered_L2_E7.75_rep1"
         # "filtered_L2_E8.0_rep1"
         # "filtered_L2_E8.0_rep2"
@@ -181,4 +181,4 @@ run_K562(){
 
 # run_mESC
 run_K562
-# run_macrophage
+run_macrophage

@@ -9,37 +9,37 @@
 
 source activate my_env
 
-PROJECT_DIR="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/"
+BASE_DIR=$(readlink -f "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER")
 
 # Define output directories and ground truth files (if needed)
 K562_OUTPUT="$PROJECT_DIR/output/K562/K562_human_filtered"
 K562_GROUND_TRUTH="$PROJECT_DIR/ground_truth_files/RN117_ChIPSeq_PMID37486787_Human_K562.tsv"
 
-# Arrays for model file, target file and save_name for each task.
-# Adjust the array elements as appropriate for your case.
-
-
+# Specify the trained model files
 MODEL_FILES=( \
-    #"$K562_OUTPUT/xgb_all_features_raw_model.pkl" \
-    #"$K562_OUTPUT/xgb_all_method_combos_summed_model.pkl" \
+    "$K562_OUTPUT/xgb_all_features_raw_model.pkl" \ 
+    "$K562_OUTPUT/xgb_all_features_w_string_model.pkl" \ 
     "$K562_OUTPUT/xgb_all_method_combos_raw_model.pkl" \
-
+    "$K562_OUTPUT/xgb_all_method_combos_summed_model.pkl" \
+    "$K562_OUTPUT/xgb_string_scores_only_model.pkl" \
 )
 
-
-
+# Specify the path to the target score file to pass into the model for inferring edge scores
 TARGET_FILES=( \
-    #"$K562_OUTPUT/full_network_feature_files/inferred_network_raw.csv" \
-    #"$K562_OUTPUT/full_network_feature_files/full_inferred_network_agg_method_combo.csv" \
-    "$K562_OUTPUT/full_network_feature_files/full_inferred_network_each_method_combo.csv" \
-
+    "$K562_OUTPUT/inferred_network_raw.csv" 
+    "$K562_OUTPUT/inferred_network_w_string.csv" 
+    "$K562_OUTPUT/inferred_network_method_combos_summed.csv" 
+    "$K562_OUTPUT/inferred_network_method_combos_raw.csv" 
+    "$K562_OUTPUT/inferred_network_string_scores_only.csv" 
 )
 
-# 
+# Specify the save name
 SAVE_NAMES=( \
-    #"full_network_all_features_raw" \
-    #"full_network_all_method_combos_summed" \
-    "full_network_all_method_combos_raw" \
+    "inferred_network_raw" \
+    "inferred_network_w_string"
+    "inferred_network_method_combos_summed" \
+    "inferred_network_method_combos_raw" \
+    "inferred_network_string_scores_only"
 )
 
 # Use SLURM_ARRAY_TASK_ID to index into each array
@@ -55,7 +55,7 @@ echo "        Target: $TARGET"
 echo "        Save Name: $SAVE_NAME"
 
 # Run the python script for the selected model
-python3 "$PROJECT_DIR/src/python_scripts/Step090.apply_trained_xgboost.py" \
+python3 "$BASE_DIR/src/python_scripts/Step090.apply_trained_xgboost.py" \
     --output_dir "$K562_OUTPUT" \
     --model "$MODEL" \
     --target "$TARGET" \

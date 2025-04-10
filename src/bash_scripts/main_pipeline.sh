@@ -22,7 +22,7 @@ STEP040_SLIDING_WINDOW_TF_TO_PEAK_SCORE=false
 STEP050_HOMER_TF_TO_PEAK_SCORE=false
 
 # Combine the score DataFrames
-STEP060_COMBINE_DATAFRAMES=false
+STEP060_COMBINE_DATAFRAMES=true
 
 # Find shared edges between the inferred network and the STRING PPI database
 STEP070_FIND_EDGES_IN_STRING_DB=true
@@ -53,11 +53,6 @@ STRING_INPUT_FILE="$OUTPUT_DIR/inferred_network_raw.csv"
 
 # Name of the inferrred network file with STRING PPI interaction columns
 INFERRED_NET_FILE="$OUTPUT_DIR/inferred_network_w_string.csv"
-
-# Name of the final file to train the XGBoost model
-#   This is separate from the inferred network file to allow for testing model performance
-#   using different sets of features
-FEATURE_FILE="$OUTPUT_DIR/full_inferred_network_agg_method_combo.csv"
 
 # ----- Resource / Database files -----
 STRING_DB_DIR="$BASE_DIR"/string_database/$SPECIES/
@@ -687,7 +682,7 @@ run_classifier_training() {
     /usr/bin/time -v \
     python3 "$PYTHON_SCRIPT_DIR/Step080.train_xgboost.py" \
         --ground_truth_file "$GROUND_TRUTH_FILE" \
-        --inferred_network_file "$FEATURE_FILE" \
+        --inferred_network_file "$INFERRED_NET_FILE" \
         --output_dir "$OUTPUT_DIR" \
         --fig_dir "$FIG_DIR" \
         --model_save_name "xgb_trained_model"

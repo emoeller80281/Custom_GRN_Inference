@@ -5,32 +5,30 @@
 #SBATCH --mem=64G
 #SBATCH -o /dev/null
 #SBATCH -e /dev/null
-#SBATCH --array=0
+#SBATCH --array=0-4
 
 # Set base directories and files
 BASE_DIR=$(readlink -f "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER")
-OUTPUT_DIR="$BASE_DIR/output/K562/K562_human_filtered"
+K562_OUTPUT="$BASE_DIR/output/K562/K562_human_filtered"
 K562_GROUND_TRUTH_FILE="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/REFERENCE_NETWORKS/RN117_ChIPSeq_PMID37486787_Human_K562.tsv"
 PYTHON_SCRIPT_DIR="$BASE_DIR/src/python_scripts"
 LOG_DIR="$BASE_DIR/LOGS"
 
 # Define array of sample names and corresponding feature files
-# all_features_raw 
-# all_features_w_string 
-# all_method_combos_summed 
-# string_score_only
-SAMPLES=( 
-    all_method_combos_raw 
+SAMPLES=( \
+    "inferred_network_raw" \
+    "inferred_network_w_string"
+    "inferred_network_method_combos_summed" \
+    "inferred_network_method_combos_raw" \
+    "inferred_network_string_scores_only"
 )
 
-# "$OUTPUT_DIR/full_network_feature_files/inferred_network_raw.csv" 
-# "$OUTPUT_DIR/full_network_feature_files/inferred_network_w_string.csv" 
-# "$OUTPUT_DIR/full_network_feature_files/full_inferred_network_agg_method_combo.csv" 
-# "$OUTPUT_DIR/full_network_feature_files/string_score_only.csv" 
-
-
 FILES=( 
-    "$OUTPUT_DIR/full_network_feature_files/full_inferred_network_each_method_combo.csv" 
+    "$K562_OUTPUT/inferred_network_raw.csv" 
+    "$K562_OUTPUT/inferred_network_w_string.csv" 
+    "$K562_OUTPUT/inferred_network_method_combos_summed.csv" 
+    "$K562_OUTPUT/inferred_network_method_combos_raw.csv" 
+    "$K562_OUTPUT/inferred_network_string_scores_only.csv" 
 )
 
 # Use the SLURM_ARRAY_TASK_ID to select the corresponding sample and feature file.
@@ -49,7 +47,7 @@ run_classifier_training() {
     python3 "$PYTHON_SCRIPT_DIR/Step080.train_xgboost.py" \
             --ground_truth_file "$K562_GROUND_TRUTH_FILE" \
             --inferred_network_file "$FEATURE_FILE" \
-            --output_dir "$OUTPUT_DIR" \
+            --output_dir "$K562_OUTPUT" \
             --fig_dir "$FIG_DIR" \
             --model_save_name "xgb_${SAMPLE}_model"
 }

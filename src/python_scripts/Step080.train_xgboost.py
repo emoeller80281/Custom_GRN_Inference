@@ -563,6 +563,7 @@ def main():
 
     drop_cols = ["source_id", "peak_id", "target_id", "label"]
     feature_names = [col for col in inferred_network.columns if col not in drop_cols]
+    
     logging.info(f'Features:')
     for feature in feature_names:
         logging.info(f'\t{feature}')
@@ -590,15 +591,10 @@ def main():
     plot_feature_importance(feature_names, xgb_model, fig_dir)
     plot_xgboost_prediction_histogram(xgb_model, X_test, fig_dir)
     plot_feature_boxplots(feature_names, inferred_network, fig_dir)
-    # plot_feature_ablation(feature_names, X_train, X_test, y_train, y_test, xgb_model, fig_dir)
+    plot_feature_ablation(feature_names, X_train, X_test, y_train, y_test, xgb_model, fig_dir)
     # plot_overlapping_roc_pr_curves(X, y, feature_names, fig_dir)
     # plot_permutation_importance_plot(xgb_model, X_test, y_test, fig_dir)
     # plot_stability_boxplot(X, y, fig_dir)
-    
-    
-    
-    
-    
     
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format='%(message)s')

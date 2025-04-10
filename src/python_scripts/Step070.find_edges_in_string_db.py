@@ -90,14 +90,16 @@ def main():
     ).drop(columns={"protein1", "protein2"})
     logging.info("\tDone!")
     
+    num_common_edges = len(inferred_edges_in_string_df.dropna(subset=["string_combined_score"]))
+    
+    logging.info(f'\nInferred edges in string:')
+    logging.info(f'\t{num_common_edges:,} common edges / {len(inferred_edges_in_string_df):,} total edges ({round(num_common_edges/len(inferred_edges_in_string_df)*100,2)}%)')
+
     logging.info('\nInferred network with STRING edge scores:')
     logging.info(inferred_edges_in_string_df.head())
     
     write_csv_in_chunks(inferred_edges_in_string_df, OUTPUT_DIR, "inferred_network_w_string.csv")
     logging.info('\tDone!')
-
-    logging.info(f'\tInferred edges in string:')
-    logging.info(f'Found {len(inferred_edges_in_string_df.dropna(subset=["string_combined_score"]))} common edges between the STRING protein-protein interaction database and the inferred network.')
 
 if __name__ == "__main__":
     # Configure logging

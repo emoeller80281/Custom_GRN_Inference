@@ -167,10 +167,10 @@ def find_genes_near_peaks(peak_bed, tss_bed, rna_df, peak_dist_limit):
     # Calculate the TSS distance for each peak - gene pair
     peak_tss_overlap_df["TSS_dist"] = np.abs(peak_tss_overlap_df["peak_end"] - peak_tss_overlap_df["gene_start"])
     
-    # Scale the TSS distance by an exponential drop-off function 
+    # Scale the TSS distance score by an exponential drop-off function 
     # (e^-dist/25000, same scaling function used in LINGER Cis-regulatory potential calculation)
     # https://github.com/Durenlab/LINGER
-    peak_tss_overlap["TSS_dist"] = math.exp(-(peak_tss_overlap["TSS_dist"]/25000))
+    peak_tss_overlap["TSS_dist"] = peak_tss_overlap["TSS_dist"].apply(lambda x: math.exp(-(x/25000)))
     
     peak_tss_subset_df = peak_tss_overlap_df[["peak_id", "target_id", "TSS_dist"]]
     

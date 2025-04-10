@@ -3,9 +3,28 @@ import os
 from tqdm import tqdm
 import gc
 import math
+import argparse
+import logging
 
-output_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output/K562/K562_human_filtered"
-raw_inferred_net_file = f'{output_dir}/full_network_feature_files/inferred_network_raw.csv'
+def parse_args() -> argparse.Namespace:
+    """
+    Parses command-line arguments.
+
+    Returns:
+        argparse.Namespace: Parsed arguments containing paths for input and output files.
+    """
+    parser = argparse.ArgumentParser(description="Process TF motif binding potential.")
+
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        required=True,
+        help="Path to the output directory for the sample"
+    )
+
+    args: argparse.Namespace = parser.parse_args()
+    return args
+
 
 def aggregate_scores_by_method_combo(df: pd.DataFrame) -> pd.DataFrame:
     """Aggregates DataFrame score columns into a single regulatory score by adding up
@@ -13,10 +32,10 @@ def aggregate_scores_by_method_combo(df: pd.DataFrame) -> pd.DataFrame:
     to peak scoring methods
     
     Sum of the following score combinations:
-      - Mean peak accessibility * Cicero peak to TG * sliding window TF to peak
-      - Mean peak accessibility * Cicero peak to TG * Homer TF to peak
-      - Mean peak accessibility * peak to TG correlation * sliding window TF to peak
-      - Mean peak accessibility * peak to TG correlation * Homer TF to peak
+    - Mean peak accessibility * Cicero peak to TG * sliding window TF to peak
+    - Mean peak accessibility * Cicero peak to TG * Homer TF to peak
+    - Mean peak accessibility * peak to TG correlation * sliding window TF to peak
+    - Mean peak accessibility * peak to TG correlation * Homer TF to peak
 
     Args:
         df (pd.DataFrame): DataFrame with all merged score columns
@@ -24,8 +43,7 @@ def aggregate_scores_by_method_combo(df: pd.DataFrame) -> pd.DataFrame:
     Returns:
         agg_score_df (pd.DataFrame): DataFrame containing the TF, TG, expression, and regulatory score
     """
-    print("\nAggregating scoring method combinations")
-    
+    logging.info("\nAggregating scoring method combinations")
     
     peak_cicero_window = df["mean_peak_accessibility"] * df["cicero_score"] * df["sliding_window_score"]
     peak_cicero_homer = df["mean_peak_accessibility"] * df["cicero_score"] * df["homer_binding_score"]
@@ -34,12 +52,18 @@ def aggregate_scores_by_method_combo(df: pd.DataFrame) -> pd.DataFrame:
     
     agg_scores = peak_cicero_window + peak_cicero_homer + peak_corr_window + peak_corr_homer
     
+    # Min-max normalize the scores
+    def minmax_normalize_scores(scores):
+        return (scores - scores.min()) / (scores.max() - scores.min())
+    
+    agg_scores_minmax = minmax_normalize_scores(agg_scores)
+    
     agg_score_df = pd.DataFrame({
         "source_id" : df["source_id"],
         "target_id" : df["target_id"],
         "Mean TF Expression" : df["mean_TF_expression"],
         "Mean TG Expression" : df["mean_TG_expression"],
-        "Regulatory Score" : agg_scores
+        "Regulatory Score" : agg_scores_minmax
         })
     
     individual_scores = pd.DataFrame({
@@ -47,16 +71,16 @@ def aggregate_scores_by_method_combo(df: pd.DataFrame) -> pd.DataFrame:
         "target_id" : df["target_id"],
         "Mean TF Expression" : df["mean_TF_expression"],
         "Mean TG Expression" : df["mean_TG_expression"],
-        "Cicero and Sliding Window" : peak_cicero_window,
-        "Cicero and Homer" : peak_cicero_homer,
-        "Correlation and Sliding Window" : peak_corr_window,
-        "Correlation and Homer" : peak_corr_homer
+        "Cicero and Sliding Window" : minmax_normalize_scores(peak_cicero_window),
+        "Cicero and Homer" : minmax_normalize_scores(peak_cicero_homer),
+        "Correlation and Sliding Window" : minmax_normalize_scores(peak_corr_window),
+        "Correlation and Homer" : minmax_normalize_scores(peak_corr_homer)
         })
     
     return agg_score_df, individual_scores
 
 def write_csv_in_chunks(df, output_dir, filename):
-    print(f'Writing out CSV file to {filename} in 5% chunks')
+    logging.info(f'Writing out CSV file to {filename} in 5% chunks')
     output_file = f'{output_dir}/{filename}'
     chunksize = int(math.ceil(0.05 * df.shape[0]))
 
@@ -74,30 +98,42 @@ def write_csv_in_chunks(df, output_dir, filename):
             # For subsequent chunks, append without header
             chunk.to_csv(output_file, mode='a', header=False, index=False)
 
-# print("Reading in the raw inferred network")
-# raw_inferred_df = pd.read_csv(raw_inferred_net_file, header=0)
+def main():
+    # Parse arguments
+    args: argparse.Namespace = parse_args()
+    output_dir: str = args.output_dir
 
-# For testing, randomly downsample to 10% of the rows
-# print("Creating and saving a 10% downsampling of the dataset for testing")
-# sample_raw_inferred_df = raw_inferred_df.sample(frac=0.1)
-# write_csv_in_chunks(sample_raw_inferred_df, output_dir, 'sampled_network_feature_files/sample_raw_inferred_df.csv')
+    raw_inferred_net_file = f'{output_dir}/inferred_network_raw.csv'
 
-# ===== AGGREGATE FEATURE SCORES BY COMBINING PERMUTATIONS OF FEATURE COMBINATIONS =====
-# # Aggregating scores for the 10% downsampled DataFrame
-# sample_agg_score_df, sample_each_combo_df = aggregate_scores_by_method_combo(sample_raw_inferred_df)
-# write_csv_in_chunks(sample_agg_score_df, output_dir, 'sampled_network_feature_files/sample_inferred_network_agg_method_combo.csv')
-# write_csv_in_chunks(sample_each_combo_df, output_dir, 'sampled_network_feature_files/sample_inferred_network_each_method_combo.csv')
+    logging.info("Reading in the raw inferred network")
+    raw_inferred_df = pd.read_csv(raw_inferred_net_file, header=0)
 
-# # Aggregating scores for the whole raw inferred DataFrame
-# full_agg_score_df, full_each_combo_df = aggregate_scores_by_method_combo(raw_inferred_df)
+    # For testing, randomly downsample to 10% of the rows
+    # logging.info("Creating and saving a 10% downsampling of the dataset for testing")
+    # sample_raw_inferred_df = raw_inferred_df.sample(frac=0.1)
+    # write_csv_in_chunks(sample_raw_inferred_df, output_dir, 'sampled_network_feature_files/sample_raw_inferred_df.csv')
 
-# # Write out the CSV files in chunks
-# write_csv_in_chunks(full_agg_score_df, output_dir, 'full_network_feature_files/full_inferred_network_agg_method_combo.csv')
-# write_csv_in_chunks(full_each_combo_df, output_dir, 'full_network_feature_files/full_inferred_network_each_method_combo.csv')
-# gc.collect()
+    # ===== AGGREGATE FEATURE SCORES BY COMBINING PERMUTATIONS OF FEATURE COMBINATIONS =====
+    # # Aggregating scores for the 10% downsampled DataFrame
+    # sample_agg_score_df, sample_each_combo_df = aggregate_scores_by_method_combo(sample_raw_inferred_df)
+    # write_csv_in_chunks(sample_agg_score_df, output_dir, 'sampled_network_feature_files/sample_inferred_network_agg_method_combo.csv')
+    # write_csv_in_chunks(sample_each_combo_df, output_dir, 'sampled_network_feature_files/sample_inferred_network_each_method_combo.csv')
 
-# Subset to only have the STRING edges
-print("Reading in the inferred network with STRING edge scores")
-inferred_net_w_string_df = pd.read_csv(f'{output_dir}/full_network_feature_files/inferred_network_w_string.csv', header=0)
-string_only_df = inferred_net_w_string_df[["source_id", "target_id", "string_experimental_score", "string_textmining_score", "string_combined_score"]].dropna(subset=["string_combined_score"])
-write_csv_in_chunks(string_only_df, output_dir, 'full_network_feature_files/string_score_only.csv')
+    # Aggregating scores for the whole raw inferred DataFrame
+    full_agg_score_df, full_each_combo_df = aggregate_scores_by_method_combo(raw_inferred_df)
+
+    # Write out the CSV files in chunks
+    write_csv_in_chunks(full_agg_score_df, output_dir, 'inferred_network_method_combos_summed.csv')
+    write_csv_in_chunks(full_each_combo_df, output_dir, 'inferred_network_method_combos_raw.csv')
+    gc.collect()
+
+    # Subset to only have the STRING edges
+    logging.info("Reading in the inferred network with STRING edge scores")
+    inferred_net_w_string_df = pd.read_csv(f'{output_dir}/inferred_network_w_string.csv', header=0)
+    string_only_df = inferred_net_w_string_df[["source_id", "target_id", "string_experimental_score", "string_textmining_score", "string_combined_score"]].dropna(subset=["string_combined_score"])
+    write_csv_in_chunks(string_only_df, output_dir, 'inferred_network_string_scores_only.csv')
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format='%(message)s')
+    
+    main()
