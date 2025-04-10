@@ -26,7 +26,7 @@ activate_conda_env() {
     echo "[INFO] Activated Conda environment: $CONDA_ENV_NAME"
 }
 
-# This function uses namerefs to reference arrays by name.
+# Handles splitting features, training XGBoost models from those features, and making predictions with the models
 run_split_train_test() {
     local CELL_TYPE="$1"
     local GROUND_TRUTH_FILE="$2"

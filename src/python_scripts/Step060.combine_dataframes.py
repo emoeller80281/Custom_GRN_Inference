@@ -206,9 +206,14 @@ def main(atac_data_file, rna_data_file, output_dir, fig_dir):
     logging.info(f'Peaks: {len(full_merged_df_norm["peak_id"].unique())}')
     logging.info(f'TGs: {len(full_merged_df_norm["target_id"].unique())}')
     
-    # ===== WRITE OUT THE FULL RAW DATAFRAME =====
-    logging.info("Writing the final dataframe as 'inferred_network_raw.csv'")
-    write_csv_in_chunks(full_merged_df_norm, output_dir, 'inferred_network_raw.csv')
+    # For testing, randomly downsample to 30% of the rows
+    logging.info("Creating and saving a 30% downsampling of the dataset for testing")
+    sample_raw_inferred_df = full_merged_df_norm.sample(frac=0.30)
+    write_csv_in_chunks(sample_raw_inferred_df, output_dir, 'inferred_network_raw.csv')
+    
+    # # ===== WRITE OUT THE FULL RAW DATAFRAME =====
+    # logging.info("Writing the final dataframe as 'inferred_network_raw.csv'")
+    # write_csv_in_chunks(full_merged_df_norm, output_dir, 'inferred_network_raw.csv')
     
     logging.info("Done!")
 

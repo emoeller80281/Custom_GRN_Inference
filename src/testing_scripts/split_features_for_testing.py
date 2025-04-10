@@ -108,17 +108,6 @@ def main():
     logging.info("Reading in the raw inferred network")
     raw_inferred_df = pd.read_csv(raw_inferred_net_file, header=0)
 
-    # For testing, randomly downsample to 10% of the rows
-    # logging.info("Creating and saving a 10% downsampling of the dataset for testing")
-    # sample_raw_inferred_df = raw_inferred_df.sample(frac=0.1)
-    # write_csv_in_chunks(sample_raw_inferred_df, output_dir, 'sampled_network_feature_files/sample_raw_inferred_df.csv')
-
-    # ===== AGGREGATE FEATURE SCORES BY COMBINING PERMUTATIONS OF FEATURE COMBINATIONS =====
-    # # Aggregating scores for the 10% downsampled DataFrame
-    # sample_agg_score_df, sample_each_combo_df = aggregate_scores_by_method_combo(sample_raw_inferred_df)
-    # write_csv_in_chunks(sample_agg_score_df, output_dir, 'sampled_network_feature_files/sample_inferred_network_agg_method_combo.csv')
-    # write_csv_in_chunks(sample_each_combo_df, output_dir, 'sampled_network_feature_files/sample_inferred_network_each_method_combo.csv')
-
     # Aggregating scores for the whole raw inferred DataFrame
     full_agg_score_df, full_each_combo_df = aggregate_scores_by_method_combo(raw_inferred_df)
 
