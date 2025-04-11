@@ -35,7 +35,7 @@ run_split_train_test() {
     local SAMPLE_NAMES_ARRAY_NAME="$3"
     local TARGET_DIR_ARRAY_NAME="$4"
 
-    # Create namerefs for the arrays
+    # Create namerefs for the arrays to pass in the entire list of targets and samples
     declare -n SAMPLE_NAMES="$SAMPLE_NAMES_ARRAY_NAME"
     declare -n TARGET_DIR="$TARGET_DIR_ARRAY_NAME"
 
@@ -43,10 +43,19 @@ run_split_train_test() {
     for SAMPLE_NAME in "${SAMPLE_NAMES[@]}"; do
         echo ""
         echo "===== FEATURE SPLITTING FOR ${CELL_TYPE} - Sample: ${SAMPLE_NAME} ====="
+
+        # Set the output and log directory for the sample
         local OUTPUT_DIR="$BASE_DIR/output/${CELL_TYPE}/${SAMPLE_NAME}"
+
+        local INFERRED_GRN_DIR="$OUTPUT_DIR/inferred_grns"
+        local TRAINED_MODEL_DIR="$OUTPUT_DIR/trained_models"
+        local MODEL_PREDICTION_DIR="$OUTPUT_DIR/model_predictions"
         local LOG_DIR="${BASE_DIR}/LOGS/${CELL_TYPE}_logs/${SAMPLE_NAME}_logs"
+
+        mkdir -p "${MODEL_PREDICTION_DIR}"
         mkdir -p "${LOG_DIR}"
 
+        # Check to see if any of the feature set data file exists 
         local FEATURE_SET_FILES_EXIST=true
         for FEATURE_SET in "${FEATURE_SET_NAMES[@]}"; do
             if [ ! -f "${OUTPUT_DIR}/${FEATURE_SET}.csv" ]; then
@@ -57,8 +66,8 @@ run_split_train_test() {
         # Run feature set splitting for the sample if any of the feature files don't exist
         if [ "$FEATURE_SET_FILES_EXIST" = false ]; then
             echo "    Python: Splitting features for sample ${SAMPLE_NAME}"
-            /usr/bin/time -v python3 "${BASE_DIR}/src/testing_scripts/split_features_for_testing.py" \
-                --output_dir "${OUTPUT_DIR}"
+            python3 "${BASE_DIR}/src/testing_scripts/split_features_for_testing.py" \
+                --inferred_grn_dir "${INFERRED_GRN_DIR}"
             echo "        Done!"
 
         else
@@ -70,7 +79,7 @@ run_split_train_test() {
         for FEATURE_SET in "${FEATURE_SET_NAMES[@]}"; do
 
             # Train the XGBoost classifier for the current feature set if a trained model doesn't exist
-            if [ ! -f "${OUTPUT_DIR}/xgb_${FEATURE_SET}_model.pkl" ]; then
+            if [ ! -f "${TRAINED_MODEL_DIR}/xgb_${FEATURE_SET}_model.pkl" ]; then
                 local FEATURE_FILE="${OUTPUT_DIR}/${FEATURE_SET}.csv"
                 local FIG_DIR="${BASE_DIR}/figures/hg38/${SAMPLE_NAME}/${FEATURE_SET}"
                 mkdir -p "$FIG_DIR"
@@ -80,7 +89,7 @@ run_split_train_test() {
                 python3 "$PYTHON_SCRIPT_DIR/Step080.train_xgboost.py" \
                         --ground_truth_file "$GROUND_TRUTH_FILE" \
                         --inferred_network_file "$FEATURE_FILE" \
-                        --output_dir "$OUTPUT_DIR" \
+                        --trained_model_dir "$TRAINED_MODEL_DIR" \
                         --fig_dir "$FIG_DIR" \
                         --model_save_name "xgb_${FEATURE_SET}_model"
                 echo "        Done!"
@@ -95,18 +104,19 @@ run_split_train_test() {
         # Apply the trained XGBoost classifier model for each feature set to the corresponding feature set in the target directory
         for FEATURE_SET in "${FEATURE_SET_NAMES[@]}"; do
 
-            local MODEL_FILE="${OUTPUT_DIR}/xgb_${FEATURE_SET}_model.pkl"
+            local MODEL_FILE="${TRAINED_MODEL_DIR}/xgb_${FEATURE_SET}_model.pkl"
+
             for TARGET in "${TARGET_DIR[@]}"; do
 
                 # Skip if the prediction file already exists
-                if [ ! -f "${OUTPUT_DIR}/${CELL_TYPE}_${FEATURE_SET}_xgb_pred.tsv" ]; then
+                if [ ! -f "${MODEL_PREDICTION_DIR}/${CELL_TYPE}_${FEATURE_SET}_xgb_pred.tsv" ]; then
 
                     # Check to make sure the target feature set dataframe file exists, otherwise skip
                     if [ -f "${TARGET}/${FEATURE_SET}.csv" ]; then
                         local TARGET_FILE="${TARGET}/${FEATURE_SET}.csv"
                         echo "    Python: Applying trained XGBoost classifier to target: ${TARGET_FILE}"
                         python3 "$BASE_DIR/src/python_scripts/Step090.apply_trained_xgboost.py" \
-                            --output_dir "${OUTPUT_DIR}" \
+                            --output_dir "${MODEL_PREDICTION_DIR}" \
                             --model "$MODEL_FILE" \
                             --target "$TARGET_FILE" \
                             --save_name "${CELL_TYPE}_${FEATURE_SET}_xgb_pred.tsv"
@@ -142,11 +152,11 @@ FEATURE_SET_NAMES=( \
 
 # Define arrays for each cell type
 SAMPLE_NAMES_K562=( "K562_human_filtered" )
-TARGET_DIR_K562=( "$BASE_DIR/output/K562/K562_human_filtered" )
+TARGET_DIR_K562=( "$BASE_DIR/output/K562/K562_human_filtered/inferred_grns" )
 GROUND_TRUTH_FILE_K562="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/REFERENCE_NETWORKS/RN117_ChIPSeq_PMID37486787_Human_K562.tsv"
 
 SAMPLE_NAMES_MACROPHAGE=( "macrophage_buffer1_filtered" )
-TARGET_DIR_MACROPHAGE=( "$BASE_DIR/output/macrophage/macrophage_buffer1_filtered" )
+TARGET_DIR_MACROPHAGE=( "$BASE_DIR/output/macrophage/macrophage_buffer1_filtered/inferred_grns" )
 GROUND_TRUTH_FILE_MACROPHAGE="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/REFERENCE_NETWORKS/RN204_ChIPSeq_ChIPAtlas_Human_Macrophages.tsv"
 
 # Run for K562

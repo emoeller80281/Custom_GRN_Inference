@@ -9,7 +9,7 @@
 #srun source /gpfs/Home/esm5360/miniconda3/envs/my_env
 
 BASE_DIR=$(readlink -f "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER")
-OUTPUT_DIR="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output/K562/K562_human_filtered"
+INFERRED_GRN_DIR="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output/K562/K562_human_filtered/inferred_grns"
 
 /usr/bin/time -v python3 "${BASE_DIR}/src/testing_scripts/split_features_for_testing.py" \
-    --output_dir "${OUTPUT_DIR}"
+    --inferred_grn_dir "${INFERRED_GRN_DIR}"

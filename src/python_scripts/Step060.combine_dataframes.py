@@ -34,10 +34,22 @@ def parse_args() -> argparse.Namespace:
         help="Path to the output directory for the sample"
     )
     parser.add_argument(
+        "--inferred_grn_dir",
+        type=str,
+        required=True,
+        help="Path to the output directory for the inferred GRNs"
+    )
+    parser.add_argument(
         "--fig_dir",
         type=str,
         required=True,
         help="Path to the figure directory for the sample"
+    )
+    parser.add_argument(
+        "--subsample",
+        type=str,
+        required=True,
+        help="Percent of rows by which to subsample the combined DataFrame"
     )
 
     args: argparse.Namespace = parser.parse_args()
@@ -84,7 +96,18 @@ def write_csv_in_chunks(df, output_dir, filename):
             # For subsequent chunks, append without header
             chunk.to_csv(output_file, mode='a', header=False, index=False)
 
-def main(atac_data_file, rna_data_file, output_dir, fig_dir):
+def main():
+    # Parse command-line arguments
+    args: argparse.Namespace = parse_args()
+    atac_data_file: str = args.atac_data_file
+    rna_data_file: str = args.rna_data_file
+    output_dir: str = args.output_dir
+    inferred_grn_dir: str = args.inferred_grn_dir
+    fig_dir: str = args.fig_dir
+    subsample: str = args.subsample
+    
+    subsample = float(subsample)
+    
     logging.info("Loading in the DataFrames")
     logging.info("\tCorrelation peak to TG DataFrame")
     peak_corr_df = pd.read_csv(f'{output_dir}/peak_to_gene_correlation.csv', sep="\t", header=0)
@@ -206,10 +229,12 @@ def main(atac_data_file, rna_data_file, output_dir, fig_dir):
     logging.info(f'Peaks: {len(full_merged_df_norm["peak_id"].unique())}')
     logging.info(f'TGs: {len(full_merged_df_norm["target_id"].unique())}')
     
-    # For testing, randomly downsample to 30% of the rows
-    logging.info("Creating and saving a 30% downsampling of the dataset for testing")
-    sample_raw_inferred_df = full_merged_df_norm.sample(frac=0.30)
-    write_csv_in_chunks(sample_raw_inferred_df, output_dir, 'inferred_network_raw.csv')
+    # For testing, randomly downsample the rows
+    logging.info(f"Creating and saving a {subsample}% downsampling of the dataset for testing")
+    decimal_subsample = subsample / 100
+    sample_raw_inferred_df = full_merged_df_norm.sample(frac=decimal_subsample)
+    
+    write_csv_in_chunks(sample_raw_inferred_df, inferred_grn_dir, 'inferred_network_raw.csv')
     
     # # ===== WRITE OUT THE FULL RAW DATAFRAME =====
     # logging.info("Writing the final dataframe as 'inferred_network_raw.csv'")
@@ -220,12 +245,5 @@ def main(atac_data_file, rna_data_file, output_dir, fig_dir):
 if __name__ == "__main__":
     # Configure logging
     logging.basicConfig(level=logging.INFO, format='%(message)s')
-    
-    # Parse command-line arguments
-    args: argparse.Namespace = parse_args()
-    atac_data_file: str = args.atac_data_file
-    rna_data_file: str = args.rna_data_file
-    output_dir: str = args.output_dir
-    fig_dir: str = args.fig_dir
 
-    main(atac_data_file, rna_data_file, output_dir, fig_dir)
+    main()

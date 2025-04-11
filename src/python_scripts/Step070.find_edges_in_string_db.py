@@ -1,6 +1,7 @@
 import pandas as pd
 import argparse
 import os
+import numpy as np
 from tqdm import tqdm
 import math
 import logging
@@ -54,6 +55,9 @@ def write_csv_in_chunks(df, output_dir, filename):
         else:
             # For subsequent chunks, append without header
             chunk.to_csv(output_file, mode='a', header=False, index=False)
+            
+def minmax_normalize_column(column: pd.DataFrame):
+    return (column - column.min()) / (column.max() - column.min())
 
 def main():
     logging.info("----- READING STRING DATABASE FILES -----")
@@ -97,6 +101,10 @@ def main():
 
     logging.info('\nInferred network with STRING edge scores:')
     logging.info(inferred_edges_in_string_df.head())
+    
+    # Min-max normalize the STRING columns
+    cols_to_normalize = ["string_experimental_score", "string_textmining_score", "string_combined_score"]
+    inferred_edges_in_string_df = inferred_edges_in_string_df[cols_to_normalize].apply(lambda x: minmax_normalize_column(x), axis=0)
     
     write_csv_in_chunks(inferred_edges_in_string_df, OUTPUT_DIR, "inferred_network_w_string.csv")
     logging.info('\tDone!')

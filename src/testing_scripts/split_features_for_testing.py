@@ -14,9 +14,8 @@ def parse_args() -> argparse.Namespace:
         argparse.Namespace: Parsed arguments containing paths for input and output files.
     """
     parser = argparse.ArgumentParser(description="Process TF motif binding potential.")
-
     parser.add_argument(
-        "--output_dir",
+        "--inferred_grn_dir",
         type=str,
         required=True,
         help="Path to the output directory for the sample"
@@ -24,7 +23,6 @@ def parse_args() -> argparse.Namespace:
 
     args: argparse.Namespace = parser.parse_args()
     return args
-
 
 def aggregate_scores_by_method_combo(df: pd.DataFrame) -> pd.DataFrame:
     """Aggregates DataFrame score columns into a single regulatory score by adding up
@@ -101,9 +99,9 @@ def write_csv_in_chunks(df, output_dir, filename):
 def main():
     # Parse arguments
     args: argparse.Namespace = parse_args()
-    output_dir: str = args.output_dir
-
-    raw_inferred_net_file = f'{output_dir}/inferred_network_raw.csv'
+    inferred_grn_dir: str = args.inferred_grn_dir
+    
+    raw_inferred_net_file = f'{inferred_grn_dir}/inferred_network_raw.csv'
 
     logging.info("Reading in the raw inferred network")
     raw_inferred_df = pd.read_csv(raw_inferred_net_file, header=0)
@@ -112,15 +110,15 @@ def main():
     full_agg_score_df, full_each_combo_df = aggregate_scores_by_method_combo(raw_inferred_df)
 
     # Write out the CSV files in chunks
-    write_csv_in_chunks(full_agg_score_df, output_dir, 'inferred_network_method_combos_summed.csv')
-    write_csv_in_chunks(full_each_combo_df, output_dir, 'inferred_network_method_combos_raw.csv')
+    write_csv_in_chunks(full_agg_score_df, inferred_grn_dir, 'inferred_network_method_combos_summed.csv')
+    write_csv_in_chunks(full_each_combo_df, inferred_grn_dir, 'inferred_network_method_combos_raw.csv')
     gc.collect()
 
     # Subset to only have the STRING edges
     logging.info("Reading in the inferred network with STRING edge scores")
-    inferred_net_w_string_df = pd.read_csv(f'{output_dir}/inferred_network_w_string.csv', header=0)
+    inferred_net_w_string_df = pd.read_csv(f'{inferred_grn_dir}/inferred_network_w_string.csv', header=0)
     string_only_df = inferred_net_w_string_df[["source_id", "target_id", "string_experimental_score", "string_textmining_score", "string_combined_score"]].dropna(subset=["string_combined_score"])
-    write_csv_in_chunks(string_only_df, output_dir, 'inferred_network_string_scores_only.csv')
+    write_csv_in_chunks(string_only_df, inferred_grn_dir, 'inferred_network_string_scores_only.csv')
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format='%(message)s')

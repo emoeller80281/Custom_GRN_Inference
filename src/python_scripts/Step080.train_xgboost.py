@@ -35,10 +35,10 @@ def parse_args() -> argparse.Namespace:
         help="Path to the inferred network file for the sample"
     )
     parser.add_argument(
-        "--output_dir",
+        "--trained_model_dir",
         type=str,
         required=True,
-        help="Path to the output directory for the sample"
+        help="Path to the output directory for the trained XGBoost model"
     )
     parser.add_argument(
         "--fig_dir",
@@ -539,7 +539,7 @@ def main():
 
     ground_truth_file: str = args.ground_truth_file
     inferred_network_file: str = args.inferred_network_file
-    output_dir: str = args.output_dir
+    trained_model_dir: str = args.trained_model_dir
     fig_dir: str = args.fig_dir
     model_save_name: str = args.model_save_name
 
@@ -579,7 +579,7 @@ def main():
     xgb_model.feature_names = list(X_train.columns.values)
     
     logging.info("Done! Saving trained XGBoost model.")
-    joblib.dump(xgb_model, f"{output_dir}/{model_save_name}.pkl")
+    joblib.dump(xgb_model, f"{trained_model_dir}/{model_save_name}.pkl")
 
     if not os.path.exists(fig_dir):
         os.makedirs(fig_dir)
