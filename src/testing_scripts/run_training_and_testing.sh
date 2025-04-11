@@ -144,26 +144,27 @@ PYTHON_SCRIPT_DIR="$BASE_DIR/src/python_scripts"
 
 # Core names of the different feature files to build off of
 FEATURE_SET_NAMES=( \
-    "inferred_network_raw" \
-    "inferred_network_w_string" \
-    "inferred_network_method_combos_summed" \
-    "inferred_network_method_combos_raw" \
-    "inferred_network_string_scores_only" \
+    # "inferred_network_raw" \
+    # "inferred_network_w_string" \
+    # "inferred_network_method_combos_summed" \
+    # "inferred_network_method_combos_raw" \
+    # "inferred_network_string_scores_only" \
+    "inferred_network_w_string_no_tf"
 )
 
 # Define arrays for each cell type
 SAMPLE_NAMES_K562=( "K562_human_filtered" )
 TARGET_DIR_K562=( "$BASE_DIR/output/K562/K562_human_filtered/inferred_grns" )
-TARGET_NAME_K562="macrophage" # Set the target for making predictions with the cell type's trained models (test model on same vs different cell type / sample)
+TARGET_NAME_K562="K562" # Set the target for making predictions with the cell type's trained models (test model on same vs different cell type / sample)
 GROUND_TRUTH_FILE_K562="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/REFERENCE_NETWORKS/RN117_ChIPSeq_PMID37486787_Human_K562.tsv"
 
 SAMPLE_NAMES_MACROPHAGE=( "macrophage_buffer1_filtered" )
 TARGET_DIR_MACROPHAGE=( "$BASE_DIR/output/macrophage/macrophage_buffer1_filtered/inferred_grns" )
-TARGET_NAME_MACROPHAGE="K562"
+TARGET_NAME_MACROPHAGE="macrophage"
 GROUND_TRUTH_FILE_MACROPHAGE="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/REFERENCE_NETWORKS/RN204_ChIPSeq_ChIPAtlas_Human_Macrophages.tsv"
 
 # Run for K562
-run_split_train_test "K562" "$GROUND_TRUTH_FILE_K562" "$TARGET_NAME_K562" SAMPLE_NAMES_K562 TARGET_DIR_MACROPHAGE
+run_split_train_test "K562" "$GROUND_TRUTH_FILE_K562" "$TARGET_NAME_K562" SAMPLE_NAMES_K562 TARGET_DIR_K562
 
 # Run for macrophage
-run_split_train_test "macrophage" "$GROUND_TRUTH_FILE_MACROPHAGE" "$TARGET_NAME_MACROPHAGE" SAMPLE_NAMES_MACROPHAGE TARGET_DIR_K562
+run_split_train_test "macrophage" "$GROUND_TRUTH_FILE_MACROPHAGE" "$TARGET_NAME_MACROPHAGE" SAMPLE_NAMES_MACROPHAGE TARGET_DIR_MACROPHAGE
