@@ -30,10 +30,11 @@ activate_conda_env() {
 run_split_train_test() {
     local CELL_TYPE="$1"
     local GROUND_TRUTH_FILE="$2"
+    local TARGET_NAME="$3"
 
     # The next two parameters are the names of the arrays
-    local SAMPLE_NAMES_ARRAY_NAME="$3"
-    local TARGET_DIR_ARRAY_NAME="$4"
+    local SAMPLE_NAMES_ARRAY_NAME="$4"
+    local TARGET_DIR_ARRAY_NAME="$5"
 
     # Create namerefs for the arrays to pass in the entire list of targets and samples
     declare -n SAMPLE_NAMES="$SAMPLE_NAMES_ARRAY_NAME"
@@ -109,17 +110,17 @@ run_split_train_test() {
             for TARGET in "${TARGET_DIR[@]}"; do
 
                 # Skip if the prediction file already exists
-                if [ ! -f "${MODEL_PREDICTION_DIR}/${CELL_TYPE}_${FEATURE_SET}_xgb_pred.tsv" ]; then
+                if [ ! -f "${MODEL_PREDICTION_DIR}/${CELL_TYPE}_vs_{$TARGET_NAME}_${FEATURE_SET}_xgb_pred.tsv" ]; then
 
                     # Check to make sure the target feature set dataframe file exists, otherwise skip
                     if [ -f "${TARGET}/${FEATURE_SET}.csv" ]; then
                         local TARGET_FILE="${TARGET}/${FEATURE_SET}.csv"
-                        echo "    Python: Applying trained XGBoost classifier to target: ${TARGET_FILE}"
+                        echo "    Python: Applying trained XGBoost classifier for ${FEATURE_SET} to target: ${TARGET_NAME}"
                         python3 "$BASE_DIR/src/python_scripts/Step090.apply_trained_xgboost.py" \
                             --output_dir "${MODEL_PREDICTION_DIR}" \
                             --model "$MODEL_FILE" \
                             --target "$TARGET_FILE" \
-                            --save_name "${CELL_TYPE}_${FEATURE_SET}_xgb_pred.tsv"
+                            --save_name "${CELL_TYPE}_vs_${TARGET_NAME}_${FEATURE_SET}_xgb_pred.tsv"
                         echo "        Done!"
                     else
                         echo "    Feature set ${FEATURE_SET}.csv does not exist for ${TARGET}"
@@ -153,14 +154,16 @@ FEATURE_SET_NAMES=( \
 # Define arrays for each cell type
 SAMPLE_NAMES_K562=( "K562_human_filtered" )
 TARGET_DIR_K562=( "$BASE_DIR/output/K562/K562_human_filtered/inferred_grns" )
+TARGET_NAME_K562="macrophage" # Set the target for making predictions with the cell type's trained models (test model on same vs different cell type / sample)
 GROUND_TRUTH_FILE_K562="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/REFERENCE_NETWORKS/RN117_ChIPSeq_PMID37486787_Human_K562.tsv"
 
 SAMPLE_NAMES_MACROPHAGE=( "macrophage_buffer1_filtered" )
 TARGET_DIR_MACROPHAGE=( "$BASE_DIR/output/macrophage/macrophage_buffer1_filtered/inferred_grns" )
+TARGET_NAME_MACROPHAGE="K562"
 GROUND_TRUTH_FILE_MACROPHAGE="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/REFERENCE_NETWORKS/RN204_ChIPSeq_ChIPAtlas_Human_Macrophages.tsv"
 
 # Run for K562
-run_split_train_test "K562" "$GROUND_TRUTH_FILE_K562" SAMPLE_NAMES_K562 TARGET_DIR_K562
+run_split_train_test "K562" "$GROUND_TRUTH_FILE_K562" "$TARGET_NAME_K562" SAMPLE_NAMES_K562 TARGET_DIR_MACROPHAGE
 
 # Run for macrophage
-run_split_train_test "macrophage" "$GROUND_TRUTH_FILE_MACROPHAGE" SAMPLE_NAMES_MACROPHAGE TARGET_DIR_MACROPHAGE
+run_split_train_test "macrophage" "$GROUND_TRUTH_FILE_MACROPHAGE" "$TARGET_NAME_MACROPHAGE" SAMPLE_NAMES_MACROPHAGE TARGET_DIR_K562
