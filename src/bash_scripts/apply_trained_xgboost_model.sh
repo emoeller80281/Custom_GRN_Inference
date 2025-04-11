@@ -14,7 +14,9 @@ BASE_DIR=$(readlink -f "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_IN
 # Define output directories and ground truth files (if needed)
 K562_OUTPUT="$PROJECT_DIR/output/K562/K562_human_filtered"
 
+
 TRAINED_MODEL_DIR="$K562_OUTPUT/trained_models"
+
 MODEL_PREDICTION_DIR="$K562_OUTPUT/model_predictions"
 K562_GROUND_TRUTH="$PROJECT_DIR/ground_truth_files/RN117_ChIPSeq_PMID37486787_Human_K562.tsv"
 

@@ -22,7 +22,7 @@ STEP040_SLIDING_WINDOW_TF_TO_PEAK_SCORE=false
 STEP050_HOMER_TF_TO_PEAK_SCORE=false
 
 # Combine the score DataFrames
-STEP060_COMBINE_DATAFRAMES=true
+STEP060_COMBINE_DATAFRAMES=false
 SUBSAMPLE_PERCENT=30 # Subsample the rows of the combined dataframe 
 
 # Find shared edges between the inferred network and the STRING PPI database

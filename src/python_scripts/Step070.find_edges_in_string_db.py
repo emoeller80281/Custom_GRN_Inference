@@ -94,17 +94,16 @@ def main():
     ).drop(columns={"protein1", "protein2"})
     logging.info("\tDone!")
     
-    num_common_edges = len(inferred_edges_in_string_df.dropna(subset=["string_combined_score"]))
+    # Min-max normalize the STRING columns
+    cols_to_normalize = ["string_experimental_score", "string_textmining_score", "string_combined_score"]
+    inferred_edges_in_string_df[cols_to_normalize] = inferred_edges_in_string_df[cols_to_normalize].apply(lambda x: minmax_normalize_column(x), axis=0)
     
     logging.info(f'\nInferred edges in string:')
+    num_common_edges = len(inferred_edges_in_string_df.dropna(subset=["string_combined_score"]))
     logging.info(f'\t{num_common_edges:,} common edges / {len(inferred_edges_in_string_df):,} total edges ({round(num_common_edges/len(inferred_edges_in_string_df)*100,2)}%)')
 
     logging.info('\nInferred network with STRING edge scores:')
     logging.info(inferred_edges_in_string_df.head())
-    
-    # Min-max normalize the STRING columns
-    cols_to_normalize = ["string_experimental_score", "string_textmining_score", "string_combined_score"]
-    inferred_edges_in_string_df = inferred_edges_in_string_df[cols_to_normalize].apply(lambda x: minmax_normalize_column(x), axis=0)
     
     write_csv_in_chunks(inferred_edges_in_string_df, OUTPUT_DIR, "inferred_network_w_string.csv")
     logging.info('\tDone!')

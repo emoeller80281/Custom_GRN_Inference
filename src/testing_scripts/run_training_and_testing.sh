@@ -58,7 +58,7 @@ run_split_train_test() {
         # Check to see if any of the feature set data file exists 
         local FEATURE_SET_FILES_EXIST=true
         for FEATURE_SET in "${FEATURE_SET_NAMES[@]}"; do
-            if [ ! -f "${OUTPUT_DIR}/${FEATURE_SET}.csv" ]; then
+            if [ ! -f "${INFERRED_GRN_DIR}/${FEATURE_SET}.csv" ]; then
                 FEATURE_SET_FILES_EXIST=false
             fi
         done
@@ -80,7 +80,7 @@ run_split_train_test() {
 
             # Train the XGBoost classifier for the current feature set if a trained model doesn't exist
             if [ ! -f "${TRAINED_MODEL_DIR}/xgb_${FEATURE_SET}_model.pkl" ]; then
-                local FEATURE_FILE="${OUTPUT_DIR}/${FEATURE_SET}.csv"
+                local FEATURE_FILE="${INFERRED_GRN_DIR}/${FEATURE_SET}.csv"
                 local FIG_DIR="${BASE_DIR}/figures/hg38/${SAMPLE_NAME}/${FEATURE_SET}"
                 mkdir -p "$FIG_DIR"
 
