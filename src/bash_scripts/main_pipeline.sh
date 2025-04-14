@@ -318,9 +318,9 @@ check_r_environment() {
 }
 
 download_file_if_missing() {
-    local file_path=$1
-    local file_url=$2
-    local file_description=$3
+    local file_path="$1"
+    local file_url="$2"
+    local file_description="$3"
 
     if [ ! -f "$file_path" ]; then
         echo "    $file_description not found, downloading..."
@@ -403,6 +403,66 @@ check_processed_files() {
     else
         echo "[INFO] Processed files not found. Running dataset preprocessing..."
         run_dataset_preprocessing
+    fi
+}
+
+check_string_db_files() {
+    echo ""
+    echo "[INFO] Checking for STRING database protein_info and protein_links_detailed files for $SPECIES"
+
+    if [ ! -d "$STRING_DB_DIR" ]; then
+        echo "[WARNING] STRING database directory missing for $SPECIES, creating and downloading files..."
+        mkdir -p "$STRING_DB_DIR"
+    fi
+
+    if [ ! -f "$STRING_DB_DIR/protein_info.txt" ]; then
+        if [ "$SPECIES" == "mm10" ]; then
+            STRING_ORG_CODE="10090"
+        elif [ "$SPECIES" == "hg38" ]; then
+            STRING_ORG_CODE="9606"
+        else
+            echo "[ERROR] $SPECIES is not valid, please specify either mm10 or hg38"
+            exit 1
+        fi
+
+        PROTEIN_INFO_FILE_PATH="$STRING_DB_DIR/${STRING_ORG_CODE}.protein.info.v12.0.txt.gz"
+        PROTEIN_INFO_FILE_URL="https://stringdb-downloads.org/download/protein.info.v12.0/${STRING_ORG_CODE}.protein.info.v12.0.txt.gz"
+        PROTEIN_INFO_DESCRIPTION="$SPECIES STRING database info file"
+
+        download_file_if_missing "$PROTEIN_INFO_FILE_PATH" "$PROTEIN_INFO_FILE_URL" "$PROTEIN_INFO_DESCRIPTION"
+
+        echo "    - Downloaded! Unzipping gunzip file"
+        gunzip -f "$PROTEIN_INFO_FILE_PATH"
+
+        echo "    - Renaming file to protein_info.txt"
+        mv "$STRING_DB_DIR/${STRING_ORG_CODE}.protein.info.v12.0.txt" "$STRING_DB_DIR/protein_info.txt"
+    else
+        echo "    - STRING protein_info.txt file found"
+    fi
+
+    if [ ! -f "$STRING_DB_DIR/protein_links_detailed.txt" ]; then
+        if [ "$SPECIES" == "mm10" ]; then
+            STRING_ORG_CODE="10090"
+        elif [ "$SPECIES" == "hg38" ]; then
+            STRING_ORG_CODE="9606"
+        else
+            echo "[ERROR] $SPECIES is not valid, please specify either mm10 or hg38"
+            exit 1
+        fi
+
+        PROTEIN_LINKS_FILE_PATH="$STRING_DB_DIR/${STRING_ORG_CODE}.protein.links.detailed.v12.0.txt.gz"
+        PROTEIN_LINKS_FILE_URL="https://stringdb-downloads.org/download/protein.links.detailed.v12.0/${STRING_ORG_CODE}.protein.links.detailed.v12.0.txt.gz"
+        PROTEIN_LINKS_DESCRIPTION="$SPECIES STRING database detailed protein-protein link file"
+
+        download_file_if_missing "$PROTEIN_LINKS_FILE_PATH" "$PROTEIN_LINKS_FILE_URL" "$PROTEIN_LINKS_DESCRIPTION"
+
+        echo "    - Downloaded! Unzipping gunzip file"
+        gunzip -f "$PROTEIN_LINKS_FILE_PATH"
+
+        echo "    - Renaming file to protein_links_detailed.txt"
+        mv "$STRING_DB_DIR/${STRING_ORG_CODE}.protein.links.detailed.v12.0.txt" "$STRING_DB_DIR/protein_links_detailed.txt"
+    else
+        echo "    - STRING protein_links_detailed.txt file found"
     fi
 }
 
@@ -677,6 +737,7 @@ run_find_edges_in_string_db() {
     echo ""
     echo "Python: Finding shared edges between the inferred net and the\
  STRING protein protein interaction database"
+
     /usr/bin/time -v \
     python3 "$PYTHON_SCRIPT_DIR/Step070.find_edges_in_string_db.py" \
         --inferred_net_file "$STRING_INPUT_FILE" \

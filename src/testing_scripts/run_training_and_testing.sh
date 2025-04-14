@@ -144,11 +144,11 @@ PYTHON_SCRIPT_DIR="$BASE_DIR/src/python_scripts"
 
 # Core names of the different feature files to build off of
 FEATURE_SET_NAMES=( \
-    # "inferred_network_raw" \
-    # "inferred_network_w_string" \
-    # "inferred_network_method_combos_summed" \
-    # "inferred_network_method_combos_raw" \
-    # "inferred_network_string_scores_only" \
+    "inferred_network_raw" \
+    "inferred_network_w_string" \
+    "inferred_network_method_combos_summed" \
+    "inferred_network_method_combos_raw" \
+    "inferred_network_string_scores_only" \
     "inferred_network_w_string_no_tf"
 )
 
