@@ -1,17 +1,19 @@
 # Load required libraries
-library(cicero)
-library(monocle3)
-library(Signac)
-library(Seurat)
-library(GenomicRanges)
-library(Matrix)
-library(rtracklayer)
-library(reshape2)
-library(dplyr)
-library(tidyr)
-library(parallel)
-library(htmlwidgets)
-library(profvis)
+suppressPackageStartupMessages({
+  library(cicero)
+  library(monocle3)
+  library(Signac)
+  library(Seurat)
+  library(GenomicRanges)
+  library(Matrix)
+  library(rtracklayer)
+  library(reshape2)
+  library(dplyr)
+  library(tidyr)
+  library(parallel)
+  library(htmlwidgets)
+  library(profvis)
+})
 
 # =============================================
 # Utility Functions

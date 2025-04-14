@@ -185,24 +185,28 @@ check_tools() {
     done
 
     # Handle GNU parallel
+    echo ""
+    echo "[INFO] Checking for the GNU parallel module for running commands in parallel"
     if ! command -v parallel &> /dev/null; then
-        echo "[INFO] GNU parallel not found in PATH. Attempting to load module..."
+        echo "    - GNU parallel not found in PATH. Attempting to load module..."
         if command -v module &> /dev/null; then
             module load parallel || {
                 echo "[ERROR] Failed to load GNU parallel using module."
                 exit 1
             }
-            echo "[INFO] GNU parallel module loaded successfully."
+            echo "    - GNU parallel module loaded successfully."
         else
             echo "[ERROR] Module command not available. GNU parallel is required."
             exit 1
         fi
     else
-        echo "[INFO] GNU parallel is available."
+        echo "    - GNU parallel is available."
     fi
 }
 
 determine_num_cpus() {
+    echo ""
+    echo "[INFO] Checking the number of CPUs available for parallel processing"
     if [ -z "${SLURM_CPUS_PER_TASK:-}" ]; then
         if command -v nproc &> /dev/null; then
             TOTAL_CPUS=$(nproc --all)
@@ -212,19 +216,20 @@ determine_num_cpus() {
                 *) IGNORED_CPUS=4 ;;       # Reserve 4 CPUs for >=32 cores
             esac
             NUM_CPU=$((TOTAL_CPUS - IGNORED_CPUS))
-            echo "[INFO] Running locally. Detected $TOTAL_CPUS CPUs, reserving $IGNORED_CPUS for system tasks. Using $NUM_CPU CPUs."
+            echo "    - Running locally. Detected $TOTAL_CPUS CPUs, reserving $IGNORED_CPUS for system tasks. Using $NUM_CPU CPUs."
         else
             NUM_CPU=1  # Fallback
-            echo "[INFO] Running locally. Unable to detect CPUs, defaulting to $NUM_CPU CPU."
+            echo "    - Running locally. Unable to detect CPUs, defaulting to $NUM_CPU CPU."
         fi
     else
         NUM_CPU=${SLURM_CPUS_PER_TASK}
-        echo "[INFO] Running on SLURM. Number of CPUs allocated: ${NUM_CPU}"
+        echo "    - Running on SLURM. Number of CPUs allocated: ${NUM_CPU}"
     fi
 }
 
 check_input_files() {
-    echo "[INFO] Validating input files."
+    echo ""
+    echo "[INFO] Validating input files exist..."
     local files=("$ATAC_FILE_NAME" "$RNA_FILE_NAME")
     for file in "${files[@]}"; do
         if [ ! -f "$file" ]; then
@@ -241,23 +246,28 @@ check_input_files() {
 }
 
 activate_conda_env() {
+    echo ""
+    echo "[INFO] Attempting to load the specified Conda module"
     CONDA_BASE=$(conda info --base)
     if [ -z "$CONDA_BASE" ]; then
+        echo ""
         echo "[ERROR] Conda base could not be determined. Is Conda installed and in your PATH?"
         exit 1
     fi
 
     source "$CONDA_BASE/bin/activate"
     if ! conda env list | grep -q "^$CONDA_ENV_NAME "; then
+        echo ""
         echo "[ERROR] Conda environment '$CONDA_ENV_NAME' does not exist."
         exit 1
     fi
 
     conda activate "$CONDA_ENV_NAME" || { echo "Error: Failed to activate Conda environment '$CONDA_ENV_NAME'."; exit 1; }
-    echo "[INFO] Activated Conda environment: $CONDA_ENV_NAME"
+    echo "   - Successfully activated Conda environment: $CONDA_ENV_NAME"
 }
 
 setup_directories() {
+    echo ""
     echo "[INFO] Ensuring required directories exist."
     local dirs=( 
         "$INPUT_DIR" \
@@ -270,6 +280,7 @@ setup_directories() {
 
     for dir in "${dirs[@]}"; do
         mkdir -p "$dir"
+        echo "    - $dir"
     done
 }
 
@@ -323,24 +334,24 @@ download_file_if_missing() {
     local file_description="$3"
 
     if [ ! -f "$file_path" ]; then
-        echo "    $file_description not found, downloading..."
+        echo "    - $file_description not found, downloading..."
         curl -s -o "$file_path" "$file_url"
 
         if [ $? -ne 0 ] || [ ! -s "$file_path" ]; then
             echo "[ERROR] Failed to download or validate $file_description from $file_url."
             exit 1
         else
-            echo "        Successfully downloaded $file_description"
+            echo "        - Successfully downloaded $file_description"
         fi
     else
-        echo "        Using existing $file_description"
+        echo "         - Using existing $file_description"
     fi
 }
 
 check_cicero_genome_files_exist() {
 
     if [ "$SPECIES" == "mm10" ]; then
-        echo "    $SPECIES detected, using mouse genome"
+        echo "    - $SPECIES detected, using mouse genome"
 
         CHROM_SIZES="$REFERENCE_GENOME_DIR/mm10.chrom.sizes"
         CHROM_SIZES_URL="https://hgdownload.soe.ucsc.edu/goldenPath/mm10/bigZips/mm10.chrom.sizes"
@@ -349,7 +360,7 @@ check_cicero_genome_files_exist() {
         GENE_ANNOT_URL="https://ftp.ensembl.org/pub/release-113/gtf/mus_musculus/Mus_musculus.GRCm39.113.gtf.gz"
     
     elif [ "$SPECIES" == "hg38" ]; then
-        echo "    $SPECIES detected, using human genome"
+        echo "    - $SPECIES detected, using human genome"
 
         CHROM_SIZES="$REFERENCE_GENOME_DIR/hg38.chrom.sizes"
         CHROM_SIZES_URL="https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/hg38.chrom.sizes"
@@ -358,7 +369,8 @@ check_cicero_genome_files_exist() {
         GENE_ANNOT_URL="https://ftp.ensembl.org/pub/release-113/gtf/homo_sapiens/Homo_sapiens.GRCh38.113.gtf.gz"
 
     else
-        echo "    [ERROR] Unsupported SPECIES: $SPECIES"
+        echo ""
+        echo "[ERROR] Unsupported SPECIES: $SPECIES"
         exit 1
     fi
 
@@ -590,7 +602,7 @@ run_cicero() {
     module unload rstudio
     activate_conda_env
 
-} 2> "$LOG_DIR/Step010.run_cicero.log"
+}
 
 run_cicero_peak_to_tg_score() {
     echo ""
@@ -782,7 +794,7 @@ setup_directories
 check_processed_files
 
 # ----- Execute selected pipeline steps -----
-if [ "$STEP010_CICERO_MAP_PEAKS_TO_TG" = true ]; then run_cicero; fi
+if [ "$STEP010_CICERO_MAP_PEAKS_TO_TG" = true ]; then run_cicero &> "$LOG_DIR/Step010.run_cicero.log"; fi
 if [ "$STEP015_CICERO_PEAK_TO_TG_SCORE" = true ]; then run_cicero_peak_to_tg_score; fi
 if [ "$STEP020_PEAK_TO_TG_CORRELATION" = true ]; then run_correlation_peak_to_tg_score; fi
 # if [ "$STEP030_PEAK_TO_ENHANCER_DB" = true ]; then run_peak_to_enhancer_db_score; fi

@@ -68,7 +68,7 @@ def main(atac_data_file, rna_data_file):
     new_atac_file = update_name(atac_data_file)
     new_rna_file = update_name(rna_data_file)
 
-    print(f"Updated ATAC file: {new_atac_file}", flush=True)
+    print(f"\nUpdated ATAC file: {new_atac_file}", flush=True)
     print(f"Updated RNA file: {new_rna_file}", flush=True)
 
     logging.info('\nWriting updated scATAC-seq dataset')
