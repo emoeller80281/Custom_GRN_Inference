@@ -58,6 +58,13 @@ def parse_args() -> argparse.Namespace:
 def minmax_normalize_column(column: pd.DataFrame):
     return (column - column.min()) / (column.max() - column.min())
 
+def clip_percentile_outliers(column: pd.DataFrame, lower: int=1, upper: int=99):
+    lower_cutoff = np.percentile(column, lower)
+    upper_cutoff = np.percentile(column, upper)
+    column = np.clip(column, lower_cutoff, upper_cutoff)
+    
+    return column
+
 def plot_column_histograms(df, fig_dir, df_name="inferred_net"):
     # Create a figure and axes with a suitable size
     plt.figure(figsize=(15, 8))
@@ -193,9 +200,19 @@ def main():
     logging.debug(final_df.columns)
     logging.debug("\n---------------------------\n")
 
-    logging.info("\nMinmax normalizing all data columns to be between 0-1")
+    # These columns have already been Log2 CPM normalized and dont need to be changed
+    cols_to_skip_normalization = ["source_id", "target_id", "peak_id", "mean_TF_expression", "mean_TG_expression", "mean_peak_accessibility"]
+    
+    logging.info(f'Removing top and bottom 99th percentiles from feature scores')
+    full_merged_df_norm: pd.DataFrame = final_df[~cols_to_skip_normalization].apply(lambda x: clip_percentile_outliers(x, lower=1, upper=99),axis=0)
+
+    logging.info(f'Log10 normalizing feature score columns\n\t- skipping gene expression and peak accessibility columns, already Log2 CPM normalized)')
+    full_merged_df_norm: pd.DataFrame = final_df[~cols_to_skip_normalization].apply(lambda x: np.log10(x),axis=0)
+
+    logging.info("Minmax normalizing all data columns to be between 0-1")
     numeric_cols = final_df.select_dtypes(include=np.number).columns.tolist()
     full_merged_df_norm: pd.DataFrame = final_df[numeric_cols].apply(lambda x: minmax_normalize_column(x),axis=0)
+
     full_merged_df_norm[["peak_id", "target_id", "source_id"]] = final_df[["peak_id", "target_id", "source_id"]]
 
     # Replace NaN values with 0 for the scores
