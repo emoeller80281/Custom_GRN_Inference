@@ -195,12 +195,13 @@ def main():
 
     # These columns have already been Log2 CPM normalized and dont need to be changed
     cols_to_skip_normalization = ["source_id", "target_id", "peak_id", "mean_TF_expression", "mean_TG_expression", "mean_peak_accessibility"]
+    cols_to_normalize = [col for col in final_df.columns if col not in cols_to_skip_normalization]
     
     logging.info(f'Removing top and bottom 99th percentiles from feature scores')
-    full_merged_df_norm: pd.DataFrame = final_df[~cols_to_skip_normalization].apply(lambda x: clip_percentile_outliers(x, lower=1, upper=99),axis=0)
+    full_merged_df_norm: pd.DataFrame = final_df[cols_to_normalize].apply(lambda x: clip_percentile_outliers(x, lower=1, upper=99),axis=0)
 
     logging.info(f'Log10 normalizing feature score columns\n\t- skipping gene expression and peak accessibility columns, already Log2 CPM normalized)')
-    full_merged_df_norm: pd.DataFrame = final_df[~cols_to_skip_normalization].apply(lambda x: np.log10(x),axis=0)
+    full_merged_df_norm: pd.DataFrame = final_df[cols_to_normalize].apply(lambda x: np.log10(x),axis=0)
 
     logging.info("Minmax normalizing all data columns to be between 0-1")
     numeric_cols = final_df.select_dtypes(include=np.number).columns.tolist()

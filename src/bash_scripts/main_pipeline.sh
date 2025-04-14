@@ -369,7 +369,7 @@ check_cicero_genome_files_exist() {
 
 run_dataset_preprocessing() {
     echo ""
-    echo "Python: Log2 CPM normalizing the ATAC-seq and RNA-seq datasets"
+    echo "Python: Checking if the scATAC-seq and scRNA-seq data is normalized or raw counts"
     /usr/bin/time -v \
     python3 "$PYTHON_SCRIPT_DIR/preprocess_datasets.py" \
         --atac_data_file "$ATAC_FILE_NAME" \
@@ -735,8 +735,7 @@ run_combine_dataframes() {
 
 run_find_edges_in_string_db() {
     echo ""
-    echo "Python: Finding shared edges between the inferred net and the\
- STRING protein protein interaction database"
+    echo "Python: Matching edges to the STRING protein-protein interaction database"
 
     /usr/bin/time -v \
     python3 "$PYTHON_SCRIPT_DIR/Step070.find_edges_in_string_db.py" \
@@ -790,5 +789,5 @@ if [ "$STEP020_PEAK_TO_TG_CORRELATION" = true ]; then run_correlation_peak_to_tg
 if [ "$STEP040_SLIDING_WINDOW_TF_TO_PEAK_SCORE" = true ]; then run_sliding_window_tf_to_peak_score; fi
 if [ "$STEP050_HOMER_TF_TO_PEAK_SCORE" = true ]; then run_homer; run_homer_tf_to_peak_score; fi
 if [ "$STEP060_COMBINE_DATAFRAMES" = true ]; then run_combine_dataframes; fi
-if [ "$STEP070_FIND_EDGES_IN_STRING_DB" = true ]; then run_find_edges_in_string_db; fi
+if [ "$STEP070_FIND_EDGES_IN_STRING_DB" = true ]; then check_string_db_files; run_find_edges_in_string_db; fi
 if [ "$STEP080_TRAIN_XGBOOST_CLASSIFIER" = true ]; then run_classifier_training; fi
