@@ -15,7 +15,7 @@ STEP010_CICERO_MAP_PEAKS_TO_TG=false
 STEP015_CICERO_PEAK_TO_TG_SCORE=false
 
 STEP020_PEAK_TO_TG_CORRELATION=false
-STEP030_PEAK_TO_ENHANCER_DB=false
+# STEP030_PEAK_TO_ENHANCER_DB=false # Deprecated, does not help model and no data for mouse
 
 # Run the TF to peak binding score calculation methods
 STEP040_SLIDING_WINDOW_TF_TO_PEAK_SCORE=false
@@ -23,7 +23,7 @@ STEP050_HOMER_TF_TO_PEAK_SCORE=false
 
 # Combine the score DataFrames
 STEP060_COMBINE_DATAFRAMES=true
-SUBSAMPLE_PERCENT=30 # Subsample the rows of the combined dataframe 
+SUBSAMPLE_PERCENT=30 # Percent of rows of the combined dataframe to subsample
 
 # Find shared edges between the inferred network and the STRING PPI database
 STEP070_FIND_EDGES_IN_STRING_DB=true
@@ -60,7 +60,7 @@ INFERRED_NET_FILE="$INFERRED_GRN_DIR/inferred_network_w_string.csv"
 
 # ----- Resource / Database files -----
 STRING_DB_DIR="$BASE_DIR"/string_database/$SPECIES/
-ENHANCERDB_FILE="$BASE_DIR/enhancer_db/enhancer"
+# ENHANCERDB_FILE="$BASE_DIR/enhancer_db/enhancer" # Deprecated
 TF_NAMES_FILE="$BASE_DIR/motif_information/$SPECIES/TF_Information_all_motifs.txt"
 MEME_DIR="$BASE_DIR/motif_information/$SPECIES/${SPECIES}_motif_meme_files"
 
@@ -143,7 +143,7 @@ check_pipeline_steps() {
         "STEP010_CICERO_MAP_PEAKS_TO_TG"
         "STEP015_CICERO_PEAK_TO_TG_SCORE"
         "STEP020_PEAK_TO_TG_CORRELATION"
-        "STEP030_PEAK_TO_ENHANCER_DB"
+        # "STEP030_PEAK_TO_ENHANCER_DB" # Deprecated
         "STEP040_SLIDING_WINDOW_TF_TO_PEAK_SCORE"
         "STEP050_HOMER_TF_TO_PEAK_SCORE"
         "STEP060_COMBINE_DATAFRAMES"
@@ -555,23 +555,24 @@ run_correlation_peak_to_tg_score() {
 
 } 2> "$LOG_DIR/Step020.peak_gene_correlation.log"
 
-run_peak_to_enhancer_db_score() {
-    if [ ! -f $ENHANCERDB_FILE ]; then
-        echo "EnhancerDB file not found, downloading..."
-        mkdir -p "$BASE_DIR/enhancer_db"
-        wget "https://lcbb.swjtu.edu.cn/EnhancerDB/_download/enhancer.gz" -P "$BASE_DIR/enhancer_db/"
-        gunzip "$BASE_DIR/enhancer_db/enhancer.gz"
-    fi
+# EnhancerDB is deprecated
+# run_peak_to_enhancer_db_score() {
+#     if [ ! -f $ENHANCERDB_FILE ]; then
+#         echo "EnhancerDB file not found, downloading..."
+#         mkdir -p "$BASE_DIR/enhancer_db"
+#         wget "https://lcbb.swjtu.edu.cn/EnhancerDB/_download/enhancer.gz" -P "$BASE_DIR/enhancer_db/"
+#         gunzip "$BASE_DIR/enhancer_db/enhancer.gz"
+#     fi
 
-    echo ""
-    echo "Python: Mapping peaks to known enhancer regions from EnhancerDB"
-    /usr/bin/time -v \
-    python3 "$PYTHON_SCRIPT_DIR/Step030.peak_to_enhancer_db.py" \
-        --atac_data_file "$ATAC_FILE_NAME" \
-        --enhancer_db_file "$ENHANCERDB_FILE" \
-        --output_dir "$OUTPUT_DIR" \
+#     echo ""
+#     echo "Python: Mapping peaks to known enhancer regions from EnhancerDB"
+#     /usr/bin/time -v \
+#     python3 "$PYTHON_SCRIPT_DIR/Step030.peak_to_enhancer_db.py" \
+#         --atac_data_file "$ATAC_FILE_NAME" \
+#         --enhancer_db_file "$ENHANCERDB_FILE" \
+#         --output_dir "$OUTPUT_DIR" \
 
-} 2> "$LOG_DIR/Step030.peak_to_enhancer_db.log"
+# } 2> "$LOG_DIR/Step030.peak_to_enhancer_db.log"
 
 run_sliding_window_tf_to_peak_score() {
     echo ""
@@ -724,7 +725,7 @@ check_processed_files
 if [ "$STEP010_CICERO_MAP_PEAKS_TO_TG" = true ]; then run_cicero; fi
 if [ "$STEP015_CICERO_PEAK_TO_TG_SCORE" = true ]; then run_cicero_peak_to_tg_score; fi
 if [ "$STEP020_PEAK_TO_TG_CORRELATION" = true ]; then run_correlation_peak_to_tg_score; fi
-if [ "$STEP030_PEAK_TO_ENHANCER_DB" = true ]; then run_peak_to_enhancer_db_score; fi
+# if [ "$STEP030_PEAK_TO_ENHANCER_DB" = true ]; then run_peak_to_enhancer_db_score; fi
 if [ "$STEP040_SLIDING_WINDOW_TF_TO_PEAK_SCORE" = true ]; then run_sliding_window_tf_to_peak_score; fi
 if [ "$STEP050_HOMER_TF_TO_PEAK_SCORE" = true ]; then run_homer; run_homer_tf_to_peak_score; fi
 if [ "$STEP060_COMBINE_DATAFRAMES" = true ]; then run_combine_dataframes; fi
