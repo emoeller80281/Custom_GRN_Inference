@@ -127,9 +127,6 @@ def main():
 
     logging.info("\tHomer TF to peak DataFrame")
     homer_df = pd.read_csv(f'{output_dir}/homer_tf_to_peak.tsv', sep="\t", header=0)
-    
-    logging.info("\tEnhancerDB scores")
-    peak_enh_df = pd.read_csv(f'{output_dir}/peak_to_known_enhancers.csv', sep="\t", header=0)
 
     logging.info("\tRNAseq dataset")
     rna_df = pd.read_csv(rna_data_file, header=0)
@@ -158,13 +155,9 @@ def main():
     logging.debug(tf_expr_to_peak_df.head())
     logging.debug(tf_expr_to_peak_df.columns)
     logging.debug("\n---------------------------\n")
-    
-    logging.info("\tMerging the peak to target gene correlation with the known enhancer location mapping")
-    peak_gene_df = pd.merge(peak_corr_df, peak_enh_df, how="left", on="peak_id")
-    peak_gene_df = peak_gene_df[["peak_id", "target_id", "correlation", "TSS_dist", "enh_score"]]
 
     logging.info("\tMerging the correlation and cicero methods for peak to target gene")
-    peak_to_tg_df = pd.merge(peak_gene_df, cicero_df, on=["peak_id", "target_id"], how="outer")
+    peak_to_tg_df = pd.merge(peak_corr_df, cicero_df, on=["peak_id", "target_id"], how="outer")
     logging.debug("peak_to_tg_df")
     logging.debug(peak_to_tg_df.head())
     logging.debug(peak_to_tg_df.columns)
