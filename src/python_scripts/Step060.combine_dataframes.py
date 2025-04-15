@@ -198,20 +198,18 @@ def main():
     cols_to_normalize = [col for col in final_df.columns if col not in cols_to_skip_normalization]
     
     logging.info(f'\tRemoving top and bottom 99th percentiles from feature scores')
-    full_merged_df_norm: pd.DataFrame = final_df[cols_to_normalize].apply(lambda x: clip_percentile_outliers(x, lower=1, upper=99),axis=0)
+    final_df[cols_to_normalize] = final_df[cols_to_normalize].apply(lambda x: clip_percentile_outliers(x, lower=1, upper=99),axis=0)
 
     logging.info(f'\tLog10 normalizing feature score columns\n\t - skipping gene expression and peak accessibility columns, already Log2 CPM normalized)')
-    full_merged_df_norm: pd.DataFrame = full_merged_df_norm[cols_to_normalize].apply(lambda x: np.log10(x),axis=0)
+    final_df[cols_to_normalize] = final_df[cols_to_normalize].apply(lambda x: np.log10(x),axis=0)
 
     logging.info("\tMinmax normalizing all data columns to be between 0-1")
     numeric_cols = final_df.select_dtypes(include=np.number).columns.tolist()
-    full_merged_df_norm: pd.DataFrame = full_merged_df_norm[numeric_cols].apply(lambda x: minmax_normalize_column(x),axis=0)
-
-    full_merged_df_norm[["peak_id", "target_id", "source_id"]] = final_df[["peak_id", "target_id", "source_id"]]
+    final_df[numeric_cols] = final_df[numeric_cols].apply(lambda x: minmax_normalize_column(x),axis=0)
 
     # Replace NaN values with 0 for the scores
-    full_merged_df_norm['cicero_score'] = full_merged_df_norm['cicero_score'].fillna(0)
-    full_merged_df_norm = full_merged_df_norm.dropna(subset=["mean_TF_expression", "mean_TG_expression"])
+    final_df['cicero_score'] = final_df['cicero_score'].fillna(0)
+    final_df = final_df.dropna(subset=["mean_TF_expression", "mean_TG_expression"])
 
     # Set the desired column order
     column_order = [
@@ -228,27 +226,27 @@ def main():
         "homer_binding_score"
     ]
     
-    full_merged_df_norm = full_merged_df_norm[column_order]
+    final_df = final_df[column_order]
     
-    logging.info(full_merged_df_norm.head())
+    logging.info(final_df.head())
     logging.info('\nColumns:')
-    for col_name in full_merged_df_norm.columns:
+    for col_name in final_df.columns:
         logging.info(f'\t{col_name}')
-    logging.info(full_merged_df_norm.columns)
-    logging.info(f'\nTFs: {len(full_merged_df_norm["source_id"].unique())}')
-    logging.info(f'Peaks: {len(full_merged_df_norm["peak_id"].unique())}')
-    logging.info(f'TGs: {len(full_merged_df_norm["target_id"].unique())}')
+    logging.info(final_df.columns)
+    logging.info(f'\nTFs: {len(final_df["source_id"].unique())}')
+    logging.info(f'Peaks: {len(final_df["peak_id"].unique())}')
+    logging.info(f'TGs: {len(final_df["target_id"].unique())}')
     
     # For testing, randomly downsample the rows
     logging.info(f"Creating and saving a {subsample}% downsampling of the dataset for testing")
     decimal_subsample = subsample / 100
-    sample_raw_inferred_df = full_merged_df_norm.sample(frac=decimal_subsample)
+    sample_raw_inferred_df = final_df.sample(frac=decimal_subsample)
     
     write_csv_in_chunks(sample_raw_inferred_df, inferred_grn_dir, 'inferred_network_raw.csv')
     
     # # ===== WRITE OUT THE FULL RAW DATAFRAME =====
     # logging.info("Writing the final dataframe as 'inferred_network_raw.csv'")
-    # write_csv_in_chunks(full_merged_df_norm, output_dir, 'inferred_network_raw.csv')
+    # write_csv_in_chunks(final_df, output_dir, 'inferred_network_raw.csv')
     
     logging.info("Done!")
 
