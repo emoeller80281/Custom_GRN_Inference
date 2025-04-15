@@ -121,8 +121,8 @@ def main():
     inferred_net_w_string_no_tf = inferred_net_w_string_df.drop(columns={"mean_TF_expression"})
     write_csv_in_chunks(inferred_net_w_string_no_tf, inferred_grn_dir, 'inferred_network_w_string_no_tf.csv')
     
-    # string_only_df = inferred_net_w_string_df[["source_id", "target_id", "string_experimental_score", "string_textmining_score", "string_combined_score"]].dropna(subset=["string_combined_score"])
-    # write_csv_in_chunks(string_only_df, inferred_grn_dir, 'inferred_network_string_scores_only.csv')
+    string_only_df = inferred_net_w_string_df[["source_id", "target_id", "string_experimental_score", "string_textmining_score", "string_combined_score"]].dropna(subset=["string_combined_score"])
+    write_csv_in_chunks(string_only_df, inferred_grn_dir, 'inferred_network_string_scores_only.csv')
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format='%(message)s')
