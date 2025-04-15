@@ -201,11 +201,11 @@ def main():
     full_merged_df_norm: pd.DataFrame = final_df[cols_to_normalize].apply(lambda x: clip_percentile_outliers(x, lower=1, upper=99),axis=0)
 
     logging.info(f'\tLog10 normalizing feature score columns\n\t - skipping gene expression and peak accessibility columns, already Log2 CPM normalized)')
-    full_merged_df_norm: pd.DataFrame = final_df[cols_to_normalize].apply(lambda x: np.log10(x),axis=0)
+    full_merged_df_norm: pd.DataFrame = full_merged_df_norm[cols_to_normalize].apply(lambda x: np.log10(x),axis=0)
 
     logging.info("\tMinmax normalizing all data columns to be between 0-1")
     numeric_cols = final_df.select_dtypes(include=np.number).columns.tolist()
-    full_merged_df_norm: pd.DataFrame = final_df[numeric_cols].apply(lambda x: minmax_normalize_column(x),axis=0)
+    full_merged_df_norm: pd.DataFrame = full_merged_df_norm[numeric_cols].apply(lambda x: minmax_normalize_column(x),axis=0)
 
     full_merged_df_norm[["peak_id", "target_id", "source_id"]] = final_df[["peak_id", "target_id", "source_id"]]
 

@@ -96,10 +96,15 @@ def train_xgboost(X_train, y_train, features):
     # Train the XGBoost Classifier
     # XGBoost automatically handles NaN values (missing=np.nan is the default)
     xgb_model = xgb.XGBClassifier(
-        random_state=42,
-        n_estimators=100,
-        max_depth=10,
-        eval_metric='logloss'
+        random_state = 42,
+        n_estimators = 100,     # or lower with early stopping
+        max_depth = 6,          # lower than 10
+        gamma = 1,              # increase this for conservative splitting
+        reg_alpha = 0.5,        # L1 regularization; adjust as needed
+        reg_lambda = 1,         # L2 regularization; adjust as needed
+        subsample = 0.8,        # use subsampling to reduce overfitting
+        colsample_bytree = 0.8,   # limit column sampling per tree
+        eval_metric = 'logloss'
     )
     xgb_model.fit(X_train_balanced, y_train_balanced)
 

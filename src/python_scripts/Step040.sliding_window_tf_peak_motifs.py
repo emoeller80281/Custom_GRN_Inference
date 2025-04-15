@@ -310,9 +310,6 @@ def find_ATAC_peak_sequence(peak_df, reference_genome_dir, parsed_peak_file):
         chr_pos_to_seq = chr_seq_list[0]
         
     logging.info(f'\tFound sequence for {chr_pos_to_seq.shape[0] / peak_df.shape[0] * 100}% of peaks ({chr_pos_to_seq.shape[0]} / {peak_df.shape[0]})')
-    logging.info('Writing to pickle file')
-    chr_pos_to_seq.to_pickle(parsed_peak_file)
-    logging.info(f'\tDone!')
     
     return chr_pos_to_seq
 
@@ -327,6 +324,8 @@ def main():
     output_dir: str = args.output_dir
     species: str = args.species
     num_cpu: int = int(args.num_cpu)
+    
+    tmp_dir = f"{output_dir}/tmp"
     
     # Alternative: Set file names manually
     # tf_names_file = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/motif_information/mm10/TF_Information_all_motifs.txt"
@@ -353,7 +352,7 @@ def main():
     rna_data_genes = set(rna_data["gene_id"])
     
     # Read in the peak dataframe containing genomic sequences    
-    parsed_peak_file = f'{output_dir}/peak_sequences.pkl'
+    parsed_peak_file = f'{tmp_dir}/peak_sequences.pkl'
     if os.path.exists(parsed_peak_file):
         logging.info('Reading ATACseq peaks from pickle file')
         chr_pos_to_seq = pd.read_pickle(parsed_peak_file)
@@ -367,6 +366,11 @@ def main():
         
         # Get the genomic sequence from the reference genome to each ATACseq peak
         chr_pos_to_seq = find_ATAC_peak_sequence(peak_df, reference_genome_dir, parsed_peak_file)
+        
+        # Write the peak sequences to a pickle file in the tmp dir
+        logging.info('Writing to pickle file')
+        chr_pos_to_seq.to_pickle(parsed_peak_file)
+        logging.info(f'\tDone!')
         
     # Associate the TFs from TF_Information_all_motifs.txt to the motif with the matching motifID
     tf_to_peak_score_df = associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, rna_data_genes, species, num_cpu)

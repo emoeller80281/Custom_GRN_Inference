@@ -140,10 +140,42 @@ def load_ensembl_organism_tss(organism, tmp_dir):
     ensembl_df.to_csv(f"{tmp_dir}/ensembl.bed", sep="\t", header=False, index=False)
 
 def find_genes_near_peaks(peak_bed, tss_bed, rna_df, peak_dist_limit):
-    # 3) Find peaks that are within PEAK_DIST_LIMIT bp of each gene's TSS
+    """
+    Identify genes whose transcription start sites (TSS) are near scATAC-seq peaks.
+    
+    This function:
+        1. Uses BedTools to find peaks that are within peak_dist_limit bp of each gene's TSS.
+        2. Converts the BedTool result to a pandas DataFrame.
+        3. Computes the absolute distance between the peak end and gene start (as a proxy for TSS distance).
+        4. Scales these distances using an exponential drop-off function (e^-dist/25000),
+           the same method used in the LINGER cis-regulatory potential calculation.
+        5. Deduplicates the data to keep the minimum (i.e., best) peak-to-gene connection.
+        6. Only keeps genes that are present in the RNA-seq dataset.
+        
+    Parameters
+    ----------
+    peak_bed : BedTool
+        A BedTool object representing scATAC-seq peaks.
+    tss_bed : BedTool
+        A BedTool object representing gene TSS locations.
+    rna_df : pandas.DataFrame
+        The RNA-seq dataset, which must have a "gene_id" column.
+    peak_dist_limit : int
+        The maximum distance (in bp) from a TSS to consider a peak as potentially regulatory.
+        
+    Returns
+    -------
+    peak_tss_subset_df : pandas.DataFrame
+        A DataFrame containing columns "peak_id", "target_id", and the scaled TSS distance "TSS_dist"
+        for peak–gene pairs.
+    gene_list : set
+        A set of unique gene IDs (target_id) present in the DataFrame.
+    """
+    # 3) Find peaks that are within peak_dist_limit bp of each gene's TSS using BedTools
     logging.info(f"Locating peaks that are within {peak_dist_limit} bp of each gene's TSS")
     peak_tss_overlap = peak_bed.window(tss_bed, w=peak_dist_limit)
     
+    # Define the column types for conversion to DataFrame
     dtype_dict = {
         "peak_chr": str,
         "peak_start": int,
@@ -155,6 +187,7 @@ def find_genes_near_peaks(peak_bed, tss_bed, rna_df, peak_dist_limit):
         "gene_id": str
     }
     
+    # Convert the BedTool result to a DataFrame for further processing.
     peak_tss_overlap_df = peak_tss_overlap.to_dataframe(
         names=[
             "peak_chr", "peak_start", "peak_end", "peak_id",
@@ -164,28 +197,30 @@ def find_genes_near_peaks(peak_bed, tss_bed, rna_df, peak_dist_limit):
         low_memory=False  # ensures the entire file is read in one go
     ).rename(columns={"gene_id": "target_id"}).dropna()
     
-    # Calculate the TSS distance for each peak - gene pair
+    # Calculate the absolute distance between the peak's end and gene's start.
+    # This serves as a proxy for the TSS distance for the peak-to-gene pair.
     peak_tss_overlap_df["TSS_dist"] = np.abs(peak_tss_overlap_df["peak_end"] - peak_tss_overlap_df["gene_start"])
     
-    # Scale the TSS distance score by an exponential drop-off function 
-    # (e^-dist/25000, same scaling function used in LINGER Cis-regulatory potential calculation)
+    # Scale the TSS distance using an exponential drop-off function
+    # e^-dist/25000, same scaling function used in LINGER Cis-regulatory potential calculation
     # https://github.com/Durenlab/LINGER
-    peak_tss_overlap_df["TSS_dist"] = peak_tss_overlap_df["TSS_dist"].apply(lambda x: math.exp(-(x/25000)))
+    peak_tss_overlap_df["TSS_dist"] = peak_tss_overlap_df["TSS_dist"].apply(lambda x: math.exp(-(x / 25000)))
     
+    # Keep only the necessary columns.
     peak_tss_subset_df = peak_tss_overlap_df[["peak_id", "target_id", "TSS_dist"]]
     
-    # Take the minimum peak to gene TSS distance
+    # Sort by the TSS distance (lower values imply closer proximity and therefore stronger association)
+    # and drop duplicates keeping only the best association for each peak-target pair.
     peak_tss_subset_df = peak_tss_subset_df.sort_values("TSS_dist")
     peak_tss_subset_df = peak_tss_subset_df.drop_duplicates(subset=["peak_id", "target_id"], keep="first")
     
-    # Only keep genes that are also in the RNA-seq dataset
+    # Filter out any genes not found in the RNA-seq dataset.
     peak_tss_subset_df = peak_tss_subset_df[peak_tss_subset_df["target_id"].isin(rna_df["gene_id"])]
     
     gene_list = set(peak_tss_subset_df["target_id"].drop_duplicates().to_list())
     
-    # logging.info("\n-----------------------------------------\n")
-    
     return peak_tss_subset_df, gene_list
+
 
 def row_normalize_sparse(X):
     """
