@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 import math
 import matplotlib.pyplot as plt
+from sklearn.preprocessing import MinMaxScaler
 import argparse
 import logging
 import os
@@ -55,15 +56,31 @@ def parse_args() -> argparse.Namespace:
     args: argparse.Namespace = parser.parse_args()
     return args
 
-def minmax_normalize_column(column: pd.DataFrame):
-    return (column - column.min()) / (column.max() - column.min())
+def get_percentile_mask(column, lower=5, upper=95):
+    col_clean = column.dropna()
+    q_low = np.percentile(col_clean, lower)
+    q_high = np.percentile(col_clean, upper)
+    logging.info(f"{lower}th percentile: {q_low}")
+    logging.info(f"{upper}th percentile: {q_high}")
+    return (column > q_low) & (column < q_high)
 
-def clip_percentile_outliers(column: pd.DataFrame, lower: int=1, upper: int=99):
-    lower_cutoff = np.percentile(column, lower)
-    upper_cutoff = np.percentile(column, upper)
-    column = np.clip(column, lower_cutoff, upper_cutoff)
+def scale_and_log1p_column(column, lower=5, upper=95):
+    mask = get_percentile_mask(column, lower, upper)
     
-    return column
+    trimmed = column.where(mask, np.nan)
+    
+    # MinMax scale only the non-NaN values
+    scaled = np.full_like(trimmed, np.nan, dtype=np.float64)
+    non_nan_mask = ~np.isnan(trimmed)
+    
+    if non_nan_mask.sum() > 0:
+        scaled_values = MinMaxScaler().fit_transform(trimmed[non_nan_mask].values.reshape(-1, 1)).flatten()
+        scaled[non_nan_mask] = scaled_values
+
+    # Apply log1p transform to scaled values
+    normalized = np.log1p(scaled)
+    
+    return pd.Series(normalized, index=column.index)
 
 def plot_column_histograms(df, fig_dir, df_name="inferred_net"):
     # Create a figure and axes with a suitable size
@@ -193,19 +210,23 @@ def main():
     logging.debug(final_df.columns)
     logging.debug("\n---------------------------\n")
 
-    # These columns have already been Log2 CPM normalized and dont need to be changed
-    cols_to_skip_normalization = ["source_id", "target_id", "peak_id", "mean_TF_expression", "mean_TG_expression", "mean_peak_accessibility"]
-    cols_to_normalize = [col for col in final_df.columns if col not in cols_to_skip_normalization]
-    
-    logging.info(f'\tRemoving top and bottom 99th percentiles from feature scores')
-    final_df[cols_to_normalize] = final_df[cols_to_normalize].apply(lambda x: clip_percentile_outliers(x, lower=1, upper=99),axis=0)
+    # Skip these already-normalized columns
+    cols_to_skip_normalization = [
+        "source_id", "target_id", "peak_id",
+        "mean_TF_expression", "mean_TG_expression", "mean_peak_accessibility"
+    ]
 
-    logging.info(f'\tLog10 normalizing feature score columns\n\t - skipping gene expression and peak accessibility columns, already Log2 CPM normalized)')
-    final_df[cols_to_normalize] = final_df[cols_to_normalize].apply(lambda x: np.log10(x),axis=0)
+    # Choose numeric columns that are not in the skip list
+    cols_to_normalize = [col for col in final_df.select_dtypes(include=np.number).columns if col not in cols_to_skip_normalization]
 
-    logging.info("\tMinmax normalizing all data columns to be between 0-1")
-    numeric_cols = final_df.select_dtypes(include=np.number).columns.tolist()
-    final_df[numeric_cols] = final_df[numeric_cols].apply(lambda x: minmax_normalize_column(x),axis=0)
+    logging.info(f"\tNormalizing columns: {cols_to_normalize}")
+
+    # Trim off the lower 5th and upper 95th percentiles
+    # MinMax scale the remaining values between 0-1
+    # log1p normalize the remaining values
+    for col in cols_to_normalize:
+        logging.info(f"\tProcessing column: {col}")
+        final_df[col] = scale_and_log1p_column(final_df[col], lower=5, upper=95)
 
     # Replace NaN values with 0 for the scores
     final_df['cicero_score'] = final_df['cicero_score'].fillna(0)
@@ -241,6 +262,7 @@ def main():
     logging.info(f"Creating and saving a {subsample}% downsampling of the dataset for testing")
     decimal_subsample = subsample / 100
     sample_raw_inferred_df = final_df.sample(frac=decimal_subsample)
+    logging.info(f'\t\tSliding window scores: {len(final_df["sliding_window_score"].dropna())}')
     
     write_csv_in_chunks(sample_raw_inferred_df, inferred_grn_dir, 'inferred_network_raw.csv')
     

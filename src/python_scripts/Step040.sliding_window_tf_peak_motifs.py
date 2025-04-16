@@ -201,8 +201,11 @@ def associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, rna_dat
         }
         
         new_columns = {}
+        
+        # Only update tqdm after every 2% of progress
+        min_update = max(1, int(0.02 * len(futures)))
 
-        for future in tqdm(as_completed(futures), total=len(futures), desc="Processing motifs"):
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Processing motifs", miniters=min_update):
             motif_name, tf_names, total_peak_score = future.result()
             for tf_name in tf_names:
                 new_columns[tf_name] = total_peak_score

@@ -100,7 +100,7 @@ def main():
     
     logging.info(f'\nInferred edges in string:')
     num_common_edges = len(inferred_edges_in_string_df.dropna(subset=["string_combined_score"]))
-    logging.info(f'\t{num_common_edges:,} common edges / {len(inferred_edges_in_string_df):,} total edges ({round(num_common_edges/len(inferred_edges_in_string_df)*100,2)}%)')
+    logging.info(f'\t{num_common_edges:,} common edges / {len(inferred_edges_in_string_df[["source_id", "target_id"]].drop_duplicates())} total edges ({round(num_common_edges/len(inferred_edges_in_string_df)*100,2)}%)')
 
     logging.info('\nInferred network with STRING edge scores:')
     logging.info(inferred_edges_in_string_df.head())

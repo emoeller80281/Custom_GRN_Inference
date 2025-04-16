@@ -138,9 +138,15 @@ run_split_train_test() {
 # Activate the Conda environment
 activate_conda_env
 
+
+
 # Global variables
 BASE_DIR=$(readlink -f "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER")
 PYTHON_SCRIPT_DIR="$BASE_DIR/src/python_scripts"
+
+K562_INFERRED_NET_DIR="$BASE_DIR/output/K562/K562_human_filtered/inferred_grns"
+MACROPHAGE_INFERRED_NET_DIR="$BASE_DIR/output/K562/K562_human_filtered/inferred_grns"
+MESC_INFERRED_NET_DIR="$BASE_DIR/output/mESC/filtered_L2_E7.5_rep1/inferred_grns"
 
 # Core names of the different feature files to build off of
 FEATURE_SET_NAMES=( \
@@ -152,17 +158,17 @@ FEATURE_SET_NAMES=( \
 
 # Define arrays for each cell type
 SAMPLE_NAMES_K562=( "K562_human_filtered" )
-TARGET_DIR_K562=( "$BASE_DIR/output/K562/K562_human_filtered/inferred_grns" )
+TARGET_DIR_K562=( "$K562_INFERRED_NET_DIR" )
 TARGET_NAME_K562="K562" # Set the target for making predictions with the cell type's trained models (test model on same vs different cell type / sample)
 GROUND_TRUTH_FILE_K562="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/REFERENCE_NETWORKS/RN117_ChIPSeq_PMID37486787_Human_K562.tsv"
 
 SAMPLE_NAMES_MACROPHAGE=( "macrophage_buffer1_filtered" )
-TARGET_DIR_MACROPHAGE=( "$BASE_DIR/output/macrophage/macrophage_buffer1_filtered/inferred_grns" )
+TARGET_DIR_MACROPHAGE=( "$MACROPHAGE_INFERRED_NET_DIR" )
 TARGET_NAME_MACROPHAGE="macrophage"
 GROUND_TRUTH_FILE_MACROPHAGE="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/REFERENCE_NETWORKS/RN204_ChIPSeq_ChIPAtlas_Human_Macrophages.tsv"
 
 SAMPLE_NAMES_MESC=( "filtered_L2_E7.5_rep1" )
-TARGET_DIR_MESC=( "$BASE_DIR/output/mESC/filtered_L2_E7.5_rep1/inferred_grns" )
+TARGET_DIR_MESC=( "$MESC_INFERRED_NET_DIR" )
 TARGET_NAME_MESC="mESC"
 GROUND_TRUTH_FILE_MESC="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/REFERENCE_NETWORKS/RN111_ChIPSeq_BEELINE_Mouse_ESC.tsv"
 
@@ -174,4 +180,4 @@ run_split_train_test "K562" "$GROUND_TRUTH_FILE_K562" "$TARGET_NAME_K562" SAMPLE
 run_split_train_test "macrophage" "$GROUND_TRUTH_FILE_MACROPHAGE" "$TARGET_NAME_MACROPHAGE" SAMPLE_NAMES_MACROPHAGE TARGET_DIR_MACROPHAGE
 
 # # Run for mESC
-# run_split_train_test "mESC" "$GROUND_TRUTH_FILE_MESC" "$TARGET_NAME_MESC" SAMPLE_NAMES_MESC TARGET_DIR_MESC
+run_split_train_test "mESC" "$GROUND_TRUTH_FILE_MESC" "$TARGET_NAME_MESC" SAMPLE_NAMES_MESC TARGET_DIR_MESC
