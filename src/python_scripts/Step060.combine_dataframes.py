@@ -62,24 +62,6 @@ def get_percentile_mask(column, lower=5, upper=95):
     q_high = np.percentile(col_clean, upper)
     return (column > q_low) & (column < q_high)
 
-def scale_and_log1p_column(column, lower=5, upper=95):
-    mask = get_percentile_mask(column, lower, upper)
-    
-    trimmed = column.where(mask, np.nan)
-    
-    # MinMax scale only the non-NaN values
-    scaled = np.full_like(trimmed, np.nan, dtype=np.float64)
-    non_nan_mask = ~np.isnan(trimmed)
-    
-    if non_nan_mask.sum() > 0:
-        scaled_values = MinMaxScaler().fit_transform(trimmed[non_nan_mask].values.reshape(-1, 1)).flatten()
-        scaled[non_nan_mask] = scaled_values
-
-    # Apply log1p transform to scaled values
-    normalized = np.log1p(scaled)
-    
-    return pd.Series(normalized, index=column.index)
-
 def plot_column_histograms(df, fig_dir, df_name="inferred_net"):
     # Create a figure and axes with a suitable size
     plt.figure(figsize=(15, 8))
@@ -212,7 +194,7 @@ def main():
     cols_to_skip_normalization = [
         "source_id", "target_id", "peak_id",
         "mean_TF_expression", "mean_TG_expression", "mean_peak_accessibility",
-        "TSS_dist_score"
+        "TSS_dist_score", "cicero_score"
     ]
 
     # Choose numeric columns that are not in the skip list
