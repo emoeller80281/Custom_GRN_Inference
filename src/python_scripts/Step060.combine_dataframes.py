@@ -219,14 +219,23 @@ def main():
     # Choose numeric columns that are not in the skip list
     cols_to_normalize = [col for col in final_df.select_dtypes(include=np.number).columns if col not in cols_to_skip_normalization]
 
-    logging.info(f"\tNormalizing columns: {cols_to_normalize}")
-
-    # Trim off the lower 5th and upper 95th percentiles
-    # MinMax scale the remaining values between 0-1
-    # log1p normalize the remaining values
+    # Normalize the score columns
     for col in cols_to_normalize:
-        logging.info(f"\tProcessing column: {col}")
-        final_df[col] = scale_and_log1p_column(final_df[col], lower=5, upper=95)
+
+        # Drop values outside the 5–95th percentile
+        mask = get_percentile_mask(final_df[col], lower=5, upper=95)
+        final_df[col] = final_df[col].where(mask, np.nan)
+
+        # MinMax scale valid values
+        non_nan_mask = final_df[col].notna()
+        scaled = np.full_like(final_df[col], np.nan, dtype=np.float64)
+
+        if non_nan_mask.sum() > 0:
+            scaled_values = MinMaxScaler().fit_transform(final_df.loc[non_nan_mask, col].values.reshape(-1, 1)).flatten()
+            scaled[non_nan_mask] = scaled_values
+
+        # log1p transform the scaled values
+        final_df[col] = np.log1p(scaled)      
 
     # Replace NaN values with 0 for the scores
     final_df['cicero_score'] = final_df['cicero_score'].fillna(0)
