@@ -204,10 +204,10 @@ def find_genes_near_peaks(peak_bed, tss_bed, rna_df, peak_dist_limit):
     # Scale the TSS distance using an exponential drop-off function
     # e^-dist/25000, same scaling function used in LINGER Cis-regulatory potential calculation
     # https://github.com/Durenlab/LINGER
-    peak_tss_overlap_df["TSS_dist"] = peak_tss_overlap_df["TSS_dist"].apply(lambda x: math.exp(-(x / 1000000)))
+    peak_tss_overlap_df["TSS_dist_score"] = peak_tss_overlap_df["TSS_dist"].apply(lambda x: math.exp(-(x / 250000)))
     
     # Keep only the necessary columns.
-    peak_tss_subset_df = peak_tss_overlap_df[["peak_id", "target_id", "TSS_dist"]]
+    peak_tss_subset_df = peak_tss_overlap_df[["peak_id", "target_id", "TSS_dist_score"]]
     
     # Sort by the TSS distance (lower values imply closer proximity and therefore stronger association)
     # and drop duplicates keeping only the best association for each peak-target pair.
@@ -401,7 +401,7 @@ def main():
     # Merge the correlation and TSS distance DataFrames
     final_df = pd.merge(top_peak_to_gene_corr, peak_gene_df, how="inner", left_on=["peak_id", "gene_id"], right_on=["peak_id", "target_id"]).dropna(subset="peak_id")
     
-    final_df = final_df[["peak_id", "target_id", "correlation", "TSS_dist"]]
+    final_df = final_df[["peak_id", "target_id", "correlation", "TSS_dist_score"]]
         
     logging.info(final_df.head())
     final_df.to_csv(f"{OUTPUT_DIR}/peak_to_gene_correlation.csv", sep="\t", header=True, index=False)

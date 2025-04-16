@@ -138,8 +138,6 @@ run_split_train_test() {
 # Activate the Conda environment
 activate_conda_env
 
-
-
 # Global variables
 BASE_DIR=$(readlink -f "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER")
 PYTHON_SCRIPT_DIR="$BASE_DIR/src/python_scripts"

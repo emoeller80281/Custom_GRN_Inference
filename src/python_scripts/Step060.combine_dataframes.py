@@ -60,8 +60,6 @@ def get_percentile_mask(column, lower=5, upper=95):
     col_clean = column.dropna()
     q_low = np.percentile(col_clean, lower)
     q_high = np.percentile(col_clean, upper)
-    logging.info(f"{lower}th percentile: {q_low}")
-    logging.info(f"{upper}th percentile: {q_high}")
     return (column > q_low) & (column < q_high)
 
 def scale_and_log1p_column(column, lower=5, upper=95):
@@ -213,7 +211,8 @@ def main():
     # Skip these already-normalized columns
     cols_to_skip_normalization = [
         "source_id", "target_id", "peak_id",
-        "mean_TF_expression", "mean_TG_expression", "mean_peak_accessibility"
+        "mean_TF_expression", "mean_TG_expression", "mean_peak_accessibility",
+        "TSS_dist_score"
     ]
 
     # Choose numeric columns that are not in the skip list
@@ -250,7 +249,7 @@ def main():
         "mean_TG_expression",
         "mean_peak_accessibility",
         "cicero_score",
-        "TSS_dist",
+        "TSS_dist_score",
         "correlation",
         "sliding_window_score",
         "homer_binding_score"
