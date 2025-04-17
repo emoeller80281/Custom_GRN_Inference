@@ -149,8 +149,8 @@ MESC_INFERRED_NET_DIR="$BASE_DIR/output/mESC/filtered_L2_E7.5_rep1/inferred_grns
 FEATURE_SET_NAMES=( \
     "inferred_network_raw" \
     "inferred_network_w_string" \
-    "inferred_network_string_scores_only" \
-    "inferred_network_w_string_no_tf"
+    # "inferred_network_string_scores_only" \
+    # "inferred_network_w_string_no_tf"
 )
 
 # Define arrays for each cell type

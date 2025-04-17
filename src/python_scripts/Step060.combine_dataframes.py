@@ -62,6 +62,9 @@ def get_percentile_mask(column, lower=5, upper=95):
     q_high = np.percentile(col_clean, upper)
     return (column > q_low) & (column < q_high)
 
+def minmax_normalize_column(column: pd.DataFrame):
+    return (column - column.min()) / (column.max() - column.min())
+
 def plot_column_histograms(df, fig_dir, df_name="inferred_net"):
     # Create a figure and axes with a suitable size
     plt.figure(figsize=(15, 8))
@@ -184,17 +187,22 @@ def main():
         "peak_id",
         "target_id",
         "source_id",
+        "mean_TF_expression",
+        "mean_TG_expression"
         ])
     logging.debug("final_df")
     logging.debug(final_df.head())
     logging.debug(final_df.columns)
     logging.debug("\n---------------------------\n")
+        
+    # final_df["num_cols_w_values"] = final_df.notna().sum(axis=1)
+    # final_df = final_df.sort_values(ascending=False, by="num_cols_w_values")
+    # final_df = final_df.drop(columns=["num_cols_w_values"])
     
-    # # ===== WRITE OUT THE FULL RAW DATAFRAME =====
-    logging.info("Writing a non-normalized 10% dataframe as 'inferred_network_non_normalized.csv'")
-    decimal_subsample = subsample / 100
-    non_norm_df = final_df.sample(frac=decimal_subsample)
-    write_csv_in_chunks(non_norm_df, output_dir, 'inferred_network_non_normalized.csv')
+    # # # ===== WRITE OUT THE FULL RAW DATAFRAME =====
+    # logging.info("Writing a non-normalized 10% dataframe as 'inferred_network_non_normalized.csv'")
+    # top_10_percent_df = final_df.head(int(len(final_df) * 0.10))    
+    # write_csv_in_chunks(top_10_percent_df, output_dir, 'inferred_network_non_normalized.csv')
 
     # Skip these already-normalized columns
     cols_to_skip_normalization = [
@@ -213,32 +221,20 @@ def main():
         if col != "cicero_score": # Skip trimming the edges of cicero_score, the 0 and 1 scores are important
             mask = get_percentile_mask(final_df[col], lower=5, upper=95)
             final_df[col] = final_df[col].where(mask, np.nan)
-
-        # MinMax scale valid values
-        non_nan_mask = final_df[col].notna()
-        scaled = np.full_like(final_df[col], np.nan, dtype=np.float64)
-
-        if non_nan_mask.sum() > 0:
-            scaled_values = MinMaxScaler().fit_transform(final_df.loc[non_nan_mask, col].values.reshape(-1, 1)).flatten()
-            scaled[non_nan_mask] = scaled_values
+            
+        final_df[col] = minmax_normalize_column(final_df[col])
 
         # log1p transform the scaled values
-        final_df[col] = np.log1p(scaled)      
-        
-        # MinMax scale valid values again after log1p normalizing
-        non_nan_mask = final_df[col].notna()
-        scaled = np.full_like(final_df[col], np.nan, dtype=np.float64)
-
-        if non_nan_mask.sum() > 0:
-            scaled_values = MinMaxScaler().fit_transform(final_df.loc[non_nan_mask, col].values.reshape(-1, 1)).flatten()
-            scaled[non_nan_mask] = scaled_values
-        
-        final_df[col] = scaled
+        final_df[col] = np.log1p(final_df[col])      
+    
+    # MinMax normalize all feature score columns, whether or not they were normalized
+    cols_to_minmax = [col for col in final_df.select_dtypes(include=np.number).columns]
+    
+    for col in cols_to_minmax:
+        final_df[col] = minmax_normalize_column(final_df[col])
 
     # Replace NaN values with 0 for the scores
     final_df['cicero_score'] = final_df['cicero_score'].fillna(0)
-    
-    final_df = final_df.dropna(subset=["mean_TF_expression", "mean_TG_expression"])
 
     # Set the desired column order
     column_order = [
