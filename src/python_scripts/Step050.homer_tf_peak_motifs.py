@@ -71,7 +71,7 @@ def process_TF_motif_file(path_to_file: str) -> pd.DataFrame:
         motif_column = motif_to_peak.columns[-2]
         
         # Extract the TF name from the motif column name; chain splits to remove extraneous info
-        TF_name = motif_column.split('/')[0].split('(')[0].split(':')[0].upper()
+        TF_name = motif_column.split('/')[0].split('(')[0].split(':')[0]
         
         # Set source_id to the TF name
         motif_to_peak['source_id'] = TF_name
