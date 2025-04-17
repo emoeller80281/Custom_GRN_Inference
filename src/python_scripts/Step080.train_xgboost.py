@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 import math
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, GridSearchCV, StratifiedKFold
 from sklearn.metrics import roc_curve, auc, precision_recall_curve, average_precision_score, roc_auc_score
 from sklearn.inspection import permutation_importance
 import matplotlib.pyplot as plt
@@ -52,6 +52,13 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="Name of the output .pkl file for the trained model"
     )
+    parser.add_argument(
+        "--cpu_count",
+        type=str,
+        required=True,
+        help="The number of CPUs to utilize for multiprocessing"
+    )
+    
     
     args: argparse.Namespace = parser.parse_args()
     return args
@@ -109,6 +116,70 @@ def train_xgboost(X_train, y_train, features):
     xgb_model.fit(X_train_balanced, y_train_balanced)
 
     return xgb_model
+
+def parameter_grid_search(X_train, y_train, features, cpu_count, fig_dir):
+    # Combine training features and labels for resampling
+    train_data = X_train.copy()
+    train_data["label"] = y_train
+
+    # Separate positive and negative examples
+    pos_train = train_data[train_data["label"] == 1]
+    neg_train = train_data[train_data["label"] == 0]
+
+    # Balance the dataset between positive and negative label values
+    neg_train_sampled = neg_train.sample(n=len(pos_train), random_state=42)
+    train_data_balanced = pd.concat([pos_train, neg_train_sampled])
+
+    X_train_balanced = train_data_balanced[features]
+    y_train_balanced = train_data_balanced["label"]
+
+    # Parameter grid
+    param_grid = {
+        "n_estimators":      [50, 100, 200],
+        "max_depth":         [4, 6, 8],
+        "gamma":             [0, 1, 5],
+        "reg_alpha":         [0.0, 0.5, 1.0],
+        "reg_lambda":        [1.0, 2.0, 5.0],
+        "subsample":         [0.8, 1.0],
+        "colsample_bytree":  [0.8, 1.0],
+    }
+
+    # Wrap an XGBClassifier in GridSearchCV
+    xgb_clf = xgb.XGBClassifier(
+        random_state=42,
+        eval_metric="logloss",
+        use_label_encoder=False,
+    )
+    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+
+    grid = GridSearchCV(
+        estimator=xgb_clf,
+        param_grid=param_grid,
+        scoring="roc_auc",
+        cv=cv,
+        n_jobs=cpu_count,
+        verbose=2,
+    )
+
+    # Fit on your balanced training set
+    grid.fit(X_train_balanced, y_train_balanced)
+
+    # Inspect the best hyperparameters & best score
+    logging.info("Best CV score:", grid.best_score_)
+    logging.info("Best params:  ", grid.best_params_)
+
+    # 5) Grab the best model
+    best_model = grid.best_estimator_
+    
+    if not os.path.exists(f'{fig_dir}/parameter_search'):
+        os.makedirs(f'{fig_dir}/parameter_search')
+
+    # Feature importances
+    plot_feature_importance(
+        features=features,
+        model=best_model,
+        fig_dir=f'{fig_dir}/parameter_search'
+    )
 
 def plot_xgboost_prediction_histogram(model, X_test, fig_dir):
     logging.info("\tPlotting model prediction histogram")
@@ -547,6 +618,7 @@ def main():
     trained_model_dir: str = args.trained_model_dir
     fig_dir: str = args.fig_dir
     model_save_name: str = args.model_save_name
+    cpu_count: int = int(args.cpu_count)
 
     inferred_network = read_inferred_network(inferred_network_file)
     ground_truth = read_ground_truth(ground_truth_file)

@@ -766,7 +766,8 @@ run_classifier_training() {
         --inferred_network_file "$INFERRED_NET_FILE" \
         --trained_model_dir "$TRAINED_MODEL_DIR" \
         --fig_dir "$FIG_DIR" \
-        --model_save_name "xgb_trained_model"
+        --model_save_name "xgb_trained_model" \
+        --cpu_count "$NUM_CPU"
 
 } 2> "$LOG_DIR/Step080.train_xgboost.log"
 
