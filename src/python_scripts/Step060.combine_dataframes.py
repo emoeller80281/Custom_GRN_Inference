@@ -2,7 +2,6 @@ import numpy as np
 import pandas as pd
 import math
 import matplotlib.pyplot as plt
-from sklearn.preprocessing import MinMaxScaler
 import argparse
 import logging
 import os
@@ -234,7 +233,7 @@ def main():
         final_df[col] = minmax_normalize_column(final_df[col])
 
     # Replace NaN values with 0 for the scores
-    final_df['cicero_score'] = final_df['cicero_score'].fillna(0)
+    # final_df['cicero_score'] = final_df['cicero_score'].fillna(0)
 
     # Set the desired column order
     column_order = [
