@@ -110,8 +110,7 @@ run_split_train_test() {
             for TARGET in "${TARGET_DIR[@]}"; do
 
                 # Skip if the prediction file already exists
-                if [ ! -f "${MODEL_PREDICTION_DIR}/${CELL_TYPE}_vs_{$TARGET_NAME}_${FEATURE_SET}_xgb_pred.tsv" ]; then
-
+                if [ ! -f "${MODEL_PREDICTION_DIR}/${CELL_TYPE}_vs_${TARGET_NAME}_${FEATURE_SET}_xgb_pred.tsv" ]; then
                     # Check to make sure the target feature set dataframe file exists, otherwise skip
                     if [ -f "${TARGET}/${FEATURE_SET}.csv" ]; then
                         local TARGET_FILE="${TARGET}/${FEATURE_SET}.csv"
@@ -143,7 +142,7 @@ BASE_DIR=$(readlink -f "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_IN
 PYTHON_SCRIPT_DIR="$BASE_DIR/src/python_scripts"
 
 K562_INFERRED_NET_DIR="$BASE_DIR/output/K562/K562_human_filtered/inferred_grns"
-MACROPHAGE_INFERRED_NET_DIR="$BASE_DIR/output/K562/K562_human_filtered/inferred_grns"
+MACROPHAGE_INFERRED_NET_DIR="$BASE_DIR/output/macrophage/macrophage_buffer1_filtered/inferred_grns"
 MESC_INFERRED_NET_DIR="$BASE_DIR/output/mESC/filtered_L2_E7.5_rep1/inferred_grns"
 
 # Core names of the different feature files to build off of

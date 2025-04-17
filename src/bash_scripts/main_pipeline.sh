@@ -23,13 +23,13 @@ STEP050_HOMER_TF_TO_PEAK_SCORE=false
 
 # Combine the score DataFrames
 STEP060_COMBINE_DATAFRAMES=true
-SUBSAMPLE_PERCENT=30 # Percent of rows of the combined dataframe to subsample
+SUBSAMPLE_PERCENT=10 # Percent of rows of the combined dataframe to subsample
 
 # Find shared edges between the inferred network and the STRING PPI database
 STEP070_FIND_EDGES_IN_STRING_DB=true
 
 # Train a predictive model to infer the GRN
-STEP080_TRAIN_XGBOOST_CLASSIFIER=false
+STEP080_TRAIN_XGBOOST_CLASSIFIER=true
 
 # =============================================
 #              USER PATH VARIABLES

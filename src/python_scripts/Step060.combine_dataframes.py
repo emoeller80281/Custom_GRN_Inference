@@ -189,6 +189,12 @@ def main():
     logging.debug(final_df.head())
     logging.debug(final_df.columns)
     logging.debug("\n---------------------------\n")
+    
+    # # ===== WRITE OUT THE FULL RAW DATAFRAME =====
+    logging.info("Writing a non-normalized 10% dataframe as 'inferred_network_non_normalized.csv'")
+    decimal_subsample = subsample / 100
+    non_norm_df = final_df.sample(frac=decimal_subsample)
+    write_csv_in_chunks(non_norm_df, output_dir, 'inferred_network_non_normalized.csv')
 
     # Skip these already-normalized columns
     cols_to_skip_normalization = [
@@ -204,8 +210,9 @@ def main():
     for col in cols_to_normalize:
 
         # Drop values outside the 5–95th percentile
-        mask = get_percentile_mask(final_df[col], lower=5, upper=95)
-        final_df[col] = final_df[col].where(mask, np.nan)
+        if col != "cicero_score": # Skip trimming the edges of cicero_score, the 0 and 1 scores are important
+            mask = get_percentile_mask(final_df[col], lower=5, upper=95)
+            final_df[col] = final_df[col].where(mask, np.nan)
 
         # MinMax scale valid values
         non_nan_mask = final_df[col].notna()
@@ -217,9 +224,20 @@ def main():
 
         # log1p transform the scaled values
         final_df[col] = np.log1p(scaled)      
+        
+        # MinMax scale valid values again after log1p normalizing
+        non_nan_mask = final_df[col].notna()
+        scaled = np.full_like(final_df[col], np.nan, dtype=np.float64)
+
+        if non_nan_mask.sum() > 0:
+            scaled_values = MinMaxScaler().fit_transform(final_df.loc[non_nan_mask, col].values.reshape(-1, 1)).flatten()
+            scaled[non_nan_mask] = scaled_values
+        
+        final_df[col] = scaled
 
     # Replace NaN values with 0 for the scores
     final_df['cicero_score'] = final_df['cicero_score'].fillna(0)
+    
     final_df = final_df.dropna(subset=["mean_TF_expression", "mean_TG_expression"])
 
     # Set the desired column order
@@ -239,6 +257,17 @@ def main():
     
     final_df = final_df[column_order]
     
+    missing_cols = [col for col in column_order if col not in final_df.columns]
+    if missing_cols:
+        raise ValueError(f"Missing expected columns in DataFrame: {missing_cols}")
+    
+    all_nan_cols = final_df.columns[final_df.isna().all()].tolist()
+    if all_nan_cols:
+        logging.warning(f"The following columns are entirely NaN: {all_nan_cols}")
+    else:
+        logging.info("No columns are entirely NaN.")
+
+        
     logging.info(final_df.head())
     logging.info('\nColumns:')
     for col_name in final_df.columns:
@@ -252,13 +281,14 @@ def main():
     logging.info(f"Creating and saving a {subsample}% downsampling of the dataset for testing")
     decimal_subsample = subsample / 100
     sample_raw_inferred_df = final_df.sample(frac=decimal_subsample)
-    logging.info(f'\t\tSliding window scores: {len(final_df["sliding_window_score"].dropna())}')
+    
+    logging.info(f'\tNumber of unique non-NaN scores for each feature:')
+    for column in column_order:
+        logging.info(f'\t\tNumber of {column} scores: {final_df[column].nunique(dropna=True)}')
     
     write_csv_in_chunks(sample_raw_inferred_df, inferred_grn_dir, 'inferred_network_raw.csv')
     
-    # # ===== WRITE OUT THE FULL RAW DATAFRAME =====
-    # logging.info("Writing the final dataframe as 'inferred_network_raw.csv'")
-    # write_csv_in_chunks(final_df, output_dir, 'inferred_network_raw.csv')
+
     
     logging.info("Done!")
 
