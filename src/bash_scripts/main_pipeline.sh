@@ -14,7 +14,7 @@ set -euo pipefail
 STEP010_CICERO_MAP_PEAKS_TO_TG=false
 STEP015_CICERO_PEAK_TO_TG_SCORE=false
 
-STEP020_PEAK_TO_TG_CORRELATION=false
+STEP020_PEAK_TO_TG_CORRELATION=true
 # STEP030_PEAK_TO_ENHANCER_DB=false # Deprecated, does not help model and no data for mouse
 
 # Run the TF to peak binding score calculation methods
@@ -29,7 +29,7 @@ SUBSAMPLE_PERCENT=30 # Percent of rows of the combined dataframe to subsample
 STEP070_FIND_EDGES_IN_STRING_DB=false
 
 # Train a predictive model to infer the GRN
-STEP080_TRAIN_XGBOOST_CLASSIFIER=true
+STEP080_TRAIN_XGBOOST_CLASSIFIER=false
 
 # =============================================
 #              USER PATH VARIABLES
@@ -766,8 +766,7 @@ run_classifier_training() {
         --inferred_network_file "$INFERRED_NET_FILE" \
         --trained_model_dir "$TRAINED_MODEL_DIR" \
         --fig_dir "$FIG_DIR" \
-        --model_save_name "xgb_trained_model" \
-        --cpu_count "$NUM_CPU"
+        --model_save_name "xgb_trained_model"
 
 } 2> "$LOG_DIR/Step080.train_xgboost.log"
 

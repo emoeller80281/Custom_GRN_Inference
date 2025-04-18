@@ -52,13 +52,6 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="Name of the output .pkl file for the trained model"
     )
-    parser.add_argument(
-        "--cpu_count",
-        type=str,
-        required=True,
-        help="The number of CPUs to utilize for multiprocessing"
-    )
-    
     
     args: argparse.Namespace = parser.parse_args()
     return args
@@ -618,7 +611,6 @@ def main():
     trained_model_dir: str = args.trained_model_dir
     fig_dir: str = args.fig_dir
     model_save_name: str = args.model_save_name
-    cpu_count: int = int(args.cpu_count)
 
     inferred_network = read_inferred_network(inferred_network_file)
     ground_truth = read_ground_truth(ground_truth_file)
@@ -656,6 +648,9 @@ def main():
     xgb_model.feature_names = list(X_train.columns.values)
     
     logging.info("Done! Saving trained XGBoost model.")
+    if not os.path.exists(trained_model_dir):
+        os.makedirs(trained_model_dir)
+    
     joblib.dump(xgb_model, f"{trained_model_dir}/{model_save_name}.pkl")
 
     if not os.path.exists(fig_dir):

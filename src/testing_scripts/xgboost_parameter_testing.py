@@ -7,8 +7,11 @@ import joblib
 import logging
 import argparse
 import xgboost as xgb
-from sklearn.model_selection import train_test_split, StratifiedKFold, ParameterGrid
+from sklearn.model_selection import train_test_split, ParameterGrid
 from sklearn.metrics import average_precision_score, roc_auc_score
+from tqdm import tqdm
+from joblib import Parallel, delayed
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Custom XGBoost parameter search and evaluation.")
@@ -25,7 +28,7 @@ def parse_args() -> argparse.Namespace:
 
 def read_inferred_network(path: str) -> pd.DataFrame:
     logging.info(f"Reading inferred network from {path}")
-    df = pd.read_csv(path)
+    df = pd.read_csv(path, nrows=500000)
     df["source_id"] = df["source_id"].str.upper()
     df["target_id"] = df["target_id"].str.upper()
     logging.info(f"Loaded {len(df)} rows")
@@ -60,12 +63,23 @@ def balance_data(df: pd.DataFrame, features: list):
     return X, y
 
 
-def parameter_grid_search(X: pd.DataFrame, y: pd.Series, features: list, fig_dir: str):
-    logging.info("Starting manual parameter search with flatness metrics...")
-
-    # train/val split
+def parameter_grid_search(
+    X: pd.DataFrame,
+    y: pd.Series,
+    features: list,
+    fig_dir: str,
+    cpu_count: int,
+    subsample_frac: float
+):
+    # single-step subsample + train/validation split
+    logging.info("Subsampling data and splitting into train/validation set...")
     X_tr, X_val, y_tr, y_val = train_test_split(
-        X, y, test_size=0.2, stratify=y, random_state=42)
+        X, y,
+        train_size=subsample_frac,
+        test_size=0.2,
+        stratify=y,
+        random_state=42
+    )
 
     # parameter grid
     param_grid = {
@@ -78,44 +92,51 @@ def parameter_grid_search(X: pd.DataFrame, y: pd.Series, features: list, fig_dir
         'colsample_bytree':  [0.8, 1.0],
         'learning_rate':     [0.01, 0.1]
     }
-    logging.info(f"Parameter grid: {param_grid}")
+    grid_list = list(ParameterGrid(param_grid))
+    total = len(grid_list)
+    logging.info(f"Parameter grid has {total} combinations")
 
-    results = []
-    for params in ParameterGrid(param_grid):
-        logging.info(f"Training with params: {params}")
+    def eval_params(params: dict) -> dict:
         model = xgb.XGBClassifier(
             **params,
             n_jobs=1,
             random_state=42,
-            use_label_encoder=False,
             eval_metric='logloss'
         )
         model.fit(
-            X_tr, y_tr,
+            X_tr,
+            y_tr,
             eval_set=[(X_val, y_val)],
-            early_stopping_rounds=10,
             verbose=False
         )
-        # performance
-        y_pred = model.predict_proba(X_val)[:,1]
+        y_pred = model.predict_proba(X_val)[:, 1]
         val_ap = average_precision_score(y_val, y_pred)
         val_auc = roc_auc_score(y_val, y_pred)
-        # flatness metrics
+
         imp = model.feature_importances_
         p = imp / np.sum(imp + 1e-12)
         entropy = -np.sum(p * np.log(p + 1e-12))
         cv = np.std(p) / (np.mean(p) + 1e-12)
 
-        results.append({**params,
-                        'val_ap': val_ap,
-                        'val_auc': val_auc,
-                        'imp_entropy': entropy,
-                        'imp_cv': cv})
+        return {**params,
+                'val_ap': val_ap,
+                'val_auc': val_auc,
+                'imp_entropy': entropy,
+                'imp_cv': cv}
+
+    # parallel evaluation
+    logging.info(f"Starting parallel grid search on {cpu_count} cores...")
+    results = Parallel(n_jobs=cpu_count)(
+        delayed(eval_params)(p) for p in tqdm(
+            grid_list,
+            total=total,
+            smoothing=0.9,
+            desc="Grid search"
+        )
+    )
 
     df_res = pd.DataFrame(results)
-    out_dir = os.path.join(fig_dir, 'parameter_search')
-    os.makedirs(out_dir, exist_ok=True)
-    csv_out = os.path.join(out_dir, 'grid_search_results.csv')
+    csv_out = os.path.join(fig_dir, 'grid_search_results.csv')
     df_res.to_csv(csv_out, index=False)
     logging.info(f"Saved parameter search results to {csv_out}")
 
@@ -126,8 +147,23 @@ def parameter_grid_search(X: pd.DataFrame, y: pd.Series, features: list, fig_dir
     logging.info(f"Highest entropy={best_flat.imp_entropy:.4f} at {best_flat.to_dict()}")
 
     # retrain best by AP on full X/y
-    best_params = {k: best_ap[k] for k in param_grid.keys()}
-    best_model = xgb.XGBClassifier(**best_params, random_state=42, use_label_encoder=False)
+    # cast best parameters to correct types
+    best_params = {
+        'n_estimators': int(best_ap['n_estimators']),
+        'max_depth': int(best_ap['max_depth']),
+        'gamma': int(best_ap['gamma']),
+        'reg_alpha': float(best_ap['reg_alpha']),
+        'reg_lambda': float(best_ap['reg_lambda']),
+        'subsample': float(best_ap['subsample']),
+        'colsample_bytree': float(best_ap['colsample_bytree']),
+        'learning_rate': float(best_ap['learning_rate'])
+    }
+    
+    best_model = xgb.XGBClassifier(
+        **best_params,
+        random_state=42,
+        use_label_encoder=False
+    )
     best_model.fit(X, y)
     joblib.dump(best_model, os.path.join(out_dir, 'best_model_by_ap.pkl'))
     logging.info(f"Saved best model by AP to {out_dir}/best_model_by_ap.pkl")
@@ -155,12 +191,21 @@ def main():
     gt = read_ground_truth(args.ground_truth_file)
     df = setup_labels(df, gt)
 
-    drop = ['source_id','target_id','label']
-    feats = [c for c in df.columns if c not in drop]
-    logging.info(f"Features for modeling: {feats}")
+    drop = ['source_id', 'peak_id', 'target_id', 'label']
+    features = [c for c in df.columns if c not in drop]
+    logging.info(f"Features for modeling: {features}")
+    
+    subsample_frac = 0.2
 
-    X_bal, y_bal = balance_data(df, feats)
-    parameter_grid_search(X_bal, y_bal, feats, args.fig_dir)
+    X_bal, y_bal = balance_data(df, features)
+    parameter_grid_search(
+        X_bal,
+        y_bal,
+        features,
+        args.fig_dir,
+        args.cpu_count,
+        subsample_frac
+    )
 
     logging.info("=== Parameter Search Completed ===")
 
