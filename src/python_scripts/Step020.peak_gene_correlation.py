@@ -203,8 +203,8 @@ def find_genes_near_peaks(peak_bed, tss_bed, rna_df, peak_dist_limit):
     
     # Sort by the TSS distance (lower values imply closer proximity and therefore stronger association)
     # and drop duplicates keeping only the best association for each peak-target pair.
-    peak_tss_subset_df = peak_tss_subset_df.sort_values("TSS_dist")
-    peak_tss_subset_df = peak_tss_subset_df.drop_duplicates(subset=["peak_id", "target_id"], keep="first")
+    peak_tss_overlap_df = peak_tss_overlap_df.sort_values("TSS_dist")
+    peak_tss_overlap_df = peak_tss_overlap_df.drop_duplicates(subset=["peak_id", "target_id"], keep="first")
     
     # Scale the TSS distance using an exponential drop-off function
     # e^-dist/25000, same scaling function used in LINGER Cis-regulatory potential calculation

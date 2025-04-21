@@ -14,7 +14,7 @@ set -euo pipefail
 STEP010_CICERO_MAP_PEAKS_TO_TG=false
 STEP015_CICERO_PEAK_TO_TG_SCORE=false
 
-STEP020_PEAK_TO_TG_CORRELATION=true
+STEP020_PEAK_TO_TG_CORRELATION=false
 # STEP030_PEAK_TO_ENHANCER_DB=false # Deprecated, does not help model and no data for mouse
 
 # Run the TF to peak binding score calculation methods
@@ -23,13 +23,13 @@ STEP050_HOMER_TF_TO_PEAK_SCORE=false
 
 # Combine the score DataFrames
 STEP060_COMBINE_DATAFRAMES=false
-SUBSAMPLE_PERCENT=30 # Percent of rows of the combined dataframe to subsample
+SUBSAMPLE_PERCENT=10 # Percent of rows of the combined dataframe to subsample
 
 # Find shared edges between the inferred network and the STRING PPI database
 STEP070_FIND_EDGES_IN_STRING_DB=false
 
 # Train a predictive model to infer the GRN
-STEP080_TRAIN_XGBOOST_CLASSIFIER=false
+STEP080_TRAIN_XGBOOST_CLASSIFIER=true
 
 # =============================================
 #              USER PATH VARIABLES

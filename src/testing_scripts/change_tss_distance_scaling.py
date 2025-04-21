@@ -34,26 +34,36 @@ def apply_different_tss_scaling(file_path, original_scaling, new_scaling):
     
     # df.to_csv(file_path, sep="\t", header=True, index=False)
 
-def get_cmap(n, name='hsv'):
-    '''Returns a function that maps each index in 0, 1, ..., n-1 to a distinct 
-    RGB color; the keyword argument name must be a standard mpl colormap name.'''
-    return plt.cm.get_cmap(name, n)
+def get_cmap(n, name):
+    """Return a ListedColormap with n discrete entries from mpl colormap `name`."""
+    return plt.get_cmap(name, n)
 
 def test_scaling_factors(file_path, original_scaling, scaling_tests):
     df = pd.read_csv(file_path, sep="\t", header=0)
-    # df["TSS_dist"] = -original_scaling * np.log(df["TSS_dist_score"])
-    
-    cmap = get_cmap(len(scaling_tests))
-    
-    plt.figure(figsize=(4, 3))
+    df["TSS_dist"] = -original_scaling * np.log(df["TSS_dist_score"])
+
+    # grab N distinct pastel colors
+    cmap = get_cmap(len(scaling_tests), 'tab10')
+
+    plt.figure(figsize=(8, 6))
     for i, scaling in enumerate(scaling_tests):
-        df[str(scaling)] = df["TSS_dist"].apply(lambda x: math.exp(-(x / scaling)))
-        plt.scatter(df[str(scaling)], df["TSS_dist"], alpha=0.5, s=10, edgecolors=cmap(i), label=str(scaling))
-    
-    plt.xlabel("TSS Distance Score")
-    plt.ylabel("TSS Distance")
-    plt.title("Impact of TSS scaling on TSS distance score")
-    plt.legend(loc='best')
+        score_col = str(scaling)
+        df[score_col] = df["TSS_dist"].apply(lambda x: math.exp(-(x / scaling)))
+
+        plt.scatter(
+            df["TSS_dist"],
+            df[score_col],
+            s=10,
+            color=cmap(i),               # pick the i‑th pastel color
+            label=f"scale = {scaling:,}"
+        )
+
+    plt.xlabel("TSS Distance", fontsize=16)
+    plt.ylabel("TSS Distance Score", fontsize=16)
+    plt.xticks(fontsize=14)
+    plt.yticks(fontsize=14)
+    plt.title("Impact of TSS scaling on TSS distance score", fontsize=18)
+    plt.legend(title="Scaling factor", loc='best', fontsize=12)
     plt.grid(False)
     plt.tight_layout()
     plt.show()
@@ -77,4 +87,3 @@ test_scaling_factors(mESC_tss_filepath, original_scaling, scaling_tests)
 # apply_different_tss_scaling(mESC_tss_filepath, original_scaling, new_scaling)
 # apply_different_tss_scaling(K562_tss_filepath, original_scaling, new_scaling)
 # apply_different_tss_scaling(macrophage_tss_filepath, original_scaling, new_scaling)
-
