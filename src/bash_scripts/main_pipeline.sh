@@ -14,19 +14,19 @@ set -euo pipefail
 STEP010_CICERO_MAP_PEAKS_TO_TG=false
 STEP015_CICERO_PEAK_TO_TG_SCORE=false
 
-STEP020_PEAK_TO_TG_CORRELATION=false
+STEP020_PEAK_TO_TG_CORRELATION=true
 # STEP030_PEAK_TO_ENHANCER_DB=false # Deprecated, does not help model and no data for mouse
 
 # Run the TF to peak binding score calculation methods
-STEP040_SLIDING_WINDOW_TF_TO_PEAK_SCORE=false
-STEP050_HOMER_TF_TO_PEAK_SCORE=false
+STEP040_SLIDING_WINDOW_TF_TO_PEAK_SCORE=true
+STEP050_HOMER_TF_TO_PEAK_SCORE=true
 
 # Combine the score DataFrames
-STEP060_COMBINE_DATAFRAMES=false
-SUBSAMPLE_PERCENT=10 # Percent of rows of the combined dataframe to subsample
+STEP060_COMBINE_DATAFRAMES=true
+SUBSAMPLE_PERCENT=50 # Percent of rows of the combined dataframe to subsample
 
 # Find shared edges between the inferred network and the STRING PPI database
-STEP070_FIND_EDGES_IN_STRING_DB=false
+STEP070_FIND_EDGES_IN_STRING_DB=true
 
 # Train a predictive model to infer the GRN
 STEP080_TRAIN_XGBOOST_CLASSIFIER=true
@@ -596,7 +596,8 @@ run_cicero() {
         "$ATAC_FILE_NAME" \
         "$OUTPUT_DIR" \
         "$CHROM_SIZES" \
-        "$GENE_ANNOT" 
+        "$GENE_ANNOT" \
+        &> "$LOG_DIR/Step010.run_cicero.log"
     
     # Unload the rstudio module and re-activate the conda environment after running the first step
     module unload rstudio
@@ -794,7 +795,7 @@ setup_directories
 check_processed_files
 
 # ----- Execute selected pipeline steps -----
-if [ "$STEP010_CICERO_MAP_PEAKS_TO_TG" = true ]; then run_cicero &> "$LOG_DIR/Step010.run_cicero.log"; fi
+if [ "$STEP010_CICERO_MAP_PEAKS_TO_TG" = true ]; then run_cicero; fi
 if [ "$STEP015_CICERO_PEAK_TO_TG_SCORE" = true ]; then run_cicero_peak_to_tg_score; fi
 if [ "$STEP020_PEAK_TO_TG_CORRELATION" = true ]; then run_correlation_peak_to_tg_score; fi
 # if [ "$STEP030_PEAK_TO_ENHANCER_DB" = true ]; then run_peak_to_enhancer_db_score; fi

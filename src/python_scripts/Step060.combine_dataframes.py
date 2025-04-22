@@ -283,7 +283,13 @@ def main():
     
     write_csv_in_chunks(sample_raw_inferred_df, inferred_grn_dir, 'inferred_network_raw.csv')
     
-
+    logging.info(f'\nSaving rows with no more than 2 missing feature scores')
+    n_score_cols = len(final_df.select_dtypes(include=np.number).columns)
+    feature_threshold = n_score_cols - 2
+    final_df_enriched_features = final_df[final_df.count(numeric_only=True, axis=1) >= feature_threshold]
+    logging.info(f'\tNumber of rows with >= {feature_threshold}/{n_score_cols} feature columns {len(final_df)}')
+    
+    write_csv_in_chunks(sample_raw_inferred_df, inferred_grn_dir, 'inferred_network_enriched_features.csv')
     
     logging.info("Done!")
 
