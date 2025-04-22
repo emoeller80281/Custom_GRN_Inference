@@ -2,6 +2,7 @@ import os
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import csv
 
 output_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output"
 print(output_dir)
@@ -34,109 +35,108 @@ for cell_type in os.listdir(output_dir):
                                 inferred_net_paths[cell_type][sample] = inferred_net_path
 
 
-# print(f'\n===== Found {feature_set_filename} in: =====')             
-# dataframes = {}                   
-# ncols = len(inferred_net_paths.keys())
-# nrows = max([len(sample_dict.keys()) for sample_dict in inferred_net_paths.values()])
-# num_samples = sum([len(sample_dict.keys()) for sample_dict in inferred_net_paths.values()])
+print(f'\n===== Found {feature_set_filename} in: =====')             
+dataframes = {}                   
 
-# print(f'Cell Types: {ncols}')
-# print(f'Max num samples: {nrows}')
-# print(f'Num samples: {num_samples}')
-
-# plt.figure(figsize=(ncols*7,nrows*5))
-# plt.suptitle("Number of rows with N non-NaN features")
-# for i, (cell_type, sample_path_dict) in enumerate(inferred_net_paths.items()):
-#     print(cell_type)
-#     col = i + 1
-#     print(f'Col: {col}')
-    
-
-#     for x, (sample_name, sample_grn_path) in enumerate(sample_path_dict.items()):
-#         row = x + 1
-#         print(f'Row: {row}')
-#         print(f'  |__{sample_name}')
+for cell_type, sample_path_dict in inferred_net_paths.items():
+    for sample_name, sample_grn_path in sample_path_dict.items():
+        df = pd.read_csv(sample_grn_path, header=0, index_col=None, nrows=100000)
+        feature_counts = df.count(numeric_only=True, axis=1).value_counts().sort_index(ascending=False)
         
-#         df = pd.read_csv(sample_grn_path, header=0, index_col=None, nrows=100000)
-#         feature_counts = df.count(numeric_only=True, axis=1).value_counts().sort_index(ascending=False)
+        n_score_cols = len(df.select_dtypes(include=np.number).columns)
+        feature_threshold = n_score_cols - 2
+        df = df[df.count(numeric_only=True, axis=1) >= feature_threshold]
+        print(f'\tNumber of rows with >= {feature_threshold}/{n_score_cols} feature columns {len(df)}')
+        print(feature_counts.values)
+        # print(sorted(feature_counts.index.to_list()))      
+#         print(feature_counts.indices)
+
+def plot_non_nan_feature_scores(inferred_net_paths):
+    cell_types = list(inferred_net_paths.keys())
+    n_cells = len(cell_types)
+
+    # One row of subplots, one per cell_type
+    fig, axes = plt.subplots(
+        nrows=1,
+        ncols=n_cells,
+        figsize=(6*n_cells, 5),
+        squeeze=False  # ensures axes is 2D even if n_cells=1
+    )
+
+    for ax, cell_type in zip(axes[0], cell_types):
+        sample_dict = inferred_net_paths[cell_type]
         
-#         n_score_cols = len(df.select_dtypes(include=np.number).columns)
-#         feature_threshold = n_score_cols - 2
-#         df = df[df.count(numeric_only=True, axis=1) >= feature_threshold]
-#         print(f'\tNumber of rows with >= {feature_threshold}/{n_score_cols} feature columns {len(df)}')
-#         print(feature_counts.values)
-#         # print(sorted(feature_counts.index.to_list()))      
-# #         print(feature_counts.indices)
+        # build a DataFrame of feature_counts for this cell_type
+        all_counts = {}
+        for sample_name, sample_path in sample_dict.items():
+            df = pd.read_csv(sample_path, nrows=1000000)
+            counts = (
+                df
+                .count(numeric_only=True, axis=1)
+                .value_counts()
+                .sort_index(ascending=False)
+            )
+            all_counts[sample_name] = counts
         
-#         index = (row - 1) * ncols + col
-#         plt.subplot(nrows, ncols, index)
-#         plt.bar(feature_counts.index, feature_counts.values)
-#         plt.title(f'{sample_name}')
-#         plt.xlabel("Non-NaN Features")
-#         plt.ylabel("Edges")
-#         plt.xticks()
-#         plt.tight_layout
-# plt.show()
-
-# How many cell types?
-cell_types = list(inferred_net_paths.keys())
-n_cells = len(cell_types)
-
-# One row of subplots, one per cell_type
-fig, axes = plt.subplots(
-    nrows=1,
-    ncols=n_cells,
-    figsize=(6*n_cells, 5),
-    squeeze=False  # ensures axes is 2D even if n_cells=1
-)
-
-for ax, cell_type in zip(axes[0], cell_types):
-    sample_dict = inferred_net_paths[cell_type]
-    
-    # build a DataFrame of feature_counts for this cell_type
-    all_counts = {}
-    for sample_name, sample_path in sample_dict.items():
-        df = pd.read_csv(sample_path)
-        counts = (
-            df
-            .count(numeric_only=True, axis=1)
-            .value_counts()
-            .sort_index(ascending=False)
+        feature_df = pd.DataFrame(all_counts).fillna(0)
+        feature_df.index.name = "# non‑NaN features"
+        feature_df.sort_index(ascending=True, inplace=True)
+        
+        # stacked bar chart
+        feature_df.plot(
+            kind='bar',
+            stacked=True,
+            ax=ax,
+            width=0.8,
         )
-        all_counts[sample_name] = counts
-    
-    feature_df = pd.DataFrame(all_counts).fillna(0)
-    feature_df.index.name = "# non‑NaN features"
-    feature_df.sort_index(ascending=True, inplace=True)
-    
-    # stacked bar chart
-    feature_df.plot(
-        kind='bar',
-        stacked=True,
-        ax=ax,
-        width=0.8,
-    )
-    # place legend below
-    n_samples = len(sample_dict)
-    ax.legend(
-        feature_df.columns,
-        title="Sample",
-        loc='upper center',
-        bbox_to_anchor=(0.5, -0.15),
-        ncol=n_samples,
-        fontsize='medium'
-    )
-    
-    ax.set_title(f"{cell_type}", fontsize=14)
-    ax.set_xlabel(feature_df.index.name, fontsize=14)
-    ax.set_ylabel("Number of edges", fontsize=14)
-    ax.tick_params(axis='x', rotation=0)
-    ax.set_ylim((0, 200000))
+        # place legend below
+        n_samples = len(sample_dict)
+        ax.legend(
+            feature_df.columns,
+            title="Sample",
+            loc='upper center',
+            bbox_to_anchor=(0.5, -0.15),
+            ncol=n_samples,
+            fontsize='medium'
+        )
+        
+        ax.set_title(f"{cell_type}", fontsize=14)
+        ax.set_xlabel(feature_df.index.name, fontsize=14)
+        ax.set_ylabel("Number of edges", fontsize=14)
+        ax.tick_params(axis='x', rotation=0)
+        # ax.set_ylim((0, 200000))
 
-fig.tight_layout()
-plt.subplots_adjust(bottom=0.2)  # make room at bottom for legends
-plt.suptitle("Number of non‑NaN feature columns", y=1.02, fontsize=18)
-plt.show()
+    fig.tight_layout()
+    plt.subplots_adjust(bottom=0.2)  # make room at bottom for legends
+    plt.suptitle("Number of non‑NaN feature columns", y=1.02, fontsize=18)
+    plt.show()
+
+def combine_ground_truth_datasets():
+    reference_net_dir="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/REFERENCE_NETWORKS"
+    
+    ground_truths = [
+        "RN117_ChIPSeq_PMID37486787_Human_K562.tsv",
+        "RN204_ChIPSeq_ChIPAtlas_Human_Macrophages.tsv",
+        "RN111_ChIPSeq_BEELINE_Mouse_ESC.tsv"
+    ]
+    
+    gt_dfs = []
+    for file in ground_truths:
+        gt_dfs.append(
+            pd.read_csv(
+                f'{reference_net_dir}/{file}', 
+                sep='\t', 
+                quoting=csv.QUOTE_NONE, 
+                on_bad_lines='skip', 
+                header=0, 
+                index_col=None,
+                usecols=["Source", "Target"]
+            )
+        )
+    
+    merged_gt_df = pd.concat(gt_dfs)
+    print(merged_gt_df)
+    print(merged_gt_df.shape)
 
         
         
