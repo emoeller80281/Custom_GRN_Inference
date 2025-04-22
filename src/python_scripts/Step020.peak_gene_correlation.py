@@ -258,7 +258,7 @@ def filter_low_variance_features(df, min_variance=0.5):
     mask = variances >= min_variance
     return df.loc[mask]
 
-def calculate_significant_peak_to_gene_correlations(atac_df, gene_df, alpha=0.05, chunk_size=1000, num_cpu=4):
+def calculate_significant_peak_to_gene_correlations(atac_df, gene_df, alpha=0.01, chunk_size=1000, num_cpu=4):
     """
     Returns a DataFrame of [peak_id, target_id, correlation] for p < alpha.
     """
@@ -381,11 +381,11 @@ def main():
         
         # Filter out genes / peaks with low variance in expression / accessibility
         logging.info("Filtering out genes and peaks with low variance")
-        rna_sub  = filter_low_variance_features(rna_sub,  min_variance=0.5)
-        atac_sub  = filter_low_variance_features(atac_sub,  min_variance=0.5)
+        rna_sub  = filter_low_variance_features(rna_sub,  min_variance=1)
+        atac_sub  = filter_low_variance_features(atac_sub,  min_variance=1)
         
         logging.info("Calculating significant ATAC-seq peak-to-gene correlations")
-        sig_peak_to_gene_corr = calculate_significant_peak_to_gene_correlations(atac_sub, rna_sub, alpha=0.05, num_cpu=NUM_CPU)
+        sig_peak_to_gene_corr = calculate_significant_peak_to_gene_correlations(atac_sub, rna_sub, alpha=0.01, num_cpu=NUM_CPU)
         logging.info(sig_peak_to_gene_corr.head())
 
         sig_peak_to_gene_corr.to_parquet(f"{TMP_DIR}/sig_peak_to_gene_corr.parquet")
@@ -393,7 +393,7 @@ def main():
         logging.info("sig_peak_to_gene_corr.parquet exists, loading")
         sig_peak_to_gene_corr = pd.read_parquet(f"{TMP_DIR}/sig_peak_to_gene_corr.parquet")
 
-    quantile_threshold = 0.75
+    quantile_threshold = 0.90
     logging.info(f"Subsetting to only retain correlations in the top {quantile_threshold} quantile")
     cutoff = sig_peak_to_gene_corr["correlation"].quantile(quantile_threshold)
     top_peak_to_gene_corr = sig_peak_to_gene_corr[sig_peak_to_gene_corr["correlation"] >= cutoff]

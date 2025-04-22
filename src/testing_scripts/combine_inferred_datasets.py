@@ -96,7 +96,7 @@ for ax, cell_type in zip(axes[0], cell_types):
     # build a DataFrame of feature_counts for this cell_type
     all_counts = {}
     for sample_name, sample_path in sample_dict.items():
-        df = pd.read_csv(sample_path, nrows=100000)
+        df = pd.read_csv(sample_path)
         counts = (
             df
             .count(numeric_only=True, axis=1)
