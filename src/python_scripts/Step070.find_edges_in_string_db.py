@@ -68,7 +68,7 @@ def main():
     protein_links_df = pd.read_csv(f'{STRING_DIR}/protein_links_detailed.txt', sep=" ", header=0)
 
     logging.info("\nReading inferred network file")
-    inferred_net_df = pd.read_csv(INFERRED_NET_FILE, header=0)
+    inferred_net_df = pd.read_parquet(INFERRED_NET_FILE, index=False)
     logging.info("\tDone!")
 
     # Find the common name for the proteins in protein_links_df using the ID to name mapping in protein_info_df
@@ -105,7 +105,9 @@ def main():
     logging.info('\nInferred network with STRING edge scores:')
     logging.info(inferred_edges_in_string_df.head())
     
-    write_csv_in_chunks(inferred_edges_in_string_df, OUTPUT_DIR, "inferred_network_w_string.csv")
+    inferred_edges_in_string_df.to_parquet(f'{OUTPUT_DIR}/inferred_network_w_string.parquet', engine="pyarrow", index=False, compression="snappy")
+    
+    # write_csv_in_chunks(inferred_edges_in_string_df, OUTPUT_DIR, "inferred_network_w_string.csv")
     logging.info('\tDone!')
 
 if __name__ == "__main__":

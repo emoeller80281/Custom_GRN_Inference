@@ -6,11 +6,19 @@ import scipy.sparse as sp
 import scipy.stats as stats
 from dask import delayed, compute
 from dask.diagnostics import ProgressBar
+import dask.dataframe as dd
+
 import math
 import os
 import sys
 import argparse
 import logging
+
+from dask import delayed, compute
+from dask.diagnostics import ProgressBar
+
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 def parse_args() -> argparse.Namespace:
     """
@@ -258,68 +266,106 @@ def filter_low_variance_features(df, min_variance=0.5):
     mask = variances >= min_variance
     return df.loc[mask]
 
-def calculate_significant_peak_to_gene_correlations(atac_df, gene_df, alpha=0.01, chunk_size=1000, num_cpu=4):
+def calculate_significant_peak_to_gene_correlations(
+    atac_df: pd.DataFrame,
+    gene_df: pd.DataFrame,
+    output_file: str,
+    alpha: float = 0.01,
+    chunk_size: int = 1000,
+    num_cpu: int = 4,
+    batch_size: int = 100
+) -> str:
     """
-    Returns a DataFrame of [peak_id, target_id, correlation] for p < alpha.
+    Streams all significant peak–gene correlations (p < alpha) into a single
+    Parquet file at `output_file`.  Returns the path to that file.
     """
-    # Convert to sparse
+    # ensure parent directory exists
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+
+    # 1) Dense→sparse
     X = sp.csr_matrix(atac_df.values.astype(float))
     Y = sp.csr_matrix(gene_df.values.astype(float))
-    
     num_peaks, n = X.shape
     df_degrees = n - 2
-    
+
+    # 2) Row-normalize so Pearson r = dot/(n-1)
     X_norm = row_normalize_sparse(X)
     Y_norm = row_normalize_sparse(Y)
-    
-    def process_peak_gene_chunked(i, X_norm, Y_norm, df_degrees, n, alpha, chunk_size):
-        """
-        For peak i, compute correlation with each gene in chunks, returning
-        (i, j, r, p) for significant pairs.
-        """
-        results = []
-        peak_row = X_norm.getrow(i)
-        num_genes = Y_norm.shape[0]
 
-        for start in range(0, num_genes, chunk_size):
-            end = min(start + chunk_size, num_genes)
-            Y_chunk = Y_norm[start:end]
-
-            # Dot product => shape(1, chunk_size)
-            r_chunk = peak_row.dot(Y_chunk.T).toarray().ravel()
-            r_chunk = r_chunk / (n - 1)
-
+    # 3) Per-peak worker
+    def process_peak_gene_chunked(i, Xn, Yn, df_deg, nn, α, csize):
+        out = []
+        prow = Xn.getrow(i)
+        total_genes = Yn.shape[0]
+        for start in range(0, total_genes, csize):
+            end = min(start + csize, total_genes)
+            chunk = Yn[start:end]
+            r = prow.dot(chunk.T).toarray().ravel() / (nn - 1)
             with np.errstate(divide='ignore', invalid='ignore'):
-                t_stat_chunk = r_chunk * np.sqrt(df_degrees / (1 - r_chunk**2))
-            p_chunk = 2 * stats.t.sf(np.abs(t_stat_chunk), df=df_degrees)
+                t = r * np.sqrt(df_deg / (1 - r**2))
+            p = 2 * stats.t.sf(np.abs(t), df=df_deg)
+            sig = np.where(p < α)[0]
+            for loc in sig:
+                out.append((i, start + loc, r[loc]))
+        return out
 
-            # Indices where p < alpha
-            sig_indices = np.where(p_chunk < alpha)[0]
-            for local_j in sig_indices:
-                global_j = start + local_j
-                results.append((i, global_j, r_chunk[local_j]))
-
-        return results
-    
+    # 4) Build delayed tasks
     tasks = [
-        delayed(process_peak_gene_chunked)(i, X_norm, Y_norm, df_degrees, n, alpha, chunk_size)
+        delayed(process_peak_gene_chunked)(
+            i, X_norm, Y_norm, df_degrees, n, alpha, chunk_size
+        )
         for i in range(num_peaks)
     ]
 
-    with ProgressBar(dt=30, out=sys.stderr):
-        results = compute(*tasks, scheduler="threads", num_workers=num_cpu)
+    writer = None
+    schema = None
 
-    flat_results = [item for sublist in results for item in sublist]
-    df_corr = pd.DataFrame(flat_results, columns=["peak_i", "gene_j", "correlation"])
+    # 5) Compute in batches and append to Parquet
+    for batch_start in range(0, num_peaks, batch_size):
+        batch = tasks[batch_start: batch_start + batch_size]
+        with ProgressBar(dt=30, out=sys.stderr):
+            results = compute(
+                *batch,
+                scheduler="threads",
+                num_workers=num_cpu
+            )
 
-    # Map i->peak_id, j->target_id
-    df_corr["peak_id"] = atac_df.index[df_corr["peak_i"]]
-    df_corr["gene_id"] = gene_df.index[df_corr["gene_j"]]
-    df_corr = df_corr[["peak_id", "gene_id", "correlation"]]
-    
-    logging.info("\tDone!")
+        for local_idx, sublist in enumerate(results):
+            peak_idx = batch_start + local_idx
+            if not sublist:
+                continue
 
-    return df_corr
+            # build small DataFrame
+            df_chunk = pd.DataFrame(
+                sublist,
+                columns=["peak_i", "gene_j", "correlation"]
+            )
+            # map back to IDs
+            df_chunk["peak_id"] = atac_df.index[df_chunk["peak_i"]]
+            df_chunk["gene_id"] = gene_df.index[df_chunk["gene_j"]]
+            df_chunk = df_chunk[["peak_id", "gene_id", "correlation"]]
+
+            # convert to Arrow Table
+            table = pa.Table.from_pandas(df_chunk, preserve_index=False)
+
+            # initialize writer on first non-empty chunk
+            if writer is None:
+                schema = table.schema
+                writer = pq.ParquetWriter(output_file, schema)
+
+            writer.write_table(table)
+            # free memory
+            del df_chunk, table
+
+        del results
+
+    if writer:
+        writer.close()
+        logging.info(f"Wrote correlations to {output_file}")
+    else:
+        logging.warning("No significant correlations found; no Parquet written.")
+
+    return output_file
 
 def main():
     # Parse arguments
@@ -369,42 +415,76 @@ def main():
     
     # ============ FINDING PEAKS NEAR GENES ============
     # Dataframe with "peak_id", "target_id" and "TSS_dist"
-    peak_gene_df, gene_list = find_genes_near_peaks(peak_bed, tss_bed, rna_df, PEAK_DIST_LIMIT)
-
-    logging.info("Subset the ATAC-seq DataFrame to only contain peak that are in range of the genes")
-    atac_sub = atac_df[atac_df["peak_id"].isin(peak_gene_df["peak_id"])].set_index("peak_id")
+    peak_gene_df, gene_list = find_genes_near_peaks(
+        peak_bed,
+        tss_bed,
+        rna_df,
+        PEAK_DIST_LIMIT
+    )
 
     # ============ PEAK TO GENE CORRELATION CALCULATION ============
-    if not os.path.exists(f"{TMP_DIR}/sig_peak_to_gene_corr.parquet"):
-        # Subset the RNA-seq DataFrame to only contain the genes in the peak-to-gene dictionary
-        rna_sub = rna_df[rna_df["gene_id"].isin(gene_list)].set_index("gene_id")
+    PARQ = f"{TMP_DIR}/sig_peak_to_gene_corr.parquet"
+    if not os.path.exists(PARQ):
+        logging.info("Subsetting ATAC and RNA matrices to relevant peaks/genes")
+        atac_sub: pd.DataFrame = (
+            atac_df
+            .loc[atac_df["peak_id"].isin(peak_gene_df["peak_id"])]
+            .set_index("peak_id")
+        )
+        rna_sub: pd.DataFrame = (
+            rna_df
+            .loc[rna_df["gene_id"].isin(gene_list)]
+            .set_index("gene_id")
+        )
         
         # Filter out genes / peaks with low variance in expression / accessibility
         logging.info("Filtering out genes and peaks with low variance")
-        rna_sub  = filter_low_variance_features(rna_sub,  min_variance=1)
-        atac_sub  = filter_low_variance_features(atac_sub,  min_variance=1)
+        rna_sub  = filter_low_variance_features(rna_sub,  min_variance=0.5)
+        atac_sub  = filter_low_variance_features(atac_sub,  min_variance=0.5)
         
         logging.info("Calculating significant ATAC-seq peak-to-gene correlations")
-        sig_peak_to_gene_corr = calculate_significant_peak_to_gene_correlations(atac_sub, rna_sub, alpha=0.01, num_cpu=NUM_CPU)
-        logging.info(sig_peak_to_gene_corr.head())
-
-        sig_peak_to_gene_corr.to_parquet(f"{TMP_DIR}/sig_peak_to_gene_corr.parquet")
+        written = calculate_significant_peak_to_gene_correlations(
+            atac_sub,
+            rna_sub,
+            output_file=PARQ,
+            alpha=0.01,
+            chunk_size=1000,
+            num_cpu=NUM_CPU,
+            batch_size=100
+        )
+        sig_peak_to_gene_corr = dd.read_parquet(written)
     else:
-        logging.info("sig_peak_to_gene_corr.parquet exists, loading")
-        sig_peak_to_gene_corr = pd.read_parquet(f"{TMP_DIR}/sig_peak_to_gene_corr.parquet")
+        logging.info("Loading existing Parquet")
+        sig_peak_to_gene_corr = dd.read_parquet(PARQ)
 
-    quantile_threshold = 0.90
-    logging.info(f"Subsetting to only retain correlations in the top {quantile_threshold} quantile")
-    cutoff = sig_peak_to_gene_corr["correlation"].quantile(quantile_threshold)
-    top_peak_to_gene_corr = sig_peak_to_gene_corr[sig_peak_to_gene_corr["correlation"] >= cutoff]
+    # Compute the 90th-percentile cutoff
+    quantile_threshold = 0.70
+    logging.info(f"Computing the {quantile_threshold*100:.0f}th percentile of correlation…")
+    cutoff = sig_peak_to_gene_corr["correlation"].quantile(quantile_threshold).compute()
+    logging.info(f"Cutoff = {cutoff:.4f}")
 
-    # Merge the correlation and TSS distance DataFrames
-    final_df = pd.merge(top_peak_to_gene_corr, peak_gene_df, how="inner", left_on=["peak_id", "gene_id"], right_on=["peak_id", "target_id"]).dropna(subset="peak_id")
+    # Filter to only peak to TG correlations ≥ cutoff
+    filtered = sig_peak_to_gene_corr[sig_peak_to_gene_corr["correlation"] >= cutoff]
     
-    final_df = final_df[["peak_id", "target_id", "correlation", "TSS_dist_score"]]
-        
-    logging.info(final_df.head())
-    final_df.to_csv(f"{OUTPUT_DIR}/peak_to_gene_correlation.csv", sep="\t", header=True, index=False)
+    # Rename so both sides use "target_id"
+    filtered = filtered.rename(columns={"gene_id": "target_id"})
+
+    # Convert the TSS distance score DataFrame to Dask
+    dd_pg: dd.DataFrame = dd.from_pandas(peak_gene_df, npartitions=1)
+
+    # Merge the TSS distance score and correlation DataFrames
+    joined: dd.DataFrame = filtered.merge(
+        dd_pg,
+        how="inner",
+        on=["peak_id", "target_id"]
+    )[["peak_id", "target_id", "correlation", "TSS_dist_score"]]
+
+    # Write the joined DataFrame to a CSV file
+    out_df: pd.DataFrame = joined.compute()
+    out_path = f"{OUTPUT_DIR}/peak_to_gene_correlation.parquet"
+    out_df.to_parquet(out_path, engine="pyarrow", index=False, compression="snappy")
+
+    logging.info(f"Wrote top-10% correlations + TSS scores to {out_path}")
     logging.info("\n-----------------------------------------\n")
     
 if __name__ == "__main__":

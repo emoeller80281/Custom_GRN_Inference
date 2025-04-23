@@ -127,7 +127,7 @@ def main():
     peak_enh_df = find_peaks_in_known_enhancer_region(peak_bed, enh_bed)
 
     # Write out the final dataframe to the output directory
-    peak_enh_df.to_csv(f'{OUTPUT_DIR}/peak_to_known_enhancers.csv', sep="\t", header=True, index=False)
+    peak_enh_df.to_parquet(f'{OUTPUT_DIR}/peak_to_known_enhancers.parquet', engine="pyarrow", index=False, compression="snappy")
 
 if __name__ == "__main__":
     # Configure logging

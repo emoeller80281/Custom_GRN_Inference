@@ -102,44 +102,7 @@ def write_csv_in_chunks(df, output_dir, filename):
             # For subsequent chunks, append without header
             chunk.to_csv(output_file, mode='a', header=False, index=False)
 
-def main():
-    # Parse command-line arguments
-    args: argparse.Namespace = parse_args()
-    atac_data_file: str = args.atac_data_file
-    rna_data_file: str = args.rna_data_file
-    output_dir: str = args.output_dir
-    inferred_grn_dir: str = args.inferred_grn_dir
-    fig_dir: str = args.fig_dir
-    subsample: str = args.subsample
-    
-    subsample = float(subsample)
-    
-    logging.info("Loading in the DataFrames")
-    logging.info("\tCorrelation peak to TG DataFrame")
-    peak_corr_df = pd.read_csv(f'{output_dir}/peak_to_gene_correlation.csv', sep="\t", header=0)
-
-    logging.info("\tCicero peak to TG DataFrame")
-    cicero_df = pd.read_csv(f'{output_dir}/cicero_peak_to_tg_scores.csv', sep="\t", header=0)
-
-    logging.info("\tSliding Window peak to TG DataFrame")
-    sliding_window_df = pd.read_csv(f'{output_dir}/sliding_window_tf_to_peak_score.tsv', sep="\t", header=0)
-
-    logging.info("\tHomer TF to peak DataFrame")
-    homer_df = pd.read_csv(f'{output_dir}/homer_tf_to_peak.tsv', sep="\t", header=0)
-
-    logging.info("\tRNAseq dataset")
-    rna_df = pd.read_csv(rna_data_file, header=0)
-    rna_df['mean_gene_expression'] = rna_df.iloc[:, 1:].mean(axis=1)
-    rna_df = rna_df[['gene_id', 'mean_gene_expression']]
-
-    logging.info("\tATACseq dataset")
-    atac_df = pd.read_csv(atac_data_file, header=0)
-    atac_df['mean_peak_accessibility'] = atac_df.iloc[:, 1:].mean(axis=1)
-    atac_df = atac_df[['peak_id', 'mean_peak_accessibility']]
-    logging.debug("Done!")
-    logging.debug("\n---------------------------\n")
-
-    logging.info("\n ============== Merging DataFrames ==============")
+def merge_score_dataframes_slow(peak_corr_df, cicero_df, sliding_window_df, homer_df, rna_df, atac_df):
     logging.info("\tCombining the sliding window and Homer TF to peak binding scores")
     tf_to_peak_df = pd.merge(sliding_window_df, homer_df, on=["peak_id", "source_id"], how="outer")
     logging.debug("tf_to_peak_df")
@@ -180,6 +143,77 @@ def main():
 
     logging.info("\t - Adding the mean ATAC-seq peak accessibility values")
     final_df = pd.merge(atac_df, tf_to_tg_score_df, on="peak_id", how="left")
+    
+    return final_df
+
+def merge_score_dataframes(peak_corr_df, cicero_df, sliding_window_df, homer_df, rna_df, atac_df):
+    # Merge the correlation, cicero, sliding window, and homer dfs
+    merge1 = (
+        peak_corr_df
+        .merge(cicero_df, on=["peak_id", "target_id"], how="outer")
+        .merge(sliding_window_df, on="peak_id", how="outer")
+        .merge(homer_df, on="peak_id", how="outer")
+    )
+
+    # Merge on RNA & ATAC means
+    rna_means = rna_df.pipe(
+        lambda df: df.assign(mean_gene_expression=df.iloc[:,1:].mean(axis=1))
+    ).loc[:, ["gene_id", "mean_gene_expression"]]
+
+    atac_means = atac_df.pipe(
+        lambda df: df.assign(mean_peak_accessibility=df.iloc[:,1:].mean(axis=1))
+    ).loc[:, ["peak_id", "mean_peak_accessibility"]]
+
+    final_df = (
+        merge1
+        .merge(rna_means,  left_on="target_id", right_on="gene_id", how="left")
+        .merge(atac_means, on="peak_id", how="left")
+    )
+    
+    return final_df
+
+def main():
+    # Parse command-line arguments
+    args: argparse.Namespace = parse_args()
+    atac_data_file: str = args.atac_data_file
+    rna_data_file: str = args.rna_data_file
+    output_dir: str = args.output_dir
+    inferred_grn_dir: str = args.inferred_grn_dir
+    fig_dir: str = args.fig_dir
+    subsample: str = args.subsample
+    
+    subsample = float(subsample)
+    
+    logging.info("Loading in the DataFrames")
+    logging.info("\tCorrelation peak to TG DataFrame")
+    peak_corr_df = pd.read_parquet(f'{output_dir}/peak_to_gene_correlation.parquet', index=False)
+
+    logging.info("\tCicero peak to TG DataFrame")
+    cicero_df = pd.read_parquet(f'{output_dir}/cicero_peak_to_tg_scores.parquet', index=False)
+
+    logging.info("\tSliding Window peak to TG DataFrame")
+    sliding_window_df = pd.read_parquet(f'{output_dir}/sliding_window_tf_to_peak_score.parquet', index=False)
+
+    logging.info("\tHomer TF to peak DataFrame")
+    homer_df = pd.read_parquet(f'{output_dir}/homer_tf_to_peak.parquet', index=False)
+
+    logging.info("\tRNAseq dataset")
+    rna_df = pd.read_csv(rna_data_file, header=0)
+    rna_df['mean_gene_expression'] = rna_df.iloc[:, 1:].mean(axis=1)
+    rna_df = rna_df[['gene_id', 'mean_gene_expression']]
+
+    logging.info("\tATACseq dataset")
+    atac_df = pd.read_csv(atac_data_file, header=0)
+    atac_df['mean_peak_accessibility'] = atac_df.iloc[:, 1:].mean(axis=1)
+    atac_df = atac_df[['peak_id', 'mean_peak_accessibility']]
+    logging.debug("Done!")
+    logging.debug("\n---------------------------\n")
+
+    logging.info("\n ============== Merging DataFrames ==============")
+    final_df = merge_score_dataframes(peak_corr_df, cicero_df, sliding_window_df, homer_df, rna_df, atac_df)
+    logging.info(final_df.head())
+    logging.info(final_df.shape)
+    
 
     # Drop columns that dont have all three of the peak, target, and source names
     final_df = final_df.dropna(subset=[
@@ -194,46 +228,35 @@ def main():
     logging.debug(final_df.columns)
     logging.debug("\n---------------------------\n")
         
-    # final_df["num_cols_w_values"] = final_df.notna().sum(axis=1)
-    # final_df = final_df.sort_values(ascending=False, by="num_cols_w_values")
-    # final_df = final_df.drop(columns=["num_cols_w_values"])
+    final_df["num_cols_w_values"] = final_df.notna().sum(axis=1)
+    final_df = final_df.sort_values(ascending=False, by="num_cols_w_values")
+    final_df = final_df.drop(columns=["num_cols_w_values"])
     
-    # # # ===== WRITE OUT THE FULL RAW DATAFRAME =====
-    # logging.info("Writing a non-normalized 10% dataframe as 'inferred_network_non_normalized.csv'")
-    # top_10_percent_df = final_df.head(int(len(final_df) * 0.10))    
-    # write_csv_in_chunks(top_10_percent_df, output_dir, 'inferred_network_non_normalized.csv')
+    # # ===== WRITE OUT THE FULL RAW DATAFRAME =====
+    logging.info("Writing a non-normalized 10% dataframe as 'inferred_network_non_normalized.csv'")
+    top_10_percent_df = final_df.head(int(len(final_df) * 0.10))    
+    write_csv_in_chunks(top_10_percent_df, output_dir, 'inferred_network_non_normalized.csv')
 
-    # Skip these already-normalized columns
-    cols_to_skip_normalization = [
-        "source_id", "target_id", "peak_id",
-        "mean_TF_expression", "mean_TG_expression", "mean_peak_accessibility",
-        "TSS_dist_score", "cicero_score"
-    ]
+    num_cols = final_df.select_dtypes("number").columns.difference([
+        "cicero_score", "TSS_dist_score"  # skip list
+    ])
 
-    # Choose numeric columns that are not in the skip list
-    cols_to_normalize = [col for col in final_df.select_dtypes(include=np.number).columns if col not in cols_to_skip_normalization]
+    # compute 5th/95th percentiles for each column in a single pass
+    quantiles = final_df[num_cols].quantile([0.05, 0.95])
 
-    # Normalize the score columns
-    for col in cols_to_normalize:
+    # mask + scale with broadcasting
+    low, high = quantiles.loc[0.05], quantiles.loc[0.95]
+    trimmed = final_df[num_cols].where(final_df[num_cols].gt(low) & final_df[num_cols].lt(high))
 
-        # Drop values outside the 5–95th percentile
-        if col != "cicero_score": # Skip trimming the edges of cicero_score, the 0 and 1 scores are important
-            mask = get_percentile_mask(final_df[col], lower=5, upper=95)
-            final_df[col] = final_df[col].where(mask, np.nan)
-            
-        final_df[col] = minmax_normalize_column(final_df[col])
-
-        # log1p transform the scaled values
-        final_df[col] = np.log1p(final_df[col])      
+    # min‐max normalize + log1p
+    scaled = (trimmed - trimmed.min()) / (trimmed.max() - trimmed.min())
+    final_df[num_cols] = np.log1p(scaled.fillna(0))     
     
     # MinMax normalize all feature score columns, whether or not they were normalized
     cols_to_minmax = [col for col in final_df.select_dtypes(include=np.number).columns]
     
     for col in cols_to_minmax:
         final_df[col] = minmax_normalize_column(final_df[col])
-
-    # Replace NaN values with 0 for the scores
-    # final_df['cicero_score'] = final_df['cicero_score'].fillna(0)
 
     # Set the desired column order
     column_order = [
@@ -250,11 +273,9 @@ def main():
         "homer_binding_score"
     ]
     
-    final_df = final_df[column_order]
+    column_order = [col for col in column_order if col in final_df.columns]
     
-    missing_cols = [col for col in column_order if col not in final_df.columns]
-    if missing_cols:
-        raise ValueError(f"Missing expected columns in DataFrame: {missing_cols}")
+    final_df = final_df[column_order]
     
     all_nan_cols = final_df.columns[final_df.isna().all()].tolist()
     if all_nan_cols:
@@ -275,21 +296,26 @@ def main():
     # For testing, randomly downsample the rows
     logging.info(f"Creating and saving a {subsample}% downsampling of the dataset for testing")
     decimal_subsample = subsample / 100
-    sample_raw_inferred_df = final_df.sample(frac=decimal_subsample)
     
     logging.info(f'\tNumber of unique non-NaN scores for each feature:')
     for column in column_order:
         logging.info(f'\t\tNumber of {column} scores: {final_df[column].nunique(dropna=True)}')
-    
-    write_csv_in_chunks(sample_raw_inferred_df, inferred_grn_dir, 'inferred_network_raw.csv')
-    
+        
+    # Write the final df as a parquet file
+    final_df.to_parquet(f"{inferred_grn_dir}/inferred_network.parquet", index=False)
+
+    # if you need a 10% sample for testing:
+    final_df.sample(frac=decimal_subsample).to_parquet(
+        f"{inferred_grn_dir}/inferred_network_{subsample}pct.parquet", index=False
+    )
+        
     logging.info(f'\nSaving rows with no more than 2 missing feature scores')
     n_score_cols = len(final_df.select_dtypes(include=np.number).columns)
     feature_threshold = n_score_cols - 2
     final_df_enriched_features = final_df[final_df.count(numeric_only=True, axis=1) >= feature_threshold]
     logging.info(f'\tNumber of rows with >= {feature_threshold}/{n_score_cols} feature columns {len(final_df)}')
     
-    write_csv_in_chunks(sample_raw_inferred_df, inferred_grn_dir, 'inferred_network_enriched_features.csv')
+    final_df_enriched_features.to_parquet(f"{inferred_grn_dir}/inferred_network_enrich_feat.parquet")
     
     logging.info("Done!")
 

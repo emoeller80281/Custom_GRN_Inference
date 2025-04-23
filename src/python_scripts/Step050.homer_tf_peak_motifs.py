@@ -118,7 +118,7 @@ def main(input_dir: str, output_file: str, cpu_count: int) -> None:
     logging.info("Concatenating all TF to peak binding score DataFrames")
     tf_binding_scores_df: pd.DataFrame = pd.concat(tf_scores_list, ignore_index=True)
     
-    tf_binding_scores_df.to_csv(output_file, sep='\t', index=False)
+    tf_binding_scores_df.to_parquet(output_file, engine="pyarrow", index=False, compression="snappy")
 
 if __name__ == "__main__":
     # Configure logging

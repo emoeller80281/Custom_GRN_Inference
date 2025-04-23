@@ -58,7 +58,7 @@ def parse_args() -> argparse.Namespace:
 
 def read_inferred_network(inferred_network_file):
     logging.info("Reading in inferred network")
-    inferred_network = pd.read_csv(inferred_network_file, header=0)
+    inferred_network = pd.read_parquet(inferred_network_file, index=False)
     
     inferred_network["source_id"] = inferred_network["source_id"].str.upper()
     inferred_network["target_id"] = inferred_network["target_id"].str.upper()

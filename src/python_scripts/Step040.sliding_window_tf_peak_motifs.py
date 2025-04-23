@@ -8,11 +8,26 @@ import numpy as np
 from typing import Any
 import matplotlib.pyplot as plt
 from matplotlib.ticker import FuncFormatter
-from numba import njit
+from numba import njit, prange
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import logging
 import argparse
 import re
+
+# at module top‐level
+_global_chr_pos_to_seq = None
+_global_tf_df         = None
+_global_bg_freq       = None
+_global_plus          = None
+_global_minus          = None
+
+def _init_worker(chr_pos_to_seq, tf_df, bg_freq, shared_plus, shared_minus):
+    global _global_chr_pos_to_seq, _global_tf_df, _global_bg_freq, _global_plus, _global_minus
+    _global_chr_pos_to_seq = chr_pos_to_seq
+    _global_tf_df          = tf_df
+    _global_bg_freq        = bg_freq
+    _global_plus           = shared_plus
+    _global_minus          = shared_minus
 
 def parse_args() -> argparse.Namespace:
     """
@@ -75,58 +90,39 @@ def parse_args() -> argparse.Namespace:
 
     return args
 
-@njit
-def calculate_strand_score(sequence, pwm_values, window_size):
-    """
-    Calculate the cumulative PWM score over all sliding windows
-    for a given strand sequence. Windows containing an ambiguous base (not in mapping)
-    are assigned a neutral contribution (score of 0 for that position).
-    """
-    # Map the sequence to indices; use -1 for ambiguous nucleotides (e.g., 'N')
-    score_total = 0
-    L = sequence.shape[0]
-    
-    # Slide over the sequence with the window size
-    for i in range(L - window_size):
-        window_score = 0.0
-        # Sum over the PWM positions.
-        for j in range(window_size):
-            window_score += pwm_values[j, sequence[i + j]]
-        score_total += window_score
-    return score_total
+@njit(parallel=True)
+def score_all_peaks(seqs_plus, seqs_minus, pwm_values):
+    n_peaks, L = seqs_plus.shape
+    wsize = pwm_values.shape[0]
+    out = np.zeros(n_peaks, dtype=np.float64)
 
-def process_motif_file(file, meme_dir, chr_pos_to_seq, background_freq, tf_df):
-    # Read in the motif PWM file.
+    for i in prange(n_peaks):
+        total = 0.0
+        for strand in (seqs_plus[i], seqs_minus[i]):
+            # slide the window
+            for j in range(L - wsize + 1):
+                s = 0.0
+                for k in range(wsize):
+                    idx = strand[j + k]
+                    # skip ambiguous bases (idx < 0 or >=4)
+                    if 0 <= idx < 4:
+                        s += pwm_values[k, idx]
+                total += s
+        out[i] = total
+    return out
+
+def process_motif_file_shared(file, meme_dir):
+    # Load the PWM, compute log2‐background‐corrected array
     motif_df = pd.read_csv(os.path.join(meme_dir, file), sep="\t", header=0, index_col=0)
-    motif_name = file.replace('.txt', '')
+    pwm = np.log2(motif_df.T.div(_global_bg_freq, axis=0) + 1).T.to_numpy()
+    pwm = np.vstack([pwm, np.zeros((1,4))])   # if you need an 'N' row
     
-    # Calculate the log2-transformed PWM (with background correction)
-    log2_motif_df_freq = np.log2(motif_df.T.div(background_freq, axis=0) + 1).T
+    # Score every peak on both strands in parallel:
+    scores = score_all_peaks(_global_plus, _global_minus, pwm)
     
-    # Set scores for ambiguous base 'N' to 0.
-    log2_motif_df_freq["N"] = [0] * log2_motif_df_freq.shape[0]
-    
-    pwm_values = log2_motif_df_freq.to_numpy()
-    window_size = log2_motif_df_freq.shape[0]
-    
-    n_peaks = chr_pos_to_seq.shape[0]
-    total_peak_score = np.zeros(n_peaks)
-    
-    # Loop over each peak to compute binding scores for both strands.
-    # (Assume that the sequences stored in chr_pos_to_seq["+ seq"] and ["- seq"]
-    # are NumPy arrays of integers.)
-    for peak_num in range(n_peaks):
-        peak = chr_pos_to_seq.iloc[peak_num, :]
-        pos_seq = peak["+ seq"]  # already a NumPy array of ints
-        neg_seq = peak["- seq"]
-        
-        pos_strand_score = calculate_strand_score(pos_seq, pwm_values, window_size)
-        neg_strand_score = calculate_strand_score(neg_seq, pwm_values, window_size)
-        total_peak_score[peak_num] = pos_strand_score + neg_strand_score
-
-    # Get the list of TF names that correspond to this motif.
-    tf_names = tf_df.loc[tf_df["Motif_ID"] == motif_name, "TF_Name"].values
-    return motif_name, tf_names, total_peak_score
+    # Look up TF names tied to this motif
+    tf_names = _global_tf_df.loc[_global_tf_df["Motif_ID"] == file.replace('.txt',''), "TF_Name"].values
+    return file.replace('.txt',''), tf_names, scores
 
 def get_background_freq(species):
     if species == "human" or species == "hg38":
@@ -153,6 +149,9 @@ def get_background_freq(species):
 
 def associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, rna_data_genes, species, num_cpu):
 
+    seqs_plus  = np.stack(chr_pos_to_seq["+ seq"].to_list())
+    seqs_minus = np.stack(chr_pos_to_seq["- seq"].to_list())
+
     background_freq = get_background_freq(species)
     
     # Read in the list of TFs to extract their name and matching motif ID
@@ -161,11 +160,10 @@ def associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, rna_dat
     # logging.info(f'tf_df TFs: {tf_df["TF_Name"][0:5]}')
     # logging.info(f'RNA dataset TFs: {rna_data_genes}')
     
-    
     tf_df = tf_df[tf_df["TF_Name"].isin(rna_data_genes)]
     logging.info(f'Number of TFs matching RNA dataset = {tf_df.shape[0]}')
     
-    tf_motif_names = tf_df["Motif_ID"].unique()
+    tf_motif_names = tf_df["Motif_ID"].unique().tolist()
     logging.info(f'Number of motifs: {len(tf_motif_names)}')
     logging.info(f'Number of peaks: {chr_pos_to_seq.shape[0]}')
     
@@ -173,8 +171,6 @@ def associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, rna_dat
     tf_to_peak_score_df["peak_id"] = chr_pos_to_seq.apply(
         lambda row: f'{row["chr"]}:{row["start"]}-{row["end"]}', axis=1
     )
-    
-    
     
     # Identify motif files that match the TF motifs.
     matching_motif_files = [file for file in os.listdir(meme_dir)
@@ -186,34 +182,38 @@ def associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, rna_dat
     logging.info(f'\tSize of calculation:') 
     logging.info(f'\t\t{len(tf_motif_names)} motifs x {chr_pos_to_seq.shape[0]} peaks = {len(tf_motif_names) * chr_pos_to_seq.shape[0]} computations')
     
-    window_len_set = set()
-    for file in matching_motif_files:
-        motif_df = pd.read_csv(os.path.join(meme_dir, file), sep="\t", header=0, index_col=0)
-        window_len = motif_df.shape[0]
-        window_len_set.add(window_len)
-    
-    # Use ProcessPoolExecutor to parallelize processing of motif files.
-    with ProcessPoolExecutor(max_workers=num_cpu) as executor:
+    # 4) One pool for ALL motifs
+    with ProcessPoolExecutor(
+        max_workers=num_cpu,
+        initializer=_init_worker,
+        initargs=(tf_df, background_freq, seqs_plus, seqs_minus)
+    ) as executor:
+
         futures = {
-            executor.submit(process_motif_file, file, meme_dir, chr_pos_to_seq,
-                            background_freq, tf_df): file
-            for file in matching_motif_files
+            executor.submit(process_motif_file_shared, f, meme_dir): f
+            for f in matching_motif_files
         }
-        
-        new_columns = {}
-        
-        # Only update tqdm after every 2% of progress
+
+        new_columns: dict[str, np.ndarray] = {}
         min_update = max(1, int(0.02 * len(futures)))
 
-        for future in tqdm(as_completed(futures), total=len(futures), desc="Processing motifs", miniters=min_update):
+        for future in tqdm(
+            as_completed(futures),
+            total=len(futures),
+            desc="Processing motifs",
+            miniters=min_update
+        ):
             motif_name, tf_names, total_peak_score = future.result()
             for tf_name in tf_names:
                 new_columns[tf_name] = total_peak_score
 
-        new_columns_df = pd.DataFrame(new_columns, index=tf_to_peak_score_df.index)
-        tf_to_peak_score_df = pd.concat([tf_to_peak_score_df, new_columns_df], axis=1)
-    
-    logging.info(tf_to_peak_score_df.head())
+    # 5) Combine into your DataFrame
+    new_columns_df = pd.DataFrame(new_columns, index=tf_to_peak_score_df.index)
+    tf_to_peak_score_df = pd.concat(
+        [tf_to_peak_score_df, new_columns_df],
+        axis=1
+    )
+
     return tf_to_peak_score_df
 
 def format_peaks(atac_df: pd.DataFrame, cicero_peak_names: list):
@@ -340,8 +340,8 @@ def main():
     # num_cpu = 4
     
     logging.info("Reading in parsed Cicero peak to TG file to find associated peaks")
-    cicero_peak_file = f"{output_dir}/cicero_peak_to_tg_scores.csv"
-    cicero_peaks = pd.read_csv(cicero_peak_file, sep="\t", header=0, index_col=None)
+    cicero_peak_file = f"{output_dir}/cicero_peak_to_tg_scores.parquet"
+    cicero_peaks = pd.read_parquet(cicero_peak_file)
     cicero_peak_names = cicero_peaks["peak_id"].to_list()
     logging.info(f'{len(cicero_peak_names)} Cicero peaks')
     
@@ -388,7 +388,7 @@ def main():
         )
 
     
-    tf_to_peak_score_df.to_csv(f'{output_dir}/sliding_window_tf_to_peak_score.tsv', sep='\t', header=True, index=False)
+    tf_to_peak_score_df.to_parquet(f'{output_dir}/sliding_window_tf_to_peak_score.parquet', engine="pyarrow", index=False, compression="snappy")
         
 if __name__ == "__main__":
     # Configure logging

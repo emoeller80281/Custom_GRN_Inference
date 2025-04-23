@@ -48,8 +48,6 @@ for cell_type, sample_path_dict in inferred_net_paths.items():
         df = df[df.count(numeric_only=True, axis=1) >= feature_threshold]
         print(f'\tNumber of rows with >= {feature_threshold}/{n_score_cols} feature columns {len(df)}')
         print(feature_counts.values)
-        # print(sorted(feature_counts.index.to_list()))      
-#         print(feature_counts.indices)
 
 def plot_non_nan_feature_scores(inferred_net_paths):
     cell_types = list(inferred_net_paths.keys())
@@ -137,39 +135,3 @@ def combine_ground_truth_datasets():
     merged_gt_df = pd.concat(gt_dfs)
     print(merged_gt_df)
     print(merged_gt_df.shape)
-
-        
-        
-        
-# def plot_column_histograms(df, fig_dir, df_name="inferred_net"):
-#     # Create a figure and axes with a suitable size
-#     plt.figure(figsize=(15, 8))
-    
-#     # Select only the numerical columns (those with numeric dtype)
-#     cols = df.select_dtypes(include=[np.number]).columns
-
-#     # Loop through each feature and create a subplot
-#     for i, col in enumerate(cols, 1):
-#         plt.subplot(3, 4, i)  # 3 rows, 4 columns, index = i
-#         plt.hist(df[col], bins=50, alpha=0.7, edgecolor='black')
-#         plt.title(f"{col} distribution")
-#         plt.xlabel(col)
-#         plt.ylabel("Frequency")
-
-#     plt.tight_layout()
-#     plt.savefig(f'{fig_dir}/{df_name}_column_histograms.png', dpi=300)
-#     plt.close()
-        
-#         if cell_type not in dataframes.keys():
-#             dataframes[cell_type] = []
-            
-#         dataframes[cell_type].append(df)
-        
-#     dataframes[cell_type] = pd.concat(dataframes[cell_type])
-#     print()
-
-# print(f'\n===== Combined DataFrames')
-# for cell_type, combined_dataframe in dataframes.items():
-#     print(cell_type)
-#     print(combined_dataframe.head())
-#     print()

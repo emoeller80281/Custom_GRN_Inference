@@ -79,7 +79,7 @@ def main():
 
     # Write the final merged peaks to a csv file
     logging.info("Writing Cicero DataFrame to: 'cicero_peak_to_tg_scores.csv'")
-    merged_with_promoter_genes.to_csv(f"{output_dir}/cicero_peak_to_tg_scores.csv", header=True, index=False, sep="\t")
+    merged_with_promoter_genes.to_parquet(f"{output_dir}/cicero_peak_to_tg_scores.parquet", engine="pyarrow", index=False, compression="snappy")
     
 if __name__ == "__main__":
     # Configure logging
