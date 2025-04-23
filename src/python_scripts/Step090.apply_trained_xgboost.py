@@ -48,7 +48,7 @@ def parse_args() -> argparse.Namespace:
     return args
 
 def read_inferred_network(inferred_network_file):
-    inferred_network = pd.read_csv(inferred_network_file, header=0)
+    inferred_network = pd.read_parquet(inferred_network_file)
     inferred_network["source_id"] = inferred_network["source_id"].str.upper()
     inferred_network["target_id"] = inferred_network["target_id"].str.upper()
     return inferred_network
@@ -85,7 +85,7 @@ def main():
     
     logging.info("Saving inferred GRN")
     output_file = os.path.join(output_dir, save_name)
-    inferred_network.to_csv(output_file, sep='\t', index=False)
+    inferred_network.to_parquet(output_file, engine="pyarrow", index=False, compression="snappy")
     logging.info("    Done!\n")
     
 if __name__ == "__main__":

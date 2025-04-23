@@ -59,7 +59,7 @@ run_split_train_test() {
         # Check to see if any of the feature set data file exists 
         local FEATURE_SET_FILES_EXIST=true
         for FEATURE_SET in "${FEATURE_SET_NAMES[@]}"; do
-            if [ ! -f "${INFERRED_GRN_DIR}/${FEATURE_SET}.csv" ]; then
+            if [ ! -f "${INFERRED_GRN_DIR}/${FEATURE_SET}.parquet" ]; then
                 FEATURE_SET_FILES_EXIST=false
             fi
         done
@@ -81,7 +81,7 @@ run_split_train_test() {
 
             # Train the XGBoost classifier for the current feature set if a trained model doesn't exist
             if [ ! -f "${TRAINED_MODEL_DIR}/xgb_${FEATURE_SET}_model.pkl" ]; then
-                local FEATURE_FILE="${INFERRED_GRN_DIR}/${FEATURE_SET}.csv"
+                local FEATURE_FILE="${INFERRED_GRN_DIR}/${FEATURE_SET}.parquet"
                 local FIG_DIR="${BASE_DIR}/figures/hg38/${SAMPLE_NAME}/${FEATURE_SET}"
                 mkdir -p "$FIG_DIR"
 
@@ -110,7 +110,7 @@ run_split_train_test() {
             for TARGET in "${TARGET_DIR[@]}"; do
 
                 # Skip if the prediction file already exists
-                if [ ! -f "${MODEL_PREDICTION_DIR}/${CELL_TYPE}_vs_${TARGET_NAME}_${FEATURE_SET}_xgb_pred.tsv" ]; then
+                if [ ! -f "${MODEL_PREDICTION_DIR}/${CELL_TYPE}_vs_${TARGET_NAME}_${FEATURE_SET}_xgb_pred.parquet" ]; then
                     # Check to make sure the target feature set dataframe file exists, otherwise skip
                     if [ -f "${TARGET}/${FEATURE_SET}.csv" ]; then
                         local TARGET_FILE="${TARGET}/${FEATURE_SET}.csv"
@@ -119,7 +119,7 @@ run_split_train_test() {
                             --output_dir "${MODEL_PREDICTION_DIR}" \
                             --model "$MODEL_FILE" \
                             --target "$TARGET_FILE" \
-                            --save_name "${CELL_TYPE}_vs_${TARGET_NAME}_${FEATURE_SET}_xgb_pred.tsv"
+                            --save_name "${CELL_TYPE}_vs_${TARGET_NAME}_${FEATURE_SET}_xgb_pred.parquet"
                         echo "        Done!"
                     else
                         echo "    Feature set ${FEATURE_SET}.csv does not exist for ${TARGET}"

@@ -186,7 +186,7 @@ def associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, rna_dat
     with ProcessPoolExecutor(
         max_workers=num_cpu,
         initializer=_init_worker,
-        initargs=(tf_df, background_freq, seqs_plus, seqs_minus)
+        initargs=(chr_pos_to_seq, tf_df, background_freq, seqs_plus, seqs_minus)
     ) as executor:
 
         futures = {

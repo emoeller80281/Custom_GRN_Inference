@@ -78,7 +78,7 @@ def main():
     merged_with_promoter_genes["peak_id"] = merged_with_promoter_genes["peak_id"].str.replace("-", ":", 1)
 
     # Write the final merged peaks to a csv file
-    logging.info("Writing Cicero DataFrame to: 'cicero_peak_to_tg_scores.csv'")
+    logging.info("Writing Cicero DataFrame to: 'cicero_peak_to_tg_scores.parquet'")
     merged_with_promoter_genes.to_parquet(f"{output_dir}/cicero_peak_to_tg_scores.parquet", engine="pyarrow", index=False, compression="snappy")
     
 if __name__ == "__main__":

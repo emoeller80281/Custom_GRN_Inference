@@ -14,7 +14,7 @@ set -euo pipefail
 STEP010_CICERO_MAP_PEAKS_TO_TG=false
 STEP015_CICERO_PEAK_TO_TG_SCORE=false
 
-STEP020_PEAK_TO_TG_CORRELATION=true
+STEP020_PEAK_TO_TG_CORRELATION=false
 # STEP030_PEAK_TO_ENHANCER_DB=false # Deprecated, does not help model and no data for mouse
 
 # Run the TF to peak binding score calculation methods
@@ -752,7 +752,19 @@ run_find_edges_in_string_db() {
 
     /usr/bin/time -v \
     python3 "$PYTHON_SCRIPT_DIR/Step070.find_edges_in_string_db.py" \
-        --inferred_net_file "$STRING_INPUT_FILE" \
+        --inferred_net_file "$INFERRED_GRN_DIR/inferred_network_raw.parquet" \
+        --string_dir "$STRING_DB_DIR" \
+        --output_dir "$INFERRED_GRN_DIR" \
+
+    /usr/bin/time -v \
+    python3 "$PYTHON_SCRIPT_DIR/Step070.find_edges_in_string_db.py" \
+        --inferred_net_file "$INFERRED_GRN_DIR/inferred_network_10pct.parquet" \
+        --string_dir "$STRING_DB_DIR" \
+        --output_dir "$INFERRED_GRN_DIR" \
+
+    /usr/bin/time -v \
+    python3 "$PYTHON_SCRIPT_DIR/Step070.find_edges_in_string_db.py" \
+        --inferred_net_file "$INFERRED_GRN_DIR/inferred_network_enrich_feat.parquet" \
         --string_dir "$STRING_DB_DIR" \
         --output_dir "$INFERRED_GRN_DIR" \
 

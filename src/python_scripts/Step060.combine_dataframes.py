@@ -148,6 +148,7 @@ def merge_score_dataframes_slow(peak_corr_df, cicero_df, sliding_window_df, home
 
 def merge_score_dataframes(peak_corr_df, cicero_df, sliding_window_df, homer_df, rna_df, atac_df):
     # Merge the correlation, cicero, sliding window, and homer dfs
+    logging.info("Combining correlation, Cicero, sliding window, and Homer Scores")
     merge1 = (
         peak_corr_df
         .merge(cicero_df, on=["peak_id", "target_id"], how="outer")
@@ -156,10 +157,13 @@ def merge_score_dataframes(peak_corr_df, cicero_df, sliding_window_df, homer_df,
     )
 
     # Merge on RNA & ATAC means
+    logging.info("Adding gene expression and peak accessibility")
+    logging.info("  - Calculating mean Gene Expression")
     rna_means = rna_df.pipe(
         lambda df: df.assign(mean_gene_expression=df.iloc[:,1:].mean(axis=1))
     ).loc[:, ["gene_id", "mean_gene_expression"]]
 
+    logging.info("  - Calculating mean peak accessibility")
     atac_means = atac_df.pipe(
         lambda df: df.assign(mean_peak_accessibility=df.iloc[:,1:].mean(axis=1))
     ).loc[:, ["peak_id", "mean_peak_accessibility"]]
@@ -186,16 +190,16 @@ def main():
     
     logging.info("Loading in the DataFrames")
     logging.info("\tCorrelation peak to TG DataFrame")
-    peak_corr_df = pd.read_parquet(f'{output_dir}/peak_to_gene_correlation.parquet', index=False)
+    peak_corr_df = pd.read_parquet(f'{output_dir}/peak_to_gene_correlation.parquet')
 
     logging.info("\tCicero peak to TG DataFrame")
-    cicero_df = pd.read_parquet(f'{output_dir}/cicero_peak_to_tg_scores.parquet', index=False)
+    cicero_df = pd.read_parquet(f'{output_dir}/cicero_peak_to_tg_scores.parquet')
 
     logging.info("\tSliding Window peak to TG DataFrame")
-    sliding_window_df = pd.read_parquet(f'{output_dir}/sliding_window_tf_to_peak_score.parquet', index=False)
+    sliding_window_df = pd.read_parquet(f'{output_dir}/sliding_window_tf_to_peak_score.parquet')
 
     logging.info("\tHomer TF to peak DataFrame")
-    homer_df = pd.read_parquet(f'{output_dir}/homer_tf_to_peak.parquet', index=False)
+    homer_df = pd.read_parquet(f'{output_dir}/homer_tf_to_peak.parquet')
 
     logging.info("\tRNAseq dataset")
     rna_df = pd.read_csv(rna_data_file, header=0)
@@ -233,10 +237,11 @@ def main():
     final_df = final_df.drop(columns=["num_cols_w_values"])
     
     # # ===== WRITE OUT THE FULL RAW DATAFRAME =====
-    logging.info("Writing a non-normalized 10% dataframe as 'inferred_network_non_normalized.csv'")
-    top_10_percent_df = final_df.head(int(len(final_df) * 0.10))    
-    write_csv_in_chunks(top_10_percent_df, output_dir, 'inferred_network_non_normalized.csv')
+    # logging.info("Writing a non-normalized 10% dataframe as 'inferred_network_non_normalized.csv'")
+    # top_10_percent_df = final_df.head(int(len(final_df) * 0.10))    
+    # write_csv_in_chunks(top_10_percent_df, output_dir, 'inferred_network_non_normalized.csv')
 
+    logging.info("\nNormalizing feature score columns")
     num_cols = final_df.select_dtypes("number").columns.difference([
         "cicero_score", "TSS_dist_score"  # skip list
     ])
@@ -302,11 +307,11 @@ def main():
         logging.info(f'\t\tNumber of {column} scores: {final_df[column].nunique(dropna=True)}')
         
     # Write the final df as a parquet file
-    final_df.to_parquet(f"{inferred_grn_dir}/inferred_network.parquet", index=False)
+    final_df.to_parquet(f"{inferred_grn_dir}/inferred_network.parquet", engine="pyarrow", index=False, compression="snappy")
 
     # if you need a 10% sample for testing:
     final_df.sample(frac=decimal_subsample).to_parquet(
-        f"{inferred_grn_dir}/inferred_network_{subsample}pct.parquet", index=False
+        f"{inferred_grn_dir}/inferred_network_{subsample}pct.parquet", engine="pyarrow", index=False, compression="snappy"
     )
         
     logging.info(f'\nSaving rows with no more than 2 missing feature scores')
@@ -315,7 +320,7 @@ def main():
     final_df_enriched_features = final_df[final_df.count(numeric_only=True, axis=1) >= feature_threshold]
     logging.info(f'\tNumber of rows with >= {feature_threshold}/{n_score_cols} feature columns {len(final_df)}')
     
-    final_df_enriched_features.to_parquet(f"{inferred_grn_dir}/inferred_network_enrich_feat.parquet")
+    final_df_enriched_features.to_parquet(f"{inferred_grn_dir}/inferred_network_enrich_feat.parquet", engine="pyarrow", index=False, compression="snappy")
     
     logging.info("Done!")
 
