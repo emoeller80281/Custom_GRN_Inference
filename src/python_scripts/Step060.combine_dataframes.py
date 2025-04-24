@@ -5,6 +5,8 @@ import matplotlib.pyplot as plt
 import argparse
 import logging
 import os
+import dask.dataframe as dd
+
 from tqdm import tqdm
 
 def parse_args() -> argparse.Namespace:
@@ -102,92 +104,7 @@ def write_csv_in_chunks(df, output_dir, filename):
             # For subsequent chunks, append without header
             chunk.to_csv(output_file, mode='a', header=False, index=False)
 
-def merge_score_dataframes_slow(peak_corr_df, cicero_df, sliding_window_df, homer_df, rna_df, atac_df):
-    logging.info("\tCombining the sliding window and Homer TF to peak binding scores")
-    tf_to_peak_df = pd.merge(sliding_window_df, homer_df, on=["peak_id", "source_id"], how="outer")
-    logging.debug("tf_to_peak_df")
-    logging.debug(tf_to_peak_df.head())
-    logging.debug(tf_to_peak_df.columns)
-    logging.debug("\n---------------------------\n")
-
-    logging.info("\t - Adding mean RNA expression to the TF to peak binding DataFrame")
-    tf_expr_to_peak_df = pd.merge(rna_df, tf_to_peak_df, left_on="gene_id", right_on="source_id", how="outer").drop("gene_id", axis=1)
-    tf_expr_to_peak_df = tf_expr_to_peak_df.rename(columns={"mean_gene_expression": "mean_TF_expression"})
-    logging.debug("tf_expr_to_peak_df")
-    logging.debug(tf_expr_to_peak_df.head())
-    logging.debug(tf_expr_to_peak_df.columns)
-    logging.debug("\n---------------------------\n")
-
-    logging.info("\tMerging the correlation and cicero methods for peak to target gene")
-    peak_to_tg_df = pd.merge(peak_corr_df, cicero_df, on=["peak_id", "target_id"], how="outer")
-    logging.debug("peak_to_tg_df")
-    logging.debug(peak_to_tg_df.head())
-    logging.debug(peak_to_tg_df.columns)
-    logging.debug("\n---------------------------\n")
-
-    logging.info("\t - Adding mean RNA expression to the peak to TF DataFrame")
-    peak_to_tg_expr_df = pd.merge(rna_df, peak_to_tg_df, left_on="gene_id", right_on="target_id", how="left").drop("gene_id", axis=1)
-    peak_to_tg_expr_df = peak_to_tg_expr_df.rename(columns={"mean_gene_expression": "mean_TG_expression"})
-    logging.debug("peak_to_tg_expr_df")
-    logging.debug(peak_to_tg_expr_df.head())
-    logging.debug(peak_to_tg_expr_df.columns)
-    logging.debug("\n---------------------------\n")
-
-    logging.info("\tMerging the peak to target gene scores with the sliding window TF to peak scores")
-    # For the sliding window genes, change their name to "source_id" to represent that these genes are TFs
-    tf_to_tg_score_df = pd.merge(tf_expr_to_peak_df, peak_to_tg_expr_df, on=["peak_id"], how="outer")
-    logging.debug("tf_to_tg_score_df")
-    logging.debug(tf_to_tg_score_df.head())
-    logging.debug(tf_to_tg_score_df.columns)
-    logging.debug("\n---------------------------\n")
-
-    logging.info("\t - Adding the mean ATAC-seq peak accessibility values")
-    final_df = pd.merge(atac_df, tf_to_tg_score_df, on="peak_id", how="left")
-    
-    return final_df
-
-def merge_score_dataframes(peak_corr_df, cicero_df, sliding_window_df, homer_df, rna_df, atac_df):
-    # Merge the correlation, cicero, sliding window, and homer dfs
-    logging.info("Combining correlation, Cicero, sliding window, and Homer Scores")
-    merge1 = (
-        peak_corr_df
-        .merge(cicero_df, on=["peak_id", "target_id"], how="outer")
-        .merge(sliding_window_df, on="peak_id", how="outer")
-        .merge(homer_df, on="peak_id", how="outer")
-    )
-
-    # Merge on RNA & ATAC means
-    logging.info("Adding gene expression and peak accessibility")
-    logging.info("  - Calculating mean Gene Expression")
-    rna_means = rna_df.pipe(
-        lambda df: df.assign(mean_gene_expression=df.iloc[:,1:].mean(axis=1))
-    ).loc[:, ["gene_id", "mean_gene_expression"]]
-
-    logging.info("  - Calculating mean peak accessibility")
-    atac_means = atac_df.pipe(
-        lambda df: df.assign(mean_peak_accessibility=df.iloc[:,1:].mean(axis=1))
-    ).loc[:, ["peak_id", "mean_peak_accessibility"]]
-
-    final_df = (
-        merge1
-        .merge(rna_means,  left_on="target_id", right_on="gene_id", how="left")
-        .merge(atac_means, on="peak_id", how="left")
-    )
-    
-    return final_df
-
-def main():
-    # Parse command-line arguments
-    args: argparse.Namespace = parse_args()
-    atac_data_file: str = args.atac_data_file
-    rna_data_file: str = args.rna_data_file
-    output_dir: str = args.output_dir
-    inferred_grn_dir: str = args.inferred_grn_dir
-    fig_dir: str = args.fig_dir
-    subsample: str = args.subsample
-    
-    subsample = float(subsample)
-    
+def merge_score_dataframes_slow(output_dir, rna_data_file, atac_data_file):
     logging.info("Loading in the DataFrames")
     logging.info("\tCorrelation peak to TG DataFrame")
     peak_corr_df = pd.read_parquet(f'{output_dir}/peak_to_gene_correlation.parquet')
@@ -212,9 +129,156 @@ def main():
     atac_df = atac_df[['peak_id', 'mean_peak_accessibility']]
     logging.debug("Done!")
     logging.debug("\n---------------------------\n")
+    
+    logging.info("\nCombining the sliding window and Homer TF to peak binding scores")
+    tf_to_peak_df = pd.merge(sliding_window_df, homer_df, on=["peak_id", "source_id"], how="outer")
+    logging.info(f"    • tf_to_peak_df shape: {tf_to_peak_df.shape}")
+
+    logging.info(" - Adding mean RNA expression to the TF to peak binding DataFrame")
+    tf_expr_to_peak_df = pd.merge(rna_df, tf_to_peak_df, left_on="gene_id", right_on="source_id", how="right").drop("gene_id", axis=1)
+    tf_expr_to_peak_df = tf_expr_to_peak_df.rename(columns={"mean_gene_expression": "mean_TF_expression"})
+    logging.info(f"    • tf_expr_to_peak_df shape: {tf_expr_to_peak_df.shape}")
+
+    logging.info("\nMerging the correlation and cicero methods for peak to target gene")
+    peak_to_tg_df = pd.merge(peak_corr_df, cicero_df, on=["peak_id", "target_id"], how="outer")
+    logging.info(f"    • peak_to_tg_df shape: {peak_to_tg_df.shape}")
+
+    logging.info(" - Adding mean RNA expression to the peak to TF DataFrame")
+    peak_to_tg_expr_df = pd.merge(rna_df, peak_to_tg_df, left_on="gene_id", right_on="target_id", how="right").drop("gene_id", axis=1)
+    peak_to_tg_expr_df = peak_to_tg_expr_df.rename(columns={"mean_gene_expression": "mean_TG_expression"})
+    logging.info(f"    • peak_to_tg_expr_df shape: {peak_to_tg_expr_df.shape}")
+
+    logging.info("\nMerging the peak to target gene scores with the sliding window TF to peak scores")
+    # For the sliding window genes, change their name to "source_id" to represent that these genes are TFs
+    tf_to_tg_score_df = pd.merge(tf_expr_to_peak_df, peak_to_tg_expr_df, on=["peak_id"], how="outer")
+    logging.info(f"    • tf_to_tg_score_df shape: {tf_to_tg_score_df.shape}")
+
+    logging.info(" - Adding the mean ATAC-seq peak accessibility values")
+    final_df = pd.merge(atac_df, tf_to_tg_score_df, on="peak_id", how="left")
+    
+    return final_df
+
+def merge_score_dataframes_dask(output_dir: str,
+                                rna_data_file: str,
+                                atac_data_file: str) -> pd.DataFrame:
+    logging.info("=== Starting Dask merge_score_dataframes ===")
+
+    # 1) Read the big Parquet tables
+    logging.info("1/8: Loading sliding_window_df and homer_df as Dask")
+    sliding_window_dd = dd.read_parquet(f"{output_dir}/sliding_window_tf_to_peak_score.parquet")
+    homer_dd          = dd.read_parquet(f"{output_dir}/homer_tf_to_peak.parquet")
+    logging.info(f"    • sliding_window_dd partitions={sliding_window_dd.npartitions}, columns={list(sliding_window_dd.columns)}")
+    logging.info(f"    • homer_dd          partitions={homer_dd.npartitions}, columns={list(homer_dd.columns)}")
+
+    logging.info("2/8: Loading peak_corr_df and cicero_df as Dask")
+    peak_corr_dd = dd.read_parquet(f"{output_dir}/peak_to_gene_correlation.parquet")
+    cicero_dd    = dd.read_parquet(f"{output_dir}/cicero_peak_to_tg_scores.parquet")
+    logging.info(f"    • peak_corr_dd partitions={peak_corr_dd.npartitions}, columns={list(peak_corr_dd.columns)}")
+    logging.info(f"    • cicero_dd    partitions={cicero_dd.npartitions}, columns={list(cicero_dd.columns)}")
+
+    # 2) tf_to_peak_df = merge sliding_window_dd & homer_dd on ["peak_id","source_id"]
+    logging.info("3/8: Combining the sliding window and Homer TF→peak scores")
+    tf_to_peak_dd = sliding_window_dd.merge(
+        homer_dd,
+        on=["peak_id", "source_id"],
+        how="outer"
+    )
+    logging.info(f"    • tf_to_peak_dd shape ~ {tf_to_peak_dd.shape} (lazy)")
+
+    # 3) Read RNA CSV, compute mean_TF_expression, convert to Dask
+    logging.info("4/8: Adding mean RNA expression for TF (mean_TF_expression)")
+    rna_df = pd.read_csv(rna_data_file)
+    rna_df["mean_TF_expression"] = rna_df.select_dtypes("number").mean(axis=1)
+    dd_rna_tf = dd.from_pandas(
+        rna_df[["gene_id", "mean_TF_expression"]]
+           .set_index("gene_id"),
+        npartitions=1
+    )
+    logging.info(f"    • dd_rna_tf shape={rna_df.shape}")
+
+    # tf_expr_to_peak_df = merge dd_rna_tf & tf_to_peak_dd
+    tf_expr_to_peak_dd = tf_to_peak_dd.merge(
+        dd_rna_tf,
+        left_on="source_id",
+        right_index=True,
+        how="right"
+    )
+    logging.info(f"    • tf_expr_to_peak_dd cols={list(tf_expr_to_peak_dd.columns)}")
+
+    # 4) peak_to_tg_df = merge peak_corr_dd & cicero_dd on ["peak_id","target_id"]
+    logging.info("5/8: Merging the correlation and Cicero methods for peak→target gene")
+    peak_to_tg_dd = peak_corr_dd.merge(
+        cicero_dd,
+        on=["peak_id", "target_id"],
+        how="outer"
+    )
+    logging.info(f"    • peak_to_tg_dd partitions={peak_to_tg_dd.npartitions}, cols={list(peak_to_tg_dd.columns)}")
+
+    # 5) Read RNA CSV again for mean_TG_expression, convert to Dask
+    logging.info("6/8: Adding mean RNA expression for TG (mean_TG_expression)")
+    # we already have rna_df; reuse it
+    rna_df = rna_df.drop(columns=["mean_TF_expression"])
+    rna_df["mean_TG_expression"] = rna_df.select_dtypes("number").mean(axis=1)
+    dd_rna_tg = dd.from_pandas(
+        rna_df[["gene_id", "mean_TG_expression"]]
+           .set_index("gene_id"),
+        npartitions=1
+    )
+    peak_to_tg_expr_dd = peak_to_tg_dd.merge(
+        dd_rna_tg,
+        left_on="target_id",
+        right_index=True,
+        how="right"
+    )
+    logging.info(f"    • peak_to_tg_expr_dd cols={list(peak_to_tg_expr_dd.columns)}")
+
+    # 6) tf_to_tg_score_df = merge tf_expr_to_peak_dd & peak_to_tg_expr_dd on ["peak_id"]
+    logging.info("7/8: Merging TF→peak and peak→TG into tf_to_tg_score_dd")
+    tf_to_tg_score_dd = tf_expr_to_peak_dd.merge(
+        peak_to_tg_expr_dd,
+        on=["peak_id"],
+        how="outer"
+    )
+    logging.info(f"    • tf_to_tg_score_dd cols={list(tf_to_tg_score_dd.columns)}")
+
+    # 7) Read ATAC CSV, compute mean_peak_accessibility, convert to Dask
+    logging.info("8/8: Adding mean ATAC‐seq peak accessibility")
+    atac_df = pd.read_csv(atac_data_file)
+    atac_df["mean_peak_accessibility"] = atac_df.iloc[:, 1:].mean(axis=1)
+    dd_atac = dd.from_pandas(
+        atac_df[["peak_id", "mean_peak_accessibility"]]
+           .set_index("peak_id"),
+        npartitions=1
+    )
+    final_dd = tf_to_tg_score_dd.merge(
+        dd_atac,
+        left_on="peak_id",
+        right_index=True,
+        how="left"
+    )
+    logging.info(f"    • final_dd cols={list(final_dd.columns)}")
+
+    # 8) Materialize the result
+    logging.info("Pulling final DataFrame into memory with .compute()")
+    final_df = final_dd.compute()
+    logging.info(f"✅ Finished: final_df.shape = {final_df.shape}")
+
+    return final_df
+
+def main():
+    # Parse command-line arguments
+    args: argparse.Namespace = parse_args()
+    atac_data_file: str = args.atac_data_file
+    rna_data_file: str = args.rna_data_file
+    output_dir: str = args.output_dir
+    inferred_grn_dir: str = args.inferred_grn_dir
+    fig_dir: str = args.fig_dir
+    subsample: str = args.subsample
+    
+    subsample = float(subsample)
 
     logging.info("\n ============== Merging DataFrames ==============")
-    final_df = merge_score_dataframes(peak_corr_df, cicero_df, sliding_window_df, homer_df, rna_df, atac_df)
+    final_df = merge_score_dataframes_dask(output_dir, rna_data_file, atac_data_file)
     logging.info(final_df.head())
     logging.info(final_df.shape)
     
@@ -309,9 +373,9 @@ def main():
     # Write the final df as a parquet file
     final_df.to_parquet(f"{inferred_grn_dir}/inferred_network.parquet", engine="pyarrow", index=False, compression="snappy")
 
-    # if you need a 10% sample for testing:
+    # Sample for testing:
     final_df.sample(frac=decimal_subsample).to_parquet(
-        f"{inferred_grn_dir}/inferred_network_{subsample}pct.parquet", engine="pyarrow", index=False, compression="snappy"
+        f"{inferred_grn_dir}/inferred_network_{subsample:.0f}pct.parquet", engine="pyarrow", index=False, compression="snappy"
     )
         
     logging.info(f'\nSaving rows with no more than 2 missing feature scores')

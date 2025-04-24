@@ -4,6 +4,7 @@ import os
 import numpy as np
 from tqdm import tqdm
 import math
+import sys
 import logging
 
 def parse_args() -> argparse.Namespace:
@@ -61,15 +62,30 @@ def minmax_normalize_column(column: pd.DataFrame):
 
 def main():
     logging.info("----- READING STRING DATABASE FILES -----")
+
+
+    logging.info("\nReading inferred network file")
+    inferred_net_df = pd.read_parquet(INFERRED_NET_FILE)
+    logging.info("\tDone!")
+    
+    string_cols = {
+    "string_experimental_score",
+    "string_textmining_score",
+    "string_combined_score",
+    }
+    present = string_cols.intersection(inferred_net_df.columns)
+
+    if present:
+        logging.info(
+            f"Found existing STRING columns {sorted(present)}, skipping STRING lookup."
+        )
+        sys.exit(0)
+    
     logging.info("\tProtein Info DataFrame")
     protein_info_df = pd.read_csv(f'{STRING_DIR}/protein_info.txt', sep="\t", header=0)
 
     logging.info("\tProtein Links DataFrame")
     protein_links_df = pd.read_csv(f'{STRING_DIR}/protein_links_detailed.txt', sep=" ", header=0)
-
-    logging.info("\nReading inferred network file")
-    inferred_net_df = pd.read_parquet(INFERRED_NET_FILE)
-    logging.info("\tDone!")
 
     # Find the common name for the proteins in protein_links_df using the ID to name mapping in protein_info_df
     logging.info("Converting STRING protein IDs to protein name")
@@ -98,14 +114,27 @@ def main():
     cols_to_normalize = ["string_experimental_score", "string_textmining_score", "string_combined_score"]
     inferred_edges_in_string_df[cols_to_normalize] = inferred_edges_in_string_df[cols_to_normalize].apply(lambda x: minmax_normalize_column(x), axis=0)
     
-    logging.info(f'\nInferred edges in string:')
-    num_common_edges = len(inferred_edges_in_string_df.dropna(subset=["string_combined_score"]))
-    logging.info(f'\t{num_common_edges:,} common edges / {len(inferred_edges_in_string_df[["source_id", "target_id"]].drop_duplicates())} total edges ({round(num_common_edges/len(inferred_edges_in_string_df)*100,2)}%)')
+    num_common_edges = (
+        inferred_edges_in_string_df
+        .dropna(subset=["string_combined_score"])
+        .shape[0]
+    )
+    num_total_edges = (
+        inferred_edges_in_string_df[["source_id","target_id"]]
+        .drop_duplicates()
+        .shape[0]
+    )
+    pct = num_common_edges / len(inferred_edges_in_string_df) * 100
 
+    # now the f-string is trivially correct
+    logging.info(
+        f"\t{num_common_edges} common edges / {num_total_edges} total edges "
+        f"({pct:.2f}%)"
+    )
     logging.info('\nInferred network with STRING edge scores:')
     logging.info(inferred_edges_in_string_df.head())
     
-    inferred_edges_in_string_df.to_parquet(f'{OUTPUT_DIR}/{INFERRED_NET_FILE}', engine="pyarrow", index=False, compression="snappy")
+    inferred_edges_in_string_df.to_parquet(INFERRED_NET_FILE, engine="pyarrow", index=False, compression="snappy")
     
     # write_csv_in_chunks(inferred_edges_in_string_df, OUTPUT_DIR, "inferred_network_w_string.csv")
     logging.info('\tDone!')

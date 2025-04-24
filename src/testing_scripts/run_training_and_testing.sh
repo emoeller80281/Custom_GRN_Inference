@@ -31,14 +31,17 @@ run_split_train_test() {
     local CELL_TYPE="$1"
     local GROUND_TRUTH_FILE="$2"
     local TARGET_NAME="$3"
+    local SPECIES="$4"
 
     # The next two parameters are the names of the arrays
-    local SAMPLE_NAMES_ARRAY_NAME="$4"
-    local TARGET_DIR_ARRAY_NAME="$5"
+    local SAMPLE_NAMES_ARRAY_NAME="$5"
+    local TARGET_DIR_ARRAY_NAME="$6"
 
     # Create namerefs for the arrays to pass in the entire list of targets and samples
     declare -n SAMPLE_NAMES="$SAMPLE_NAMES_ARRAY_NAME"
     declare -n TARGET_DIR="$TARGET_DIR_ARRAY_NAME"
+
+    local STRING_DB_DIR="$BASE_DIR"/string_database/$SPECIES/
 
     # Run for each selected sample
     for SAMPLE_NAME in "${SAMPLE_NAMES[@]}"; do
@@ -56,24 +59,24 @@ run_split_train_test() {
         mkdir -p "${MODEL_PREDICTION_DIR}"
         mkdir -p "${LOG_DIR}"
 
-        # Check to see if any of the feature set data file exists 
-        local FEATURE_SET_FILES_EXIST=true
-        for FEATURE_SET in "${FEATURE_SET_NAMES[@]}"; do
-            if [ ! -f "${INFERRED_GRN_DIR}/${FEATURE_SET}.parquet" ]; then
-                FEATURE_SET_FILES_EXIST=false
-            fi
-        done
+        # # Check to see if any of the feature set data file exists 
+        # local FEATURE_SET_FILES_EXIST=true
+        # for FEATURE_SET in "${FEATURE_SET_NAMES[@]}"; do
+        #     if [ ! -f "${INFERRED_GRN_DIR}/${FEATURE_SET}.parquet" ]; then
+        #         FEATURE_SET_FILES_EXIST=false
+        #     fi
+        # done
 
         # Run feature set splitting for the sample if any of the feature files don't exist
-        if [ "$FEATURE_SET_FILES_EXIST" = false ]; then
-            echo "    Python: Splitting features for sample ${SAMPLE_NAME}"
-            python3 "${BASE_DIR}/src/testing_scripts/split_features_for_testing.py" \
-                --inferred_grn_dir "${INFERRED_GRN_DIR}"
-            echo "        Done!"
+        # if [ "$FEATURE_SET_FILES_EXIST" = false ]; then
+        python3 "$PYTHON_SCRIPT_DIR/Step070.find_edges_in_string_db.py" \
+            --inferred_net_file "$FEATURE_SET" \
+            --string_dir "$STRING_DB_DIR" \
+            --output_dir "$INFERRED_GRN_DIR" \
 
-        else
-            echo "    All feature files already exist for ${SAMPLE_NAME}, skipping..."
-        fi
+        # else
+        #     echo "    All feature files already exist for ${SAMPLE_NAME}, skipping..."
+        # fi
 
         echo ""
         echo "===== XGBOOST MODEL TRAINING FOR ${CELL_TYPE} - Sample: ${SAMPLE_NAME} ====="
@@ -112,17 +115,17 @@ run_split_train_test() {
                 # Skip if the prediction file already exists
                 if [ ! -f "${MODEL_PREDICTION_DIR}/${CELL_TYPE}_vs_${TARGET_NAME}_${FEATURE_SET}_xgb_pred.parquet" ]; then
                     # Check to make sure the target feature set dataframe file exists, otherwise skip
-                    if [ -f "${TARGET}/${FEATURE_SET}.csv" ]; then
-                        local TARGET_FILE="${TARGET}/${FEATURE_SET}.csv"
+                    if [ -f "${TARGET}/${FEATURE_SET}.parquet" ]; then
+                        local TARGET_FILE="${TARGET}/${FEATURE_SET}.parquet"
                         echo "    Python: Applying trained XGBoost classifier for ${FEATURE_SET} to target: ${TARGET_NAME}"
                         python3 "$BASE_DIR/src/python_scripts/Step090.apply_trained_xgboost.py" \
                             --output_dir "${MODEL_PREDICTION_DIR}" \
                             --model "$MODEL_FILE" \
                             --target "$TARGET_FILE" \
-                            --save_name "${CELL_TYPE}_vs_${TARGET_NAME}_${FEATURE_SET}_xgb_pred.parquet"
+                            --save_name "${CELL_TYPE}_vs_${TARGET_NAME}_${FEATURE_SET}_xgb_pred.tsv"
                         echo "        Done!"
                     else
-                        echo "    Feature set ${FEATURE_SET}.csv does not exist for ${TARGET}"
+                        echo "    Feature set ${FEATURE_SET}.parquet does not exist for ${TARGET}"
                     fi
 
                 else
@@ -147,8 +150,10 @@ MESC_INFERRED_NET_DIR="$BASE_DIR/output/mESC/filtered_L2_E7.5_rep1/inferred_grns
 
 # Core names of the different feature files to build off of
 FEATURE_SET_NAMES=( \
-    "inferred_network_raw" \
-    "inferred_network_w_string" \
+    "inferred_network" \
+    "inferred_network_50.0pct" \
+    "inferred_network_enrich_feat" \
+    # "inferred_network_w_string" \
     # "inferred_network_string_scores_only" \
     # "inferred_network_w_string_no_tf"
 )
@@ -164,17 +169,27 @@ TARGET_DIR_MACROPHAGE=( "$MACROPHAGE_INFERRED_NET_DIR" )
 TARGET_NAME_MACROPHAGE="macrophage"
 GROUND_TRUTH_FILE_MACROPHAGE="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/REFERENCE_NETWORKS/RN204_ChIPSeq_ChIPAtlas_Human_Macrophages.tsv"
 
-SAMPLE_NAMES_MESC=( "filtered_L2_E7.5_rep1" )
-TARGET_DIR_MESC=( "$MACROPHAGE_INFERRED_NET_DIR" )
-TARGET_NAME_MESC="macrophage"
+SAMPLE_NAMES_MESC=( \
+        # "filtered_L2_E7.5_rep1"
+        # "filtered_L2_E7.5_rep2"
+        # "filtered_L2_E7.75_rep1"
+        # "filtered_L2_E8.0_rep1"
+        # "filtered_L2_E8.0_rep2"
+        "filtered_L2_E8.5_rep1"
+        # "filtered_L2_E8.5_rep2"
+        # "filtered_L2_E8.75_rep1"
+        # "filtered_L2_E8.75_rep2"
+    )
+TARGET_DIR_MESC=( "$MESC_INFERRED_NET_DIR" )
+TARGET_NAME_MESC="mESC"
 GROUND_TRUTH_FILE_MESC="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/REFERENCE_NETWORKS/RN111_ChIPSeq_BEELINE_Mouse_ESC.tsv"
 
 
 # # Run for K562
-# run_split_train_test "K562" "$GROUND_TRUTH_FILE_K562" "$TARGET_NAME_K562" SAMPLE_NAMES_K562 TARGET_DIR_K562
+# run_split_train_test "K562" "$GROUND_TRUTH_FILE_K562" "$TARGET_NAME_K562" "hg38" SAMPLE_NAMES_K562 TARGET_DIR_K562 hg38
 
 # # Run for macrophage
-# run_split_train_test "macrophage" "$GROUND_TRUTH_FILE_MACROPHAGE" "$TARGET_NAME_MACROPHAGE" SAMPLE_NAMES_MACROPHAGE TARGET_DIR_MACROPHAGE
+# run_split_train_test "macrophage" "$GROUND_TRUTH_FILE_MACROPHAGE" "$TARGET_NAME_MACROPHAGE" "hg38" SAMPLE_NAMES_MACROPHAGE TARGET_DIR_MACROPHAGE 
 
 # # Run for mESC
-run_split_train_test "mESC" "$GROUND_TRUTH_FILE_MESC" "$TARGET_NAME_MESC" SAMPLE_NAMES_MESC TARGET_DIR_MESC
+run_split_train_test "mESC" "$GROUND_TRUTH_FILE_MESC" "$TARGET_NAME_MESC" "mm10" SAMPLE_NAMES_MESC TARGET_DIR_MESC 

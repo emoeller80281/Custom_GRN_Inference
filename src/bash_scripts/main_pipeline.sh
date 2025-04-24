@@ -12,24 +12,24 @@ set -euo pipefail
 # =============================================
 # Run the peak to TG regulatory potential calculation methods
 STEP010_CICERO_MAP_PEAKS_TO_TG=false
-STEP015_CICERO_PEAK_TO_TG_SCORE=false
+STEP015_CICERO_PEAK_TO_TG_SCORE=true
 
-STEP020_PEAK_TO_TG_CORRELATION=false
+STEP020_PEAK_TO_TG_CORRELATION=true
 # STEP030_PEAK_TO_ENHANCER_DB=false # Deprecated, does not help model and no data for mouse
 
 # Run the TF to peak binding score calculation methods
 STEP040_SLIDING_WINDOW_TF_TO_PEAK_SCORE=true
-STEP050_HOMER_TF_TO_PEAK_SCORE=false
+STEP050_HOMER_TF_TO_PEAK_SCORE=true
 
 # Combine the score DataFrames
 STEP060_COMBINE_DATAFRAMES=true
 SUBSAMPLE_PERCENT=50 # Percent of rows of the combined dataframe to subsample
 
 # Find shared edges between the inferred network and the STRING PPI database
-STEP070_FIND_EDGES_IN_STRING_DB=false
+STEP070_FIND_EDGES_IN_STRING_DB=true
 
 # Train a predictive model to infer the GRN
-STEP080_TRAIN_XGBOOST_CLASSIFIER=false
+STEP080_TRAIN_XGBOOST_CLASSIFIER=true
 
 # =============================================
 #              USER PATH VARIABLES
@@ -52,11 +52,8 @@ REFERENCE_GENOME_DIR="$BASE_DIR/reference_genome/$SPECIES"
 INFERRED_GRN_DIR="$OUTPUT_DIR/inferred_grns"
 TRAINED_MODEL_DIR="$OUTPUT_DIR/trained_models"
 
-# Name of the inferred network file created from Step060.combine_dataframes.py
-STRING_INPUT_FILE="$INFERRED_GRN_DIR/inferred_network_raw.csv"
-
 # Name of the inferrred network file with STRING PPI interaction columns
-INFERRED_NET_FILE="$INFERRED_GRN_DIR/inferred_network_w_string.csv"
+INFERRED_NET_FILE="$INFERRED_GRN_DIR/inferred_network.csv"
 
 # ----- Resource / Database files -----
 STRING_DB_DIR="$BASE_DIR"/string_database/$SPECIES/
@@ -752,19 +749,7 @@ run_find_edges_in_string_db() {
 
     /usr/bin/time -v \
     python3 "$PYTHON_SCRIPT_DIR/Step070.find_edges_in_string_db.py" \
-        --inferred_net_file "$INFERRED_GRN_DIR/inferred_network_raw.parquet" \
-        --string_dir "$STRING_DB_DIR" \
-        --output_dir "$INFERRED_GRN_DIR" \
-
-    /usr/bin/time -v \
-    python3 "$PYTHON_SCRIPT_DIR/Step070.find_edges_in_string_db.py" \
-        --inferred_net_file "$INFERRED_GRN_DIR/inferred_network_10pct.parquet" \
-        --string_dir "$STRING_DB_DIR" \
-        --output_dir "$INFERRED_GRN_DIR" \
-
-    /usr/bin/time -v \
-    python3 "$PYTHON_SCRIPT_DIR/Step070.find_edges_in_string_db.py" \
-        --inferred_net_file "$INFERRED_GRN_DIR/inferred_network_enrich_feat.parquet" \
+        --inferred_net_file "$INFERRED_NET_FILE" \
         --string_dir "$STRING_DB_DIR" \
         --output_dir "$INFERRED_GRN_DIR" \
 
@@ -779,7 +764,8 @@ run_classifier_training() {
         --inferred_network_file "$INFERRED_NET_FILE" \
         --trained_model_dir "$TRAINED_MODEL_DIR" \
         --fig_dir "$FIG_DIR" \
-        --model_save_name "xgb_trained_model"
+        --model_save_name "xgb_full_network_model"
+
 
 } 2> "$LOG_DIR/Step080.train_xgboost.log"
 

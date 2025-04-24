@@ -85,7 +85,7 @@ def main():
     
     logging.info("Saving inferred GRN")
     output_file = os.path.join(output_dir, save_name)
-    inferred_network.to_parquet(output_file, engine="pyarrow", index=False, compression="snappy")
+    inferred_network.to_csv(output_file, sep="\t", header=True, index=False)
     logging.info("    Done!\n")
     
 if __name__ == "__main__":
