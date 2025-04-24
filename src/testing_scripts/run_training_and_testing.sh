@@ -46,7 +46,7 @@ run_split_train_test() {
     # Run for each selected sample
     for SAMPLE_NAME in "${SAMPLE_NAMES[@]}"; do
         echo ""
-        echo "===== FEATURE SPLITTING FOR ${CELL_TYPE} - Sample: ${SAMPLE_NAME} ====="
+        echo "===== ADDING STRING SCORES FOR ${CELL_TYPE} - Sample: ${SAMPLE_NAME} ====="
 
         # Set the output and log directory for the sample
         local OUTPUT_DIR="$BASE_DIR/output/${CELL_TYPE}/${SAMPLE_NAME}"
@@ -61,22 +61,24 @@ run_split_train_test() {
 
         # # Check to see if any of the feature set data file exists 
         # local FEATURE_SET_FILES_EXIST=true
-        # for FEATURE_SET in "${FEATURE_SET_NAMES[@]}"; do
-        #     if [ ! -f "${INFERRED_GRN_DIR}/${FEATURE_SET}.parquet" ]; then
-        #         FEATURE_SET_FILES_EXIST=false
-        #     fi
-        # done
+        for FEATURE_SET in "${FEATURE_SET_NAMES[@]}"; do
+            echo ""
+            echo "===== ${CELL_TYPE} — Sample ${SAMPLE_NAME} — Feature set: ${FEATURE_SET} ====="
 
-        # Run feature set splitting for the sample if any of the feature files don't exist
-        # if [ "$FEATURE_SET_FILES_EXIST" = false ]; then
-        python3 "$PYTHON_SCRIPT_DIR/Step070.find_edges_in_string_db.py" \
-            --inferred_net_file "$FEATURE_SET" \
-            --string_dir "$STRING_DB_DIR" \
-            --output_dir "$INFERRED_GRN_DIR" \
+            # prefer the “_w_string.parquet” if it exists
+            if [[ -f "${INFERRED_GRN_DIR}/${FEATURE_SET}_w_string.parquet" ]]; then
+                FEATURE_FILE="${INFERRED_GRN_DIR}/${FEATURE_SET}_w_string.parquet"
+                echo "    Found string-augmented file: ${FEATURE_SET}_w_string.parquet"
+            else
+                FEATURE_FILE="${INFERRED_GRN_DIR}/${FEATURE_SET}.parquet"
+                echo "    Using original file: ${FEATURE_SET}.parquet"
 
-        # else
-        #     echo "    All feature files already exist for ${SAMPLE_NAME}, skipping..."
-        # fi
+                python3 "$PYTHON_SCRIPT_DIR/Step070.find_edges_in_string_db.py" \
+                    --inferred_net_file "$FEATURE_FILE" \
+                    --string_dir       "$STRING_DB_DIR" \
+                    --output_dir       "$INFERRED_GRN_DIR"
+            fi
+        done
 
         echo ""
         echo "===== XGBOOST MODEL TRAINING FOR ${CELL_TYPE} - Sample: ${SAMPLE_NAME} ====="
@@ -84,7 +86,7 @@ run_split_train_test() {
 
             # Train the XGBoost classifier for the current feature set if a trained model doesn't exist
             if [ ! -f "${TRAINED_MODEL_DIR}/xgb_${FEATURE_SET}_model.pkl" ]; then
-                local FEATURE_FILE="${INFERRED_GRN_DIR}/${FEATURE_SET}.parquet"
+                local FEATURE_FILE="${INFERRED_GRN_DIR}/${FEATURE_SET}_w_string.parquet"
                 local FIG_DIR="${BASE_DIR}/figures/hg38/${SAMPLE_NAME}/${FEATURE_SET}"
                 mkdir -p "$FIG_DIR"
 
@@ -115,8 +117,8 @@ run_split_train_test() {
                 # Skip if the prediction file already exists
                 if [ ! -f "${MODEL_PREDICTION_DIR}/${CELL_TYPE}_vs_${TARGET_NAME}_${FEATURE_SET}_xgb_pred.parquet" ]; then
                     # Check to make sure the target feature set dataframe file exists, otherwise skip
-                    if [ -f "${TARGET}/${FEATURE_SET}.parquet" ]; then
-                        local TARGET_FILE="${TARGET}/${FEATURE_SET}.parquet"
+                    if [ -f "${TARGET}/${FEATURE_SET}_w_string.parquet" ]; then
+                        local TARGET_FILE="${TARGET}/${FEATURE_SET}_w_string.parquet"
                         echo "    Python: Applying trained XGBoost classifier for ${FEATURE_SET} to target: ${TARGET_NAME}"
                         python3 "$BASE_DIR/src/python_scripts/Step090.apply_trained_xgboost.py" \
                             --output_dir "${MODEL_PREDICTION_DIR}" \
@@ -125,7 +127,7 @@ run_split_train_test() {
                             --save_name "${CELL_TYPE}_vs_${TARGET_NAME}_${FEATURE_SET}_xgb_pred.tsv"
                         echo "        Done!"
                     else
-                        echo "    Feature set ${FEATURE_SET}.parquet does not exist for ${TARGET}"
+                        echo "    Feature set ${FEATURE_SET}_w_string.parquet does not exist for ${TARGET}"
                     fi
 
                 else
@@ -146,16 +148,13 @@ PYTHON_SCRIPT_DIR="$BASE_DIR/src/python_scripts"
 
 K562_INFERRED_NET_DIR="$BASE_DIR/output/K562/K562_human_filtered/inferred_grns"
 MACROPHAGE_INFERRED_NET_DIR="$BASE_DIR/output/macrophage/macrophage_buffer1_filtered/inferred_grns"
-MESC_INFERRED_NET_DIR="$BASE_DIR/output/mESC/filtered_L2_E7.5_rep1/inferred_grns"
+MESC_INFERRED_NET_DIR="$BASE_DIR/output/mESC/filtered_L2_E8.5_rep1/inferred_grns"
 
 # Core names of the different feature files to build off of
 FEATURE_SET_NAMES=( \
     "inferred_network" \
     "inferred_network_50.0pct" \
     "inferred_network_enrich_feat" \
-    # "inferred_network_w_string" \
-    # "inferred_network_string_scores_only" \
-    # "inferred_network_w_string_no_tf"
 )
 
 # Define arrays for each cell type

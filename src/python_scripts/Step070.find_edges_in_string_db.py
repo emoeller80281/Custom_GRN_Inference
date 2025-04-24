@@ -6,6 +6,7 @@ from tqdm import tqdm
 import math
 import sys
 import logging
+import pyarrow.parquet as pq
 
 def parse_args() -> argparse.Namespace:
     """
@@ -61,25 +62,26 @@ def minmax_normalize_column(column: pd.DataFrame):
     return (column - column.min()) / (column.max() - column.min())
 
 def main():
-    logging.info("----- READING STRING DATABASE FILES -----")
-
-
-    logging.info("\nReading inferred network file")
-    inferred_net_df = pd.read_parquet(INFERRED_NET_FILE)
-    logging.info("\tDone!")
     
-    string_cols = {
-    "string_experimental_score",
-    "string_textmining_score",
-    "string_combined_score",
-    }
-    present = string_cols.intersection(inferred_net_df.columns)
 
-    if present:
-        logging.info(
-            f"Found existing STRING columns {sorted(present)}, skipping STRING lookup."
-        )
+    pf = pq.ParquetFile(INFERRED_NET_FILE)
+    cols = set(pf.schema.names)
+
+    needed = {"string_experimental_score",
+            "string_textmining_score",
+            "string_combined_score"}
+    
+    file_name = os.path.basename(INFERRED_NET_FILE)
+
+    if needed.issubset(cols):
+        logging.info(f"All STRING columns already present in {file_name}; skipping.")
         sys.exit(0)
+    else:
+        logging.info(f"Adding missing STRING columns to {file_name}")
+    
+    logging.info("\tReading inferred network file")
+    inferred_net_df = pd.read_parquet(INFERRED_NET_FILE)
+    logging.info("\t  - Done!")
     
     logging.info("\tProtein Info DataFrame")
     protein_info_df = pd.read_csv(f'{STRING_DIR}/protein_info.txt', sep="\t", header=0)
@@ -88,7 +90,7 @@ def main():
     protein_links_df = pd.read_csv(f'{STRING_DIR}/protein_links_detailed.txt', sep=" ", header=0)
 
     # Find the common name for the proteins in protein_links_df using the ID to name mapping in protein_info_df
-    logging.info("Converting STRING protein IDs to protein name")
+    logging.info("\tConverting STRING protein IDs to protein name")
     protein_links_df["protein1"] = protein_info_df.set_index("#string_protein_id").loc[protein_links_df["protein1"], "preferred_name"].reset_index()["preferred_name"]
     protein_links_df["protein2"] = protein_info_df.set_index("#string_protein_id").loc[protein_links_df["protein2"], "preferred_name"].reset_index()["preferred_name"]
 
@@ -100,7 +102,7 @@ def main():
     })
     
     # Merge the inferred network and STRING edge scores
-    logging.info("Merging the STRING edges with the inferred network edges")
+    logging.info("\tMerging the STRING edges with the inferred network edges")
     inferred_edges_in_string_df = pd.merge(
         inferred_net_df,
         protein_links_df,
@@ -108,9 +110,10 @@ def main():
         right_on=["protein1", "protein2"],
         how="left"
     ).drop(columns={"protein1", "protein2"})
-    logging.info("\tDone!")
+    logging.info("\t  - Done!")
     
     # Min-max normalize the STRING columns
+    logging.info("\tNormalizing STRING scores")
     cols_to_normalize = ["string_experimental_score", "string_textmining_score", "string_combined_score"]
     inferred_edges_in_string_df[cols_to_normalize] = inferred_edges_in_string_df[cols_to_normalize].apply(lambda x: minmax_normalize_column(x), axis=0)
     
@@ -128,16 +131,18 @@ def main():
 
     # now the f-string is trivially correct
     logging.info(
-        f"\t{num_common_edges} common edges / {num_total_edges} total edges "
+        f"\tFound {num_common_edges} common edges / {num_total_edges} total edges "
         f"({pct:.2f}%)"
     )
     logging.info('\nInferred network with STRING edge scores:')
     logging.info(inferred_edges_in_string_df.head())
     
-    inferred_edges_in_string_df.to_parquet(INFERRED_NET_FILE, engine="pyarrow", index=False, compression="snappy")
-    
+    out_file = os.path.splitext(INFERRED_NET_FILE)[0] + "_w_string.parquet"
+    inferred_edges_in_string_df.to_parquet(out_file, engine="pyarrow",
+                                            index=False, compression="snappy")
+        
     # write_csv_in_chunks(inferred_edges_in_string_df, OUTPUT_DIR, "inferred_network_w_string.csv")
-    logging.info('\tDone!')
+    logging.info('\t  - Done!')
 
 if __name__ == "__main__":
     # Configure logging

@@ -12,24 +12,24 @@ set -euo pipefail
 # =============================================
 # Run the peak to TG regulatory potential calculation methods
 STEP010_CICERO_MAP_PEAKS_TO_TG=false
-STEP015_CICERO_PEAK_TO_TG_SCORE=true
+STEP015_CICERO_PEAK_TO_TG_SCORE=false
 
-STEP020_PEAK_TO_TG_CORRELATION=true
+STEP020_PEAK_TO_TG_CORRELATION=false
 # STEP030_PEAK_TO_ENHANCER_DB=false # Deprecated, does not help model and no data for mouse
 
 # Run the TF to peak binding score calculation methods
-STEP040_SLIDING_WINDOW_TF_TO_PEAK_SCORE=true
-STEP050_HOMER_TF_TO_PEAK_SCORE=true
+STEP040_SLIDING_WINDOW_TF_TO_PEAK_SCORE=false
+STEP050_HOMER_TF_TO_PEAK_SCORE=false
 
 # Combine the score DataFrames
 STEP060_COMBINE_DATAFRAMES=true
 SUBSAMPLE_PERCENT=50 # Percent of rows of the combined dataframe to subsample
 
 # Find shared edges between the inferred network and the STRING PPI database
-STEP070_FIND_EDGES_IN_STRING_DB=true
+STEP070_FIND_EDGES_IN_STRING_DB=false
 
 # Train a predictive model to infer the GRN
-STEP080_TRAIN_XGBOOST_CLASSIFIER=true
+STEP080_TRAIN_XGBOOST_CLASSIFIER=false
 
 # =============================================
 #              USER PATH VARIABLES
@@ -53,7 +53,10 @@ INFERRED_GRN_DIR="$OUTPUT_DIR/inferred_grns"
 TRAINED_MODEL_DIR="$OUTPUT_DIR/trained_models"
 
 # Name of the inferrred network file with STRING PPI interaction columns
-INFERRED_NET_FILE="$INFERRED_GRN_DIR/inferred_network.csv"
+INFERRED_NET_FILE="$INFERRED_GRN_DIR/inferred_network.parquet"
+
+# Name of the inferrred network file with STRING PPI interaction columns
+INFERRED_NET_W_STRING_FILE="$INFERRED_GRN_DIR/inferred_network_w_string.parquet"
 
 # ----- Resource / Database files -----
 STRING_DB_DIR="$BASE_DIR"/string_database/$SPECIES/
@@ -724,7 +727,7 @@ run_homer_tf_to_peak_score() {
     /usr/bin/time -v \
     python3 src/python_scripts/Step050.homer_tf_peak_motifs.py \
         --input_dir "${OUTPUT_DIR}/homer_results/homer_tf_motif_scores" \
-        --output_file "${OUTPUT_DIR}/homer_tf_to_peak.tsv" \
+        --output_file "${OUTPUT_DIR}/homer_tf_to_peak.parquet" \
         --cpu_count $NUM_CPU
 
 } 2> "$LOG_DIR/Step050.homer_tf_to_peak_motifs.log"
@@ -761,7 +764,7 @@ run_classifier_training() {
     /usr/bin/time -v \
     python3 "$PYTHON_SCRIPT_DIR/Step080.train_xgboost.py" \
         --ground_truth_file "$GROUND_TRUTH_FILE" \
-        --inferred_network_file "$INFERRED_NET_FILE" \
+        --inferred_network_file "$INFERRED_NET_W_STRING_FILE" \
         --trained_model_dir "$TRAINED_MODEL_DIR" \
         --fig_dir "$FIG_DIR" \
         --model_save_name "xgb_full_network_model"
