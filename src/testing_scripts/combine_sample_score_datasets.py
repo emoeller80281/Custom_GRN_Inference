@@ -8,7 +8,7 @@ output_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MO
 print(output_dir)
 
 inferred_net_paths = {}
-feature_set_filename = "inferred_network_w_string.csv"
+feature_set_filename = "inferred_network_enrich_feat_w_string.parquet"
 
 for cell_type in os.listdir(output_dir):
     cell_type_path = os.path.join(output_dir, cell_type)
@@ -26,8 +26,8 @@ for cell_type in os.listdir(output_dir):
                 for inferred_net in os.listdir(folder_path):
                     inferred_net_path = os.path.join(folder_path, inferred_net)
                     if os.path.isfile(inferred_net_path):
-                        print(f'    |____{inferred_net}')
                         if inferred_net == feature_set_filename:
+                            print(f'    |____{inferred_net}')
                             if not cell_type in inferred_net_paths:
                                 inferred_net_paths[cell_type] = {}
                                 
@@ -37,18 +37,19 @@ for cell_type in os.listdir(output_dir):
 
 print(f'\n===== Found {feature_set_filename} in: =====')             
 dataframes = {}                   
-
+sampled_enriched_feature_dfs = []
+sample_fraction = 1 / len(inferred_net_paths)
 for cell_type, sample_path_dict in inferred_net_paths.items():
     for sample_name, sample_grn_path in sample_path_dict.items():
-        df = pd.read_csv(sample_grn_path, header=0, index_col=None, nrows=100000)
-        feature_counts = df.count(numeric_only=True, axis=1).value_counts().sort_index(ascending=False)
+        df = pd.read_parquet(sample_grn_path)
         
-        n_score_cols = len(df.select_dtypes(include=np.number).columns)
-        feature_threshold = n_score_cols - 2
-        df = df[df.count(numeric_only=True, axis=1) >= feature_threshold]
-        print(f'\tNumber of rows with >= {feature_threshold}/{n_score_cols} feature columns {len(df)}')
-        print(feature_counts.values)
+        # Take a sample corresponding to 1 / number of inferred networks, to have the dataset not get too huge
+        df_sample = df.sample(frac=sample_fraction)
+        
+        sampled_enriched_feature_dfs.append(df_sample)
 
+combined_df = pd.concat(sampled_enriched_feature_dfs)
+print(combined_df.head())
 def plot_non_nan_feature_scores(inferred_net_paths):
     cell_types = list(inferred_net_paths.keys())
     n_cells = len(cell_types)

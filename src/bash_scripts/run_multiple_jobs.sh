@@ -23,7 +23,7 @@ submit_job() {
 run_macrophage() {
     local CELL_TYPE="macrophage"
     local SAMPLE_NAMES=(
-        # "macrophage_buffer1_filtered"
+        "macrophage_buffer1_filtered"
         "macrophage_buffer2_filtered"
         "macrophage_buffer3_filtered"
         "macrophage_buffer4_filtered"

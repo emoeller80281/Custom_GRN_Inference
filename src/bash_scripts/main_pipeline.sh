@@ -22,14 +22,14 @@ STEP040_SLIDING_WINDOW_TF_TO_PEAK_SCORE=false
 STEP050_HOMER_TF_TO_PEAK_SCORE=false
 
 # Combine the score DataFrames
-STEP060_COMBINE_DATAFRAMES=true
+STEP060_COMBINE_DATAFRAMES=false
 SUBSAMPLE_PERCENT=50 # Percent of rows of the combined dataframe to subsample
 
 # Find shared edges between the inferred network and the STRING PPI database
-STEP070_FIND_EDGES_IN_STRING_DB=false
+STEP070_FIND_EDGES_IN_STRING_DB=true
 
 # Train a predictive model to infer the GRN
-STEP080_TRAIN_XGBOOST_CLASSIFIER=false
+STEP080_TRAIN_XGBOOST_CLASSIFIER=true
 
 # =============================================
 #              USER PATH VARIABLES
@@ -53,10 +53,10 @@ INFERRED_GRN_DIR="$OUTPUT_DIR/inferred_grns"
 TRAINED_MODEL_DIR="$OUTPUT_DIR/trained_models"
 
 # Name of the inferrred network file with STRING PPI interaction columns
-INFERRED_NET_FILE="$INFERRED_GRN_DIR/inferred_network.parquet"
+INFERRED_NET_FILE="$INFERRED_GRN_DIR/inferred_network_enrich_feat.parquet"
 
 # Name of the inferrred network file with STRING PPI interaction columns
-INFERRED_NET_W_STRING_FILE="$INFERRED_GRN_DIR/inferred_network_w_string.parquet"
+INFERRED_NET_W_STRING_FILE="$INFERRED_GRN_DIR/inferred_network_enrich_feat_w_string.parquet"
 
 # ----- Resource / Database files -----
 STRING_DB_DIR="$BASE_DIR"/string_database/$SPECIES/

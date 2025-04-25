@@ -29,13 +29,14 @@ activate_conda_env() {
 # Handles splitting features, training XGBoost models from those features, and making predictions with the models
 run_split_train_test() {
     local CELL_TYPE="$1"
-    local GROUND_TRUTH_FILE="$2"
-    local TARGET_NAME="$3"
-    local SPECIES="$4"
+    local MODEL_NAME="$2"
+    local GROUND_TRUTH_FILE="$3"
+    local TARGET_NAME="$4"
+    local SPECIES="$5"
 
     # The next two parameters are the names of the arrays
-    local SAMPLE_NAMES_ARRAY_NAME="$5"
-    local TARGET_DIR_ARRAY_NAME="$6"
+    local SAMPLE_NAMES_ARRAY_NAME="$6"
+    local TARGET_DIR_ARRAY_NAME="$7"
 
     # Create namerefs for the arrays to pass in the entire list of targets and samples
     declare -n SAMPLE_NAMES="$SAMPLE_NAMES_ARRAY_NAME"
@@ -124,7 +125,7 @@ run_split_train_test() {
                             --output_dir "${MODEL_PREDICTION_DIR}" \
                             --model "$MODEL_FILE" \
                             --target "$TARGET_FILE" \
-                            --save_name "${CELL_TYPE}_vs_${TARGET_NAME}_${FEATURE_SET}_xgb_pred.tsv"
+                            --save_name "${MODEL_NAME}_vs_${TARGET_NAME}_${FEATURE_SET}_xgb_pred.tsv"
                         echo "        Done!"
                     else
                         echo "    Feature set ${FEATURE_SET}_w_string.parquet does not exist for ${TARGET}"
@@ -168,19 +169,20 @@ TARGET_DIR_MACROPHAGE=( "$MACROPHAGE_INFERRED_NET_DIR" )
 TARGET_NAME_MACROPHAGE="macrophage"
 GROUND_TRUTH_FILE_MACROPHAGE="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/REFERENCE_NETWORKS/RN204_ChIPSeq_ChIPAtlas_Human_Macrophages.tsv"
 
+
 SAMPLE_NAMES_MESC=( \
-        "filtered_L2_E7.5_rep1"
+        # "filtered_L2_E7.5_rep1"
         # "filtered_L2_E7.5_rep2"
         # "filtered_L2_E7.75_rep1"
         # "filtered_L2_E8.0_rep1"
         # "filtered_L2_E8.0_rep2"
-        # "filtered_L2_E8.5_rep1"
+        "filtered_L2_E8.5_rep1"
         # "filtered_L2_E8.5_rep2"
         # "filtered_L2_E8.75_rep1"
         # "filtered_L2_E8.75_rep2"
     )
 TARGET_DIR_MESC=( "$MESC_INFERRED_NET_DIR" )
-TARGET_NAME_MESC="mESC"
+TARGET_NAME_MESC="mESC_E7.5_rep1"
 GROUND_TRUTH_FILE_MESC="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/REFERENCE_NETWORKS/RN111_ChIPSeq_BEELINE_Mouse_ESC.tsv"
 
 
@@ -191,4 +193,4 @@ GROUND_TRUTH_FILE_MESC="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REP
 # run_split_train_test "macrophage" "$GROUND_TRUTH_FILE_MACROPHAGE" "$TARGET_NAME_MACROPHAGE" "hg38" SAMPLE_NAMES_MACROPHAGE TARGET_DIR_MACROPHAGE 
 
 # # Run for mESC
-run_split_train_test "mESC" "$GROUND_TRUTH_FILE_MESC" "$TARGET_NAME_MESC" "mm10" SAMPLE_NAMES_MESC TARGET_DIR_MESC 
+run_split_train_test "mESC" "mESC_E8.5_rep1" "$GROUND_TRUTH_FILE_MESC" "$TARGET_NAME_MESC" "mm10" SAMPLE_NAMES_MESC TARGET_DIR_MESC 
