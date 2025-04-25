@@ -148,12 +148,12 @@ PYTHON_SCRIPT_DIR="$BASE_DIR/src/python_scripts"
 
 K562_INFERRED_NET_DIR="$BASE_DIR/output/K562/K562_human_filtered/inferred_grns"
 MACROPHAGE_INFERRED_NET_DIR="$BASE_DIR/output/macrophage/macrophage_buffer1_filtered/inferred_grns"
-MESC_INFERRED_NET_DIR="$BASE_DIR/output/mESC/filtered_L2_E8.5_rep1/inferred_grns"
+MESC_INFERRED_NET_DIR="$BASE_DIR/output/mESC/filtered_L2_E7.5_rep1/inferred_grns"
 
 # Core names of the different feature files to build off of
 FEATURE_SET_NAMES=( \
     "inferred_network" \
-    "inferred_network_50.0pct" \
+    "inferred_network_50pct" \
     "inferred_network_enrich_feat" \
 )
 
@@ -169,12 +169,12 @@ TARGET_NAME_MACROPHAGE="macrophage"
 GROUND_TRUTH_FILE_MACROPHAGE="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/REFERENCE_NETWORKS/RN204_ChIPSeq_ChIPAtlas_Human_Macrophages.tsv"
 
 SAMPLE_NAMES_MESC=( \
-        # "filtered_L2_E7.5_rep1"
+        "filtered_L2_E7.5_rep1"
         # "filtered_L2_E7.5_rep2"
         # "filtered_L2_E7.75_rep1"
         # "filtered_L2_E8.0_rep1"
         # "filtered_L2_E8.0_rep2"
-        "filtered_L2_E8.5_rep1"
+        # "filtered_L2_E8.5_rep1"
         # "filtered_L2_E8.5_rep2"
         # "filtered_L2_E8.75_rep1"
         # "filtered_L2_E8.75_rep2"

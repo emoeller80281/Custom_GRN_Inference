@@ -669,7 +669,7 @@ run_homer() {
     echo "[HINT] Homer log files are found under Homer_logs in the sample log directory"
     mkdir -p "$LOG_DIR/Homer_logs/"
 
-    echo "Searching for 'BASE_DIR/homer' directory..."
+    echo "Searching for '${BASE_DIR}/homer' directory..."
     # Check to make sure Homer is installed, else install it
     if [ ! -d "$BASE_DIR/homer" ]; then
         echo ""
@@ -687,13 +687,14 @@ run_homer() {
     
     echo "Checking for the Homer ${SPECIES} genome file..."
     # Check if the species Homer genome is installed
-    if perl "$BASE_DIR/homer/configureHomer.pl" -list | grep -q "^+.*${SPECIES}"; then
+    if [ -d "$BASE_DIR/homer/data/genomes/${SPECIES}" ]; then
         echo "    - ${SPECIES} genome is installed"
     else
-        echo "    ${SPECIES} genome is not installed, installing..."
+        echo "    - ${SPECIES} genome is not installed, installing..."
         install_homer_species_genome
         echo "    Done!"
     fi
+
 
     echo "Checking for existing Homer peak file (created from the ATACseq dataset)"
     if [ ! -f "$OUTPUT_DIR/homer_peaks.txt" ]; then
