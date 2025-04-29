@@ -71,25 +71,6 @@ def parse_args() -> argparse.Namespace:
     return args
 
 # ------------------------- DATA LOADING & PREPARATION ------------------------- #
-def load_atac_dataset(atac_data_file: str) -> pd.DataFrame:
-    """
-    Load ATAC peaks from a CSV file. Parse the chromosome, start, end, and center
-    for each peak.
-
-    Returns
-    -------
-    atac_df : pd.DataFrame
-        The raw ATAC data with the first column containing the peak positions.
-    """
-    atac_df: pd.DataFrame = pd.read_csv(atac_data_file, sep="\t", header=0)
-    
-    return atac_df
-
-def load_rna_dataset(rna_data_file: str) -> pd.DataFrame:
-    rna_df: pd.DataFrame = pd.read_csv(rna_data_file, sep="\t", header=0)
-    
-    return rna_df
-
 def extract_atac_peaks(atac_df, tmp_dir):
     peak_pos = atac_df["peak_id"].tolist()
 
@@ -105,7 +86,8 @@ def extract_atac_peaks(atac_df, tmp_dir):
     peak_df["peak_id"] = peak_df["peak_id"].astype(str)
     
     # Write the peak DataFrame to a file
-    peak_df.to_csv(f"{tmp_dir}/peak_df.bed", sep="\t", header=False, index=False)
+    peak_df.to_parquet(f"{tmp_dir}/peak_df.parquet", engine="pyarrow", index=False, compression="snappy")
+
 
 def load_ensembl_organism_tss(organism, tmp_dir):
     # Connect to the Ensembl BioMart server
@@ -145,9 +127,9 @@ def load_ensembl_organism_tss(organism, tmp_dir):
     ensembl_df["gene_id"] = ensembl_df["gene_id"].astype(str)
     
     # Write the peak DataFrame to a file
-    ensembl_df.to_csv(f"{tmp_dir}/ensembl.bed", sep="\t", header=False, index=False)
+    ensembl_df.to_parquet(f"{tmp_dir}/ensembl.parquet", engine="pyarrow", index=False, compression="snappy")
 
-def find_genes_near_peaks(peak_bed, tss_bed, rna_df, peak_dist_limit):
+def find_genes_near_peaks(peak_bed, tss_bed, rna_df, peak_dist_limit, tmp_dir):
     """
     Identify genes whose transcription start sites (TSS) are near scATAC-seq peaks.
     
@@ -224,10 +206,9 @@ def find_genes_near_peaks(peak_bed, tss_bed, rna_df, peak_dist_limit):
     
     # Filter out any genes not found in the RNA-seq dataset.
     peak_tss_subset_df = peak_tss_subset_df[peak_tss_subset_df["target_id"].isin(rna_df["gene_id"])]
-    
-    gene_list = set(peak_tss_subset_df["target_id"].drop_duplicates().to_list())
-    
-    return peak_tss_subset_df, gene_list
+        
+    peak_tss_subset_df.to_parquet(f"{tmp_dir}/peak_to_gene_map.parquet", index=False)
+
 
 
 def row_normalize_sparse(X):
@@ -258,13 +239,11 @@ def row_normalize_sparse(X):
     return X_norm.tocsr()
 
 def filter_low_variance_features(df, min_variance=0.5):
-    """
-    Filter rows of 'df' (features) that have variance < min_variance.
-    Returns the filtered DataFrame and the mask of kept rows.
-    """
-    variances = df.var(axis=1)
-    mask = variances >= min_variance
-    return df.loc[mask]
+    def row_var(part):
+        return part.var(axis=1, skipna=True)
+
+    variances = df.map_partitions(row_var, meta=('x', 'f8'))
+    return df[variances >= min_variance]
 
 def calculate_significant_peak_to_gene_correlations(
     atac_df: pd.DataFrame,
@@ -367,6 +346,14 @@ def calculate_significant_peak_to_gene_correlations(
 
     return output_file
 
+def load_atac_dataset(atac_data_file: str) -> dd.DataFrame:
+    atac_df: dd.DataFrame = dd.read_csv(atac_data_file, sep="\t", assume_missing=True)
+    return atac_df
+
+def load_rna_dataset(rna_data_file: str) -> dd.DataFrame:
+    rna_df: dd.DataFrame = dd.read_csv(rna_data_file, sep="\t", assume_missing=True)
+    return rna_df
+
 def main():
     # Parse arguments
     args: argparse.Namespace = parse_args()
@@ -390,18 +377,18 @@ def main():
         os.makedirs(TMP_DIR)
     
     logging.info("Loading the scRNA-seq dataset.")
-    rna_df: pd.DataFrame = pd.read_csv(RNA_DATA_FILE, header=0)
+    rna_df: dd.DataFrame = load_rna_dataset(RNA_DATA_FILE,)
 
     logging.info("Loading and parsing the ATAC-seq peaks")
-    atac_df: pd.DataFrame = pd.read_csv(ATAC_DATA_FILE, header=0)
+    atac_df: dd.DataFrame = load_atac_dataset(ATAC_DATA_FILE)
 
-    if not os.path.exists(f"{TMP_DIR}/peak_df.bed"):
+    if not os.path.exists(f"{TMP_DIR}/peak_df.parquet"):
         logging.info(f"Extracting peak information and saving as a bed file")
         extract_atac_peaks(atac_df, TMP_DIR)
     else:
         logging.info("ATAC-seq BED file exists, loading...")
 
-    if not os.path.exists(f"{TMP_DIR}/ensembl.bed"):
+    if not os.path.exists(f"{TMP_DIR}/ensembl.parquet"):
         logging.info(f"Extracting TSS locations for {ORGANISM} from Ensembl and saving as a bed file")
         load_ensembl_organism_tss(ORGANISM, TMP_DIR)
     else:
@@ -410,32 +397,33 @@ def main():
     pybedtools.set_tempdir(TMP_DIR)
     
     # Load the peak and gene TSS BED files
-    peak_bed = pybedtools.BedTool(f"{TMP_DIR}/peak_df.bed")
-    tss_bed = pybedtools.BedTool(f"{TMP_DIR}/ensembl.bed")
+    peak_df = dd.read_parquet(f"{TMP_DIR}/peak_df.parquet").compute()
+    tss_df = dd.read_parquet(f"{TMP_DIR}/ensembl.parquet").compute()
+
+    peak_bed = pybedtools.BedTool.from_dataframe(peak_df)
+    tss_bed = pybedtools.BedTool.from_dataframe(tss_df)
     
     # ============ FINDING PEAKS NEAR GENES ============
     # Dataframe with "peak_id", "target_id" and "TSS_dist"
-    peak_gene_df, gene_list = find_genes_near_peaks(
+    find_genes_near_peaks(
         peak_bed,
         tss_bed,
         rna_df,
-        PEAK_DIST_LIMIT
+        PEAK_DIST_LIMIT,
+        TMP_DIR
     )
+    
+    peak_gene_df = dd.read_parquet(f"{TMP_DIR}/peak_to_gene_map.parquet")
 
     # ============ PEAK TO GENE CORRELATION CALCULATION ============
     PARQ = f"{TMP_DIR}/sig_peak_to_gene_corr.parquet"
     if not os.path.exists(PARQ):
         logging.info("Subsetting ATAC and RNA matrices to relevant peaks/genes")
-        atac_sub: pd.DataFrame = (
-            atac_df
-            .loc[atac_df["peak_id"].isin(peak_gene_df["peak_id"])]
-            .set_index("peak_id")
-        )
-        rna_sub: pd.DataFrame = (
-            rna_df
-            .loc[rna_df["gene_id"].isin(gene_list)]
-            .set_index("gene_id")
-        )
+        atac_sub = atac_df.merge(peak_gene_df[["peak_id"]].drop_duplicates(), on="peak_id", how="inner")
+
+        rna_sub = rna_df.merge(peak_gene_df[["target_id"]].drop_duplicates(), 
+                       left_on="gene_id", right_on="target_id", how="inner")
+        rna_sub = rna_sub.drop(columns="target_id")
         
         # Filter out genes / peaks with low variance in expression / accessibility
         logging.info("Filtering out genes and peaks with low variance")

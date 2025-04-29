@@ -66,9 +66,8 @@ MEME_DIR="$BASE_DIR/motif_information/$SPECIES/${SPECIES}_motif_meme_files"
 
 # LOG_DIR="$BASE_DIR/LOGS/${SAMPLE_NAME}/"
 FIG_DIR="$BASE_DIR/figures/$SPECIES/$SAMPLE_NAME"
-
-# mkdir -p "${LOG_DIR}"
 mkdir -p "${FIG_DIR}"
+
 LOG_DIR="${BASE_DIR}/LOGS/${CELL_TYPE}_logs/${SAMPLE_NAME}_logs/"
 
 if [ "$SPECIES" == "human" ]; then

@@ -97,7 +97,7 @@ run_split_train_test() {
                         --ground_truth_file "$GROUND_TRUTH_FILE" \
                         --inferred_network_file "$FEATURE_FILE" \
                         --trained_model_dir "$TRAINED_MODEL_DIR" \
-                        --fig_dir "$FIG_DIR" \
+                        --fig_dir "$FIG_DIR/$FEATURE_SET" \
                         --model_save_name "xgb_${FEATURE_SET}_model"
                 echo "        Done!"
 
@@ -153,8 +153,8 @@ MESC_INFERRED_NET_DIR="$BASE_DIR/output/mESC/filtered_L2_E7.5_rep1/inferred_grns
 
 # Core names of the different feature files to build off of
 FEATURE_SET_NAMES=( \
-    "inferred_network" \
-    "inferred_network_50pct" \
+    # "inferred_network" \
+    # "inferred_network_50pct" \
     "inferred_network_enrich_feat" \
 )
 

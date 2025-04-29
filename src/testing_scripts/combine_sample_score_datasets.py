@@ -3,53 +3,43 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import csv
+import dask.dataframe as dd
+import argparse
+import logging
 
-output_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output"
-print(output_dir)
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(message)s')
 
-inferred_net_paths = {}
-feature_set_filename = "inferred_network_enrich_feat_w_string.parquet"
+def parse_args() -> argparse.Namespace:
+    """
+    Parses command-line arguments.
 
-for cell_type in os.listdir(output_dir):
-    cell_type_path = os.path.join(output_dir, cell_type)
-    print(f'\n----- {cell_type.upper()} -----')
-    
-    
-    for sample in os.listdir(cell_type_path):
-        sample_path = os.path.join(cell_type_path, sample)
-        print(f'{sample}')
-        
-        for folder in os.listdir(sample_path):
-            if folder == "inferred_grns":
-                folder_path = os.path.join(sample_path, folder)
-                
-                for inferred_net in os.listdir(folder_path):
-                    inferred_net_path = os.path.join(folder_path, inferred_net)
-                    if os.path.isfile(inferred_net_path):
-                        if inferred_net == feature_set_filename:
-                            print(f'    |____{inferred_net}')
-                            if not cell_type in inferred_net_paths:
-                                inferred_net_paths[cell_type] = {}
-                                
-                            if not sample in inferred_net_paths[cell_type]:
-                                inferred_net_paths[cell_type][sample] = inferred_net_path
+    Returns:
+        argparse.Namespace: Parsed arguments containing paths for input and output files and CPU count.
+    """
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--feature_set_filename",
+        type=str,
+        required=True,
+        help="Name of the feature set to combine"
+    )
+    parser.add_argument(
+        "--sample_output_dir",
+        type=str,
+        required=True,
+        help="Path to the output directory"
+    )
+    parser.add_argument(
+        "--combined_dataframe_dir",
+        type=str,
+        required=True,
+        help="Path to the output directory for the final combined dataframe"
+    )
 
+    args: argparse.Namespace = parser.parse_args()
+    return args
 
-print(f'\n===== Found {feature_set_filename} in: =====')             
-dataframes = {}                   
-sampled_enriched_feature_dfs = []
-sample_fraction = 1 / len(inferred_net_paths)
-for cell_type, sample_path_dict in inferred_net_paths.items():
-    for sample_name, sample_grn_path in sample_path_dict.items():
-        df = pd.read_parquet(sample_grn_path)
-        
-        # Take a sample corresponding to 1 / number of inferred networks, to have the dataset not get too huge
-        df_sample = df.sample(frac=sample_fraction)
-        
-        sampled_enriched_feature_dfs.append(df_sample)
-
-combined_df = pd.concat(sampled_enriched_feature_dfs)
-print(combined_df.head())
 def plot_non_nan_feature_scores(inferred_net_paths):
     cell_types = list(inferred_net_paths.keys())
     n_cells = len(cell_types)
@@ -134,5 +124,77 @@ def combine_ground_truth_datasets():
         )
     
     merged_gt_df = pd.concat(gt_dfs)
-    print(merged_gt_df)
-    print(merged_gt_df.shape)
+    logging.info(merged_gt_df)
+    logging.info(merged_gt_df.shape)
+
+args: argparse.Namespace = parse_args()
+
+feature_set_filename = args.feature_set_filename
+output_dir = args.sample_output_dir
+combined_dataframe_dir = args.combined_dataframe_dir
+
+logging.info(output_dir)
+
+inferred_net_paths = {}
+for cell_type in os.listdir(output_dir):
+    cell_type_path = os.path.join(output_dir, cell_type)
+    logging.info(f'\n----- {cell_type.upper()} -----')
+    
+    
+    for sample in os.listdir(cell_type_path):
+        sample_path = os.path.join(cell_type_path, sample)
+        logging.info(f'{sample}')
+        
+        for folder in os.listdir(sample_path):
+            if folder == "inferred_grns":
+                folder_path = os.path.join(sample_path, folder)
+                
+                for inferred_net in os.listdir(folder_path):
+                    inferred_net_path = os.path.join(folder_path, inferred_net)
+                    if os.path.isfile(inferred_net_path):
+                        if inferred_net == feature_set_filename:
+                            logging.info(f'    |____{inferred_net}')
+                            if not cell_type in inferred_net_paths:
+                                inferred_net_paths[cell_type] = {}
+                                
+                            if not sample in inferred_net_paths[cell_type]:
+                                inferred_net_paths[cell_type][sample] = inferred_net_path
+
+       
+logging.info("Starting Dask-based sampling and combination of inferred networks.")
+
+# Combine the sampled Dask DataFrames
+sampled_enriched_feature_dfs = []
+sample_fraction = 1 / len(inferred_net_paths)
+logging.info(f"Sample fraction set to: {sample_fraction:.4f} based on {len(inferred_net_paths)} inferred networks.")
+
+for cell_type, sample_path_dict in inferred_net_paths.items():
+    logging.info(f"Processing cell type: {cell_type} with {len(sample_path_dict)} sample(s).")
+    for sample_name, sample_grn_path in sample_path_dict.items():
+        logging.info(f"  Reading Parquet file: {sample_grn_path}")
+        try:
+            df = dd.read_parquet(sample_grn_path)
+            df_sample = df.sample(frac=sample_fraction, random_state=42)
+            
+            sample_row_count = df_sample.shape[0].compute()
+            logging.info(f"  Sampled {sample_row_count:,} rows ({sample_fraction*100:.2f}%) from {sample_name}")
+
+            sampled_enriched_feature_dfs.append(df_sample)
+        except Exception as e:
+            logging.error(f"  Failed to process {sample_grn_path}: {e}")
+
+logging.info(f"Combining {len(sampled_enriched_feature_dfs)} sampled Dask DataFrames.")
+combined_ddf = dd.concat(sampled_enriched_feature_dfs)
+
+output_path = os.path.join(combined_dataframe_dir, 'combined_enrich_feat_w_string.parquet')
+logging.info(f"Writing combined DataFrame to {output_path}")
+
+try:
+    combined_ddf.to_parquet(
+        output_path,
+        compression='snappy',
+        engine='pyarrow'
+    )
+    logging.info("Successfully wrote combined Dask DataFrame to disk.")
+except Exception as e:
+    logging.error(f"Failed to write Parquet output: {e}")
