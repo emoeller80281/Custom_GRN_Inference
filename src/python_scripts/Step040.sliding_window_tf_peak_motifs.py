@@ -3,6 +3,7 @@ import sys
 import os
 import pandas as pd
 from tqdm import tqdm
+import dask.dataframe as dd
 from Bio import SeqIO
 import numpy as np
 from typing import Any
@@ -10,6 +11,9 @@ import matplotlib.pyplot as plt
 from matplotlib.ticker import FuncFormatter
 from numba import njit, prange
 from concurrent.futures import ProcessPoolExecutor, as_completed
+import pyarrow as pa
+import pyarrow.parquet as pq
+import dask.dataframe as dd
 import logging
 import argparse
 import re
@@ -111,19 +115,6 @@ def score_all_peaks(seqs_plus, seqs_minus, pwm_values):
         out[i] = total
     return out
 
-def process_motif_file_shared(file, meme_dir):
-    # Load the PWM, compute log2‐background‐corrected array
-    motif_df = pd.read_csv(os.path.join(meme_dir, file), sep="\t", header=0, index_col=0)
-    pwm = np.log2(motif_df.T.div(_global_bg_freq, axis=0) + 1).T.to_numpy()
-    pwm = np.vstack([pwm, np.zeros((1,4))])   # if you need an 'N' row
-    
-    # Score every peak on both strands in parallel:
-    scores = score_all_peaks(_global_plus, _global_minus, pwm)
-    
-    # Look up TF names tied to this motif
-    tf_names = _global_tf_df.loc[_global_tf_df["Motif_ID"] == file.replace('.txt',''), "TF_Name"].values
-    return file.replace('.txt',''), tf_names, scores
-
 def get_background_freq(species):
     if species == "human" or species == "hg38":
         background_freq = pd.Series({
@@ -147,113 +138,121 @@ def get_background_freq(species):
     return background_freq
     
 
-def associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, rna_data_genes, species, num_cpu):
+def process_motif_file_and_save(file, meme_dir, output_dir):
+    try:
+        # Load the PWM
+        motif_df = pd.read_csv(os.path.join(meme_dir, file), sep="\t", header=0, index_col=0)
+        pwm = np.log2(motif_df.T.div(_global_bg_freq, axis=0) + 1).T.to_numpy()
+        pwm = np.vstack([pwm, np.zeros((1, 4))])  # add row for 'N'
 
-    seqs_plus  = np.stack(chr_pos_to_seq["+ seq"].to_list())
+        # Score every peak on both strands in parallel
+        scores = score_all_peaks(_global_plus, _global_minus, pwm)
+
+        # Look up TFs for this motif
+        motif_name = file.replace('.txt', '')
+        tf_names = _global_tf_df.loc[_global_tf_df["Motif_ID"] == motif_name, "TF_Name"].values
+
+        peak_ids = _global_chr_pos_to_seq.apply(
+            lambda row: f'{row["chr"]}:{row["start"]}-{row["end"]}', axis=1
+        )
+
+        tmp_dir = os.path.join(output_dir, "tmp", "sliding_window_tf_scores")
+        os.makedirs(tmp_dir, exist_ok=True)
+
+        for tf in tf_names:
+            df = pd.DataFrame({
+                "peak_id": peak_ids,
+                "source_id": tf,
+                "sliding_window_score": scores
+            })
+            df = df.dropna()
+
+            tf_out_path = os.path.join(tmp_dir, f"{tf}.parquet")
+            table = pa.Table.from_pandas(df, preserve_index=False)
+            pq.write_table(table, tf_out_path, compression="snappy")
+
+        return True
+
+    except Exception as e:
+        logging.error(f"Error processing {file}: {e}")
+        return False
+
+def associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, rna_data_genes, species, num_cpu, output_dir):
+    logging.info("Preparing for parallel motif scoring...")
+
+    # Background nucleotide frequencies
+    background_freq = get_background_freq(species)
+
+    # Load TF-to-motif mapping
+    tf_df = pd.read_csv(tf_names_file, sep="\t", header=0)
+    tf_df = tf_df[tf_df["TF_Name"].isin(rna_data_genes)]
+    logging.info(f"Number of TFs matching RNA dataset = {tf_df.shape[0]}")
+
+    tf_motif_names = tf_df["Motif_ID"].unique().tolist()
+    logging.info(f"Number of motifs: {len(tf_motif_names)}")
+    logging.info(f"Number of peaks: {chr_pos_to_seq.shape[0]}")
+
+    seqs_plus = np.stack(chr_pos_to_seq["+ seq"].to_list())
     seqs_minus = np.stack(chr_pos_to_seq["- seq"].to_list())
 
-    background_freq = get_background_freq(species)
-    
-    # Read in the list of TFs to extract their name and matching motif ID
-    tf_df = pd.read_csv(tf_names_file, sep="\t", header=0, index_col=None)
-    
-    # logging.info(f'tf_df TFs: {tf_df["TF_Name"][0:5]}')
-    # logging.info(f'RNA dataset TFs: {rna_data_genes}')
-    
-    tf_df = tf_df[tf_df["TF_Name"].isin(rna_data_genes)]
-    logging.info(f'Number of TFs matching RNA dataset = {tf_df.shape[0]}')
-    
-    tf_motif_names = tf_df["Motif_ID"].unique().tolist()
-    logging.info(f'Number of motifs: {len(tf_motif_names)}')
-    logging.info(f'Number of peaks: {chr_pos_to_seq.shape[0]}')
-    
-    tf_to_peak_score_df = pd.DataFrame()
-    tf_to_peak_score_df["peak_id"] = chr_pos_to_seq.apply(
-        lambda row: f'{row["chr"]}:{row["start"]}-{row["end"]}', axis=1
-    )
-    
-    # Identify motif files that match the TF motifs.
-    matching_motif_files = [file for file in os.listdir(meme_dir)
-                            if file.replace('.txt', '') in tf_motif_names]
-    logging.info(f'Number of TF meme files matching motifs: {len(matching_motif_files)}')
-    
-    logging.info(f'\nCalclating motif binding scores for each ATACseq peak and matching TFs to motifs')
-    logging.info(f'\tUsing {num_cpu} processors')
-    logging.info(f'\tSize of calculation:') 
-    logging.info(f'\t\t{len(tf_motif_names)} motifs x {chr_pos_to_seq.shape[0]} peaks = {len(tf_motif_names) * chr_pos_to_seq.shape[0]} computations')
-    
-    # 4) One pool for ALL motifs
+    # Match only files for motifs we care about
+    matching_motif_files = [f for f in os.listdir(meme_dir) if f.replace('.txt', '') in tf_motif_names]
+    logging.info(f"Number of motif files matching motifs in dataset: {len(matching_motif_files)}")
+
+    logging.info(f"\nCalculating sliding window motif scores for each ATAC-seq peak")
+    logging.info(f"\tUsing {num_cpu} processors")
+    logging.info(f"\tSize of calculation: {len(tf_motif_names)} motifs × {chr_pos_to_seq.shape[0]} peaks = {len(tf_motif_names) * chr_pos_to_seq.shape[0]} computations")
+
     with ProcessPoolExecutor(
         max_workers=num_cpu,
         initializer=_init_worker,
         initargs=(chr_pos_to_seq, tf_df, background_freq, seqs_plus, seqs_minus)
     ) as executor:
-
         futures = {
-            executor.submit(process_motif_file_shared, f, meme_dir): f
+            executor.submit(process_motif_file_and_save, f, meme_dir, output_dir): f
             for f in matching_motif_files
         }
 
-        new_columns: dict[str, np.ndarray] = {}
         min_update = max(1, int(0.02 * len(futures)))
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Scoring motifs", miniters=min_update):
+            _ = future.result()
 
-        for future in tqdm(
-            as_completed(futures),
-            total=len(futures),
-            desc="Processing motifs",
-            miniters=min_update
-        ):
-            motif_name, tf_names, total_peak_score = future.result()
-            for tf_name in tf_names:
-                new_columns[tf_name] = total_peak_score
+    logging.info("Finished scoring all motifs. Reading per-TF Parquet files...")
+    parquet_dir = os.path.join(output_dir, "tmp", "sliding_window_tf_scores")
+    ddf = dd.read_parquet(os.path.join(parquet_dir, "*.parquet"))
 
-    # 5) Combine into your DataFrame
-    new_columns_df = pd.DataFrame(new_columns, index=tf_to_peak_score_df.index)
-    tf_to_peak_score_df = pd.concat(
-        [tf_to_peak_score_df, new_columns_df],
-        axis=1
-    )
+    return ddf
 
-    return tf_to_peak_score_df
+def format_peaks(peak_ids: pd.Series) -> pd.DataFrame:
+    """
+    Given a Series of peak IDs in the format 'chr:start-end', parse and return a formatted DataFrame.
+    """
+    if peak_ids.empty:
+        raise ValueError("Input peak ID list is empty.")
 
-def format_peaks(atac_df: pd.DataFrame, cicero_peak_names: list):
-        # Validate that the input DataFrame has the expected structure
-    if atac_df.empty:
-        raise ValueError("Input ATAC-seq data is empty.")
-    
-    # Extract the peak ID column
-    # logging.info(f'First column of atac_df:\n{atac_df.iloc[:, 0].head()}')  # Check first column
-    # logging.info(f'First few peak names:\n{list(cicero_peak_names)[:5]}')  # Check first few peak names
-    # logging.info(f'Data Type:\n{atac_df.iloc[:, 0].dtype}')  # Check data type
-    peak_ids = atac_df[atac_df.iloc[:, 0].astype(str).isin(map(str, cicero_peak_names))].iloc[:, 0].astype(str)
-    
     logging.info(f'Formatting {peak_ids.shape[0]} peaks')
-    # logging.info(peak_ids)
-    
-    # Split peak IDs into chromosome, start, and end
+
+    # Extract chromosome, start, and end from peak ID strings
     try:
-        chromosomes: pd.Series = peak_ids.str.extract(r'([^:]+):')[0]
-        starts: pd.Series = peak_ids.str.extract(r':(\d+)-')[0]
-        ends: pd.Series = peak_ids.str.extract(r'-(\d+)$')[0]
+        chromosomes = peak_ids.str.extract(r'([^:]+):')[0]
+        starts = peak_ids.str.extract(r':(\d+)-')[0]
+        ends = peak_ids.str.extract(r'-(\d+)$')[0]
     except Exception as e:
         raise ValueError(f"Error parsing 'peak_id' values: {e}")
 
-    # Check for missing or invalid values
     if chromosomes.isnull().any() or starts.isnull().any() or ends.isnull().any():
-        raise ValueError("One or more peak IDs are malformed. Ensure all peak IDs are formatted as 'chr:start-end'.")
+        raise ValueError("Malformed peak IDs. Expect format 'chr:start-end'.")
 
-    # Create a dictionary for constructing the HOMER-compatible DataFrame
-    peak_dict: dict[str, Any] = {
-        "PeakID": [f"peak{i + 1}" for i in range(len(peak_ids))],  # Generate unique peak IDs
+    peak_df = pd.DataFrame({
+        "PeakID": [f"peak{i + 1}" for i in range(len(peak_ids))],
         "chr": chromosomes,
-        "start": pd.to_numeric(starts, errors='coerce'),  # Convert to numeric and handle errors
-        "end": pd.to_numeric(ends, errors='coerce'),      # Convert to numeric and handle errors
-        "strand": ["."] * len(peak_ids),                 # Set strand as "."
-    }
-    
-    peak_df = pd.DataFrame(peak_dict)
-    
+        "start": pd.to_numeric(starts, errors='coerce'),
+        "end": pd.to_numeric(ends, errors='coerce'),
+        "strand": ["."] * len(peak_ids)
+    })
+
     return peak_df
+
 
 def find_ATAC_peak_sequence(peak_df, reference_genome_dir, parsed_peak_file):
     logging.info("Reading in ATACseq peak file")
@@ -346,10 +345,13 @@ def main():
     logging.info(f'{len(cicero_peak_names)} Cicero peaks')
     
     logging.info('Reading scATACseq data')
-    atac_df: pd.DataFrame = pd.read_parquet(atac_data_file)
-    
+    atac_df: dd.DataFrame = dd.read_parquet(atac_data_file)
+
     logging.info('Reading gene names from scATACseq data')
-    rna_data = pd.read_parquet(rna_data_file)
+    rna_data: dd.DataFrame = dd.read_parquet(rna_data_file)
+    
+    peak_ids = atac_df[atac_df.columns[0]].compute()
+    peak_ids = peak_ids[peak_ids.isin(cicero_peak_names)].astype(str)
     
     # Get the set of unique gene_ids from the RNA dataset
     rna_data_genes = set(rna_data["gene_id"].compute().dropna())
@@ -364,7 +366,7 @@ def main():
     else:
         # Read in the ATACseq dataframe and parse the peak locations into a dataframe of genomic locations and peak IDs
         logging.info(f'Identifying ATACseq peak sequences')
-        peak_df = format_peaks(atac_df, cicero_peak_names)
+        peak_df = format_peaks(peak_ids, cicero_peak_names)
         logging.info(peak_df.head())
         
         # Get the genomic sequence from the reference genome to each ATACseq peak
@@ -376,20 +378,15 @@ def main():
         logging.info(f'\tDone!')
         
     # Associate the TFs from TF_Information_all_motifs.txt to the motif with the matching motifID
-    tf_to_peak_score_df = associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, rna_data_genes, species, num_cpu)
-    
-    # Melt the wide-format dataframe to a three column long format, matching the other output files
-    tf_to_peak_score_df = pd.melt(
-        frame=tf_to_peak_score_df,
-        id_vars="peak_id",
-        value_vars=tf_to_peak_score_df.columns[1:],
-        var_name="source_id",
-        value_name="sliding_window_score"
-        )
+    ddf = associate_tf_with_motif_pwm(
+        tf_names_file, meme_dir, chr_pos_to_seq,
+        rna_data_genes, species, num_cpu, output_dir
+    )
+
+    ddf.to_parquet(f"{output_dir}/sliding_window_tf_to_peak_score.parquet", engine="pyarrow", compression="snappy", index=False)
+    logging.info(f"Wrote final TF–peak sliding window scores to sliding_window_tf_to_peak_score.parquet")
 
     
-    tf_to_peak_score_df.to_parquet(f'{output_dir}/sliding_window_tf_to_peak_score.parquet', engine="pyarrow", index=False, compression="snappy")
-        
 if __name__ == "__main__":
     # Configure logging
     logging.basicConfig(level=logging.INFO, format='%(message)s')

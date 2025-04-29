@@ -107,25 +107,25 @@ def write_csv_in_chunks(df, output_dir, filename):
 def merge_score_dataframes_slow(output_dir, rna_data_file, atac_data_file):
     logging.info("Loading in the DataFrames")
     logging.info("\tCorrelation peak to TG DataFrame")
-    peak_corr_df = pd.read_parquet(f'{output_dir}/peak_to_gene_correlation.parquet')
+    peak_corr_df = dd.read_parquet(f'{output_dir}/peak_to_gene_correlation.parquet')
 
     logging.info("\tCicero peak to TG DataFrame")
-    cicero_df = pd.read_parquet(f'{output_dir}/cicero_peak_to_tg_scores.parquet')
+    cicero_df = dd.read_parquet(f'{output_dir}/cicero_peak_to_tg_scores.parquet')
 
     logging.info("\tSliding Window peak to TG DataFrame")
-    sliding_window_df = pd.read_parquet(f'{output_dir}/sliding_window_tf_to_peak_score.parquet')
+    sliding_window_df = dd.read_parquet(f'{output_dir}/sliding_window_tf_to_peak_score.parquet')
 
     logging.info("\tHomer TF to peak DataFrame")
-    homer_df = pd.read_parquet(f'{output_dir}/homer_tf_to_peak.parquet')
+    homer_df = dd.read_parquet(f'{output_dir}/homer_tf_to_peak.parquet')
 
     logging.info("\tRNAseq dataset")
-    rna_df = pd.read_csv(rna_data_file, header=0)
-    rna_df['mean_gene_expression'] = rna_df.iloc[:, 1:].mean(axis=1)
+    rna_df = dd.read_parquet(rna_data_file)
+    rna_df['mean_gene_expression'] = rna_df.select_dtypes("number").mean(axis=1)
     rna_df = rna_df[['gene_id', 'mean_gene_expression']]
 
     logging.info("\tATACseq dataset")
-    atac_df = pd.read_csv(atac_data_file, header=0)
-    atac_df['mean_peak_accessibility'] = atac_df.iloc[:, 1:].mean(axis=1)
+    atac_df = dd.read_parquet(atac_data_file)
+    atac_df['mean_peak_accessibility'] = atac_df.select_dtypes("number").mean(axis=1)
     atac_df = atac_df[['peak_id', 'mean_peak_accessibility']]
     logging.debug("Done!")
     logging.debug("\n---------------------------\n")
@@ -160,7 +160,7 @@ def merge_score_dataframes_slow(output_dir, rna_data_file, atac_data_file):
 
 def merge_score_dataframes_dask(output_dir: str,
                                 rna_data_file: str,
-                                atac_data_file: str) -> pd.DataFrame:
+                                atac_data_file: str) -> dd.DataFrame:
     logging.info("=== Starting Dask merge_score_dataframes ===")
 
     # 1) Read the big Parquet tables
@@ -176,7 +176,7 @@ def merge_score_dataframes_dask(output_dir: str,
     logging.info(f"    • peak_corr_dd partitions={peak_corr_dd.npartitions}, columns={list(peak_corr_dd.columns)}")
     logging.info(f"    • cicero_dd    partitions={cicero_dd.npartitions}, columns={list(cicero_dd.columns)}")
 
-    # 2) tf_to_peak_df = merge sliding_window_dd & homer_dd on ["peak_id","source_id"]
+    # 2) Merge sliding window and Homer TF-peak scores
     logging.info("3/8: Combining the sliding window and Homer TF→peak scores")
     tf_to_peak_dd = sliding_window_dd.merge(
         homer_dd,
@@ -185,85 +185,69 @@ def merge_score_dataframes_dask(output_dir: str,
     )
     logging.info(f"    • tf_to_peak_dd shape ~ {tf_to_peak_dd.shape} (lazy)")
 
-    # 3) Read RNA CSV, compute mean_TF_expression, convert to Dask
+    # 3) Read RNA data, compute mean TF expression
     logging.info("4/8: Adding mean RNA expression for TF (mean_TF_expression)")
-    rna_df = pd.read_csv(rna_data_file)
+    rna_df = dd.read_parquet(rna_data_file)
     rna_df["mean_TF_expression"] = rna_df.select_dtypes("number").mean(axis=1)
-    dd_rna_tf = dd.from_pandas(
-        rna_df[["gene_id", "mean_TF_expression"]]
-           .set_index("gene_id"),
-        npartitions=1
-    )
-    logging.info(f"    • dd_rna_tf shape={rna_df.shape}")
+    dd_rna_tf = rna_df[["gene_id", "mean_TF_expression"]].set_index("gene_id")
+    logging.info(f"    • dd_rna_tf partitions={dd_rna_tf.npartitions}")
 
-    # tf_expr_to_peak_df = merge dd_rna_tf & tf_to_peak_dd
+    # Merge TF expression into TF-peak DataFrame
     tf_expr_to_peak_dd = tf_to_peak_dd.merge(
         dd_rna_tf,
         left_on="source_id",
         right_index=True,
         how="right"
     )
-    logging.info(f"    • tf_expr_to_peak_dd cols={list(tf_expr_to_peak_dd.columns)}")
+    logging.info(f"    • tf_expr_to_peak_dd columns={list(tf_expr_to_peak_dd.columns)}")
 
-    # 4) peak_to_tg_df = merge peak_corr_dd & cicero_dd on ["peak_id","target_id"]
+    # 4) Merge peak to gene scores (correlation + Cicero)
     logging.info("5/8: Merging the correlation and Cicero methods for peak→target gene")
     peak_to_tg_dd = peak_corr_dd.merge(
         cicero_dd,
         on=["peak_id", "target_id"],
         how="outer"
     )
-    logging.info(f"    • peak_to_tg_dd partitions={peak_to_tg_dd.npartitions}, cols={list(peak_to_tg_dd.columns)}")
+    logging.info(f"    • peak_to_tg_dd partitions={peak_to_tg_dd.npartitions}")
 
-    # 5) Read RNA CSV again for mean_TG_expression, convert to Dask
+    # 5) Add mean TG expression
     logging.info("6/8: Adding mean RNA expression for TG (mean_TG_expression)")
-    # we already have rna_df; reuse it
     rna_df = rna_df.drop(columns=["mean_TF_expression"])
     rna_df["mean_TG_expression"] = rna_df.select_dtypes("number").mean(axis=1)
-    dd_rna_tg = dd.from_pandas(
-        rna_df[["gene_id", "mean_TG_expression"]]
-           .set_index("gene_id"),
-        npartitions=1
-    )
+    dd_rna_tg = rna_df[["gene_id", "mean_TG_expression"]].set_index("gene_id")
+
     peak_to_tg_expr_dd = peak_to_tg_dd.merge(
         dd_rna_tg,
         left_on="target_id",
         right_index=True,
         how="right"
     )
-    logging.info(f"    • peak_to_tg_expr_dd cols={list(peak_to_tg_expr_dd.columns)}")
+    logging.info(f"    • peak_to_tg_expr_dd columns={list(peak_to_tg_expr_dd.columns)}")
 
-    # 6) tf_to_tg_score_df = merge tf_expr_to_peak_dd & peak_to_tg_expr_dd on ["peak_id"]
+    # 6) Merge TF→peak and peak→TG
     logging.info("7/8: Merging TF→peak and peak→TG into tf_to_tg_score_dd")
     tf_to_tg_score_dd = tf_expr_to_peak_dd.merge(
         peak_to_tg_expr_dd,
         on=["peak_id"],
         how="outer"
     )
-    logging.info(f"    • tf_to_tg_score_dd cols={list(tf_to_tg_score_dd.columns)}")
+    logging.info(f"    • tf_to_tg_score_dd columns={list(tf_to_tg_score_dd.columns)}")
 
-    # 7) Read ATAC CSV, compute mean_peak_accessibility, convert to Dask
+    # 7) Read ATAC data, compute mean peak accessibility
     logging.info("8/8: Adding mean ATAC‐seq peak accessibility")
-    atac_df = pd.read_csv(atac_data_file)
-    atac_df["mean_peak_accessibility"] = atac_df.iloc[:, 1:].mean(axis=1)
-    dd_atac = dd.from_pandas(
-        atac_df[["peak_id", "mean_peak_accessibility"]]
-           .set_index("peak_id"),
-        npartitions=1
-    )
+    atac_df = dd.read_parquet(atac_data_file)
+    atac_df["mean_peak_accessibility"] = atac_df.select_dtypes("number").mean(axis=1)
+    dd_atac = atac_df[["peak_id", "mean_peak_accessibility"]].set_index("peak_id")
+
     final_dd = tf_to_tg_score_dd.merge(
         dd_atac,
         left_on="peak_id",
         right_index=True,
         how="left"
     )
-    logging.info(f"    • final_dd cols={list(final_dd.columns)}")
+    logging.info(f"    • final_dd columns={list(final_dd.columns)}")
 
-    # 8) Materialize the result
-    logging.info("Pulling final DataFrame into memory with .compute()")
-    final_df = final_dd.compute()
-    logging.info(f"✅ Finished: final_df.shape = {final_df.shape}")
-
-    return final_df
+    return final_dd
 
 def main():
     # Parse command-line arguments
@@ -273,61 +257,58 @@ def main():
     output_dir: str = args.output_dir
     inferred_grn_dir: str = args.inferred_grn_dir
     fig_dir: str = args.fig_dir
-    subsample: str = args.subsample
+    subsample: str = float(args.subsample)
     
-    subsample = float(subsample)
 
     logging.info("\n ============== Merging DataFrames ==============")
-    final_df = merge_score_dataframes_dask(output_dir, rna_data_file, atac_data_file)
-    logging.info(final_df.head())
-    logging.info(final_df.shape)
+    final_dd = merge_score_dataframes_dask(output_dir, rna_data_file, atac_data_file)
     
+    # ============ L A Z Y  Processing ============ #
 
-    # Drop columns that dont have all three of the peak, target, and source names
-    final_df = final_df.dropna(subset=[
+    logging.info("Filtering out rows missing peak_id, target_id, source_id, TF/TG expr")
+    final_dd = final_dd.dropna(subset=[
         "peak_id",
         "target_id",
         "source_id",
         "mean_TF_expression",
         "mean_TG_expression"
-        ])
-    logging.debug("final_df")
-    logging.debug(final_df.head())
-    logging.debug(final_df.columns)
-    logging.debug("\n---------------------------\n")
-        
-    final_df["num_cols_w_values"] = final_df.notna().sum(axis=1)
-    final_df = final_df.sort_values(ascending=False, by="num_cols_w_values")
-    final_df = final_df.drop(columns=["num_cols_w_values"])
-    
-    # # ===== WRITE OUT THE FULL RAW DATAFRAME =====
-    # logging.info("Writing a non-normalized 10% dataframe as 'inferred_network_non_normalized.csv'")
-    # top_10_percent_df = final_df.head(int(len(final_df) * 0.10))    
-    # write_csv_in_chunks(top_10_percent_df, output_dir, 'inferred_network_non_normalized.csv')
-
-    logging.info("\nNormalizing feature score columns")
-    num_cols = final_df.select_dtypes("number").columns.difference([
-        "cicero_score", "TSS_dist_score"  # skip list
     ])
 
-    # compute 5th/95th percentiles for each column in a single pass
-    quantiles = final_df[num_cols].quantile([0.05, 0.95])
+    # Sort by number of non-null columns
+    final_dd["num_cols_w_values"] = final_dd.notna().sum(axis=1)
+    final_dd = final_dd.map_partitions(
+        lambda df: df.sort_values(ascending=False, by="num_cols_w_values")
+    ).drop(columns=["num_cols_w_values"])
 
-    # mask + scale with broadcasting
+    # Normalize score columns
+    logging.info("\nNormalizing feature score columns")
+
+    num_cols = final_dd.select_dtypes("number").columns.difference([
+        "cicero_score", "TSS_dist_score"
+    ])
+
+    # Get 5th/95th percentiles lazily
+    logging.info("Calculating 5th and 95th percentiles for normalization")
+    quantiles = final_dd[num_cols].quantile([0.05, 0.95]).compute()
     low, high = quantiles.loc[0.05], quantiles.loc[0.95]
-    trimmed = final_df[num_cols].where(final_df[num_cols].gt(low) & final_df[num_cols].lt(high))
 
-    # min‐max normalize + log1p
-    scaled = (trimmed - trimmed.min()) / (trimmed.max() - trimmed.min())
-    final_df[num_cols] = np.log1p(scaled.fillna(0))     
-    
-    # MinMax normalize all feature score columns, whether or not they were normalized
-    cols_to_minmax = [col for col in final_df.select_dtypes(include=np.number).columns]
-    
-    for col in cols_to_minmax:
-        final_df[col] = minmax_normalize_column(final_df[col])
+    def normalize_partition(df):
+        trimmed = df[num_cols].where(df[num_cols].gt(low) & df[num_cols].lt(high))
+        scaled = (trimmed - trimmed.min()) / (trimmed.max() - trimmed.min())
+        df[num_cols] = np.log1p(scaled.fillna(0))
+        return df
 
-    # Set the desired column order
+    final_dd = final_dd.map_partitions(normalize_partition)
+
+    # Normalize again min-max to [0,1]
+    def minmax_partition(df):
+        for col in df.select_dtypes(include="number").columns:
+            df[col] = (df[col] - df[col].min()) / (df[col].max() - df[col].min())
+        return df
+
+    final_dd = final_dd.map_partitions(minmax_partition)
+
+    # Select final column order
     column_order = [
         "source_id",
         "target_id",
@@ -341,51 +322,41 @@ def main():
         "sliding_window_score",
         "homer_binding_score"
     ]
-    
-    column_order = [col for col in column_order if col in final_df.columns]
-    
-    final_df = final_df[column_order]
-    
-    all_nan_cols = final_df.columns[final_df.isna().all()].tolist()
-    if all_nan_cols:
-        logging.warning(f"The following columns are entirely NaN: {all_nan_cols}")
-    else:
-        logging.info("No columns are entirely NaN.")
 
-        
-    logging.info(final_df.head())
-    logging.info('\nColumns:')
-    for col_name in final_df.columns:
-        logging.info(f'\t{col_name}')
-    logging.info(final_df.columns)
-    logging.info(f'\nTFs: {len(final_df["source_id"].unique())}')
-    logging.info(f'Peaks: {len(final_df["peak_id"].unique())}')
-    logging.info(f'TGs: {len(final_df["target_id"].unique())}')
+    existing_columns = [col for col in column_order if col in final_dd.columns]
+    final_dd = final_dd[existing_columns]
     
-    # For testing, randomly downsample the rows
-    logging.info(f"Creating and saving a {subsample}% downsampling of the dataset for testing")
-    decimal_subsample = subsample / 100
-    
-    logging.info(f'\tNumber of unique non-NaN scores for each feature:')
-    for column in column_order:
-        logging.info(f'\t\tNumber of {column} scores: {final_df[column].nunique(dropna=True)}')
-        
-    # Write the final df as a parquet file
-    final_df.to_parquet(f"{inferred_grn_dir}/inferred_network.parquet", engine="pyarrow", index=False, compression="snappy")
-
-    # Sample for testing:
-    final_df.sample(frac=decimal_subsample).to_parquet(
-        f"{inferred_grn_dir}/inferred_network_{subsample:.0f}pct.parquet", engine="pyarrow", index=False, compression="snappy"
+    # Save final merged DataFrame
+    logging.info("Writing full inferred network Parquet")
+    final_dd.repartition(partition_size="256MB").to_parquet(
+        f"{inferred_grn_dir}/inferred_network.parquet",
+        engine="pyarrow",
+        compression="snappy",
+        write_index=False
     )
-        
-    logging.info(f'\nSaving rows with no more than 2 missing feature scores')
-    n_score_cols = len(final_df.select_dtypes(include=np.number).columns)
+
+    # Save subsampled version
+    logging.info(f"Writing {subsample:.0f}% subsample of inferred network")
+    final_dd.sample(frac=subsample/100).repartition(partition_size="256MB").to_parquet(
+        f"{inferred_grn_dir}/inferred_network_{subsample:.0f}pct.parquet",
+        engine="pyarrow",
+        compression="snappy",
+        write_index=False
+    )
+
+    # Save enriched features (rows with ≥ N-2 numeric scores)
+    n_score_cols = len(final_dd.select_dtypes(include="number").columns)
     feature_threshold = n_score_cols - 2
-    final_df_enriched_features = final_df[final_df.count(numeric_only=True, axis=1) >= feature_threshold]
-    logging.info(f'\tNumber of rows with >= {feature_threshold}/{n_score_cols} feature columns {len(final_df)}')
-    
-    final_df_enriched_features.to_parquet(f"{inferred_grn_dir}/inferred_network_enrich_feat.parquet", engine="pyarrow", index=False, compression="snappy")
-    
+    enriched_dd = final_dd[final_dd.count(axis=1, numeric_only=True) >= feature_threshold]
+
+    logging.info(f"Writing enriched feature subset: {feature_threshold}/{n_score_cols} non-null numeric features required")
+    enriched_dd.repartition(partition_size="256MB").to_parquet(
+        f"{inferred_grn_dir}/inferred_network_enrich_feat.parquet",
+        engine="pyarrow",
+        compression="snappy",
+        write_index=False
+    )
+
     logging.info("Done!")
 
 if __name__ == "__main__":
