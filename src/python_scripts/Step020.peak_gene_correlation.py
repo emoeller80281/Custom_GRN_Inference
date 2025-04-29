@@ -258,25 +258,29 @@ def select_top_dispersion_auto(df, target_n_features=5000, dispersion_quantile=0
     """
 
     def compute_dispersion(part):
-        mean = part.mean(axis=1, skipna=True)
-        var = part.var(axis=1, skipna=True)
+        numeric_part = part.select_dtypes(include=[np.number])
+        mean = numeric_part.mean(axis=1, skipna=True)
+        var = numeric_part.var(axis=1, skipna=True)
         disp = var / (mean + 1e-8)
         return disp
 
-    # Step 1: Compute dispersion
-    logging.info("Computing feature dispersion across cells...")
-    dispersions = df.map_partitions(compute_dispersion, meta=('x', 'f8')).compute()
+    # Step 1: Preserve original row identity as a column
+    df_reset = df.reset_index(drop=False)  # index becomes a column, preserves row mapping
+    df_reset = df_reset.persist()
+
+    logging.info("Computing feature dispersion across cells...")    
+    dispersions = df_reset.map_partitions(compute_dispersion, meta=('x', 'f8')).compute()
 
     total_features = len(dispersions)
 
-    # Step 2: Set dispersion threshold based on quantile
+    # Step 2: Compute quantile-based dispersion threshold
     min_disp = dispersions.quantile(dispersion_quantile)
 
     # Step 3: Keep only features above the threshold
     filtered = dispersions[dispersions >= min_disp]
     n_above_thresh = len(filtered)
 
-    # Step 4: Select top-N features if necessary
+    # Step 4: Select top-N features if needed
     if n_above_thresh > target_n_features:
         top_features_idx = filtered.nlargest(target_n_features).index
         n_final = target_n_features
@@ -284,13 +288,17 @@ def select_top_dispersion_auto(df, target_n_features=5000, dispersion_quantile=0
         top_features_idx = filtered.index
         n_final = n_above_thresh
 
-    # Logging summary
+    # Log summary
     logging.info(f"Initial features: {total_features:,}")
     logging.info(f"Features above dispersion threshold (quantile={dispersion_quantile}): {n_above_thresh:,}")
     logging.info(f"Final selected features (after top-N limit): {n_final:,}")
     logging.info(f"Dispersion threshold (min_disp) used: {min_disp:.4f}")
 
-    return df.loc[top_features_idx]
+    # Step 5: Map integer positions to index values and subset
+    index_values = df_reset.index.to_numpy()[top_features_idx]
+    df_filtered = df_reset.loc[index_values].drop(columns=["index"], errors="ignore")
+
+    return df_filtered
 
 
 def auto_tune_parameters(num_cpu: int = None, total_memory_gb: int = None) -> dict:
@@ -611,10 +619,10 @@ def main():
 
     def prepare_inputs_for_correlation():
         logging.info("Subsetting ATAC and RNA matrices to relevant peaks/genes")
-        atac_sub = atac_df.merge(peak_gene_df[["peak_id"]], on="peak_id", how="inner")
+        atac_sub = atac_df.merge(peak_gene_df[["peak_id"]].drop_duplicates(), on="peak_id", how="inner")
         atac_sub = atac_sub.drop(columns="peak_id", errors="ignore")
         
-        rna_sub = rna_df.merge(peak_gene_df[["target_id"]], 
+        rna_sub = rna_df.merge(peak_gene_df[["target_id"]].drop_duplicates(), 
                     left_on="gene_id", right_on="target_id", how="inner")
         rna_sub = rna_sub.drop(columns=["target_id", "gene_id"], errors="ignore")
 

@@ -1,4 +1,14 @@
 #!/bin/bash -l
+#!/bin/bash -l
+#SBATCH --job-name="submit_grn_inference_jobs"
+#SBATCH -p compute
+#SBATCH --nodes=1
+#SBATCH -c 1
+#SBATCH --mem=2G
+
+# Set the maximum number of jobs that can run at once
+MAX_JOBS_IN_QUEUE=5
+
 
 submit_job() {
     local SAMPLE_NAME=$1
@@ -12,12 +22,14 @@ submit_job() {
     mkdir -p "LOGS/${CELL_TYPE}_logs/${SAMPLE_NAME}_logs"
 
     # Submit the job
-    sbatch \
-        --export=ALL,SAMPLE_NAME="$SAMPLE_NAME",CELL_TYPE="$CELL_TYPE",SPECIES="$SPECIES",RNA_FILE_NAME="$RNA_FILE_NAME",ATAC_FILE_NAME="$ATAC_FILE_NAME",GROUND_TRUTH_FILE="$GROUND_TRUTH_FILE" \
-        --output="LOGS/${CELL_TYPE}_logs/${SAMPLE_NAME}_logs/custom_grn_${CELL_TYPE}_${SAMPLE_NAME}.out" \
-        --error="LOGS/${CELL_TYPE}_logs/${SAMPLE_NAME}_logs/custom_grn_${CELL_TYPE}_${SAMPLE_NAME}.err" \
-        --job-name="custom_grn_method_${CELL_TYPE}_${SAMPLE_NAME}" \
-        /gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/src/bash_scripts/main_pipeline.sh
+    job_output=$(
+        sbatch \
+            --export=ALL,SAMPLE_NAME="$SAMPLE_NAME",CELL_TYPE="$CELL_TYPE",SPECIES="$SPECIES",RNA_FILE_NAME="$RNA_FILE_NAME",ATAC_FILE_NAME="$ATAC_FILE_NAME",GROUND_TRUTH_FILE="$GROUND_TRUTH_FILE" \
+            --output="LOGS/${CELL_TYPE}_logs/${SAMPLE_NAME}_logs/custom_grn_${CELL_TYPE}_${SAMPLE_NAME}.out" \
+            --error="LOGS/${CELL_TYPE}_logs/${SAMPLE_NAME}_logs/custom_grn_${CELL_TYPE}_${SAMPLE_NAME}.err" \
+            --job-name="custom_grn_method_${CELL_TYPE}_${SAMPLE_NAME}" \
+            /gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/src/bash_scripts/main_pipeline.sh
+    )
 }
 
 run_macrophage() {
@@ -30,7 +42,16 @@ run_macrophage() {
         )
     local SPECIES="hg38"
 
+    echo "Submitting jobs"
+    # Submit each SAMPLE_NAME as a separate job
     for SAMPLE_NAME in "${SAMPLE_NAMES[@]}"; do
+        # Check how many jobs are currently queued/running
+        while [ "$(squeue -u $USER | grep custom_grn_method | wc -l)" -ge "$MAX_JOBS_IN_QUEUE" ]; do
+            echo "Maximum jobs ($MAX_JOBS_IN_QUEUE) in queue. Checking again in 5 minutes..."
+            sleep 300
+        done
+
+        echo "    - Running custom GRN method for ${SAMPLE_NAME}"
         local RNA_FILE_NAME="${SAMPLE_NAME}_RNA.csv"
         local ATAC_FILE_NAME="${SAMPLE_NAME}_ATAC.csv"
         local GROUND_TRUTH_FILE="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/REFERENCE_NETWORKS/RN204_ChIPSeq_ChIPAtlas_Human_Macrophages.tsv"
@@ -61,8 +82,15 @@ run_mESC(){
     )
     local SPECIES="mm10"
 
+    echo "Submitting jobs"
     # Submit each SAMPLE_NAME as a separate job
     for SAMPLE_NAME in "${SAMPLE_NAMES[@]}"; do
+        # Check how many jobs are currently queued/running
+        while [ "$(squeue -u $USER | grep custom_grn_method | wc -l)" -ge "$MAX_JOBS_IN_QUEUE" ]; do
+            echo "Maximum jobs ($MAX_JOBS_IN_QUEUE) in queue. Checking again in 5 minutes..."
+            sleep 300
+        done
+        echo "    - Running custom GRN method for ${SAMPLE_NAME}"
         local RNA_FILE_NAME="mESC_${SAMPLE_NAME}_RNA.csv"
         local ATAC_FILE_NAME="mESC_${SAMPLE_NAME}_ATAC.csv"
         local GROUND_TRUTH_FILE="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/REFERENCE_NETWORKS/RN111_ChIPSeq_BEELINE_Mouse_ESC.tsv"
@@ -86,12 +114,20 @@ run_K562(){
     )
     local SPECIES="hg38"
 
+    echo "Submitting jobs"
     # Submit each SAMPLE_NAME as a separate job
     for SAMPLE_NAME in "${SAMPLE_NAMES[@]}"; do
+        # Check how many jobs are currently queued/running
+        while [ "$(squeue -u $USER | grep custom_grn_method | wc -l)" -ge "$MAX_JOBS_IN_QUEUE" ]; do
+            echo "Maximum jobs ($MAX_JOBS_IN_QUEUE) in queue. Checking again in 5 minutes..."
+            sleep 300
+        done
+
         local RNA_FILE_NAME="${SAMPLE_NAME}_RNA.csv"
         local ATAC_FILE_NAME="${SAMPLE_NAME}_ATAC.csv"
         local GROUND_TRUTH_FILE="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/REFERENCE_NETWORKS/RN117_ChIPSeq_PMID37486787_Human_K562.tsv"
 
+        echo "    - Submitted custom GRN method job for '${SAMPLE_NAME}'"
         # Submit the job for each sample
         submit_job \
             "$SAMPLE_NAME" \
