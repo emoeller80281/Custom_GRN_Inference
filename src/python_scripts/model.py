@@ -14,6 +14,8 @@ import matplotlib.pyplot as plt
 
 import xgboost as xgb
 
+from plotting import plot_feature_importance
+
 
 def train_xgboost_dask(X_train_dd, y_train_dd, feature_names):
     """

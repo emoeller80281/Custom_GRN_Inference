@@ -1,93 +1,70 @@
+import dask.dataframe as dd
+from dask.distributed import Client
+import xgboost as xgb
 import pandas as pd
-import numpy as np
-from sklearn.metrics import classification_report, roc_auc_score
-import matplotlib.pyplot as plt
-import random
-import csv
 import os
-import joblib
-import argparse
 import logging
-import xgboost as xgb  # Import XGBoost
+import argparse
 
 def parse_args() -> argparse.Namespace:
-    """
-    Parses command-line arguments.
+    parser = argparse.ArgumentParser(description="Apply Dask-trained XGBoost model to a new network")
+    parser.add_argument("--output_dir", type=str, required=True, help="Directory to save predictions")
+    parser.add_argument("--model", type=str, required=True, help="Path to trained XGBoost .json Booster model")
+    parser.add_argument("--target", type=str, required=True, help="Path to .parquet file for inference")
+    parser.add_argument("--save_name", type=str, required=True, help="Filename for output")
+    return parser.parse_args()
 
-    Returns:
-        argparse.Namespace: Parsed arguments containing paths for input and output files.
-    """
-    parser = argparse.ArgumentParser(description="Process TF motif binding potential.")
-
-    parser.add_argument(
-        "--output_dir",
-        type=str,
-        required=True,
-        help="Path to the output directory for the sample"
-    )
-    parser.add_argument(
-        "--model",
-        type=str,
-        required=True,
-        help="Path to the trained XGBoost model file"
-    )
-    parser.add_argument(
-        "--target",
-        type=str,
-        required=True,
-        help="Path to the inferred network pickle file to apply the model to"
-    )
-    parser.add_argument(
-        "--save_name",
-        type=str,
-        required=True,
-        help="Name used to save the predicted network"
-    )
-    
-    args: argparse.Namespace = parser.parse_args()
-    return args
-
-def read_inferred_network(inferred_network_file):
-    inferred_network = pd.read_parquet(inferred_network_file)
-    inferred_network["source_id"] = inferred_network["source_id"].str.upper()
-    inferred_network["target_id"] = inferred_network["target_id"].str.upper()
-    return inferred_network
+def read_inferred_network_dask(inferred_network_file):
+    df = dd.read_parquet(inferred_network_file)
+    df["source_id"] = df["source_id"].str.upper()
+    df["target_id"] = df["target_id"].str.upper()
+    return df
 
 def main():
-    # Parse arguments
-    args: argparse.Namespace = parse_args()
+    args = parse_args()
 
-    output_dir: str = args.output_dir
-    model_path: str = args.model
-    target: str = args.target
-    save_name: str = args.save_name
-    
-    logging.info(f'Running XGBoost predictions for {save_name}')
-    
+    model_path = args.model
+    target_path = args.target
+    output_dir = args.output_dir
+    save_name = args.save_name
+
+    logging.info("Connecting to Dask client")
+    client = Client(processes=False)
+
+    logging.info("Loading XGBoost Booster")
+    booster = xgb.Booster()
+    booster.load_model(model_path)
+
+    feature_names_str = booster.attr("feature_names")
+    if feature_names_str is None:
+        raise ValueError("Missing feature_names in model attributes. Use booster.set_attr(...) during training.")
+    feature_names = feature_names_str.split(",")
+
     logging.info("Reading inferred network")
-    inferred_network = read_inferred_network(target)
-    logging.info("    Done!")
-    
-    logging.info("Loading trained XGBoost model")
-    xgb_model = joblib.load(model_path)
-    # Use the feature names stored in the model to select the correct columns
-    X = inferred_network[xgb_model.feature_names]
-    logging.info("    Done!")
-    
-    logging.info("Making predictions")
-    inferred_network["score"] = xgb_model.predict_proba(X)[:, 1]
-    inferred_network = inferred_network[["source_id", "target_id", "score"]]
-    
-    inferred_network = inferred_network.drop_duplicates()
-    logging.info(f'Num unique TFs: {len(inferred_network["source_id"].unique())}')
-    logging.info(f'Num unique TGs: {len(inferred_network["target_id"].unique())}')
-    logging.info("    Done!")
-    
-    logging.info("Saving inferred GRN")
-    output_file = os.path.join(output_dir, save_name)
-    inferred_network.to_csv(output_file, sep="\t", header=True, index=False)
-    logging.info("    Done!\n")
-    
+    inferred_dd = read_inferred_network_dask(target_path)
+    X_dd = inferred_dd[feature_names]
+
+    logging.info("Converting to DaskDMatrix")
+    dtest = xgb.dask.DaskDMatrix(client, X_dd, feature_names=feature_names)
+
+    logging.info("Running distributed prediction")
+    y_pred = xgb.dask.predict(client, booster, dtest)
+
+    # Convert to pandas (merging Dask DataFrame + Dask array)
+    logging.info("Joining predictions back to source-target pairs")
+    result_df = inferred_dd[["source_id", "target_id"]].compute()
+    result_df["score"] = y_pred.compute()
+    result_df = result_df.drop_duplicates()
+
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    output_path = os.path.join(output_dir, save_name)
+    logging.info(f"Saving to {output_path}")
+    result_df.to_csv(output_path, sep="\t", index=False)
+
+    client.close()
+
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format='%(message)s')
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     main()

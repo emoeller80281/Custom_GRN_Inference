@@ -7,6 +7,9 @@ import scipy.stats as stats
 from dask import delayed, compute
 from dask.diagnostics import ProgressBar
 import dask.dataframe as dd
+from tqdm import tqdm
+import psutil
+import shutil
 
 import math
 import os
@@ -16,6 +19,7 @@ import logging
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pyarrow.lib as pa_lib
 
 def parse_args() -> argparse.Namespace:
     """
@@ -69,7 +73,7 @@ def parse_args() -> argparse.Namespace:
 
 # ------------------------- DATA LOADING & PREPARATION ------------------------- #
 def extract_atac_peaks(atac_df, tmp_dir):
-    peak_pos = atac_df["peak_id"].tolist()
+    peak_pos = atac_df["peak_id"].compute().tolist()
 
     peak_df = pd.DataFrame()
     peak_df["chr"] = [pos.split(":")[0].replace("chr", "") for pos in peak_pos]
@@ -84,7 +88,6 @@ def extract_atac_peaks(atac_df, tmp_dir):
     
     # Write the peak DataFrame to a file
     peak_df.to_parquet(f"{tmp_dir}/peak_df.parquet", engine="pyarrow", index=False, compression="snappy")
-
 
 def load_ensembl_organism_tss(organism, tmp_dir):
     # Connect to the Ensembl BioMart server
@@ -206,8 +209,6 @@ def find_genes_near_peaks(peak_bed, tss_bed, rna_df, peak_dist_limit, tmp_dir):
         
     peak_tss_subset_df.to_parquet(f"{tmp_dir}/peak_to_gene_map.parquet", index=False)
 
-
-
 def row_normalize_sparse(X):
     """
     Row-normalize a sparse matrix X (CSR format) so that each row
@@ -235,113 +236,292 @@ def row_normalize_sparse(X):
             X_norm.data[i] = [0 for _ in X_norm.data[i]]
     return X_norm.tocsr()
 
-def filter_low_variance_features(df, min_variance=0.5):
-    def row_var(part):
-        return part.var(axis=1, skipna=True)
+def select_top_dispersion_auto(df, target_n_features=5000, dispersion_quantile=0.75):
+    """
+    Automatically selects top most dispersed features by:
+    1. Filtering features with dispersion above a dataset-driven threshold.
+    2. Selecting the top-N features with the highest dispersion.
 
-    variances = df.map_partitions(row_var, meta=('x', 'f8'))
-    return df[variances >= min_variance]
+    Parameters
+    ----------
+    df : dask.DataFrame
+        Rows are features (peaks or genes), columns are cells.
+    target_n_features : int
+        Number of features you ideally want to select (default: 5000).
+    dispersion_quantile : float
+        Quantile of dispersion to define filtering threshold (default: 0.75 = top 25%).
+
+    Returns
+    -------
+    dask.DataFrame
+        Subset of original DataFrame with selected features.
+    """
+
+    def compute_dispersion(part):
+        mean = part.mean(axis=1, skipna=True)
+        var = part.var(axis=1, skipna=True)
+        disp = var / (mean + 1e-8)
+        return disp
+
+    # Step 1: Compute dispersion
+    logging.info("Computing feature dispersion across cells...")
+    dispersions = df.map_partitions(compute_dispersion, meta=('x', 'f8')).compute()
+
+    total_features = len(dispersions)
+
+    # Step 2: Set dispersion threshold based on quantile
+    min_disp = dispersions.quantile(dispersion_quantile)
+
+    # Step 3: Keep only features above the threshold
+    filtered = dispersions[dispersions >= min_disp]
+    n_above_thresh = len(filtered)
+
+    # Step 4: Select top-N features if necessary
+    if n_above_thresh > target_n_features:
+        top_features_idx = filtered.nlargest(target_n_features).index
+        n_final = target_n_features
+    else:
+        top_features_idx = filtered.index
+        n_final = n_above_thresh
+
+    # Logging summary
+    logging.info(f"Initial features: {total_features:,}")
+    logging.info(f"Features above dispersion threshold (quantile={dispersion_quantile}): {n_above_thresh:,}")
+    logging.info(f"Final selected features (after top-N limit): {n_final:,}")
+    logging.info(f"Dispersion threshold (min_disp) used: {min_disp:.4f}")
+
+    return df.loc[top_features_idx]
+
+
+def auto_tune_parameters(num_cpu: int = None, total_memory_gb: int = None) -> dict:
+    """
+    Suggests optimal chunk_size, batch_size, and number of Dask workers based on system resources.
+
+    Parameters
+    ----------
+    num_cpu : int, optional
+        Number of CPU cores available. If None, detects automatically.
+    total_memory_gb : int, optional
+        Total available RAM in GB. If None, detects automatically.
+
+    Returns
+    -------
+    dict
+        Dictionary with 'chunk_size', 'batch_size', and 'num_workers'.
+    """
+    # Auto-detect if not provided
+    if num_cpu is None:
+        num_cpu = psutil.cpu_count(logical=False) or psutil.cpu_count(logical=True)
+
+    if total_memory_gb is None:
+        total_memory_gb = psutil.virtual_memory().total / (1024 ** 3)  # bytes → GB
+
+    # -------------------------------
+    # Tuning chunk size (gene side)
+    # -------------------------------
+    if total_memory_gb >= 512:
+        chunk_size = 50000
+    elif total_memory_gb >= 256:
+        chunk_size = 30000
+    elif total_memory_gb >= 128:
+        chunk_size = 20000
+    else:
+        chunk_size = 10000
+
+    # -------------------------------
+    # Tuning batch size (peak side)
+    # -------------------------------
+    if num_cpu >= 64:
+        batch_size = 2000
+    elif num_cpu >= 32:
+        batch_size = 1000
+    elif num_cpu >= 16:
+        batch_size = 500
+    else:
+        batch_size = 200
+
+    # -------------------------------
+    # Tuning Dask number of workers
+    # -------------------------------
+    num_workers = max(1, num_cpu - 2)
+
+    return {
+        "chunk_size": chunk_size,
+        "batch_size": batch_size,
+        "num_workers": num_workers
+    }
 
 def calculate_significant_peak_to_gene_correlations(
-    atac_df: pd.DataFrame,
-    gene_df: pd.DataFrame,
-    output_file: str,
-    alpha: float = 0.01,
-    chunk_size: int = 1000,
-    num_cpu: int = 4,
-    batch_size: int = 100
-) -> str:
+    atac_df,
+    gene_df,
+    output_file=None,
+    alpha=0.01,
+    chunk_size=25_000,
+    num_cpu=4,
+    batch_size=1500,
+    memory_threshold=1e8  # 100 million peak-gene pairs (default switch)
+):
     """
-    Streams all significant peak–gene correlations (p < alpha) into a single
-    Parquet file at `output_file`.  Returns the path to that file.
-    """
-    # ensure parent directory exists
-    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+    Calculates significant peak-to-gene correlations (p < alpha).
 
-    # 1) Dense→sparse
+    If the number of peak × gene pairs is small enough (< memory_threshold),
+    computes everything in memory and returns a DataFrame.
+    If too large, streams to Parquet file on disk.
+
+    Parameters
+    ----------
+    atac_df : pandas.DataFrame or dask.DataFrame
+        ATAC matrix (peaks × cells)
+    gene_df : pandas.DataFrame or dask.DataFrame
+        RNA matrix (genes × cells)
+    output_file : str, optional
+        Output file path to save results (only required if streaming)
+    alpha : float
+        P-value threshold
+    chunk_size : int
+        Chunk size for dot products
+    num_cpu : int
+        Number of threads
+    batch_size : int
+        Batch size for Dask task execution
+    memory_threshold : int
+        Max number of peak-gene pairs to allow full-memory mode
+
+    Returns
+    -------
+    pandas.DataFrame or str
+        If using memory mode, returns a DataFrame.
+        If using disk streaming mode, returns output_file path.
+    """
+    logging.info("Calculating significant peak-to-gene correlations")
+
+    # Make sure dataframes are pandas
+    if isinstance(atac_df, dd.DataFrame):
+        atac_df = atac_df.compute()
+    if isinstance(gene_df, dd.DataFrame):
+        gene_df = gene_df.compute()
+
+    num_peaks, n = atac_df.shape
+    num_genes = gene_df.shape[0]
+    num_pairs = num_peaks * num_genes
+
+    logging.info(f"    Number of peaks: {num_peaks}")
+    logging.info(f"    Number of genes: {num_genes}")
+    logging.info(f"    Total peak-gene pairs: {num_pairs:,}")
+
+    # Convert to sparse
     X = sp.csr_matrix(atac_df.values.astype(float))
     Y = sp.csr_matrix(gene_df.values.astype(float))
-    num_peaks, n = X.shape
+
     df_degrees = n - 2
 
-    # 2) Row-normalize so Pearson r = dot/(n-1)
+    # Row-normalize
     X_norm = row_normalize_sparse(X)
     Y_norm = row_normalize_sparse(Y)
 
-    # 3) Per-peak worker
-    def process_peak_gene_chunked(i, Xn, Yn, df_deg, nn, α, csize):
-        out = []
-        prow = Xn.getrow(i)
-        total_genes = Yn.shape[0]
-        for start in range(0, total_genes, csize):
-            end = min(start + csize, total_genes)
-            chunk = Yn[start:end]
-            r = prow.dot(chunk.T).toarray().ravel() / (nn - 1)
+    def process_peak_gene_chunked(i, X_norm, Y_norm, df_degrees, n, alpha, chunk_size, min_r=0.0):
+        results = []
+        peak_row = X_norm.getrow(i)
+        total_genes = Y_norm.shape[0]
+        for start in range(0, total_genes, chunk_size):
+            end = min(start + chunk_size, total_genes)
+            Y_chunk = Y_norm[start:end]
+
+            r_chunk = peak_row.dot(Y_chunk.T).toarray().ravel()
+            r_chunk = r_chunk / (n - 1)
+
+            # Optional rough correlation filtering
+            if min_r > 0:
+                keep = np.where(np.abs(r_chunk) >= min_r)[0]
+                if len(keep) == 0:
+                    continue
+                r_chunk = r_chunk[keep]
+                gene_indices = keep + start
+            else:
+                gene_indices = np.arange(start, end)
+
             with np.errstate(divide='ignore', invalid='ignore'):
-                t = r * np.sqrt(df_deg / (1 - r**2))
-            p = 2 * stats.t.sf(np.abs(t), df=df_deg)
-            sig = np.where(p < α)[0]
-            for loc in sig:
-                out.append((i, start + loc, r[loc]))
-        return out
+                t_stat_chunk = r_chunk * np.sqrt(df_degrees / (1 - r_chunk**2))
+            p_chunk = 2 * stats.t.sf(np.abs(t_stat_chunk), df=df_degrees)
 
-    # 4) Build delayed tasks
-    tasks = [
-        delayed(process_peak_gene_chunked)(
-            i, X_norm, Y_norm, df_degrees, n, alpha, chunk_size
-        )
-        for i in range(num_peaks)
-    ]
+            sig_indices = np.where(p_chunk < alpha)[0]
+            for local_idx in sig_indices:
+                results.append((i, gene_indices[local_idx], r_chunk[local_idx]))
 
-    writer = None
-    schema = None
+        return results
 
-    # 5) Compute in batches and append to Parquet
-    for batch_start in range(0, num_peaks, batch_size):
-        batch = tasks[batch_start: batch_start + batch_size]
+    if num_pairs <= memory_threshold:
+        # --- Version 2: Full Memory Mode ---
+        logging.info("    Using in-memory calculation (faster)")
+
+        tasks = [
+            delayed(process_peak_gene_chunked)(i, X_norm, Y_norm, df_degrees, n, alpha, chunk_size)
+            for i in range(num_peaks)
+        ]
+
         with ProgressBar(dt=30, out=sys.stderr):
-            results = compute(
-                *batch,
-                scheduler="threads",
-                num_workers=num_cpu
-            )
+            results = compute(*tasks, scheduler="threads", num_workers=num_cpu)
 
-        for local_idx, sublist in enumerate(results):
-            peak_idx = batch_start + local_idx
-            if not sublist:
-                continue
+        flat_results = [item for sublist in results for item in sublist]
 
-            # build small DataFrame
-            df_chunk = pd.DataFrame(
-                sublist,
-                columns=["peak_i", "gene_j", "correlation"]
-            )
-            # map back to IDs
-            df_chunk["peak_id"] = atac_df.index[df_chunk["peak_i"]]
-            df_chunk["gene_id"] = gene_df.index[df_chunk["gene_j"]]
-            df_chunk = df_chunk[["peak_id", "gene_id", "correlation"]]
+        df_corr = pd.DataFrame(flat_results, columns=["peak_i", "gene_j", "correlation"])
+        df_corr["peak_id"] = atac_df.index[df_corr["peak_i"]]
+        df_corr["gene_id"] = gene_df.index[df_corr["gene_j"]]
+        df_corr = df_corr[["peak_id", "gene_id", "correlation"]]
 
-            # convert to Arrow Table
-            table = pa.Table.from_pandas(df_chunk, preserve_index=False)
+        logging.info("    Done!")
+        return df_corr
 
-            # initialize writer on first non-empty chunk
-            if writer is None:
-                schema = table.schema
-                writer = pq.ParquetWriter(output_file, schema)
-
-            writer.write_table(table)
-            # free memory
-            del df_chunk, table
-
-        del results
-
-    if writer:
-        writer.close()
-        logging.info(f"Wrote correlations to {output_file}")
     else:
-        logging.warning("No significant correlations found; no Parquet written.")
+        # --- Version 1: Streaming-to-Parquet Mode ---
+        logging.info("    Too large for memory. Streaming results to disk.")
 
-    return output_file
+        if output_file is None:
+            raise ValueError("output_file must be provided for streaming mode.")
+
+        os.makedirs(os.path.dirname(output_file), exist_ok=True)
+
+        tasks = [
+            delayed(process_peak_gene_chunked)(i, X_norm, Y_norm, df_degrees, n, alpha, chunk_size, min_r=0.2)
+            for i in range(num_peaks)
+        ]
+
+        writer = None
+        schema = None
+        num_batches = (num_peaks + batch_size - 1) // batch_size
+
+        for batch_start in tqdm(range(0, num_peaks, batch_size), total=num_batches, desc="Computing peak-gene batches"):
+            batch = tasks[batch_start: batch_start + batch_size]
+            results = compute(*batch, scheduler="threads", num_workers=num_cpu)
+
+            for local_idx, sublist in enumerate(results):
+                peak_idx = batch_start + local_idx
+                if not sublist:
+                    continue
+
+                df_chunk = pd.DataFrame(sublist, columns=["peak_i", "gene_j", "correlation"])
+                df_chunk["peak_id"] = atac_df.index[df_chunk["peak_i"]]
+                df_chunk["gene_id"] = gene_df.index[df_chunk["gene_j"]]
+                df_chunk = df_chunk[["peak_id", "gene_id", "correlation"]]
+
+                table = pa.Table.from_pandas(df_chunk, preserve_index=False)
+
+                if writer is None:
+                    schema = table.schema
+                    writer = pq.ParquetWriter(output_file, schema)
+
+                writer.write_table(table)
+                del df_chunk, table
+
+            del results
+
+        if writer:
+            writer.close()
+            logging.info(f"    Wrote correlations to {output_file}")
+        else:
+            logging.warning("    No significant correlations found; no Parquet written.")
+
+        return output_file
 
 def load_atac_dataset(atac_data_file: str) -> dd.DataFrame:
     atac_df: dd.DataFrame = dd.read_parquet(atac_data_file)
@@ -368,6 +548,17 @@ def main():
     TMP_DIR = f"{OUTPUT_DIR}/tmp"
     NUM_CPU = int(args.num_cpu)
     PEAK_DIST_LIMIT=args.peak_dist_limit
+    
+    # Auto-tune parameters based on system resources
+    tuned_params = auto_tune_parameters(num_cpu=int(args.num_cpu))
+    chunk_size = tuned_params["chunk_size"]
+    batch_size = tuned_params["batch_size"]
+    num_workers = tuned_params["num_workers"]
+
+    logging.info("Auto-tuned parameters:")
+    logging.info(f"  - chunk_size = {chunk_size:,}")
+    logging.info(f"  - batch_size = {batch_size:,}")
+    logging.info(f"  - num_workers = {num_workers}")
     
     # Make the tmp dir if it does not exist
     if not os.path.exists(TMP_DIR):
@@ -402,45 +593,65 @@ def main():
     
     # ============ FINDING PEAKS NEAR GENES ============
     # Dataframe with "peak_id", "target_id" and "TSS_dist"
-    find_genes_near_peaks(
-        peak_bed,
-        tss_bed,
-        rna_df,
-        PEAK_DIST_LIMIT,
-        TMP_DIR
-    )
+    if not os.path.exists(os.path.join(TMP_DIR, "peak_to_gene_map.parquet")):
+        find_genes_near_peaks(
+            peak_bed,
+            tss_bed,
+            rna_df,
+            PEAK_DIST_LIMIT,
+            TMP_DIR
+        )
+    else:
+        logging.info('TSS distance file exists, loading...')
     
     peak_gene_df = dd.read_parquet(f"{TMP_DIR}/peak_to_gene_map.parquet")
 
     # ============ PEAK TO GENE CORRELATION CALCULATION ============
     PARQ = f"{TMP_DIR}/sig_peak_to_gene_corr.parquet"
-    if not os.path.exists(PARQ):
-        logging.info("Subsetting ATAC and RNA matrices to relevant peaks/genes")
-        atac_sub = atac_df.merge(peak_gene_df[["peak_id"]].drop_duplicates(), on="peak_id", how="inner")
 
-        rna_sub = rna_df.merge(peak_gene_df[["target_id"]].drop_duplicates(), 
-                       left_on="gene_id", right_on="target_id", how="inner")
-        rna_sub = rna_sub.drop(columns="target_id")
+    def prepare_inputs_for_correlation():
+        logging.info("Subsetting ATAC and RNA matrices to relevant peaks/genes")
+        atac_sub = atac_df.merge(peak_gene_df[["peak_id"]], on="peak_id", how="inner")
+        atac_sub = atac_sub.drop(columns="peak_id", errors="ignore")
         
-        # Filter out genes / peaks with low variance in expression / accessibility
+        rna_sub = rna_df.merge(peak_gene_df[["target_id"]], 
+                    left_on="gene_id", right_on="target_id", how="inner")
+        rna_sub = rna_sub.drop(columns=["target_id", "gene_id"], errors="ignore")
+
         logging.info("Filtering out genes and peaks with low variance")
-        rna_sub  = filter_low_variance_features(rna_sub,  min_variance=0.5)
-        atac_sub  = filter_low_variance_features(atac_sub,  min_variance=0.5)
+
+        rna_sub = select_top_dispersion_auto(rna_df, target_n_features=5000, dispersion_quantile=0.75)
+        atac_sub = select_top_dispersion_auto(rna_df, target_n_features=50000, dispersion_quantile=0.75)
+        logging.info(f"Selected {rna_sub.shape[0]} RNA features with highest dispersion")
+        logging.info(f"Selected {atac_sub.shape[0]} ATAC features with highest dispersion")
         
+        return atac_sub, rna_sub
+
+    def run_correlation_and_load():
+        atac_sub, rna_sub = prepare_inputs_for_correlation()
         logging.info("Calculating significant ATAC-seq peak-to-gene correlations")
         written = calculate_significant_peak_to_gene_correlations(
             atac_sub,
             rna_sub,
             output_file=PARQ,
-            alpha=0.01,
-            chunk_size=1000,
-            num_cpu=NUM_CPU,
-            batch_size=100
+            alpha=0.05,
+            chunk_size=chunk_size,
+            num_cpu=num_workers,
+            batch_size=batch_size
         )
-        sig_peak_to_gene_corr = dd.read_parquet(written)
+        return dd.read_parquet(written)
+
+    if not os.path.exists(PARQ):
+        sig_peak_to_gene_corr = run_correlation_and_load()
+
     else:
-        logging.info("Loading existing Parquet")
-        sig_peak_to_gene_corr = dd.read_parquet(PARQ)
+        try:
+            logging.info("Loading existing Parquet")
+            sig_peak_to_gene_corr = dd.read_parquet(PARQ)
+        except pa_lib.ArrowInvalid:
+            logging.warning(f"Corrupt Parquet file detected at {PARQ}. Deleting and recalculating...")
+            os.remove(PARQ)
+            sig_peak_to_gene_corr = run_correlation_and_load()
 
     # Compute the 90th-percentile cutoff
     quantile_threshold = 0.70

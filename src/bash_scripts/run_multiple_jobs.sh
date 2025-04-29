@@ -23,10 +23,10 @@ submit_job() {
 run_macrophage() {
     local CELL_TYPE="macrophage"
     local SAMPLE_NAMES=(
-        "macrophage_buffer1_filtered"
-        "macrophage_buffer2_filtered"
-        "macrophage_buffer3_filtered"
-        "macrophage_buffer4_filtered"
+        # "macrophage_buffer1_filtered"
+        # "macrophage_buffer2_filtered"
+        # "macrophage_buffer3_filtered"
+        # "macrophage_buffer4_filtered"
         )
     local SPECIES="hg38"
 
@@ -49,15 +49,15 @@ run_macrophage() {
 run_mESC(){
     local CELL_TYPE="mESC"
     local SAMPLE_NAMES=(
-        # "filtered_L2_E7.5_rep1"
-        "filtered_L2_E7.5_rep2"
-        "filtered_L2_E7.75_rep1"
-        "filtered_L2_E8.0_rep1"
-        "filtered_L2_E8.0_rep2"
-        # "filtered_L2_E8.5_rep1"
-        "filtered_L2_E8.5_rep2"
-        "filtered_L2_E8.75_rep1"
-        "filtered_L2_E8.75_rep2"
+        "filtered_L2_E7.5_rep1"
+        # "filtered_L2_E7.5_rep2"
+        # "filtered_L2_E7.75_rep1"
+        # "filtered_L2_E8.0_rep1"
+        # "filtered_L2_E8.0_rep2"
+        # # "filtered_L2_E8.5_rep1"
+        # "filtered_L2_E8.5_rep2"
+        # "filtered_L2_E8.75_rep1"
+        # "filtered_L2_E8.75_rep2"
     )
     local SPECIES="mm10"
 
@@ -82,7 +82,7 @@ run_mESC(){
 run_K562(){
     local CELL_TYPE="K562"
     local SAMPLE_NAMES=(
-        "K562_human_filtered"
+        # "K562_human_filtered"
     )
     local SPECIES="hg38"
 
