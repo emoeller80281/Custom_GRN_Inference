@@ -1,76 +1,28 @@
 import pandas as pd
-import argparse
-import os
-import numpy as np
-from tqdm import tqdm
-import math
-import sys
-import logging
+import dask.dataframe as dd
 import pyarrow.parquet as pq
+import argparse
+import logging
+import os
+import sys
+import numpy as np
 
 def parse_args() -> argparse.Namespace:
-    """
-    Parses command-line arguments.
+    parser = argparse.ArgumentParser(description="Add STRING scores to inferred network")
+    parser.add_argument("--inferred_net_file", type=str, required=True, help="Path to inferred network Parquet file")
+    parser.add_argument("--string_dir", type=str, required=True, help="Path to STRING database directory")
+    parser.add_argument("--output_dir", type=str, required=True, help="Path to output directory")
+    return parser.parse_args()
 
-    Returns:
-        argparse.Namespace: Parsed arguments containing paths for input and output files and CPU count.
-    """
-    parser = argparse.ArgumentParser(description="Process TF motif binding potential.")
-    parser.add_argument(
-        "--inferred_net_file",
-        type=str,
-        required=True,
-        help="Path to the inferred network (network must contain at least 'source_id' and 'target_id' columns)"
-    )
-    parser.add_argument(
-        "--string_dir",
-        type=str,
-        required=True,
-        help="Path to the directory containing the STRING database files"
-    )
-
-    parser.add_argument(
-        "--output_dir",
-        type=str,
-        required=True,
-        help="Path to the output directory for the sample"
-    )
-
-    args: argparse.Namespace = parser.parse_args()
-    return args
-
-def write_csv_in_chunks(df, output_dir, filename):
-    logging.info(f'Writing out CSV file to {filename} in 5% chunks')
-    output_file = f'{output_dir}/{filename}'
-    chunksize = int(math.ceil(0.05 * df.shape[0]))
-
-    # Remove the output file if it already exists
-    if os.path.exists(output_file):
-        os.remove(output_file)
-
-    # Write the DataFrame in chunks
-    for start in tqdm(range(0, len(df), chunksize), unit="chunk"):
-        chunk = df.iloc[start:start + chunksize]
-        if start == 0:
-            # For the first chunk, write with header in write mode
-            chunk.to_csv(output_file, mode='w', header=True, index=False)
-        else:
-            # For subsequent chunks, append without header
-            chunk.to_csv(output_file, mode='a', header=False, index=False)
-            
-def minmax_normalize_column(column: pd.DataFrame):
+def minmax_normalize_column(column: pd.Series) -> pd.Series:
     return (column - column.min()) / (column.max() - column.min())
 
 def main():
-    
-
+    # Check if STRING columns already present
     pf = pq.ParquetFile(INFERRED_NET_FILE)
     cols = set(pf.schema.names)
 
-    needed = {"string_experimental_score",
-            "string_textmining_score",
-            "string_combined_score"}
-    
+    needed = {"string_experimental_score", "string_textmining_score", "string_combined_score"}
     file_name = os.path.basename(INFERRED_NET_FILE)
 
     if needed.issubset(cols):
@@ -78,81 +30,71 @@ def main():
         sys.exit(0)
     else:
         logging.info(f"Adding missing STRING columns to {file_name}")
-    
-    logging.info("\tReading inferred network file")
-    inferred_net_df = pd.read_parquet(INFERRED_NET_FILE)
-    logging.info("\t  - Done!")
-    
-    logging.info("\tProtein Info DataFrame")
-    protein_info_df = pd.read_csv(f'{STRING_DIR}/protein_info.txt', sep="\t", header=0)
 
-    logging.info("\tProtein Links DataFrame")
-    protein_links_df = pd.read_csv(f'{STRING_DIR}/protein_links_detailed.txt', sep=" ", header=0)
+    # Load inferred network as Dask
+    logging.info("Reading inferred network file with Dask")
+    inferred_net_dd = dd.read_parquet(INFERRED_NET_FILE)
 
-    # Find the common name for the proteins in protein_links_df using the ID to name mapping in protein_info_df
-    logging.info("\tConverting STRING protein IDs to protein name")
-    protein_links_df["protein1"] = protein_info_df.set_index("#string_protein_id").loc[protein_links_df["protein1"], "preferred_name"].reset_index()["preferred_name"]
-    protein_links_df["protein2"] = protein_info_df.set_index("#string_protein_id").loc[protein_links_df["protein2"], "preferred_name"].reset_index()["preferred_name"]
+    # Load STRING metadata files (small)
+    logging.info("Reading STRING protein info")
+    protein_info_df = pd.read_csv(f"{STRING_DIR}/protein_info.txt", sep="\t", header=0)
 
-    cols_to_keep = ["protein1", "protein2", "experimental", "textmining", "combined_score"]
-    protein_links_df = protein_links_df[cols_to_keep].rename(columns={
+    logging.info("Reading STRING protein links detailed")
+    protein_links_df = pd.read_csv(f"{STRING_DIR}/protein_links_detailed.txt", sep=" ", header=0)
+
+    # Map STRING protein IDs to human-readable names
+    logging.info("Mapping STRING protein IDs to preferred names")
+    id_to_name = protein_info_df.set_index("#string_protein_id")["preferred_name"].to_dict()
+    protein_links_df["protein1"] = protein_links_df["protein1"].map(id_to_name)
+    protein_links_df["protein2"] = protein_links_df["protein2"].map(id_to_name)
+
+    # Select relevant STRING columns
+    protein_links_df = protein_links_df.rename(columns={
         "experimental": "string_experimental_score",
-        "textmining" : "string_textmining_score",
-        "combined_score" : "string_combined_score"
-    })
-    
-    # Merge the inferred network and STRING edge scores
-    logging.info("\tMerging the STRING edges with the inferred network edges")
-    inferred_edges_in_string_df = pd.merge(
-        inferred_net_df,
-        protein_links_df,
+        "textmining": "string_textmining_score",
+        "combined_score": "string_combined_score"
+    })[["protein1", "protein2", "string_experimental_score", "string_textmining_score", "string_combined_score"]]
+
+    # Convert STRING links to Dask
+    logging.info("Converting STRING links to Dask")
+    protein_links_dd = dd.from_pandas(protein_links_df, npartitions=1)
+
+    # Merge inferred network with STRING scores
+    logging.info("Merging inferred network with STRING edges")
+    merged_dd = inferred_net_dd.merge(
+        protein_links_dd,
         left_on=["source_id", "target_id"],
         right_on=["protein1", "protein2"],
         how="left"
-    ).drop(columns={"protein1", "protein2"})
-    logging.info("\t  - Done!")
-    
-    # Min-max normalize the STRING columns
-    logging.info("\tNormalizing STRING scores")
-    cols_to_normalize = ["string_experimental_score", "string_textmining_score", "string_combined_score"]
-    inferred_edges_in_string_df[cols_to_normalize] = inferred_edges_in_string_df[cols_to_normalize].apply(lambda x: minmax_normalize_column(x), axis=0)
-    
-    num_common_edges = (
-        inferred_edges_in_string_df
-        .dropna(subset=["string_combined_score"])
-        .shape[0]
-    )
-    num_total_edges = (
-        inferred_edges_in_string_df[["source_id","target_id"]]
-        .drop_duplicates()
-        .shape[0]
-    )
-    pct = num_common_edges / len(inferred_edges_in_string_df) * 100
+    ).drop(columns=["protein1", "protein2"])
 
-    # now the f-string is trivially correct
-    logging.info(
-        f"\tFound {num_common_edges} common edges / {num_total_edges} total edges "
-        f"({pct:.2f}%)"
+    # Normalize STRING score columns
+    logging.info("Normalizing STRING scores")
+    cols_to_normalize = ["string_experimental_score", "string_textmining_score", "string_combined_score"]
+
+    for col in cols_to_normalize:
+        if col in merged_dd.columns:
+            merged_dd[col] = merged_dd[col].map_partitions(minmax_normalize_column)
+
+    # Write out new Parquet file
+    out_file = os.path.join(OUTPUT_DIR, os.path.basename(INFERRED_NET_FILE).replace(".parquet", "_w_string.parquet"))
+    logging.info(f"Saving inferred network with STRING scores to {out_file}")
+
+    merged_dd.repartition(partition_size="256MB").to_parquet(
+        out_file,
+        engine="pyarrow",
+        compression="snappy",
+        write_index=False
     )
-    logging.info('\nInferred network with STRING edge scores:')
-    logging.info(inferred_edges_in_string_df.head())
-    
-    out_file = os.path.splitext(INFERRED_NET_FILE)[0] + "_w_string.parquet"
-    inferred_edges_in_string_df.to_parquet(out_file, engine="pyarrow",
-                                            index=False, compression="snappy")
-        
-    # write_csv_in_chunks(inferred_edges_in_string_df, OUTPUT_DIR, "inferred_network_w_string.csv")
-    logging.info('\t  - Done!')
+
+    logging.info("Done adding STRING scores!")
 
 if __name__ == "__main__":
-    # Configure logging
-    logging.basicConfig(level=logging.INFO, format='%(message)s')
-    
-    # Parse command-line arguments
-    args: argparse.Namespace = parse_args()
-    
-    INFERRED_NET_FILE: str = args.inferred_net_file
-    STRING_DIR: str = args.string_dir
-    OUTPUT_DIR: str = args.output_dir
-    
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    args = parse_args()
+
+    INFERRED_NET_FILE = args.inferred_net_file
+    STRING_DIR = args.string_dir
+    OUTPUT_DIR = args.output_dir
+
     main()
