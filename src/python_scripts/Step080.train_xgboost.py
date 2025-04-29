@@ -1,7 +1,10 @@
 import pandas as pd
 import numpy as np
+import dask.dataframe as dd
+from dask_ml.model_selection import train_test_split
+from dask.distributed import Client
 import math
-from sklearn.model_selection import train_test_split, GridSearchCV, StratifiedKFold
+from sklearn.model_selection import GridSearchCV, StratifiedKFold
 from sklearn.metrics import roc_curve, auc, precision_recall_curve, average_precision_score, roc_auc_score
 from sklearn.inspection import permutation_importance
 import matplotlib.pyplot as plt
@@ -11,7 +14,10 @@ import os
 import joblib
 import logging
 import argparse
-import xgboost as xgb  # Import XGBoost
+import xgboost as xgb
+import dask.array as da
+from joblib import Parallel, delayed
+from sklearn.base import BaseEstimator
 
 def parse_args() -> argparse.Namespace:
     """
@@ -57,9 +63,8 @@ def parse_args() -> argparse.Namespace:
     return args
 
 def read_inferred_network(inferred_network_file):
-    logging.info("Reading in inferred network")
-    inferred_network = pd.read_parquet(inferred_network_file)
-    
+    logging.info("Reading inferred network with Dask")
+    inferred_network = dd.read_parquet(inferred_network_file)
     inferred_network["source_id"] = inferred_network["source_id"].str.upper()
     inferred_network["target_id"] = inferred_network["target_id"].str.upper()
     return inferred_network
@@ -75,58 +80,75 @@ def read_merged_ground_truth(merged_ground_truth_file):
     logging.info(merged_ground_truth)
     return merged_ground_truth
 
-def train_xgboost(X_train, y_train, features):
-    # Combine training features and labels for resampling
-    train_data = X_train.copy()
-    train_data["label"] = y_train
+def train_xgboost_dask(X_train_dd, y_train_dd, feature_names):
+    """
+    Train an XGBoost model using DaskDMatrix (distributed).
+    
+    Args:
+        X_train_dd (dask.dataframe.DataFrame): Training features (Dask)
+        y_train_dd (dask.dataframe.Series): Training labels (Dask)
+        feature_names (list): List of feature column names
+        
+    Returns:
+        booster (xgboost.Booster): Trained XGBoost Booster object
+    """
+    logging.info("Training XGBoost model with Dask")
 
-    # Separate positive and negative examples
-    pos_train = train_data[train_data["label"] == 1]
-    neg_train = train_data[train_data["label"] == 0]
-
-    # Balance the dataset between positive and negative label values
-    neg_train_sampled = neg_train.sample(n=len(pos_train), random_state=42)
-    train_data_balanced = pd.concat([pos_train, neg_train_sampled])
-
-    X_train_balanced = train_data_balanced[features]
-    y_train_balanced = train_data_balanced["label"]
-
-    # logging.info(f"Balanced training set: {len(pos_train)} positives and {len(neg_train_sampled)} negatives.")
-
-    # Train the XGBoost Classifier
-    # XGBoost automatically handles NaN values (missing=np.nan is the default)
-    xgb_model = xgb.XGBClassifier(
-        random_state = 42,
-        n_estimators = 100,     # or lower with early stopping
-        max_depth = 6,          # lower than 10
-        gamma = 1,              # increase this for conservative splitting
-        reg_alpha = 0.5,        # L1 regularization; adjust as needed
-        reg_lambda = 1,         # L2 regularization; adjust as needed
-        subsample = 0.8,        # use subsampling to reduce overfitting
-        colsample_bytree = 0.8,   # limit column sampling per tree
-        eval_metric = 'logloss'
+    # Create a DaskDMatrix
+    dtrain = xgb.dask.DaskDMatrix(
+        client=None,  # If using local CPU, otherwise pass Dask client
+        data=X_train_dd,
+        label=y_train_dd,
+        feature_names=feature_names
     )
-    xgb_model.fit(X_train_balanced, y_train_balanced)
 
-    return xgb_model
+    params = {
+        'objective': 'binary:logistic',
+        'eval_metric': 'logloss',
+        'tree_method': 'hist',    # highly recommended for large data
+        'max_depth': 6,
+        'subsample': 0.8,
+        'colsample_bytree': 0.8,
+        'gamma': 1,
+        'reg_alpha': 0.5,
+        'reg_lambda': 1,
+        'random_state': 42
+    }
 
-def parameter_grid_search(X_train, y_train, features, cpu_count, fig_dir):
-    # Combine training features and labels for resampling
+    output = xgb.dask.train(
+        client=None,       # None uses threads; you could pass a Dask client
+        params=params,
+        dtrain=dtrain,
+        num_boost_round=100,
+        evals=[(dtrain, 'train')],
+    )
+
+    booster = output['booster']  # This is the trained model
+    booster.set_attr(feature_names=",".join(feature_names))  # Save feature names
+
+    return booster
+
+def parameter_grid_search(X_train_dd, y_train_dd, features, cpu_count, fig_dir):
+    logging.info("⚙️ Starting XGBoost hyperparameter grid search")
+
+    # Convert Dask → pandas (required for GridSearchCV)
+    X_train = X_train_dd.compute()
+    y_train = y_train_dd.compute()
+
+    # Combine into single DataFrame for balancing
     train_data = X_train.copy()
     train_data["label"] = y_train
 
-    # Separate positive and negative examples
+    # Balance classes
     pos_train = train_data[train_data["label"] == 1]
     neg_train = train_data[train_data["label"] == 0]
-
-    # Balance the dataset between positive and negative label values
     neg_train_sampled = neg_train.sample(n=len(pos_train), random_state=42)
     train_data_balanced = pd.concat([pos_train, neg_train_sampled])
 
-    X_train_balanced = train_data_balanced[features]
-    y_train_balanced = train_data_balanced["label"]
+    X_bal = train_data_balanced[features]
+    y_bal = train_data_balanced["label"]
 
-    # Parameter grid
+    # Define parameter grid
     param_grid = {
         "n_estimators":      [50, 100, 200],
         "max_depth":         [4, 6, 8],
@@ -137,49 +159,82 @@ def parameter_grid_search(X_train, y_train, features, cpu_count, fig_dir):
         "colsample_bytree":  [0.8, 1.0],
     }
 
-    # Wrap an XGBClassifier in GridSearchCV
+    # Initialize classifier (use hist method for speed)
     xgb_clf = xgb.XGBClassifier(
         random_state=42,
         eval_metric="logloss",
-        use_label_encoder=False,
+        tree_method="hist",
+        use_label_encoder=False
     )
+
+    # Cross-validation strategy
     cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 
+    # Perform grid search
     grid = GridSearchCV(
         estimator=xgb_clf,
         param_grid=param_grid,
         scoring="roc_auc",
         cv=cv,
         n_jobs=cpu_count,
-        verbose=2,
+        verbose=2
     )
 
-    # Fit on your balanced training set
-    grid.fit(X_train_balanced, y_train_balanced)
+    logging.info("Running GridSearchCV on balanced training set")
+    grid.fit(X_bal, y_bal)
 
-    # Inspect the best hyperparameters & best score
-    logging.info("Best CV score:", grid.best_score_)
-    logging.info("Best params:  ", grid.best_params_)
+    logging.info(f"  Best CV score:  {grid.best_score_:.4f}")
+    logging.info(f"  Best parameters: {grid.best_params_}")
 
-    # 5) Grab the best model
     best_model = grid.best_estimator_
-    
-    if not os.path.exists(f'{fig_dir}/parameter_search'):
-        os.makedirs(f'{fig_dir}/parameter_search')
 
-    # Feature importances
+    # Save plot
+    output_dir = os.path.join(fig_dir, "parameter_search")
+    os.makedirs(output_dir, exist_ok=True)
+
     plot_feature_importance(
         features=features,
         model=best_model,
-        fig_dir=f'{fig_dir}/parameter_search'
+        fig_dir=output_dir
     )
 
-def plot_xgboost_prediction_histogram(model, X_test, fig_dir):
-    logging.info("\tPlotting model prediction histogram")
-    y_pred_prob = model.predict_proba(X_test)[:, 1]  # Probability for the positive class
+def xgb_classifier_from_booster(booster: xgb.Booster, feature_names: list | np.ndarray | pd.Index) -> xgb.XGBClassifier:
+    """
+    Converts a trained XGBoost Booster (e.g., from Dask) to a scikit-learn XGBClassifier.
+    This allows use of sklearn-compatible APIs like predict_proba, permutation_importance, etc.
 
+    Parameters:
+    -----------
+    booster : xgb.Booster
+        Trained Booster object (e.g. from xgb.dask.train)
+
+    feature_names : list or array
+        List of feature names used during training
+
+    Returns:
+    --------
+    xgb.XGBClassifier
+        Fully compatible sklearn-style classifier loaded from booster
+    """
+    clf = xgb.XGBClassifier()
+    clf._Booster = booster
+    clf.n_features_in_ = len(feature_names)
+    clf.feature_names_in_ = np.array(feature_names)
+    clf.classes_ = np.array([0, 1])
+    return clf
+
+def plot_xgboost_prediction_histogram(booster, X_test, fig_dir):
+    logging.info("\tPlotting model prediction histogram")
+
+    # Convert to DMatrix (required for Booster prediction)
+    dtest = xgb.DMatrix(X_test)
+
+    # Get predicted probabilities for the positive class
+    y_pred_prob = booster.predict(dtest)
+
+    # Plot histogram of predicted probabilities
     plt.figure(figsize=(8, 6))
-    plt.hist(y_pred_prob, bins=50)
+    plt.hist(y_pred_prob, bins=50, color='skyblue', edgecolor='black')
     plt.title("Histogram of XGBoost Prediction Probabilities", fontsize=18)
     plt.xlabel("Prediction Probability", fontsize=16)
     plt.ylabel("Frequency", fontsize=16)
@@ -191,12 +246,20 @@ def plot_xgboost_prediction_histogram(model, X_test, fig_dir):
 
 def plot_feature_importance(features: list, model, fig_dir: str):
     logging.info("\tPlotting feature importance barplot")
-    # Feature Importance Analysis
+
+    # Extract raw importance scores from Booster
+    importance_dict = model.get_score(importance_type="weight")
+
+    # Build DataFrame ensuring all input features are represented (default to 0 if missing)
     feature_importances = pd.DataFrame({
         "Feature": features,
-        "Importance": model.feature_importances_
+        "Importance": [importance_dict.get(f, 0) for f in features]
     }).sort_values(by="Importance", ascending=False)
 
+    if feature_importances["Importance"].sum() == 0:
+        logging.warning("All feature importances are zero; model may not have learned from any features.")
+
+    # Plot
     plt.figure(figsize=(8, 6))
     plt.barh(feature_importances["Feature"], feature_importances["Importance"], color="skyblue")
     plt.xlabel("Importance", fontsize=16)
@@ -204,118 +267,196 @@ def plot_feature_importance(features: list, model, fig_dir: str):
     plt.title("Feature Importance", fontsize=16)
     plt.xticks(fontsize=14)
     plt.yticks(fontsize=14)
-    plt.gca().invert_yaxis()  # Highest importance at the top
+    plt.gca().invert_yaxis()
     plt.tight_layout()
     plt.savefig(f"{fig_dir}/xgboost_feature_importance.png", dpi=200)
     plt.close()
-    
+  
 def plot_feature_score_histograms(features, inferred_network, fig_dir):
     logging.info("\tPlotting feature score histograms")
-    
+
+    # Step 1: Convert only necessary columns to pandas
+    if isinstance(inferred_network, dd.DataFrame):
+        logging.info("\tConverting feature columns from Dask to pandas for plotting")
+        inferred_network = inferred_network[features].compute()
+
     ncols = 4
     nrows = math.ceil(len(features) / ncols)
-    
-    # Dynamically change the height of the figure based on the number of rows
+
     plt.figure(figsize=(5 * ncols, 4 * nrows))
-    
+
     for i, feature in enumerate(features, 1):
         plt.subplot(nrows, ncols, i)
-        plt.hist(inferred_network[feature], bins=50, alpha=0.7, edgecolor='black')
+        plt.hist(inferred_network[feature].dropna(), bins=50, alpha=0.7, edgecolor='black')
         plt.title(f"{feature}", fontsize=14)
         plt.xlabel(feature, fontsize=14)
         plt.ylabel("Frequency", fontsize=14)
         plt.xticks(fontsize=12)
         plt.yticks(fontsize=12)
+
     plt.tight_layout()
-    plt.savefig(f'{fig_dir}/xgboost_feature_score_hist.png', dpi=300)
+    plt.savefig(f"{fig_dir}/xgboost_feature_score_hist.png", dpi=300)
     plt.close()
-    
+
 def plot_feature_boxplots(features, inferred_network, fig_dir):
     logging.info("\tPlotting feature importance boxplots")
-    def remove_outliers(series):
+
+    def remove_outliers(series: pd.Series) -> pd.Series:
         """
-        Remove outliers from a pandas Series using the IQR method.
+        Remove outliers using the IQR method.
+        NaN values are preserved.
         """
         Q1 = series.quantile(0.25)
         Q3 = series.quantile(0.75)
         IQR = Q3 - Q1
-        lower_bound = Q1 - 1.5 * IQR
-        upper_bound = Q3 + 1.5 * IQR
-        return series[(series >= lower_bound) & (series <= upper_bound)]
-    
+        lower = Q1 - 1.5 * IQR
+        upper = Q3 + 1.5 * IQR
+        return series[(series >= lower) & (series <= upper)]
+
     n_features = len(features)
     ncols = 3
     nrows = math.ceil(n_features / ncols)
-    
+
     fig, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 4 * nrows))
-    axes = axes.flatten()  # Flatten the 2D array of axes
-    
+    axes = axes.flatten()
+
     for i, feature in enumerate(features):
         ax = axes[i]
-        data_label1 = remove_outliers(inferred_network.loc[inferred_network["label"] == 1, feature])
-        data_label0 = remove_outliers(inferred_network.loc[inferred_network["label"] == 0, feature])
-        ax.boxplot([data_label1, data_label0], patch_artist=True)
-        ax.set_title(feature, fontsize=18)
-        ax.set_xticklabels(["True", "False"], fontsize=16)
-        ax.set_ylabel("score", fontsize=16)
-    
-    # Hide any unused subplots if they exist
-    for j in range(i+1, len(axes)):
+
+        try:
+            data_0 = remove_outliers(inferred_network[inferred_network["label"] == 0][feature].dropna())
+            data_1 = remove_outliers(inferred_network[inferred_network["label"] == 1][feature].dropna())
+        except KeyError as e:
+            logging.warning(f"Feature '{feature}' not found in inferred network. Skipping.")
+            continue
+
+        ax.boxplot([data_0, data_1], patch_artist=True,
+                   boxprops=dict(facecolor='lightgray', color='black'),
+                   medianprops=dict(color='red'),
+                   whiskerprops=dict(color='black'),
+                   capprops=dict(color='black'),
+                   flierprops=dict(markerfacecolor='red', markersize=4, linestyle='none'))
+
+        ax.set_title(feature, fontsize=16)
+        ax.set_xticks([1, 2])
+        ax.set_xticklabels(["False", "True"], fontsize=14)
+        ax.set_ylabel("Score", fontsize=14)
+
+    # Hide any unused subplots
+    for j in range(i + 1, len(axes)):
         fig.delaxes(axes[j])
-    
+
     plt.tight_layout()
     plt.savefig(f'{fig_dir}/xgboost_feature_boxplots.png', dpi=300)
     plt.close()
-    
+
 def plot_permutation_importance_plot(xgb_model, X_test, y_test, fig_dir):
     logging.info("\tPlotting permutation importance plot")
-    result = permutation_importance(xgb_model, X_test, y_test, 
-                                n_repeats=10, random_state=42, scoring='roc_auc')
 
-    # Extract mean importance and standard deviation for each feature
+    # Ensure input is clean and has no NaNs
+    X_test_clean = X_test.copy()
+    y_test_clean = y_test.copy()
+    valid_rows = X_test_clean.notna().all(axis=1) & y_test_clean.notna()
+    X_test_clean = X_test_clean[valid_rows]
+    y_test_clean = y_test_clean[valid_rows]
+
+    if X_test_clean.empty:
+        logging.warning("No valid data for permutation importance plot.")
+        return
+
+    result = permutation_importance(
+        estimator=xgb_model,
+        X=X_test_clean,
+        y=y_test_clean,
+        n_repeats=10,
+        random_state=42,
+        scoring="roc_auc"
+    )
+
+    # Extract means and standard deviations
     importances = result.importances_mean
     std = result.importances_std
+    feature_names = X_test_clean.columns.to_numpy()
+    sorted_idx = np.argsort(importances)
 
-    # Get the feature names (assuming X_test is a DataFrame)
-    feature_names = X_test.columns
-
-    # Sort the feature importances in ascending order for plotting
-    indices = np.argsort(importances)
-
+    # Plotting
     plt.figure(figsize=(8, 6))
-    plt.barh(range(len(importances)), importances[indices], xerr=std[indices],
-            align='center')
-    plt.yticks(range(len(importances)), feature_names[indices], fontsize=14)
-    plt.xlabel("Decrease in ROC-AUC", fontsize=16)
-    plt.xticks(fontsize=14)
+    plt.barh(
+        y=range(len(importances)),
+        width=importances[sorted_idx],
+        xerr=std[sorted_idx],
+        align='center',
+        color='skyblue',
+        edgecolor='black'
+    )
+    plt.yticks(ticks=range(len(importances)), labels=feature_names[sorted_idx], fontsize=12)
+    plt.xlabel("Decrease in ROC-AUC", fontsize=14)
     plt.title("Permutation Feature Importance", fontsize=16)
+    plt.xticks(fontsize=12)
     plt.tight_layout()
     plt.savefig(f"{fig_dir}/xgboost_permutation_importance.png", dpi=300)
     plt.close()
+    
+def plot_stability_boxplot(X: pd.DataFrame, y: pd.Series, feature_names: list[str], fig_dir: str):
+    logging.info("\tPlotting stability boxplot using Dask-trained XGBoost")
 
-def plot_stability_boxplot(X, y, fig_dir):
-    logging.info("\tPlotting stability boxplot")
+    # Start local Dask client for multithreaded parallelism
+    client = Client(processes=False)
+    logging.info(f"\tDask client started: {client}")
+
     n_runs = 20
     auroc_scores = []
 
     for i in range(n_runs):
-        # Use different random seeds for splitting
+        # Split the data with a different random seed
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=i)
-        model = xgb.XGBClassifier(random_state=42, n_estimators=100, max_depth=10, eval_metric='logloss')
-        model.fit(X_train, y_train)
-        y_pred_prob = model.predict_proba(X_test)[:, 1]
+
+        # Convert to Dask arrays for training
+        X_train_da = da.from_array(X_train.values, chunks="auto")
+        y_train_da = da.from_array(y_train.values, chunks="auto")
+
+        # Convert test set to DMatrix for prediction (local)
+        dtest = xgb.DMatrix(X_test, label=y_test)
+
+        # Train using Dask
+        dtrain = xgb.dask.DaskDMatrix(client, X_train_da, y_train_da, feature_names=feature_names)
+        params = {
+            "objective": "binary:logistic",
+            "eval_metric": "logloss",
+            "tree_method": "hist",
+            "max_depth": 6,
+            "subsample": 0.8,
+            "colsample_bytree": 0.8,
+            "gamma": 1,
+            "reg_alpha": 0.5,
+            "reg_lambda": 1,
+            "random_state": 42 + i,
+        }
+        booster = xgb.dask.train(
+            client,
+            params,
+            dtrain,
+            num_boost_round=100,
+            evals=[(dtrain, "train")],
+        )["booster"]
+
+        # Predict and evaluate
+        y_pred_prob = booster.predict(dtest)
         auroc = roc_auc_score(y_test, y_pred_prob)
         auroc_scores.append(auroc)
+        logging.info(f"\tRun {i+1}: AUROC = {auroc:.4f}")
 
-    # Plotting the AUROC distribution
+    # Shutdown Dask client
+    client.close()
+
+    # Plotting AUROC distribution
     plt.figure(figsize=(8, 6))
-    plt.boxplot(auroc_scores, patch_artist=True, boxprops=dict(facecolor='blue'))
-    plt.ylabel('AUROC', fontsize=16)
-    plt.title('Stability Analysis of AUROC over {} runs'.format(n_runs), fontsize=18)
+    plt.boxplot(auroc_scores, patch_artist=True, boxprops=dict(facecolor="blue"))
+    plt.ylabel("AUROC", fontsize=16)
+    plt.title(f"Stability Analysis of AUROC over {n_runs} runs", fontsize=18)
     plt.ylim((0, 1))
-    plt.legend()
     plt.tight_layout()
-    plt.savefig(f"{fig_dir}/xgboost_stability_boxplot.png", dpi=300)
+    plt.savefig(f"{fig_dir}/xgboost_stability_boxplot_dask.png", dpi=300)
     plt.close()
     
 def plot_overlapping_roc_pr_curves(X, y, feature_names, fig_dir):
@@ -382,229 +523,67 @@ def plot_overlapping_roc_pr_curves(X, y, feature_names, fig_dir):
     plt.savefig(f"{fig_dir}/xgboost_stability_auroc_auprc.png", dpi=300)
     plt.close()
 
-def plot_feature_ablation(feature_names, X_train, X_test, y_train, y_test, full_model, fig_dir):
-    logging.info(f'\tPlotting feature ablation for each feature')
+def plot_feature_ablation(feature_names, X_train, X_test, y_train, y_test, full_model, fig_dir, n_jobs=-1):
+    logging.info("\tPlotting feature ablation for each feature")
+
+    # Evaluate full model AUROC
     y_pred_prob_full = full_model.predict_proba(X_test)[:, 1]
     full_auroc = roc_auc_score(y_test, y_pred_prob_full)
-    logging.info(f"\t\tFull model AUROC: {full_auroc:.2f}")
-    
-    # Initialize a dictionary to store AUROC for each ablated model
-    feature_performance = {}
+    logging.info(f"\t\tFull model AUROC: {full_auroc:.4f}")
 
-    # For each feature, remove it, retrain the model, and compute AUROC
-    for feature in feature_names:
-        # Create a list of features excluding the current one
+    def evaluate_feature_removal(feature):
         features_subset = [f for f in feature_names if f != feature]
-        
-        # Subset training and test sets
         X_train_subset = X_train[features_subset]
         X_test_subset = X_test[features_subset]
-        
-        # Train a model on the subset
-        model_subset = train_xgboost(X_train_subset, y_train, features_subset)
-        model_subset.feature_names = list(X_train_subset.columns.values)
-        
-        # Evaluate performance on the test set
-        y_pred_prob_subset = model_subset.predict_proba(X_test_subset)[:, 1]
-        auroc_subset = roc_auc_score(y_test, y_pred_prob_subset)
-        feature_performance[feature] = auroc_subset
-        logging.info(f"\t\t\tAUROC without {feature}: {auroc_subset:.2f}")
 
-    # Plot the results: AUROC for each ablated model versus the full model
-    features = list(feature_performance.keys())
-    auroc_values = [feature_performance[f] for f in features]
+        model = xgb.XGBClassifier(
+            random_state=42,
+            n_estimators=100,
+            max_depth=6,
+            gamma=1,
+            reg_alpha=0.5,
+            reg_lambda=1,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            eval_metric='logloss',
+            use_label_encoder=False
+        )
+        model.fit(X_train_subset, y_train)
+        y_pred = model.predict_proba(X_test_subset)[:, 1]
+        auroc = roc_auc_score(y_test, y_pred)
+        return feature, auroc
+
+    # Run in parallel
+    results = Parallel(n_jobs=n_jobs)(
+        delayed(evaluate_feature_removal)(feature)
+        for feature in feature_names
+    )
+
+    # Sort and plot results
+    features, auroc_scores = zip(*results)
+    features = list(features)
+    auroc_scores = list(auroc_scores)
 
     plt.figure(figsize=(10, 6))
-    bars = plt.bar(features, auroc_values, color='blue')
-    plt.axhline(full_auroc, color='black', linestyle='--')
-    plt.xlabel("Removed Feature", fontsize=16)
-    plt.ylabel("AUROC", fontsize=16)
-    plt.title("Feature Ablation Analysis", fontsize=18)
-    plt.ylim((0,1))
-    plt.xticks(rotation=45, fontsize=14)
-    plt.yticks(fontsize=14)
+    bars = plt.bar(features, auroc_scores, color='steelblue')
+    plt.axhline(full_auroc, color='black', linestyle='--', label=f'Full model AUROC = {full_auroc:.2f}')
+    plt.xlabel("Removed Feature", fontsize=14)
+    plt.ylabel("AUROC", fontsize=14)
+    plt.title("Feature Ablation Analysis", fontsize=16)
+    plt.xticks(rotation=45, fontsize=12)
+    plt.yticks(fontsize=12)
+    plt.ylim(0, 1)
+    plt.legend()
     plt.tight_layout()
     plt.savefig(f"{fig_dir}/xgboost_feature_ablation.png", dpi=300)
     plt.close()
 
-def plot_combined_figure(xgb_model, X, y, X_train, X_test, y_train, y_test, 
-                           inferred_network, feature_names, fig_dir, full_model):
-    """
-    Combines all individual analysis plots into a single large image.
-    This function creates:
-      1. XGBoost Prediction Histogram
-      2. Feature Importance Barplot
-      3. Permutation Importance Plot
-      4. Feature Score Histograms (multi-panel)
-      5. Feature Boxplots (multi-panel)
-      6. Stability Analysis Boxplot
-      7. Overlapping ROC & Precision-Recall Curves (each in its own subplot)
-      8. Feature Ablation Analysis Barplot
-    """
-    logging.info("\tPlotting the combined figure")
-    # Create a master figure using GridSpec with adjusted size and spacing.
-    # You can further tweak figsize, hspace, and wspace to your liking.
-    fig = plt.figure(figsize=(20, 32))
-    gs = GridSpec(9, 3, figure=fig, hspace=0.2, wspace=0.2)
-    
-    # -------------------------------
-    # Panel 1: XGBoost Prediction Histogram (gs[0,0])
-    logging.info("\t\t1. XGBoost Prediction Histogram")
-    ax1 = fig.add_subplot(gs[0, 0])
-    y_pred_prob = xgb_model.predict_proba(X_test)[:, 1]
-    ax1.hist(y_pred_prob, bins=50, color='skyblue', edgecolor='black')
-    ax1.set_title("Histogram of XGBoost Prediction Probabilities", fontsize=18)
-    ax1.set_xlabel("Prediction Probability", fontsize=16)
-    ax1.set_ylabel("Frequency", fontsize=16)
-    ax1.tick_params(axis='both', labelsize=14)
-    
-    # -------------------------------
-    # Panel 2: Feature Importance (gs[0,1])
-    logging.info("\t\t2. Feature Importance Barplot")
-    ax2 = fig.add_subplot(gs[0, 2])
-    feature_importances = pd.DataFrame({
-        "Feature": feature_names,
-        "Importance": xgb_model.feature_importances_
-    }).sort_values(by="Importance", ascending=False)
-    ax2.barh(feature_importances["Feature"], feature_importances["Importance"], color="skyblue")
-    ax2.set_xlabel("Importance", fontsize=16)
-    ax2.set_ylabel("Feature", fontsize=16)
-    ax2.set_title("Feature Importance", fontsize=18)
-    ax2.tick_params(axis='both', labelsize=14)
-    ax2.invert_yaxis()
-    
-    # -------------------------------
-    # Panel 4: Feature Score Histograms (multi-panel)
-    logging.info("\t\t4. Feature Score Histograms")
-    # We embed a 4x3 grid inside one subplot (spanning row 1 entirely)
-    gs4 = GridSpecFromSubplotSpec(4, 3, subplot_spec=gs[1:4, :], hspace=0.7, wspace=0.4)
-    for i, feature in enumerate(feature_names):
-        ax = fig.add_subplot(gs4[i])
-        ax.hist(inferred_network[feature].dropna(), bins=50, alpha=0.7, edgecolor='black', color='lightgreen')
-        ax.set_title(f"{feature} distribution", fontsize=16)
-        ax.set_xlabel(feature, fontsize=16)
-        ax.set_ylabel("Frequency", fontsize=16)
-        ax.tick_params(axis='both', labelsize=12)
-    
-    # -------------------------------
-    # Panel 5: Feature Boxplots (multi-panel)
-    logging.info("\t\t5. Feature Boxplots")
-    gs5 = GridSpecFromSubplotSpec(math.ceil(len(feature_names)/3), 3, subplot_spec=gs[4:7, :], 
-                                  hspace=0.5, wspace=0.4)
-    def remove_outliers(series):
-        Q1 = series.quantile(0.25)
-        Q3 = series.quantile(0.75)
-        IQR = Q3 - Q1
-        lower_bound = Q1 - 1.5 * IQR
-        upper_bound = Q3 + 1.5 * IQR
-        return series[(series >= lower_bound) & (series <= upper_bound)]
-    
-    for i, feature in enumerate(feature_names):
-        ax = fig.add_subplot(gs5[i])
-        data_label0 = remove_outliers(inferred_network.loc[inferred_network["label"] == 0, feature])
-        data_label1 = remove_outliers(inferred_network.loc[inferred_network["label"] == 1, feature])
-        ax.boxplot([data_label0, data_label1], patch_artist=True)
-        ax.set_title(feature, fontsize=18)
-        ax.set_xticklabels(["True", "False"], fontsize=16)
-        ax.set_ylabel("Score", fontsize=16)
-    
-    # -------------------------------
-    # Panel 6: Stability Boxplot (gs[3,0])
-    logging.info("\t\t6. Stability Boxplot")
-    ax6 = fig.add_subplot(gs[7, 0])
-    n_runs = 20
-    auroc_scores = []
-    for i in range(n_runs):
-        X_train_i, X_test_i, y_train_i, y_test_i = train_test_split(X, y, test_size=0.2, random_state=i)
-        model_i = xgb.XGBClassifier(random_state=42, n_estimators=100, max_depth=10, eval_metric='logloss')
-        model_i.fit(X_train_i, y_train_i)
-        y_pred_prob_i = model_i.predict_proba(X_test_i)[:, 1]
-        auroc = roc_auc_score(y_test_i, y_pred_prob_i)
-        auroc_scores.append(auroc)
-    ax6.boxplot(auroc_scores, patch_artist=True, boxprops=dict(facecolor='blue'))
-    ax6.set_ylabel("AUROC", fontsize=16)
-    ax6.set_title("Stability Analysis of AUROC", fontsize=18)
-    ax6.tick_params(axis='both', labelsize=14)
-    
-    # -------------------------------
-    # Panel 7: Overlapping ROC & Precision-Recall Curves (two sub-panels)
-    logging.info("\t\t7. Overlapping ROC & Precision-Recall Curves")
-    gs7 = GridSpecFromSubplotSpec(1, 2, subplot_spec=gs[7, 1:3], wspace=0.4)
-    
-    # Generate predictions over multiple runs
-    n_runs = 10
-    y_true_list = []
-    y_score_list = []
-    for i in range(n_runs):
-        X_train_i, X_test_i, y_train_i, y_test_i = train_test_split(X, y, test_size=0.2, random_state=i)
-        model_i = train_xgboost(X_train_i, y_train_i, feature_names)
-        model_i.feature_names = list(X_train_i.columns.values)
-        y_pred_prob_i = model_i.predict_proba(X_test_i)[:, 1]
-        y_true_list.append(y_test_i.to_numpy())
-        y_score_list.append(y_pred_prob_i)
-    
-    logging.info("\t\t7. AUROC and AUPRC")
-    # ROC Curve subplot (left of Panel 7)
-    ax7_roc = fig.add_subplot(gs7[0])
-    for i, (y_true, y_score) in enumerate(zip(y_true_list, y_score_list)):
-        fpr, tpr, _ = roc_curve(y_true, y_score)
-        roc_auc = auc(fpr, tpr)
-        ax7_roc.plot(fpr, tpr, lw=1, alpha=0.8, label=f"Run {i+1} (AUC={roc_auc:.2f})")
-    ax7_roc.plot([0,1], [0,1], color="navy", lw=1, linestyle="--")
-    ax7_roc.set_xlim([0.0,1.0])
-    ax7_roc.set_ylim([0.0,1.0])
-    ax7_roc.set_xlabel("False Positive Rate", fontsize=14)
-    ax7_roc.set_ylabel("True Positive Rate", fontsize=14)
-    ax7_roc.set_title("ROC Curve", fontsize=16)
-    ax7_roc.legend(loc="lower right", fontsize=8)
-    
-    # Precision-Recall Curve subplot (right of Panel 7)
-    ax7_pr = fig.add_subplot(gs7[1])
-    for i, (y_true, y_score) in enumerate(zip(y_true_list, y_score_list)):
-        precision, recall, _ = precision_recall_curve(y_true, y_score)
-        avg_prec = average_precision_score(y_true, y_score)
-        ax7_pr.plot(recall, precision, lw=1, alpha=0.8, label=f"Run {i+1} (AP={avg_prec:.2f})")
-    ax7_pr.set_xlim([0.0,1.0])
-    ax7_pr.set_ylim([0.0,1.05])
-    ax7_pr.set_xlabel("Recall", fontsize=14)
-    ax7_pr.set_ylabel("Precision", fontsize=14)
-    ax7_pr.set_title("Precision-Recall Curve", fontsize=16)
-    ax7_pr.legend(loc="lower left", fontsize=8)
-    
-    # -------------------------------
-    # Panel 8: Feature Ablation Analysis (gs[4, :])
-    logging.info("\t\t8. Feature Ablation Analysis")
-    ax8 = fig.add_subplot(gs[8, :])
-    y_pred_prob_full = full_model.predict_proba(X_test)[:, 1]
-    full_auroc = roc_auc_score(y_test, y_pred_prob_full)
-    feature_performance = {}
-    for feature in feature_names:
-        features_subset = [f for f in feature_names if f != feature]
-        X_train_subset = X_train[features_subset]
-        X_test_subset = X_test[features_subset]
-        model_subset = train_xgboost(X_train_subset, y_train, features_subset)
-        model_subset.feature_names = list(X_train_subset.columns.values)
-        y_pred_prob_subset = model_subset.predict_proba(X_test_subset)[:, 1]
-        auroc_subset = roc_auc_score(y_test, y_pred_prob_subset)
-        feature_performance[feature] = auroc_subset
-    features_ablate = list(feature_performance.keys())
-    auroc_values = [feature_performance[f] for f in features_ablate]
-    ax8.bar(features_ablate, auroc_values, color='blue')
-    ax8.axhline(full_auroc, color='black', linestyle='--')
-    ax8.set_xlabel("Removed Feature", fontsize=16)
-    ax8.set_ylabel("AUROC", fontsize=16)
-    ax8.set_title("Feature Ablation Analysis", fontsize=18)
-    ax8.set_xticklabels(features_ablate, rotation=45, fontsize=14)
-    ax8.tick_params(axis='y', labelsize=14)
-    
-    # plt.tight_layout()
-    plt.savefig(f"{fig_dir}/combined_xgboost_analysis.png", dpi=300)
-    plt.close()
-
+    # Log results
+    for f, a in zip(features, auroc_scores):
+        logging.info(f"\t\tAUROC without '{f}': {a:.4f}")
 
 def main():
-    # Parse arguments
-    args: argparse.Namespace = parse_args()
+    args = parse_args()
 
     ground_truth_file: str = args.ground_truth_file
     inferred_network_file: str = args.inferred_network_file
@@ -612,65 +591,89 @@ def main():
     fig_dir: str = args.fig_dir
     model_save_name: str = args.model_save_name
 
-    inferred_network = read_inferred_network(inferred_network_file)
-    ground_truth = read_ground_truth(ground_truth_file)
+    inferred_network_dd = read_inferred_network(inferred_network_file)
+    ground_truth_df = read_ground_truth(ground_truth_file)
 
-    logging.info("Creating set of TF-TG pairs for ground truth")
-    ground_truth_pairs = set(zip(ground_truth["source_id"], ground_truth["target_id"]))
+    # Create set of (TF, TG) from ground truth
+    logging.info("Creating ground truth set")
+    ground_truth_pairs = set(zip(ground_truth_df["source_id"], ground_truth_df["target_id"]))
 
-    logging.info("Adding labels to inferred network: 1 if predicted edge is in ground truth, else 0")
-    inferred_network["label"] = inferred_network.apply(
-        lambda row: 1 if (row["source_id"], row["target_id"]) in ground_truth_pairs else 0,
-        axis=1
+    logging.info("Adding labels to inferred network")
+    inferred_network_dd = inferred_network_dd.map_partitions(
+        lambda df: df.assign(label=df.apply(
+            lambda row: 1 if (row["source_id"], row["target_id"]) in ground_truth_pairs else 0,
+            axis=1
+        )),
+        meta=inferred_network_dd._meta.assign(label=np.int64(0))
     )
 
-    logging.info(inferred_network.head())
-    logging.info(f'Number of True labels: {len(inferred_network[inferred_network["label"] == 1])}')
-    logging.info(f'Number of False labels: {len(inferred_network[inferred_network["label"] == 0])}')
-    logging.info(f'Balancing the number of True and False labels in the training set')
-
+    # Drop unnecessary columns
     drop_cols = ["source_id", "peak_id", "target_id", "label"]
-    feature_names = [col for col in inferred_network.columns if col not in drop_cols]
-    
-    logging.info(f'Features:')
-    for feature in feature_names:
-        logging.info(f'\t{feature}')
+    feature_names = [col for col in inferred_network_dd.columns if col not in drop_cols]
 
-    X = inferred_network[feature_names]
-    y = inferred_network["label"]
+    # Only keep columns needed for modeling
+    logging.info(f"Keeping {len(feature_names)} feature columns + labels")
+    model_dd = inferred_network_dd[feature_names + ["label"]]
 
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    logging.info(f"Splitting {model_dd.shape[0].compute():,} rows into train/test with stratification")
 
+    # Dask-ML's split works directly on Dask DataFrames
+    X_dd = model_dd[feature_names]
+    y_dd = model_dd["label"]
+
+    X_train_dd, X_test_dd, y_train_dd, y_test_dd = train_test_split(
+        X_dd,
+        y_dd,
+        test_size=0.2,
+        shuffle=True,
+        stratify=y_dd,   # Pure Dask stratification!
+        random_state=42
+    )
+
+    logging.info(f"Done splitting: {X_train_dd.shape[0].compute():,} train / {X_test_dd.shape[0].compute():,} test rows")
     logging.info("Training XGBoost Model")
-    xgb_model = train_xgboost(X_train, y_train, feature_names)
+    xgb_booster = train_xgboost_dask(X_train_dd, y_train_dd, feature_names)
+
+    # Save the feature names
+    xgb_booster.set_attr(feature_names=",".join(feature_names))
     
-    # Save feature names for reference
-    xgb_model.feature_names = list(X_train.columns.values)
-    
-    logging.info("Done! Saving trained XGBoost model.")
     if not os.path.exists(trained_model_dir):
         os.makedirs(trained_model_dir)
-    
-    joblib.dump(xgb_model, f"{trained_model_dir}/{model_save_name}.pkl")
+
+    model_save_path = os.path.join(trained_model_dir, f"{model_save_name}.json")
+    xgb_booster.save_model(model_save_path)
+    logging.info(f"Saved trained XGBoost booster to {model_save_path}")
+
+    importance_dict = xgb_booster.get_score(importance_type="weight")
+    feature_importances = pd.DataFrame({
+        "Feature": list(importance_dict.keys()),
+        "Importance": list(importance_dict.values())
+    })
+    feature_importances = feature_importances.sort_values(by="Importance", ascending=False)
+
+    logging.info("\n----- Plotting Figures -----")
+    model_df = model_dd.compute()
+    X = model_df[feature_names]
+    y = model_df["label"]
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    model_cls = xgb_classifier_from_booster(xgb_booster, X.columns)
 
     if not os.path.exists(fig_dir):
         os.makedirs(fig_dir)
-    
+
     logging.info("\n----- Plotting Figures -----")
-    plot_feature_score_histograms(feature_names, inferred_network, fig_dir)
-    plot_feature_importance(feature_names, xgb_model, fig_dir)
-    plot_feature_boxplots(feature_names, inferred_network, fig_dir)
-    
-    # plot_xgboost_prediction_histogram(xgb_model, X_test, fig_dir)
+    plot_feature_score_histograms(feature_names, model_df, fig_dir)
+    plot_feature_importance(feature_names, xgb_booster, fig_dir)
+    plot_feature_boxplots(feature_names, model_df, fig_dir)
+    plot_xgboost_prediction_histogram(xgb_booster, X_test, fig_dir)
     
     # --- Note: The following plots take a long time to run for large models, as they test re-training the model ---
-    
-    # plot_overlapping_roc_pr_curves(X, y, feature_names, fig_dir)
-    # plot_permutation_importance_plot(xgb_model, X_test, y_test, fig_dir)
-    # plot_feature_ablation(feature_names, X_train, X_test, y_train, y_test, xgb_model, fig_dir)
-    # plot_stability_boxplot(X, y, fig_dir)
-    # plot_combined_figure(xgb_model, X, y, X_train, X_test, y_train, y_test, inferred_network, feature_names, fig_dir, xgb_model)
 
+    plot_overlapping_roc_pr_curves(X, y, feature_names, fig_dir)
+    plot_permutation_importance_plot(model_cls, X_test, y_test, fig_dir)
+    plot_feature_ablation(feature_names, X_train, X_test, y_train, y_test, model_cls, fig_dir)
+    plot_stability_boxplot(X, y, fig_dir)
+    
     
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format='%(message)s')
