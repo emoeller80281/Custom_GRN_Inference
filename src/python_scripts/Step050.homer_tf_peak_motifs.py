@@ -1,11 +1,12 @@
+import dask.dataframe as dd
+import dask
+from dask import delayed, compute
 import pandas as pd
 import os
-from tqdm import tqdm
-from multiprocessing import Pool
-from functools import partial
+from dask.diagnostics import ProgressBar
+from typing import List
 import argparse
 import logging
-from typing import List
 
 def parse_args() -> argparse.Namespace:
     """
@@ -22,10 +23,10 @@ def parse_args() -> argparse.Namespace:
         help="Path to the directory containing Homer TF motif scores from Homer 'annotatePeaks.pl'"
     )
     parser.add_argument(
-        "--output_file",
+        "--output_dir",
         type=str,
         required=True,
-        help="Path for the merged TF TG motif binding score TSV file"
+        help="Output directory for the sample"
     )
     parser.add_argument(
         "--cpu_count",
@@ -43,7 +44,7 @@ def is_file_empty(file_path: str) -> bool:
     """
     return os.stat(file_path).st_size == 0
 
-def process_TF_motif_file(path_to_file: str) -> pd.DataFrame:
+def process_TF_motif_file(path_to_file: str, output_dir: str) -> str:
     """
     Processes a single Homer TF motif file and extracts TF-TG relationships and motif scores.
 
@@ -73,6 +74,11 @@ def process_TF_motif_file(path_to_file: str) -> pd.DataFrame:
         # Extract the TF name from the motif column name; chain splits to remove extraneous info
         TF_name = motif_column.split('/')[0].split('(')[0].split(':')[0]
         
+        tmp_dir =  os.path.join(output_dir, "tmp", "homer_tf_parquet_files")
+        os.makedirs(tmp_dir, exist_ok=True)
+        
+        output_path = os.path.join(tmp_dir, f"{TF_name}.parquet")
+        
         # Set source_id to the TF name
         motif_to_peak['source_id'] = TF_name
         
@@ -94,31 +100,45 @@ def process_TF_motif_file(path_to_file: str) -> pd.DataFrame:
         # Select only the columns of interest and drop any rows with missing values
         df = motif_to_peak[['peak_id', 'source_id', 'homer_binding_score']].dropna()
         
-        return df
+        df.to_parquet(output_path, engine="pyarrow", compression="snappy", index=False)
+        
+        return output_path
     
     except Exception as e:
         print(f"Error processing file {path_to_file}: {e}")
-        return pd.DataFrame()  # Return an empty DataFrame if there is an error
+        return None  # Return an empty DataFrame if there is an error
 
-def main(input_dir: str, output_file: str, cpu_count: int) -> None:
+def main(input_dir: str, output_dir: str, cpu_count: int) -> None:
     
-    # List all files in the input directory
-    file_paths: List[str] = [os.path.join(input_dir, f) for f in os.listdir(input_dir) if os.path.isfile(os.path.join(input_dir, f))]
+    file_paths: List[str] = [
+        os.path.join(input_dir, f)
+        for f in os.listdir(input_dir)
+        if os.path.isfile(os.path.join(input_dir, f))
+    ]
 
-    tf_scores_list = []
-    with Pool(processes=cpu_count) as pool:
-        with tqdm(total=len(file_paths), desc="Processing files") as pbar:
-            for tf_tg_scores in pool.imap_unordered(process_TF_motif_file, file_paths):
-                tf_scores_list.append(tf_tg_scores)
-                pbar.update(1)
+    logging.info(f"Found {len(file_paths)} files in {input_dir}")
 
-    logging.info("Finished formatting all TF motif binding sites for downstream target genes, combining")
+    logging.info("Wrapping delayed processing tasks")
+    delayed_tasks = [delayed(process_TF_motif_file)(f, output_dir) for f in file_paths]
     
-    # Combine all results
-    logging.info("Concatenating all TF to peak binding score DataFrames")
-    tf_binding_scores_df: pd.DataFrame = pd.concat(tf_scores_list, ignore_index=True)
+    with ProgressBar():
+        all_parquet_paths = compute(*delayed_tasks, scheduler="processes", num_workers=cpu_count)
+        
+    parquet_paths = [p for p in all_parquet_paths if p]
     
-    tf_binding_scores_df.to_parquet(output_file, engine="pyarrow", index=False, compression="snappy")
+    if not parquet_paths:
+        logging.error("No valid parquet files were written")
+        return
+
+    logging.info(f"Combining {len(parquet_paths)} Parquet files into a single Dask DataFrame")
+    ddf = dd.read_parquet(parquet_paths)
+    
+    combined_out = os.path.join(output_dir, "homer_tf_peak.parquet")
+    
+    logging.info("Writing to Parquet")
+    ddf.to_parquet(combined_out, engine="pyarrow", index=False, compression="snappy")
+
+    logging.info("Finished writing combined TF motif binding scores to Parquet")
 
 if __name__ == "__main__":
     # Configure logging
@@ -127,8 +147,8 @@ if __name__ == "__main__":
     # Parse command-line arguments
     args: argparse.Namespace = parse_args()
     input_dir: str = args.input_dir
-    output_file: str = args.output_file
+    output_dir: str = args.output_dir
     cpu_count: int = int(args.cpu_count)
 
     # Run the main function
-    main(input_dir, output_file, cpu_count)
+    main(input_dir, output_dir, cpu_count)

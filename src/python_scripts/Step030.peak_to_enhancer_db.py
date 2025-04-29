@@ -1,4 +1,5 @@
 import pandas as pd
+import dask.dataframe as dd
 import logging
 import argparse
 import pybedtools
@@ -55,7 +56,7 @@ def extract_atac_peaks(atac_df, tmp_dir):
     peak_df.to_csv(f"{tmp_dir}/peak_df.bed", sep="\t", header=False, index=False)
 
 def load_enhancer_database_file(enhancer_db_file, tmp_dir):
-    enhancer_db = pd.read_csv(enhancer_db_file, sep="\t", header=None, index_col=None)
+    enhancer_db = pd.read_parquet(enhancer_db_file)
     enhancer_db = enhancer_db.rename(columns={
         0 : "chr",
         1 : "start",
@@ -105,7 +106,7 @@ def main():
     # (This file should be created during Step020.peak_gene_correlation.py)
     if not os.path.exists(f"{TMP_DIR}/peak_df.bed"):
         logging.info("Loading and parsing the ATAC-seq peaks")
-        atac_df: pd.DataFrame = pd.read_csv(ATAC_DATA_FILE, header=0)
+        atac_df: pd.DataFrame = pd.read_parquet(ATAC_DATA_FILE)
         
         logging.info(f"Extracting peak information and saving as a bed file")
         extract_atac_peaks(atac_df, TMP_DIR)
@@ -119,9 +120,12 @@ def main():
     else:
         logging.info("Enhancer BED file exists, loading...")
 
-    # Load in the peak and enhancer bed files
-    peak_bed = pybedtools.BedTool(f"{TMP_DIR}/peak_df.bed")
-    enh_bed = pybedtools.BedTool(f"{TMP_DIR}/enhancer.bed")
+    # Load the peak and gene TSS BED files
+    peak_df = dd.read_parquet(f"{TMP_DIR}/peak_df.parquet").compute()
+    enh_df = dd.read_parquet(f"{TMP_DIR}/enh_df.parquet").compute()
+
+    peak_bed = pybedtools.BedTool.from_dataframe(peak_df)
+    enh_bed = pybedtools.BedTool.from_dataframe(enh_df)
 
     # Find the peaks that are in known enhancer regions
     peak_enh_df = find_peaks_in_known_enhancer_region(peak_bed, enh_bed)

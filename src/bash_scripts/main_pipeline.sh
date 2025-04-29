@@ -389,8 +389,8 @@ run_dataset_preprocessing() {
     # After preprocessing, update the file names to the new processed files.
     # This assumes that the processed file name is constructed by replacing
     # the original file extension with _processed.tsv.
-    new_atac_file="$(dirname "$ATAC_FILE_NAME")/$(basename "$ATAC_FILE_NAME" | sed 's/\.[^.]*$/_processed.csv/')"
-    new_rna_file="$(dirname "$RNA_FILE_NAME")/$(basename "$RNA_FILE_NAME" | sed 's/\.[^.]*$/_processed.csv/')"
+    new_atac_file="$(dirname "$ATAC_FILE_NAME")/$(basename "$ATAC_FILE_NAME" | sed 's/\.[^.]*$/_processed.parquet/')"
+    new_rna_file="$(dirname "$RNA_FILE_NAME")/$(basename "$RNA_FILE_NAME" | sed 's/\.[^.]*$/_processed.parquet/')"
     
     ATAC_FILE_NAME="$new_atac_file"
     RNA_FILE_NAME="$new_rna_file"
@@ -401,8 +401,8 @@ check_processed_files() {
     echo ""
 
     # Derive the expected processed filenames from the original file names.
-    new_atac_file="$(dirname "$ATAC_FILE_NAME")/$(basename "$ATAC_FILE_NAME" | sed 's/\.[^.]*$/_processed.csv/')"
-    new_rna_file="$(dirname "$RNA_FILE_NAME")/$(basename "$RNA_FILE_NAME" | sed 's/\.[^.]*$/_processed.csv/')"
+    new_atac_file="$(dirname "$ATAC_FILE_NAME")/$(basename "$ATAC_FILE_NAME" | sed 's/\.[^.]*$/_processed.parquet/')"
+    new_rna_file="$(dirname "$RNA_FILE_NAME")/$(basename "$RNA_FILE_NAME" | sed 's/\.[^.]*$/_processed.parquet/')"
 
     if [ -f "$new_atac_file" ] && [ -f "$new_rna_file" ]; then
         echo "[INFO] Processed files found:"
@@ -727,7 +727,7 @@ run_homer_tf_to_peak_score() {
     /usr/bin/time -v \
     python3 src/python_scripts/Step050.homer_tf_peak_motifs.py \
         --input_dir "${OUTPUT_DIR}/homer_results/homer_tf_motif_scores" \
-        --output_file "${OUTPUT_DIR}/homer_tf_to_peak.parquet" \
+        --output_dir "$OUTPUT_DIR" \
         --cpu_count $NUM_CPU
 
 } 2> "$LOG_DIR/Step050.homer_tf_to_peak_motifs.log"

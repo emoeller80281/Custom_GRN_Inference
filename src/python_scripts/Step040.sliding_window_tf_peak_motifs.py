@@ -346,13 +346,13 @@ def main():
     logging.info(f'{len(cicero_peak_names)} Cicero peaks')
     
     logging.info('Reading scATACseq data')
-    atac_df: pd.DataFrame = pd.read_csv(atac_data_file, header=0)
+    atac_df: pd.DataFrame = pd.read_parquet(atac_data_file)
     
     logging.info('Reading gene names from scATACseq data')
-    rna_data = pd.read_csv(rna_data_file, header=0)
+    rna_data = pd.read_parquet(rna_data_file)
     
     # Get the set of unique gene_ids from the RNA dataset
-    rna_data_genes = set(rna_data["gene_id"])
+    rna_data_genes = set(rna_data["gene_id"].compute().dropna())
     
     # Read in the peak dataframe containing genomic sequences    
     parsed_peak_file = f'{tmp_dir}/peak_sequences.pkl'

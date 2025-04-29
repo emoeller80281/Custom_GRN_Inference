@@ -14,9 +14,6 @@ import sys
 import argparse
 import logging
 
-from dask import delayed, compute
-from dask.diagnostics import ProgressBar
-
 import pyarrow as pa
 import pyarrow.parquet as pq
 
@@ -347,11 +344,11 @@ def calculate_significant_peak_to_gene_correlations(
     return output_file
 
 def load_atac_dataset(atac_data_file: str) -> dd.DataFrame:
-    atac_df: dd.DataFrame = dd.read_csv(atac_data_file, sep="\t", assume_missing=True)
+    atac_df: dd.DataFrame = dd.read_parquet(atac_data_file)
     return atac_df
 
 def load_rna_dataset(rna_data_file: str) -> dd.DataFrame:
-    rna_df: dd.DataFrame = dd.read_csv(rna_data_file, sep="\t", assume_missing=True)
+    rna_df: dd.DataFrame = dd.read_parquet(rna_data_file)
     return rna_df
 
 def main():

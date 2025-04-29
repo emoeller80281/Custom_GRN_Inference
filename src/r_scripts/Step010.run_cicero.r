@@ -13,6 +13,7 @@ suppressPackageStartupMessages({
   library(parallel)
   library(htmlwidgets)
   library(profvis)
+  library(arrow)
 })
 
 # =============================================
@@ -55,8 +56,11 @@ log_message(sprintf("Output directory: %s", output_dir))
 # Load and Preprocess Data
 # =============================================
 
-log_message("Loading ATACseq data...")
-atac_data <- read.csv(atac_file_path, row.names = 1, check.names = FALSE)
+log_message("Loading ATACseq data from Parquet...")
+atac_data <- read_parquet(atac_file_path)
+log_message("    Done!")
+rownames(atac_data) <- atac_data[[1]]
+atac_data[[1]] <- NULL  # remove the now-redundant ID column
 log_message("    Done!")
 
 # log_message("Subsetting peaks...")
@@ -67,9 +71,15 @@ log_message("    Done!")
 # # log_message(sprintf("Subset to %d peaks", nrow(atac_data)))
 
 log_message("Reshaping ATACseq datset to a matrix...")
-atac_long <- reshape2::melt(as.matrix(atac_data), varnames = c("peak_position", "cell"), value.name = "reads") %>%
-  filter(reads > 0) %>%
-  mutate(peak_position = gsub("[:\\-]", "_", peak_position))
+atac_long <- reshape2::melt(
+  atac_data,
+  id.vars = "peak_position",
+  variable.name = "cell",
+  value.name = "reads"
+) %>%
+  dplyr::filter(reads > 0) %>%
+  dplyr::mutate(peak_position = gsub("[:\\-]", "_", peak_position))
+
 log_message("    Done!")
 
 log_message("Creating a Cicero cell_data_set (CDS) from ATAC data...")

@@ -63,20 +63,20 @@ def main(atac_data_file, rna_data_file):
 
     def update_name(filename):
         base, ext = os.path.splitext(filename)
-        return f"{base}_processed.csv"
+        return f"{base}_processed.parquet"
 
     new_atac_file = update_name(atac_data_file)
     new_rna_file = update_name(rna_data_file)
 
     print(f"\nUpdated ATAC file: {new_atac_file}", flush=True)
     print(f"Updated RNA file: {new_rna_file}", flush=True)
-
-    logging.info('\nWriting updated scATAC-seq dataset')
-    atac_df_norm.to_csv(new_atac_file, sep=",", header=True, index=False)
-    logging.info("  Done!")
     
-    logging.info('\nWriting updated scRNA-seq dataset')
-    rna_df_norm.to_csv(new_rna_file, sep=",", header=True, index=False)
+    logging.info('\nWriting ATAC-seq dataset to Parquet')
+    atac_df_norm.to_parquet(new_atac_file, engine="pyarrow", compression="snappy", index=False)
+    logging.info("  Done!")
+
+    logging.info('\nWriting RNA-seq dataset to Parquet')
+    rna_df_norm.to_parquet(new_rna_file, engine="pyarrow", compression="snappy", index=False)
     logging.info("  Done!")
 
 if __name__ == "__main__":
