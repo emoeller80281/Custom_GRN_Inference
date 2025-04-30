@@ -192,36 +192,74 @@ def associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, rna_dat
     logging.info(f"Number of motifs: {len(tf_motif_names)}")
     logging.info(f"Number of peaks: {chr_pos_to_seq.shape[0]}")
 
+    # Sequences
     seqs_plus = np.stack(chr_pos_to_seq["+ seq"].to_list())
     seqs_minus = np.stack(chr_pos_to_seq["- seq"].to_list())
 
-    # Match only files for motifs we care about
-    matching_motif_files = [f for f in os.listdir(meme_dir) if f.replace('.txt', '') in tf_motif_names]
-    logging.info(f"Number of motif files matching motifs in dataset: {len(matching_motif_files)}")
+    # Directory for cached output
+    tmp_dir = os.path.join(output_dir, "tmp", "sliding_window_tf_scores")
+    os.makedirs(tmp_dir, exist_ok=True)
+
+    # Filter motif files for motifs where NOT all associated TF files are cached
+    logging.info(f"Checking the tmp directory for existing sliding window results for each TF...")
+    filtered_motif_files = []
+    for motif_file in os.listdir(meme_dir):
+        motif_id = motif_file.replace('.txt', '')
+        if motif_id in tf_motif_names:
+            tf_names = tf_df[tf_df["Motif_ID"] == motif_id]["TF_Name"].values
+            all_cached = all(os.path.exists(os.path.join(tmp_dir, f"{tf}.parquet")) for tf in tf_names)
+            if not all_cached:
+                filtered_motif_files.append(motif_file)
+
+    logging.info(f"\t- Number of motif files missing: {len(filtered_motif_files)} / {len(tf_motif_names)}")
 
     logging.info(f"\nCalculating sliding window motif scores for each ATAC-seq peak")
     logging.info(f"\tUsing {num_cpu} processors")
-    logging.info(f"\tSize of calculation: {len(tf_motif_names)} motifs × {chr_pos_to_seq.shape[0]} peaks = {len(tf_motif_names) * chr_pos_to_seq.shape[0]} computations")
+    logging.info(f"\tSize of calculation: {len(filtered_motif_files)} motifs × {chr_pos_to_seq.shape[0]} peaks")
 
-    with ProcessPoolExecutor(
-        max_workers=num_cpu,
-        initializer=_init_worker,
-        initargs=(chr_pos_to_seq, tf_df, background_freq, seqs_plus, seqs_minus)
-    ) as executor:
-        futures = {
-            executor.submit(process_motif_file_and_save, f, meme_dir, output_dir): f
-            for f in matching_motif_files
-        }
+    if len(filtered_motif_files) > 0:
+        with ProcessPoolExecutor(
+            max_workers=num_cpu,
+            initializer=_init_worker,
+            initargs=(chr_pos_to_seq, tf_df, background_freq, seqs_plus, seqs_minus)
+        ) as executor:
+            futures = {
+                executor.submit(process_motif_file_and_save, f, meme_dir, output_dir): f
+                for f in filtered_motif_files
+            }
 
-        min_update = max(1, int(0.02 * len(futures)))
-        for future in tqdm(as_completed(futures), total=len(futures), desc="Scoring motifs", miniters=min_update):
-            _ = future.result()
-
-    logging.info("Finished scoring all motifs. Reading per-TF Parquet files...")
+            min_update = max(1, int(0.02 * len(futures)))
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Scoring motifs", miniters=min_update):
+                _ = future.result()
+        logging.info("Finished scoring all motifs. Reading TF motif parquet files...")
+    else:
+        logging.info("All TFs have pre-existing parquet files in the tmp directory, reading cached parquet files...")
+    
     parquet_dir = os.path.join(output_dir, "tmp", "sliding_window_tf_scores")
     ddf = dd.read_parquet(os.path.join(parquet_dir, "*.parquet"))
 
-    return ddf
+    # Normalize the sliding_window_tf_scores column
+    score_col = "sliding_window_tf_scores"
+    
+    # Compute global 5th and 95th quantiles
+    qs = ddf[score_col].quantile([0.05, 0.95]).compute()
+    low, high = qs.loc[0.05], qs.loc[0.95]
+
+    # Per-partition normalization
+    def normalize_block(df):
+        # clip into [low, high]
+        df[score_col] = df[score_col].clip(lower=low, upper=high)
+        # scale to [0,1]
+        df[score_col] = (df[score_col] - low) / (high - low)
+        # log1p
+        df[score_col] = np.log1p(df[score_col])
+
+        return df
+
+    normalized_dd = ddf.map_partitions(normalize_block)
+    
+    return normalized_dd
+
 
 def format_peaks(peak_ids: pd.Series) -> pd.DataFrame:
     """
@@ -366,7 +404,7 @@ def main():
     else:
         # Read in the ATACseq dataframe and parse the peak locations into a dataframe of genomic locations and peak IDs
         logging.info(f'Identifying ATACseq peak sequences')
-        peak_df = format_peaks(peak_ids, cicero_peak_names)
+        peak_df = format_peaks(peak_ids)
         logging.info(peak_df.head())
         
         # Get the genomic sequence from the reference genome to each ATACseq peak
@@ -383,7 +421,7 @@ def main():
         rna_data_genes, species, num_cpu, output_dir
     )
 
-    ddf.to_parquet(f"{output_dir}/sliding_window_tf_to_peak_score.parquet", engine="pyarrow", compression="snappy", index=False)
+    ddf.to_parquet(f"{output_dir}/sliding_window_tf_to_peak_score.parquet", engine="pyarrow", compression="snappy")
     logging.info(f"Wrote final TF–peak sliding window scores to sliding_window_tf_to_peak_score.parquet")
 
     

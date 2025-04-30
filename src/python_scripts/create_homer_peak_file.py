@@ -87,7 +87,7 @@ def main() -> None:
     output_dir: str = args.output_dir
 
     logging.info('Reading scATACseq data')
-    atac_data: pd.DataFrame = pd.read_csv(atac_data_file, header=0)
+    atac_data: pd.DataFrame = pd.read_parquet(atac_data_file)
     logging.info(atac_data.head())
 
     logging.info('Converting scATACseq peaks to Homer peak format')

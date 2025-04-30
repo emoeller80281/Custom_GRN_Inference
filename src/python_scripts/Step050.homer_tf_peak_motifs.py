@@ -7,6 +7,7 @@ from dask.diagnostics import ProgressBar
 from typing import List
 import argparse
 import logging
+import numpy as np
 
 def parse_args() -> argparse.Namespace:
     """
@@ -121,7 +122,10 @@ def main(input_dir: str, output_dir: str, cpu_count: int) -> None:
     logging.info("Wrapping delayed processing tasks")
     delayed_tasks = [delayed(process_TF_motif_file)(f, output_dir) for f in file_paths]
     
-    with ProgressBar():
+    # Get the stream used by the root logger or your custom logger
+    log_stream = logging.getLogger().handlers[0].stream
+
+    with ProgressBar(dt=5.0, minimum=1, width=80, out=log_stream):
         all_parquet_paths = compute(*delayed_tasks, scheduler="processes", num_workers=cpu_count)
         
     parquet_paths = [p for p in all_parquet_paths if p]
@@ -133,10 +137,36 @@ def main(input_dir: str, output_dir: str, cpu_count: int) -> None:
     logging.info(f"Combining {len(parquet_paths)} Parquet files into a single Dask DataFrame")
     ddf = dd.read_parquet(parquet_paths)
     
-    combined_out = os.path.join(output_dir, "homer_tf_peak.parquet")
+    combined_out = os.path.join(output_dir, "homer_tf_to_peak.parquet")
     
-    logging.info("Writing to Parquet")
-    ddf.to_parquet(combined_out, engine="pyarrow", index=False, compression="snappy")
+    # Compute global 5th/95th quantiles for homer_binding_score
+    score_col = "homer_binding_score"
+    qs = combined_out[score_col].quantile([0.05, 0.95]).compute()
+    low, high = qs.loc[0.05], qs.loc[0.95]
+    logging.info(f"Global {score_col} 5th/95th cutoffs: {low:.4g}, {high:.4g}")
+
+    # Define per-partition normalizer
+    def normalize_homer(df):
+        # clip into [low, high]
+        df[score_col] = df[score_col].clip(lower=low, upper=high)
+        # linear scale to [0,1]
+        df[score_col] = (df[score_col] - low) / (high - low)
+        # log1p
+        df[score_col] = np.log1p(df[score_col])
+        return df
+
+    # Apply across your Dask DataFrame
+    normalized_dd = combined_out.map_partitions(normalize_homer)
+
+    # (Optional) persist or overwrite final_dd
+    combined_out = normalized_dd.persist()
+
+    # Then continue on—e.g. write back out:
+    combined_out.to_parquet(
+        f"{output_dir}/inferred_network_with_normalized_homer.parquet",
+        engine="pyarrow",
+        compression="snappy",
+    )
 
     logging.info("Finished writing combined TF motif binding scores to Parquet")
 

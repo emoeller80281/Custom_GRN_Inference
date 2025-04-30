@@ -238,25 +238,10 @@ def row_normalize_sparse(X):
 
 def select_top_dispersion_auto(df, target_n_features=5000, dispersion_quantile=0.75):
     """
-    Automatically selects top most dispersed features by:
+    Automatically selects the top most dispersed features by:
     1. Filtering features with dispersion above a dataset-driven threshold.
     2. Selecting the top-N features with the highest dispersion.
-
-    Parameters
-    ----------
-    df : dask.DataFrame
-        Rows are features (peaks or genes), columns are cells.
-    target_n_features : int
-        Number of features you ideally want to select (default: 5000).
-    dispersion_quantile : float
-        Quantile of dispersion to define filtering threshold (default: 0.75 = top 25%).
-
-    Returns
-    -------
-    dask.DataFrame
-        Subset of original DataFrame with selected features.
     """
-
     def compute_dispersion(part):
         numeric_part = part.select_dtypes(include=[np.number])
         mean = numeric_part.mean(axis=1, skipna=True)
@@ -264,42 +249,36 @@ def select_top_dispersion_auto(df, target_n_features=5000, dispersion_quantile=0
         disp = var / (mean + 1e-8)
         return disp
 
-    # Step 1: Preserve original row identity as a column
-    df_reset = df.reset_index(drop=False)  # index becomes a column, preserves row mapping
-    df_reset = df_reset.persist()
-
-    logging.info("Computing feature dispersion across cells...")    
-    dispersions = df_reset.map_partitions(compute_dispersion, meta=('x', 'f8')).compute()
+    logging.info("Computing feature dispersion across cells...")
+    dispersions = df.map_partitions(compute_dispersion, meta=('x', 'f8')).compute()
 
     total_features = len(dispersions)
-
-    # Step 2: Compute quantile-based dispersion threshold
     min_disp = dispersions.quantile(dispersion_quantile)
-
-    # Step 3: Keep only features above the threshold
     filtered = dispersions[dispersions >= min_disp]
     n_above_thresh = len(filtered)
 
-    # Step 4: Select top-N features if needed
     if n_above_thresh > target_n_features:
-        top_features_idx = filtered.nlargest(target_n_features).index
-        n_final = target_n_features
+        top_features = filtered.nlargest(target_n_features)
     else:
-        top_features_idx = filtered.index
-        n_final = n_above_thresh
+        top_features = filtered
 
-    # Log summary
-    logging.info(f"Initial features: {total_features:,}")
-    logging.info(f"Features above dispersion threshold (quantile={dispersion_quantile}): {n_above_thresh:,}")
-    logging.info(f"Final selected features (after top-N limit): {n_final:,}")
-    logging.info(f"Dispersion threshold (min_disp) used: {min_disp:.4f}")
+    top_feature_names = top_features.index.to_list()
 
-    # Step 5: Map integer positions to index values and subset
-    index_values = df_reset.index.to_numpy()[top_features_idx]
-    df_filtered = df_reset.loc[index_values].drop(columns=["index"], errors="ignore")
+    logging.info(f"\t- Initial features: {total_features:,}")
+    logging.info(f"\t- Features above dispersion threshold (quantile={dispersion_quantile}): {n_above_thresh:,}")
+    logging.info(f"\t- Final selected features (after top-N limit): {len(top_feature_names):,}")
+    logging.info(f"\t- Dispersion threshold (min_disp) used: {min_disp:.4f}")
 
-    return df_filtered
+    # Explicitly create a new column from the index to preserve feature IDs
+    df = df.assign(feature_id=df.index)
 
+    # Filter rows based on selected feature IDs
+    df = df[df["feature_id"].isin(top_feature_names)]
+
+    # Set index back to feature_id (for clarity)
+    df = df.set_index("feature_id")
+
+    return df
 
 def auto_tune_parameters(num_cpu: int = None, total_memory_gb: int = None) -> dict:
     """
@@ -401,7 +380,6 @@ def calculate_significant_peak_to_gene_correlations(
         If using memory mode, returns a DataFrame.
         If using disk streaming mode, returns output_file path.
     """
-    logging.info("Calculating significant peak-to-gene correlations")
 
     # Make sure dataframes are pandas
     if isinstance(atac_df, dd.DataFrame):
@@ -413,13 +391,13 @@ def calculate_significant_peak_to_gene_correlations(
     num_genes = gene_df.shape[0]
     num_pairs = num_peaks * num_genes
 
-    logging.info(f"    Number of peaks: {num_peaks}")
-    logging.info(f"    Number of genes: {num_genes}")
-    logging.info(f"    Total peak-gene pairs: {num_pairs:,}")
+    logging.info(f"\t- Number of peaks: {num_peaks}")
+    logging.info(f"\t- Number of genes: {num_genes}")
+    logging.info(f"\t- Total peak-gene pairs: {num_pairs:,}")
 
     # Convert to sparse
-    X = sp.csr_matrix(atac_df.values.astype(float))
-    Y = sp.csr_matrix(gene_df.values.astype(float))
+    X = sp.csr_matrix(atac_df.select_dtypes(include=[np.number]).values.astype(float))
+    Y = sp.csr_matrix(gene_df.select_dtypes(include=[np.number]).values.astype(float))
 
     df_degrees = n - 2
 
@@ -460,7 +438,7 @@ def calculate_significant_peak_to_gene_correlations(
 
     if num_pairs <= memory_threshold:
         # --- Version 2: Full Memory Mode ---
-        logging.info("    Using in-memory calculation (faster)")
+        logging.info("\t- Using in-memory calculation (faster)")
 
         tasks = [
             delayed(process_peak_gene_chunked)(i, X_norm, Y_norm, df_degrees, n, alpha, chunk_size)
@@ -612,28 +590,33 @@ def main():
     else:
         logging.info('TSS distance file exists, loading...')
     
-    peak_gene_df = dd.read_parquet(f"{TMP_DIR}/peak_to_gene_map.parquet")
+    peak_gene_dd = dd.read_parquet(f"{TMP_DIR}/peak_to_gene_map.parquet")
 
     # ============ PEAK TO GENE CORRELATION CALCULATION ============
     PARQ = f"{TMP_DIR}/sig_peak_to_gene_corr.parquet"
 
     def prepare_inputs_for_correlation():
         logging.info("Subsetting ATAC and RNA matrices to relevant peaks/genes")
-        atac_sub = atac_df.merge(peak_gene_df[["peak_id"]].drop_duplicates(), on="peak_id", how="inner")
-        atac_sub = atac_sub.drop(columns="peak_id", errors="ignore")
-        
-        rna_sub = rna_df.merge(peak_gene_df[["target_id"]].drop_duplicates(), 
-                    left_on="gene_id", right_on="target_id", how="inner")
-        rna_sub = rna_sub.drop(columns=["target_id", "gene_id"], errors="ignore")
 
-        logging.info("Filtering out genes and peaks with low variance")
+        # Align by IDs
+        atac_sub = atac_df.merge(peak_gene_dd[["peak_id"]].drop_duplicates(), on="peak_id", how="inner")
+        rna_sub = rna_df.merge(peak_gene_dd[["target_id"]].drop_duplicates(),
+                            left_on="gene_id", right_on="target_id", how="inner")
 
-        rna_sub = select_top_dispersion_auto(rna_df, target_n_features=5000, dispersion_quantile=0.75)
-        atac_sub = select_top_dispersion_auto(rna_df, target_n_features=50000, dispersion_quantile=0.75)
-        logging.info(f"Selected {rna_sub.shape[0]} RNA features with highest dispersion")
-        logging.info(f"Selected {atac_sub.shape[0]} ATAC features with highest dispersion")
-        
+        # Use peak_id / target_id as index before dispersion selection
+        atac_sub = atac_sub.set_index("peak_id")
+        rna_sub = rna_sub.set_index("target_id")
+
+        # Compute dispersion and filter
+        logging.info("Filtering out genes and peaks with high dispersion")
+        atac_sub = select_top_dispersion_auto(atac_sub, target_n_features=50000, dispersion_quantile=0.75)
+        rna_sub = select_top_dispersion_auto(rna_sub, target_n_features=5000, dispersion_quantile=0.75)
+
+        logging.info(f"Selected {atac_sub.shape[0].compute()} ATAC features with highest dispersion")
+        logging.info(f"Selected {rna_sub.shape[0].compute()} RNA features with highest dispersion")
+
         return atac_sub, rna_sub
+
 
     def run_correlation_and_load():
         atac_sub, rna_sub = prepare_inputs_for_correlation()
@@ -673,20 +656,32 @@ def main():
     # Rename so both sides use "target_id"
     filtered = filtered.rename(columns={"gene_id": "target_id"})
 
-    # Convert the TSS distance score DataFrame to Dask
-    dd_pg: dd.DataFrame = dd.from_pandas(peak_gene_df, npartitions=1)
-
     # Merge the TSS distance score and correlation DataFrames
     joined: dd.DataFrame = filtered.merge(
-        dd_pg,
+        peak_gene_dd,
         how="inner",
         on=["peak_id", "target_id"]
     )[["peak_id", "target_id", "correlation", "TSS_dist_score"]]
+    
+    score_cols = ["correlation"]
+    
+    qs = joined[score_cols].quantile([0.05, 0.95]).compute()
+    low, high = qs.loc[0.05], qs.loc[0.95]
 
-    # Write the joined DataFrame to a CSV file
-    out_df: pd.DataFrame = joined.compute()
+    def normalize_block(df):
+        # clip into [low, high]
+        df[score_cols] = df[score_cols].clip(lower=low, upper=high, axis=1)
+        # scale to [0,1]
+        df[score_cols] = (df[score_cols] - low) / (high - low)
+        # log1p
+        df[score_cols] = np.log1p(df[score_cols])
+
+        return df
+
+    normalized_dd = joined.map_partitions(normalize_block)
+        
     out_path = f"{OUTPUT_DIR}/peak_to_gene_correlation.parquet"
-    out_df.to_parquet(out_path, engine="pyarrow", index=False, compression="snappy")
+    normalized_dd.to_parquet(out_path, engine="pyarrow", compression="snappy")
 
     logging.info(f"Wrote top-10% correlations + TSS scores to {out_path}")
     logging.info("\n-----------------------------------------\n")

@@ -30,6 +30,9 @@ submit_job() {
             --job-name="custom_grn_method_${CELL_TYPE}_${SAMPLE_NAME}" \
             /gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/src/bash_scripts/main_pipeline.sh
     )
+        # Extract and print job ID
+    job_id=$(echo "$job_output" | awk '{print $4}')
+    echo "    - Submitted job $job_id for '${CELL_TYPE}/${SAMPLE_NAME}'"
 }
 
 run_macrophage() {
@@ -51,7 +54,6 @@ run_macrophage() {
             sleep 300
         done
 
-        echo "    - Running custom GRN method for ${SAMPLE_NAME}"
         local RNA_FILE_NAME="${SAMPLE_NAME}_RNA.csv"
         local ATAC_FILE_NAME="${SAMPLE_NAME}_ATAC.csv"
         local GROUND_TRUTH_FILE="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/REFERENCE_NETWORKS/RN204_ChIPSeq_ChIPAtlas_Human_Macrophages.tsv"
@@ -90,7 +92,7 @@ run_mESC(){
             echo "Maximum jobs ($MAX_JOBS_IN_QUEUE) in queue. Checking again in 5 minutes..."
             sleep 300
         done
-        echo "    - Running custom GRN method for ${SAMPLE_NAME}"
+
         local RNA_FILE_NAME="mESC_${SAMPLE_NAME}_RNA.csv"
         local ATAC_FILE_NAME="mESC_${SAMPLE_NAME}_ATAC.csv"
         local GROUND_TRUTH_FILE="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/REFERENCE_NETWORKS/RN111_ChIPSeq_BEELINE_Mouse_ESC.tsv"
@@ -127,7 +129,6 @@ run_K562(){
         local ATAC_FILE_NAME="${SAMPLE_NAME}_ATAC.csv"
         local GROUND_TRUTH_FILE="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/REFERENCE_NETWORKS/RN117_ChIPSeq_PMID37486787_Human_K562.tsv"
 
-        echo "    - Submitted custom GRN method job for '${SAMPLE_NAME}'"
         # Submit the job for each sample
         submit_job \
             "$SAMPLE_NAME" \

@@ -6,6 +6,8 @@ import argparse
 import logging
 import os
 import dask.dataframe as dd
+from dask.distributed import Client, LocalCluster
+
 
 from tqdm import tqdm
 
@@ -167,14 +169,14 @@ def merge_score_dataframes_dask(output_dir: str,
     logging.info("1/8: Loading sliding_window_df and homer_df as Dask")
     sliding_window_dd = dd.read_parquet(f"{output_dir}/sliding_window_tf_to_peak_score.parquet")
     homer_dd          = dd.read_parquet(f"{output_dir}/homer_tf_to_peak.parquet")
-    logging.info(f"    • sliding_window_dd partitions={sliding_window_dd.npartitions}, columns={list(sliding_window_dd.columns)}")
-    logging.info(f"    • homer_dd          partitions={homer_dd.npartitions}, columns={list(homer_dd.columns)}")
+    logging.debug(f"    • sliding_window_dd partitions={sliding_window_dd.npartitions}, columns={list(sliding_window_dd.columns)}")
+    logging.debug(f"    • homer_dd          partitions={homer_dd.npartitions}, columns={list(homer_dd.columns)}")
 
     logging.info("2/8: Loading peak_corr_df and cicero_df as Dask")
     peak_corr_dd = dd.read_parquet(f"{output_dir}/peak_to_gene_correlation.parquet")
     cicero_dd    = dd.read_parquet(f"{output_dir}/cicero_peak_to_tg_scores.parquet")
-    logging.info(f"    • peak_corr_dd partitions={peak_corr_dd.npartitions}, columns={list(peak_corr_dd.columns)}")
-    logging.info(f"    • cicero_dd    partitions={cicero_dd.npartitions}, columns={list(cicero_dd.columns)}")
+    logging.debug(f"    • peak_corr_dd partitions={peak_corr_dd.npartitions}, columns={list(peak_corr_dd.columns)}")
+    logging.debug(f"    • cicero_dd    partitions={cicero_dd.npartitions}, columns={list(cicero_dd.columns)}")
 
     # 2) Merge sliding window and Homer TF-peak scores
     logging.info("3/8: Combining the sliding window and Homer TF→peak scores")
@@ -183,14 +185,14 @@ def merge_score_dataframes_dask(output_dir: str,
         on=["peak_id", "source_id"],
         how="outer"
     )
-    logging.info(f"    • tf_to_peak_dd shape ~ {tf_to_peak_dd.shape} (lazy)")
+    logging.debug(f"    • tf_to_peak_dd shape ~ {tf_to_peak_dd.shape} (lazy)")
 
     # 3) Read RNA data, compute mean TF expression
     logging.info("4/8: Adding mean RNA expression for TF (mean_TF_expression)")
     rna_df = dd.read_parquet(rna_data_file)
     rna_df["mean_TF_expression"] = rna_df.select_dtypes("number").mean(axis=1)
     dd_rna_tf = rna_df[["gene_id", "mean_TF_expression"]].set_index("gene_id")
-    logging.info(f"    • dd_rna_tf partitions={dd_rna_tf.npartitions}")
+    logging.debug(f"    • dd_rna_tf partitions={dd_rna_tf.npartitions}")
 
     # Merge TF expression into TF-peak DataFrame
     tf_expr_to_peak_dd = tf_to_peak_dd.merge(
@@ -199,7 +201,7 @@ def merge_score_dataframes_dask(output_dir: str,
         right_index=True,
         how="right"
     )
-    logging.info(f"    • tf_expr_to_peak_dd columns={list(tf_expr_to_peak_dd.columns)}")
+    logging.debug(f"    • tf_expr_to_peak_dd columns={list(tf_expr_to_peak_dd.columns)}")
 
     # 4) Merge peak to gene scores (correlation + Cicero)
     logging.info("5/8: Merging the correlation and Cicero methods for peak→target gene")
@@ -208,7 +210,7 @@ def merge_score_dataframes_dask(output_dir: str,
         on=["peak_id", "target_id"],
         how="outer"
     )
-    logging.info(f"    • peak_to_tg_dd partitions={peak_to_tg_dd.npartitions}")
+    logging.debug(f"    • peak_to_tg_dd partitions={peak_to_tg_dd.npartitions}")
 
     # 5) Add mean TG expression
     logging.info("6/8: Adding mean RNA expression for TG (mean_TG_expression)")
@@ -222,7 +224,7 @@ def merge_score_dataframes_dask(output_dir: str,
         right_index=True,
         how="right"
     )
-    logging.info(f"    • peak_to_tg_expr_dd columns={list(peak_to_tg_expr_dd.columns)}")
+    logging.debug(f"    • peak_to_tg_expr_dd columns={list(peak_to_tg_expr_dd.columns)}")
 
     # 6) Merge TF→peak and peak→TG
     logging.info("7/8: Merging TF→peak and peak→TG into tf_to_tg_score_dd")
@@ -231,7 +233,7 @@ def merge_score_dataframes_dask(output_dir: str,
         on=["peak_id"],
         how="outer"
     )
-    logging.info(f"    • tf_to_tg_score_dd columns={list(tf_to_tg_score_dd.columns)}")
+    logging.debug(f"    • tf_to_tg_score_dd columns={list(tf_to_tg_score_dd.columns)}")
 
     # 7) Read ATAC data, compute mean peak accessibility
     logging.info("8/8: Adding mean ATAC‐seq peak accessibility")
@@ -245,7 +247,7 @@ def merge_score_dataframes_dask(output_dir: str,
         right_index=True,
         how="left"
     )
-    logging.info(f"    • final_dd columns={list(final_dd.columns)}")
+    logging.debug(f"    • final_dd columns={list(final_dd.columns)}")
 
     return final_dd
 
@@ -259,9 +261,18 @@ def main():
     fig_dir: str = args.fig_dir
     subsample: str = float(args.subsample)
     
+    dask_tmp = os.path.join(output_dir, "tmp", "dask_tmp")
+    if not os.path.exists(dask_tmp):
+        os.makedirs(dask_tmp)
+        
+    cluster = LocalCluster(n_workers=6, threads_per_worker=4, memory_limit="20GB", local_directory=dask_tmp)
+    client = Client(cluster)
 
     logging.info("\n ============== Merging DataFrames ==============")
-    final_dd = merge_score_dataframes_dask(output_dir, rna_data_file, atac_data_file)
+    final_dd = merge_score_dataframes_dask(output_dir, rna_data_file, atac_data_file).persist()
+    
+    num_cols = list(final_dd.select_dtypes("number").columns)
+    final_dd = final_dd.astype({col: "float64" for col in num_cols})
     
     # ============ L A Z Y  Processing ============ #
 
@@ -275,38 +286,12 @@ def main():
     ])
 
     # Sort by number of non-null columns
-    final_dd["num_cols_w_values"] = final_dd.notna().sum(axis=1)
+    final_dd["num_cols_w_values"] = final_dd.map_partitions(
+        lambda df: df.notna().sum(axis=1)
+    )
     final_dd = final_dd.map_partitions(
         lambda df: df.sort_values(ascending=False, by="num_cols_w_values")
     ).drop(columns=["num_cols_w_values"])
-
-    # Normalize score columns
-    logging.info("\nNormalizing feature score columns")
-
-    num_cols = final_dd.select_dtypes("number").columns.difference([
-        "cicero_score", "TSS_dist_score"
-    ])
-
-    # Get 5th/95th percentiles lazily
-    logging.info("Calculating 5th and 95th percentiles for normalization")
-    quantiles = final_dd[num_cols].quantile([0.05, 0.95]).compute()
-    low, high = quantiles.loc[0.05], quantiles.loc[0.95]
-
-    def normalize_partition(df):
-        trimmed = df[num_cols].where(df[num_cols].gt(low) & df[num_cols].lt(high))
-        scaled = (trimmed - trimmed.min()) / (trimmed.max() - trimmed.min())
-        df[num_cols] = np.log1p(scaled.fillna(0))
-        return df
-
-    final_dd = final_dd.map_partitions(normalize_partition)
-
-    # Normalize again min-max to [0,1]
-    def minmax_partition(df):
-        for col in df.select_dtypes(include="number").columns:
-            df[col] = (df[col] - df[col].min()) / (df[col].max() - df[col].min())
-        return df
-
-    final_dd = final_dd.map_partitions(minmax_partition)
 
     # Select final column order
     column_order = [
@@ -325,36 +310,20 @@ def main():
 
     existing_columns = [col for col in column_order if col in final_dd.columns]
     final_dd = final_dd[existing_columns]
-    
-    # Save final merged DataFrame
-    logging.info("Writing full inferred network Parquet")
-    final_dd.repartition(partition_size="256MB").to_parquet(
-        f"{inferred_grn_dir}/inferred_network.parquet",
-        engine="pyarrow",
-        compression="snappy",
-        write_index=False
-    )
-
-    # Save subsampled version
-    logging.info(f"Writing {subsample:.0f}% subsample of inferred network")
-    final_dd.sample(frac=subsample/100).repartition(partition_size="256MB").to_parquet(
-        f"{inferred_grn_dir}/inferred_network_{subsample:.0f}pct.parquet",
-        engine="pyarrow",
-        compression="snappy",
-        write_index=False
-    )
 
     # Save enriched features (rows with ≥ N-2 numeric scores)
     n_score_cols = len(final_dd.select_dtypes(include="number").columns)
     feature_threshold = n_score_cols - 2
     enriched_dd = final_dd[final_dd.count(axis=1, numeric_only=True) >= feature_threshold]
+    
+    logging.info(f"Total rows: {final_dd.shape[0].compute()}")
+    logging.info(f"Enriched rows: {enriched_dd.shape[0].compute()}")
 
     logging.info(f"Writing enriched feature subset: {feature_threshold}/{n_score_cols} non-null numeric features required")
     enriched_dd.repartition(partition_size="256MB").to_parquet(
         f"{inferred_grn_dir}/inferred_network_enrich_feat.parquet",
         engine="pyarrow",
         compression="snappy",
-        write_index=False
     )
 
     logging.info("Done!")
