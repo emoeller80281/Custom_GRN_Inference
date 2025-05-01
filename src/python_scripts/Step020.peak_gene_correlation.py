@@ -21,6 +21,11 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pyarrow.lib as pa_lib
 
+from normalization import (
+    minmax_normalize_dask,
+    clip_and_normalize_log1p_dask
+)
+
 def parse_args() -> argparse.Namespace:
     """
     Parses command-line arguments.
@@ -662,24 +667,23 @@ def main():
         how="inner",
         on=["peak_id", "target_id"]
     )[["peak_id", "target_id", "correlation", "TSS_dist_score"]]
+        
+    normalized_ddf = clip_and_normalize_log1p_dask(
+        ddf=joined,
+        score_cols=["correlation"],
+        quantiles=(0.05, 0.95),
+        apply_log1p=True,
+        dtype=np.float32
+    )
     
-    score_cols = ["correlation"]
-    
-    qs = joined[score_cols].quantile([0.05, 0.95]).compute()
-    low = qs.loc[0.05].to_dict()
-    high = qs.loc[0.95].to_dict()
-
-    def normalize_block(df):
-        for col in score_cols:
-            df[col] = df[col].clip(lower=low[col], upper=high[col])
-            df[col] = (df[col] - low[col]) / (high[col] - low[col])
-            df[col] = np.log1p(df[col])
-        return df
-
-    normalized_dd = joined.map_partitions(normalize_block)
+    normalized_ddf = minmax_normalize_dask(
+        ddf=normalized_ddf, 
+        score_cols=["correlation", "TSS_dist_score"], 
+        dtype=np.float32
+    )
         
     out_path = f"{OUTPUT_DIR}/peak_to_gene_correlation.parquet"
-    normalized_dd.to_parquet(out_path, engine="pyarrow", compression="snappy")
+    normalized_ddf.to_parquet(out_path, engine="pyarrow", compression="snappy")
 
     logging.info(f"Wrote top-10% correlations + TSS scores to {out_path}")
     logging.info("\n-----------------------------------------\n")

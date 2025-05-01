@@ -4,6 +4,8 @@ import numpy as np
 import argparse
 import logging
 
+from normalization import minmax_normalize_pandas
+
 def parse_args() -> argparse.Namespace:
     """
     Parses command-line arguments.
@@ -76,10 +78,16 @@ def main():
     # Format the peaks to chr:start-stop rather than chr_start_stop to match the ATACseq peaks
     merged_with_promoter_genes["peak_id"] = merged_with_promoter_genes["peak_id"].str.replace("_", "-")
     merged_with_promoter_genes["peak_id"] = merged_with_promoter_genes["peak_id"].str.replace("-", ":", 1)
+    
+    normalized_df = minmax_normalize_pandas(
+        ddf=merged_with_promoter_genes, 
+        score_cols=["cicero_score"], 
+        dtype=np.float32
+    )
 
     # Write the final merged peaks to a csv file
     logging.info("Writing Cicero DataFrame to: 'cicero_peak_to_tg_scores.parquet'")
-    merged_with_promoter_genes.to_parquet(f"{output_dir}/cicero_peak_to_tg_scores.parquet", engine="pyarrow", index=False, compression="snappy")
+    normalized_df.to_parquet(f"{output_dir}/cicero_peak_to_tg_scores.parquet", engine="pyarrow", index=False, compression="snappy")
     
 if __name__ == "__main__":
     # Configure logging

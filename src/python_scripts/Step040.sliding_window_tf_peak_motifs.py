@@ -18,6 +18,11 @@ import logging
 import argparse
 import re
 
+from normalization import (
+    minmax_normalize_dask,
+    clip_and_normalize_log1p_dask
+)
+
 # at module top‐level
 _global_chr_pos_to_seq = None
 _global_tf_df         = None
@@ -238,27 +243,21 @@ def associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, rna_dat
     parquet_dir = os.path.join(output_dir, "tmp", "sliding_window_tf_scores")
     ddf = dd.read_parquet(os.path.join(parquet_dir, "*.parquet"))
 
-    # Normalize the sliding_window_tf_scores column
-    score_col = "sliding_window_tf_scores"
+    normalized_ddf = clip_and_normalize_log1p_dask(
+        ddf=ddf,
+        score_cols=["sliding_window_tf_scores"],
+        quantiles=(0.05, 0.95),
+        apply_log1p=True,
+        dtype=np.float32
+    )
     
-    # Compute global 5th and 95th quantiles
-    qs = ddf[score_col].quantile([0.05, 0.95]).compute()
-    low, high = qs.loc[0.05], qs.loc[0.95]
-
-    # Per-partition normalization
-    def normalize_block(df):
-        # clip into [low, high]
-        df[score_col] = df[score_col].clip(lower=low, upper=high)
-        # scale to [0,1]
-        df[score_col] = (df[score_col] - low) / (high - low)
-        # log1p
-        df[score_col] = np.log1p(df[score_col])
-
-        return df
-
-    normalized_dd = ddf.map_partitions(normalize_block)
+    normalized_ddf = minmax_normalize_dask(
+        ddf=normalized_ddf, 
+        score_cols=["sliding_window_tf_scores"], 
+        dtype=np.float32
+    )
     
-    return normalized_dd
+    return normalized_ddf
 
 
 def format_peaks(peak_ids: pd.Series) -> pd.DataFrame:

@@ -7,15 +7,17 @@ import os
 import sys
 import numpy as np
 
+from normalization import (
+    minmax_normalize_dask,
+    clip_and_normalize_log1p_dask
+)
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Add STRING scores to inferred network")
     parser.add_argument("--inferred_net_file", type=str, required=True, help="Path to inferred network Parquet file")
     parser.add_argument("--string_dir", type=str, required=True, help="Path to STRING database directory")
     parser.add_argument("--output_dir", type=str, required=True, help="Path to output directory")
     return parser.parse_args()
-
-def minmax_normalize_column(column: pd.Series) -> pd.Series:
-    return (column - column.min()) / (column.max() - column.min())
 
 def main():
     # Check if STRING columns already present
@@ -72,15 +74,25 @@ def main():
     logging.info("Normalizing STRING scores")
     cols_to_normalize = ["string_experimental_score", "string_textmining_score", "string_combined_score"]
 
-    for col in cols_to_normalize:
-        if col in merged_dd.columns:
-            merged_dd[col] = merged_dd[col].map_partitions(minmax_normalize_column)
+    normalized_ddf = clip_and_normalize_log1p_dask(
+        ddf=merged_dd,
+        score_cols=cols_to_normalize,
+        quantiles=(0.05, 0.95),
+        apply_log1p=True,
+        dtype=np.float32
+    )
+    
+    normalized_ddf = minmax_normalize_dask(
+        ddf=normalized_ddf, 
+        score_cols=cols_to_normalize, 
+        dtype=np.float32
+    )
 
     # Write out new Parquet file
     out_file = os.path.join(OUTPUT_DIR, os.path.basename(INFERRED_NET_FILE).replace(".parquet", "_w_string.parquet"))
     logging.info(f"Saving inferred network with STRING scores to {out_file}")
 
-    merged_dd.repartition(partition_size="256MB").to_parquet(
+    normalized_ddf.repartition(partition_size="256MB").to_parquet(
         out_file,
         engine="pyarrow",
         compression="snappy",

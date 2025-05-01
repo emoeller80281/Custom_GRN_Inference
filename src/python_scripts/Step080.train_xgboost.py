@@ -69,12 +69,33 @@ def parse_args() -> argparse.Namespace:
     args: argparse.Namespace = parser.parse_args()
     return args
 
-def read_inferred_network(inferred_network_file):
-    logging.info("Reading inferred network with Dask")
-    inferred_network = dd.read_parquet(inferred_network_file)
-    inferred_network["source_id"] = inferred_network["source_id"].str.upper()
-    inferred_network["target_id"] = inferred_network["target_id"].str.upper()
-    return inferred_network
+def read_inferred_network(inferred_network_file: str) -> dd.DataFrame:
+    """
+    Loads a melted sparse inferred network from Parquet and pivots it into a Dask DataFrame
+    where each row is (source_id, target_id) and columns are score_types (mean-aggregated).
+    """
+    logging.info(f"Loading melted sparse network from: {inferred_network_file}")
+    melted_ddf = dd.read_parquet(inferred_network_file)
+
+    # Clean and standardize
+    melted_ddf["source_id"] = melted_ddf["source_id"].str.upper()
+    melted_ddf["target_id"] = melted_ddf["target_id"].str.upper()
+
+    # Use pivot_table equivalent via groupby → aggregate → reshape
+    grouped_ddf = melted_ddf.groupby(["source_id", "target_id", "score_type"])["score_value"].mean().reset_index()
+
+    # Now simulate unstack via pivot_table (Dask 2023+)
+    pivot_ddf = grouped_ddf.pivot_table(
+        index=["source_id", "target_id"],
+        columns="score_type",
+        values="score_value",
+        aggfunc="mean"
+    )
+
+    # Reset index to flatten columns
+    pivot_ddf = pivot_ddf.reset_index()
+
+    return pivot_ddf
 
 def read_ground_truth(ground_truth_file):
     logging.info("Reading in the ground truth")
@@ -86,6 +107,28 @@ def read_merged_ground_truth(merged_ground_truth_file):
     merged_ground_truth = pd.read_csv(merged_ground_truth_file, sep='\t', header=0)
     logging.info(merged_ground_truth)
     return merged_ground_truth
+
+def label_edges_with_ground_truth(inferred_network_dd, ground_truth_df):
+    logging.info("Creating ground truth set")
+    ground_truth_pairs = set(zip(
+        ground_truth_df["source_id"].str.upper(),
+        ground_truth_df["target_id"].str.upper()
+    ))
+
+    logging.info("Adding labels to inferred network")
+
+    def label_partition(df):
+        tf_tg_tuples = list(zip(df["source_id"], df["target_id"]))
+        df["label"] = [1 if pair in ground_truth_pairs else 0 for pair in tf_tg_tuples]
+        return df
+
+    inferred_network_dd = inferred_network_dd.map_partitions(
+        label_partition,
+        meta=inferred_network_dd._meta.assign(label=np.bool_(0))
+    )
+
+    return inferred_network_dd
+    
 
 def main():
     args = parse_args()
@@ -99,18 +142,7 @@ def main():
     inferred_network_dd = read_inferred_network(inferred_network_file)
     ground_truth_df = read_ground_truth(ground_truth_file)
 
-    # Create set of (TF, TG) from ground truth
-    logging.info("Creating ground truth set")
-    ground_truth_pairs = set(zip(ground_truth_df["source_id"], ground_truth_df["target_id"]))
-
-    logging.info("Adding labels to inferred network")
-    inferred_network_dd = inferred_network_dd.map_partitions(
-        lambda df: df.assign(label=df.apply(
-            lambda row: 1 if (row["source_id"], row["target_id"]) in ground_truth_pairs else 0,
-            axis=1
-        )),
-        meta=inferred_network_dd._meta.assign(label=np.int64(0))
-    )
+    inferred_network_dd = label_edges_with_ground_truth(inferred_network_dd, ground_truth_df)
 
     # Drop unnecessary columns
     drop_cols = ["source_id", "peak_id", "target_id", "label"]

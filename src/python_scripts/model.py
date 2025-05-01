@@ -66,7 +66,7 @@ def train_xgboost_dask(X_train_dd, y_train_dd, feature_names):
     return booster
 
 def parameter_grid_search(X_train_dd, y_train_dd, features, cpu_count, fig_dir):
-    logging.info("⚙️ Starting XGBoost hyperparameter grid search")
+    logging.info(" Starting XGBoost hyperparameter grid search")
 
     # Convert Dask → pandas (required for GridSearchCV)
     X_train = X_train_dd.compute()

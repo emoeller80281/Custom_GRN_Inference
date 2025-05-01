@@ -9,6 +9,11 @@ import argparse
 import logging
 import numpy as np
 
+from normalization import (
+    minmax_normalize_dask,
+    clip_and_normalize_log1p_dask
+)
+
 def parse_args() -> argparse.Namespace:
     """
     Parses command-line arguments.
@@ -139,31 +144,23 @@ def main(input_dir: str, output_dir: str, cpu_count: int) -> None:
     
     combined_out = os.path.join(output_dir, "homer_tf_to_peak.parquet")
     
-    # Compute global 5th/95th quantiles for homer_binding_score
-    score_col = "homer_binding_score"
-    qs = combined_out[score_col].quantile([0.05, 0.95]).compute()
-    low, high = qs.loc[0.05], qs.loc[0.95]
-    logging.info(f"Global {score_col} 5th/95th cutoffs: {low:.4g}, {high:.4g}")
-
-    # Define per-partition normalizer
-    def normalize_homer(df):
-        # clip into [low, high]
-        df[score_col] = df[score_col].clip(lower=low, upper=high)
-        # linear scale to [0,1]
-        df[score_col] = (df[score_col] - low) / (high - low)
-        # log1p
-        df[score_col] = np.log1p(df[score_col])
-        return df
-
-    # Apply across your Dask DataFrame
-    normalized_dd = combined_out.map_partitions(normalize_homer)
-
-    # (Optional) persist or overwrite final_dd
-    combined_out = normalized_dd.persist()
+    normalized_ddf = clip_and_normalize_log1p_dask(
+        ddf=ddf,
+        score_cols=["homer_binding_score"],
+        quantiles=(0.05, 0.95),
+        apply_log1p=True,
+        dtype=np.float32
+    )
+    
+    normalized_ddf = minmax_normalize_dask(
+        ddf=normalized_ddf, 
+        score_cols=["homer_binding_score"], 
+        dtype=np.float32
+    )
 
     # Then continue on—e.g. write back out:
-    combined_out.to_parquet(
-        f"{output_dir}/inferred_network_with_normalized_homer.parquet",
+    normalized_ddf.to_parquet(
+        combined_out,
         engine="pyarrow",
         compression="snappy",
     )
