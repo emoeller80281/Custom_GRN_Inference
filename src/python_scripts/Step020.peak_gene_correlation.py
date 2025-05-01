@@ -666,16 +666,14 @@ def main():
     score_cols = ["correlation"]
     
     qs = joined[score_cols].quantile([0.05, 0.95]).compute()
-    low, high = qs.loc[0.05], qs.loc[0.95]
+    low = qs.loc[0.05].to_dict()
+    high = qs.loc[0.95].to_dict()
 
     def normalize_block(df):
-        # clip into [low, high]
-        df[score_cols] = df[score_cols].clip(lower=low, upper=high, axis=1)
-        # scale to [0,1]
-        df[score_cols] = (df[score_cols] - low) / (high - low)
-        # log1p
-        df[score_cols] = np.log1p(df[score_cols])
-
+        for col in score_cols:
+            df[col] = df[col].clip(lower=low[col], upper=high[col])
+            df[col] = (df[col] - low[col]) / (high[col] - low[col])
+            df[col] = np.log1p(df[col])
         return df
 
     normalized_dd = joined.map_partitions(normalize_block)
