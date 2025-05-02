@@ -17,6 +17,7 @@ import dask.dataframe as dd
 import logging
 import argparse
 import re
+from scipy import stats
 
 from normalization import (
     minmax_normalize_dask,
@@ -93,6 +94,12 @@ def parse_args() -> argparse.Namespace:
         type=str,
         required=True,
         help="Number of processors to run multithreading with"
+    )
+    parser.add_argument(
+        "--fig_dir",
+        type=str,
+        required=True,
+        help="Output directory for figueres"
     )
     
     args: argparse.Namespace = parser.parse_args()
@@ -291,7 +298,7 @@ def format_peaks(peak_ids: pd.Series) -> pd.DataFrame:
     return peak_df
 
 
-def find_ATAC_peak_sequence(peak_df, reference_genome_dir, parsed_peak_file):
+def find_ATAC_peak_sequence(peak_df, reference_genome_dir, parsed_peak_file, fig_dir):
     logging.info("Reading in ATACseq peak file")
     # Read in the Homer peaks dataframe
     chr_seq_list = []
@@ -348,6 +355,29 @@ def find_ATAC_peak_sequence(peak_df, reference_genome_dir, parsed_peak_file):
     else:
         chr_pos_to_seq = chr_seq_list[0]
         
+    peak_lengths = peak_df["end"] - peak_df["start"]
+    mode_length = int(stats.mode(peak_lengths, keepdims=False).mode)
+    logging.info(f"\tMost common peak length (mode): {mode_length} bp")
+
+    # Filter chr_pos_to_seq based on mode
+    chr_pos_to_seq = chr_pos_to_seq[
+        (chr_pos_to_seq["+ seq"].apply(lambda x: len(x) == mode_length)) &
+        (chr_pos_to_seq["- seq"].apply(lambda x: len(x) == mode_length))
+    ]
+    
+    logging.info(f'\t    - Saving histogram of peak lengths')
+    plt.figure(figsize=(8,6))
+    plt.hist(peak_lengths, bins=50, edgecolor='black')
+    plt.xlabel("Peak length (bp)", fontsize=14)
+    plt.ylabel("Count", fontsize=14)
+    plt.title("Distribution of ATAC peak lengths", fontsize=16)
+    plt.grid(False)
+    plt.savefig(os.path.join(fig_dir, "atac_peak_len_hist.png"), dpi=200)
+    
+    kept = chr_pos_to_seq.shape[0]
+    total = peak_df.shape[0]
+    logging.info(f"\tKept {kept:,} / {total:,} peaks ({kept / total * 100:.2f}%) with {mode_length}bp sequence length")
+
     logging.info(f'\tFound sequence for {chr_pos_to_seq.shape[0] / peak_df.shape[0] * 100}% of peaks ({chr_pos_to_seq.shape[0]} / {peak_df.shape[0]})')
     
     return chr_pos_to_seq
@@ -363,6 +393,7 @@ def main():
     output_dir: str = args.output_dir
     species: str = args.species
     num_cpu: int = int(args.num_cpu)
+    fig_dir: str = args.fig_dir
     
     tmp_dir = f"{output_dir}/tmp"
     
@@ -407,7 +438,7 @@ def main():
         logging.info(peak_df.head())
         
         # Get the genomic sequence from the reference genome to each ATACseq peak
-        chr_pos_to_seq = find_ATAC_peak_sequence(peak_df, reference_genome_dir, parsed_peak_file)
+        chr_pos_to_seq = find_ATAC_peak_sequence(peak_df, reference_genome_dir, parsed_peak_file, fig_dir)
         
         # Write the peak sequences to a pickle file in the tmp dir
         logging.info('Writing to pickle file')

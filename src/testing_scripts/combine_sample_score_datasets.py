@@ -36,6 +36,12 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="Path to the output directory for the final combined dataframe"
     )
+    parser.add_argument(
+        "--cell_types",
+        type=list,
+        required=True,
+        help="List of cell types to combine"
+    )
 
     args: argparse.Namespace = parser.parse_args()
     return args

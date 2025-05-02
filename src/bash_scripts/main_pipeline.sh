@@ -651,7 +651,8 @@ run_sliding_window_tf_to_peak_score() {
         --rna_data_file "$RNA_FILE_NAME" \
         --output_dir "$OUTPUT_DIR" \
         --species "$SPECIES" \
-        --num_cpu "$NUM_CPU" 
+        --num_cpu "$NUM_CPU" \
+        --fig_dir "$FIG_DIR"
     
 } 2> "$LOG_DIR/Step040.sliding_window_tf_peak_motifs.log"
 
