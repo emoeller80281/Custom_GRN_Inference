@@ -1,5 +1,4 @@
 #!/bin/bash -l
-#!/bin/bash -l
 #SBATCH --job-name="submit_grn_inference_jobs"
 #SBATCH -p compute
 #SBATCH --nodes=1
@@ -9,7 +8,7 @@
 #SBATCH -e /gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/LOGS/run_multiple_jobs.log
 
 # Set the maximum number of jobs that can run at once
-MAX_JOBS_IN_QUEUE=5
+MAX_JOBS_IN_QUEUE=50
 
 
 submit_job() {
@@ -29,12 +28,24 @@ submit_job() {
             --export=ALL,SAMPLE_NAME="$SAMPLE_NAME",CELL_TYPE="$CELL_TYPE",SPECIES="$SPECIES",RNA_FILE_NAME="$RNA_FILE_NAME",ATAC_FILE_NAME="$ATAC_FILE_NAME",GROUND_TRUTH_FILE="$GROUND_TRUTH_FILE" \
             --output="LOGS/${CELL_TYPE}_logs/${SAMPLE_NAME}_logs/custom_grn_${CELL_TYPE}_${SAMPLE_NAME}.out" \
             --error="LOGS/${CELL_TYPE}_logs/${SAMPLE_NAME}_logs/custom_grn_${CELL_TYPE}_${SAMPLE_NAME}.err" \
-            --job-name="custom_grn_method" \
+            --job-name="custom_grn_method_${CELL_TYPE}_${SAMPLE_NAME}" \
             /gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/src/bash_scripts/main_pipeline.sh
     )
         # Extract and print job ID
     job_id=$(echo "$job_output" | awk '{print $4}')
     echo "    - Submitted job $job_id for '${CELL_TYPE}/${SAMPLE_NAME}'"
+
+    # Wait until job appears in squeue
+    while ! squeue -u "$USER" --noheader -o "%j" | grep -q "custom_grn_method_${CELL_TYPE}_${SAMPLE_NAME}"; do
+        sleep 2
+    done
+}
+
+wait_for_available_slot() {
+    while [ "$(squeue -u "$USER" --noheader -o "%j" | grep -c '^custom_grn_method_')" -ge "$MAX_JOBS_IN_QUEUE" ]; do
+        echo "Maximum jobs ($MAX_JOBS_IN_QUEUE) in queue. Checking again in 60 seconds..."
+        sleep 60
+    done
 }
 
 run_macrophage() {
@@ -50,11 +61,7 @@ run_macrophage() {
     echo "Submitting jobs"
     # Submit each SAMPLE_NAME as a separate job
     for SAMPLE_NAME in "${SAMPLE_NAMES[@]}"; do
-        # Check how many jobs are currently queued/running
-        while [ "$(squeue -u $USER | grep custom_grn_method | wc -l)" -ge "$MAX_JOBS_IN_QUEUE" ]; do
-            echo "Maximum jobs ($MAX_JOBS_IN_QUEUE) in queue. Checking again in 5 minutes..."
-            sleep 300
-        done
+        wait_for_available_slot
 
         local RNA_FILE_NAME="${SAMPLE_NAME}_RNA.csv"
         local ATAC_FILE_NAME="${SAMPLE_NAME}_ATAC.csv"
@@ -75,25 +82,21 @@ run_mESC(){
     local CELL_TYPE="mESC"
     local SAMPLE_NAMES=(
         # "filtered_L2_E7.5_rep1"
-        # "filtered_L2_E7.5_rep2"
-        "filtered_L2_E7.75_rep1"
-        "filtered_L2_E8.0_rep1"
-        "filtered_L2_E8.0_rep2"
-        "filtered_L2_E8.5_rep1"
-        "filtered_L2_E8.5_rep2"
-        "filtered_L2_E8.75_rep1"
-        "filtered_L2_E8.75_rep2"
+        "filtered_L2_E7.5_rep2"
+        # "filtered_L2_E7.75_rep1"
+        # "filtered_L2_E8.0_rep1"
+        # "filtered_L2_E8.0_rep2"
+        # "filtered_L2_E8.5_rep1"
+        # "filtered_L2_E8.5_rep2"
+        # "filtered_L2_E8.75_rep1"
+        # "filtered_L2_E8.75_rep2"
     )
     local SPECIES="mm10"
 
     echo "Submitting jobs"
     # Submit each SAMPLE_NAME as a separate job
     for SAMPLE_NAME in "${SAMPLE_NAMES[@]}"; do
-        # Check how many jobs are currently queued/running
-        while [ "$(squeue -u $USER | grep custom_grn_method | wc -l)" -ge "$MAX_JOBS_IN_QUEUE" ]; do
-            echo "Maximum jobs ($MAX_JOBS_IN_QUEUE) in queue. Checking again in 5 minutes..."
-            sleep 300
-        done
+        wait_for_available_slot
 
         local RNA_FILE_NAME="mESC_${SAMPLE_NAME}_RNA.csv"
         local ATAC_FILE_NAME="mESC_${SAMPLE_NAME}_ATAC.csv"
@@ -121,11 +124,7 @@ run_K562(){
     echo "Submitting jobs"
     # Submit each SAMPLE_NAME as a separate job
     for SAMPLE_NAME in "${SAMPLE_NAMES[@]}"; do
-        # Check how many jobs are currently queued/running
-        while [ "$(squeue -u $USER | grep custom_grn_method | wc -l)" -ge "$MAX_JOBS_IN_QUEUE" ]; do
-            echo "Maximum jobs ($MAX_JOBS_IN_QUEUE) in queue. Checking again in 5 minutes..."
-            sleep 300
-        done
+        wait_for_available_slot
 
         local RNA_FILE_NAME="${SAMPLE_NAME}_RNA.csv"
         local ATAC_FILE_NAME="${SAMPLE_NAME}_ATAC.csv"
@@ -143,5 +142,5 @@ run_K562(){
 }
 
 run_mESC
-run_K562
-run_macrophage
+# run_K562
+# run_macrophage

@@ -331,7 +331,7 @@ def main():
         "string_experimental_score", "string_textmining_score", "string_combined_score"
     ]
     
-    num_score_col_threshold = 1
+    num_score_col_threshold = 7
     
     logging.info(f"  - Filtering combined DataFrame to only contain edges with at least {num_score_col_threshold} / {len(score_cols)} scores")
     # Filter the combined dataframe to only contain rows with scores in num_score_col_threshold columns
@@ -369,7 +369,10 @@ def main():
     )
     logging.info("      Done!")
     
-    
+    logging.info("\nSize of the final combined DataFrame:")
+    logging.info(f'\t- Number of unique TFs: {non_null_scores_ddf["source_id"].nunique().compute():,}')
+    logging.info(f'\t- Number of unique Peaks: {non_null_scores_ddf["peak_id"].nunique().compute():,}')
+    logging.info(f'\t- Number of unique TGs: {non_null_scores_ddf["target_id"].nunique().compute():,}')
     
     logging.info("\nFinished")
 

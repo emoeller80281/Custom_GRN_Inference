@@ -25,7 +25,7 @@ def parse_args() -> argparse.Namespace:
         help="Name of the feature set to combine"
     )
     parser.add_argument(
-        "--sample_output_dir",
+        "--output_dir",
         type=str,
         required=True,
         help="Path to the output directory"
@@ -58,7 +58,7 @@ def plot_non_nan_feature_scores(inferred_net_paths):
         # build a DataFrame of feature_counts for this cell_type
         all_counts = {}
         for sample_name, sample_path in sample_dict.items():
-            df = pd.read_csv(sample_path, nrows=1000000)
+            df = pd.read_csv(sample_path, nrows=1000)
             counts = (
                 df
                 .count(numeric_only=True, axis=1)
@@ -127,67 +127,76 @@ def combine_ground_truth_datasets():
     logging.info(merged_gt_df)
     logging.info(merged_gt_df.shape)
 
-args: argparse.Namespace = parse_args()
+# args: argparse.Namespace = parse_args()
 
-feature_set_filename = args.feature_set_filename
-output_dir = args.sample_output_dir
-combined_dataframe_dir = args.combined_dataframe_dir
+# feature_set_filename = args.feature_set_filename
+# output_dir = args.output_dir
+# combined_dataframe_dir = args.combined_dataframe_dir
 
-logging.info(output_dir)
+feature_set_filename = "inferred_score_df.parquet"
+output_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output"
+combined_dataframe_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output/combined_inferred_dfs"
+cell_types = ["mESC"]
 
+logging.info("\n============ LOADING INFERRED SCORE FILES ============")
 inferred_net_paths = {}
-for cell_type in os.listdir(output_dir):
-    cell_type_path = os.path.join(output_dir, cell_type)
-    logging.info(f'\n----- {cell_type.upper()} -----')
-    
-    
-    for sample in os.listdir(cell_type_path):
-        sample_path = os.path.join(cell_type_path, sample)
-        logging.info(f'{sample}')
+for cell_type in cell_types:
+    if cell_type in os.listdir(output_dir):
+        cell_type_path = os.path.join(output_dir, cell_type)
+        logging.info(f'\n  ----- {cell_type.upper()} -----')
         
-        for folder in os.listdir(sample_path):
-            if folder == "inferred_grns":
-                folder_path = os.path.join(sample_path, folder)
-                
-                for inferred_net in os.listdir(folder_path):
-                    inferred_net_path = os.path.join(folder_path, inferred_net)
-                    if os.path.isfile(inferred_net_path):
-                        if inferred_net == feature_set_filename:
-                            logging.info(f'    |____{inferred_net}')
-                            if not cell_type in inferred_net_paths:
-                                inferred_net_paths[cell_type] = {}
-                                
-                            if not sample in inferred_net_paths[cell_type]:
-                                inferred_net_paths[cell_type][sample] = inferred_net_path
+        
+        for sample in os.listdir(cell_type_path):
+            sample_path = os.path.join(cell_type_path, sample)
+            
+            for folder in os.listdir(sample_path):
+                if folder == "inferred_grns":
+                    folder_path = os.path.join(sample_path, folder)
+                    
+                    for inferred_net in os.listdir(folder_path):
+                        inferred_net_path = os.path.join(folder_path, inferred_net)
+                        if os.path.exists(inferred_net_path):
+                            if inferred_net == feature_set_filename:
+                                logging.info(f'\t- Found combined score dataframe for {sample}')
+                                if not cell_type in inferred_net_paths:
+                                    inferred_net_paths[cell_type] = {}
+                                    
+                                if not sample in inferred_net_paths[cell_type]:
+                                    inferred_net_paths[cell_type][sample] = inferred_net_path
 
        
-logging.info("Starting Dask-based sampling and combination of inferred networks.")
+logging.info("\n============ COMBINING INFERRED SCORES ============")
 
 # Combine the sampled Dask DataFrames
 sampled_enriched_feature_dfs = []
-sample_fraction = 1 / len(inferred_net_paths)
-logging.info(f"Sample fraction set to: {sample_fraction:.4f} based on {len(inferred_net_paths)} inferred networks.")
+total_samples = sum(len(samples) for samples in inferred_net_paths.values())
+sample_fraction = 1
+logging.info(f"\t- Sample fraction set to: {sample_fraction*100:.4f} based on {total_samples} inferred networks.")
 
 for cell_type, sample_path_dict in inferred_net_paths.items():
-    logging.info(f"Processing cell type: {cell_type} with {len(sample_path_dict)} sample(s).")
+    logging.info(f"\n- Processing cell type: {cell_type} with {len(sample_path_dict)} sample(s).")
     for sample_name, sample_grn_path in sample_path_dict.items():
-        logging.info(f"  Reading Parquet file: {sample_grn_path}")
         try:
             df = dd.read_parquet(sample_grn_path)
+
+            # Sample the pivoted DataFrame
             df_sample = df.sample(frac=sample_fraction, random_state=42)
             
             sample_row_count = df_sample.shape[0].compute()
-            logging.info(f"  Sampled {sample_row_count:,} rows ({sample_fraction*100:.2f}%) from {sample_name}")
+            logging.info(f"\t- Sampled {sample_row_count:,} rows ({sample_fraction*100:.2f}%) from {sample_name}")
 
             sampled_enriched_feature_dfs.append(df_sample)
         except Exception as e:
-            logging.error(f"  Failed to process {sample_grn_path}: {e}")
+            logging.error(f"\t- [ERROR] Failed to process {sample_grn_path}: {e}")
 
-logging.info(f"Combining {len(sampled_enriched_feature_dfs)} sampled Dask DataFrames.")
+logging.info(f"\nCombining {len(sampled_enriched_feature_dfs)} sampled Dask DataFrames.")
 combined_ddf = dd.concat(sampled_enriched_feature_dfs)
+logging.info(f'\t- Number of unique TFs: {combined_ddf["source_id"].nunique().compute():,}')
+logging.info(f'\t- Number of unique Peaks: {combined_ddf["peak_id"].nunique().compute():,}')
+logging.info(f'\t- Number of unique TGs: {combined_ddf["target_id"].nunique().compute():,}')
 
 output_path = os.path.join(combined_dataframe_dir, 'combined_enrich_feat_w_string.parquet')
-logging.info(f"Writing combined DataFrame to {output_path}")
+logging.info(f"\nWriting combined DataFrame to {output_path}")
 
 try:
     combined_ddf.to_parquet(
