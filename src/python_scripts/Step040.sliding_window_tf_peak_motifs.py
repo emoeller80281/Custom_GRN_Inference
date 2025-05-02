@@ -203,10 +203,21 @@ def associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, rna_dat
     tf_motif_names = tf_df["Motif_ID"].unique().tolist()
     logging.info(f"Number of motifs: {len(tf_motif_names)}")
     logging.info(f"Number of peaks: {chr_pos_to_seq.shape[0]}")
+    
+    # Determine max length of all sequences
+    chr_pos_to_seq["peak_len"] = chr_pos_to_seq["+ seq"].apply(len)
+    max_len = chr_pos_to_seq["peak_len"].max()
+    logging.info(f"\tMaximum peak length: {max_len} bp")
 
-    # Sequences
-    seqs_plus = np.stack(chr_pos_to_seq["+ seq"].to_list())
-    seqs_minus = np.stack(chr_pos_to_seq["- seq"].to_list())
+    # Pad all sequences to max_len
+    def pad_sequences(seqs, fixed_len, pad_val=-1):
+        padded = np.full((len(seqs), fixed_len), pad_val, dtype=np.int8)
+        for i, seq in enumerate(seqs):
+            padded[i, :len(seq)] = seq[:fixed_len]
+        return padded
+
+    seqs_plus = pad_sequences(chr_pos_to_seq["+ seq"].to_list(), fixed_len=max_len)
+    seqs_minus = pad_sequences(chr_pos_to_seq["- seq"].to_list(), fixed_len=max_len)
 
     # Directory for cached output
     tmp_dir = os.path.join(output_dir, "tmp", "sliding_window_tf_scores")
@@ -358,12 +369,6 @@ def find_ATAC_peak_sequence(peak_df, reference_genome_dir, parsed_peak_file, fig
     peak_lengths = peak_df["end"] - peak_df["start"]
     mode_length = int(stats.mode(peak_lengths, keepdims=False).mode)
     logging.info(f"\tMost common peak length (mode): {mode_length} bp")
-
-    # Filter chr_pos_to_seq based on mode
-    chr_pos_to_seq = chr_pos_to_seq[
-        (chr_pos_to_seq["+ seq"].apply(lambda x: len(x) == mode_length)) &
-        (chr_pos_to_seq["- seq"].apply(lambda x: len(x) == mode_length))
-    ]
     
     logging.info(f'\t    - Saving histogram of peak lengths')
     plt.figure(figsize=(8,6))
@@ -373,11 +378,7 @@ def find_ATAC_peak_sequence(peak_df, reference_genome_dir, parsed_peak_file, fig
     plt.title("Distribution of ATAC peak lengths", fontsize=16)
     plt.grid(False)
     plt.savefig(os.path.join(fig_dir, "atac_peak_len_hist.png"), dpi=200)
-    
-    kept = chr_pos_to_seq.shape[0]
-    total = peak_df.shape[0]
-    logging.info(f"\tKept {kept:,} / {total:,} peaks ({kept / total * 100:.2f}%) with {mode_length}bp sequence length")
-
+        
     logging.info(f'\tFound sequence for {chr_pos_to_seq.shape[0] / peak_df.shape[0] * 100}% of peaks ({chr_pos_to_seq.shape[0]} / {peak_df.shape[0]})')
     
     return chr_pos_to_seq

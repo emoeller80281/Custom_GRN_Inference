@@ -1,6 +1,7 @@
 import dask.dataframe as dd
 import dask
 from dask import delayed, compute
+from dask.delayed import Delayed
 import pandas as pd
 import os
 from dask.diagnostics import ProgressBar
@@ -133,7 +134,7 @@ def main(input_dir: str, output_dir: str, cpu_count: int) -> None:
     with ProgressBar(dt=5.0, minimum=1, width=80, out=log_stream):
         all_parquet_paths = compute(*delayed_tasks, scheduler="processes", num_workers=cpu_count)
         
-    parquet_paths = [p for p in all_parquet_paths if p]
+    parquet_paths = [p for p in all_parquet_paths if isinstance(p, str) or isinstance(p, Delayed)]
     
     if not parquet_paths:
         logging.error("No valid parquet files were written")

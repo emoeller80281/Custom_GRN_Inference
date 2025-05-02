@@ -5,6 +5,7 @@ import argparse
 import logging
 import os
 import dask.dataframe as dd
+from dask import compute
 import pandas as pd
 import logging
 from typing import Set, Tuple, Union
@@ -144,23 +145,23 @@ def build_scored_edges_dataframe(
     df = full_edges_dd.merge(sliding_window_dd, on=["source_id", "peak_id"], how="left")
     logging.info("      Done!")
 
-    logging.info("  - (2/7)Adding Homer TF to peak scores")
+    logging.info("  - (2/7) Adding Homer TF to peak scores")
     df = df.merge(homer_dd, on=["source_id", "peak_id"], how="left")
     logging.info("      Done!")
 
-    logging.info("  - (3/7)Adding Peak to TG correlation scores")
+    logging.info("  - (3/7) Adding Peak to TG correlation scores")
     df = df.merge(peak_corr_dd, on=["peak_id", "target_id"], how="left")
     logging.info("      Done!")
 
-    logging.info("  - (4/7)Adding Cicero peak to TG scores")
+    logging.info("  - (4/7) Adding Cicero peak to TG scores")
     df = df.merge(cicero_dd, on=["peak_id", "target_id"], how="left")
     logging.info("      Done!")
 
-    logging.info("  - (5/7)Adding mean TF expression scores")
+    logging.info("  - (5/7) Adding mean TF expression scores")
     df = df.merge(rna_tf_dd, on="source_id", how="left")
     logging.info("      Done!")
 
-    logging.info("  - (6/7)Adding mean TG expression")
+    logging.info("  - (6/7) Adding mean TG expression")
     df = df.merge(rna_tg_dd, on="target_id", how="left")
     logging.info("      Done!")
 
@@ -331,7 +332,7 @@ def main():
         "string_experimental_score", "string_textmining_score", "string_combined_score"
     ]
     
-    num_score_col_threshold = 7
+    num_score_col_threshold = 9
     
     logging.info(f"  - Filtering combined DataFrame to only contain edges with at least {num_score_col_threshold} / {len(score_cols)} scores")
     # Filter the combined dataframe to only contain rows with scores in num_score_col_threshold columns
@@ -340,12 +341,6 @@ def main():
          min_valid_scores=num_score_col_threshold,
          score_cols=score_cols
          )
-    logging.info("      Done!")
-    
-    # Repartition to balance the partition size
-    partition_size = "256MB"
-    logging.info(f'  - Repartitioning the final Dask DataFrame to {partition_size}')
-    filtered_combined_string_ddf = filtered_combined_string_ddf.repartition(partition_size=partition_size)
     logging.info("      Done!")
     
     logging.info(f'  - Melting the combined DataFrame to reduce NaN values')
@@ -359,20 +354,42 @@ def main():
     non_null_scores_ddf = melted_ddf.dropna(subset=["score_value"])
     logging.info("      Done!")    
     
+    # Repartition to balance the partition size
+    partition_size = "50MB"
+    logging.info(f'  - Repartitioning the final Dask DataFrame to {partition_size}')
+    non_null_scores_ddf = non_null_scores_ddf.repartition(partition_size=partition_size)
+    logging.info("      Done!")
+
+    logging.info("  - Loading the changes to memory")
+    non_null_scores_ddf.persist()
+    logging.info("      Done!")
+
+    # build all metrics into Dask objects
+    row_count    = non_null_scores_ddf.shape[0]
+    n_tfs        = non_null_scores_ddf["source_id"].nunique()
+    n_peaks      = non_null_scores_ddf["peak_id"].nunique()
+    n_targets    = non_null_scores_ddf["target_id"].nunique()
+
+    # compute them *all at once*
+    n_rows, n_tfs, n_peaks, n_targets = compute(row_count, n_tfs, n_peaks, n_targets)
+
+    logging.info(f"\nFinal number of rows:     {n_rows:,}")
+    logging.info(f"Unique TFs:               {n_tfs:,}")
+    logging.info(f"Unique Peaks:             {n_peaks:,}")
+    logging.info(f"Unique TGs:               {n_targets:,}")
+    
+    
     # Save the final combined network scores
     logging.info(f'  - Saving final combined score Dask DataFrame to the inferred GRN output directory')
     non_null_scores_ddf.to_parquet(
         os.path.join(inferred_grn_dir, "inferred_score_df.parquet"),
         engine="pyarrow",
         compression="snappy",
-        write_index=False
+        write_index=False,
+        write_metadata_file=True,   # helps for fast dataset reads later
+        compute_kwargs={"scheduler": "threads"},  # use multi‐threading
     )
     logging.info("      Done!")
-    
-    logging.info("\nSize of the final combined DataFrame:")
-    logging.info(f'\t- Number of unique TFs: {non_null_scores_ddf["source_id"].nunique().compute():,}')
-    logging.info(f'\t- Number of unique Peaks: {non_null_scores_ddf["peak_id"].nunique().compute():,}')
-    logging.info(f'\t- Number of unique TGs: {non_null_scores_ddf["target_id"].nunique().compute():,}')
     
     logging.info("\nFinished")
 

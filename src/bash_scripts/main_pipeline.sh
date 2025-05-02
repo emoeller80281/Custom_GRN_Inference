@@ -2,7 +2,7 @@
 
 #SBATCH --partition compute
 #SBATCH --nodes=1
-#SBATCH --cpus-per-task=16
+#SBATCH --cpus-per-task=32
 #SBATCH --mem=128G
 
 set -euo pipefail
