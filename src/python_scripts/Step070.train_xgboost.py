@@ -21,7 +21,6 @@ from plotting import (
 )
 from model import (
     train_xgboost_dask,
-    xgb_classifier_from_booster,
     parameter_grid_search,
 )
 
@@ -75,27 +74,33 @@ def read_inferred_network(inferred_network_file: str) -> dd.DataFrame:
     where each row is (source_id, target_id) and columns are score_types (mean-aggregated).
     """
     logging.info(f"Loading melted sparse network from: {inferred_network_file}")
-    melted_ddf = dd.read_parquet(inferred_network_file)
+    melted_ddf = dd.read_parquet(inferred_network_file, engine="pyarrow")
 
-    # Clean and standardize
+    # Standardize IDs
     melted_ddf["source_id"] = melted_ddf["source_id"].str.upper()
     melted_ddf["target_id"] = melted_ddf["target_id"].str.upper()
 
-    # Use pivot_table equivalent via groupby → aggregate → reshape
-    grouped_ddf = melted_ddf.groupby(["source_id", "target_id", "score_type"])["score_value"].mean().reset_index()
-
-    # Now simulate unstack via pivot_table (Dask 2023+)
-    pivot_ddf = grouped_ddf.pivot_table(
-        index=["source_id", "target_id"],
-        columns="score_type",
-        values="score_value",
-        aggfunc="mean"
+    # Aggregate scores
+    grouped_ddf = (
+        melted_ddf
+        .groupby(["source_id", "target_id", "score_type"])["score_value"]
+        .mean()
+        .reset_index()
     )
 
-    # Reset index to flatten columns
-    pivot_ddf = pivot_ddf.reset_index()
+    # Pivot manually by converting to pandas (if dataset is small enough)
+    def pivot_partition(df):
+        return df.pivot_table(
+            index=["source_id", "target_id"],
+            columns="score_type",
+            values="score_value",
+            aggfunc="mean"
+        ).reset_index()
 
-    return pivot_ddf
+    # Apply pivot in a single partition (best if you've already aggregated)
+    pivot_df = grouped_ddf.compute()  # convert to Pandas here
+    pivot_df = pivot_partition(pivot_df)
+    return dd.from_pandas(pivot_df, npartitions=1)
 
 def read_ground_truth(ground_truth_file):
     logging.info("Reading in the ground truth")
@@ -118,13 +123,14 @@ def label_edges_with_ground_truth(inferred_network_dd, ground_truth_df):
     logging.info("Adding labels to inferred network")
 
     def label_partition(df):
+        df = df.copy()  # <-- avoids SettingWithCopyWarning
         tf_tg_tuples = list(zip(df["source_id"], df["target_id"]))
-        df["label"] = [1 if pair in ground_truth_pairs else 0 for pair in tf_tg_tuples]
+        df.loc[:, "label"] = [1 if pair in ground_truth_pairs else 0 for pair in tf_tg_tuples]
         return df
 
     inferred_network_dd = inferred_network_dd.map_partitions(
         label_partition,
-        meta=inferred_network_dd._meta.assign(label=np.bool_(0))
+        meta=inferred_network_dd._meta.assign(label=np.int64(0))
     )
 
     return inferred_network_dd
@@ -150,7 +156,7 @@ def main():
 
     # Only keep columns needed for modeling
     logging.info(f"Keeping {len(feature_names)} feature columns + labels")
-    model_dd = inferred_network_dd[feature_names + ["label"]]
+    model_dd = inferred_network_dd[feature_names + ["label"]].persist()
 
     logging.info(f"Splitting {model_dd.shape[0].compute():,} rows into train/test with stratification")
 
@@ -163,7 +169,6 @@ def main():
         y_dd,
         test_size=0.2,
         shuffle=True,
-        stratify=y_dd,   # Pure Dask stratification!
         random_state=42
     )
 
@@ -192,11 +197,20 @@ def main():
     model_df = model_dd.compute()
     X = model_df[feature_names]
     y = model_df["label"]
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-    model_cls = xgb_classifier_from_booster(xgb_booster, X.columns)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=True, random_state=42)
+    # model_cls = xgb_classifier_from_booster(xgb_booster, X.columns)
 
     if not os.path.exists(fig_dir):
         os.makedirs(fig_dir)
+    
+    # Run the parameter grid search
+    grid = parameter_grid_search(X_train_dd, y_train_dd, feature_names, cpu_count=16, fig_dir=fig_dir)
+
+    plot_feature_importance(
+        features=feature_names,
+        model=grid.best_estimator_,
+        fig_dir=os.path.join(fig_dir, "parameter_search")
+    )
 
     logging.info("\n----- Plotting Figures -----")
     plot_feature_score_histograms(feature_names, model_df, fig_dir)
@@ -207,8 +221,8 @@ def main():
     # --- Note: The following plots take a long time to run for large models, as they test re-training the model ---
 
     plot_overlapping_roc_pr_curves(X, y, feature_names, fig_dir)
-    plot_permutation_importance_plot(model_cls, X_test, y_test, fig_dir)
-    plot_feature_ablation(feature_names, X_train, X_test, y_train, y_test, model_cls, fig_dir)
+    plot_permutation_importance_plot(xgb_booster, X_test, y_test, fig_dir)
+    plot_feature_ablation(feature_names, X_train, X_test, y_train, y_test, xgb_booster, fig_dir)
     plot_stability_boxplot(X, y, fig_dir)
     
     

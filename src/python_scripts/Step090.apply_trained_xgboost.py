@@ -15,7 +15,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 def read_inferred_network_dask(inferred_network_file):
-    df = dd.read_parquet(inferred_network_file)
+    df = dd.read_parquet(inferred_network_file, )
     df["source_id"] = df["source_id"].str.upper()
     df["target_id"] = df["target_id"].str.upper()
     return df
@@ -35,13 +35,16 @@ def main():
     booster = xgb.Booster()
     booster.load_model(model_path)
 
-    feature_names_str = booster.attr("feature_names")
-    if feature_names_str is None:
-        raise ValueError("Missing feature_names in model attributes. Use booster.set_attr(...) during training.")
-    feature_names = feature_names_str.split(",")
-
     logging.info("Reading inferred network")
     inferred_dd = read_inferred_network_dask(target_path)
+    
+    feature_names = [
+        "sliding_window_score", "homer_binding_score",
+        "correlation", "TSS_dist_score", "cicero_score",
+        "mean_TF_expression", "mean_TG_expression", "mean_peak_accessibility",
+        "string_experimental_score", "string_textmining_score", "string_combined_score"
+    ]
+    
     X_dd = inferred_dd[feature_names]
 
     logging.info("Converting to DaskDMatrix")

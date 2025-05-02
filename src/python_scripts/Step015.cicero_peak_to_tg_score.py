@@ -80,7 +80,7 @@ def main():
     merged_with_promoter_genes["peak_id"] = merged_with_promoter_genes["peak_id"].str.replace("-", ":", 1)
     
     normalized_df = minmax_normalize_pandas(
-        ddf=merged_with_promoter_genes, 
+        df=merged_with_promoter_genes, 
         score_cols=["cicero_score"], 
         dtype=np.float32
     )

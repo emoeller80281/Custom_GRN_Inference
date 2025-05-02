@@ -171,60 +171,65 @@ def build_scored_edges_dataframe(
     logging.info("\n  All merges complete. Returning final Dask DataFrame.")
     return df
 
-def add_string_db_scores(inferred_net_dd, string_dir):
-    # Load STRING metadata files (small)
+def add_string_db_scores(inferred_net_dd, string_dir, full_edges):
+    # Load STRING protein info and links (small)
     logging.info("  - Reading STRING protein info")
-    protein_info_df = pd.read_csv(f"{string_dir}/protein_info.txt", sep="\t", header=0)
-
+    protein_info_df = pd.read_csv(f"{string_dir}/protein_info.txt", sep="\t")
+    
     logging.info("  - Reading STRING protein links detailed")
-    protein_links_df = pd.read_csv(f"{string_dir}/protein_links_detailed.txt", sep=" ", header=0)
+    protein_links_df = pd.read_csv(f"{string_dir}/protein_links_detailed.txt", sep=" ")
 
-    # Map STRING protein IDs to human-readable names
     logging.info("  - Mapping STRING protein IDs to preferred names")
     id_to_name = protein_info_df.set_index("#string_protein_id")["preferred_name"].to_dict()
     protein_links_df["protein1"] = protein_links_df["protein1"].map(id_to_name)
     protein_links_df["protein2"] = protein_links_df["protein2"].map(id_to_name)
 
-    # Select relevant STRING columns
-    protein_links_df = protein_links_df.rename(columns={
+    # Extract all TF–TG pairs from the full TF–peak–TG edges
+    tf_tg_pairs = set((tf, tg) for tf, _, tg in full_edges)
+
+    logging.info(f"  - Filtering STRING links to match {len(tf_tg_pairs):,} TF–TG pairs")
+    filtered_links_df = protein_links_df[
+        protein_links_df[["protein1", "protein2"]]
+        .apply(tuple, axis=1)
+        .isin(tf_tg_pairs)
+    ]
+
+    # Rename columns and normalize
+    filtered_links_df = filtered_links_df.rename(columns={
         "experimental": "string_experimental_score",
         "textmining": "string_textmining_score",
         "combined_score": "string_combined_score"
     })[["protein1", "protein2", "string_experimental_score", "string_textmining_score", "string_combined_score"]]
 
-    # Convert STRING links to Dask
-    logging.info("  - Converting STRING links to Dask")
-    protein_links_dd = dd.from_pandas(protein_links_df, npartitions=1)
+    logging.info("  - Converting to Dask and normalizing STRING scores")
+    string_dd = dd.from_pandas(filtered_links_df, npartitions=1)
 
-    # Merge inferred network with STRING scores
-    logging.info("  - Merging inferred network with STRING edges")
+    string_dd = clip_and_normalize_log1p_dask(
+        ddf=string_dd,
+        score_cols=["string_experimental_score", "string_textmining_score", "string_combined_score"],
+        quantiles=(0.05, 0.95),
+        apply_log1p=True,
+        dtype=np.float32,
+        sample_frac=0.1  # optional: for speed
+    )
+
+    string_dd = minmax_normalize_dask(
+        ddf=string_dd,
+        score_cols=["string_experimental_score", "string_textmining_score", "string_combined_score"],
+        dtype=np.float32
+    )
+
+    logging.info("  - Merging normalized STRING scores into inferred network")
     merged_dd = inferred_net_dd.merge(
-        protein_links_dd,
+        string_dd,
         left_on=["source_id", "target_id"],
         right_on=["protein1", "protein2"],
         how="left"
     ).drop(columns=["protein1", "protein2"])
 
-    # Normalize STRING score columns
-    logging.info("  - Normalizing STRING scores")
-    cols_to_normalize = ["string_experimental_score", "string_textmining_score", "string_combined_score"]
-
-    norm_string_ddf = clip_and_normalize_log1p_dask(
-        ddf=merged_dd,
-        score_cols=cols_to_normalize,
-        quantiles=(0.05, 0.95),
-        apply_log1p=True,
-        dtype=np.float32
-    )
-    
-    norm_string_ddf = minmax_normalize_dask(
-        ddf=norm_string_ddf, 
-        score_cols=cols_to_normalize, 
-        dtype=np.float32
-    )
     logging.info("  Done!")
-    
-    return norm_string_ddf
+    return merged_dd
+
 
 def filter_scored_edges(df, min_valid_scores=6, score_cols=None):
     """
@@ -258,22 +263,22 @@ def main():
     logging.info("\n ============== Loading Score DataFrames ==============")
     # Load Dask DataFrames
     logging.info("  - (1/6) Loading Sliding Window DataFrame")
-    sliding_window_dd = dd.read_parquet(f"{output_dir}/sliding_window_tf_to_peak_score.parquet").head(10000)
+    sliding_window_dd = dd.read_parquet(f"{output_dir}/sliding_window_tf_to_peak_score.parquet")
     
     logging.info("  - (2/6) Loading Homer DataFrame")
-    homer_dd          = dd.read_parquet(f"{output_dir}/homer_tf_to_peak.parquet").head(10000)
+    homer_dd          = dd.read_parquet(f"{output_dir}/homer_tf_to_peak.parquet")
     
     logging.info("  - (3/6) Loading Peak to TG Correlation DataFrame")
-    peak_corr_dd      = dd.read_parquet(f"{output_dir}/peak_to_gene_correlation.parquet").head(10000)
+    peak_corr_dd      = dd.read_parquet(f"{output_dir}/peak_to_gene_correlation.parquet")
     
     logging.info("  - (4/6) Loading Cicero DataFrame")
-    cicero_dd         = dd.read_parquet(f"{output_dir}/cicero_peak_to_tg_scores.parquet").head(10000)
+    cicero_dd         = dd.read_parquet(f"{output_dir}/cicero_peak_to_tg_scores.parquet")
     
     logging.info("  - (5/6) Loading scRNAseq DataFrame")
-    rna_df            = dd.read_parquet(rna_data_file).head(10000)
+    rna_df            = dd.read_parquet(rna_data_file)
     
     logging.info("  - (6/6) Loading scATACseq DataFrame")
-    atac_df           = dd.read_parquet(atac_data_file).head(10000)
+    atac_df           = dd.read_parquet(atac_data_file)
     logging.info("\n  All dataframes loaded")
     
     # Compute mean TF and TG expression
@@ -316,7 +321,7 @@ def main():
     )
     
     logging.info("\n ============== Adding STRING Scores ==============")
-    combined_string_ddf = add_string_db_scores(combined_ddf, args.string_dir)
+    combined_string_ddf = add_string_db_scores(combined_ddf, args.string_dir, full_edges)
     
     logging.info("\n ============== Filtering and Melting Combined Score DataFrame ==============")
     score_cols = [

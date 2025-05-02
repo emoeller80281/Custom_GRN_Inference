@@ -38,3 +38,4 @@ enhancer_db/
 tmp/
 keypairs.json
 string_database/
+__pycache__/

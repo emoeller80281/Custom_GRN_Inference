@@ -245,7 +245,7 @@ def associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, rna_dat
 
     normalized_ddf = clip_and_normalize_log1p_dask(
         ddf=ddf,
-        score_cols=["sliding_window_tf_scores"],
+        score_cols=["sliding_window_score"],
         quantiles=(0.05, 0.95),
         apply_log1p=True,
         dtype=np.float32
@@ -253,7 +253,7 @@ def associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, rna_dat
     
     normalized_ddf = minmax_normalize_dask(
         ddf=normalized_ddf, 
-        score_cols=["sliding_window_tf_scores"], 
+        score_cols=["sliding_window_score"], 
         dtype=np.float32
     )
     

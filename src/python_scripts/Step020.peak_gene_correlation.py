@@ -598,7 +598,7 @@ def main():
     peak_gene_dd = dd.read_parquet(f"{TMP_DIR}/peak_to_gene_map.parquet")
 
     # ============ PEAK TO GENE CORRELATION CALCULATION ============
-    PARQ = f"{TMP_DIR}/sig_peak_to_gene_corr.parquet"
+    PARQ = os.path.join(TMP_DIR, "sig_peak_to_gene_corr.parquet")
 
     def prepare_inputs_for_correlation():
         logging.info("Subsetting ATAC and RNA matrices to relevant peaks/genes")
@@ -626,7 +626,7 @@ def main():
     def run_correlation_and_load():
         atac_sub, rna_sub = prepare_inputs_for_correlation()
         logging.info("Calculating significant ATAC-seq peak-to-gene correlations")
-        written = calculate_significant_peak_to_gene_correlations(
+        result = calculate_significant_peak_to_gene_correlations(
             atac_sub,
             rna_sub,
             output_file=PARQ,
@@ -635,7 +635,10 @@ def main():
             num_cpu=num_workers,
             batch_size=batch_size
         )
-        return dd.read_parquet(written)
+        if isinstance(result, str):
+            return dd.read_parquet(result)  # streaming mode
+        else:
+            return dd.from_pandas(result, npartitions=1)  # in-memory mode
 
     if not os.path.exists(PARQ):
         sig_peak_to_gene_corr = run_correlation_and_load()

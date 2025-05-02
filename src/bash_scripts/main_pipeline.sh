@@ -3,7 +3,7 @@
 #SBATCH --partition compute
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=64G
+#SBATCH --mem=128G
 
 set -euo pipefail
 
@@ -12,24 +12,21 @@ set -euo pipefail
 # =============================================
 # Run the peak to TG regulatory potential calculation methods
 STEP010_CICERO_MAP_PEAKS_TO_TG=false
-STEP015_CICERO_PEAK_TO_TG_SCORE=true
+STEP015_CICERO_PEAK_TO_TG_SCORE=false
 
-STEP020_PEAK_TO_TG_CORRELATION=true
+STEP020_PEAK_TO_TG_CORRELATION=false
 # STEP030_PEAK_TO_ENHANCER_DB=false # Deprecated, does not help model and no data for mouse
 
 # Run the TF to peak binding score calculation methods
-STEP040_SLIDING_WINDOW_TF_TO_PEAK_SCORE=true
-STEP050_HOMER_TF_TO_PEAK_SCORE=true
+STEP040_SLIDING_WINDOW_TF_TO_PEAK_SCORE=false
+STEP050_HOMER_TF_TO_PEAK_SCORE=false
 
 # Combine the score DataFrames
 STEP060_COMBINE_DATAFRAMES=true
 SUBSAMPLE_PERCENT=50 # Percent of rows of the combined dataframe to subsample
 
-# Find shared edges between the inferred network and the STRING PPI database
-STEP070_FIND_EDGES_IN_STRING_DB=false
-
 # Train a predictive model to infer the GRN
-STEP080_TRAIN_XGBOOST_CLASSIFIER=false
+STEP070_TRAIN_XGBOOST_CLASSIFIER=false
 
 # =============================================
 #              USER PATH VARIABLES
@@ -53,10 +50,7 @@ INFERRED_GRN_DIR="$OUTPUT_DIR/inferred_grns"
 TRAINED_MODEL_DIR="$OUTPUT_DIR/trained_models"
 
 # Name of the inferrred network file with STRING PPI interaction columns
-INFERRED_NET_FILE="$INFERRED_GRN_DIR/inferred_network_enrich_feat.parquet"
-
-# Name of the inferrred network file with STRING PPI interaction columns
-INFERRED_NET_W_STRING_FILE="$INFERRED_GRN_DIR/inferred_network_enrich_feat_w_string.parquet"
+INFERRED_NET_FILE="$INFERRED_GRN_DIR/inferred_score_df.parquet"
 
 # ----- Resource / Database files -----
 STRING_DB_DIR="$BASE_DIR"/string_database/$SPECIES/
@@ -146,8 +140,7 @@ check_pipeline_steps() {
         "STEP040_SLIDING_WINDOW_TF_TO_PEAK_SCORE"
         "STEP050_HOMER_TF_TO_PEAK_SCORE"
         "STEP060_COMBINE_DATAFRAMES"
-        "STEP070_FIND_EDGES_IN_STRING_DB"
-        "STEP080_TRAIN_XGBOOST_CLASSIFIER"
+        "STEP070_TRAIN_XGBOOST_CLASSIFIER"
     )
 
     enabled=0
@@ -745,31 +738,19 @@ run_combine_dataframes() {
     
 } 2> "$LOG_DIR/Step060.combine_dataframes.log"
 
-run_find_edges_in_string_db() {
-    echo ""
-    echo "Python: Matching edges to the STRING protein-protein interaction database"
-
-    /usr/bin/time -v \
-    python3 "$PYTHON_SCRIPT_DIR/Step070.find_edges_in_string_db.py" \
-        --inferred_net_file "$INFERRED_NET_FILE" \
-        --string_dir "$STRING_DB_DIR" \
-        --output_dir "$INFERRED_GRN_DIR" \
-
-} 2> "$LOG_DIR/Step070.find_edges_in_string_db.log"
-
 run_classifier_training() {
     echo ""
     echo "Python: Training XGBoost Classifier"
     /usr/bin/time -v \
-    python3 "$PYTHON_SCRIPT_DIR/Step080.train_xgboost.py" \
+    python3 "$PYTHON_SCRIPT_DIR/Step070.train_xgboost.py" \
         --ground_truth_file "$GROUND_TRUTH_FILE" \
-        --inferred_network_file "$INFERRED_NET_W_STRING_FILE" \
+        --inferred_network_file "$INFERRED_NET_FILE" \
         --trained_model_dir "$TRAINED_MODEL_DIR" \
         --fig_dir "$FIG_DIR" \
         --model_save_name "xgb_full_network_model"
 
 
-} 2> "$LOG_DIR/Step080.train_xgboost.log"
+} 2> "$LOG_DIR/Step070.train_xgboost.log"
 
 # =============================================
 #               MAIN PIPELINE
@@ -801,6 +782,5 @@ if [ "$STEP020_PEAK_TO_TG_CORRELATION" = true ]; then run_correlation_peak_to_tg
 # if [ "$STEP030_PEAK_TO_ENHANCER_DB" = true ]; then run_peak_to_enhancer_db_score; fi
 if [ "$STEP040_SLIDING_WINDOW_TF_TO_PEAK_SCORE" = true ]; then run_sliding_window_tf_to_peak_score; fi
 if [ "$STEP050_HOMER_TF_TO_PEAK_SCORE" = true ]; then run_homer; run_homer_tf_to_peak_score; fi
-if [ "$STEP060_COMBINE_DATAFRAMES" = true ]; then run_combine_dataframes; fi
-if [ "$STEP070_FIND_EDGES_IN_STRING_DB" = true ]; then check_string_db_files; run_find_edges_in_string_db; fi
-if [ "$STEP080_TRAIN_XGBOOST_CLASSIFIER" = true ]; then run_classifier_training; fi
+if [ "$STEP060_COMBINE_DATAFRAMES" = true ]; then check_string_db_files; run_combine_dataframes; fi
+if [ "$STEP070_TRAIN_XGBOOST_CLASSIFIER" = true ]; then run_classifier_training; fi

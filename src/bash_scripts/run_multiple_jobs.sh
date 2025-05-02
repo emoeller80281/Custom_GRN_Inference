@@ -5,6 +5,8 @@
 #SBATCH --nodes=1
 #SBATCH -c 1
 #SBATCH --mem=2G
+#SBATCH -o /gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/LOGS/run_multiple_jobs.log
+#SBATCH -e /gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/LOGS/run_multiple_jobs.log
 
 # Set the maximum number of jobs that can run at once
 MAX_JOBS_IN_QUEUE=5
@@ -27,7 +29,7 @@ submit_job() {
             --export=ALL,SAMPLE_NAME="$SAMPLE_NAME",CELL_TYPE="$CELL_TYPE",SPECIES="$SPECIES",RNA_FILE_NAME="$RNA_FILE_NAME",ATAC_FILE_NAME="$ATAC_FILE_NAME",GROUND_TRUTH_FILE="$GROUND_TRUTH_FILE" \
             --output="LOGS/${CELL_TYPE}_logs/${SAMPLE_NAME}_logs/custom_grn_${CELL_TYPE}_${SAMPLE_NAME}.out" \
             --error="LOGS/${CELL_TYPE}_logs/${SAMPLE_NAME}_logs/custom_grn_${CELL_TYPE}_${SAMPLE_NAME}.err" \
-            --job-name="custom_grn_method_${CELL_TYPE}_${SAMPLE_NAME}" \
+            --job-name="custom_grn_method" \
             /gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/src/bash_scripts/main_pipeline.sh
     )
         # Extract and print job ID
@@ -38,10 +40,10 @@ submit_job() {
 run_macrophage() {
     local CELL_TYPE="macrophage"
     local SAMPLE_NAMES=(
-        # "macrophage_buffer1_filtered"
-        # "macrophage_buffer2_filtered"
-        # "macrophage_buffer3_filtered"
-        # "macrophage_buffer4_filtered"
+        "macrophage_buffer1_filtered"
+        "macrophage_buffer2_filtered"
+        "macrophage_buffer3_filtered"
+        "macrophage_buffer4_filtered"
         )
     local SPECIES="hg38"
 
@@ -72,15 +74,15 @@ run_macrophage() {
 run_mESC(){
     local CELL_TYPE="mESC"
     local SAMPLE_NAMES=(
-        "filtered_L2_E7.5_rep1"
+        # "filtered_L2_E7.5_rep1"
         # "filtered_L2_E7.5_rep2"
-        # "filtered_L2_E7.75_rep1"
-        # "filtered_L2_E8.0_rep1"
-        # "filtered_L2_E8.0_rep2"
-        # "filtered_L2_E8.5_rep1"
-        # "filtered_L2_E8.5_rep2"
-        # "filtered_L2_E8.75_rep1"
-        # "filtered_L2_E8.75_rep2"
+        "filtered_L2_E7.75_rep1"
+        "filtered_L2_E8.0_rep1"
+        "filtered_L2_E8.0_rep2"
+        "filtered_L2_E8.5_rep1"
+        "filtered_L2_E8.5_rep2"
+        "filtered_L2_E8.75_rep1"
+        "filtered_L2_E8.75_rep2"
     )
     local SPECIES="mm10"
 
@@ -112,7 +114,7 @@ run_mESC(){
 run_K562(){
     local CELL_TYPE="K562"
     local SAMPLE_NAMES=(
-        # "K562_human_filtered"
+        "K562_human_filtered"
     )
     local SPECIES="hg38"
 
@@ -141,5 +143,5 @@ run_K562(){
 }
 
 run_mESC
-# run_K562
-# run_macrophage
+run_K562
+run_macrophage
