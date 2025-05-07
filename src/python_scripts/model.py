@@ -111,7 +111,6 @@ def parameter_grid_search(X_train_dd, y_train_dd, features, cpu_count, fig_dir):
         random_state=42,
         eval_metric="logloss",
         tree_method="hist",
-        use_label_encoder=False,
         scale_pos_weight=scale_pos_weight
     )
 

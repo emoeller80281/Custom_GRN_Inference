@@ -6,9 +6,9 @@ import csv
 import dask.dataframe as dd
 import argparse
 import logging
+from typing import Union
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(message)s')
+
 
 def parse_args() -> argparse.Namespace:
     """
@@ -19,7 +19,7 @@ def parse_args() -> argparse.Namespace:
     """
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--feature_set_filename",
+        "--inferred_score_filename",
         type=str,
         required=True,
         help="Name of the feature set to combine"
@@ -106,53 +106,78 @@ def plot_non_nan_feature_scores(inferred_net_paths):
     plt.suptitle("Number of non‑NaN feature columns", y=1.02, fontsize=18)
     plt.show()
 
-def combine_ground_truth_datasets():
-    reference_net_dir="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/REFERENCE_NETWORKS"
+def combine_ground_truth_datasets(
+    reference_net_dir: str, 
+    cell_type: str,
+    ground_truths: list[str], 
+    save_dir: str,
+    excluded_files: Union[list[str], None] = None
+    ) -> None:
     
-    ground_truths = [
-        "RN117_ChIPSeq_PMID37486787_Human_K562.tsv",
-        "RN204_ChIPSeq_ChIPAtlas_Human_Macrophages.tsv",
-        "RN111_ChIPSeq_BEELINE_Mouse_ESC.tsv"
-    ]
+    logging.info(f'============ COMBINING GROUND TRUTH FILES ============')
     
-    gt_dfs = []
-    for file in ground_truths:
-        gt_dfs.append(
-            pd.read_csv(
-                f'{reference_net_dir}/{file}', 
-                sep='\t', 
-                quoting=csv.QUOTE_NONE, 
-                on_bad_lines='skip', 
-                header=0, 
-                index_col=None,
-                usecols=["Source", "Target"]
-            )
-        )
+    if excluded_files:
+        logging.info(f'NOTE: Excluding {excluded_files} for testing the trained XGBoost model on a naive ground truth\n')
     
+    if os.path.isdir(reference_net_dir):
+        
+        gt_dfs = []
+        # Read in the ground truth files
+        for file in ground_truths:
+            
+            # Exclude any ground truth files that are in the testing_
+            if not file in excluded_files:
+                file_path = os.path.join(reference_net_dir, file)
+                if os.path.isfile(file_path):
+                    logging.info(f'\t- Loading "{file}"')
+                    gt_dfs.append(
+                        pd.read_csv(
+                            filepath_or_buffer=file_path, 
+                            sep='\t', 
+                            quoting=csv.QUOTE_NONE, 
+                            on_bad_lines='skip', 
+                            header=0, 
+                            index_col=None,
+                            usecols=["Source", "Target"]
+                        )
+                    )
+                else:
+                    logging.warning(f'WARNING: "{file_path}" is not a file')
+            else:
+                logging.info(f'\t- Not combining excluded file {file}')
+    else:
+        logging.error(f'ERROR: {reference_net_dir} is not a directory')
+    
+    # Combine the individual ground truth files together
+    logging.info(f'\nCombining ground truth networks')
     merged_gt_df = pd.concat(gt_dfs)
-    logging.info(merged_gt_df)
-    logging.info(merged_gt_df.shape)
+    
+    combined_gt_path = os.path.join(save_dir, f'combined_{cell_type}_ground_truth.tsv')
+    
+    logging.info(f'\nSaving combined ground truth file to "{combined_gt_path}"')
+    # Write the merged ground truth dataframes to the reference network directory
+    merged_gt_df.to_csv(
+        combined_gt_path, 
+        sep='\t', 
+        header=True, 
+        index=False
+        )
 
-# args: argparse.Namespace = parse_args()
-
-# feature_set_filename = args.feature_set_filename
-# output_dir = args.output_dir
-# combined_dataframe_dir = args.combined_dataframe_dir
-
-feature_set_filename = "inferred_score_df.parquet"
-output_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output"
-combined_dataframe_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output/combined_inferred_dfs"
-cell_types = ["mESC"]
-
-logging.info("\n============ LOADING INFERRED SCORE FILES ============")
-inferred_net_paths = {}
-for cell_type in cell_types:
+def locate_inferred_score_files(
+    inferred_score_filename: str, 
+    output_dir: str, 
+    cell_type: str,
+    excluded_samples: Union[None, list[str]] = None
+) -> dict[list]:
+    logging.info("\n============ LOADING INFERRED SCORE FILES ============")    
+    cell_type_paths = {}
     if cell_type in os.listdir(output_dir):
         cell_type_path = os.path.join(output_dir, cell_type)
         logging.info(f'\n  ----- {cell_type.upper()} -----')
         
         
         for sample in os.listdir(cell_type_path):
+                
             sample_path = os.path.join(cell_type_path, sample)
             
             for folder in os.listdir(sample_path):
@@ -161,27 +186,45 @@ for cell_type in cell_types:
                     
                     for inferred_net in os.listdir(folder_path):
                         inferred_net_path = os.path.join(folder_path, inferred_net)
-                        if os.path.exists(inferred_net_path):
-                            if inferred_net == feature_set_filename:
+                        if os.path.isfile(inferred_net_path):
+                            if inferred_net == inferred_score_filename:
                                 logging.info(f'\t- Found combined score dataframe for {sample}')
-                                if not cell_type in inferred_net_paths:
-                                    inferred_net_paths[cell_type] = {}
-                                    
-                                if not sample in inferred_net_paths[cell_type]:
-                                    inferred_net_paths[cell_type][sample] = inferred_net_path
 
-       
-logging.info("\n============ COMBINING INFERRED SCORES ============")
+                                if not sample in cell_type_paths:
+                                    cell_type_paths[sample] = inferred_net_path
+    
+    if excluded_samples:
+        logging.info("\nRemoving excluded samples: ")
+        for excluded_sample_name in excluded_samples:
+            if excluded_sample_name in cell_type_paths.keys():
+                removed_sample = cell_type_paths.pop(excluded_sample_name)
+                
+                logging.info(f'\t- {removed_sample}')
+    
+    return cell_type_paths
+    
+def combine_inferred_score_files(
+    cell_type_paths: dict[list],
+    cell_type: str,
+    excluded_inferred_score_files: Union[list[str], None] = None
+    ) -> dd.DataFrame:
+    
+    logging.info("\n============ COMBINING INFERRED SCORES ============")
+    sample_fraction = 1
+    logging.info(f"\nSampling {sample_fraction*100:.0f}% of each inferred network.")
+    
+    if excluded_inferred_score_files:
+        for excluded_file in excluded_inferred_score_files:
+            logging.info(f'\nExcluding sample "{excluded_file}"')
+            cell_type_paths.pop(excluded_file)
+    
+    # Combine the sampled Dask DataFrames
+    sampled_enriched_feature_dfs = []
 
-# Combine the sampled Dask DataFrames
-sampled_enriched_feature_dfs = []
-total_samples = sum(len(samples) for samples in inferred_net_paths.values())
-sample_fraction = 1
-logging.info(f"\t- Sample fraction set to: {sample_fraction*100:.4f} based on {total_samples} inferred networks.")
-
-for cell_type, sample_path_dict in inferred_net_paths.items():
-    logging.info(f"\n- Processing cell type: {cell_type} with {len(sample_path_dict)} sample(s).")
-    for sample_name, sample_grn_path in sample_path_dict.items():
+    logging.info(f"\nLoading inferred score DataFrames for cell type {cell_type} with {len(cell_type_paths)} sample(s).")
+    
+    # Read in and sample the sample parquet files
+    for sample_name, sample_grn_path in cell_type_paths.items():
         try:
             df = dd.read_parquet(sample_grn_path)
 
@@ -189,27 +232,87 @@ for cell_type, sample_path_dict in inferred_net_paths.items():
             df_sample = df.sample(frac=sample_fraction, random_state=42)
             
             sample_row_count = df_sample.shape[0].compute()
-            logging.info(f"\t- Sampled {sample_row_count:,} rows ({sample_fraction*100:.2f}%) from {sample_name}")
+            logging.info(f"\t- Sampled {sample_row_count:,} rows ({sample_fraction*100:.0f}%) from {sample_name}")
 
             sampled_enriched_feature_dfs.append(df_sample)
+
         except Exception as e:
             logging.error(f"\t- [ERROR] Failed to process {sample_grn_path}: {e}")
 
-logging.info(f"\nCombining {len(sampled_enriched_feature_dfs)} sampled Dask DataFrames.")
-combined_ddf = dd.concat(sampled_enriched_feature_dfs)
-logging.info(f'\t- Number of unique TFs: {combined_ddf["source_id"].nunique().compute():,}')
-logging.info(f'\t- Number of unique Peaks: {combined_ddf["peak_id"].nunique().compute():,}')
-logging.info(f'\t- Number of unique TGs: {combined_ddf["target_id"].nunique().compute():,}')
+    # Combine the sampels into a single combined Dask DataFrame for the cell-type
+    logging.info(f"\nCombining {len(sampled_enriched_feature_dfs)} DataFrames.")
+    combined_ddf = dd.concat(sampled_enriched_feature_dfs)
+    
+    return combined_ddf
 
-output_path = os.path.join(combined_dataframe_dir, 'combined_enrich_feat_w_string.parquet')
-logging.info(f"\nWriting combined DataFrame to {output_path}")
+def write_combined_dataframe(combined_ddf: dd.DataFrame, cell_type: str, output_dir: str) -> None:
+        combined_dataframe_dir = os.path.join(output_dir, "combined_inferred_dfs")
+        os.makedirs(combined_dataframe_dir, exist_ok=True)
 
-try:
-    combined_ddf.to_parquet(
-        output_path,
-        compression='snappy',
-        engine='pyarrow'
-    )
-    logging.info("Successfully wrote combined Dask DataFrame to disk.")
-except Exception as e:
-    logging.error(f"Failed to write Parquet output: {e}")
+        output_path = os.path.join(combined_dataframe_dir, f'{cell_type}_combined_inferred_score_df.parquet')
+        logging.info(f"\nWriting combined DataFrame to {output_path}")
+
+        try:
+            combined_ddf.to_parquet(
+                output_path,
+                compression='snappy',
+                engine='pyarrow'
+            )
+            logging.info("Successfully wrote combined Dask DataFrame to disk.")
+        except Exception as e:
+            logging.error(f"Failed to write Parquet output: {e}")
+
+# args: argparse.Namespace = parse_args()
+
+# inferred_score_filename = args.inferred_score_filename
+# output_dir = args.output_dir
+# combined_dataframe_dir = args.combined_dataframe_dir
+
+def main():
+    inferred_score_filename = "inferred_score_df.parquet"
+    output_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output"
+    cell_types = ["mESC"]
+    
+    reference_net_dir="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/REFERENCE_NETWORKS"
+    
+    ground_truth_files = {
+        "mESC": ["RN111_ChIPSeq_BEELINE_Mouse_ESC.tsv", "RN112_LOGOF_BEELINE_Mouse_ESC.tsv", "RN114_ChIPX_ESCAPE_Mouse_ESC.tsv"],
+        "K562": ["RN117_ChIPSeq_PMID37486787_Human_K562.tsv", "RN118_KO_KnockTF_Human_K562.tsv", "RN119_ChIPSeqandKO_PMID37486787andKnockTF_Human_K562.tsv"],
+        "macrophage":["RN204_ChIPSeq_ChIPAtlas_Human_Macrophages.tsv"]
+        }
+    
+    # Excluding this ground truth, keeping it separate for testing the model with a naive ground truth
+    excluded_ground_truth_files = ["RN115_LOGOF_ESCAPE_Mouse_ESC.tsv"]
+    excluded_inferred_score_files = ["filtered_L2_E7.5_rep1"]
+    
+    ground_truth_save_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/ground_truth_files"
+    
+    for cell_type in cell_types:
+        
+        # Combine the ground truth files together
+        combine_ground_truth_datasets(
+            reference_net_dir,
+            cell_type,
+            ground_truth_files[cell_type],
+            ground_truth_save_dir,
+            excluded_ground_truth_files
+        )
+        
+        # find the path to the inferred score files for each cell type
+        cell_type_paths: dict[list] = locate_inferred_score_files(inferred_score_filename, output_dir, cell_type)
+        
+        # Combine the inferred score files together
+        combined_ddf = combine_inferred_score_files(cell_type_paths, cell_type, excluded_inferred_score_files)
+        
+        logging.info(f'\t- Number of unique TFs: {combined_ddf["source_id"].nunique().compute():,}')
+        logging.info(f'\t- Number of unique Peaks: {combined_ddf["peak_id"].nunique().compute():,}')
+        logging.info(f'\t- Number of unique TGs: {combined_ddf["target_id"].nunique().compute():,}')
+        
+        # Write out the final combined score file
+        write_combined_dataframe(combined_ddf, cell_type, output_dir)
+
+if __name__ == "__main__":
+    # Configure logging
+    logging.basicConfig(level=logging.INFO, format='%(message)s')
+    
+    main()

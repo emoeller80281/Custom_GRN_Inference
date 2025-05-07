@@ -50,7 +50,7 @@ def plot_feature_importance(features: list, model, fig_dir: str):
     logging.info("\tPlotting feature importance barplot")
 
     # Extract raw importance scores from Booster
-    importance_dict = model.get_score(importance_type="weight")
+    importance_dict = model.get_booster().get_score(importance_type="weight")
 
     # Build DataFrame ensuring all input features are represented (default to 0 if missing)
     feature_importances = pd.DataFrame({

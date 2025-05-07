@@ -14,11 +14,39 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--save_name", type=str, required=True, help="Filename for output")
     return parser.parse_args()
 
-def read_inferred_network_dask(inferred_network_file):
-    df = dd.read_parquet(inferred_network_file, )
-    df["source_id"] = df["source_id"].str.upper()
-    df["target_id"] = df["target_id"].str.upper()
-    return df
+def read_inferred_network_dask(inferred_network_file: str) -> dd.DataFrame:
+    """
+    Loads a melted sparse inferred network from Parquet and pivots it into a Dask DataFrame
+    where each row is (source_id, target_id) and columns are score_types (mean-aggregated).
+    """
+    logging.info(f"Loading melted sparse network from: {inferred_network_file}")
+    melted_ddf = dd.read_parquet(inferred_network_file, engine="pyarrow")
+
+    # Standardize IDs
+    melted_ddf["source_id"] = melted_ddf["source_id"].str.upper()
+    melted_ddf["target_id"] = melted_ddf["target_id"].str.upper()
+
+    # Aggregate scores
+    grouped_ddf = (
+        melted_ddf
+        .groupby(["source_id", "target_id", "score_type"])["score_value"]
+        .mean()
+        .reset_index()
+    )
+
+    # Pivot manually by converting to pandas (if dataset is small enough)
+    def pivot_partition(df):
+        return df.pivot_table(
+            index=["source_id", "target_id"],
+            columns="score_type",
+            values="score_value",
+            aggfunc="mean"
+        ).reset_index()
+
+    # Apply pivot in a single partition (best if you've already aggregated)
+    pivot_df = grouped_ddf.compute()  # convert to Pandas here
+    pivot_df = pivot_partition(pivot_df)
+    return dd.from_pandas(pivot_df, npartitions=1)
 
 def main():
     args = parse_args()
@@ -28,9 +56,6 @@ def main():
     output_dir = args.output_dir
     save_name = args.save_name
 
-    logging.info("Connecting to Dask client")
-    client = Client(processes=False)
-
     logging.info("Loading XGBoost Booster")
     booster = xgb.Booster()
     booster.load_model(model_path)
@@ -38,20 +63,15 @@ def main():
     logging.info("Reading inferred network")
     inferred_dd = read_inferred_network_dask(target_path)
     
-    feature_names = [
-        "sliding_window_score", "homer_binding_score",
-        "correlation", "TSS_dist_score", "cicero_score",
-        "mean_TF_expression", "mean_TG_expression", "mean_peak_accessibility",
-        "string_experimental_score", "string_textmining_score", "string_combined_score"
-    ]
+    feature_names = booster.feature_names
     
     X_dd = inferred_dd[feature_names]
 
     logging.info("Converting to DaskDMatrix")
-    dtest = xgb.dask.DaskDMatrix(client, X_dd, feature_names=feature_names)
+    dtest = xgb.dask.DaskDMatrix(X_dd, feature_names=feature_names)
 
     logging.info("Running distributed prediction")
-    y_pred = xgb.dask.predict(client, booster, dtest)
+    y_pred = xgb.dask.predict(booster, dtest)
 
     # Convert to pandas (merging Dask DataFrame + Dask array)
     logging.info("Joining predictions back to source-target pairs")
@@ -65,8 +85,6 @@ def main():
     output_path = os.path.join(output_dir, save_name)
     logging.info(f"Saving to {output_path}")
     result_df.to_csv(output_path, sep="\t", index=False)
-
-    client.close()
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(message)s")

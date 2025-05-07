@@ -16,7 +16,6 @@ def minmax_normalize_dask(
     ddf = ddf.persist()
 
     if sample_frac:
-        logging.info(f"Sampling {sample_frac*100:.1f}% of data to estimate min/max")
         stats_df = ddf[score_cols].sample(frac=sample_frac, random_state=random_state).compute()
     else:
         stats_df = ddf[score_cols].compute()

@@ -6,10 +6,10 @@ import logging
 import os
 import dask.dataframe as dd
 from dask import compute
-import pandas as pd
-import logging
 from typing import Set, Tuple, Union
 from tqdm import tqdm
+from dask.diagnostics import ProgressBar
+
 
 from normalization import (
     minmax_normalize_pandas,
@@ -79,26 +79,6 @@ def plot_column_histograms(df, fig_dir, df_name="inferred_net"):
     plt.savefig(f'{fig_dir}/{df_name}_column_histograms.png', dpi=300)
     plt.close()
 
-def extract_edges(df: Union[pd.DataFrame, dd.DataFrame], edge_cols: list) -> Set[Tuple[str, ...]]:
-    """Extract unique edge tuples from a DataFrame."""
-    df = df[edge_cols]
-    if isinstance(df, dd.DataFrame):
-        df = df.compute()
-    return set(map(tuple, df.values))
-
-def build_full_edges(tf_peak_edges: Set[Tuple[str, str]], peak_tg_edges: Set[Tuple[str, str]]) -> Set[Tuple[str, str, str]]:
-    """Build all valid (source_id, peak_id, target_id) triples based on shared peak_id."""
-    peak_to_targets = {}
-    for peak_id, target_id in peak_tg_edges:
-        peak_to_targets.setdefault(peak_id, set()).add(target_id)
-
-    full_edges = set()
-    for source_id, peak_id in tf_peak_edges:
-        if peak_id in peak_to_targets:
-            for target_id in peak_to_targets[peak_id]:
-                full_edges.add((source_id, peak_id, target_id))
-    return full_edges
-
 def compute_expression_means(rna_df: dd.DataFrame) -> Tuple[dd.DataFrame, dd.DataFrame]:
     """Compute mean TF and TG expression from RNA matrix."""
     mean_expr = rna_df.select_dtypes("number").mean(axis=1)
@@ -127,49 +107,11 @@ def compute_atac_mean(atac_df: dd.DataFrame) -> dd.DataFrame:
     
     return norm_atac_df[["peak_id", "mean_peak_accessibility"]]
 
-def build_scored_edges_dataframe(
-    full_edges: Set[Tuple[str, str, str]],
-    sliding_window_dd: dd.DataFrame,
-    homer_dd: dd.DataFrame,
-    peak_corr_dd: dd.DataFrame,
-    cicero_dd: dd.DataFrame,
-    rna_tf_dd: dd.DataFrame,
-    rna_tg_dd: dd.DataFrame,
-    atac_dd: dd.DataFrame
-) -> dd.DataFrame:
-    """Build merged scored edge table from component scores."""
-    full_edges_df = pd.DataFrame(list(full_edges), columns=["source_id", "peak_id", "target_id"])
-    full_edges_dd = dd.from_pandas(full_edges_df, npartitions=1)
-
-    logging.info("  - (1/7) Adding Sliding Window TF to peak scores")
-    df = full_edges_dd.merge(sliding_window_dd, on=["source_id", "peak_id"], how="left")
-    logging.info("      Done!")
-
-    logging.info("  - (2/7) Adding Homer TF to peak scores")
-    df = df.merge(homer_dd, on=["source_id", "peak_id"], how="left")
-    logging.info("      Done!")
-
-    logging.info("  - (3/7) Adding Peak to TG correlation scores")
-    df = df.merge(peak_corr_dd, on=["peak_id", "target_id"], how="left")
-    logging.info("      Done!")
-
-    logging.info("  - (4/7) Adding Cicero peak to TG scores")
-    df = df.merge(cicero_dd, on=["peak_id", "target_id"], how="left")
-    logging.info("      Done!")
-
-    logging.info("  - (5/7) Adding mean TF expression scores")
-    df = df.merge(rna_tf_dd, on="source_id", how="left")
-    logging.info("      Done!")
-
-    logging.info("  - (6/7) Adding mean TG expression")
-    df = df.merge(rna_tg_dd, on="target_id", how="left")
-    logging.info("      Done!")
-
-    logging.info("  - (7/7) Adding mean peak accessibility")
-    df = df.merge(atac_dd, on="peak_id", how="left")
-    logging.info("      Done!")
-
-    logging.info("\n  All merges complete. Returning final Dask DataFrame.")
+def join_all_scores(full_edges_dd, score_dfs):
+    df = full_edges_dd
+    for label, score_df, keys in score_dfs:
+        logging.info(f"  - Merging {label}")
+        df = df.merge(score_df, how="left", on=keys)
     return df
 
 def add_string_db_scores(inferred_net_dd, string_dir, full_edges):
@@ -185,15 +127,17 @@ def add_string_db_scores(inferred_net_dd, string_dir, full_edges):
     protein_links_df["protein1"] = protein_links_df["protein1"].map(id_to_name)
     protein_links_df["protein2"] = protein_links_df["protein2"].map(id_to_name)
 
-    # Extract all TF–TG pairs from the full TF–peak–TG edges
-    tf_tg_pairs = set((tf, tg) for tf, _, tg in full_edges)
+    logging.info(f"  - Filtering STRING links to match TF–TG pairs")
+    logging.info(f"\t\t  Computing unique source_id edges")
+    with ProgressBar():
+        tf_set = set(full_edges["source_id"].compute().unique())
+        
+    logging.info(f"\t\t  Computing unique target_id edges")
+    with ProgressBar():
+        tg_set = set(full_edges["target_id"].compute().unique())
 
-    logging.info(f"  - Filtering STRING links to match {len(tf_tg_pairs):,} TF–TG pairs")
-    filtered_links_df = protein_links_df[
-        protein_links_df[["protein1", "protein2"]]
-        .apply(tuple, axis=1)
-        .isin(tf_tg_pairs)
-    ]
+    mask = protein_links_df["protein1"].isin(tf_set) & protein_links_df["protein2"].isin(tg_set)
+    filtered_links_df = protein_links_df[mask]
 
     # Rename columns and normalize
     filtered_links_df = filtered_links_df.rename(columns={
@@ -211,7 +155,6 @@ def add_string_db_scores(inferred_net_dd, string_dir, full_edges):
         quantiles=(0.05, 0.95),
         apply_log1p=True,
         dtype=np.float32,
-        sample_frac=0.1  # optional: for speed
     )
 
     string_dd = minmax_normalize_dask(
@@ -230,7 +173,6 @@ def add_string_db_scores(inferred_net_dd, string_dir, full_edges):
 
     logging.info("  Done!")
     return merged_dd
-
 
 def filter_scored_edges(df, min_valid_scores=6, score_cols=None):
     """
@@ -252,6 +194,26 @@ def filter_scored_edges(df, min_valid_scores=6, score_cols=None):
         ]
 
     return df.dropna(subset=score_cols, thresh=min_valid_scores)
+
+def extract_edges(df: Union[pd.DataFrame, dd.DataFrame], edge_cols: list) -> Set[Tuple[str, ...]]:
+    """Extract unique edge tuples from a DataFrame."""
+    df = df[edge_cols]
+    if isinstance(df, dd.DataFrame):
+        df = df.compute()
+    return set(map(tuple, df.values))
+
+def build_full_edges(tf_peak_edges: Set[Tuple[str, str]], peak_tg_edges: Set[Tuple[str, str]]) -> Set[Tuple[str, str, str]]:
+    """Build all valid (source_id, peak_id, target_id) triples based on shared peak_id."""
+    peak_to_targets = {}
+    for peak_id, target_id in peak_tg_edges:
+        peak_to_targets.setdefault(peak_id, set()).add(target_id)
+
+    full_edges = set()
+    for source_id, peak_id in tf_peak_edges:
+        if peak_id in peak_to_targets:
+            for target_id in peak_to_targets[peak_id]:
+                full_edges.add((source_id, peak_id, target_id))
+    return full_edges
 
 def main():
     # Parse command-line arguments
@@ -281,7 +243,7 @@ def main():
     logging.info("  - (6/6) Loading scATACseq DataFrame")
     atac_df           = dd.read_parquet(atac_data_file)
     logging.info("\n  All dataframes loaded")
-    
+
     # Compute mean TF and TG expression
     logging.info("\n  - Calculating average TF and TG expression")
     dd_rna_tf, dd_rna_tg = compute_expression_means(rna_df)
@@ -309,20 +271,49 @@ def main():
     logging.info(f"  Done! Found {len(full_edges)} full edges")
     
     logging.info("\n ============== Merging DataFrames ==============")
-
-    combined_ddf = build_scored_edges_dataframe(
-        full_edges,
-        sliding_window_dd,
-        homer_dd,
-        peak_corr_dd,
-        cicero_dd,
-        dd_rna_tf,
-        dd_rna_tg,
-        dd_atac
+    
+    # suppose full_edges is a set of (source_id, peak_id, target_id)
+    full_edges_df = pd.DataFrame(list(full_edges),
+                                columns=["source_id","peak_id","target_id"])
+    # pick a reasonable partition count
+    full_edges_dd = dd.from_pandas(full_edges_df, npartitions=32)
+    
+    # 1) First, fuse the two TF→peak merges into one shuffle
+    tf_scores_dd = (
+        sliding_window_dd
+        .merge(homer_dd, how="outer", on=["source_id","peak_id"])
     )
+
+    # 2) Fuse the two peak→TG merges into one shuffle
+    ptg_scores_dd = (
+        peak_corr_dd
+        .merge(cicero_dd, how="outer", on=["peak_id","target_id"])
+    )
+
+    # 3) Build your full_edges (however you prefer—set‑based or Dask join)
+    #    Assume `full_edges` is your big Dask DataFrame of (source_id,peak_id,target_id)
+
+    # 4) Merge those two big score tables onto full_edges (2 shuffles)
+    combined_ddf = (
+        full_edges_dd
+        .merge(tf_scores_dd,  how="left", on=["source_id","peak_id"])
+        .merge(ptg_scores_dd, how="left", on=["peak_id","target_id"])
+    )
+
+    tf_expr_pdf = dd_rna_tf
+    tg_expr_pdf = dd_rna_tg
+    atac_pdf    = dd_atac
+
+    # 6) Broadcast‑join those into each partition (zero additional shuffles)
+    def _merge_pdf(df, pdf, on):
+        return df.merge(pdf, how="left", on=on)
+
+    combined_ddf = combined_ddf.map_partitions(_merge_pdf, tf_expr_pdf, on="source_id")
+    combined_ddf = combined_ddf.map_partitions(_merge_pdf, tg_expr_pdf, on="target_id")
+    combined_ddf = combined_ddf.map_partitions(_merge_pdf, atac_pdf,    on="peak_id")
     
     logging.info("\n ============== Adding STRING Scores ==============")
-    combined_string_ddf = add_string_db_scores(combined_ddf, args.string_dir, full_edges)
+    combined_string_ddf = add_string_db_scores(combined_ddf, args.string_dir, full_edges_dd)
     
     logging.info("\n ============== Filtering and Melting Combined Score DataFrame ==============")
     score_cols = [
@@ -332,7 +323,7 @@ def main():
         "string_experimental_score", "string_textmining_score", "string_combined_score"
     ]
     
-    num_score_col_threshold = 9
+    num_score_col_threshold = 7
     
     logging.info(f"  - Filtering combined DataFrame to only contain edges with at least {num_score_col_threshold} / {len(score_cols)} scores")
     # Filter the combined dataframe to only contain rows with scores in num_score_col_threshold columns
@@ -344,55 +335,26 @@ def main():
     logging.info("      Done!")
     
     logging.info(f'  - Melting the combined DataFrame to reduce NaN values')
-    melted_ddf = filtered_combined_string_ddf.melt(
+    melted_df = filtered_combined_string_ddf.melt(
         id_vars=["source_id", "peak_id", "target_id"],
         value_vars=score_cols,
         var_name="score_type",
         value_name="score_value"
     )
 
-    non_null_scores_ddf = melted_ddf.dropna(subset=["score_value"])
+    non_null_scores_ddf = melted_df.dropna(subset=["score_value"])
     logging.info("      Done!")    
     
-    # Repartition to balance the partition size
-    partition_size = "50MB"
-    logging.info(f'  - Repartitioning the final Dask DataFrame to {partition_size}')
-    non_null_scores_ddf = non_null_scores_ddf.repartition(partition_size=partition_size)
-    logging.info("      Done!")
-
-    logging.info("  - Loading the changes to memory")
-    non_null_scores_ddf.persist()
-    logging.info("      Done!")
-
-    # build all metrics into Dask objects
-    row_count    = non_null_scores_ddf.shape[0]
-    n_tfs        = non_null_scores_ddf["source_id"].nunique()
-    n_peaks      = non_null_scores_ddf["peak_id"].nunique()
-    n_targets    = non_null_scores_ddf["target_id"].nunique()
-
-    # compute them *all at once*
-    n_rows, n_tfs, n_peaks, n_targets = compute(row_count, n_tfs, n_peaks, n_targets)
-
-    logging.info(f"\nFinal number of rows:     {n_rows:,}")
-    logging.info(f"Unique TFs:               {n_tfs:,}")
-    logging.info(f"Unique Peaks:             {n_peaks:,}")
-    logging.info(f"Unique TGs:               {n_targets:,}")
-    
-    
-    # Save the final combined network scores
-    logging.info(f'  - Saving final combined score Dask DataFrame to the inferred GRN output directory')
-    non_null_scores_ddf.to_parquet(
+    logging.info(f"Writing out inferred_score_df.parquet")
+    pdf = non_null_scores_ddf.compute()
+    pdf.to_parquet(
         os.path.join(inferred_grn_dir, "inferred_score_df.parquet"),
         engine="pyarrow",
         compression="snappy",
-        write_index=False,
-        write_metadata_file=True,   # helps for fast dataset reads later
-        compute_kwargs={"scheduler": "threads"},  # use multi‐threading
+        index=False,
     )
-    logging.info("      Done!")
+    logging.info("  Done!")
     
-    logging.info("\nFinished")
-
 if __name__ == "__main__":
     # Configure logging
     logging.basicConfig(level=logging.INFO, format='%(message)s')

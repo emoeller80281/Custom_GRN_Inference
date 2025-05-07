@@ -220,10 +220,10 @@ def main():
     
     # --- Note: The following plots take a long time to run for large models, as they test re-training the model ---
 
-    plot_overlapping_roc_pr_curves(X, y, feature_names, fig_dir)
-    plot_permutation_importance_plot(xgb_booster, X_test, y_test, fig_dir)
-    plot_feature_ablation(feature_names, X_train, X_test, y_train, y_test, xgb_booster, fig_dir)
-    plot_stability_boxplot(X, y, fig_dir)
+    # plot_overlapping_roc_pr_curves(X, y, feature_names, fig_dir)
+    # plot_permutation_importance_plot(xgb_booster, X_test, y_test, fig_dir)
+    # plot_feature_ablation(feature_names, X_train, X_test, y_train, y_test, xgb_booster, fig_dir)
+    # plot_stability_boxplot(X, y, fig_dir)
     
     
 if __name__ == "__main__":

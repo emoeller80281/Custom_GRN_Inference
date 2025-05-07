@@ -81,8 +81,8 @@ run_macrophage() {
 run_mESC(){
     local CELL_TYPE="mESC"
     local SAMPLE_NAMES=(
-        # "filtered_L2_E7.5_rep1"
-        "filtered_L2_E7.5_rep2"
+        "filtered_L2_E7.5_rep1"
+        # "filtered_L2_E7.5_rep2"
         # "filtered_L2_E7.75_rep1"
         # "filtered_L2_E8.0_rep1"
         # "filtered_L2_E8.0_rep2"

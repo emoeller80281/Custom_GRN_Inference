@@ -1,9 +1,9 @@
 #!/bin/bash -l
 
-#SBATCH --partition compute
+#SBATCH --partition memory
 #SBATCH --nodes=1
-#SBATCH --cpus-per-task=32
-#SBATCH --mem=128G
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=64G
 
 set -euo pipefail
 
@@ -22,11 +22,11 @@ STEP040_SLIDING_WINDOW_TF_TO_PEAK_SCORE=false
 STEP050_HOMER_TF_TO_PEAK_SCORE=false
 
 # Combine the score DataFrames
-STEP060_COMBINE_DATAFRAMES=true
+STEP060_COMBINE_DATAFRAMES=false
 SUBSAMPLE_PERCENT=50 # Percent of rows of the combined dataframe to subsample
 
 # Train a predictive model to infer the GRN
-STEP070_TRAIN_XGBOOST_CLASSIFIER=false
+STEP070_TRAIN_XGBOOST_CLASSIFIER=true
 
 # =============================================
 #              USER PATH VARIABLES
