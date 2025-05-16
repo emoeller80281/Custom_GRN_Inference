@@ -11,22 +11,22 @@ set -euo pipefail
 #        SELECT PIPELINE STEPS TO RUN
 # =============================================
 # Run the peak to TG regulatory potential calculation methods
-STEP010_CICERO_MAP_PEAKS_TO_TG=false
-STEP015_CICERO_PEAK_TO_TG_SCORE=false
+STEP010_CICERO_MAP_PEAKS_TO_TG=true
+STEP015_CICERO_PEAK_TO_TG_SCORE=true
 
-STEP020_PEAK_TO_TG_CORRELATION=false
+STEP020_PEAK_TO_TG_CORRELATION=true
 # STEP030_PEAK_TO_ENHANCER_DB=false # Deprecated, does not help model and no data for mouse
 
 # Run the TF to peak binding score calculation methods
-STEP040_SLIDING_WINDOW_TF_TO_PEAK_SCORE=false
-STEP050_HOMER_TF_TO_PEAK_SCORE=false
+STEP040_SLIDING_WINDOW_TF_TO_PEAK_SCORE=true
+STEP050_HOMER_TF_TO_PEAK_SCORE=true
 
 # Combine the score DataFrames
-STEP060_COMBINE_DATAFRAMES=false
+STEP060_COMBINE_DATAFRAMES=true
 SUBSAMPLE_PERCENT=50 # Percent of rows of the combined dataframe to subsample
 
 # Train a predictive model to infer the GRN
-STEP070_TRAIN_XGBOOST_CLASSIFIER=true
+STEP070_TRAIN_XGBOOST_CLASSIFIER=false
 
 # =============================================
 #              USER PATH VARIABLES
@@ -175,7 +175,9 @@ check_tools() {
             echo "    - $tool is available."
         fi
     done
+}
 
+load_parallel() {
     # Handle GNU parallel
     echo ""
     echo "[INFO] Checking for the GNU parallel module for running commands in parallel"
@@ -277,29 +279,29 @@ setup_directories() {
 }
 
 check_r_environment() {
-    REQUIRED_R_VERSION="4.3.2"  # Replace with your required version
+    # REQUIRED_R_VERSION="4.3.2"  # Replace with your required version
     echo "    [INFO] Checking R environment..."
 
-    # Check if the 'module' command exists
-    if ! command -v module &> /dev/null; then
-        echo "        [ERROR] 'module' command is not available. Ensure the environment module system is installed."
-        exit 1
-    fi
+    # # Check if the 'module' command exists
+    # if ! command -v module &> /dev/null; then
+    #     echo "        [ERROR] 'module' command is not available. Ensure the environment module system is installed."
+    #     exit 1
+    # fi
 
-    # Check if the 'rstudio' module is available
-    if ! module avail rstudio &> /dev/null; then
-        echo "        [ERROR] 'rstudio' module is not available. Check your module system."
-        exit 1
-    fi
+    # # Check if the 'rstudio' module is available
+    # if ! module avail rstudio &> /dev/null; then
+    #     echo "        [ERROR] 'rstudio' module is not available. Check your module system."
+    #     exit 1
+    # fi
 
-    # Load the 'rstudio' module
-    module load rstudio
-    if [ $? -ne 0 ]; then
-        echo "        [ERROR] Failed to load 'rstudio' module."
-        exit 1
-    else
-        echo "        [INFO] Successfully loaded 'rstudio' module."
-    fi
+    # # Load the 'rstudio' module
+    # module load rstudio
+    # if [ $? -ne 0 ]; then
+    #     echo "        [ERROR] Failed to load 'rstudio' module."
+    #     exit 1
+    # else
+    #     echo "        [INFO] Successfully loaded 'rstudio' module."
+    # fi
 
     # Check R version
     if ! command -v R &> /dev/null; then
@@ -309,10 +311,10 @@ check_r_environment() {
 
     # Check if the installed version of R is different
     INSTALLED_R_VERSION=$(R --version | grep -oP "(?<=R version )\d+\.\d+\.\d+" | head -1)
-    if [[ "$(printf '%s\n' "$REQUIRED_R_VERSION" "$INSTALLED_R_VERSION" | sort -V | head -1)" != "$REQUIRED_R_VERSION" ]]; then
-        echo "        [ERROR] Installed R version ($INSTALLED_R_VERSION) is older than required ($REQUIRED_R_VERSION). Please update R."
-        exit 1
-    fi
+    # if [[ "$(printf '%s\n' "$REQUIRED_R_VERSION" "$INSTALLED_R_VERSION" | sort -V | head -1)" != "$REQUIRED_R_VERSION" ]]; then
+    #     echo "        [ERROR] Installed R version ($INSTALLED_R_VERSION) is older than required ($REQUIRED_R_VERSION). Please update R."
+    #     exit 1
+    # fi
     echo "        R version $INSTALLED_R_VERSION is installed."
 
     # Check for required R packages
@@ -470,6 +472,57 @@ check_string_db_files() {
     fi
 }
 
+# install_spark() {
+#     local SPARK_VERSION="3.5.1"
+#     local HADOOP_VERSION="hadoop3"
+#     local SPARK_DIR="$BASE_DIR/spark"
+#     local INSTALL_DIR="$SPARK_DIR/spark-${SPARK_VERSION}"
+#     local LOG_FILE="$LOG_DIR/Cicero_logs/01.install_spark.log"
+#     local TAR_FILE="$SPARK_DIR/spark-${SPARK_VERSION}-bin-${HADOOP_VERSION}.tgz"
+#     local JAVA_REQUIRED_VERSION=8
+
+#     mkdir -p "$SPARK_DIR"
+#     mkdir -p "$(dirname "$LOG_FILE")"
+
+#     # Skip if already installed
+#     if [[ -d "$INSTALL_DIR" ]]; then
+#         echo "[INFO] Spark already installed at $INSTALL_DIR" | tee -a "$LOG_FILE"
+#     else
+#         echo "[INFO] Checking Java version..." | tee "$LOG_FILE"
+#         if ! command -v java &>/dev/null; then
+#             echo "[ERROR] Java not found. Please load a compatible Java module (e.g., Java 8 or 11)." | tee -a "$LOG_FILE"
+#             return 1
+#         fi
+
+#         JAVA_VERSION=$(
+#             java -version 2>&1 | awk -F '"' '/version/ {print $2}' | cut -d. -f1
+#         )
+
+#         if [[ "$JAVA_VERSION" -lt "$JAVA_REQUIRED_VERSION" ]]; then
+#             echo "[ERROR] Java version $JAVA_VERSION is too old. Java 8+ is required." | tee -a "$LOG_FILE"
+#             return 1
+#         fi
+
+#         echo "[INFO] Java version $JAVA_VERSION detected. Proceeding with Spark installation..." | tee -a "$LOG_FILE"
+
+#         echo "[INFO] Downloading Apache Spark $SPARK_VERSION..." | tee -a "$LOG_FILE"
+#         wget -q "https://downloads.apache.org/spark/spark-${SPARK_VERSION}/spark-${SPARK_VERSION}-bin-${HADOOP_VERSION}.tgz" -P "$SPARK_DIR" >>"$LOG_FILE" 2>&1
+
+#         echo "[INFO] Extracting Spark..." | tee -a "$LOG_FILE"
+#         tar -xzf "$TAR_FILE" -C "$SPARK_DIR" >>"$LOG_FILE" 2>&1
+#         mv "$SPARK_DIR/spark-${SPARK_VERSION}-bin-${HADOOP_VERSION}" "$INSTALL_DIR" >>"$LOG_FILE" 2>&1
+#     fi
+
+#     # Set env variables
+#     echo "export SPARK_HOME=\"$INSTALL_DIR\"" > "$BASE_DIR/.spark_env.sh"
+#     echo "export PATH=\"\$SPARK_HOME/bin:\$PATH\"" >> "$BASE_DIR/.spark_env.sh"
+#     echo "export JAVA_HOME=$(dirname $(dirname $(readlink -f $(which java))))" >> "$BASE_DIR/.spark_env.sh"
+
+#     echo "[INFO] Environment variables written to $BASE_DIR/.spark_env.sh" | tee -a "$LOG_FILE"
+#     echo "[INFO] Spark installation complete."
+# }
+
+
 # -------------- HOMER FUNCTIONS --------------
 install_homer() {
     mkdir -p "$BASE_DIR/homer"
@@ -498,6 +551,8 @@ homer_process_motif_files() {
     echo ""
     echo "----- Homer annotatePeaks.pl -----"
     echo "[INFO] Starting motif file processing"
+
+    load_parallel
 
     # Check for GNU parallel
     if ! command -v parallel &> /dev/null; then
@@ -530,7 +585,9 @@ homer_process_motif_files() {
     if [ "$use_parallel" = true ]; then
         echo "$motif_files" | /usr/bin/time -v parallel -j "$NUM_CPU" \
             "perl $BASE_DIR/homer/bin/annotatePeaks.pl $OUTPUT_DIR/homer_peaks.txt '$SPECIES' -m {} > $PROCESSED_MOTIF_DIR/{/}_tf_motifs.txt"
-    
+
+        module unload parallel
+
     # Process files sequentially
     else
         for file in $motif_files; do
@@ -554,6 +611,7 @@ homer_process_motif_files() {
 
     echo "[INFO] Motif file processing completed successfully."
     echo ""
+
 } 2> "$LOG_DIR/Homer_logs/05.homer_annotatePeaks.log"
 
 # -------------- MAIN PIPELINE FUNCTIONS --------------
@@ -573,26 +631,33 @@ run_cicero() {
     # Check R environment
     check_r_environment
 
+    # install_spark
+
+    # # Source environment variables for Spark
+    # if [[ -f "$BASE_DIR/.spark_env.sh" ]]; then
+    #     source "$BASE_DIR/.spark_env.sh"
+    # else
+    #     echo "[ERROR] Spark environment setup file not found."
+    #     exit 1
+    # fi
+
     # Check for the chomosome size and gene annotation files in INPUT_DIR
     check_cicero_genome_files_exist
 
-    # Load R module (optional, for HPC systems)
-    if command -v module &> /dev/null; then
-        module load rstudio
-    fi
-
     echo "    Checks complete, running Cicero"
 
+    # Run your R script and pass PYTHON_PATH to the environment
     /usr/bin/time -v \
-    Rscript "$R_SCRIPT_DIR/Step010.run_cicero.r" \
-        "$ATAC_FILE_NAME" \
-        "$OUTPUT_DIR" \
-        "$CHROM_SIZES" \
-        "$GENE_ANNOT" \
-        &> "$LOG_DIR/Step010.run_cicero.log"
+        Rscript "$R_SCRIPT_DIR/Step010.run_cicero.r" \
+            "$ATAC_FILE_NAME" \
+            "$OUTPUT_DIR" \
+            "$CHROM_SIZES" \
+            "$GENE_ANNOT" \
+            &> "$LOG_DIR/Step010.run_cicero.log"
+
     
     # Unload the rstudio module and re-activate the conda environment after running the first step
-    module unload rstudio
+    # module unload rstudio
     activate_conda_env
 
 }

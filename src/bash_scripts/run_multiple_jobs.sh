@@ -114,6 +114,36 @@ run_mESC(){
     done
 }
 
+run_DS011_mESC(){
+    local CELL_TYPE="DS011_mESC"
+    local SAMPLE_NAMES=(
+        "DS011_mESC_sample1"
+
+    )
+    local SPECIES="mm10"
+
+    echo "Submitting jobs"
+    # Submit each SAMPLE_NAME as a separate job
+    for SAMPLE_NAME in "${SAMPLE_NAMES[@]}"; do
+        wait_for_available_slot
+
+        local RNA_FILE_NAME="DS011_mESC_RNA.parquet"
+        local ATAC_FILE_NAME="DS011_mESC_ATAC.parquet"
+        local GROUND_TRUTH_FILE="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/REFERENCE_NETWORKS/RN111_ChIPSeq_BEELINE_Mouse_ESC.tsv"
+
+        # Submit the job for each sample
+        submit_job \
+            "$SAMPLE_NAME" \
+            "$CELL_TYPE" \
+            "$SPECIES" \
+            "$RNA_FILE_NAME" \
+            "$ATAC_FILE_NAME" \
+            "$GROUND_TRUTH_FILE"
+
+    done
+}
+
+
 run_K562(){
     local CELL_TYPE="K562"
     local SAMPLE_NAMES=(
@@ -141,6 +171,7 @@ run_K562(){
     done
 }
 
-run_mESC
+run_DS011_mESC
+# run_mESC
 # run_K562
 # run_macrophage

@@ -1,18 +1,10 @@
 # Load required libraries
 suppressPackageStartupMessages({
   library(cicero)
-  library(monocle3)
-  library(Signac)
-  library(Seurat)
-  library(GenomicRanges)
-  library(Matrix)
+  library(monocle)
   library(rtracklayer)
-  library(reshape2)
-  library(dplyr)
   library(tidyr)
-  library(parallel)
-  library(htmlwidgets)
-  library(profvis)
+  library(dplyr)
   library(arrow)
 })
 
@@ -57,28 +49,42 @@ log_message(sprintf("Output directory: %s", output_dir))
 # =============================================
 
 log_message("Loading ATACseq data from Parquet...")
-atac_data <- read_parquet(atac_file_path)
-log_message("    Done!")
-rownames(atac_data) <- atac_data[[1]]
-atac_data[[1]] <- NULL  # remove the now-redundant ID column
-log_message("    Done!")
+# Read and collect ATAC matrix from Parquet
+atac_tbl <- read_parquet(atac_file_path)
+atac_data <- collect(atac_tbl)
+atac_data <- as.data.frame(atac_data)
 
-# log_message("Subsetting peaks...")
+# Rename peak_id → peak_position if needed
+if ("peak_id" %in% colnames(atac_data)) {
+  log_message("Renaming 'peak_id' to 'peak_position'")
+  colnames(atac_data)[colnames(atac_data) == "peak_id"] <- "peak_position"
+}
 
-# # Subset to a random sample of 10,000 peaks (adjust as needed)
-# subset_peaks <- sample(rownames(atac_data), size = 10000, replace = FALSE)
-# atac_data <- atac_data[subset_peaks, ]
-# # log_message(sprintf("Subset to %d peaks", nrow(atac_data)))
+# 1. Ensure all cell columns are numeric
+cell_columns <- setdiff(colnames(atac_data), "peak_position")
 
-log_message("Reshaping ATACseq datset to a matrix...")
-atac_long <- reshape2::melt(
+# Log column count
+log_message(sprintf("Found %d cell columns", length(cell_columns)))
+
+# 2. Coerce all cell columns to numeric (if not already)
+atac_data[cell_columns] <- lapply(
+  atac_data[cell_columns],
+  function(x) {
+    if (is.list(x)) x <- unlist(x)
+    as.numeric(as.character(x))
+  }
+)
+
+log_message("Checking final column classes...")
+print(sapply(atac_data[1:5], class))  # sample few columns to verify
+
+# 3. Melt using tidyr
+atac_long <- tidyr::pivot_longer(
   atac_data,
-  id.vars = "peak_position",
-  variable.name = "cell",
-  value.name = "reads"
-) %>%
-  dplyr::filter(reads > 0) %>%
-  dplyr::mutate(peak_position = gsub("[:\\-]", "_", peak_position))
+  cols = -peak_position,
+  names_to = "cell",
+  values_to = "reads"
+)
 
 log_message("    Done!")
 
@@ -182,3 +188,5 @@ peak_to_gene <- as.data.frame(fData(cds)) %>%
 write.csv(peak_to_gene, file.path(output_dir, "cicero_peak_to_gene.csv"), row.names = TRUE)
 
 log_message("Cicero pipeline completed.")
+
+spark_disconnect(sc)

@@ -41,11 +41,33 @@ def log2_cpm_normalize(df: pd.DataFrame, label: str = "") -> pd.DataFrame:
     return pd.concat([row_ids, log2_cpm], axis=1)
 
 def load_atac_dataset(atac_data_file: str) -> pd.DataFrame:
-    df = pd.read_csv(atac_data_file, sep=",", header=0, index_col=None)
+    if atac_data_file.lower().endswith('.parquet'):
+        df = pd.read_parquet(atac_data_file)
+        
+    elif atac_data_file.lower().endswith('.csv'):
+        df = pd.read_csv(atac_data_file, sep=",", header=0, index_col=None)
+        
+    elif atac_data_file.lower().endswith('.tsv'):
+        df = pd.read_csv(atac_data_file, sep="\t", header=0, index_col=None)
+        
+    else:
+        logging.error("ERROR: ATAC data file must be a csv, tsv, or parquet format. Check column separators")
+        
     return df.rename(columns={df.columns[0]: "peak_id"})
 
 def load_rna_dataset(rna_data_file: str) -> pd.DataFrame:
-    df = pd.read_csv(rna_data_file, sep=",", header=0)
+    if rna_data_file.lower().endswith('.parquet'):
+        df = pd.read_parquet(rna_data_file)
+        
+    elif rna_data_file.lower().endswith('.csv'):
+        df = pd.read_csv(rna_data_file, sep=",", header=0, index_col=None)
+        
+    elif rna_data_file.lower().endswith('.tsv'):
+        df = pd.read_csv(rna_data_file, sep="\t", header=0, index_col=None)
+        
+    else:
+        logging.error("ERROR: RNA data file must be a csv, tsv, or parquet format. Check column separators")
+    
     return df.rename(columns={df.columns[0]: "gene_id"})
 
 def main(atac_data_file, rna_data_file):
