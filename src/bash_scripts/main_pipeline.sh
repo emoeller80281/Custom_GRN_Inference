@@ -317,9 +317,9 @@ check_r_environment() {
     # fi
     echo "        R version $INSTALLED_R_VERSION is installed."
 
-    # Check for required R packages
-    Rscript $R_SCRIPT_DIR/check_dependencies.r
-    echo ""
+    # # Check for required R packages
+    # Rscript $R_SCRIPT_DIR/check_dependencies.r
+    # echo ""
 }
 
 download_file_if_missing() {
@@ -472,56 +472,6 @@ check_string_db_files() {
     fi
 }
 
-# install_spark() {
-#     local SPARK_VERSION="3.5.1"
-#     local HADOOP_VERSION="hadoop3"
-#     local SPARK_DIR="$BASE_DIR/spark"
-#     local INSTALL_DIR="$SPARK_DIR/spark-${SPARK_VERSION}"
-#     local LOG_FILE="$LOG_DIR/Cicero_logs/01.install_spark.log"
-#     local TAR_FILE="$SPARK_DIR/spark-${SPARK_VERSION}-bin-${HADOOP_VERSION}.tgz"
-#     local JAVA_REQUIRED_VERSION=8
-
-#     mkdir -p "$SPARK_DIR"
-#     mkdir -p "$(dirname "$LOG_FILE")"
-
-#     # Skip if already installed
-#     if [[ -d "$INSTALL_DIR" ]]; then
-#         echo "[INFO] Spark already installed at $INSTALL_DIR" | tee -a "$LOG_FILE"
-#     else
-#         echo "[INFO] Checking Java version..." | tee "$LOG_FILE"
-#         if ! command -v java &>/dev/null; then
-#             echo "[ERROR] Java not found. Please load a compatible Java module (e.g., Java 8 or 11)." | tee -a "$LOG_FILE"
-#             return 1
-#         fi
-
-#         JAVA_VERSION=$(
-#             java -version 2>&1 | awk -F '"' '/version/ {print $2}' | cut -d. -f1
-#         )
-
-#         if [[ "$JAVA_VERSION" -lt "$JAVA_REQUIRED_VERSION" ]]; then
-#             echo "[ERROR] Java version $JAVA_VERSION is too old. Java 8+ is required." | tee -a "$LOG_FILE"
-#             return 1
-#         fi
-
-#         echo "[INFO] Java version $JAVA_VERSION detected. Proceeding with Spark installation..." | tee -a "$LOG_FILE"
-
-#         echo "[INFO] Downloading Apache Spark $SPARK_VERSION..." | tee -a "$LOG_FILE"
-#         wget -q "https://downloads.apache.org/spark/spark-${SPARK_VERSION}/spark-${SPARK_VERSION}-bin-${HADOOP_VERSION}.tgz" -P "$SPARK_DIR" >>"$LOG_FILE" 2>&1
-
-#         echo "[INFO] Extracting Spark..." | tee -a "$LOG_FILE"
-#         tar -xzf "$TAR_FILE" -C "$SPARK_DIR" >>"$LOG_FILE" 2>&1
-#         mv "$SPARK_DIR/spark-${SPARK_VERSION}-bin-${HADOOP_VERSION}" "$INSTALL_DIR" >>"$LOG_FILE" 2>&1
-#     fi
-
-#     # Set env variables
-#     echo "export SPARK_HOME=\"$INSTALL_DIR\"" > "$BASE_DIR/.spark_env.sh"
-#     echo "export PATH=\"\$SPARK_HOME/bin:\$PATH\"" >> "$BASE_DIR/.spark_env.sh"
-#     echo "export JAVA_HOME=$(dirname $(dirname $(readlink -f $(which java))))" >> "$BASE_DIR/.spark_env.sh"
-
-#     echo "[INFO] Environment variables written to $BASE_DIR/.spark_env.sh" | tee -a "$LOG_FILE"
-#     echo "[INFO] Spark installation complete."
-# }
-
 
 # -------------- HOMER FUNCTIONS --------------
 install_homer() {
@@ -631,20 +581,17 @@ run_cicero() {
     # Check R environment
     check_r_environment
 
-    # install_spark
-
-    # # Source environment variables for Spark
-    # if [[ -f "$BASE_DIR/.spark_env.sh" ]]; then
-    #     source "$BASE_DIR/.spark_env.sh"
-    # else
-    #     echo "[ERROR] Spark environment setup file not found."
-    #     exit 1
-    # fi
-
     # Check for the chomosome size and gene annotation files in INPUT_DIR
     check_cicero_genome_files_exist
 
     echo "    Checks complete, running Cicero"
+    conda deactivate
+    conda activate monocle3_env
+
+    export HDF5_DIR=$CONDA_PREFIX
+    export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+    export CFLAGS="-std=gnu99"
+    export CXXFLAGS="-std=gnu++14"
 
     # Run your R script and pass PYTHON_PATH to the environment
     /usr/bin/time -v \

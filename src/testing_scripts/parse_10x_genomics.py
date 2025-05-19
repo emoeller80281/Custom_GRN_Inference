@@ -1,7 +1,7 @@
 import pandas as pd
 import scipy
 import anndata
-from scipy.sparse import  csc_matrix
+from scipy.sparse import  csc_matrix, coo_matrix
 import scanpy as sc
 import numpy as np
 import os
@@ -108,11 +108,11 @@ def get_adata(matrix: csc_matrix, features: pd.DataFrame, barcodes: pd.DataFrame
     # Return the filtered and annotated RNA and ATAC AnnData objects
     return adata_RNA, adata_ATAC
 
-def combine_peaks_and_fragments(peak_bed_file, atac_fragments_file):
+def combine_peaks_and_fragments(peak_bed_file, atac_fragments_file, tmp_dir):
     import os
     import pandas as pd
     
-    os.environ["TMPDIR"] = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output/DS011_mESC/DS011_mESC_sample1/tmp_dir"  # or any scratch space you prefer
+    os.environ["TMPDIR"] = tmp_dir  # or any scratch space you prefer
 
     import pybedtools
     
@@ -123,7 +123,6 @@ def combine_peaks_and_fragments(peak_bed_file, atac_fragments_file):
         sep="\t",
         comment="#",
         header=None,
-        nrows=10000
     )
 
     # Read fragments.tsv (first 4 columns: chrom, start, end, barcode)
@@ -132,7 +131,6 @@ def combine_peaks_and_fragments(peak_bed_file, atac_fragments_file):
         atac_fragments_file,
         sep="\t",
         header=None,
-        nrows=100000  # Increase only if memory permits
     )
 
     print("Loaded peaks:", peak_df.shape)
@@ -155,20 +153,36 @@ def combine_peaks_and_fragments(peak_bed_file, atac_fragments_file):
     
     return overlap_df
 
-def convert_peak_frag_intersect_to_count_matrix(overlap_df: pd.DataFrame):
 
-    
+def convert_peak_frag_intersect_to_sparse_dataframe(overlap_df: pd.DataFrame) -> pd.DataFrame:
+    print(" - Creating sparse matrix from peak-barcode counts")
+
+    # Convert to category codes to get compact integer indices
     overlap_df["peak_id"] = overlap_df["peak_chr"] + ":" + overlap_df["peak_start"].astype(str) + "-" + overlap_df["peak_end"].astype(str)
+    peak_cats = overlap_df["peak_id"].astype("category")
+    barcode_cats = overlap_df["barcode"].astype("category")
 
-    # Sum counts per peak-barcode
-    atac_count_matrix = overlap_df.groupby(["peak_id", "barcode"])["count"].sum().unstack(fill_value=0)
+    # Build sparse matrix
+    row = peak_cats.cat.codes.values
+    col = barcode_cats.cat.codes.values
+    data = overlap_df["count"].astype(np.int64).values
+    sparse_matrix = coo_matrix((data, (row, col)),
+                               shape=(len(peak_cats.cat.categories), len(barcode_cats.cat.categories)))
+
+
+    # Convert to long format DataFrame
+    sparse_df = pd.DataFrame({
+        "peak_id": peak_cats.cat.categories[row],
+        "barcode": barcode_cats.cat.categories[col],
+        "count": data
+    })
     
-    atac_count_matrix["peak_id"] = atac_count_matrix.index
-    atac_count_matrix.reset_index(drop=True, inplace=True)
-    print(atac_count_matrix.head())
-    print(atac_count_matrix.shape)
-    
-    return atac_count_matrix
+    # Confirm shape
+    print(f"ATAC dataframe Shape: {sparse_df.shape} (cells x genes)")
+    print(sparse_df.head())
+
+    return sparse_df
+
 
 def convert_h5_gene_expression_to_count_matrix(h5_file_path):
     # Read 10X file
@@ -194,81 +208,96 @@ def convert_h5_gene_expression_to_count_matrix(h5_file_path):
     
     return rna_count_df
 
-data_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/kidney"
-peak_bed_file = os.path.join(data_dir, "M_Kidney_Chromium_Nuc_Isolation_vs_SaltyEZ_vs_ComplexTissueDP_atac_peaks.bed")
-atac_fragments_file = os.path.join(data_dir, "M_Kidney_Chromium_Nuc_Isolation_vs_SaltyEZ_vs_ComplexTissueDP_atac_fragments.tsv")
-h5_file_path = os.path.join(data_dir, "M_Kidney_Chromium_Nuc_Isolation_vs_SaltyEZ_vs_ComplexTissueDP_filtered_feature_bc_matrix.h5")
-output_dir = os.path.join(data_dir, "mouse_kidney_data")
+def convert_peak_fragment_h5_10X_files_to_count_matrices():
+    data_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/mouse_kidney/10X_raw_data"
+    peak_bed_file = os.path.join(data_dir, "M_Kidney_Chromium_Nuc_Isolation_vs_SaltyEZ_vs_ComplexTissueDP_atac_peaks.bed")
+    atac_fragments_file = os.path.join(data_dir, "M_Kidney_Chromium_Nuc_Isolation_vs_SaltyEZ_vs_ComplexTissueDP_atac_fragments.tsv")
+    h5_file_path = os.path.join(data_dir, "M_Kidney_Chromium_Nuc_Isolation_vs_SaltyEZ_vs_ComplexTissueDP_filtered_feature_bc_matrix.h5")
+    tmp_dir = os.path.join(data_dir, "tmp_dir")
+    output_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/mouse_kidney/mouse_kidney_sample1"
 
-os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(tmp_dir, exist_ok=True)
 
-overlap_df = combine_peaks_and_fragments(peak_bed_file, atac_fragments_file)
-atac_count_df= convert_peak_frag_intersect_to_count_matrix(overlap_df)
+    overlap_df = combine_peaks_and_fragments(peak_bed_file, atac_fragments_file, tmp_dir)
+    atac_sparse_df = convert_peak_frag_intersect_to_sparse_dataframe(overlap_df)
 
-print(f'Exporting filtered ATAC data')
-atac_output_file = os.path.join(output_dir, "mouse_kidney_ATAC.parquet")
-atac_count_df.to_parquet(atac_output_file, engine="pyarrow", compression="snappy")
+    print(f'Exporting ATAC sparse matrix in long format')
+    atac_output_file = os.path.join(output_dir, "mouse_kidney_ATAC_long.parquet")
+    atac_sparse_df.to_parquet(atac_output_file, engine="pyarrow", compression="snappy", index=False)
 
-rna_count_df = convert_h5_gene_expression_to_count_matrix(h5_file_path)
+    rna_count_df = convert_h5_gene_expression_to_count_matrix(h5_file_path)
 
-print(f'Exporting filtered ATAC data')
-rna_output_file = os.path.join(output_dir, "mouse_kidney_RNA.parquet")
-rna_count_df.to_parquet(rna_output_file, engine="pyarrow", compression="snappy")
+    print(f'Exporting filtered ATAC data')
+    rna_output_file = os.path.join(output_dir, "mouse_kidney_RNA.parquet")
+    rna_count_df.to_parquet(rna_output_file, engine="pyarrow", compression="snappy", index=False)
 
+def convert_matrix_features_barcodes_10X_files_to_count_matrices():
+    print('\tReading in cell labels...')
 
-# print('\tReading in cell labels...')
+    base_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/DS011_mESC/10X_raw_data"
+    # Read in the data files
+    matrix=scipy.io.mmread(os.path.join(base_dir, "GSE198730_HIFLR_snRNA_matrix.mtx"))
+    features=pd.read_csv(os.path.join(base_dir, "GSE198730_HIFLR_snRNA_features.tsv"),sep='\t',header=None)
+    barcodes=pd.read_csv(os.path.join(base_dir, "GSE198730_HIFLR_snRNA_barcodes.tsv"),sep='\t',header=None)
+    peaks=pd.read_csv(os.path.join(base_dir, "peaks.bed"), sep="\t")
+    # ---------------------------------------------------
 
-# base_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/DS011_mESC/10X_raw_data"
-# # Read in the data files
-# matrix=scipy.io.mmread(os.path.join(base_dir, "GSE198730_HIFLR_snRNA_matrix.mtx"))
-# features=pd.read_csv(os.path.join(base_dir, "GSE198730_HIFLR_snRNA_features.tsv"),sep='\t',header=None)
-# barcodes=pd.read_csv(os.path.join(base_dir, "GSE198730_HIFLR_snRNA_barcodes.tsv"),sep='\t',header=None)
-# # label=pd.read_csv("/home/emoeller/github/Custom_GRN_Inference/input/filtered_feature_bc_matrix/PBMC_label.txt",sep='\t',header=0)
-# peaks=pd.read_csv(os.path.join(base_dir, "peaks.bed"), sep="\t")
-# # ---------------------------------------------------
+    print('\nExtracting the adata RNA and ATAC seq data...')
+    # Create AnnData objects for the scRNA-seq and scATAC-seq datasets
+    adata_RNA, adata_ATAC = get_adata(matrix, features, barcodes)  # adata_RNA and adata_ATAC are scRNA and scATAC
 
-# print('\nExtracting the adata RNA and ATAC seq data...')
-# # Create AnnData objects for the scRNA-seq and scATAC-seq datasets
-# adata_RNA, adata_ATAC = get_adata(matrix, features, barcodes)  # adata_RNA and adata_ATAC are scRNA and scATAC
+    print(f'\tscRNAseq Dataset: {adata_RNA.shape[0]} genes, {adata_RNA.shape[1]} cells')
+    print(f'\tscATACseq Dataset: {adata_ATAC.shape[0]} peaks, {adata_ATAC.shape[1]} cells')
 
-# print(f'\tscRNAseq Dataset: {adata_RNA.shape[0]} genes, {adata_RNA.shape[1]} cells')
-# print(f'\tscATACseq Dataset: {adata_ATAC.shape[0]} peaks, {adata_ATAC.shape[1]} cells')
+    # Filter RNA data for a specific cell type
+    # rna_filtered = adata_RNA[adata_RNA.obs['label'] == 'classical monocytes']
 
-# # Filter RNA data for 'classical monocytes'
-# # rna_filtered = adata_RNA[adata_RNA.obs['label'] == 'classical monocytes']
+    # Extract the expression matrix (X) and convert it to a gene x cell DataFrame
+    RNA_expression_matrix: pd.DataFrame = pd.DataFrame(
+        data=adata_RNA.X.T.toarray(),  # Convert sparse matrix to dense
+        index=adata_RNA.var['gene_ids'],    # Gene IDs as rows
+        columns=adata_RNA.obs['barcode']  # Cell barcodes as columns
+    )
+    
+    RNA_expression_matrix["gene_id"] = RNA_expression_matrix.index
+    RNA_expression_matrix.reset_index(drop=True, inplace=True)
+    
+    # Make sure gene_id is column 0
+    cols = ['gene_id'] + [col for col in RNA_expression_matrix.columns if col != 'gene_id']
+    RNA_expression_matrix = RNA_expression_matrix[cols]
+    print(RNA_expression_matrix.head())
+    print(RNA_expression_matrix.index)
 
-# # Extract the expression matrix (X) and convert it to a gene x cell DataFrame
-# RNA_expression_matrix: pd.DataFrame = pd.DataFrame(
-#     data=adata_RNA.X.T.toarray(),  # Convert sparse matrix to dense
-#     index=adata_RNA.var['gene_ids'],    # Gene IDs as rows
-#     columns=adata_RNA.obs['barcode']  # Cell barcodes as columns
-# )
-# RNA_expression_matrix["gene_id"] = RNA_expression_matrix.index
-# RNA_expression_matrix.reset_index(drop=True, inplace=True)
-# print(RNA_expression_matrix.head())
-# print(RNA_expression_matrix.index)
+    output_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/DS011_mESC/DS011_mESC_sample1"
 
-# output_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/DS011_mESC/DS011_mESC_sample1"
+    # Export the filtered RNA expression matrix to a CSV file
+    print(f'\tExporting filtered RNA data')
+    RNA_output_file = os.path.join(output_dir, "DS011_mESC_RNA.parquet")
+    RNA_expression_matrix.to_parquet(RNA_output_file, engine="pyarrow", compression="snappy")
 
-# # Export the filtered RNA expression matrix to a CSV file
-# print(f'\tExporting filtered RNA data')
-# RNA_output_file = os.path.join(output_dir, "DS011_mESC_RNA.parquet")
-# RNA_expression_matrix.to_parquet(RNA_output_file, engine="pyarrow", compression="snappy")
+    # Filter ATAC data for 'classical monocytes'
+    # atac_filtered = adata_ATAC[adata_ATAC.obs['label'] == 'classical monocytes']
 
-# # Filter ATAC data for 'classical monocytes'
-# # atac_filtered = adata_ATAC[adata_ATAC.obs['label'] == 'classical monocytes']
+    # Extract the expression matrix (X) and convert it to a gene x cell DataFrame
+    ATAC_expression_matrix = pd.DataFrame(
+        data=adata_ATAC.X.T.toarray(),
+        index=adata_ATAC.var['gene_ids'],
+        columns=adata_ATAC.obs['barcode']
+    )
+    ATAC_expression_matrix["peak_id"] = ATAC_expression_matrix.index
+    ATAC_expression_matrix.reset_index(drop=True, inplace=True)
+    
+    # Make sure peak_id is column 0
+    cols = ['peak_id'] + [col for col in ATAC_expression_matrix.columns if col != 'peak_id']
+    ATAC_expression_matrix = ATAC_expression_matrix[cols]
+    print(ATAC_expression_matrix.index)
 
-# # Extract the expression matrix (X) and convert it to a gene x cell DataFrame
-# ATAC_expression_matrix = pd.DataFrame(
-#     data=adata_ATAC.X.T.toarray(),
-#     index=adata_ATAC.var['gene_ids'],
-#     columns=adata_ATAC.obs['barcode']
-# )
-# ATAC_expression_matrix["peak_id"] = ATAC_expression_matrix.index
-# ATAC_expression_matrix.reset_index(drop=True, inplace=True)
-# print(ATAC_expression_matrix.index)
-
-# # Export the filtered ATAC expression matrix to a CSV file
-# print(f'\tExporting filtered ATAC data')
-# ATAC_output_file = os.path.join(output_dir, "DS011_mESC_ATAC.parquet")
-# ATAC_expression_matrix.to_parquet(ATAC_output_file, engine="pyarrow", compression="snappy")
+    # Export the filtered ATAC expression matrix to a CSV file
+    print(f'\tExporting filtered ATAC data')
+    ATAC_output_file = os.path.join(output_dir, "DS011_mESC_ATAC.parquet")
+    ATAC_expression_matrix.to_parquet(ATAC_output_file, engine="pyarrow", compression="snappy", index=False)
+    
+if __name__ == "__main__":
+    convert_peak_fragment_h5_10X_files_to_count_matrices()
+    convert_matrix_features_barcodes_10X_files_to_count_matrices()

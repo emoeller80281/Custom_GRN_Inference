@@ -143,6 +143,35 @@ run_DS011_mESC(){
     done
 }
 
+run_mouse_kidney(){
+    local CELL_TYPE="mouse_kidney"
+    local SAMPLE_NAMES=(
+        "mouse_kidney_sample1"
+
+    )
+    local SPECIES="mm10"
+
+    echo "Submitting jobs"
+    # Submit each SAMPLE_NAME as a separate job
+    for SAMPLE_NAME in "${SAMPLE_NAMES[@]}"; do
+        wait_for_available_slot
+
+        local RNA_FILE_NAME="mouse_kidney_RNA.parquet"
+        local ATAC_FILE_NAME="mouse_kidney_ATAC.parquet"
+        local GROUND_TRUTH_FILE="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/ground_truth_files/kidney_chipatlas.tsv"
+
+        # Submit the job for each sample
+        submit_job \
+            "$SAMPLE_NAME" \
+            "$CELL_TYPE" \
+            "$SPECIES" \
+            "$RNA_FILE_NAME" \
+            "$ATAC_FILE_NAME" \
+            "$GROUND_TRUTH_FILE"
+
+    done
+}
+
 
 run_K562(){
     local CELL_TYPE="K562"
@@ -172,6 +201,7 @@ run_K562(){
 }
 
 run_DS011_mESC
+run_mouse_kidney
 # run_mESC
 # run_K562
 # run_macrophage

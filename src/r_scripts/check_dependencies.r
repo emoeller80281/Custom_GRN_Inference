@@ -1,37 +1,69 @@
-# Handle installing missing packages
-required_packages <- c(
-  "cicero", "monocle", "Signac", "Seurat", "GenomicRanges",
-  "Matrix", "rtracklayer", "reshape2", "dplyr", "tidyr", "parallel",
-  "arrow"
+# =============================================
+# Install all required packages (CRAN + Bioconductor + GitHub)
+# =============================================
+
+# Required packages
+required_cran_packages <- c(
+  "Matrix", "reshape2", "dplyr", "tidyr", "parallel", 
+  "arrow", "terra", "ggrastr", "devtools", "lme4", "limma"
 )
 
-install_missing_packages <- function(packages) {
-  for (pkg in packages) {
+required_bioc_packages <- c(
+  "BiocGenerics", "DelayedArray", "DelayedMatrixStats", "S4Vectors",
+  "SingleCellExperiment", "SummarizedExperiment", "batchelor",
+  "HDF5Array", "GenomicRanges", "rtracklayer", "Signac", "cicero"
+)
+
+# ---------------------------------------------
+# Install CRAN packages
+# ---------------------------------------------
+install_missing_cran <- function(pkgs) {
+  for (pkg in pkgs) {
     if (!requireNamespace(pkg, quietly = TRUE)) {
-      cat(sprintf("        Installing missing package: %s\n", pkg))
-      install.packages(pkg, repos = "http://cran.r-project.org")
+      cat(sprintf("Installing missing CRAN package: %s\n", pkg))
+      install.packages(pkg, repos = "https://cloud.r-project.org")
     }
   }
 }
 
-install_missing_bioc_packages <- function(packages) {
+# ---------------------------------------------
+# Install Bioconductor packages
+# ---------------------------------------------
+install_missing_bioc <- function(pkgs) {
   if (!requireNamespace("BiocManager", quietly = TRUE)) {
-    install.packages("BiocManager", repos = "http://cran.r-project.org")
+    install.packages("BiocManager", repos = "https://cloud.r-project.org")
   }
-  for (pkg in packages) {
+  BiocManager::install(version = "3.20", ask = FALSE)
+
+  for (pkg in pkgs) {
     if (!requireNamespace(pkg, quietly = TRUE)) {
-      cat(sprintf("        Installing missing Bioconductor package: %s\n", pkg))
+      cat(sprintf("Installing missing Bioconductor package: %s\n", pkg))
       BiocManager::install(pkg, ask = FALSE)
     }
   }
 }
 
-# Install CRAN packages
-cran_packages <- setdiff(required_packages, c("cicero", "monocle", "Signac", "GenomicRanges", "rtracklayer"))
-install_missing_packages(cran_packages)
+# ---------------------------------------------
+# Install monocle3 from GitHub (cole-trapnell-lab)
+# ---------------------------------------------
+install_monocle3_github <- function() {
+  if (!requireNamespace("devtools", quietly = TRUE)) {
+    install.packages("devtools", repos = "https://cloud.r-project.org")
+  }
+  cat("Installing monocle3 from GitHub (cole-trapnell-lab)...\n")
+  devtools::install_github("cole-trapnell-lab/monocle3", ref = "master", upgrade = "never")
+}
 
-# Install Bioconductor packages
-bioc_packages <- intersect(required_packages, c("cicero", "monocle", "Signac", "GenomicRanges", "rtracklayer"))
-install_missing_bioc_packages(bioc_packages)
+# =============================================
+# Run installations
+# =============================================
+cat("Installing CRAN packages...\n")
+install_missing_cran(required_cran_packages)
 
-cat("        All R dependencies are installed.\n")
+cat("Installing Bioconductor packages...\n")
+install_missing_bioc(required_bioc_packages)
+
+cat("Installing monocle3 from GitHub...\n")
+install_monocle3_github()
+
+cat("All dependencies installed successfully.\n")

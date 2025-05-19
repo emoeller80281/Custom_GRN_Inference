@@ -20,25 +20,29 @@ def is_normalized(df: pd.DataFrame, threshold: float = 1.5) -> bool:
     mean_val = values[values > 0].mean()
     return 0 < mean_val < threshold
 
-def log2_cpm_normalize(df: pd.DataFrame, label: str = "") -> pd.DataFrame:
-    """
-    Normalize the data if it doesn't appear already normalized.
-    Assumes first column contains row identifiers.
-    """
-    row_ids = df.iloc[:, 0]
-    counts = df.iloc[:, 1:]
+def log2_cpm_normalize(df: pd.DataFrame, id_col_name: str, label: str = "dataset") -> pd.DataFrame:
+    if id_col_name not in df.columns:
+        raise ValueError(f"Identifier column '{id_col_name}' not found in DataFrame.")
 
-    if is_normalized(df):
+    # Split into ID column and numeric values
+    id_col = df[[id_col_name]].reset_index(drop=True)
+    counts = df.drop(columns=[id_col_name]).apply(pd.to_numeric, errors="coerce").fillna(0)
+
+    # Combine and check normalization status
+    full_df = pd.concat([id_col, counts], axis=1)
+    if is_normalized(full_df):
         print(f" - {label} matrix appears already normalized. Skipping log2 CPM.", flush=True)
-        return df
+        return full_df
 
     print(f" - {label} matrix appears unnormalized. Applying log2 CPM normalization.", flush=True)
 
+    # Compute log2 CPM
     library_sizes = counts.sum(axis=0)
     cpm = (counts.div(library_sizes, axis=1) * 1e6).add(1)
-    log2_cpm = np.log2(cpm)
+    log2_cpm = np.log2(cpm).reset_index(drop=True)
 
-    return pd.concat([row_ids, log2_cpm], axis=1)
+    return pd.concat([id_col, log2_cpm], axis=1)
+
 
 def load_atac_dataset(atac_data_file: str) -> pd.DataFrame:
     if atac_data_file.lower().endswith('.parquet'):
@@ -70,6 +74,29 @@ def load_rna_dataset(rna_data_file: str) -> pd.DataFrame:
     
     return df.rename(columns={df.columns[0]: "gene_id"})
 
+def deduplicate_columns(df: pd.DataFrame, label: str) -> pd.DataFrame:
+    seen = {}
+    new_columns = []
+    
+    for col in df.columns:
+        if col not in seen:
+            seen[col] = 0
+            new_columns.append(col)
+        else:
+            seen[col] += 1
+            new_columns.append(f"{col}.{seen[col]}")
+    
+    if len(new_columns) != len(set(new_columns)):
+        raise ValueError(f"[{label}] Still found duplicates after deduplication attempt.")
+    
+    if df.columns.tolist() != new_columns:
+        print(f"[{label}] Duplicate column names found. Renaming to make unique.")
+        df.columns = new_columns
+    else:
+        print(f"[{label}] No duplicates found.")
+    
+    return df
+
 def main(atac_data_file, rna_data_file):
     logging.info("Loading ATAC-seq dataset")
     atac_df = load_atac_dataset(atac_data_file)
@@ -78,10 +105,10 @@ def main(atac_data_file, rna_data_file):
     rna_df = load_rna_dataset(rna_data_file)
 
     logging.info("Checking and normalizing ATAC-seq data")
-    atac_df_norm = log2_cpm_normalize(atac_df, label="scATAC-seq")
+    atac_df_norm = log2_cpm_normalize(atac_df, label="scATAC-seq", id_col_name="peak_id")
 
     logging.info("Checking and normalizing RNA-seq data")
-    rna_df_norm = log2_cpm_normalize(rna_df, label="scRNA-seq")
+    rna_df_norm = log2_cpm_normalize(rna_df, label="scRNA-seq", id_col_name="gene_id")
 
     def update_name(filename):
         base, ext = os.path.splitext(filename)
@@ -93,10 +120,14 @@ def main(atac_data_file, rna_data_file):
     print(f"\nUpdated ATAC file: {new_atac_file}", flush=True)
     print(f"Updated RNA file: {new_rna_file}", flush=True)
     
+    # atac_count_df = deduplicate_columns(atac_df_norm, label="ATAC")
+
     logging.info('\nWriting ATAC-seq dataset to Parquet')
     atac_df_norm.to_parquet(new_atac_file, engine="pyarrow", compression="snappy", index=False)
     logging.info("  Done!")
-
+    
+    # rna_count_df = deduplicate_columns(rna_df_norm, label="RNA")
+    
     logging.info('\nWriting RNA-seq dataset to Parquet')
     rna_df_norm.to_parquet(new_rna_file, engine="pyarrow", compression="snappy", index=False)
     logging.info("  Done!")
