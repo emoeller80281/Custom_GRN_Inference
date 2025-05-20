@@ -139,21 +139,34 @@ def parameter_grid_search(
     fig_dir: str,
     cpu_count: int,
 ):
-
-    # parameter grid
-    param_grid = {
-        'n_estimators':      [50, 100, 200],
-        'max_depth':         [4, 6, 8],
-        'gamma':             [0, 1, 5],
-        'reg_alpha':         [0.0, 0.5, 1.0],
-        'reg_lambda':        [1.0, 2.0, 5.0],
-        'subsample':         [0.8, 1.0],
-        'colsample_bytree':  [0.8, 1.0],
-        'learning_rate':     [0.01, 0.1]
+    param_dist = {
+        'n_estimators':      randint(100, 500),
+        'max_depth':         randint(4, 12),
+        'gamma':             uniform(0, 20),
+        'reg_alpha':         uniform(0, 5),
+        'reg_lambda':        uniform(0.5, 10),
+        'subsample':         uniform(0.6, 0.4),           # 0.6 to 1.0
+        'colsample_bytree':  uniform(0.6, 0.4),           # 0.6 to 1.0
+        'learning_rate':     uniform(0.01, 0.3)           # 0.01 to 0.31
     }
-    grid_list = list(ParameterGrid(param_grid))
-    total = len(grid_list)
-    logging.info(f"Parameter grid has {total} combinations")
+    n_iter = 2000  # Try 100 random combos
+    param_list = list(ParameterSampler(param_dist, n_iter=n_iter, random_state=42))
+
+
+    # # parameter grid
+    # param_grid = {
+    #     'n_estimators':      [50, 100, 200],
+    #     'max_depth':         [4, 6, 8],
+    #     'gamma':             [0, 1, 5],
+    #     'reg_alpha':         [0.0, 0.5, 1.0],
+    #     'reg_lambda':        [1.0, 2.0, 5.0],
+    #     'subsample':         [0.8, 1.0],
+    #     'colsample_bytree':  [0.8, 1.0],
+    #     'learning_rate':     [0.01, 0.1]
+    # }
+    # grid_list = list(ParameterGrid(param_grid))
+    # total = len(grid_list)
+    # logging.info(f"Parameter grid has {total} combinations")
 
     def eval_params(params: dict) -> dict:
         model = xgb.XGBClassifier(
@@ -183,15 +196,27 @@ def parameter_grid_search(
                 'imp_entropy': entropy,
                 'imp_cv': cv}
 
-    # parallel evaluation
+    # # parallel evaluation
+    # logging.info(f"Starting parallel grid search on {cpu_count} cores...")
+    # results = Parallel(n_jobs=cpu_count)(
+    #     delayed(eval_params)(p) for p in tqdm(
+    #         grid_list,
+    #         total=total,
+    #         smoothing=0.9,
+    #         desc="Grid search",
+    #         miniters=max(1, total // 20)  # update every 5%
+    #     )
+    # )
+    
+        # parallel evaluation
     logging.info(f"Starting parallel grid search on {cpu_count} cores...")
     results = Parallel(n_jobs=cpu_count)(
         delayed(eval_params)(p) for p in tqdm(
-            grid_list,
-            total=total,
+            param_list,
+            total=n_iter,
             smoothing=0.9,
             desc="Grid search",
-            miniters=max(1, total // 20)  # update every 5%
+            miniters=max(1, n_iter // 20)  # update every 5%
         )
     )
 
@@ -248,7 +273,7 @@ def parameter_grid_search(
     plt.scatter(df_res.imp_entropy, df_res.val_auc, alpha=0.7)
     plt.xlabel('Feature Importance Entropy', fontsize=14)
     plt.ylabel('AUROC Score', fontsize=14)
-    plt.title('XGBoost Parameter Search - AUROC Performance vs Feature Importance Entropy', fontsize=13)
+    plt.title('AUROC Performance vs Feature Importance Entropy', fontsize=13)
     plt.tight_layout()
     plot_out = os.path.join(fig_dir, 'param_grid_search_auroc_vs_feature_importance.png')
     plt.savefig(plot_out, dpi=200)

@@ -72,7 +72,7 @@ def main():
     dtest = xgb.dask.DaskDMatrix(data=X_dd, feature_names=feature_names, client=client)
 
     logging.info("Running distributed prediction")
-    y_pred = xgb.dask.predict(booster, dtest)
+    y_pred = xgb.dask.predict(client=client, model=booster, data=dtest)
 
     # Convert to pandas (merging Dask DataFrame + Dask array)
     logging.info("Joining predictions back to source-target pairs")

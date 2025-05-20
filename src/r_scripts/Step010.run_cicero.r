@@ -62,6 +62,23 @@ atac_tbl <- read_parquet(atac_file_path)
 atac_data <- collect(atac_tbl)
 atac_data <- as.data.frame(atac_data)
 
+stopifnot("peak_id" %in% colnames(atac_data))
+stopifnot(anyDuplicated(colnames(atac_data)) == 0)
+
+atac_long <- reshape2::melt(
+  atac_data,
+  id.vars = "peak_id",
+  variable.name = "cell",
+  value.name = "reads"
+)
+
+colnames(atac_data)[1] <- "peak_id"
+
+
+str(atac_data[, 1, drop=FALSE])
+print(colnames(atac_data)[1])
+
+
 log_message("Reshaping ATACseq datset to Cicero input format...")
 atac_long <- reshape2::melt(
   atac_data,
@@ -88,17 +105,30 @@ log_message("    Done!")
 str(atac_long)
 log_message("Creating a Cicero cell_data_set (CDS) from ATAC data...")
 log_message("    Running dimensionality reduction")
-cds <- make_atac_cds(atac_long, binarize = TRUE) %>%
-  detect_genes() %>%
-  estimate_size_factors() %>%
-  preprocess_cds(method = "LSI") %>%
-  monocle3::reduce_dimension(reduction_method = "UMAP", preprocess_method = "LSI")
+cds <- make_atac_cds(
+  atac_long %>% dplyr::select(peak_id, cell, count) %>% as.data.frame() %>% `colnames<-`(NULL),
+  binarize = TRUE
+)
 
-umap_coords <- reducedDims(cds)$UMAP
+set.seed(2017)
+log_message("    Detecting genes in cds")
+cds <- detectGenes(cds)
+
+log_message("    Estimating cds size factor")
+cds <- estimateSizeFactors(cds)
+
+log_message("    Reducing dimensions for cds using tSNE")
+# input_cds <- preprocessCDS(cds, norm_method = "none")
+cds <- reduceDimension(cds, max_components = 2, num_dim=6,
+                      reduction_method = 'tSNE', norm_method = "none")
+
+log_message("    Extracting reduced tSNE coordinates")
+tsne_coords <- t(reducedDimA(cds))
+row.names(tsne_coords) <- row.names(colData(cds))
 log_message("        Done!")
 
 log_message("    Making Cicero CDS object")
-cicero_obj <- make_cicero_cds(cds, reduced_coordinates = umap_coords)
+cicero_obj <- make_cicero_cds(cds, reduced_coordinates = tsne_coords)
 log_message("        Done!")
 
 # =============================================
