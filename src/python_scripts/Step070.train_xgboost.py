@@ -163,6 +163,9 @@ def main():
     # Dask-ML's split works directly on Dask DataFrames
     X_dd = model_dd[feature_names]
     y_dd = model_dd["label"]
+    
+    label_dist = y_dd.value_counts().compute()
+    logging.info(f"Label distribution: {label_dist.to_dict()}")
 
     X_train_dd, X_test_dd, y_train_dd, y_test_dd = train_test_split(
         X_dd,
@@ -171,10 +174,21 @@ def main():
         shuffle=True,
         random_state=42
     )
+    
+    model_save_path = os.path.join(trained_model_dir, f"{model_save_name}.json")
 
     logging.info(f"Done splitting: {X_train_dd.shape[0].compute():,} train / {X_test_dd.shape[0].compute():,} test rows")
+    logging.info(f"Saving Train / Test splits to disk in {trained_model_dir}")
+    train_test_dir = os.path.join(trained_model_dir, f"train_test_splits/{model_save_name}")
+    os.makedirs(train_test_dir, exist_ok=True)
+    X_train_dd.to_parquet(os.path.join(train_test_dir, "X_train.parquet"))
+    X_test_dd.to_parquet(os.path.join(train_test_dir, "X_test.parquet"))
+    y_train_dd.to_parquet(os.path.join(train_test_dir, "y_train.parquet"))
+    y_test_dd.to_parquet(os.path.join(train_test_dir, "y_test.parquet"))
+    
+    
     logging.info("Training XGBoost Model")
-    xgb_booster = train_xgboost_dask(X_train_dd, y_train_dd, feature_names)
+    xgb_booster = train_xgboost_dask(train_test_dir, feature_names)
 
     # Save the feature names
     xgb_booster.set_attr(feature_names=",".join(feature_names))
@@ -182,7 +196,7 @@ def main():
     if not os.path.exists(trained_model_dir):
         os.makedirs(trained_model_dir)
 
-    model_save_path = os.path.join(trained_model_dir, f"{model_save_name}.json")
+    
     xgb_booster.save_model(model_save_path)
     logging.info(f"Saved trained XGBoost booster to {model_save_path}")
 
@@ -204,15 +218,16 @@ def main():
         os.makedirs(fig_dir)
     
     # Run the parameter grid search
+    logging.info("Starting parameter grid search")
     grid = parameter_grid_search(X_train_dd, y_train_dd, feature_names, cpu_count=16, fig_dir=fig_dir)
 
+    logging.info("Plotting grid search best estimator feature importances")
     plot_feature_importance(
         features=feature_names,
         model=grid.best_estimator_,
         fig_dir=os.path.join(fig_dir, "parameter_search")
     )
 
-    logging.info("\n----- Plotting Figures -----")
     plot_feature_score_histograms(feature_names, model_df, fig_dir)
     plot_feature_importance(feature_names, xgb_booster, fig_dir)
     plot_feature_boxplots(feature_names, model_df, fig_dir)

@@ -4,47 +4,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import csv
 import dask.dataframe as dd
-import argparse
 import logging
 from typing import Union
-
-
-
-def parse_args() -> argparse.Namespace:
-    """
-    Parses command-line arguments.
-
-    Returns:
-        argparse.Namespace: Parsed arguments containing paths for input and output files and CPU count.
-    """
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--inferred_score_filename",
-        type=str,
-        required=True,
-        help="Name of the feature set to combine"
-    )
-    parser.add_argument(
-        "--output_dir",
-        type=str,
-        required=True,
-        help="Path to the output directory"
-    )
-    parser.add_argument(
-        "--combined_dataframe_dir",
-        type=str,
-        required=True,
-        help="Path to the output directory for the final combined dataframe"
-    )
-    parser.add_argument(
-        "--cell_types",
-        type=list,
-        required=True,
-        help="List of cell types to combine"
-    )
-
-    args: argparse.Namespace = parser.parse_args()
-    return args
 
 def plot_non_nan_feature_scores(inferred_net_paths):
     cell_types = list(inferred_net_paths.keys())
@@ -114,7 +75,7 @@ def combine_ground_truth_datasets(
     excluded_files: Union[list[str], None] = None
     ) -> None:
     
-    logging.info(f'============ COMBINING GROUND TRUTH FILES ============')
+    logging.info(f'============ COMBINING GROUND TRUTH FILES FOR {cell_type.upper()} ============')
     
     if excluded_files:
         logging.info(f'NOTE: Excluding {excluded_files} for testing the trained XGBoost model on a naive ground truth\n')
@@ -169,12 +130,10 @@ def locate_inferred_score_files(
     cell_type: str,
     excluded_samples: Union[None, list[str]] = None
 ) -> dict[list]:
-    logging.info("\n============ LOADING INFERRED SCORE FILES ============")    
+    logging.info(f"\n============ LOADING INFERRED SCORE FILES FOR {cell_type.upper()} ============")    
     cell_type_paths = {}
     if cell_type in os.listdir(output_dir):
-        cell_type_path = os.path.join(output_dir, cell_type)
-        logging.info(f'\n  ----- {cell_type.upper()} -----')
-        
+        cell_type_path = os.path.join(output_dir, cell_type)        
         
         for sample in os.listdir(cell_type_path):
                 
@@ -261,12 +220,9 @@ def write_combined_dataframe(combined_ddf: dd.DataFrame, cell_type: str, output_
             logging.info("Successfully wrote combined Dask DataFrame to disk.")
         except Exception as e:
             logging.error(f"Failed to write Parquet output: {e}")
+            
+        logging.info('\tDONE!')
 
-# args: argparse.Namespace = parse_args()
-
-# inferred_score_filename = args.inferred_score_filename
-# output_dir = args.output_dir
-# combined_dataframe_dir = args.combined_dataframe_dir
 
 def main():
     inferred_score_filename = "inferred_score_df.parquet"
@@ -276,19 +232,18 @@ def main():
     reference_net_dir="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/REFERENCE_NETWORKS"
     
     ground_truth_files = {
-        "mESC": ["RN111_ChIPSeq_BEELINE_Mouse_ESC.tsv", "RN112_LOGOF_BEELINE_Mouse_ESC.tsv", "RN114_ChIPX_ESCAPE_Mouse_ESC.tsv"],
+        "mESC": ["RN111_ChIPSeq_BEELINE_Mouse_ESC.tsv", "RN112_LOGOF_BEELINE_Mouse_ESC.tsv", "RN114_ChIPX_ESCAPE_Mouse_ESC.tsv", "RN115_LOGOF_ESCAPE_Mouse_ESC.tsv"],
         "K562": ["RN117_ChIPSeq_PMID37486787_Human_K562.tsv", "RN118_KO_KnockTF_Human_K562.tsv", "RN119_ChIPSeqandKO_PMID37486787andKnockTF_Human_K562.tsv"],
         "macrophage":["RN204_ChIPSeq_ChIPAtlas_Human_Macrophages.tsv"]
         }
     
     # Excluding this ground truth, keeping it separate for testing the model with a naive ground truth
-    excluded_ground_truth_files = ["RN115_LOGOF_ESCAPE_Mouse_ESC.tsv"]
+    excluded_ground_truth_files = ["RN111_ChIPSeq_BEELINE_Mouse_ESC.tsv"]
     excluded_inferred_score_files = ["filtered_L2_E7.5_rep1"]
     
     ground_truth_save_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/ground_truth_files"
     
     for cell_type in cell_types:
-        
         # Combine the ground truth files together
         combine_ground_truth_datasets(
             reference_net_dir,

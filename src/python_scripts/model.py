@@ -18,7 +18,7 @@ import xgboost as xgb
 
 from dask.distributed import Client
 
-def train_xgboost_dask(X_train_dd, y_train_dd, feature_names, client=None):
+def train_xgboost_dask(train_test_dir, feature_names, client=None):
     """
     Train an XGBoost model using DaskDMatrix (distributed).
     
@@ -32,6 +32,13 @@ def train_xgboost_dask(X_train_dd, y_train_dd, feature_names, client=None):
         xgboost.Booster: Trained model
     """
     logging.info("Training XGBoost model with Dask")
+    logging.info("Reading X_train.parquet")
+    X_train_dd = dd.read_parquet(os.path.join(train_test_dir, "X_train.parquet"))
+    logging.info("\tDONE!")
+    
+    logging.info("Reading y_train.parquet")
+    y_train_dd = dd.read_parquet(os.path.join(train_test_dir, "y_train.parquet"))["label"]
+    logging.info("\tDONE!")
 
     client_created = False
     if client is None:

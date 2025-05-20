@@ -33,6 +33,8 @@ def plot_xgboost_prediction_histogram(booster, X_test, fig_dir):
 
     # Get predicted probabilities for the positive class
     y_pred_prob = booster.predict(dtest)
+    
+    os.makedirs(fig_dir, exist_ok=True)
 
     # Plot histogram of predicted probabilities
     plt.figure(figsize=(8, 6))
@@ -48,6 +50,8 @@ def plot_xgboost_prediction_histogram(booster, X_test, fig_dir):
 
 def plot_feature_importance(features: list, model, fig_dir: str):
     logging.info("\tPlotting feature importance barplot")
+    
+    os.makedirs(fig_dir, exist_ok=True)
 
     # Extract raw importance scores from Booster
     importance_dict = model.get_booster().get_score(importance_type="weight")
@@ -60,8 +64,8 @@ def plot_feature_importance(features: list, model, fig_dir: str):
 
     if feature_importances["Importance"].sum() == 0:
         logging.warning("All feature importances are zero; model may not have learned from any features.")
-
-    # Plot
+    
+    # Plot the feature importances
     plt.figure(figsize=(8, 6))
     plt.barh(feature_importances["Feature"], feature_importances["Importance"], color="skyblue")
     plt.xlabel("Importance", fontsize=16)
@@ -76,6 +80,8 @@ def plot_feature_importance(features: list, model, fig_dir: str):
   
 def plot_feature_score_histograms(features, inferred_network, fig_dir):
     logging.info("\tPlotting feature score histograms")
+    
+    os.makedirs(fig_dir, exist_ok=True)
 
     # Step 1: Convert only necessary columns to pandas
     if isinstance(inferred_network, dd.DataFrame):
@@ -102,6 +108,8 @@ def plot_feature_score_histograms(features, inferred_network, fig_dir):
 
 def plot_feature_boxplots(features, inferred_network, fig_dir):
     logging.info("\tPlotting feature importance boxplots")
+    
+    os.makedirs(fig_dir, exist_ok=True)
 
     def remove_outliers(series: pd.Series) -> pd.Series:
         """
@@ -154,6 +162,8 @@ def plot_feature_boxplots(features, inferred_network, fig_dir):
 
 def plot_permutation_importance_plot(xgb_model, X_test, y_test, fig_dir):
     logging.info("\tPlotting permutation importance plot")
+    
+    os.makedirs(fig_dir, exist_ok=True)
 
     # Ensure input is clean and has no NaNs
     X_test_clean = X_test.copy()
@@ -201,6 +211,8 @@ def plot_permutation_importance_plot(xgb_model, X_test, y_test, fig_dir):
     
 def plot_stability_boxplot(X: pd.DataFrame, y: pd.Series, feature_names: list[str], fig_dir: str):
     logging.info("\tPlotting stability boxplot using Dask-trained XGBoost")
+    
+    os.makedirs(fig_dir, exist_ok=True)
 
     # Start local Dask client for multithreaded parallelism
     client = Client(processes=False)
@@ -266,6 +278,8 @@ def plot_overlapping_roc_pr_curves(X_dd, y_dd, feature_names, fig_dir, n_runs=10
     Plots overlapping ROC and Precision-Recall curves for multiple runs using Dask with parallel training.
     """
     logging.info("\tPlotting stability AUROC and AUPRC curves in parallel")
+    
+    os.makedirs(fig_dir, exist_ok=True)
 
     def run_single_split(i):
         logging.info(f"\t[Job {i+1}] Splitting and training")
@@ -323,9 +337,10 @@ def plot_overlapping_roc_pr_curves(X_dd, y_dd, feature_names, fig_dir, n_runs=10
     plt.savefig(f"{fig_dir}/xgboost_stability_auroc_auprc.png", dpi=300)
     plt.close()
 
-
 def plot_feature_ablation(feature_names, X_train, X_test, y_train, y_test, full_model, fig_dir, n_jobs=-1):
     logging.info("\tPlotting feature ablation for each feature")
+    
+    os.makedirs(fig_dir, exist_ok=True)
 
     # Evaluate full model AUROC
     y_pred_prob_full = full_model.predict_proba(X_test)[:, 1]

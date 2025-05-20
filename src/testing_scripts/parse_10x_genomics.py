@@ -5,6 +5,7 @@ from scipy.sparse import  csc_matrix, coo_matrix
 import scanpy as sc
 import numpy as np
 import os
+import logging
 
 # From Duren Lab's LINGER.preprocessing
 def get_adata(matrix: csc_matrix, features: pd.DataFrame, barcodes: pd.DataFrame):
@@ -38,7 +39,7 @@ def get_adata(matrix: csc_matrix, features: pd.DataFrame, barcodes: pd.DataFrame
 
     # Create an AnnData object with the transposed matrix (cells as rows, features as columns)
     adata = anndata.AnnData(X=csc_matrix(matrix).T)
-    print(f'Reading 10X genomics dataset with {adata.shape[0]:,} cells and {adata.shape[1]:,} features')
+    logging.info(f'Reading 10X genomics dataset with {adata.shape[0]:,} cells and {adata.shape[1]:,} features')
     
     # Assign feature names (e.g., gene IDs or peak names) to the variable (features) metadata in AnnData
     adata.var['gene_ids'] = features[1].values
@@ -117,7 +118,7 @@ def combine_peaks_and_fragments(peak_bed_file, atac_fragments_file, tmp_dir):
     import pybedtools
     
     # Read peaks.bed (just 3 columns)
-    print("Reading ATAC peaks.bed")
+    logging.info("Reading ATAC peaks.bed")
     peak_df = pd.read_csv(
         peak_bed_file,
         sep="\t",
@@ -126,18 +127,18 @@ def combine_peaks_and_fragments(peak_bed_file, atac_fragments_file, tmp_dir):
     )
 
     # Read fragments.tsv (first 4 columns: chrom, start, end, barcode)
-    print("Reading ATAC fragment file")
+    logging.info("Reading ATAC fragment file")
     fragments_df = pd.read_csv(
         atac_fragments_file,
         sep="\t",
         header=None,
     )
 
-    print("Loaded peaks:", peak_df.shape)
-    print("Loaded fragments:", fragments_df.shape)
+    logging.info("Loaded peaks:", peak_df.shape)
+    logging.info("Loaded fragments:", fragments_df.shape)
 
     # Convert to BedTool
-    print("Converting peaks to BedTool")
+    logging.info("Converting peaks to BedTool")
     peak_bed = pybedtools.BedTool.from_dataframe(peak_df)
     fragment_bed = pybedtools.BedTool.from_dataframe(fragments_df)
 
@@ -155,33 +156,44 @@ def combine_peaks_and_fragments(peak_bed_file, atac_fragments_file, tmp_dir):
 
 
 def convert_peak_frag_intersect_to_sparse_dataframe(overlap_df: pd.DataFrame) -> pd.DataFrame:
-    print(" - Creating sparse matrix from peak-barcode counts")
+    logging.info(" - Creating sparse matrix from peak-barcode counts")
 
-    # Convert to category codes to get compact integer indices
-    overlap_df["peak_id"] = overlap_df["peak_chr"] + ":" + overlap_df["peak_start"].astype(str) + "-" + overlap_df["peak_end"].astype(str)
+    # Construct unique peak_id
+    overlap_df["peak_id"] = (
+        overlap_df["peak_chr"] + ":" +
+        overlap_df["peak_start"].astype(str) + "-" +
+        overlap_df["peak_end"].astype(str)
+    )
+
+    # Convert to categorical
     peak_cats = overlap_df["peak_id"].astype("category")
     barcode_cats = overlap_df["barcode"].astype("category")
 
-    # Build sparse matrix
+    # COO matrix
     row = peak_cats.cat.codes.values
     col = barcode_cats.cat.codes.values
     data = overlap_df["count"].astype(np.int64).values
-    sparse_matrix = coo_matrix((data, (row, col)),
-                               shape=(len(peak_cats.cat.categories), len(barcode_cats.cat.categories)))
+    sparse_matrix = coo_matrix(
+        (data, (row, col)),
+        shape=(len(peak_cats.cat.categories), len(barcode_cats.cat.categories))
+    )
 
+    # Convert to DataFrame in wide format
+    df_wide = pd.DataFrame.sparse.from_spmatrix(
+        sparse_matrix,
+        index=peak_cats.cat.categories,
+        columns=barcode_cats.cat.categories
+    )
 
-    # Convert to long format DataFrame
-    sparse_df = pd.DataFrame({
-        "peak_id": peak_cats.cat.categories[row],
-        "barcode": barcode_cats.cat.categories[col],
-        "count": data
-    })
+    df_wide.index.name = "peak_id"
+    df_wide.reset_index(inplace=True)
     
-    # Confirm shape
-    print(f"ATAC dataframe Shape: {sparse_df.shape} (cells x genes)")
-    print(sparse_df.head())
+    df_wide = df_wide.sparse.to_dense().astype("float32")
 
-    return sparse_df
+    logging.info(f"ATAC matrix shape: {df_wide.shape} (peaks x cells)")
+    logging.info(df_wide.iloc[:5, :5])
+
+    return df_wide
 
 
 def convert_h5_gene_expression_to_count_matrix(h5_file_path):
@@ -193,7 +205,7 @@ def convert_h5_gene_expression_to_count_matrix(h5_file_path):
         adata = adata[:, adata.var["feature_types"] == "Gene Expression"]
         
     # Confirm shape
-    print(f"Shape: {adata.shape} (cells x genes)")
+    logging.info(f"Shape: {adata.shape} (cells x genes)")
     
     # Transpose and convert to DataFrame
     rna_count_df = pd.DataFrame(
@@ -204,7 +216,7 @@ def convert_h5_gene_expression_to_count_matrix(h5_file_path):
     
     rna_count_df["gene_id"] = rna_count_df.index
     rna_count_df.reset_index(drop=True, inplace=True)
-    print(rna_count_df.head())
+    logging.info(rna_count_df.head())
     
     return rna_count_df
 
@@ -221,19 +233,26 @@ def convert_peak_fragment_h5_10X_files_to_count_matrices():
 
     overlap_df = combine_peaks_and_fragments(peak_bed_file, atac_fragments_file, tmp_dir)
     atac_sparse_df = convert_peak_frag_intersect_to_sparse_dataframe(overlap_df)
+    
+    cols = ['peak_id'] + [col for col in atac_sparse_df.columns if col != 'peak_id']
+    atac_sparse_df = atac_sparse_df[cols]
 
-    print(f'Exporting ATAC sparse matrix in long format')
-    atac_output_file = os.path.join(output_dir, "mouse_kidney_ATAC_long.parquet")
+    logging.info(f'Exporting ATAC sparse matrix in long format')
+    logging.info(atac_sparse_df.head())
+    atac_output_file = os.path.join(output_dir, "mouse_kidney_ATAC.parquet")
     atac_sparse_df.to_parquet(atac_output_file, engine="pyarrow", compression="snappy", index=False)
 
     rna_count_df = convert_h5_gene_expression_to_count_matrix(h5_file_path)
+    
+    cols = ['gene_id'] + [col for col in atac_sparse_df.columns if col != 'gene_id']
+    rna_count_df = rna_count_df[cols]
 
-    print(f'Exporting filtered ATAC data')
+    logging.info(f'Exporting filtered ATAC data')
     rna_output_file = os.path.join(output_dir, "mouse_kidney_RNA.parquet")
     rna_count_df.to_parquet(rna_output_file, engine="pyarrow", compression="snappy", index=False)
 
 def convert_matrix_features_barcodes_10X_files_to_count_matrices():
-    print('\tReading in cell labels...')
+    logging.info('\tReading in cell labels...')
 
     base_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/DS011_mESC/10X_raw_data"
     # Read in the data files
@@ -243,12 +262,12 @@ def convert_matrix_features_barcodes_10X_files_to_count_matrices():
     peaks=pd.read_csv(os.path.join(base_dir, "peaks.bed"), sep="\t")
     # ---------------------------------------------------
 
-    print('\nExtracting the adata RNA and ATAC seq data...')
+    logging.info('\nExtracting the adata RNA and ATAC seq data...')
     # Create AnnData objects for the scRNA-seq and scATAC-seq datasets
     adata_RNA, adata_ATAC = get_adata(matrix, features, barcodes)  # adata_RNA and adata_ATAC are scRNA and scATAC
 
-    print(f'\tscRNAseq Dataset: {adata_RNA.shape[0]} genes, {adata_RNA.shape[1]} cells')
-    print(f'\tscATACseq Dataset: {adata_ATAC.shape[0]} peaks, {adata_ATAC.shape[1]} cells')
+    logging.info(f'\tscRNAseq Dataset: {adata_RNA.shape[0]} genes, {adata_RNA.shape[1]} cells')
+    logging.info(f'\tscATACseq Dataset: {adata_ATAC.shape[0]} peaks, {adata_ATAC.shape[1]} cells')
 
     # Filter RNA data for a specific cell type
     # rna_filtered = adata_RNA[adata_RNA.obs['label'] == 'classical monocytes']
@@ -266,13 +285,13 @@ def convert_matrix_features_barcodes_10X_files_to_count_matrices():
     # Make sure gene_id is column 0
     cols = ['gene_id'] + [col for col in RNA_expression_matrix.columns if col != 'gene_id']
     RNA_expression_matrix = RNA_expression_matrix[cols]
-    print(RNA_expression_matrix.head())
-    print(RNA_expression_matrix.index)
+    logging.info(RNA_expression_matrix.head())
+    logging.info(RNA_expression_matrix.index)
 
     output_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/DS011_mESC/DS011_mESC_sample1"
 
     # Export the filtered RNA expression matrix to a CSV file
-    print(f'\tExporting filtered RNA data')
+    logging.info(f'\tExporting filtered RNA data')
     RNA_output_file = os.path.join(output_dir, "DS011_mESC_RNA.parquet")
     RNA_expression_matrix.to_parquet(RNA_output_file, engine="pyarrow", compression="snappy")
 
@@ -291,13 +310,19 @@ def convert_matrix_features_barcodes_10X_files_to_count_matrices():
     # Make sure peak_id is column 0
     cols = ['peak_id'] + [col for col in ATAC_expression_matrix.columns if col != 'peak_id']
     ATAC_expression_matrix = ATAC_expression_matrix[cols]
-    print(ATAC_expression_matrix.index)
+    logging.info(ATAC_expression_matrix.index)
 
     # Export the filtered ATAC expression matrix to a CSV file
-    print(f'\tExporting filtered ATAC data')
+    logging.info(f'\tExporting filtered ATAC data')
     ATAC_output_file = os.path.join(output_dir, "DS011_mESC_ATAC.parquet")
     ATAC_expression_matrix.to_parquet(ATAC_output_file, engine="pyarrow", compression="snappy", index=False)
     
 if __name__ == "__main__":
+    # Configure logging
+    logging.basicConfig(level=logging.INFO, format='%(message)s')
+    
+    logging.info("\n----- Converting peak fragment h5 10X genomics project to count matrices -----")
     convert_peak_fragment_h5_10X_files_to_count_matrices()
+    
+    logging.info("\n----- Converting matrix / features / barcodes 10X genomics project to count matrices -----")
     convert_matrix_features_barcodes_10X_files_to_count_matrices()
