@@ -75,7 +75,7 @@ atac_long <- reshape2::melt(
   dplyr::filter(!is.na(numeric_reads) & numeric_reads > 0) %>%
   dplyr::mutate(
     peak_id = gsub("[:\\-]", "_", peak_id),
-    count = as.integer(numeric_reads)
+    count = numeric_reads
   ) %>%
   dplyr::select(peak_id, cell, count)
 
@@ -85,7 +85,7 @@ sum(is.na(atac_long$count))
 
 
 log_message("    Done!")
-
+str(atac_long)
 log_message("Creating a Cicero cell_data_set (CDS) from ATAC data...")
 log_message("    Running dimensionality reduction")
 cds <- make_atac_cds(atac_long, binarize = TRUE) %>%

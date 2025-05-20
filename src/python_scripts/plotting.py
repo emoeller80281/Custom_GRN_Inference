@@ -52,9 +52,12 @@ def plot_feature_importance(features: list, model, fig_dir: str):
     logging.info("\tPlotting feature importance barplot")
     
     os.makedirs(fig_dir, exist_ok=True)
+    if hasattr(model, "get_booster"):
+        booster = model.get_booster()
+    else:
+        booster = model  # assume already a Booster
 
-    # Extract raw importance scores from Booster
-    importance_dict = model.get_booster().get_score(importance_type="weight")
+    importance_dict = booster.get_score(importance_type="weight")
 
     # Build DataFrame ensuring all input features are represented (default to 0 if missing)
     feature_importances = pd.DataFrame({
@@ -99,6 +102,7 @@ def plot_feature_score_histograms(features, inferred_network, fig_dir):
         plt.title(f"{feature}", fontsize=14)
         plt.xlabel(feature, fontsize=14)
         plt.ylabel("Frequency", fontsize=14)
+        plt.xlim((0, 1))
         plt.xticks(fontsize=12)
         plt.yticks(fontsize=12)
 

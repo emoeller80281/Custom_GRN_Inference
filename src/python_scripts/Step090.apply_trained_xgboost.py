@@ -68,7 +68,8 @@ def main():
     X_dd = inferred_dd[feature_names]
 
     logging.info("Converting to DaskDMatrix")
-    dtest = xgb.dask.DaskDMatrix(X_dd, feature_names=feature_names)
+    client = Client()
+    dtest = xgb.dask.DaskDMatrix(data=X_dd, feature_names=feature_names, client=client)
 
     logging.info("Running distributed prediction")
     y_pred = xgb.dask.predict(booster, dtest)

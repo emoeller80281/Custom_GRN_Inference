@@ -64,6 +64,12 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="Name of the output .pkl file for the trained model"
     )
+    parser.add_argument(
+        "--num_cpu",
+        type=int,
+        required=True,
+        help="Number of CPUs allocated to the job"
+    )
     
     args: argparse.Namespace = parser.parse_args()
     return args
@@ -144,6 +150,7 @@ def main():
     trained_model_dir: str = args.trained_model_dir
     fig_dir: str = args.fig_dir
     model_save_name: str = args.model_save_name
+    num_cpu: int = int(args.num_cpu)
 
     inferred_network_dd = read_inferred_network(inferred_network_file)
     ground_truth_df = read_ground_truth(ground_truth_file)
@@ -178,16 +185,16 @@ def main():
     model_save_path = os.path.join(trained_model_dir, f"{model_save_name}.json")
 
     logging.info(f"Done splitting: {X_train_dd.shape[0].compute():,} train / {X_test_dd.shape[0].compute():,} test rows")
-    logging.info(f"Saving Train / Test splits to disk in {trained_model_dir}")
+    logging.info(f"\tSaving Train / Test splits to disk in {trained_model_dir}")
     train_test_dir = os.path.join(trained_model_dir, f"train_test_splits/{model_save_name}")
     os.makedirs(train_test_dir, exist_ok=True)
+    
     X_train_dd.to_parquet(os.path.join(train_test_dir, "X_train.parquet"))
     X_test_dd.to_parquet(os.path.join(train_test_dir, "X_test.parquet"))
-    y_train_dd.to_parquet(os.path.join(train_test_dir, "y_train.parquet"))
-    y_test_dd.to_parquet(os.path.join(train_test_dir, "y_test.parquet"))
+    y_train_dd.to_frame(name="label").to_parquet(os.path.join(train_test_dir, "y_train.parquet"))
+    y_test_dd.to_frame(name="label").to_parquet(os.path.join(train_test_dir, "y_test.parquet"))
     
-    
-    logging.info("Training XGBoost Model")
+    logging.info("\n")
     xgb_booster = train_xgboost_dask(train_test_dir, feature_names)
 
     # Save the feature names
@@ -208,23 +215,34 @@ def main():
     feature_importances = feature_importances.sort_values(by="Importance", ascending=False)
 
     logging.info("\n----- Plotting Figures -----")
-    model_df = model_dd.compute()
-    X = model_df[feature_names]
-    y = model_df["label"]
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=True, random_state=42)
-    # model_cls = xgb_classifier_from_booster(xgb_booster, X.columns)
-
     if not os.path.exists(fig_dir):
         os.makedirs(fig_dir)
+        
+    X_train = X_train_dd.compute()
+    X_test = X_test_dd.compute()
+    
+    y_train = y_train_dd.compute()
+    y_test = y_test_dd.compute()
+    model_df = model_dd.compute()
+    
+    prarm_grid_out_dir = train_test_dir = os.path.join(trained_model_dir, f"parameter_grid_search/{model_save_name}")
     
     # Run the parameter grid search
     logging.info("Starting parameter grid search")
-    grid = parameter_grid_search(X_train_dd, y_train_dd, feature_names, cpu_count=16, fig_dir=fig_dir)
+    grid = parameter_grid_search(
+        X_train, 
+        y_train, 
+        X_test,
+        y_test,
+        prarm_grid_out_dir, 
+        cpu_count=16, 
+        fig_dir=fig_dir
+        )
 
     logging.info("Plotting grid search best estimator feature importances")
     plot_feature_importance(
         features=feature_names,
-        model=grid.best_estimator_,
+        model=grid,
         fig_dir=os.path.join(fig_dir, "parameter_search")
     )
 

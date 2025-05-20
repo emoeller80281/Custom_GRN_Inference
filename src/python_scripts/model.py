@@ -7,16 +7,58 @@ import dask.array as da
 from dask.distributed import Client
 
 from dask_ml.model_selection import train_test_split
-from sklearn.model_selection import GridSearchCV, StratifiedKFold
+from sklearn.model_selection import GridSearchCV, StratifiedKFold, ParameterGrid, ParameterSampler
 from sklearn.metrics import roc_auc_score, precision_recall_curve, average_precision_score, roc_curve, auc
 from sklearn.inspection import permutation_importance
+from scipy.stats import uniform, randint
 from joblib import Parallel, delayed
 import matplotlib.pyplot as plt
 from typing import Union
+from tqdm import tqdm
 
 import xgboost as xgb
 
 from dask.distributed import Client
+
+def undersample_training_set(X_dd, y_dd, seed=42):
+    """
+    Balance the dataset by undersampling the majority class.
+
+    Returns:
+        tuple of (X_balanced_dd, y_balanced_dd)
+    """
+    logging.info("Scaling the number of positive and negatives values for training")
+    
+    # Combine X and y
+    y_dd = y_dd.rename("label")
+    df = X_dd.assign(label=y_dd)
+
+    # Split into positive and negative
+    pos_df = df[df.label == 1]
+    neg_df = df[df.label == 0]
+    
+    # Compute number of positives
+    n_pos = pos_df.shape[0].compute()
+    n_neg = neg_df.shape[0].compute()
+    frac = n_pos / n_neg
+    
+    logging.info(f'\tPositive values: {n_pos}')
+    logging.info(f'\tNegative values: {n_neg}')
+    
+    # Randomly sample negatives
+    neg_df_sampled = neg_df.sample(frac=frac, random_state=seed)
+    
+    logging.info(f"\tUnderscaling so positive and negative classes both have {n_pos} values")
+
+    # Combine
+    balanced_df = dd.concat([pos_df, neg_df_sampled])
+    balanced_df = balanced_df.shuffle(on="label", seed=seed)
+
+    # Separate X and y again
+    y_balanced_dd = balanced_df["label"]
+    X_balanced_dd = balanced_df.drop(columns=["label"])
+
+    return X_balanced_dd, y_balanced_dd
 
 def train_xgboost_dask(train_test_dir, feature_names, client=None):
     """
@@ -45,13 +87,16 @@ def train_xgboost_dask(train_test_dir, feature_names, client=None):
         logging.info("No Dask client provided — starting a local threaded client")
         client = Client(processes=False)
         client_created = True
+        
+    X_train_dd_bal, y_train_dd_bal = undersample_training_set(X_train_dd, y_train_dd)
 
     dtrain = xgb.dask.DaskDMatrix(
         client=client,
-        data=X_train_dd,
-        label=y_train_dd,
+        data=X_train_dd_bal,
+        label=y_train_dd_bal,
         feature_names=feature_names
     )
+    
 
     params = {
         'objective': 'binary:logistic',
@@ -85,60 +130,132 @@ def train_xgboost_dask(train_test_dir, feature_names, client=None):
     return booster
 
 
-def parameter_grid_search(X_train_dd, y_train_dd, features, cpu_count, fig_dir):
-    logging.info("Starting XGBoost hyperparameter grid search (auto-balanced)")
+def parameter_grid_search(
+    X_tr: pd.DataFrame,
+    y_tr: pd.Series,
+    X_val: pd.DataFrame,
+    y_val: pd.Series,
+    out_dir: str,
+    fig_dir: str,
+    cpu_count: int,
+):
 
-    # Convert Dask → Pandas
-    X_train = X_train_dd.compute()
-    y_train = y_train_dd.compute()
-
-    # Log class distribution
-    n_pos = (y_train == 1).sum()
-    n_neg = (y_train == 0).sum()
-    logging.info(f"Training samples: {len(y_train)} — Pos: {n_pos}, Neg: {n_neg}")
-
-    if n_pos == 0 or n_neg == 0:
-        raise ValueError("Training set must contain both positive and negative samples.")
-
-    # Compute scale_pos_weight for imbalance handling
-    scale_pos_weight = n_neg / n_pos
-
-    # Define parameter grid
+    # parameter grid
     param_grid = {
-        "n_estimators": [50, 100, 200],
-        "max_depth": [4, 6, 8],
-        "gamma": [0, 1, 5],
-        "reg_alpha": [0.0, 0.5, 1.0],
-        "reg_lambda": [1.0, 2.0, 5.0],
-        "subsample": [0.8, 1.0],
-        "colsample_bytree": [0.8, 1.0],
+        'n_estimators':      [50, 100, 200],
+        'max_depth':         [4, 6, 8],
+        'gamma':             [0, 1, 5],
+        'reg_alpha':         [0.0, 0.5, 1.0],
+        'reg_lambda':        [1.0, 2.0, 5.0],
+        'subsample':         [0.8, 1.0],
+        'colsample_bytree':  [0.8, 1.0],
+        'learning_rate':     [0.01, 0.1]
     }
+    grid_list = list(ParameterGrid(param_grid))
+    total = len(grid_list)
+    logging.info(f"Parameter grid has {total} combinations")
 
-    xgb_clf = xgb.XGBClassifier(
+    def eval_params(params: dict) -> dict:
+        model = xgb.XGBClassifier(
+            **params,
+            n_jobs=1,
+            random_state=42,
+            eval_metric='logloss'
+        )
+        model.fit(
+            X_tr,
+            y_tr,
+            eval_set=[(X_val, y_val)],
+            verbose=False
+        )
+        y_pred = model.predict_proba(X_val)[:, 1]
+        val_ap = average_precision_score(y_val, y_pred)
+        val_auc = roc_auc_score(y_val, y_pred)
+
+        imp = model.feature_importances_
+        p = imp / np.sum(imp + 1e-12)
+        entropy = -np.sum(p * np.log(p + 1e-12))
+        cv = np.std(p) / (np.mean(p) + 1e-12)
+
+        return {**params,
+                'val_ap': val_ap,
+                'val_auc': val_auc,
+                'imp_entropy': entropy,
+                'imp_cv': cv}
+
+    # parallel evaluation
+    logging.info(f"Starting parallel grid search on {cpu_count} cores...")
+    results = Parallel(n_jobs=cpu_count)(
+        delayed(eval_params)(p) for p in tqdm(
+            grid_list,
+            total=total,
+            smoothing=0.9,
+            desc="Grid search",
+            miniters=max(1, total // 20)  # update every 5%
+        )
+    )
+
+    df_res = pd.DataFrame(results)
+    results_out_path = os.path.join(out_dir, 'grid_search_results.parquet')
+    os.makedirs(out_dir, exist_ok=True)
+    df_res.to_parquet(results_out_path, index=False, compression='snappy', engine='pyarrow')
+    logging.info(f"Saved parameter search results to {results_out_path}")
+
+    # identify best
+    best_auc = df_res.loc[df_res.val_auc.idxmax()]
+    best_flat = df_res.loc[df_res.imp_entropy.idxmax()]
+    logging.info(f"Best AUROC={best_auc.val_auc:.4f} at {best_auc.to_dict()}")
+    logging.info(f"Highest entropy={best_flat.imp_entropy:.4f} at {best_flat.to_dict()}")
+    
+    # Compute ranks (lower rank = better)
+    df_res["auc_rank"] = df_res["val_auc"].rank(ascending=False, method="min")
+    df_res["entropy_rank"] = df_res["imp_entropy"].rank(ascending=False, method="min")
+
+    # Sum ranks
+    df_res["combined_rank"] = df_res["auc_rank"] + df_res["entropy_rank"]
+
+    # Select best overall
+    best_overall = df_res.loc[df_res["combined_rank"].idxmin()]
+    logging.info(f"Best overall (AUROC + entropy rank) = {best_overall.to_dict()}")
+
+    # retrain best by AP on full X/y
+    # cast best parameters to correct types
+    best_params = {
+        'n_estimators': int(best_overall['n_estimators']),
+        'max_depth': int(best_overall['max_depth']),
+        'gamma': int(best_overall['gamma']),
+        'reg_alpha': float(best_overall['reg_alpha']),
+        'reg_lambda': float(best_overall['reg_lambda']),
+        'subsample': float(best_overall['subsample']),
+        'colsample_bytree': float(best_overall['colsample_bytree']),
+        'learning_rate': float(best_overall['learning_rate'])
+    }
+    
+    best_model = xgb.XGBClassifier(
+        **best_params,
         random_state=42,
-        eval_metric="logloss",
-        tree_method="hist",
-        scale_pos_weight=scale_pos_weight
+        use_label_encoder=False
     )
+    best_model.fit(X_tr, y_tr)
+    
+    json_model_path = os.path.join(out_dir, 'best_model_combined_rank.json')
+    best_model.get_booster().save_model(json_model_path)
+    logging.info(f"Saved best model by combined rank to {json_model_path}")
 
-    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-
-    grid = GridSearchCV(
-        estimator=xgb_clf,
-        param_grid=param_grid,
-        scoring="roc_auc",
-        cv=cv,
-        n_jobs=cpu_count,
-        verbose=2
-    )
-
-    logging.info("Running GridSearchCV on imbalanced training set")
-    grid.fit(X_train, y_train)
-
-    logging.info(f"  Best CV score:  {grid.best_score_:.4f}")
-    logging.info(f"  Best parameters: {grid.best_params_}")
-
-    return grid
+    # scatter plot AP vs entropy
+    import matplotlib.pyplot as plt
+    plt.figure(figsize=(6,6))
+    plt.scatter(df_res.imp_entropy, df_res.val_auc, alpha=0.7)
+    plt.xlabel('Feature Importance Entropy', fontsize=14)
+    plt.ylabel('AUROC Score', fontsize=14)
+    plt.title('XGBoost Parameter Search - AUROC Performance vs Feature Importance Entropy', fontsize=13)
+    plt.tight_layout()
+    plot_out = os.path.join(fig_dir, 'param_grid_search_auroc_vs_feature_importance.png')
+    plt.savefig(plot_out, dpi=200)
+    plt.close()
+    logging.info(f"Saved flatness vs AUROC plot to {plot_out}")
+    
+    return best_model
 
     
 

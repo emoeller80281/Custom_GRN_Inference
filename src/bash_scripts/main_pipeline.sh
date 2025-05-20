@@ -786,10 +786,13 @@ determine_num_cpus
 check_input_files
 activate_conda_env
 setup_directories
-check_processed_files
+
 
 # ----- Execute selected pipeline steps -----
 if [ "$STEP010_CICERO_MAP_PEAKS_TO_TG" = true ]; then run_cicero; fi
+
+check_processed_files
+
 if [ "$STEP015_CICERO_PEAK_TO_TG_SCORE" = true ]; then run_cicero_peak_to_tg_score; fi
 if [ "$STEP020_PEAK_TO_TG_CORRELATION" = true ]; then run_correlation_peak_to_tg_score; fi
 # if [ "$STEP030_PEAK_TO_ENHANCER_DB" = true ]; then run_peak_to_enhancer_db_score; fi

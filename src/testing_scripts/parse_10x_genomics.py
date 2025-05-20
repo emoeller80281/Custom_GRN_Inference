@@ -111,32 +111,33 @@ def get_adata(matrix: csc_matrix, features: pd.DataFrame, barcodes: pd.DataFrame
     return adata_RNA, adata_ATAC
 
 def combine_peaks_and_fragments(peak_bed_file, atac_fragments_file, tmp_dir):
-    import os
-    import pandas as pd
-    
-    os.environ["TMPDIR"] = tmp_dir  # or any scratch space you prefer
+    os.environ["TMPDIR"] = tmp_dir  # ensures large temp files go to scratch
 
-    import pybedtools
-    
-    # Read peaks.bed (just 3 columns)
-    logging.info("Reading ATAC peaks.bed")
+    # Define output path for cached overlap file
+    basename = os.path.splitext(os.path.basename(peak_bed_file))[0]
+    overlap_cache_path = os.path.join(tmp_dir, f"{basename}_overlap_df.tsv")
+
+    if os.path.exists(overlap_cache_path):
+        logging.info(f"Found cached overlap file at {overlap_cache_path}, loading instead of recomputing")
+        overlap_df = pd.read_csv(overlap_cache_path, sep="\t")
+        return overlap_df
+
+    # Read peaks.bed (3-column BED)
     peak_df = pd.read_csv(
         peak_bed_file,
         sep="\t",
         comment="#",
         header=None,
+        names=["Chromosome", "Start", "End"]
     )
 
-    # Read fragments.tsv (first 4 columns: chrom, start, end, barcode)
-    logging.info("Reading ATAC fragment file")
+    # Read fragments.tsv
     fragments_df = pd.read_csv(
         atac_fragments_file,
         sep="\t",
         header=None,
+        names=["Chromosome", "Start", "End", "Barcode", "Count"]
     )
-
-    logging.info(f"Loaded peaks: {peak_df.shape}")
-    logging.info(f"Loaded fragments: {fragments_df.shape}")
 
     logging.info("Converting to PyRanges")
     peak_gr = pr.PyRanges(peak_df)
@@ -144,52 +145,77 @@ def combine_peaks_and_fragments(peak_bed_file, atac_fragments_file, tmp_dir):
 
     logging.info("Performing overlap join")
     overlap = peak_gr.join(frag_gr)
+    logging.info(f"overlap.df.columns = {overlap.df.columns.tolist()}")
 
-    logging.info("Converting overlap to DataFrame")
+    # Rename and select columns
     overlap_df = overlap.df.rename(columns={
         "Chromosome": "peak_chr",
         "Start": "peak_start",
         "End": "peak_end",
         "Start_b": "frag_start",
         "End_b": "frag_end",
-        "Chromosome_b": "frag_chr"
+        "Barcode": "barcode",
+        "Count": "count"
     })
 
-    # Reorder + ensure same column names
     overlap_df = overlap_df[[
         "peak_chr", "peak_start", "peak_end",
-        "frag_chr", "frag_start", "frag_end",
+        "frag_start", "frag_end",
         "barcode", "count"
     ]]
-    
+
+    # Save to disk for future use
+    overlap_df.to_csv(overlap_cache_path, sep="\t", index=False)
+    logging.info(f"Saved overlap_df to {overlap_cache_path}")
+
     return overlap_df
 
 
-def convert_peak_frag_intersect_to_sparse_dataframe(overlap_df: pd.DataFrame) -> pd.DataFrame:
-    logging.info(" - Pivoting overlap DataFrame to peak × cell matrix")
+def convert_peak_frag_intersect_to_sparse_dataframe(
+    overlap_df: pd.DataFrame,
+    min_fragments_per_cell: int = 1000,
+    min_peaks_per_cell: int = 100
+) -> pd.DataFrame:
+    logging.info(" - Filtering low-quality barcodes")
 
-    overlap_df["peak_id"] = (
-        overlap_df["peak_chr"] + ":" +
-        overlap_df["peak_start"].astype(str) + "-" +
-        overlap_df["peak_end"].astype(str)
+    # Calculate total fragments and number of peaks per barcode
+    cell_stats = overlap_df.groupby("barcode").agg(
+        total_fragments=("count", "sum"),
+        nonzero_peaks=("peak_chr", "count")  # count of entries per barcode
     )
 
-    # Pivot: rows = peak_id, columns = barcode, values = count
-    df_wide = overlap_df.pivot_table(
+    # Keep barcodes with sufficient coverage
+    high_quality_barcodes = cell_stats[
+        (cell_stats["total_fragments"] >= min_fragments_per_cell) &
+        (cell_stats["nonzero_peaks"] >= min_peaks_per_cell)
+    ].index
+
+    logging.info(f" - Keeping {len(high_quality_barcodes)} barcodes after QC filtering")
+
+    # Filter overlap_df
+    filtered_df = overlap_df[overlap_df["barcode"].isin(high_quality_barcodes)].copy()
+
+    logging.info(" - Creating peak IDs")
+    filtered_df["peak_id"] = (
+        filtered_df["peak_chr"].astype(str) + ":" +
+        filtered_df["peak_start"].astype(str) + "-" +
+        filtered_df["peak_end"].astype(str)
+    )
+
+    # Pivot to dense matrix
+    logging.info(" - Pivoting overlap DataFrame to peak × cell matrix")
+    df_wide = filtered_df.pivot_table(
         index="peak_id",
         columns="barcode",
         values="count",
-        aggfunc="sum",     # In case a peak-barcode pair appears more than once
+        aggfunc="sum",
         fill_value=0
     ).astype("float32")
 
-    df_wide.reset_index(inplace=True)  # make peak_id a column
+    df_wide.reset_index(inplace=True)
 
-    logging.info(f"ATAC matrix shape: {df_wide.shape} (peaks x cells)")
-    logging.info(df_wide.iloc[:5, :5])
-
+    logging.info(f" - Final ATAC matrix shape: {df_wide.shape} (peaks x cells)")
     return df_wide
-
 
 def convert_h5_gene_expression_to_count_matrix(h5_file_path):
     # Read 10X file
@@ -226,6 +252,7 @@ def convert_peak_fragment_h5_10X_files_to_count_matrices():
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(tmp_dir, exist_ok=True)
 
+    
     overlap_df = combine_peaks_and_fragments(peak_bed_file, atac_fragments_file, tmp_dir)
     atac_sparse_df = convert_peak_frag_intersect_to_sparse_dataframe(overlap_df)
     
@@ -239,7 +266,7 @@ def convert_peak_fragment_h5_10X_files_to_count_matrices():
 
     rna_count_df = convert_h5_gene_expression_to_count_matrix(h5_file_path)
     
-    cols = ['gene_id'] + [col for col in atac_sparse_df.columns if col != 'gene_id']
+    cols = ['gene_id'] + [col for col in rna_count_df.columns if col != 'gene_id']
     rna_count_df = rna_count_df[cols]
 
     logging.info(f'Exporting filtered ATAC data')
@@ -247,8 +274,6 @@ def convert_peak_fragment_h5_10X_files_to_count_matrices():
     rna_count_df.to_parquet(rna_output_file, engine="pyarrow", compression="snappy", index=False)
 
 def convert_matrix_features_barcodes_10X_files_to_count_matrices():
-    logging.info('\tReading in cell labels...')
-
     base_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/DS011_mESC/10X_raw_data"
     # Read in the data files
     matrix=scipy.io.mmread(os.path.join(base_dir, "GSE198730_HIFLR_snRNA_matrix.mtx"))
@@ -281,14 +306,13 @@ def convert_matrix_features_barcodes_10X_files_to_count_matrices():
     cols = ['gene_id'] + [col for col in RNA_expression_matrix.columns if col != 'gene_id']
     RNA_expression_matrix = RNA_expression_matrix[cols]
     logging.info(RNA_expression_matrix.head())
-    logging.info(RNA_expression_matrix.index)
 
     output_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/DS011_mESC/DS011_mESC_sample1"
 
     # Export the filtered RNA expression matrix to a CSV file
     logging.info(f'\tExporting filtered RNA data')
     RNA_output_file = os.path.join(output_dir, "DS011_mESC_RNA.parquet")
-    RNA_expression_matrix.to_parquet(RNA_output_file, engine="pyarrow", compression="snappy")
+    RNA_expression_matrix.to_parquet(RNA_output_file, engine="pyarrow", compression="snappy", index=False)
 
     # Filter ATAC data for 'classical monocytes'
     # atac_filtered = adata_ATAC[adata_ATAC.obs['label'] == 'classical monocytes']
@@ -305,7 +329,7 @@ def convert_matrix_features_barcodes_10X_files_to_count_matrices():
     # Make sure peak_id is column 0
     cols = ['peak_id'] + [col for col in ATAC_expression_matrix.columns if col != 'peak_id']
     ATAC_expression_matrix = ATAC_expression_matrix[cols]
-    logging.info(ATAC_expression_matrix.index)
+    logging.info(ATAC_expression_matrix.head())
 
     # Export the filtered ATAC expression matrix to a CSV file
     logging.info(f'\tExporting filtered ATAC data')
@@ -317,7 +341,7 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format='%(message)s')
     
     logging.info("\n----- Converting peak fragment h5 10X genomics project to count matrices -----")
-    convert_peak_fragment_h5_10X_files_to_count_matrices()
+    # convert_peak_fragment_h5_10X_files_to_count_matrices()
     
     logging.info("\n----- Converting matrix / features / barcodes 10X genomics project to count matrices -----")
     convert_matrix_features_barcodes_10X_files_to_count_matrices()

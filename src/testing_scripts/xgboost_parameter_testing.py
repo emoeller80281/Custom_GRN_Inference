@@ -67,6 +67,7 @@ def parameter_grid_search(
     X: pd.DataFrame,
     y: pd.Series,
     features: list,
+    out_dir: str,
     fig_dir: str,
     cpu_count: int,
     subsample_frac: float

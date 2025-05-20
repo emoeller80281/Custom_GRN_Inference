@@ -53,6 +53,7 @@ def load_atac_dataset(atac_data_file: str) -> pd.DataFrame:
         
     elif atac_data_file.lower().endswith('.tsv'):
         df = pd.read_csv(atac_data_file, sep="\t", header=0, index_col=None)
+
         
     else:
         logging.error("ERROR: ATAC data file must be a csv, tsv, or parquet format. Check column separators")
