@@ -20,8 +20,7 @@ mkdir -p "$OUTPUT_DIR"
 
 echo ""
 echo "Python: Training XGBoost Classifier"
-/usr/bin/time -v \
-python3 "$PYTHON_SCRIPT_DIR/Step070.train_xgboost.py" \
+/usr/bin/time -v python3 "$PYTHON_SCRIPT_DIR/Step070.train_xgboost.py" \
         --ground_truth_file "$COMBINED_GROUND_TRUTH" \
         --inferred_network_file "$COMBINED_INFERRED_NET" \
         --trained_model_dir "$OUTPUT_DIR" \

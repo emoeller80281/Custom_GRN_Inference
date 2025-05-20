@@ -6,6 +6,7 @@ import scanpy as sc
 import numpy as np
 import os
 import logging
+import pyranges as pr
 
 # From Duren Lab's LINGER.preprocessing
 def get_adata(matrix: csc_matrix, features: pd.DataFrame, barcodes: pd.DataFrame):
@@ -134,61 +135,55 @@ def combine_peaks_and_fragments(peak_bed_file, atac_fragments_file, tmp_dir):
         header=None,
     )
 
-    logging.info("Loaded peaks:", peak_df.shape)
-    logging.info("Loaded fragments:", fragments_df.shape)
+    logging.info(f"Loaded peaks: {peak_df.shape}")
+    logging.info(f"Loaded fragments: {fragments_df.shape}")
 
-    # Convert to BedTool
-    logging.info("Converting peaks to BedTool")
-    peak_bed = pybedtools.BedTool.from_dataframe(peak_df)
-    fragment_bed = pybedtools.BedTool.from_dataframe(fragments_df)
+    logging.info("Converting to PyRanges")
+    peak_gr = pr.PyRanges(peak_df)
+    frag_gr = pr.PyRanges(fragments_df)
 
-    # Perform intersection
-    peak_frag_overlap = peak_bed.intersect(fragment_bed, wa=True, wb=True)
-    
-    overlap_df = peak_frag_overlap.to_dataframe(
-        names=["peak_chr", "peak_start", "peak_end", "frag_chr",
-               "frag_start", "frag_end", "barcode", "count"]
-    )
-    
-    pybedtools.cleanup(remove_all=True)
+    logging.info("Performing overlap join")
+    overlap = peak_gr.join(frag_gr)
+
+    logging.info("Converting overlap to DataFrame")
+    overlap_df = overlap.df.rename(columns={
+        "Chromosome": "peak_chr",
+        "Start": "peak_start",
+        "End": "peak_end",
+        "Start_b": "frag_start",
+        "End_b": "frag_end",
+        "Chromosome_b": "frag_chr"
+    })
+
+    # Reorder + ensure same column names
+    overlap_df = overlap_df[[
+        "peak_chr", "peak_start", "peak_end",
+        "frag_chr", "frag_start", "frag_end",
+        "barcode", "count"
+    ]]
     
     return overlap_df
 
 
 def convert_peak_frag_intersect_to_sparse_dataframe(overlap_df: pd.DataFrame) -> pd.DataFrame:
-    logging.info(" - Creating sparse matrix from peak-barcode counts")
+    logging.info(" - Pivoting overlap DataFrame to peak × cell matrix")
 
-    # Construct unique peak_id
     overlap_df["peak_id"] = (
         overlap_df["peak_chr"] + ":" +
         overlap_df["peak_start"].astype(str) + "-" +
         overlap_df["peak_end"].astype(str)
     )
 
-    # Convert to categorical
-    peak_cats = overlap_df["peak_id"].astype("category")
-    barcode_cats = overlap_df["barcode"].astype("category")
+    # Pivot: rows = peak_id, columns = barcode, values = count
+    df_wide = overlap_df.pivot_table(
+        index="peak_id",
+        columns="barcode",
+        values="count",
+        aggfunc="sum",     # In case a peak-barcode pair appears more than once
+        fill_value=0
+    ).astype("float32")
 
-    # COO matrix
-    row = peak_cats.cat.codes.values
-    col = barcode_cats.cat.codes.values
-    data = overlap_df["count"].astype(np.int64).values
-    sparse_matrix = coo_matrix(
-        (data, (row, col)),
-        shape=(len(peak_cats.cat.categories), len(barcode_cats.cat.categories))
-    )
-
-    # Convert to DataFrame in wide format
-    df_wide = pd.DataFrame.sparse.from_spmatrix(
-        sparse_matrix,
-        index=peak_cats.cat.categories,
-        columns=barcode_cats.cat.categories
-    )
-
-    df_wide.index.name = "peak_id"
-    df_wide.reset_index(inplace=True)
-    
-    df_wide = df_wide.sparse.to_dense().astype("float32")
+    df_wide.reset_index(inplace=True)  # make peak_id a column
 
     logging.info(f"ATAC matrix shape: {df_wide.shape} (peaks x cells)")
     logging.info(df_wide.iloc[:5, :5])
