@@ -201,7 +201,7 @@ run_K562(){
 }
 
 run_DS011_mESC
-run_mouse_kidney
+# run_mouse_kidney
 # run_mESC
 # run_K562
 # run_macrophage

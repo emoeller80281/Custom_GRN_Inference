@@ -11,7 +11,7 @@ set -euo pipefail
 #        SELECT PIPELINE STEPS TO RUN
 # =============================================
 # Run the peak to TG regulatory potential calculation methods
-STEP010_CICERO_MAP_PEAKS_TO_TG=true
+STEP010_CICERO_MAP_PEAKS_TO_TG=false
 STEP015_CICERO_PEAK_TO_TG_SCORE=true
 
 STEP020_PEAK_TO_TG_CORRELATION=true

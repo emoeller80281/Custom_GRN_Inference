@@ -1,7 +1,7 @@
 # Load required libraries
 suppressPackageStartupMessages({
   library(cicero)
-  library(monocle3)
+  # library(monocle3)
   library(Signac)
   library(Seurat)
   library(GenomicRanges)
@@ -57,44 +57,67 @@ log_message(sprintf("Output directory: %s", output_dir))
 # =============================================
 
 log_message("Loading ATACseq data from Parquet...")
-# Read and collect ATAC matrix from Parquet
 atac_tbl <- read_parquet(atac_file_path)
-atac_data <- collect(atac_tbl)
-atac_data <- as.data.frame(atac_data)
+atac_data <- as.data.frame(collect(atac_tbl))
 
-stopifnot("peak_id" %in% colnames(atac_data))
-stopifnot(anyDuplicated(colnames(atac_data)) == 0)
+# Rename column 1 if needed
+if (colnames(atac_data)[1] != "peak_id") {
+  colnames(atac_data)[1] <- "peak_id"
+}
+atac_data$peak_id <- as.character(atac_data$peak_id)
 
-atac_long <- reshape2::melt(
-  atac_data,
-  id.vars = "peak_id",
-  variable.name = "cell",
-  value.name = "reads"
-)
+# Ensure there are measure columns
+if (ncol(atac_data) <= 1) {
+  stop("No measure columns found in ATAC data.")
+}
 
-colnames(atac_data)[1] <- "peak_id"
-
-
-str(atac_data[, 1, drop=FALSE])
-print(colnames(atac_data)[1])
-
+# Sanity check
+log_message("Printing column names before melt...")
+print(head(colnames(atac_data)))
 
 log_message("Reshaping ATACseq datset to Cicero input format...")
-atac_long <- reshape2::melt(
+# atac_long <- reshape2::melt(
+#   atac_data,
+#   id.vars = "peak_id",
+#   variable.name = "cell",
+#   value.name = "reads"
+# ) %>%
+#   dplyr::mutate(
+#     numeric_reads = suppressWarnings(as.numeric(reads))
+#   ) %>%
+#   dplyr::filter(!is.na(numeric_reads) & numeric_reads > 0) %>%
+#   dplyr::mutate(
+#     peak_id = gsub("[:\\-]", "_", peak_id),
+#     count = numeric_reads
+#   ) %>%
+#   dplyr::select(peak_id, cell, count)
+
+log_message("Printing number of columns...")
+print(ncol(atac_data))
+print(colnames(atac_data)[1:5])
+
+log_message("Checking for non-numeric columns (excluding 'peak_id')...")
+non_numeric <- sapply(atac_data[ , -1, drop = FALSE], function(x) !is.numeric(x))
+print(which(non_numeric))
+
+if (ncol(atac_data) <= 1) stop("Only one column in data — no columns to melt.")
+if (all(non_numeric)) stop("All columns (except peak_id) are non-numeric — nothing to melt.")
+
+# Manually define measure.vars as all columns *except* "peak_id"
+cell_columns <- setdiff(colnames(atac_data), "peak_id")
+
+# Double check there are cell columns to melt
+stopifnot(length(cell_columns) > 0)
+
+print(str(atac_data[ , 1:5]))
+print(summary(sapply(atac_data[ , -1], class)))  # Should be numeric
+
+atac_long <- melt(
   atac_data,
-  id.vars = "peak_id",
+  id_vars = "peak_id",
   variable.name = "cell",
-  value.name = "reads"
-) %>%
-  dplyr::mutate(
-    numeric_reads = suppressWarnings(as.numeric(reads))
-  ) %>%
-  dplyr::filter(!is.na(numeric_reads) & numeric_reads > 0) %>%
-  dplyr::mutate(
-    peak_id = gsub("[:\\-]", "_", peak_id),
-    count = numeric_reads
-  ) %>%
-  dplyr::select(peak_id, cell, count)
+  value.name = "count"
+)
 
 length(unique(atac_long$peak_id))
 length(unique(atac_long$cell))
@@ -110,6 +133,9 @@ cds <- make_atac_cds(
   binarize = TRUE
 )
 
+print(class(cds))  # Should say "cell_data_set"
+
+
 set.seed(2017)
 log_message("    Detecting genes in cds")
 cds <- detectGenes(cds)
@@ -124,7 +150,7 @@ cds <- reduceDimension(cds, max_components = 2, num_dim=6,
 
 log_message("    Extracting reduced tSNE coordinates")
 tsne_coords <- t(reducedDimA(cds))
-row.names(tsne_coords) <- row.names(colData(cds))
+row.names(tsne_coords) <- row.names(pData(cds))
 log_message("        Done!")
 
 log_message("    Making Cicero CDS object")
@@ -217,4 +243,3 @@ write.csv(peak_to_gene, file.path(output_dir, "cicero_peak_to_gene.csv"), row.na
 
 log_message("Cicero pipeline completed.")
 
-spark_disconnect(sc)
