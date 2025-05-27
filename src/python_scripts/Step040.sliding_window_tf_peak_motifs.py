@@ -383,6 +383,13 @@ def find_ATAC_peak_sequence(peak_df, reference_genome_dir, parsed_peak_file, fig
     
     return chr_pos_to_seq
 
+def replace_nth(sub,repl,txt,nth):
+    arr=txt.split(sub)
+    part1=sub.join(arr[:nth])
+    part2=sub.join(arr[nth:])
+
+    return part1+repl+part2
+
 def main():
     # Parse arguments
     args: argparse.Namespace = parse_args()
@@ -413,14 +420,23 @@ def main():
     cicero_peak_names = cicero_peaks["peak_id"].to_list()
     logging.info(f'{len(cicero_peak_names)} Cicero peaks')
     
+    for i, peak in enumerate(cicero_peak_names):
+        if peak.count(":") > 1:
+            fmt_peak = replace_nth(":", "-", peak, 2)
+            cicero_peak_names[i] = fmt_peak
+        
     logging.info('Reading scATACseq data')
     atac_df: dd.DataFrame = dd.read_parquet(atac_data_file)
 
-    logging.info('Reading gene names from scATACseq data')
+    logging.info('Reading gene names from scRNAseq data')
     rna_data: dd.DataFrame = dd.read_parquet(rna_data_file)
+    
+    logging.info(atac_df.head().compute())
     
     peak_ids = atac_df[atac_df.columns[0]].compute()
     peak_ids = peak_ids[peak_ids.isin(cicero_peak_names)].astype(str)
+    
+    logging.info(f'{len(peak_ids)} peak_ids')
     
     # Get the set of unique gene_ids from the RNA dataset
     rna_data_genes = set(rna_data["gene_id"].compute().dropna())
