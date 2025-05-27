@@ -619,6 +619,15 @@ def main():
 
         logging.info(f"Selected {atac_sub.shape[0].compute()} ATAC features with highest dispersion")
         logging.info(f"Selected {rna_sub.shape[0].compute()} RNA features with highest dispersion")
+        
+        # 1) find the common cell barcodes
+        common_cells = list(set(atac_sub.columns).intersection(rna_sub.columns))
+        if len(common_cells) == 0:
+            raise ValueError("No shared cells between ATAC and RNA!")
+        
+        # 2) subset and reorder both DataFrames to that same list
+        atac_sub = atac_sub[common_cells]
+        rna_sub  = rna_sub[common_cells]
 
         return atac_sub, rna_sub
 

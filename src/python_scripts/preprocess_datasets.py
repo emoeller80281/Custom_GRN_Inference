@@ -3,6 +3,7 @@ import pandas as pd
 import argparse
 import logging
 import os
+from scipy import sparse
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Process TF motif binding potential.")

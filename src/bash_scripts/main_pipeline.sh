@@ -1,9 +1,9 @@
 #!/bin/bash -l
 
-#SBATCH --partition memory
+#SBATCH --partition compute
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=64G
+#SBATCH --mem=128G
 
 set -euo pipefail
 
@@ -12,7 +12,7 @@ set -euo pipefail
 # =============================================
 # Run the peak to TG regulatory potential calculation methods
 STEP010_CICERO_MAP_PEAKS_TO_TG=false
-STEP015_CICERO_PEAK_TO_TG_SCORE=true
+STEP015_CICERO_PEAK_TO_TG_SCORE=false
 
 STEP020_PEAK_TO_TG_CORRELATION=true
 # STEP030_PEAK_TO_ENHANCER_DB=false # Deprecated, does not help model and no data for mouse
@@ -593,10 +593,19 @@ run_cicero() {
     export CFLAGS="-std=gnu99"
     export CXXFLAGS="-std=gnu++14"
 
+    if [ ! -f "$OUTPUT_DIR/cicero_atac_input.txt" ]; then
+        {
+            /usr/bin/time -v \
+                python3 "$PYTHON_SCRIPT_DIR/convert_atac_to_sparse_for_cicero.py" \
+                    --atac_data_file "$ATAC_FILE_NAME" \
+                    --output_dir "$OUTPUT_DIR"
+        } &> "$LOG_DIR/convert_atac_to_sparse_for_cicero.log"
+    fi
+
     # Run your R script and pass PYTHON_PATH to the environment
     /usr/bin/time -v \
         Rscript "$R_SCRIPT_DIR/Step010.run_cicero.r" \
-            "$ATAC_FILE_NAME" \
+            "$OUTPUT_DIR/cicero_atac_input.txt" \
             "$OUTPUT_DIR" \
             "$CHROM_SIZES" \
             "$GENE_ANNOT" \

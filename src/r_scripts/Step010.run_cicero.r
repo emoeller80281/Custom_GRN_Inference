@@ -1,7 +1,7 @@
 # Load required libraries
 suppressPackageStartupMessages({
   library(cicero)
-  # library(monocle3)
+  library(monocle)
   library(Signac)
   library(Seurat)
   library(GenomicRanges)
@@ -14,6 +14,7 @@ suppressPackageStartupMessages({
   library(htmlwidgets)
   library(profvis)
   library(arrow)
+  library(data.table)
 })
 
 # =============================================
@@ -56,85 +57,98 @@ log_message(sprintf("Output directory: %s", output_dir))
 # Load and Preprocess Data
 # =============================================
 
-log_message("Loading ATACseq data from Parquet...")
-atac_tbl <- read_parquet(atac_file_path)
-atac_data <- as.data.frame(collect(atac_tbl))
+# log_message("Loading ATACseq data from Parquet...")
+# atac_tbl <- read_parquet(atac_file_path)
+# atac_data <- as.data.frame(collect(atac_tbl))
 
-# Rename column 1 if needed
-if (colnames(atac_data)[1] != "peak_id") {
-  colnames(atac_data)[1] <- "peak_id"
-}
-atac_data$peak_id <- as.character(atac_data$peak_id)
+# # Rename column 1 if needed
+# if (colnames(atac_data)[1] != "peak_id") {
+#   colnames(atac_data)[1] <- "peak_id"
+# }
+# atac_data$peak_id <- as.character(atac_data$peak_id)
 
-# Ensure there are measure columns
-if (ncol(atac_data) <= 1) {
-  stop("No measure columns found in ATAC data.")
-}
+# # Ensure there are measure columns
+# if (ncol(atac_data) <= 1) {
+#   stop("No measure columns found in ATAC data.")
+# }
 
-# Sanity check
-log_message("Printing column names before melt...")
-print(head(colnames(atac_data)))
+# # Sanity check
+# log_message("Printing column names before melt...")
+# print(head(colnames(atac_data)))
 
-log_message("Reshaping ATACseq datset to Cicero input format...")
-# atac_long <- reshape2::melt(
-#   atac_data,
-#   id.vars = "peak_id",
-#   variable.name = "cell",
-#   value.name = "reads"
-# ) %>%
-#   dplyr::mutate(
-#     numeric_reads = suppressWarnings(as.numeric(reads))
-#   ) %>%
-#   dplyr::filter(!is.na(numeric_reads) & numeric_reads > 0) %>%
-#   dplyr::mutate(
-#     peak_id = gsub("[:\\-]", "_", peak_id),
-#     count = numeric_reads
-#   ) %>%
-#   dplyr::select(peak_id, cell, count)
+# log_message("Reshaping ATACseq datset to Cicero input format...")
 
-log_message("Printing number of columns...")
-print(ncol(atac_data))
-print(colnames(atac_data)[1:5])
+# log_message("Printing number of columns...")
+# print(ncol(atac_data))
+# print(colnames(atac_data)[1:5])
 
-log_message("Checking for non-numeric columns (excluding 'peak_id')...")
-non_numeric <- sapply(atac_data[ , -1, drop = FALSE], function(x) !is.numeric(x))
-print(which(non_numeric))
+# log_message("Checking for non-numeric columns (excluding 'peak_id')...")
+# non_numeric <- sapply(atac_data[ , -1, drop = FALSE], function(x) !is.numeric(x))
+# print(which(non_numeric))
 
-if (ncol(atac_data) <= 1) stop("Only one column in data — no columns to melt.")
-if (all(non_numeric)) stop("All columns (except peak_id) are non-numeric — nothing to melt.")
+# if (ncol(atac_data) <= 1) stop("Only one column in data — no columns to melt.")
+# if (all(non_numeric)) stop("All columns (except peak_id) are non-numeric — nothing to melt.")
 
-# Manually define measure.vars as all columns *except* "peak_id"
-cell_columns <- setdiff(colnames(atac_data), "peak_id")
+# # Manually define measure.vars as all columns *except* "peak_id"
+# cell_columns <- setdiff(colnames(atac_data), "peak_id")
 
-# Double check there are cell columns to melt
-stopifnot(length(cell_columns) > 0)
+# # Double check there are cell columns to melt
+# stopifnot(length(cell_columns) > 0)
 
-print(str(atac_data[ , 1:5]))
-print(summary(sapply(atac_data[ , -1], class)))  # Should be numeric
+# print(str(atac_data[ , 1:5]))
+# print(summary(sapply(atac_data[ , -1], class)))  # Should be numeric
 
-atac_long <- melt(
-  atac_data,
-  id_vars = "peak_id",
-  variable.name = "cell",
-  value.name = "count"
-)
+# Drop-in replacement for deprecated as(..., "dgTMatrix")
+# dense_mat <- as.matrix(atac_data[, -1])
+# sparse_mat <- as(as(as(dense_mat, "dMatrix"), "generalMatrix"), "TsparseMatrix")
 
-length(unique(atac_long$peak_id))
-length(unique(atac_long$cell))
-sum(is.na(atac_long$count))
+# # Create long-format nonzero table
+# atac_sparse <- data.table(
+#   peak_id = atac_data$peak_id[sparse_mat@i + 1],
+#   cell    = colnames(atac_data)[-1][sparse_mat@j + 1],
+#   count   = sparse_mat@x
+# )
+
+# length(unique(atac_sparse$peak_id))
+# length(unique(atac_sparse$cell))
+# sum(is.na(atac_sparse$count))
 
 
-log_message("    Done!")
-str(atac_long)
+# log_message("    Done!")
+# str(atac_sparse)
 log_message("Creating a Cicero cell_data_set (CDS) from ATAC data...")
-log_message("    Running dimensionality reduction")
-cds <- make_atac_cds(
-  atac_long %>% dplyr::select(peak_id, cell, count) %>% as.data.frame() %>% `colnames<-`(NULL),
-  binarize = TRUE
-)
+# log_message("    Running dimensionality reduction")
+# cds <- make_atac_cds(
+#   atac_sparse %>% dplyr::select(peak_id, cell, count) %>% as.data.frame() %>% `colnames<-`(NULL),
+#   binarize = TRUE
+# )
 
-print(class(cds))  # Should say "cell_data_set"
+# 1) Read your three-column file (no header)
+sparse_df <- data.table::fread(atac_file_path,
+                               header    = FALSE,
+                               sep       = "\t",
+                               data.table= FALSE,
+                               col.names = c("peak_id", "cell", "count"))
 
+# Suppresses warning: 'as(<dgCMatrix>, "dgTMatrix")' is deprecated
+suppressWarnings({
+  cds <- make_atac_cds(sparse_df, binarize = TRUE)
+})
+
+# stopifnot(all(!is.na(atac_sparse$cell)))
+# stopifnot(all(!is.na(atac_sparse$peak_id)))
+# stopifnot(all(atac_sparse$count >= 0))
+
+# expr_mat <- exprs(cds)
+# stopifnot(!any(is.na(expr_mat)))
+# stopifnot(!any(is.infinite(expr_mat)))
+
+# stopifnot(nrow(cds) > 0)
+# stopifnot(ncol(cds) > 0)
+
+# print(class(cds))  # Should say "cell_data_set"
+
+cds <- aggregate_nearby_peaks(cds, distance = 10000)
 
 set.seed(2017)
 log_message("    Detecting genes in cds")
@@ -143,10 +157,19 @@ cds <- detectGenes(cds)
 log_message("    Estimating cds size factor")
 cds <- estimateSizeFactors(cds)
 
+cds <- estimateDispersions(cds)
+
+# log_message("    Preprocessing CDS")
+# cds <- preprocessCDS(
+#   cds,
+#   method = "PCA",
+#   num_dim = 50,
+#   norm_method = "log",
+# )
+
 log_message("    Reducing dimensions for cds using tSNE")
-# input_cds <- preprocessCDS(cds, norm_method = "none")
 cds <- reduceDimension(cds, max_components = 2, num_dim=6,
-                      reduction_method = 'tSNE', norm_method = "none")
+                      reduction_method = 'tSNE', norm_method = "log")
 
 log_message("    Extracting reduced tSNE coordinates")
 tsne_coords <- t(reducedDimA(cds))
@@ -206,7 +229,7 @@ gene_anno <- rtracklayer::import(gene_annot) %>%
   as.data.frame() %>%
   select(seqnames, start, end, strand, gene_id, gene_name, transcript_id) %>%
   mutate(
-    chromosome = paste0("chr", seqnames),
+    chromosome = as.character(seqnames),
     gene = gene_id,
     symbol = gene_name
   )
@@ -214,18 +237,22 @@ gene_anno <- rtracklayer::import(gene_annot) %>%
 
 # Prepare TSS annotations
 log_message("Preparing TSS annotations...")
-pos <- gene_anno %>% filter(strand == "+") %>%
+pos <- gene_anno %>% 
+  filter(strand == "+") %>%
   arrange(start) %>%
   distinct(gene_id, .keep_all = TRUE) %>%
   mutate(end = start + 1)
 
-neg <- gene_anno %>% filter(strand == "-") %>%
+neg <- gene_anno %>% 
+  filter(strand == "-") %>%
   arrange(desc(start)) %>%
   distinct(gene_id, .keep_all = TRUE) %>%
   mutate(start = end - 1)
 
 gene_annotation_sub <- bind_rows(pos, neg) %>%
   select(chromosome, start, end, gene = symbol)
+
+gene_annotation_sub$chromosome <- paste0("chr", gsub("^chr", "", gene_annotation_sub$chromosome))
 
 # Annotate CDS
 log_message("Annotating CDS...")
