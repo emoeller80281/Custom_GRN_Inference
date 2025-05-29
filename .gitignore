@@ -39,3 +39,4 @@ tmp/
 keypairs.json
 string_database/
 __pycache__/
+scratchpad/

@@ -54,10 +54,12 @@ def load_atac_dataset(atac_data_file: str) -> pd.DataFrame:
         
     elif atac_data_file.lower().endswith('.tsv'):
         df = pd.read_csv(atac_data_file, sep="\t", header=0, index_col=None)
-
         
     else:
         logging.error("ERROR: ATAC data file must be a csv, tsv, or parquet format. Check column separators")
+        
+    logging.info(f'\tNumber of peaks: {df.shape[0]}')
+    logging.info(f'\tNumber of cells: {df.shape[1]-1}')
         
     return df.rename(columns={df.columns[0]: "peak_id"})
 
@@ -73,6 +75,9 @@ def load_rna_dataset(rna_data_file: str) -> pd.DataFrame:
         
     else:
         logging.error("ERROR: RNA data file must be a csv, tsv, or parquet format. Check column separators")
+        
+    logging.info(f'\tNumber of genes: {df.shape[0]}')
+    logging.info(f'\tNumber of cells: {df.shape[1]-1}')
     
     return df.rename(columns={df.columns[0]: "gene_id"})
 

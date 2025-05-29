@@ -125,7 +125,7 @@ def plot_feature_boxplots(features, inferred_network, fig_dir):
         IQR = Q3 - Q1
         lower = Q1 - 1.5 * IQR
         upper = Q3 + 1.5 * IQR
-        return series[(series >= lower) & (series <= upper)]
+        return series.where((series >= lower) & (series <= upper) | series.isna())
 
     n_features = len(features)
     ncols = 3
@@ -138,8 +138,8 @@ def plot_feature_boxplots(features, inferred_network, fig_dir):
         ax = axes[i]
 
         try:
-            data_0 = remove_outliers(inferred_network[inferred_network["label"] == 0][feature].dropna())
-            data_1 = remove_outliers(inferred_network[inferred_network["label"] == 1][feature].dropna())
+            data_0 = remove_outliers(inferred_network[inferred_network["label"] == 0][feature])
+            data_1 = remove_outliers(inferred_network[inferred_network["label"] == 1][feature])
         except KeyError as e:
             logging.warning(f"Feature '{feature}' not found in inferred network. Skipping.")
             continue

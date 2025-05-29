@@ -20,6 +20,7 @@ import logging
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pyarrow.lib as pa_lib
+import matplotlib.pyplot as plt
 
 from normalization import (
     minmax_normalize_dask,
@@ -70,6 +71,12 @@ def parse_args() -> argparse.Namespace:
         type=str,
         required=True,
         help="Number of base pairs away from a genes TSS to associate with peaks"
+    )
+    parser.add_argument(
+        "--fig_dir",
+        type=str,
+        required=True,
+        help="Path to the sample's figure directory"
     )
     
     args: argparse.Namespace = parser.parse_args()
@@ -211,6 +218,8 @@ def find_genes_near_peaks(peak_bed, tss_bed, rna_df, peak_dist_limit, tmp_dir):
     
     # Filter out any genes not found in the RNA-seq dataset.
     peak_tss_subset_df = peak_tss_subset_df[peak_tss_subset_df["target_id"].isin(rna_df["gene_id"])]
+    
+    logging.info(f'\t- Number of peaks: {len(peak_tss_subset_df)}')
         
     peak_tss_subset_df.to_parquet(f"{tmp_dir}/peak_to_gene_map.parquet", index=False)
 
@@ -281,10 +290,110 @@ def select_top_dispersion_auto(df, target_n_features=5000, dispersion_quantile=0
     df = df[df["feature_id"].isin(top_feature_names)]
 
     # Set index back to feature_id (for clarity)
-    df = df.set_index("feature_id")
-
+    df = df.set_index("feature_id")         
+    
     return df
 
+def plot_dispersion_histogram_from_ddf(
+    ddf,                     # Dask DataFrame: features × cells
+    quantile,
+    title,
+    fig_dir,
+    highlight_idx=None,
+    bins=100
+):
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    import os
+
+    # 1) Compute dispersion = var/mean across cells
+    disp = (ddf.var(axis=1) / (ddf.mean(axis=1) + 1e-8))
+    
+    # 2) Optional highlight series
+    if highlight_idx is not None:
+        highlight_idx = set(highlight_idx)
+        disp_high = disp.loc[disp.index.isin(highlight_idx)]
+    else:
+        disp_high = None
+
+    # 3) Plot
+    plt.figure(figsize=(8, 5))
+    sns.histplot(disp, bins=bins, color="gray", alpha=0.6, label="All features")
+    if disp_high is not None and not disp_high.empty:
+        sns.histplot(disp_high, bins=bins, color="red", alpha=0.6, label="Highlighted")
+    thresh = disp.quantile(quantile)
+    plt.axvline(thresh, color="black", linestyle="--", label=f"{quantile:.2f} quantile")
+
+    plt.title(f"{title} Dispersion Histogram")
+    plt.xlabel("Dispersion")
+    plt.ylabel("Feature count")
+    plt.legend()
+    plt.tight_layout()
+
+    os.makedirs(fig_dir, exist_ok=True)
+    plt.savefig(f"{fig_dir}/{title.lower()}_dispersion_distribution_hist.png", dpi=200)
+    plt.close()
+
+
+    
+def plot_atac_vs_rna_dispersion_scatterplot(
+    rna_ddf,                 # Dask DataFrame: genes × cells
+    atac_ddf,                # Dask DataFrame: peaks × cells
+    peak_to_gene_dd,         # Dask DataFrame with peak_id→target_id
+    fig_dir,
+    quantile=0.75,
+    highlight_genes=None     # list of gene IDs to highlight
+):
+    import matplotlib.pyplot as plt
+    import pandas as pd
+    import os
+
+    # 1) compute RNA dispersion z
+    rna_disp = (rna_ddf.var(axis=1) / (rna_ddf.mean(axis=1) + 1e-8))
+    rna_z    = (rna_disp - rna_disp.mean()) / rna_disp.std()
+
+    # 2) compute peak-level dispersion z
+    peak_disp = (atac_ddf.var(axis=1) / (atac_ddf.mean(axis=1) + 1e-8))
+    peak_z    = (peak_disp - peak_disp.mean()) / peak_disp.std()
+
+    # 3) map peaks → gene, aggregate by max
+    p2g = peak_to_gene_dd[["peak_id","target_id"]].drop_duplicates()
+    peak_df = pd.DataFrame({"peak_id": peak_z.index, "peak_z": peak_z.values})
+    merged  = peak_df.merge(p2g, on="peak_id")
+    gene_z  = merged.groupby("target_id")["peak_z"].max()
+    gene_z  = (gene_z - gene_z.mean()) / gene_z.std()
+
+    # 4) intersect
+    common = rna_z.index.intersection(gene_z.index)
+    x = rna_z.loc[common]
+    y = gene_z.loc[common]
+
+    # 5) plot
+    plt.figure(figsize=(6,6))
+    plt.scatter(x, y, s=5, alpha=0.4, color="gray", label="All genes")
+
+    if highlight_genes:
+        h = list(set(highlight_genes) & set(common))
+        plt.scatter(x.loc[h], y.loc[h], s=10, color="red", alpha=0.8,
+                    label=f"Highlighted (n={len(h)})")
+
+    plt.axhline(0, color="black", linestyle="--")
+    plt.axvline(0, color="black", linestyle="--")
+    mx = max(abs(x.min()), abs(x.max()))+0.5
+    my = max(abs(y.min()), abs(y.max()))+0.5
+    plt.xlim(-mx,mx); plt.ylim(-my,my)
+
+    plt.xlabel("RNA Dispersion (z-score)")
+    plt.ylabel("ATAC Gene Dispersion (z-score)")
+    plt.title("Gene‐Level Dispersion (RNA vs ATAC)")
+    plt.legend()
+    plt.tight_layout()
+
+    os.makedirs(fig_dir, exist_ok=True)
+    plt.savefig(f"{fig_dir}/atac_vs_rna_dispersion_scatterplot.png", dpi=200)
+    plt.close()
+
+    
 def auto_tune_parameters(num_cpu: int = None, total_memory_gb: int = None) -> dict:
     """
     Suggests optimal chunk_size, batch_size, and number of Dask workers based on system resources.
@@ -347,7 +456,7 @@ def calculate_significant_peak_to_gene_correlations(
     atac_df,
     gene_df,
     output_file=None,
-    alpha=0.01,
+    alpha=0.05,
     chunk_size=25_000,
     num_cpu=4,
     batch_size=1500,
@@ -385,10 +494,18 @@ def calculate_significant_peak_to_gene_correlations(
         If using memory mode, returns a DataFrame.
         If using disk streaming mode, returns output_file path.
     """
+    
+    if output_file is None:
+        raise ValueError("output_file must be provided.")
+
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
 
     # Make sure dataframes are pandas
+    logging.info('\tConverting ATAC dask dataframe to pandas')
     if isinstance(atac_df, dd.DataFrame):
         atac_df = atac_df.compute()
+        
+    logging.info('\tConverting RNA dask dataframe to pandas')
     if isinstance(gene_df, dd.DataFrame):
         gene_df = gene_df.compute()
 
@@ -438,7 +555,7 @@ def calculate_significant_peak_to_gene_correlations(
             sig_indices = np.where(p_chunk < alpha)[0]
             for local_idx in sig_indices:
                 results.append((i, gene_indices[local_idx], r_chunk[local_idx]))
-
+                
         return results
 
     if num_pairs <= memory_threshold:
@@ -461,16 +578,14 @@ def calculate_significant_peak_to_gene_correlations(
         df_corr = df_corr[["peak_id", "gene_id", "correlation"]]
 
         logging.info("    Done!")
+        
+        df_corr.to_parquet(output_file, engine="pyarrow", compression="snappy")
+
         return df_corr
 
     else:
         # --- Version 1: Streaming-to-Parquet Mode ---
         logging.info("    Too large for memory. Streaming results to disk.")
-
-        if output_file is None:
-            raise ValueError("output_file must be provided for streaming mode.")
-
-        os.makedirs(os.path.dirname(output_file), exist_ok=True)
 
         tasks = [
             delayed(process_peak_gene_chunked)(i, X_norm, Y_norm, df_degrees, n, alpha, chunk_size, min_r=0.2)
@@ -539,9 +654,12 @@ def main():
     TMP_DIR = f"{OUTPUT_DIR}/tmp"
     NUM_CPU = int(args.num_cpu)
     PEAK_DIST_LIMIT=args.peak_dist_limit
+    FIG_DIR=os.path.join(args.fig_dir, "peak_gene_correlation_figures")
+    
+    os.makedirs(FIG_DIR, exist_ok=True)
     
     # Auto-tune parameters based on system resources
-    tuned_params = auto_tune_parameters(num_cpu=int(args.num_cpu))
+    tuned_params = auto_tune_parameters(num_cpu=NUM_CPU)
     chunk_size = tuned_params["chunk_size"]
     batch_size = tuned_params["batch_size"]
     num_workers = tuned_params["num_workers"]
@@ -595,11 +713,13 @@ def main():
     else:
         logging.info('TSS distance file exists, loading...')
     
+    pybedtools.helpers.cleanup(verbose=False, remove_all=True)
+    
     peak_gene_dd = dd.read_parquet(f"{TMP_DIR}/peak_to_gene_map.parquet")
 
     # ============ PEAK TO GENE CORRELATION CALCULATION ============
     PARQ = os.path.join(TMP_DIR, "sig_peak_to_gene_corr.parquet")
-
+    
     def prepare_inputs_for_correlation():
         logging.info("Subsetting ATAC and RNA matrices to relevant peaks/genes")
 
@@ -634,12 +754,13 @@ def main():
 
     def run_correlation_and_load():
         atac_sub, rna_sub = prepare_inputs_for_correlation()
-        logging.info("Calculating significant ATAC-seq peak-to-gene correlations")
+        
+        logging.info("\nCalculating significant ATAC-seq peak-to-gene correlations")
         result = calculate_significant_peak_to_gene_correlations(
             atac_sub,
             rna_sub,
             output_file=PARQ,
-            alpha=0.05,
+            alpha=0.5,
             chunk_size=chunk_size,
             num_cpu=num_workers,
             batch_size=batch_size
@@ -660,44 +781,64 @@ def main():
             logging.warning(f"Corrupt Parquet file detected at {PARQ}. Deleting and recalculating...")
             os.remove(PARQ)
             sig_peak_to_gene_corr = run_correlation_and_load()
+    
+    logging.info("DataFrame after calculating sig peak to gene correlations")
+    logging.info(f'Number of edges in sig_peak_to_gene_corr: {len(sig_peak_to_gene_corr)}')
 
-    # Compute the 90th-percentile cutoff
-    quantile_threshold = 0.70
-    logging.info(f"Computing the {quantile_threshold*100:.0f}th percentile of correlation…")
-    cutoff = sig_peak_to_gene_corr["correlation"].quantile(quantile_threshold).compute()
-    logging.info(f"Cutoff = {cutoff:.4f}")
+    if len(sig_peak_to_gene_corr["correlation"]) > 1_000_000:
+        quantile_threshold = 0.70
+        logging.info("More than 1,000,000 significantly correlated edges")
+        logging.info(f"Computing the {quantile_threshold*100:.0f}th percentile of correlation…")
+        cutoff = sig_peak_to_gene_corr["correlation"].quantile(quantile_threshold).compute()
+        logging.info(f"\tCutoff = {cutoff:.4f}")
+        
+    else:
+        logging.info("Less than 1,000,000 significant edges, skipping quantile thresholding")
+        cutoff = 0
 
     # Filter to only peak to TG correlations ≥ cutoff
     filtered = sig_peak_to_gene_corr[sig_peak_to_gene_corr["correlation"] >= cutoff]
+    
+    # logging.info("DataFrame after filtering 70th quantile")
+    logging.info(f'\t- Number of edges: {len(filtered)}')
     
     # Rename so both sides use "target_id"
     filtered = filtered.rename(columns={"gene_id": "target_id"})
 
     # Merge the TSS distance score and correlation DataFrames
+    logging.info('Merging the correlation and TSS distance score DataFrames')
+    logging.info(f'\t- Number of rows in the TSS DataFrame: {len(peak_gene_dd)}')
+    logging.info(f'\t- Number of rows in the correlation DataFrame: {len(filtered)}')
     joined: dd.DataFrame = filtered.merge(
         peak_gene_dd,
-        how="inner",
+        how="outer",
         on=["peak_id", "target_id"]
     )[["peak_id", "target_id", "correlation", "TSS_dist_score"]]
-        
+    
+    logging.info(f'\t- Number of overlapping edges: {len(joined)}')
+    
+    logging.info(f'\nClipping to within the upper and lower 95th quantiles, log1p normalizing scores')
     normalized_ddf = clip_and_normalize_log1p_dask(
         ddf=joined,
         score_cols=["correlation"],
-        quantiles=(0.05, 0.95),
+        quantiles=(0, 1),
         apply_log1p=True,
         dtype=np.float32
     )
+    logging.info(f'\t- Number of edges after clipping and normalizing: {len(normalized_ddf)}')
     
+    logging.info(f'\nMinmax normalizing scores between 0-1')
     normalized_ddf = minmax_normalize_dask(
         ddf=normalized_ddf, 
         score_cols=["correlation", "TSS_dist_score"], 
         dtype=np.float32
     )
+    logging.info(f'\t- Number of edges: {len(normalized_ddf)}')
         
     out_path = f"{OUTPUT_DIR}/peak_to_gene_correlation.parquet"
     normalized_ddf.to_parquet(out_path, engine="pyarrow", compression="snappy")
-
-    logging.info(f"Wrote top-10% correlations + TSS scores to {out_path}")
+    
+    logging.info(f"Wrote peak to gene correlation and TSS scores to {out_path}")
     logging.info("\n-----------------------------------------\n")
     
 if __name__ == "__main__":

@@ -232,26 +232,26 @@ def main():
     reference_net_dir="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/REFERENCE_NETWORKS"
     
     ground_truth_files = {
-        "mESC": ["RN111_ChIPSeq_BEELINE_Mouse_ESC.tsv", "RN112_LOGOF_BEELINE_Mouse_ESC.tsv", "RN114_ChIPX_ESCAPE_Mouse_ESC.tsv", "RN115_LOGOF_ESCAPE_Mouse_ESC.tsv"],
+        "mESC": ["RN111_ChIPSeq_BEELINE_Mouse_ESC.tsv"],
         "K562": ["RN117_ChIPSeq_PMID37486787_Human_K562.tsv", "RN118_KO_KnockTF_Human_K562.tsv", "RN119_ChIPSeqandKO_PMID37486787andKnockTF_Human_K562.tsv"],
         "macrophage":["RN204_ChIPSeq_ChIPAtlas_Human_Macrophages.tsv"]
         }
     
     # Excluding this ground truth, keeping it separate for testing the model with a naive ground truth
-    excluded_ground_truth_files = ["RN111_ChIPSeq_BEELINE_Mouse_ESC.tsv"]
-    excluded_inferred_score_files = ["filtered_L2_E7.5_rep1"]
+    excluded_ground_truth_files = []
+    excluded_inferred_score_files = []
     
     ground_truth_save_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/ground_truth_files"
     
     for cell_type in cell_types:
         # Combine the ground truth files together
-        combine_ground_truth_datasets(
-            reference_net_dir,
-            cell_type,
-            ground_truth_files[cell_type],
-            ground_truth_save_dir,
-            excluded_ground_truth_files
-        )
+        # combine_ground_truth_datasets(
+        #     reference_net_dir,
+        #     cell_type,
+        #     ground_truth_files[cell_type],
+        #     ground_truth_save_dir,
+        #     excluded_ground_truth_files
+        # )
         
         # find the path to the inferred score files for each cell type
         cell_type_paths: dict[list] = locate_inferred_score_files(inferred_score_filename, output_dir, cell_type)

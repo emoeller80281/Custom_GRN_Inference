@@ -86,6 +86,7 @@ def main():
     output_path = os.path.join(output_dir, save_name)
     logging.info(f"Saving to {output_path}")
     result_df.to_csv(output_path, sep="\t", index=False)
+    logging.info("Done!")
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(message)s")

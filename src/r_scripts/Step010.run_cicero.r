@@ -249,10 +249,24 @@ neg <- gene_anno %>%
   distinct(gene_id, .keep_all = TRUE) %>%
   mutate(start = end - 1)
 
-gene_annotation_sub <- bind_rows(pos, neg) %>%
+# 1. Build your data.frame of TSS sites
+gene_df <- bind_rows(pos, neg) %>%
   select(chromosome, start, end, gene = symbol)
 
-gene_annotation_sub$chromosome <- paste0("chr", gsub("^chr", "", gene_annotation_sub$chromosome))
+# 2. Turn it into a GRanges
+gr_genes <- makeGRangesFromDataFrame(
+  gene_df,
+  seqnames.field   = "chromosome",
+  keep.extra.columns = TRUE
+)
+
+keep <- c(paste0("chr", 1:19), "chrX", "chrY", "chrM")
+
+# 3. Harmonize naming & prune
+seqlevelsStyle(gr_genes)  <- "UCSC"
+gr_genes <- keepSeqlevels(gr_genes, keep, pruning.mode="coarse")
+
+gene_annotation_sub <- as.data.frame(gr_genes)
 
 # Annotate CDS
 log_message("Annotating CDS...")

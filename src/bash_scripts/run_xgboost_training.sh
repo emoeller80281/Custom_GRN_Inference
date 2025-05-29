@@ -1,5 +1,5 @@
 #!/bin/bash -l
-#SBATCH -p compute
+#SBATCH -p memory
 #SBATCH --nodes=1
 #SBATCH -c 64
 #SBATCH --mem=256G
@@ -31,14 +31,18 @@ determine_num_cpus() {
 
 determine_num_cpus
 
+conda activate my_env
+
 # Set base directories and files
 BASE_DIR=$(readlink -f "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER")
 PYTHON_SCRIPT_DIR="$BASE_DIR/src/python_scripts"
 
-COMBINED_GROUND_TRUTH="$BASE_DIR/ground_truth_files/combined_mESC_ground_truth.tsv"
+GROUND_TRUTH="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/REFERENCE_NETWORKS/RN111_ChIPSeq_BEELINE_Mouse_ESC.tsv"
 COMBINED_INFERRED_NET="$BASE_DIR/output/combined_inferred_dfs/mESC_combined_inferred_score_df.parquet"
+DS011_INFERRED_NET="$BASE_DIR/output/DS011_mESC/DS011_mESC_sample1/inferred_grns/inferred_score_df.parquet"
 OUTPUT_DIR="$BASE_DIR/output/combined_inferred_dfs/xgb_trained_models"
 FIG_DIR="$BASE_DIR/figures/mm10/combined_samples"
+DS011_FIG_DIR="$BASE_DIR/figures/mm10/DS011"
 
 mkdir -p "$FIG_DIR"
 mkdir -p "$OUTPUT_DIR"
@@ -46,10 +50,20 @@ mkdir -p "$OUTPUT_DIR"
 echo ""
 echo "Python: Training XGBoost Classifier"
 /usr/bin/time -v python3 "$PYTHON_SCRIPT_DIR/Step070.train_xgboost.py" \
-        --ground_truth_file "$COMBINED_GROUND_TRUTH" \
+        --ground_truth_file "$GROUND_TRUTH" \
         --inferred_network_file "$COMBINED_INFERRED_NET" \
         --trained_model_dir "$OUTPUT_DIR" \
         --fig_dir "$FIG_DIR" \
         --model_save_name "xgb_mESC_combined_model" \
+        --num_cpu "$NUM_CPU"
+
+echo ""
+echo "Python: Training XGBoost Classifier"
+/usr/bin/time -v python3 "$PYTHON_SCRIPT_DIR/Step070.train_xgboost.py" \
+        --ground_truth_file "$GROUND_TRUTH" \
+        --inferred_network_file "$DS011_INFERRED_NET" \
+        --trained_model_dir "$OUTPUT_DIR" \
+        --fig_dir "$DS011_FIG_DIR" \
+        --model_save_name "xgb_mESC_DS011_model" \
         --num_cpu "$NUM_CPU"
 

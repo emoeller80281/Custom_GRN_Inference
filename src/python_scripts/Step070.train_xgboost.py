@@ -228,23 +228,23 @@ def main():
     prarm_grid_out_dir = train_test_dir = os.path.join(trained_model_dir, f"parameter_grid_search/{model_save_name}")
     
     # Run the parameter grid search
-    logging.info("Starting parameter grid search")
-    grid = parameter_grid_search(
-        X_train, 
-        y_train, 
-        X_test,
-        y_test,
-        prarm_grid_out_dir, 
-        cpu_count=16, 
-        fig_dir=fig_dir
-        )
+    # logging.info("Starting parameter grid search")
+    # grid = parameter_grid_search(
+    #     X_train, 
+    #     y_train, 
+    #     X_test,
+    #     y_test,
+    #     prarm_grid_out_dir, 
+    #     cpu_count=num_cpu, 
+    #     fig_dir=fig_dir
+    #     )
 
-    logging.info("Plotting grid search best estimator feature importances")
-    plot_feature_importance(
-        features=feature_names,
-        model=grid,
-        fig_dir=os.path.join(fig_dir, "parameter_search")
-    )
+    # logging.info("Plotting grid search best estimator feature importances")
+    # plot_feature_importance(
+    #     features=feature_names,
+    #     model=grid,
+    #     fig_dir=os.path.join(fig_dir, "parameter_search")
+    # )
 
     plot_feature_score_histograms(feature_names, model_df, fig_dir)
     plot_feature_importance(feature_names, xgb_booster, fig_dir)

@@ -14,15 +14,15 @@ set -euo pipefail
 STEP010_CICERO_MAP_PEAKS_TO_TG=false
 STEP015_CICERO_PEAK_TO_TG_SCORE=false
 
-STEP020_PEAK_TO_TG_CORRELATION=false
+STEP020_PEAK_TO_TG_CORRELATION=true
 # STEP030_PEAK_TO_ENHANCER_DB=false # Deprecated, does not help model and no data for mouse
 
 # Run the TF to peak binding score calculation methods
-STEP040_SLIDING_WINDOW_TF_TO_PEAK_SCORE=true
-STEP050_HOMER_TF_TO_PEAK_SCORE=true
+STEP040_SLIDING_WINDOW_TF_TO_PEAK_SCORE=false
+STEP050_HOMER_TF_TO_PEAK_SCORE=false
 
 # Combine the score DataFrames
-STEP060_COMBINE_DATAFRAMES=true
+STEP060_COMBINE_DATAFRAMES=false
 SUBSAMPLE_PERCENT=50 # Percent of rows of the combined dataframe to subsample
 
 # Train a predictive model to infer the GRN
@@ -575,6 +575,15 @@ run_cicero() {
         exit 1
     fi
 
+    if [ ! -f "$OUTPUT_DIR/cicero_atac_input.txt" ]; then
+        {
+            /usr/bin/time -v \
+                python3 "$PYTHON_SCRIPT_DIR/convert_atac_to_sparse_for_cicero.py" \
+                    --atac_data_file "$ATAC_FILE_NAME" \
+                    --output_dir "$OUTPUT_DIR"
+        } &> "$LOG_DIR/convert_atac_to_sparse_for_cicero.log"
+    fi
+
     # Ensure log directory exists
     mkdir -p "$LOG_DIR"
 
@@ -592,15 +601,6 @@ run_cicero() {
     export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
     export CFLAGS="-std=gnu99"
     export CXXFLAGS="-std=gnu++14"
-
-    if [ ! -f "$OUTPUT_DIR/cicero_atac_input.txt" ]; then
-        {
-            /usr/bin/time -v \
-                python3 "$PYTHON_SCRIPT_DIR/convert_atac_to_sparse_for_cicero.py" \
-                    --atac_data_file "$ATAC_FILE_NAME" \
-                    --output_dir "$OUTPUT_DIR"
-        } &> "$LOG_DIR/convert_atac_to_sparse_for_cicero.log"
-    fi
 
     # Run your R script and pass PYTHON_PATH to the environment
     /usr/bin/time -v \
@@ -637,7 +637,8 @@ run_correlation_peak_to_tg_score() {
         --output_dir "$OUTPUT_DIR" \
         --species "$SPECIES" \
         --num_cpu "$NUM_CPU" \
-        --peak_dist_limit 1000000
+        --peak_dist_limit 1000000 \
+        --fig_dir "$FIG_DIR"
 
 } 2> "$LOG_DIR/Step020.peak_gene_correlation.log"
 

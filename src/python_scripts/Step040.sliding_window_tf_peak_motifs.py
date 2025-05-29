@@ -18,6 +18,9 @@ import logging
 import argparse
 import re
 from scipy import stats
+from pyarrow.parquet import ParquetFile
+from pyarrow.lib import ArrowInvalid
+
 
 from normalization import (
     minmax_normalize_dask,
@@ -189,6 +192,13 @@ def process_motif_file_and_save(file, meme_dir, output_dir):
         logging.error(f"Error processing {file}: {e}")
         return False
 
+def is_valid_parquet(file_path):
+    try:
+        ParquetFile(file_path)
+        return True
+    except (ArrowInvalid, OSError):
+        return False
+
 def associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, rna_data_genes, species, num_cpu, output_dir):
     logging.info("Preparing for parallel motif scoring...")
 
@@ -230,7 +240,10 @@ def associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, rna_dat
         motif_id = motif_file.replace('.txt', '')
         if motif_id in tf_motif_names:
             tf_names = tf_df[tf_df["Motif_ID"] == motif_id]["TF_Name"].values
-            all_cached = all(os.path.exists(os.path.join(tmp_dir, f"{tf}.parquet")) for tf in tf_names)
+            all_cached = all(
+                is_valid_parquet(os.path.join(tmp_dir, f"{tf}.parquet"))
+                for tf in tf_names
+            )
             if not all_cached:
                 filtered_motif_files.append(motif_file)
 
@@ -417,7 +430,7 @@ def main():
     logging.info("Reading in parsed Cicero peak to TG file to find associated peaks")
     cicero_peak_file = f"{output_dir}/cicero_peak_to_tg_scores.parquet"
     cicero_peaks = pd.read_parquet(cicero_peak_file)
-    cicero_peak_names = cicero_peaks["peak_id"].to_list()
+    cicero_peak_names = cicero_peaks["peak_id"].drop_duplicates().to_list()
     logging.info(f'{len(cicero_peak_names)} Cicero peaks')
     
     for i, peak in enumerate(cicero_peak_names):
@@ -430,13 +443,11 @@ def main():
 
     logging.info('Reading gene names from scRNAseq data')
     rna_data: dd.DataFrame = dd.read_parquet(rna_data_file)
-    
-    logging.info(atac_df.head().compute())
-    
+        
     peak_ids = atac_df[atac_df.columns[0]].compute()
     peak_ids = peak_ids[peak_ids.isin(cicero_peak_names)].astype(str)
     
-    logging.info(f'{len(peak_ids)} peak_ids')
+    logging.info(f'{len(peak_ids)} peak_ids overlapping between Cicero and ATAC')
     
     # Get the set of unique gene_ids from the RNA dataset
     rna_data_genes = set(rna_data["gene_id"].compute().dropna())
@@ -452,7 +463,6 @@ def main():
         # Read in the ATACseq dataframe and parse the peak locations into a dataframe of genomic locations and peak IDs
         logging.info(f'Identifying ATACseq peak sequences')
         peak_df = format_peaks(peak_ids)
-        logging.info(peak_df.head())
         
         # Get the genomic sequence from the reference genome to each ATACseq peak
         chr_pos_to_seq = find_ATAC_peak_sequence(peak_df, reference_genome_dir, parsed_peak_file, fig_dir)

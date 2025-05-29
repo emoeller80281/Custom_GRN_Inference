@@ -1,5 +1,5 @@
 #!/bin/bash -l
-#SBATCH --partition=compute
+#SBATCH --partition=memory
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=32G
@@ -10,17 +10,21 @@ source activate my_env
 
 BASE_DIR=$(readlink -f "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER")
 
-MODEL_PREDICTION_DIR="$BASE_DIR/output/combined_inferred_dfs/model_predictions"
+COMBINED_MODEL_PREDICTION_DIR="$BASE_DIR/output/combined_inferred_dfs/model_predictions"
 
-MODEL="$BASE_DIR/output/combined_inferred_dfs/xgb_trained_models/xgb_mESC_combined_model.json"
+MESC_COMBINED_MODEL="$BASE_DIR/output/combined_inferred_dfs/xgb_trained_models/xgb_mESC_combined_model.json"
 
-TARGET="$BASE_DIR/output/mESC/filtered_L2_E7.5_rep1/inferred_grns/inferred_score_df.parquet"
+KIDNEY_TARGET="$BASE_DIR/output/mouse_kidney/mouse_kidney_sample1/inferred_grns/inferred_score_df.parquet"
+DS011_TARGET="$BASE_DIR/output/DS011_mESC/DS011_mESC_sample1/inferred_grns/inferred_score_df.parquet"
 
-SAVE_NAME="combined_mESC_vs_E7.5_rep1_xgb_pred.tsv"
+KIDNEY_SAVE_NAME="combined_mESC_vs_mouse_kidney_xgb_pred.tsv"
+DS011_SAVE_NAME="combined_mESC_vs_DS011_mESC_xgb_pred.tsv"
 
 # Run the python script for the selected model
 python3 "$BASE_DIR/src/python_scripts/Step090.apply_trained_xgboost.py" \
-    --output_dir "$MODEL_PREDICTION_DIR" \
-    --model "$MODEL" \
-    --target "$TARGET" \
-    --save_name "$SAVE_NAME"
+    --output_dir "$COMBINED_MODEL_PREDICTION_DIR" \
+    --model "$MESC_COMBINED_MODEL" \
+    --target "$DS011_TARGET" \
+    --save_name "$DS011_SAVE_NAME"
+
+echo "DONE!"

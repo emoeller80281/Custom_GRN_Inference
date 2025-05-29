@@ -76,8 +76,10 @@ def main():
     merged_with_promoter_genes = merged_with_promoter_genes[["peak_id","target_id","cicero_score"]]
     
     # Format the peaks to chr:start-stop rather than chr_start_stop to match the ATACseq peaks
-    merged_with_promoter_genes["peak_id"] = merged_with_promoter_genes["peak_id"].str.replace("_", "-")
-    merged_with_promoter_genes["peak_id"] = merged_with_promoter_genes["peak_id"].str.replace("-", ":", 1)
+    merged_with_promoter_genes["peak_id"] = (
+        merged_with_promoter_genes["peak_id"]
+        .str.replace(r"^(chr[^_]+)_([0-9]+)_([0-9]+)$", r"\1:\2-\3", regex=True)
+    )
     
     normalized_df = minmax_normalize_pandas(
         df=merged_with_promoter_genes, 

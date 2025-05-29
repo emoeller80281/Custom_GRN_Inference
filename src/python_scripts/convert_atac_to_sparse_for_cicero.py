@@ -11,8 +11,22 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 def load_atac_dataset(atac_data_file: str) -> pd.DataFrame:
-    atac_df: pd.DataFrame = pd.read_parquet(atac_data_file)
-    return atac_df
+    if atac_data_file.lower().endswith('.parquet'):
+        df = pd.read_parquet(atac_data_file)
+        
+    elif atac_data_file.lower().endswith('.csv'):
+        df = pd.read_csv(atac_data_file, sep=",", header=0, index_col=None)
+        
+    elif atac_data_file.lower().endswith('.tsv'):
+        df = pd.read_csv(atac_data_file, sep="\t", header=0, index_col=None)
+        
+    else:
+        logging.error("ERROR: ATAC data file must be a csv, tsv, or parquet format. Check column separators")
+        
+    logging.info(f'\tNumber of peaks: {df.shape[0]}')
+    logging.info(f'\tNumber of cells: {df.shape[1]-1}')
+        
+    return df.rename(columns={df.columns[0]: "peak_id"})
 
 def main():
     args = parse_args()
