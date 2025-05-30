@@ -158,7 +158,7 @@ def main():
     inferred_network_dd = label_edges_with_ground_truth(inferred_network_dd, ground_truth_df)
 
     # Drop unnecessary columns
-    drop_cols = ["source_id", "peak_id", "target_id", "label"]
+    drop_cols = ["source_id", "peak_id", "target_id", "label", "correlation", "cicero_score"]
     feature_names = [col for col in inferred_network_dd.columns if col not in drop_cols]
 
     # Only keep columns needed for modeling
@@ -215,8 +215,11 @@ def main():
     feature_importances = feature_importances.sort_values(by="Importance", ascending=False)
 
     logging.info("\n----- Plotting Figures -----")
+
     if not os.path.exists(fig_dir):
         os.makedirs(fig_dir)
+        
+    plot_feature_importance(feature_names, xgb_booster, fig_dir)
         
     X_train = X_train_dd.compute()
     X_test = X_test_dd.compute()
@@ -228,28 +231,27 @@ def main():
     prarm_grid_out_dir = train_test_dir = os.path.join(trained_model_dir, f"parameter_grid_search/{model_save_name}")
     
     # Run the parameter grid search
-    # logging.info("Starting parameter grid search")
-    # grid = parameter_grid_search(
-    #     X_train, 
-    #     y_train, 
-    #     X_test,
-    #     y_test,
-    #     prarm_grid_out_dir, 
-    #     cpu_count=num_cpu, 
-    #     fig_dir=fig_dir
-    #     )
+    logging.info("Starting parameter grid search")
+    grid = parameter_grid_search(
+        X_train, 
+        y_train, 
+        X_test,
+        y_test,
+        prarm_grid_out_dir, 
+        cpu_count=num_cpu, 
+        fig_dir=fig_dir
+        )
 
-    # logging.info("Plotting grid search best estimator feature importances")
-    # plot_feature_importance(
-    #     features=feature_names,
-    #     model=grid,
-    #     fig_dir=os.path.join(fig_dir, "parameter_search")
-    # )
+    logging.info("Plotting grid search best estimator feature importances")
+    plot_feature_importance(
+        features=feature_names,
+        model=grid,
+        fig_dir=os.path.join(fig_dir, "parameter_search")
+    )
 
     plot_feature_score_histograms(feature_names, model_df, fig_dir)
-    plot_feature_importance(feature_names, xgb_booster, fig_dir)
     plot_feature_boxplots(feature_names, model_df, fig_dir)
-    plot_xgboost_prediction_histogram(xgb_booster, X_test, fig_dir)
+    # plot_xgboost_prediction_histogram(xgb_booster, X_test, fig_dir)
     
     # --- Note: The following plots take a long time to run for large models, as they test re-training the model ---
 

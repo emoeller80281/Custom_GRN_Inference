@@ -21,6 +21,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pyarrow.lib as pa_lib
 import matplotlib.pyplot as plt
+import seaborn as sns
 
 from normalization import (
     minmax_normalize_dask,
@@ -250,7 +251,7 @@ def row_normalize_sparse(X):
             X_norm.data[i] = [0 for _ in X_norm.data[i]]
     return X_norm.tocsr()
 
-def select_top_dispersion_auto(df, target_n_features=5000, dispersion_quantile=0.75):
+def select_top_dispersion_auto(df, fig_dir, target_n_features=5000, dispersion_quantile=0.75):
     """
     Automatically selects the top most dispersed features by:
     1. Filtering features with dispersion above a dataset-driven threshold.
@@ -263,8 +264,22 @@ def select_top_dispersion_auto(df, target_n_features=5000, dispersion_quantile=0
         disp = var / (mean + 1e-8)
         return disp
 
-    logging.info("Computing feature dispersion across cells...")
+    logging.info("    Computing feature dispersion across cells...")
     dispersions = df.map_partitions(compute_dispersion, meta=('x', 'f8')).compute()
+    
+    os.makedirs(fig_dir, exist_ok=True)
+    thresh = dispersions.quantile(dispersion_quantile)
+
+    plt.figure(figsize=(8, 4))
+    sns.histplot(dispersions, bins=100, kde=True, stat="count", edgecolor=None)
+    plt.axvline(thresh, color="red", linestyle="--", label=f"{dispersion_quantile:.2f} quantile = {thresh:.2f}")
+    plt.title("Feature Dispersion Distribution")
+    plt.xlabel("Dispersion")
+    plt.ylabel("Count")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(fig_dir, "dispersion_histogram.png"), dpi=200)
+    plt.close()
 
     total_features = len(dispersions)
     min_disp = dispersions.quantile(dispersion_quantile)
@@ -278,10 +293,10 @@ def select_top_dispersion_auto(df, target_n_features=5000, dispersion_quantile=0
 
     top_feature_names = top_features.index.to_list()
 
-    logging.info(f"\t- Initial features: {total_features:,}")
-    logging.info(f"\t- Features above dispersion threshold (quantile={dispersion_quantile}): {n_above_thresh:,}")
-    logging.info(f"\t- Final selected features (after top-N limit): {len(top_feature_names):,}")
-    logging.info(f"\t- Dispersion threshold (min_disp) used: {min_disp:.4f}")
+    logging.info(f"\t  - Initial features: {total_features:,}")
+    logging.info(f"\t  - Features above dispersion threshold (quantile={dispersion_quantile}): {n_above_thresh:,}")
+    logging.info(f"\t  - Final selected features (after top-N limit): {len(top_feature_names):,}")
+    logging.info(f"\t  - Dispersion threshold (min_disp) used: {min_disp:.4f}")
 
     # Explicitly create a new column from the index to preserve feature IDs
     df = df.assign(feature_id=df.index)
@@ -293,105 +308,6 @@ def select_top_dispersion_auto(df, target_n_features=5000, dispersion_quantile=0
     df = df.set_index("feature_id")         
     
     return df
-
-def plot_dispersion_histogram_from_ddf(
-    ddf,                     # Dask DataFrame: features × cells
-    quantile,
-    title,
-    fig_dir,
-    highlight_idx=None,
-    bins=100
-):
-    import matplotlib.pyplot as plt
-    import seaborn as sns
-    import os
-
-    # 1) Compute dispersion = var/mean across cells
-    disp = (ddf.var(axis=1) / (ddf.mean(axis=1) + 1e-8))
-    
-    # 2) Optional highlight series
-    if highlight_idx is not None:
-        highlight_idx = set(highlight_idx)
-        disp_high = disp.loc[disp.index.isin(highlight_idx)]
-    else:
-        disp_high = None
-
-    # 3) Plot
-    plt.figure(figsize=(8, 5))
-    sns.histplot(disp, bins=bins, color="gray", alpha=0.6, label="All features")
-    if disp_high is not None and not disp_high.empty:
-        sns.histplot(disp_high, bins=bins, color="red", alpha=0.6, label="Highlighted")
-    thresh = disp.quantile(quantile)
-    plt.axvline(thresh, color="black", linestyle="--", label=f"{quantile:.2f} quantile")
-
-    plt.title(f"{title} Dispersion Histogram")
-    plt.xlabel("Dispersion")
-    plt.ylabel("Feature count")
-    plt.legend()
-    plt.tight_layout()
-
-    os.makedirs(fig_dir, exist_ok=True)
-    plt.savefig(f"{fig_dir}/{title.lower()}_dispersion_distribution_hist.png", dpi=200)
-    plt.close()
-
-
-    
-def plot_atac_vs_rna_dispersion_scatterplot(
-    rna_ddf,                 # Dask DataFrame: genes × cells
-    atac_ddf,                # Dask DataFrame: peaks × cells
-    peak_to_gene_dd,         # Dask DataFrame with peak_id→target_id
-    fig_dir,
-    quantile=0.75,
-    highlight_genes=None     # list of gene IDs to highlight
-):
-    import matplotlib.pyplot as plt
-    import pandas as pd
-    import os
-
-    # 1) compute RNA dispersion z
-    rna_disp = (rna_ddf.var(axis=1) / (rna_ddf.mean(axis=1) + 1e-8))
-    rna_z    = (rna_disp - rna_disp.mean()) / rna_disp.std()
-
-    # 2) compute peak-level dispersion z
-    peak_disp = (atac_ddf.var(axis=1) / (atac_ddf.mean(axis=1) + 1e-8))
-    peak_z    = (peak_disp - peak_disp.mean()) / peak_disp.std()
-
-    # 3) map peaks → gene, aggregate by max
-    p2g = peak_to_gene_dd[["peak_id","target_id"]].drop_duplicates()
-    peak_df = pd.DataFrame({"peak_id": peak_z.index, "peak_z": peak_z.values})
-    merged  = peak_df.merge(p2g, on="peak_id")
-    gene_z  = merged.groupby("target_id")["peak_z"].max()
-    gene_z  = (gene_z - gene_z.mean()) / gene_z.std()
-
-    # 4) intersect
-    common = rna_z.index.intersection(gene_z.index)
-    x = rna_z.loc[common]
-    y = gene_z.loc[common]
-
-    # 5) plot
-    plt.figure(figsize=(6,6))
-    plt.scatter(x, y, s=5, alpha=0.4, color="gray", label="All genes")
-
-    if highlight_genes:
-        h = list(set(highlight_genes) & set(common))
-        plt.scatter(x.loc[h], y.loc[h], s=10, color="red", alpha=0.8,
-                    label=f"Highlighted (n={len(h)})")
-
-    plt.axhline(0, color="black", linestyle="--")
-    plt.axvline(0, color="black", linestyle="--")
-    mx = max(abs(x.min()), abs(x.max()))+0.5
-    my = max(abs(y.min()), abs(y.max()))+0.5
-    plt.xlim(-mx,mx); plt.ylim(-my,my)
-
-    plt.xlabel("RNA Dispersion (z-score)")
-    plt.ylabel("ATAC Gene Dispersion (z-score)")
-    plt.title("Gene‐Level Dispersion (RNA vs ATAC)")
-    plt.legend()
-    plt.tight_layout()
-
-    os.makedirs(fig_dir, exist_ok=True)
-    plt.savefig(f"{fig_dir}/atac_vs_rna_dispersion_scatterplot.png", dpi=200)
-    plt.close()
 
     
 def auto_tune_parameters(num_cpu: int = None, total_memory_gb: int = None) -> dict:
@@ -733,17 +649,22 @@ def main():
         rna_sub = rna_sub.set_index("target_id")
 
         # Compute dispersion and filter
-        logging.info("Filtering out genes and peaks with high dispersion")
-        atac_sub = select_top_dispersion_auto(atac_sub, target_n_features=50000, dispersion_quantile=0.75)
-        rna_sub = select_top_dispersion_auto(rna_sub, target_n_features=5000, dispersion_quantile=0.75)
+        logging.info("Filtering out peaks with high dispersion")
+        atac_sub = select_top_dispersion_auto(atac_sub, FIG_DIR, target_n_features=500_000, dispersion_quantile=0.75)
+        
+        logging.info("Filtering out genes with high dispersion")
+        rna_sub = select_top_dispersion_auto(rna_sub, FIG_DIR, target_n_features=50_000, dispersion_quantile=0.75)
 
-        logging.info(f"Selected {atac_sub.shape[0].compute()} ATAC features with highest dispersion")
+        logging.info(f"\nSelected {atac_sub.shape[0].compute()} ATAC features with highest dispersion")
         logging.info(f"Selected {rna_sub.shape[0].compute()} RNA features with highest dispersion")
         
+        logging.info('\nSubsetting datasets to shared cell barcodes')
         # 1) find the common cell barcodes
-        common_cells = list(set(atac_sub.columns).intersection(rna_sub.columns))
+        common_cells = [cell for cell in atac_sub.columns if cell in rna_sub.columns]        
         if len(common_cells) == 0:
             raise ValueError("No shared cells between ATAC and RNA!")
+        else:
+            logging.info(f'\t- Found {len(common_cells):,} common cells between ATAC and RNA datasets')
         
         # 2) subset and reorder both DataFrames to that same list
         atac_sub = atac_sub[common_cells]
