@@ -137,28 +137,33 @@ def plot_feature_score_histograms(
     
 ground_truth_file: str = "/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/REFERENCE_NETWORKS/RN111_ChIPSeq_BEELINE_Mouse_ESC.tsv"
 
-inferred_network1_file: str = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output/combined_inferred_dfs/mESC_combined_inferred_score_df.parquet"
-# inferred_network1_file: str = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output/mESC/filtered_L2_E7.5_rep2/inferred_grns/inferred_score_df.parquet"
+# inferred_network1_file: str = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output/combined_inferred_dfs/mESC_combined_inferred_score_df.parquet"
+inferred_network1_file: str = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output/mESC/filtered_L2_E7.5_rep2/inferred_grns/inferred_score_df.parquet"
 
 inferred_network2_file: str = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output/DS011_mESC/DS011_mESC_sample1/inferred_grns/inferred_score_df.parquet"
 
+print("Reading inferred network1")
 inferred_network1_dd = read_inferred_network(inferred_network1_file)
-inferred_network2_dd = read_inferred_network(inferred_network2_file)
+print("\tDone!")
 
-print(inferred_network1_dd.columns)
+print('Reading inferred network2')
+inferred_network2_dd = read_inferred_network(inferred_network2_file)
+print('\tDone!')
 
 feature_names = [
     'mean_TF_expression',
     'mean_peak_accessibility',
     'mean_TG_expression',
     'cicero_score',
-    # 'correlation',
-    # 'TSS_dist_score', 
-    # 'homer_binding_score', 
+    'correlation',
+    'TSS_dist_score', 
+    'homer_binding_score', 
     'sliding_window_score', 
     'string_combined_score', 
     'string_experimental_score', 
     'string_textmining_score'
     ]
 
+print('Plotting overlapping feature score histograms')
 plot_feature_score_histograms(feature_names, inferred_network1_dd, inferred_network2_dd, "Combined mESC", "DS011 mESC")
+print('\tDone!')

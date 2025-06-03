@@ -22,7 +22,7 @@ from joblib import Parallel, delayed
 
 import xgboost as xgb
 
-from .model import (
+from model import (
     train_xgboost_dask, xgb_classifier_from_booster
 )
 
