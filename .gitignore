@@ -39,3 +39,4 @@ tmp/
 keypairs.json
 string_database/
 __pycache__/
+train_test_splits

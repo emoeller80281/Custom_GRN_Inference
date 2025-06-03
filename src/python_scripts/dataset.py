@@ -1,28 +1,18 @@
 import dask.dataframe as dd
 import pandas as pd
+import numpy as np
+
+from typing import Tuple
 
 # Loading functions from Step020.peak_gene_correlation.py
 def load_atac_dataset(atac_data_file: str) -> dd.DataFrame:
-    atac_df: dd.DataFrame = dd.read_parquet(atac_data_file)
+    atac_df: dd.DataFrame = dd.read_parquet(atac_data_file, engine="pyarrow")
     return atac_df
 
 def load_rna_dataset(rna_data_file: str) -> dd.DataFrame:
-    rna_df: dd.DataFrame = dd.read_parquet(rna_data_file)
+    rna_df: dd.DataFrame = dd.read_parquet(rna_data_file, engine="pyarrow")
     return rna_df
 
-# Loading from Step040.sliding_window_tf_peak_motifs.py
-atac_df: dd.DataFrame = dd.read_parquet(atac_data_file)
-
-rna_data: dd.DataFrame = dd.read_parquet(rna_data_file)
-
-peak_ids = atac_df[atac_df.columns[0]].compute()
-
-rna_data_genes = set(rna_data["gene_id"].compute().dropna())
-
-# Loading from Step060.combine_dataframes.py
-rna_df            = dd.read_parquet(rna_data_file)
-
-atac_df           = dd.read_parquet(atac_data_file)
 
 def compute_atac_mean(atac_df: dd.DataFrame) -> dd.DataFrame:
     """Compute mean peak accessibility."""
@@ -35,6 +25,40 @@ def compute_atac_mean(atac_df: dd.DataFrame) -> dd.DataFrame:
     )
     
     return norm_atac_df[["peak_id", "mean_peak_accessibility"]]
+
+def pivot_melted_inferred_network(melted_ddf: str) -> dd.DataFrame:
+    """
+    Loads the melted sparse inferred-network parquet (source_id, peak_id, target_id, score_type, score_value)
+    and pivots it back to wide form *including* peak_id in the index.
+    """
+    
+
+    # Standardize IDs
+    melted_ddf["source_id"] = melted_ddf["source_id"].str.upper()
+    melted_ddf["target_id"] = melted_ddf["target_id"].str.upper()
+    # peak_id probably doesn't need uppercasing but you could if you like:
+    # melted_ddf["peak_id"]   = melted_ddf["peak_id"].str.upper()
+
+    # 1) group on THREE id-columns + score_type
+    grouped = (
+        melted_ddf
+        .groupby(["source_id", "peak_id", "target_id", "score_type"])
+        ["score_value"]
+        .mean()
+        .reset_index()
+    )
+
+    # 2) pivot in pandas (safe since it's already aggregated)
+    pdf = grouped.compute()
+    wide = pdf.pivot_table(
+        index=["source_id", "peak_id", "target_id"],
+        columns="score_type",
+        values="score_value",
+        aggfunc="first"       # now that each is unique per id-triple
+    ).reset_index()
+
+    # 3) back to Dask if you want
+    return dd.from_pandas(wide, npartitions=1)
 
 def compute_expression_means(rna_df: dd.DataFrame) -> Tuple[dd.DataFrame, dd.DataFrame]:
     """Compute mean TF and TG expression from RNA matrix."""

@@ -14,7 +14,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--save_name", type=str, required=True, help="Filename for output")
     return parser.parse_args()
 
-def read_inferred_network_dask(inferred_network_file: str) -> dd.DataFrame:
+def read_inferred_network(inferred_network_file: str) -> dd.DataFrame:
     """
     Loads a melted sparse inferred network from Parquet and pivots it into a Dask DataFrame
     where each row is (source_id, target_id) and columns are score_types (mean-aggregated).
@@ -29,7 +29,7 @@ def read_inferred_network_dask(inferred_network_file: str) -> dd.DataFrame:
     # Aggregate scores
     grouped_ddf = (
         melted_ddf
-        .groupby(["source_id", "target_id", "score_type"])["score_value"]
+        .groupby(["source_id", "peak_id", "target_id", "score_type"])["score_value"]
         .mean()
         .reset_index()
     )
@@ -37,10 +37,10 @@ def read_inferred_network_dask(inferred_network_file: str) -> dd.DataFrame:
     # Pivot manually by converting to pandas (if dataset is small enough)
     def pivot_partition(df):
         return df.pivot_table(
-            index=["source_id", "target_id"],
+            index=["source_id", "peak_id", "target_id"],
             columns="score_type",
             values="score_value",
-            aggfunc="mean"
+            aggfunc="first"
         ).reset_index()
 
     # Apply pivot in a single partition (best if you've already aggregated)
@@ -61,7 +61,7 @@ def main():
     booster.load_model(model_path)
 
     logging.info("Reading inferred network")
-    inferred_dd = read_inferred_network_dask(target_path)
+    inferred_dd = read_inferred_network(target_path)
     
     feature_names = booster.feature_names
     

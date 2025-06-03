@@ -4,6 +4,7 @@ import logging
 
 import numpy as np
 import pandas as pd
+import seaborn as sns
 import dask.dataframe as dd
 import dask.array as da
 
@@ -21,7 +22,7 @@ from joblib import Parallel, delayed
 
 import xgboost as xgb
 
-from model import (
+from .model import (
     train_xgboost_dask, xgb_classifier_from_booster
 )
 
@@ -109,60 +110,124 @@ def plot_feature_score_histograms(features, inferred_network, fig_dir):
     plt.tight_layout()
     plt.savefig(f"{fig_dir}/xgboost_feature_score_hist.png", dpi=300)
     plt.close()
-
-def plot_feature_boxplots(features, inferred_network, fig_dir):
-    logging.info("\tPlotting feature importance boxplots")
     
+def plot_multi_sample_feature_score_histograms(
+    features,
+    inferred_network1,
+    inferred_network2,
+    label1_name,
+    label2_name
+):
+    print("\tPlotting feature score histograms")
+    
+    # materialize only needed columns
+    if isinstance(inferred_network1, dd.DataFrame):
+        print("\tConverting feature columns from Dask to pandas for plotting")
+        inferred_network1 = inferred_network1[features].compute()
+    if isinstance(inferred_network2, dd.DataFrame):
+        inferred_network2 = inferred_network2[features].compute()
+
+    ncols = 4
+    nrows = math.ceil(len(features) / ncols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 4 * nrows), squeeze=False)
+
+    # flatten axes for easy indexing
+    axes_flat = axes.flat
+
+    for ax, feature in zip(axes_flat, features):
+        # draw into this axis explicitly:
+        sns.histplot(
+            inferred_network1[feature].dropna(),
+            bins=50, alpha=0.7,
+            color='#1682b1', edgecolor="#032b5f",
+            stat='proportion',
+            label=label1_name,
+            ax=ax
+        )
+        sns.histplot(
+            inferred_network2[feature].dropna(),
+            bins=50, alpha=0.7,
+            color="#cb5f17", edgecolor="#b13301",
+            stat='proportion',
+            label=label2_name,
+            ax=ax
+        )
+
+        # set titles/labels on the same ax
+        ax.set_title(feature, fontsize=14)
+        ax.set_xlabel(feature, fontsize=14)
+        ax.set_ylabel("Proportion", fontsize=14)
+        ax.set_xlim(0, 1)
+        ax.tick_params(axis='both', labelsize=12)
+
+    # turn off any leftover empty subplots
+    for ax in axes_flat[len(features):]:
+        ax.set_visible(False)
+
+    # figure-level legend
+    handles, labels = axes[0,0].get_legend_handles_labels()
+    fig.legend(
+        handles, labels,
+        loc="lower center",
+        ncol=2,
+        fontsize=14,
+        bbox_to_anchor=(0.5, -0.02)
+    )
+    fig.tight_layout(rect=[0, 0.05, 1, 1])
+    plt.show()
+
+def plot_feature_boxplots(features, inferred_network_ddf, fig_dir):
+    logging.info("Plotting feature importance boxplots")
     os.makedirs(fig_dir, exist_ok=True)
 
-    def remove_outliers(series: pd.Series) -> pd.Series:
-        """
-        Remove outliers using the IQR method.
-        NaN values are preserved.
-        """
-        Q1 = series.quantile(0.25)
-        Q3 = series.quantile(0.75)
-        IQR = Q3 - Q1
-        lower = Q1 - 1.5 * IQR
-        upper = Q3 + 1.5 * IQR
-        return series.where((series >= lower) & (series <= upper) | series.isna())
+    # 0) Make sure you have a pandas DataFrame
+    if hasattr(inferred_network_ddf, "compute"):
+        net = inferred_network_ddf.compute()
+    else:
+        net = inferred_network_ddf
 
-    n_features = len(features)
+    n = len(features)
     ncols = 3
-    nrows = math.ceil(n_features / ncols)
-
-    fig, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 4 * nrows))
+    nrows = math.ceil(n / ncols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(5*ncols, 4*nrows), squeeze=False)
     axes = axes.flatten()
 
-    for i, feature in enumerate(features):
-        ax = axes[i]
-
-        try:
-            data_0 = remove_outliers(inferred_network[inferred_network["label"] == 0][feature])
-            data_1 = remove_outliers(inferred_network[inferred_network["label"] == 1][feature])
-        except KeyError as e:
-            logging.warning(f"Feature '{feature}' not found in inferred network. Skipping.")
+    for idx, feat in enumerate(features):
+        ax = axes[idx]
+        if feat not in net.columns:
+            logging.warning(f"Missing feature `{feat}`, skipping.")
+            ax.set_visible(False)
             continue
 
-        ax.boxplot([data_0, data_1], patch_artist=True,
-                   boxprops=dict(facecolor='lightgray', color='black'),
-                   medianprops=dict(color='red'),
-                   whiskerprops=dict(color='black'),
-                   capprops=dict(color='black'),
-                   flierprops=dict(markerfacecolor='red', markersize=4, linestyle='none'))
+        # split by label and drop NA
+        data_0 = net.loc[net.label==0, feat].dropna()
+        data_1 = net.loc[net.label==1, feat].dropna()
 
-        ax.set_title(feature, fontsize=16)
-        ax.set_xticks([1, 2])
-        ax.set_xticklabels(["False", "True"], fontsize=14)
-        ax.set_ylabel("Score", fontsize=14)
+        # if there's nothing to plot on one side, skip
+        if data_0.empty and data_1.empty:
+            ax.set_visible(False)
+            continue
 
-    # Hide any unused subplots
-    for j in range(i + 1, len(axes)):
-        fig.delaxes(axes[j])
+        ax.boxplot(
+            [data_0, data_1],
+            labels=["False","True"],
+            patch_artist=True,
+            showfliers=False,
+            boxprops=dict(facecolor="lightgray"),
+            medianprops=dict(color="black"),
+        )
+        ax.set_title(feat, fontsize=14)
+        ax.set_ylabel("Score", fontsize=12)
+
+    # hide any leftover axes beyond your features
+    for j in range(len(features), len(axes)):
+        axes[j].set_visible(False)
 
     plt.tight_layout()
-    plt.savefig(f'{fig_dir}/xgboost_feature_boxplots.png', dpi=300)
+    out = os.path.join(fig_dir, "feature_boxplots.png")
+    plt.savefig(out, dpi=200)
     plt.close()
+    logging.info(f"Saved boxplots to {out}")
 
 def plot_permutation_importance_plot(xgb_model, X_test, y_test, fig_dir):
     logging.info("\tPlotting permutation importance plot")

@@ -89,7 +89,7 @@ def read_inferred_network(inferred_network_file: str) -> dd.DataFrame:
     # Aggregate scores
     grouped_ddf = (
         melted_ddf
-        .groupby(["source_id", "target_id", "score_type"])["score_value"]
+        .groupby(["source_id", "peak_id", "target_id", "score_type"])["score_value"]
         .mean()
         .reset_index()
     )
@@ -97,10 +97,10 @@ def read_inferred_network(inferred_network_file: str) -> dd.DataFrame:
     # Pivot manually by converting to pandas (if dataset is small enough)
     def pivot_partition(df):
         return df.pivot_table(
-            index=["source_id", "target_id"],
+            index=["source_id", "peak_id", "target_id"],
             columns="score_type",
             values="score_value",
-            aggfunc="mean"
+            aggfunc="first"
         ).reset_index()
 
     # Apply pivot in a single partition (best if you've already aggregated)
@@ -158,8 +158,22 @@ def main():
     inferred_network_dd = label_edges_with_ground_truth(inferred_network_dd, ground_truth_df)
 
     # Drop unnecessary columns
-    drop_cols = ["source_id", "peak_id", "target_id", "label", "correlation", "cicero_score"]
-    feature_names = [col for col in inferred_network_dd.columns if col not in drop_cols]
+    # drop_cols = ["source_id", "peak_id", "target_id", "label", "correlation", "cicero_score"]
+    # feature_names = [col for col in inferred_network_dd.columns if col not in drop_cols]
+    feature_names = [
+        'mean_TF_expression',
+        'mean_peak_accessibility',
+        'mean_TG_expression',
+        'cicero_score',
+        'TSS_dist_score', 
+        'correlation',
+        'homer_binding_score', 
+        'sliding_window_score', 
+        'string_combined_score', 
+        'string_experimental_score', 
+        'string_textmining_score'
+        ]
+
 
     # Only keep columns needed for modeling
     logging.info(f"Keeping {len(feature_names)} feature columns + labels")
@@ -218,9 +232,7 @@ def main():
 
     if not os.path.exists(fig_dir):
         os.makedirs(fig_dir)
-        
-    plot_feature_importance(feature_names, xgb_booster, fig_dir)
-        
+
     X_train = X_train_dd.compute()
     X_test = X_test_dd.compute()
     
@@ -228,31 +240,32 @@ def main():
     y_test = y_test_dd.compute()
     model_df = model_dd.compute()
     
-    prarm_grid_out_dir = train_test_dir = os.path.join(trained_model_dir, f"parameter_grid_search/{model_save_name}")
-    
-    # Run the parameter grid search
-    logging.info("Starting parameter grid search")
-    grid = parameter_grid_search(
-        X_train, 
-        y_train, 
-        X_test,
-        y_test,
-        prarm_grid_out_dir, 
-        cpu_count=num_cpu, 
-        fig_dir=fig_dir
-        )
-
-    logging.info("Plotting grid search best estimator feature importances")
-    plot_feature_importance(
-        features=feature_names,
-        model=grid,
-        fig_dir=os.path.join(fig_dir, "parameter_search")
-    )
-
+    plot_feature_importance(feature_names, xgb_booster, fig_dir)
     plot_feature_score_histograms(feature_names, model_df, fig_dir)
     plot_feature_boxplots(feature_names, model_df, fig_dir)
-    # plot_xgboost_prediction_histogram(xgb_booster, X_test, fig_dir)
+    plot_xgboost_prediction_histogram(xgb_booster, X_test, fig_dir)
     
+    # prarm_grid_out_dir = train_test_dir = os.path.join(trained_model_dir, f"parameter_grid_search/{model_save_name}")
+    
+    # # Run the parameter grid search
+    # logging.info("Starting parameter grid search")
+    # grid = parameter_grid_search(
+    #     X_train, 
+    #     y_train, 
+    #     X_test,
+    #     y_test,
+    #     prarm_grid_out_dir, 
+    #     cpu_count=num_cpu, 
+    #     fig_dir=fig_dir
+    #     )
+
+    # logging.info("Plotting grid search best estimator feature importances")
+    # plot_feature_importance(
+    #     features=feature_names,
+    #     model=grid,
+    #     fig_dir=os.path.join(fig_dir, "parameter_search")
+    # )
+
     # --- Note: The following plots take a long time to run for large models, as they test re-training the model ---
 
     # plot_overlapping_roc_pr_curves(X, y, feature_names, fig_dir)

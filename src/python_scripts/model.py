@@ -149,7 +149,7 @@ def parameter_grid_search(
         'colsample_bytree':  uniform(0.6, 0.4),           # 0.6 to 1.0
         'learning_rate':     uniform(0.01, 0.3)           # 0.01 to 0.31
     }
-    n_iter = 2000  # Try 100 random combos
+    n_iter = 100  # Try 100 random combos
     param_list = list(ParameterSampler(param_dist, n_iter=n_iter, random_state=42))
 
 
