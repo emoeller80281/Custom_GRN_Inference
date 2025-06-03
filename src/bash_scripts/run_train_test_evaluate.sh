@@ -1,8 +1,8 @@
 #!/bin/bash -l
 #SBATCH -p compute
 #SBATCH --nodes=1
-#SBATCH -c 64
-#SBATCH --mem=256G
+#SBATCH -c 32
+#SBATCH --mem=128G
 #SBATCH -o "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/LOGS/train_test_evaluate.log"
 #SBATCH -e "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/LOGS/train_test_evaluate.err"
 
@@ -33,10 +33,13 @@ determine_num_cpus() {
 
 determine_num_cpus
 
+source /gpfs/Home/esm5360/miniconda3/etc/profile.d/conda.sh
+
 # ----- MODIFY THE FOLLOWING SETTINGS -----
-RUN_TRAINING=true
-RUN_PREDICTION=true
-RUN_STATS_ANALYSIS=true
+COMPARE_FEATURE_SCORES=true
+RUN_TRAINING=false
+RUN_PREDICTION=false
+RUN_STATS_ANALYSIS=false
 
 GROUND_TRUTH_NAME="RN111_ChIPSeq"
 
@@ -74,7 +77,23 @@ mkdir -p "$MODEL_FIG_DIR"
 mkdir -p "$MODEL_PREDICTION_DIR"
 mkdir -p "$PROJECT_BASE_DIR/output"
 
+create_overlapping_feature_score_histogram() {
+    conda activate my_env
+
+    echo ""
+    echo "Plotting overlapping feature score histogram between the model training dataset and the target dataset"
+    /usr/bin/time -v python3 "$PROJECT_PYTHON_SCRIPT_DIR/compare_score_distributions.py" \
+        --model_training_inferred_net "$MODEL_TRAINING_INFERRED_NET" \
+        --prediction_target_inferred_net "$PREDICTION_TARGET_INFERRED_NET" \
+        --model_training_sample_name "$MODEL_TRAINING_SAMPLE" \
+        --prediction_target_sample_name "$PREDICTION_TARGET_SAMPLE" \
+        --fig_dir "$PROJECT_BASE_DIR/output/prediction_accuracy_results/${MODEL_TRAINING_SAMPLE}_model/${PREDICTION_TARGET_SAMPLE}_target"
+    echo "    DONE!"
+}
+
 run_xgboost_training() {
+    conda activate my_env
+
     echo ""
     echo "  ----- Training XGBoost Classifier -----"
     echo "    Ground Truth = ${MODEL_TRAINING_GROUND_TRUTH_FILE}"
@@ -91,18 +110,19 @@ run_xgboost_training() {
 }
 
 run_model_predictions() {
-    source activate my_env
+    conda activate my_env
 
     echo ""
     echo "  ----- Applying XGBoost Classifier -----"
-    echo "    Applying Model = ${MODEL_SAVE_NAME}"
+    echo "    Model Trained on = ${MODEL_TRAINING_SAMPLE}"
+    echo "    Trained Model = ${MODEL_SAVE_NAME}"
     echo "    Target = ${PREDICTION_TARGET_SAMPLE}"
 
     /usr/bin/time -v python3 "$PROJECT_PYTHON_SCRIPT_DIR/Step090.apply_trained_xgboost.py" \
-        --output_dir "$MODEL_PREDICTION_DIR" \
-        --model "$MODEL_SAVE_DIR/$MODEL_SAVE_NAME" \
-        --target "$PREDICTION_TARGET_INFERRED_NET" \
-        --save_name "$PREDICTION_SAVE_NAME"
+        --output_dir "${MODEL_PREDICTION_DIR}" \
+        --model "${MODEL_SAVE_DIR}/${MODEL_SAVE_NAME}.json" \
+        --target "${PREDICTION_TARGET_INFERRED_NET}" \
+        --save_name "${PREDICTION_SAVE_NAME}"
     echo "    DONE!"
 }
 
@@ -113,7 +133,7 @@ run_stats_analysis() {
     echo "    Target = ${PREDICTION_TARGET_SAMPLE}"
     echo "    Ground Truth = ${PREDICTION_GROUND_TRUTH_FILE}"
 
-    source activate grn_analysis
+    conda activate grn_analysis
 
     /usr/bin/time -v python3 "$STATS_BASE_DIR/Analyze_Inferred_GRN.py" \
         --inferred_net_filename "$PREDICTION_SAVE_NAME" \
@@ -125,11 +145,15 @@ run_stats_analysis() {
     echo "    DONE!"
 }
 
+if [ "$COMPARE_FEATURE_SCORES" = true ]; then
+    create_overlapping_feature_score_histogram
+fi
+
 if [ "$RUN_TRAINING" = true ]; then
     run_xgboost_training
 fi
 
-if [ "$RUN_PREDICTIONS" = true ]; then
+if [ "$RUN_PREDICTION" = true ]; then
     run_model_predictions
 fi
 

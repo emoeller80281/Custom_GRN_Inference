@@ -44,7 +44,7 @@ COMBINED_VS_DS011_SAVE_NAME="combined_mESC_vs_DS011_mESC_xgb_pred.tsv"
 DS011_PREDICTION_DIR="$BASE_DIR/output/DS011_mESC/DS011_mESC_sample1/model_predictions"
 DS011_MODEL="$BASE_DIR/output/DS011_mESC/DS011_mESC_sample1/trained_models/xgb_mESC_DS011_model.json"
 MESC_TARGET="$BASE_DIR/output/mESC/filtered_L2_E7.5_rep2/inferred_grns/inferred_score_df.parquet"
-DS011_VS_MESC_SAVE_NAME="DS011_vs_filtered_L2_E7.5_xgb_pred.tsv"
+DS011_VS_MESC_SAVE_NAME="DS011_vs_filtered_L2_E7.5_rep2_xgb_pred.tsv"
 
 # Running predictions for filtered_L2_E7.5_rep2 using DS011 model
 python3 "$BASE_DIR/src/python_scripts/Step090.apply_trained_xgboost.py" \
