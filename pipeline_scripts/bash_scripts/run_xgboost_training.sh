@@ -35,7 +35,7 @@ conda activate my_env
 
 # Set base directories and files
 BASE_DIR=$(readlink -f "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER")
-PYTHON_SCRIPT_DIR="$BASE_DIR/src/python_scripts"
+PYTHON_SCRIPT_DIR="$BASE_DIR/src/grn_inference"
 
 GROUND_TRUTH="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/REFERENCE_NETWORKS/RN111_ChIPSeq_BEELINE_Mouse_ESC.tsv"
 # COMBINED_INFERRED_NET="$BASE_DIR/output/combined_inferred_dfs/mESC_combined_inferred_score_df.parquet"

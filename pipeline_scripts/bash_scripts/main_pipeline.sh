@@ -11,14 +11,13 @@ set -euo pipefail
 #        SELECT PIPELINE STEPS TO RUN
 # =============================================
 # Run the peak to TG regulatory potential calculation methods
-STEP010_CICERO_MAP_PEAKS_TO_TG=true
-STEP015_CICERO_PEAK_TO_TG_SCORE=true
+STEP010_CICERO_MAP_PEAKS_TO_TG=false
+STEP015_CICERO_PEAK_TO_TG_SCORE=false
 
 STEP020_PEAK_TO_TG_CORRELATION=false
-# STEP030_PEAK_TO_ENHANCER_DB=false # Deprecated, does not help model and no data for mouse
 
 # Run the TF to peak binding score calculation methods
-STEP040_SLIDING_WINDOW_TF_TO_PEAK_SCORE=false
+STEP040_SLIDING_WINDOW_TF_TO_PEAK_SCORE=true
 STEP050_HOMER_TF_TO_PEAK_SCORE=false
 
 # Combine the score DataFrames
@@ -41,10 +40,10 @@ RNA_FILE_NAME="$INPUT_DIR/$RNA_FILE_NAME"
 ATAC_FILE_NAME="$INPUT_DIR/$ATAC_FILE_NAME"
 
 # Other paths
-PYTHON_SCRIPT_DIR="$BASE_DIR/src/python_scripts"
-R_SCRIPT_DIR="$BASE_DIR/src/r_scripts"
+PYTHON_SCRIPT_DIR="$BASE_DIR/src/grn_inference/pipeline"
+R_SCRIPT_DIR="$BASE_DIR/pipeline_scripts/r_scripts"
 OUTPUT_DIR="$BASE_DIR/output/$CELL_TYPE/$SAMPLE_NAME"
-REFERENCE_GENOME_DIR="$BASE_DIR/reference_genome/$SPECIES"
+REFERENCE_GENOME_DIR="$BASE_DIR/data/reference_genome/$SPECIES"
 
 INFERRED_GRN_DIR="$OUTPUT_DIR/inferred_grns"
 TRAINED_MODEL_DIR="$OUTPUT_DIR/trained_models"
@@ -53,10 +52,10 @@ TRAINED_MODEL_DIR="$OUTPUT_DIR/trained_models"
 INFERRED_NET_FILE="$INFERRED_GRN_DIR/inferred_score_df.parquet"
 
 # ----- Resource / Database files -----
-STRING_DB_DIR="$BASE_DIR"/string_database/$SPECIES/
+STRING_DB_DIR="$BASE_DIR/data/string_database/$SPECIES/"
 # ENHANCERDB_FILE="$BASE_DIR/enhancer_db/enhancer" # Deprecated
-TF_NAMES_FILE="$BASE_DIR/motif_information/$SPECIES/TF_Information_all_motifs.txt"
-MEME_DIR="$BASE_DIR/motif_information/$SPECIES/${SPECIES}_motif_meme_files"
+TF_NAMES_FILE="$BASE_DIR/data/motif_information/$SPECIES/TF_Information_all_motifs.txt"
+MEME_DIR="$BASE_DIR/data/motif_information/$SPECIES/${SPECIES}_motif_meme_files"
 
 # LOG_DIR="$BASE_DIR/LOGS/${SAMPLE_NAME}/"
 FIG_DIR="$BASE_DIR/figures/$SPECIES/$SAMPLE_NAME"
@@ -451,11 +450,11 @@ check_string_db_files() {
 install_homer() {
     mkdir -p "$BASE_DIR/homer"
     wget "http://homer.ucsd.edu/homer/configureHomer.pl" -P "$BASE_DIR/homer"
-    perl "$BASE_DIR/homer/configureHomer.pl" -install
+    perl "$BASE_DIR/data/homer/configureHomer.pl" -install
 } 2> "$LOG_DIR/Homer_logs/01.install_homer.log"
 
 install_homer_species_genome() {
-    perl "$BASE_DIR/homer/configureHomer.pl" -install "$SPECIES"
+    perl "$BASE_DIR/data/homer/configureHomer.pl" -install "$SPECIES"
 } 2> "$LOG_DIR/Homer_logs/02.install_homer_species.log"
 
 create_homer_peak_file() {
@@ -467,7 +466,7 @@ create_homer_peak_file() {
 
 homer_find_motifs() {
     mkdir -p "$OUTPUT_DIR/homer_results"
-    perl "$BASE_DIR/homer/bin/findMotifsGenome.pl" "$OUTPUT_DIR/homer_peaks.txt" "$SPECIES" "$OUTPUT_DIR/homer_results/" -size 200
+    perl "$BASE_DIR/data/homer/bin/findMotifsGenome.pl" "$OUTPUT_DIR/homer_peaks.txt" "$SPECIES" "$OUTPUT_DIR/homer_results/" -size 200
     echo "    Done!"
 } 2> "$LOG_DIR/Homer_logs/04.homer_findMotifsGenome.log"
 
@@ -508,7 +507,7 @@ homer_process_motif_files() {
     # Process files in parallel
     if [ "$use_parallel" = true ]; then
         echo "$motif_files" | /usr/bin/time -v parallel -j "$NUM_CPU" \
-            "perl $BASE_DIR/homer/bin/annotatePeaks.pl $OUTPUT_DIR/homer_peaks.txt '$SPECIES' -m {} > $PROCESSED_MOTIF_DIR/{/}_tf_motifs.txt"
+            "perl $BASE_DIR/data/homer/bin/annotatePeaks.pl $OUTPUT_DIR/homer_peaks.txt '$SPECIES' -m {} > $PROCESSED_MOTIF_DIR/{/}_tf_motifs.txt"
 
         module unload parallel
 
@@ -517,7 +516,7 @@ homer_process_motif_files() {
         for file in $motif_files; do
             local output_file="$PROCESSED_MOTIF_DIR/$(basename "$file" .motif)_tf_motifs.txt"
             /usr/bin/time -v \
-            "perl $BASE_DIR/homer/bin/annotatePeaks.pl $OUTPUT_DIR/homer_peaks.txt '$SPECIES' -m $file > $output_file" \
+            "perl $BASE_DIR/data/homer/bin/annotatePeaks.pl $OUTPUT_DIR/homer_peaks.txt '$SPECIES' -m $file > $output_file" \
 
             if [ $? -ne 0 ]; then
                 echo "[ERROR] Failed to process motif file: $file" >> "$LOG_DIR/step05_sequential.err"
@@ -650,12 +649,12 @@ run_homer() {
 
     # Make sure that the homer directory is part of the path
     echo "Adding the 'homer/bin' directory to PATH"
-    PATH="$PATH:$BASE_DIR/homer/bin"
+    PATH="$PATH:$BASE_DIR/data/homer/bin"
     export PATH
     
     echo "Checking for the Homer ${SPECIES} genome file..."
     # Check if the species Homer genome is installed
-    if [ -d "$BASE_DIR/homer/data/genomes/${SPECIES}" ]; then
+    if [ -d "$BASE_DIR/data/homer/data/genomes/${SPECIES}" ]; then
         echo "    - ${SPECIES} genome is installed"
     else
         echo "    - ${SPECIES} genome is not installed, installing..."
@@ -694,7 +693,7 @@ run_homer_tf_to_peak_score() {
     echo ""
     echo "Python: Calculating homer TF to peak scores"
     /usr/bin/time -v \
-    poetry run python src/python_scripts/Step050.homer_tf_peak_motifs.py \
+    poetry run python "$PYTHON_SCRIPT_DIR/Step050.homer_tf_peak_motifs.py" \
         --input_dir "${OUTPUT_DIR}/homer_results/homer_tf_motif_scores" \
         --output_dir "$OUTPUT_DIR" \
         --cpu_count $NUM_CPU
@@ -756,7 +755,6 @@ setup_directories
 if [ "$STEP010_CICERO_MAP_PEAKS_TO_TG" = true ]; then run_cicero; fi
 if [ "$STEP015_CICERO_PEAK_TO_TG_SCORE" = true ]; then run_cicero_peak_to_tg_score; fi
 if [ "$STEP020_PEAK_TO_TG_CORRELATION" = true ]; then run_correlation_peak_to_tg_score; fi
-# if [ "$STEP030_PEAK_TO_ENHANCER_DB" = true ]; then run_peak_to_enhancer_db_score; fi
 if [ "$STEP040_SLIDING_WINDOW_TF_TO_PEAK_SCORE" = true ]; then run_sliding_window_tf_to_peak_score; fi
 if [ "$STEP050_HOMER_TF_TO_PEAK_SCORE" = true ]; then run_homer; run_homer_tf_to_peak_score; fi
 if [ "$STEP060_COMBINE_DATAFRAMES" = true ]; then check_string_db_files; run_combine_dataframes; fi

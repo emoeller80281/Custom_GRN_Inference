@@ -11,7 +11,7 @@ from tqdm import tqdm
 from dask.diagnostics import ProgressBar
 
 
-from normalization import (
+from grn_inference.normalization import (
     minmax_normalize_pandas,
     minmax_normalize_dask,
     clip_and_normalize_log1p_dask

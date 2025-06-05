@@ -28,7 +28,7 @@ figures
 MEME_ALL_MOTIFS/
 motif_binding_output/
 *.pkl
-motif_information/*
+motif_information/
 ground_truth_files/*
 yasin_motif_binding_code
 string_protein_links.txt

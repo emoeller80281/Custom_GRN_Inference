@@ -5,7 +5,8 @@ import argparse
 import logging
 import os
 
-from normalization import minmax_normalize_pandas
+from grn_inference.normalization import minmax_normalize_pandas
+from grn_inference.plotting import plot_feature_score_histogram
 
 def parse_args() -> argparse.Namespace:
     """
@@ -37,10 +38,10 @@ def main():
     cicero_peak_to_gene_file = os.path.join(output_dir, "cicero_peak_to_gene.csv")
 
     logging.info("Loading 'cicero_peak_to_peak.csv'")
-    peak_to_peak = pd.read_csv(cicero_peak_to_peak_file, header=0, index_col=None)
+    peak_to_peak: pd.DataFrame = pd.read_csv(cicero_peak_to_peak_file, header=0, index_col=None)
     
     logging.info("Loading 'cicero_peak_to_gene.csv'")
-    peak_to_gene = pd.read_csv(cicero_peak_to_gene_file, header=0, index_col=0)
+    peak_to_gene: pd.DataFrame = pd.read_csv(cicero_peak_to_gene_file, header=0, index_col=0)
 
     # Merge matching peaks to get a single dataframes
     logging.info("Merging peak to peak with peak to gene scores")
@@ -85,7 +86,6 @@ def main():
     normalized_df = minmax_normalize_pandas(
         df=merged_with_promoter_genes, 
         score_cols=["cicero_score"], 
-        dtype=np.float32
     )
     
     # 1) Compute mean of the “non-1” scores
@@ -102,6 +102,8 @@ def main():
 
     # 3) Clip to [0,1] in case any values wandered outside
     normalized_df["cicero_score"] = normalized_df["cicero_score"].clip(0.0, 1.0)
+    
+    plot_feature_score_histogram(normalized_df, "cicero_score", output_dir)
 
     # Write the final merged peaks to a csv file
     logging.info("Writing Cicero DataFrame to: 'cicero_peak_to_tg_scores.parquet'")

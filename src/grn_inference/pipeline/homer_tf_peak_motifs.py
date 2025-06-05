@@ -10,7 +10,7 @@ import argparse
 import logging
 import numpy as np
 
-from normalization import (
+from grn_inference.normalization import (
     minmax_normalize_dask,
     clip_and_normalize_log1p_dask
 )

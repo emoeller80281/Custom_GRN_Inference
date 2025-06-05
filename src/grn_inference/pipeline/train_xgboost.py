@@ -9,7 +9,7 @@ import logging
 import os
 import csv
 
-from plotting import (
+from grn_inference.plotting import (
     plot_feature_score_histograms,
     plot_feature_importance,
     plot_feature_boxplots,
@@ -19,7 +19,7 @@ from plotting import (
     plot_feature_ablation,
     plot_stability_boxplot,
 )
-from model import (
+from grn_inference.model import (
     train_xgboost_dask,
     parameter_grid_search,
 )

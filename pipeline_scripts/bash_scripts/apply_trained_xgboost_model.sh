@@ -19,7 +19,7 @@ MESC_COMBINED_MODEL="$BASE_DIR/output/combined_inferred_dfs/xgb_trained_models/x
 COMBINED_VS_DS011_SAVE_NAME="combined_mESC_vs_DS011_mESC_xgb_pred.tsv"
 
 # # Run the python script for the selected model
-# python3 "$BASE_DIR/src/python_scripts/Step090.apply_trained_xgboost.py" \
+# python3 "$BASE_DIR/src/grn_inference/Step090.apply_trained_xgboost.py" \
 #     --output_dir "$COMBINED_MODEL_PREDICTION_DIR" \
 #     --model "$MESC_COMBINED_MODEL" \
 #     --target "$DS011_TARGET" \
@@ -33,7 +33,7 @@ COMBINED_VS_DS011_SAVE_NAME="combined_mESC_vs_DS011_mESC_xgb_pred.tsv"
 # MESC_VS_DS011_SAVE_NAME="filtered_L2_E7.5_vs_DS011_xgb_pred_no_peak_agg.tsv"
 
 # # Run the python script for the selected model
-# python3 "$BASE_DIR/src/python_scripts/Step090.apply_trained_xgboost.py" \
+# python3 "$BASE_DIR/src/grn_inference/Step090.apply_trained_xgboost.py" \
 #     --output_dir "$MESC_MODEL_PREDICTION_DIR" \
 #     --model "$MESC_MODEL" \
 #     --target "$DS011_TARGET" \
@@ -47,7 +47,7 @@ MESC_TARGET="$BASE_DIR/output/mESC/filtered_L2_E7.5_rep2/inferred_grns/inferred_
 DS011_VS_MESC_SAVE_NAME="DS011_vs_filtered_L2_E7.5_rep2_xgb_pred.tsv"
 
 # Running predictions for filtered_L2_E7.5_rep2 using DS011 model
-python3 "$BASE_DIR/src/python_scripts/Step090.apply_trained_xgboost.py" \
+python3 "$BASE_DIR/src/grn_inference/Step090.apply_trained_xgboost.py" \
     --output_dir "$DS011_PREDICTION_DIR" \
     --model "$DS011_MODEL" \
     --target "$MESC_TARGET" \

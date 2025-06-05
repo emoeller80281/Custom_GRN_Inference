@@ -5,7 +5,7 @@ import os
 import re
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from typing import Any
+from typing import Any, Union
 
 import dask.dataframe as dd
 import matplotlib.pyplot as plt
@@ -23,11 +23,11 @@ from scipy import stats
 from tqdm import tqdm
 
 # at module top‐level
-_global_chr_pos_to_seq = None
-_global_tf_df         = None
-_global_bg_freq       = None
-_global_plus          = None
-_global_minus          = None
+_global_chr_pos_to_seq: Union[None, pd.DataFrame] = None
+_global_tf_df: Union[None, pd.DataFrame] = None
+_global_bg_freq: Union[None, pd.Series] = None
+_global_plus: Union[None, np.ndarray] = None
+_global_minus: Union[None, np.ndarray] = None
 
 def _init_worker(chr_pos_to_seq, tf_df, bg_freq, shared_plus, shared_minus):
     global _global_chr_pos_to_seq, _global_tf_df, _global_bg_freq, _global_plus, _global_minus
@@ -151,8 +151,10 @@ def get_background_freq(species):
 def process_motif_file_and_save(file, meme_dir, output_dir):
     try:
         # Load the PWM
+        assert _global_bg_freq is not None, "Background frequencies must be set before calling PWM scoring."
+        bg: pd.Series[float] = _global_bg_freq
         motif_df = pd.read_csv(os.path.join(meme_dir, file), sep="\t", header=0, index_col=0)
-        pwm = np.log2(motif_df.T.div(_global_bg_freq, axis=0) + 1).T.to_numpy()
+        pwm = np.log2(motif_df.T.div(bg, axis=0).add(1)).T
         pwm = np.vstack([pwm, np.zeros((1, 4))])  # add row for 'N'
 
         # Score every peak on both strands in parallel
@@ -160,7 +162,13 @@ def process_motif_file_and_save(file, meme_dir, output_dir):
 
         # Look up TFs for this motif
         motif_name = file.replace('.txt', '')
-        tf_names = _global_tf_df.loc[_global_tf_df["Motif_ID"] == motif_name, "TF_Name"].values
+        
+        
+        assert _global_tf_df is not None, "Global TF‐to‐motif DataFrame was never initialized"
+        assert _global_chr_pos_to_seq is not None, "Global peak position to sequence DataFrame was never initialized"
+        
+        mask = _global_tf_df["Motif_ID"] == motif_name
+        tf_names = _global_tf_df.loc[mask]["TF_Name"].values
 
         peak_ids = _global_chr_pos_to_seq.apply(
             lambda row: f'{row["chr"]}:{row["start"]}-{row["end"]}', axis=1
@@ -274,7 +282,6 @@ def associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, rna_dat
         score_cols=["sliding_window_score"],
         quantiles=(0.05, 0.95),
         apply_log1p=True,
-        dtype=np.float32
     )
     
     normalized_ddf = minmax_normalize_dask(
@@ -349,11 +356,11 @@ def find_ATAC_peak_sequence(peak_df, reference_genome_dir, parsed_peak_file, fig
         fasta_sequences = SeqIO.parse(open(file), 'fasta')
         
         # Find the sequence for each peak in the ATACseq data
-        for chr in fasta_sequences:
-            if chr.id in peak_chr_ids:
-                chr_seq_plus = str(chr.seq).upper()
-                chr_seq_neg = str(chr.seq.complement()).upper()
-                chr_peaks = peak_df[peak_df["chr"] == chr.id][["chr", "start", "end"]]
+        for fasta_rec in fasta_sequences:
+            if fasta_rec.id in peak_chr_ids:
+                chr_seq_plus = str(fasta_rec.seq).upper()
+                chr_seq_neg = str(fasta_rec.seq.complement()).upper()
+                chr_peaks = peak_df[peak_df["chr"] == fasta_rec.id][["chr", "start", "end"]]
                 starts = chr_peaks["start"].to_numpy()
                 ends = chr_peaks["end"].to_numpy()
                 
@@ -421,17 +428,6 @@ def main():
     # rna_data_file = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/mESC_filtered_L2_E7.5_merged_RNA.csv"
     # output_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output/mESC"
     # num_cpu = 4
-    
-    logging.info("Reading in parsed Cicero peak to TG file to find associated peaks")
-    cicero_peak_file = f"{output_dir}/cicero_peak_to_tg_scores.parquet"
-    cicero_peaks = pd.read_parquet(cicero_peak_file)
-    cicero_peak_names = cicero_peaks["peak_id"].drop_duplicates().to_list()
-    logging.info(f'{len(cicero_peak_names)} Cicero peaks')
-    
-    for i, peak in enumerate(cicero_peak_names):
-        if peak.count(":") > 1:
-            fmt_peak = replace_nth(":", "-", peak, 2)
-            cicero_peak_names[i] = fmt_peak
         
     logging.info('Reading scATACseq data')
     atac_df: dd.DataFrame = dd.read_parquet(atac_data_file)
@@ -440,7 +436,6 @@ def main():
     rna_data: dd.DataFrame = dd.read_parquet(rna_data_file)
         
     peak_ids = atac_df[atac_df.columns[0]].compute()
-    peak_ids = peak_ids[peak_ids.isin(cicero_peak_names)].astype(str)
     
     logging.info(f'{len(peak_ids)} peak_ids overlapping between Cicero and ATAC')
     

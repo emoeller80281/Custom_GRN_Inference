@@ -29,7 +29,7 @@ submit_job() {
             --output="LOGS/${CELL_TYPE}_logs/${SAMPLE_NAME}_logs/custom_grn_${CELL_TYPE}_${SAMPLE_NAME}.out" \
             --error="LOGS/${CELL_TYPE}_logs/${SAMPLE_NAME}_logs/custom_grn_${CELL_TYPE}_${SAMPLE_NAME}.err" \
             --job-name="custom_grn_method_${CELL_TYPE}_${SAMPLE_NAME}" \
-            /gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/src/bash_scripts/main_pipeline.sh
+            /gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/pipeline_scripts/bash_scripts/main_pipeline.sh
     )
         # Extract and print job ID
     job_id=$(echo "$job_output" | awk '{print $4}')
@@ -202,6 +202,6 @@ run_K562(){
 
 run_DS011_mESC
 # run_mouse_kidney
-# run_mESC
+run_mESC
 # run_K562
 # run_macrophage

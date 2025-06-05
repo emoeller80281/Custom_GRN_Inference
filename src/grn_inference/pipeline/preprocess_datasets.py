@@ -18,8 +18,8 @@ import math
 from anndata import AnnData
 from matplotlib.axes import Axes
 
-from plotting import plot_feature_score_histogram
-from normalization import minmax_normalize_pandas
+from grn_inference.plotting import plot_feature_score_histogram
+from grn_inference.normalization import minmax_normalize_pandas
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Process TF motif binding potential.")

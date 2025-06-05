@@ -16,7 +16,7 @@ import os
 import sys
 import argparse
 import logging
-from typing import Tuple
+from typing import Tuple, Union
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -24,10 +24,11 @@ import pyarrow.lib as pa_lib
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-from normalization import (
+from grn_inference.normalization import (
     minmax_normalize_dask,
     clip_and_normalize_log1p_dask
 )
+from grn_inference.plotting import plot_feature_score_histogram
 
 def parse_args() -> argparse.Namespace:
     """
@@ -158,7 +159,10 @@ def select_top_dispersion_auto(df, fig_dir, target_n_features=5000, dispersion_q
     
     return df
 
-def auto_tune_parameters(num_cpu: int = None, total_memory_gb: int = None) -> dict:
+def auto_tune_parameters(
+    num_cpu: Union[int,None] = None, 
+    total_memory_gb: Union[int,None] = None
+    ) -> dict:
     """
     Suggests optimal chunk_size, batch_size, and number of Dask workers based on system resources.
 
@@ -394,10 +398,10 @@ def calculate_significant_peak_to_gene_correlations(
         return output_file
 
 def prepare_inputs_for_correlation(
-    atac_df: pd.DataFrame, 
-    rna_df: pd.DataFrame,
+    atac_df: dd.DataFrame, 
+    rna_df: dd.DataFrame,
     fig_dir: str
-    ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    ) -> Tuple[dd.DataFrame, dd.DataFrame]:
     
     # Use peak_id / target_id as index before dispersion selection
     atac_df = atac_df.set_index("peak_id")
@@ -410,8 +414,8 @@ def prepare_inputs_for_correlation(
     logging.info("Filtering out genes with high dispersion")
     rna_df = select_top_dispersion_auto(rna_df, fig_dir, target_n_features=50_000, dispersion_quantile=0.75)
 
-    logging.info(f"\nSelected {atac_df.shape[0]} ATAC features with highest dispersion")
-    logging.info(f"Selected {rna_df.shape[0]} RNA features with highest dispersion")
+    logging.info(f"\nSelected {atac_df.shape[0].compute()} ATAC features with highest dispersion")
+    logging.info(f"Selected {rna_df.shape[0].compute()} RNA features with highest dispersion")
     
     logging.info('\nSubsetting datasets to shared cell barcodes')
     # 1) find the common cell barcodes
@@ -436,7 +440,6 @@ def main():
     OUTPUT_DIR = args.output_dir
     TMP_DIR = f"{OUTPUT_DIR}/tmp"
     NUM_CPU = int(args.num_cpu)
-    PEAK_DIST_LIMIT=args.peak_dist_limit
     FIG_DIR=os.path.join(args.fig_dir, "peak_gene_correlation_figures")
     
     os.makedirs(FIG_DIR, exist_ok=True)
@@ -453,10 +456,10 @@ def main():
     logging.info(f"  - num_workers = {num_workers}")
     
     logging.info("Loading the scRNA-seq dataset.")
-    rna_df: pd.DataFrame = pd.read_parquet(RNA_DATA_FILE, engine="pyarrow")
+    rna_df: pd.DataFrame = dd.read_parquet(RNA_DATA_FILE, engine="pyarrow")
 
     logging.info("Loading and parsing the ATAC-seq peaks")
-    atac_df: pd.DataFrame = pd.read_parquet(ATAC_DATA_FILE, engine="pyarrow")
+    atac_df: pd.DataFrame = dd.read_parquet(ATAC_DATA_FILE, engine="pyarrow")
     
     # ============ PEAK TO GENE CORRELATION CALCULATION ============
     PARQ = os.path.join(TMP_DIR, "sig_peak_to_gene_corr.parquet")
@@ -522,6 +525,8 @@ def main():
         dtype=np.float32
     )
     logging.info(f'\t- Number of edges: {len(normalized_ddf)}')
+    
+    plot_feature_score_histogram(normalized_ddf, "correlation", OUTPUT_DIR)
         
     out_path = f"{OUTPUT_DIR}/peak_to_gene_correlation.parquet"
     normalized_ddf.to_parquet(out_path, engine="pyarrow", compression="snappy")

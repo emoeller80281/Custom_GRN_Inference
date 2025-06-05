@@ -90,7 +90,9 @@ def plot_feature_score_histograms(features, inferred_network, fig_dir):
     # Step 1: Convert only necessary columns to pandas
     if isinstance(inferred_network, dd.DataFrame):
         logging.info("\tConverting feature columns from Dask to pandas for plotting")
-        inferred_network = inferred_network[features].compute()
+        inferred_network_series = inferred_network[features].compute()
+    else:
+        inferred_network_series = inferred_network[features]
 
     ncols = 4
     nrows = math.ceil(len(features) / ncols)
@@ -99,7 +101,7 @@ def plot_feature_score_histograms(features, inferred_network, fig_dir):
 
     for i, feature in enumerate(features, 1):
         plt.subplot(nrows, ncols, i)
-        plt.hist(inferred_network[feature].dropna(), bins=50, alpha=0.7, edgecolor='black')
+        plt.hist(inferred_network_series.dropna(), bins=50, alpha=0.7, edgecolor='black')
         plt.title(f"{feature}", fontsize=14)
         plt.xlabel(feature, fontsize=14)
         plt.ylabel("Frequency", fontsize=14)
@@ -114,11 +116,18 @@ def plot_feature_score_histograms(features, inferred_network, fig_dir):
 def plot_feature_score_histogram(df, score_col, fig_dir):
     logging.info("\tPlotting feature score histogram")
     
+    if isinstance(df, dd.DataFrame):
+        logging.info("\tConverting feature columns from Dask to pandas for plotting")
+        df_series = df[score_col].compute()
+    else:
+        # If it’s already a Pandas DataFrame, pull out the column as a Series:
+        df_series = df[score_col]
+    
     os.makedirs(fig_dir, exist_ok=True)
 
     plt.figure(figsize=(8, 8))
 
-    plt.hist(df[score_col].dropna(), bins=50, alpha=0.7, edgecolor='black')
+    plt.hist(df_series.dropna(), bins=50, alpha=0.7, edgecolor='black')
     plt.title(f"{score_col}", fontsize=14)
     plt.xlabel("Score", fontsize=14)
     plt.ylabel("Frequency", fontsize=14)
