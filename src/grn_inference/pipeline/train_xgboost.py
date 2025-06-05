@@ -241,7 +241,7 @@ def main():
     model_df = model_dd.compute()
     
     plot_feature_importance(feature_names, xgb_booster, fig_dir)
-    plot_feature_score_histograms(feature_names, model_df, fig_dir)
+    plot_feature_score_histograms(model_df, feature_names, fig_dir)
     plot_feature_boxplots(feature_names, model_df, fig_dir)
     plot_xgboost_prediction_histogram(xgb_booster, X_test, fig_dir)
     

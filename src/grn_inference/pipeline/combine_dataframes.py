@@ -17,6 +17,8 @@ from grn_inference.normalization import (
     clip_and_normalize_log1p_dask
 )
 
+from grn_inference.plotting import plot_feature_score_histograms
+
 def parse_args() -> argparse.Namespace:
     """
     Parses command-line arguments.
@@ -154,7 +156,6 @@ def add_string_db_scores(inferred_net_dd, string_dir, full_edges):
         score_cols=["string_experimental_score", "string_textmining_score", "string_combined_score"],
         quantiles=(0.05, 0.95),
         apply_log1p=True,
-        dtype=np.float32,
     )
 
     string_dd = minmax_normalize_dask(
@@ -344,6 +345,8 @@ def main():
 
     non_null_scores_ddf = melted_df.dropna(subset=["score_value"])
     logging.info("      Done!")    
+    
+    plot_feature_score_histograms(non_null_scores_ddf, score_cols, output_dir)
     
     logging.info(f"Writing out inferred_score_df.parquet")
     pdf = non_null_scores_ddf.compute()

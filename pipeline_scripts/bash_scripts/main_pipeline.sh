@@ -672,18 +672,19 @@ run_homer() {
     fi
 
     # If the homer_results directory doesn't exist for the sample, run findMotifsGenome
-    if [ ! -d "$OUTPUT_DIR/homer_results/" ]; then
-        echo "Running Homer findMotifsGenome to identify enriched motifs in the ATAC-seq peaks"
+    if [ ! -d "$OUTPUT_DIR/homer_results/knownResults" ] || [ -z "$(ls -A "$OUTPUT_DIR/homer_results/knownResults" 2>/dev/null)" ]; then
+        echo "[INFO] Running HOMER: knownResults/ missing or empty."
         homer_find_motifs
     else
-        echo "Found existing Homer findMotifsGenome results"
+        echo "[INFO] HOMER knownResults/ already exists and is populated."
     fi
 
-    if [ ! -d "$OUTPUT_DIR/homer_results/homer_tf_motif_scores/" ]; then
-        echo "Running Homer annotatePeaks to find instances of specific motifs in the ATAC-seq peaks"
+
+    if [ ! -d "$OUTPUT_DIR/homer_results/homer_tf_motif_scores" ] || [ -z "$(ls -A "$OUTPUT_DIR/homer_results/homer_tf_motif_scores" 2>/dev/null)" ]; then
+        echo "[INFO] Running HOMER annotatePeaks."
         homer_process_motif_files
     else
-        echo "Found existing Homer annotatePeaks results"
+        echo "[INFO] annotatePeaks results already exist."
     fi
     echo "Finished running Homer"
 }

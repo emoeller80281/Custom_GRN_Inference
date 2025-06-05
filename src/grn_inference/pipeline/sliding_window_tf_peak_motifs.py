@@ -23,6 +23,7 @@ from scipy import stats
 from tqdm import tqdm
 
 from grn_inference.normalization import clip_and_normalize_log1p_dask, minmax_normalize_dask
+from grn_inference.plotting import plot_feature_score_histogram
 
 # at module top‐level
 _global_chr_pos_to_seq: Union[None, pd.DataFrame] = None
@@ -469,6 +470,8 @@ def main():
         tf_names_file, meme_dir, chr_pos_to_seq,
         rna_data_genes, species, num_cpu, output_dir
     )
+    
+    plot_feature_score_histogram(ddf, "sliding_window_score", output_dir)
 
     ddf.to_parquet(f"{output_dir}/sliding_window_tf_to_peak_score.parquet", engine="pyarrow", compression="snappy")
     logging.info(f"Wrote final TF–peak sliding window scores to sliding_window_tf_to_peak_score.parquet")
