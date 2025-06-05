@@ -15,6 +15,8 @@ from grn_inference.normalization import (
     clip_and_normalize_log1p_dask
 )
 
+from grn_inference.plotting import plot_feature_score_histogram
+
 def parse_args() -> argparse.Namespace:
     """
     Parses command-line arguments.
@@ -158,6 +160,8 @@ def main(input_dir: str, output_dir: str, cpu_count: int) -> None:
         score_cols=["homer_binding_score"], 
         dtype=np.float32
     )
+    
+    plot_feature_score_histogram(normalized_ddf, "homer_binding_score", output_dir)
 
     # Then continue on—e.g. write back out:
     normalized_ddf.to_parquet(

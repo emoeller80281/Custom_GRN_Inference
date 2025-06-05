@@ -687,6 +687,11 @@ run_homer() {
         echo "[INFO] annotatePeaks results already exist."
     fi
     echo "Finished running Homer"
+
+    if [ -d "$OUTPUT_DIR/homer_results" ] && [ -z "$(ls -A "$OUTPUT_DIR/homer_results")" ]; then
+        echo "[WARN] HOMER directory exists but is empty — removing..."
+        rm -rf "$OUTPUT_DIR/homer_results"
+    fi
 }
 
 run_homer_tf_to_peak_score() {
