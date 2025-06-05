@@ -127,8 +127,8 @@ run_DS011_mESC(){
     for SAMPLE_NAME in "${SAMPLE_NAMES[@]}"; do
         wait_for_available_slot
 
-        local RNA_FILE_NAME="DS011_mESC_RNA.parquet"
-        local ATAC_FILE_NAME="DS011_mESC_ATAC.parquet"
+        local RNA_FILE_NAME="DS011_mESC_filtered_RNA.parquet"
+        local ATAC_FILE_NAME="DS011_mESC_filtered_ATAC.parquet"
         local GROUND_TRUTH_FILE="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/REFERENCE_NETWORKS/RN111_ChIPSeq_BEELINE_Mouse_ESC.tsv"
 
         # Submit the job for each sample

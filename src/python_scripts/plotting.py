@@ -81,7 +81,7 @@ def plot_feature_importance(features: list, model, fig_dir: str):
     plt.tight_layout()
     plt.savefig(f"{fig_dir}/xgboost_feature_importance.png", dpi=200)
     plt.close()
-  
+
 def plot_feature_score_histograms(features, inferred_network, fig_dir):
     logging.info("\tPlotting feature score histograms")
     

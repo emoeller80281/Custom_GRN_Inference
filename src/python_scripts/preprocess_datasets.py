@@ -141,5 +141,9 @@ def main(atac_data_file, rna_data_file):
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format='%(message)s')
-    args = parse_args()
-    main(args.atac_data_file, args.rna_data_file)
+    # args = parse_args()
+    
+    atac_data_file = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/DS011_mESC/DS011_mESC_sample1/DS011_mESC_filtered_ATAC.parquet"
+    rna_data_file = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/DS011_mESC/DS011_mESC_sample1/DS011_mESC_filtered_RNA.parquet"
+    
+    main(atac_data_file, rna_data_file)

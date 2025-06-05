@@ -12,14 +12,14 @@ set -euo pipefail
 # =============================================
 # Run the peak to TG regulatory potential calculation methods
 STEP010_CICERO_MAP_PEAKS_TO_TG=false
-STEP015_CICERO_PEAK_TO_TG_SCORE=false
+STEP015_CICERO_PEAK_TO_TG_SCORE=true
 
-STEP020_PEAK_TO_TG_CORRELATION=false
+STEP020_PEAK_TO_TG_CORRELATION=true
 # STEP030_PEAK_TO_ENHANCER_DB=false # Deprecated, does not help model and no data for mouse
 
 # Run the TF to peak binding score calculation methods
-STEP040_SLIDING_WINDOW_TF_TO_PEAK_SCORE=false
-STEP050_HOMER_TF_TO_PEAK_SCORE=false
+STEP040_SLIDING_WINDOW_TF_TO_PEAK_SCORE=true
+STEP050_HOMER_TF_TO_PEAK_SCORE=true
 
 # Combine the score DataFrames
 STEP060_COMBINE_DATAFRAMES=true

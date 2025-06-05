@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import argparse
 import logging
+import os
 
 from normalization import minmax_normalize_pandas
 
@@ -32,8 +33,8 @@ def main():
     
     output_dir: str = args.output_dir
     
-    cicero_peak_to_peak_file = f"{output_dir}/cicero_peak_to_peak.csv"
-    cicero_peak_to_gene_file = f"{output_dir}/cicero_peak_to_gene.csv"
+    cicero_peak_to_peak_file = os.path.join(output_dir, "cicero_peak_to_peak.csv")
+    cicero_peak_to_gene_file = os.path.join(output_dir, "cicero_peak_to_gene.csv")
 
     logging.info("Loading 'cicero_peak_to_peak.csv'")
     peak_to_peak = pd.read_csv(cicero_peak_to_peak_file, header=0, index_col=None)
@@ -47,7 +48,7 @@ def main():
     merged_peaks = merged_peaks.rename(columns={"coaccess": "score"})
 
     # Remove edges between peaks with no coaccessibility
-    logging.info("Removing 0 scores")
+    logging.info("Removing scores with value == 0")
     merged_peaks = merged_peaks[merged_peaks["score"] != 0]
 
     # Extract only rows where peaks have an associated gene
@@ -86,6 +87,21 @@ def main():
         score_cols=["cicero_score"], 
         dtype=np.float32
     )
+    
+    # 1) Compute mean of the “non-1” scores
+    non1_mask = normalized_df["cicero_score"] < 1.0
+    non1_mean = normalized_df.loc[non1_mask, "cicero_score"].mean()
+
+    # 2) Shift only those rows so their mean becomes 0.5
+    #    NewScore = oldScore − non1_mean + 0.5
+    normalized_df.loc[non1_mask, "cicero_score"] = (
+        normalized_df.loc[non1_mask, "cicero_score"]
+        - non1_mean
+        + 0.5
+    )
+
+    # 3) Clip to [0,1] in case any values wandered outside
+    normalized_df["cicero_score"] = normalized_df["cicero_score"].clip(0.0, 1.0)
 
     # Write the final merged peaks to a csv file
     logging.info("Writing Cicero DataFrame to: 'cicero_peak_to_tg_scores.parquet'")

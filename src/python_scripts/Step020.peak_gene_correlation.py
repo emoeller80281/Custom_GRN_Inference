@@ -1,769 +1,230 @@
-import pandas as pd
-import pybedtools
 import numpy as np
-from pybiomart import Server
-import scipy.sparse as sp
-import scipy.stats as stats
-from dask import delayed, compute
-from dask.diagnostics import ProgressBar
-import dask.dataframe as dd
-from tqdm import tqdm
-import psutil
-import shutil
-
-import math
-import os
-import sys
+import pandas as pd
 import argparse
 import logging
-
-import pyarrow as pa
+import os
 import pyarrow.parquet as pq
-import pyarrow.lib as pa_lib
-import matplotlib.pyplot as plt
-import seaborn as sns
+import pyarrow as pa
 
-from normalization import (
-    minmax_normalize_dask,
-    clip_and_normalize_log1p_dask
-)
+import pyranges as pr
+from pybiomart import Server
+from scipy import sparse
 
 def parse_args() -> argparse.Namespace:
-    """
-    Parses command-line arguments.
-
-    Returns:
-    argparse.Namespace: Parsed arguments containing paths for input and output files.
-    """
-
     parser = argparse.ArgumentParser(description="Process TF motif binding potential.")
-    parser.add_argument(
-        "--atac_data_file",
-        type=str,
-        required=True,
-        help="Path to the scATACseq data file"
-    )
-    parser.add_argument(
-        "--rna_data_file",
-        type=str,
-        required=True,
-        help="Path to the scRNAseq data file"
-    )
-    parser.add_argument(
-        "--output_dir",
-        type=str,
-        required=True,
-        help="Path to the output directory for the sample"
-    )
-    parser.add_argument(
-        "--species",
-        type=str,
-        required=True,
-        help="Species of the sample, either 'mouse', 'human', 'hg38', or 'mm10'"
-    )
-    parser.add_argument(
-        "--num_cpu",
-        type=str,
-        required=True,
-        help="Number of processors to run multithreading with"
-    )
-    parser.add_argument(
-        "--peak_dist_limit",
-        type=str,
-        required=True,
-        help="Number of base pairs away from a genes TSS to associate with peaks"
-    )
-    parser.add_argument(
-        "--fig_dir",
-        type=str,
-        required=True,
-        help="Path to the sample's figure directory"
-    )
-    
-    args: argparse.Namespace = parser.parse_args()
+    parser.add_argument("--atac_data_file", type=str, required=True, help="Path to the scATAC-seq dataset")
+    parser.add_argument("--rna_data_file", type=str, required=True, help="Path to the scRNA-seq dataset")
+    parser.add_argument("--organism", type=str, default="mmusculus", 
+                        help="Ensembl organism prefix (e.g. mmusculus for mouse) for TSS lookup")
+    parser.add_argument("--tss_distance", type=int, default=1_000_000,
+                        help="Distance (bp) from TSS to filter peaks (default: 1,000,000)")
+    return parser.parse_args()
 
-    return args
-
-# ------------------------- DATA LOADING & PREPARATION ------------------------- #
-def extract_atac_peaks(atac_df, tmp_dir):
-    peak_pos = atac_df["peak_id"].compute().tolist()
-
-    peak_df = pd.DataFrame()
-    peak_df["chr"] = [pos.split(":")[0].replace("chr", "") for pos in peak_pos]
-    peak_df["start"] = [int(pos.split(":")[1].split("-")[0]) for pos in peak_pos]
-    peak_df["end"] = [int(pos.split(":")[1].split("-")[1]) for pos in peak_pos]
-    peak_df["peak_id"] = peak_pos
-
-    peak_df["chr"] = peak_df["chr"].astype(str)
-    peak_df["start"] = peak_df["start"].astype(int)
-    peak_df["end"] = peak_df["end"].astype(int)
-    peak_df["peak_id"] = peak_df["peak_id"].astype(str)
-    
-    # Write the peak DataFrame to a file
-    peak_df.to_parquet(f"{tmp_dir}/peak_df.parquet", engine="pyarrow", index=False, compression="snappy")
-
-def load_ensembl_organism_tss(organism, tmp_dir):
-    # Connect to the Ensembl BioMart server
-    server = Server(host='http://www.ensembl.org')
-
-    gene_ensembl_name = f'{organism}_gene_ensembl'
-    
-    # Select the Ensembl Mart and the human dataset
-    mart = server['ENSEMBL_MART_ENSEMBL']
-    dataset: pd.DataFrame = mart[gene_ensembl_name]
-
-    # Query for attributes: Ensembl gene ID, gene name, strand, and transcription start site (TSS)
-    ensembl_df = dataset.query(attributes=[
-        'external_gene_name', 
-        'strand', 
-        'chromosome_name',
-        'transcription_start_site'
-    ])
-
-    ensembl_df.rename(columns={
-        "Chromosome/scaffold name": "chr",
-        "Transcription start site (TSS)": "tss",
-        "Gene name": "gene_id"
-    }, inplace=True)
-    
-    # Make sure TSS is integer (some might be floats).
-    ensembl_df["tss"] = ensembl_df["tss"].astype(int)
-
-    # In a BED file, we’ll store TSS as [start, end) = [tss, tss+1)
-    ensembl_df["start"] = ensembl_df["tss"].astype(int)
-    ensembl_df["end"] = ensembl_df["tss"].astype(int) + 1
-
-    # Re-order columns for clarity: [chr, start, end, gene]
-    ensembl_df = ensembl_df[["chr", "start", "end", "gene_id"]]
-    
-    ensembl_df["chr"] = ensembl_df["chr"].astype(str)
-    ensembl_df["gene_id"] = ensembl_df["gene_id"].astype(str)
-    
-    # Write the peak DataFrame to a file
-    ensembl_df.to_parquet(f"{tmp_dir}/ensembl.parquet", engine="pyarrow", index=False, compression="snappy")
-
-def find_genes_near_peaks(peak_bed, tss_bed, rna_df, peak_dist_limit, tmp_dir):
+def is_normalized(df: pd.DataFrame, threshold: float = 1.5) -> bool:
     """
-    Identify genes whose transcription start sites (TSS) are near scATAC-seq peaks.
-    
-    This function:
-        1. Uses BedTools to find peaks that are within peak_dist_limit bp of each gene's TSS.
-        2. Converts the BedTool result to a pandas DataFrame.
-        3. Computes the absolute distance between the peak end and gene start (as a proxy for TSS distance).
-        4. Scales these distances using an exponential drop-off function (e^-dist/25000),
-           the same method used in the LINGER cis-regulatory potential calculation.
-        5. Deduplicates the data to keep the minimum (i.e., best) peak-to-gene connection.
-        6. Only keeps genes that are present in the RNA-seq dataset.
-        
-    Parameters
-    ----------
-    peak_bed : BedTool
-        A BedTool object representing scATAC-seq peaks.
-    tss_bed : BedTool
-        A BedTool object representing gene TSS locations.
-    rna_df : pandas.DataFrame
-        The RNA-seq dataset, which must have a "gene_id" column.
-    peak_dist_limit : int
-        The maximum distance (in bp) from a TSS to consider a peak as potentially regulatory.
-        
-    Returns
-    -------
-    peak_tss_subset_df : pandas.DataFrame
-        A DataFrame containing columns "peak_id", "target_id", and the scaled TSS distance "TSS_dist"
-        for peak–gene pairs.
-    gene_list : set
-        A set of unique gene IDs (target_id) present in the DataFrame.
+    Heuristically check if the dataset appears normalized.
     """
-    # 3) Find peaks that are within peak_dist_limit bp of each gene's TSS using BedTools
-    logging.info(f"Locating peaks that are within {peak_dist_limit} bp of each gene's TSS")
-    peak_tss_overlap = peak_bed.window(tss_bed, w=peak_dist_limit)
-    
-    # Define the column types for conversion to DataFrame
-    dtype_dict = {
-        "peak_chr": str,
-        "peak_start": int,
-        "peak_end": int,
-        "peak_id": str,
-        "gene_chr": str,
-        "gene_start": int,
-        "gene_end": int,
-        "gene_id": str
-    }
-    
-    # Convert the BedTool result to a DataFrame for further processing.
-    peak_tss_overlap_df = peak_tss_overlap.to_dataframe(
-        names=[
-            "peak_chr", "peak_start", "peak_end", "peak_id",
-            "gene_chr", "gene_start", "gene_end", "gene_id"
-        ],
-        dtype=dtype_dict,
-        low_memory=False  # ensures the entire file is read in one go
-    ).rename(columns={"gene_id": "target_id"}).dropna()
-    
-    # Calculate the absolute distance between the peak's end and gene's start.
-    # This serves as a proxy for the TSS distance for the peak-to-gene pair.
-    peak_tss_overlap_df["TSS_dist"] = np.abs(peak_tss_overlap_df["peak_end"] - peak_tss_overlap_df["gene_start"])
-    
-    # Sort by the TSS distance (lower values imply closer proximity and therefore stronger association)
-    # and drop duplicates keeping only the best association for each peak-target pair.
-    peak_tss_overlap_df = peak_tss_overlap_df.sort_values("TSS_dist")
-    peak_tss_overlap_df = peak_tss_overlap_df.drop_duplicates(subset=["peak_id", "target_id"], keep="first")
-    
-    # Scale the TSS distance using an exponential drop-off function
-    # e^-dist/25000, same scaling function used in LINGER Cis-regulatory potential calculation
-    # https://github.com/Durenlab/LINGER
-    peak_tss_overlap_df["TSS_dist_score"] = peak_tss_overlap_df["TSS_dist"].apply(lambda x: math.exp(-(x / 250000)))
-    
-    # Keep only the necessary columns.
-    peak_tss_subset_df = peak_tss_overlap_df[["peak_id", "target_id", "TSS_dist_score"]]
-    
-    # Filter out any genes not found in the RNA-seq dataset.
-    peak_tss_subset_df = peak_tss_subset_df[peak_tss_subset_df["target_id"].isin(rna_df["gene_id"])]
-    
-    logging.info(f'\t- Number of peaks: {len(peak_tss_subset_df)}')
-        
-    peak_tss_subset_df.to_parquet(f"{tmp_dir}/peak_to_gene_map.parquet", index=False)
+    values = df.iloc[:, 1:].values
+    if not np.issubdtype(values.dtype, np.floating):
+        return False
+    mean_val = values[values > 0].mean()
+    return 0 < mean_val < threshold
 
-def row_normalize_sparse(X):
-    """
-    Row-normalize a sparse matrix X (CSR format) so that each row
-    has zero mean and unit variance. Only nonzero entries are stored.
-    """
-    # Compute row means (this works even with sparse matrices)
-    means = np.array(X.mean(axis=1)).flatten()
-    
-    # Compute row means of squared values:
-    X2 = X.multiply(X)
-    means2 = np.array(X2.mean(axis=1)).flatten()
-    
-    # Standard deviation: sqrt(E[x^2] - mean^2)
-    stds = np.sqrt(np.maximum(0, means2 - means**2))
-    
-    # Convert to LIL format for efficient row-wise operations.
-    X_norm = X.tolil(copy=True)
-    for i in range(X.shape[0]):
-        if stds[i] > 0:
-            # For each nonzero in row i, subtract the row mean and divide by std.
-            # X_norm.rows[i] gives the column indices and X_norm.data[i] the values.
-            X_norm.data[i] = [(val - means[i]) / stds[i] for val in X_norm.data[i]]
-        else:
-            # If the row has zero variance, leave it as-is (or set to zero)
-            X_norm.data[i] = [0 for _ in X_norm.data[i]]
-    return X_norm.tocsr()
+def log2_cpm_normalize(df: pd.DataFrame, id_col_name: str, label: str = "dataset") -> pd.DataFrame:
+    if id_col_name not in df.columns:
+        raise ValueError(f"Identifier column '{id_col_name}' not found in DataFrame.")
 
-def select_top_dispersion_auto(df, fig_dir, target_n_features=5000, dispersion_quantile=0.75):
-    """
-    Automatically selects the top most dispersed features by:
-    1. Filtering features with dispersion above a dataset-driven threshold.
-    2. Selecting the top-N features with the highest dispersion.
-    """
-    def compute_dispersion(part):
-        numeric_part = part.select_dtypes(include=[np.number])
-        mean = numeric_part.mean(axis=1, skipna=True)
-        var = numeric_part.var(axis=1, skipna=True)
-        disp = var / (mean + 1e-8)
-        return disp
+    # Split into ID column and numeric values
+    id_col = df[[id_col_name]].reset_index(drop=True)
+    counts = df.drop(columns=[id_col_name]).apply(pd.to_numeric, errors="coerce").fillna(0)
 
-    logging.info("    Computing feature dispersion across cells...")
-    dispersions = df.map_partitions(compute_dispersion, meta=('x', 'f8')).compute()
-    
-    os.makedirs(fig_dir, exist_ok=True)
-    thresh = dispersions.quantile(dispersion_quantile)
+    # Combine and check normalization status
+    full_df = pd.concat([id_col, counts], axis=1)
+    if is_normalized(full_df):
+        print(f" - {label} matrix appears already normalized. Skipping log2 CPM.", flush=True)
+        return full_df
 
-    plt.figure(figsize=(8, 4))
-    sns.histplot(dispersions, bins=100, kde=True, stat="count", edgecolor=None)
-    plt.axvline(thresh, color="red", linestyle="--", label=f"{dispersion_quantile:.2f} quantile = {thresh:.2f}")
-    plt.title("Feature Dispersion Distribution")
-    plt.xlabel("Dispersion")
-    plt.ylabel("Count")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(os.path.join(fig_dir, "dispersion_histogram.png"), dpi=200)
-    plt.close()
+    print(f" - {label} matrix appears unnormalized. Applying log2 CPM normalization.", flush=True)
 
-    total_features = len(dispersions)
-    min_disp = dispersions.quantile(dispersion_quantile)
-    filtered = dispersions[dispersions >= min_disp]
-    n_above_thresh = len(filtered)
+    # Compute log2 CPM
+    library_sizes = counts.sum(axis=0)
+    cpm = (counts.div(library_sizes, axis=1) * 1e6).add(1)
+    log2_cpm = np.log2(cpm).reset_index(drop=True)
 
-    if n_above_thresh > target_n_features:
-        top_features = filtered.nlargest(target_n_features)
+    return pd.concat([id_col, log2_cpm], axis=1)
+
+def load_atac_dataset(atac_data_file: str) -> pd.DataFrame:
+    if atac_data_file.lower().endswith('.parquet'):
+        df = pd.read_parquet(atac_data_file)
+    elif atac_data_file.lower().endswith('.csv'):
+        df = pd.read_csv(atac_data_file, sep=",", header=0, index_col=None)
+    elif atac_data_file.lower().endswith('.tsv'):
+        df = pd.read_csv(atac_data_file, sep="\t", header=0, index_col=None)
     else:
-        top_features = filtered
+        logging.error("ERROR: ATAC data file must be a csv, tsv, or parquet format. Check column separators")
+        raise ValueError("Unsupported ATAC file format.")
+        
+    logging.info(f'\tNumber of peaks: {df.shape[0]}')
+    logging.info(f'\tNumber of cells: {df.shape[1] - 1}')
+    return df.rename(columns={df.columns[0]: "peak_id"})
 
-    top_feature_names = top_features.index.to_list()
+def load_rna_dataset(rna_data_file: str) -> pd.DataFrame:
+    if rna_data_file.lower().endswith('.parquet'):
+        df = pd.read_parquet(rna_data_file)
+    elif rna_data_file.lower().endswith('.csv'):
+        df = pd.read_csv(rna_data_file, sep=",", header=0, index_col=None)
+    elif rna_data_file.lower().endswith('.tsv'):
+        df = pd.read_csv(rna_data_file, sep="\t", header=0, index_col=None)
+    else:
+        logging.error("ERROR: RNA data file must be a csv, tsv, or parquet format. Check column separators")
+        raise ValueError("Unsupported RNA file format.")
+        
+    logging.info(f'\tNumber of genes: {df.shape[0]}')
+    logging.info(f'\tNumber of cells: {df.shape[1] - 1}')
+    return df.rename(columns={df.columns[0]: "gene_id"})
 
-    logging.info(f"\t  - Initial features: {total_features:,}")
-    logging.info(f"\t  - Features above dispersion threshold (quantile={dispersion_quantile}): {n_above_thresh:,}")
-    logging.info(f"\t  - Final selected features (after top-N limit): {len(top_feature_names):,}")
-    logging.info(f"\t  - Dispersion threshold (min_disp) used: {min_disp:.4f}")
+def load_ensembl_tss_df(organism: str) -> pd.DataFrame:
+    """
+    Query Ensembl BioMart for TSS of all genes in 'organism'
+    (e.g. 'mmusculus_gene_ensembl'). Returns a DataFrame with columns:
+    ['chr', 'start', 'end', 'gene_id'], where start = TSS, end = TSS+1.
+    """
+    server = Server(host="http://www.ensembl.org")
+    dataset_name = f"{organism}_gene_ensembl"
+    mart = server["ENSEMBL_MART_ENSEMBL"]
+    ds = mart[dataset_name]
+    
+    df = ds.query(
+        attributes=[
+            "external_gene_name",
+            "strand",
+            "chromosome_name",
+            "transcription_start_site"
+        ]
+    )
+    df.rename(
+        columns={
+            "Chromosome/scaffold name": "chr",
+            "Transcription start site (TSS)": "tss",
+            "Gene name": "gene_id"
+        },
+        inplace=True
+    )
+    df["tss"] = df["tss"].astype(int)
+    df["start"] = df["tss"]
+    df["end"] = df["tss"] + 1
+    return df[["chr", "start", "end", "gene_id"]].copy()
 
-    # Explicitly create a new column from the index to preserve feature IDs
-    df = df.assign(feature_id=df.index)
+def filter_peaks_within_distance(atac_df: pd.DataFrame,
+                                 tss_df: pd.DataFrame,
+                                 distance: int) -> pd.DataFrame:
+    """
+    Given atac_df with a 'peak_id' column ("chr:start-end") and numeric cell columns,
+    plus tss_df with columns ['chr','start','end','gene_id'], filter to keep only
+    peaks whose interval overlaps (±distance bp) any TSS.
 
-    # Filter rows based on selected feature IDs
-    df = df[df["feature_id"].isin(top_feature_names)]
+    Returns atac_df filtered to those peak_ids.
+    """
+    # 1) Build PyRanges for TSS expanded by ±distance
+    tss_df = tss_df.copy()
+    tss_df["Chromosome"] = "chr" + tss_df["chr"].astype(str)
+    tss_df["Start"] = tss_df["start"] - distance
+    tss_df["End"]   = tss_df["end"] + distance
+    # Ensure non-negative start
+    tss_df["Start"] = tss_df["Start"].clip(lower=0)
+    promoter_pr = pr.PyRanges(tss_df[["Chromosome", "Start", "End", "gene_id"]])
+    
+    # 2) Parse peaks from atac_df['peak_id']
+    peaks = atac_df["peak_id"].str.split("[:-]", expand=True)
+    # peaks has columns [chr, start, end] but split by ':' and '-'
+    peaks.columns = ["Chromosome", "Start", "End"]
+    peaks["Chromosome"] = peaks["Chromosome"].astype(str)
+    peaks["Start"] = peaks["Start"].astype(int)
+    peaks["End"] = peaks["End"].astype(int)
+    peaks_pr = pr.PyRanges(peaks)
+    
+    # 3) Find peaks overlapping any promoter window
+    overlap_pr = peaks_pr.overlap(promoter_pr)
+    overlap_df = overlap_pr.df.iloc[:, :3].copy()
+    overlap_df.columns = ["Chromosome", "Start", "End"]
+    
+    # 4) Reconstruct peak_id strings for filtering
+    overlap_df["peak_id"] = (
+        overlap_df["Chromosome"]
+        + ":"
+        + overlap_df["Start"].astype(str)
+        + "-"
+        + overlap_df["End"].astype(str)
+    )
+    kept_peak_ids = set(overlap_df["peak_id"].tolist())
+    
+    # 5) Filter atac_df to only those peak_ids
+    filtered = atac_df[atac_df["peak_id"].isin(kept_peak_ids)].copy()
+    logging.info(f"Filtered peaks within ±{distance} bp of TSS: kept {filtered.shape[0]} peaks (out of {atac_df.shape[0]})")
+    return filtered.reset_index(drop=True)
 
-    # Set index back to feature_id (for clarity)
-    df = df.set_index("feature_id")         
+def deduplicate_columns(df: pd.DataFrame, label: str) -> pd.DataFrame:
+    seen = {}
+    new_columns = []
+    
+    for col in df.columns:
+        if col not in seen:
+            seen[col] = 0
+            new_columns.append(col)
+        else:
+            seen[col] += 1
+            new_columns.append(f"{col}.{seen[col]}")
+    
+    if len(new_columns) != len(set(new_columns)):
+        raise ValueError(f"[{label}] Still found duplicates after deduplication attempt.")
+    
+    if df.columns.tolist() != new_columns:
+        print(f"[{label}] Duplicate column names found. Renaming to make unique.")
+        df.columns = new_columns
+    else:
+        print(f"[{label}] No duplicates found.")
     
     return df
 
-    
-def auto_tune_parameters(num_cpu: int = None, total_memory_gb: int = None) -> dict:
-    """
-    Suggests optimal chunk_size, batch_size, and number of Dask workers based on system resources.
+def main(atac_data_file, rna_data_file, organism, tss_distance):
+    logging.info("Loading ATAC-seq dataset")
+    atac_df = load_atac_dataset(atac_data_file)
 
-    Parameters
-    ----------
-    num_cpu : int, optional
-        Number of CPU cores available. If None, detects automatically.
-    total_memory_gb : int, optional
-        Total available RAM in GB. If None, detects automatically.
+    logging.info("Loading RNA-seq dataset")
+    rna_df = load_rna_dataset(rna_data_file)
 
-    Returns
-    -------
-    dict
-        Dictionary with 'chunk_size', 'batch_size', and 'num_workers'.
-    """
-    # Auto-detect if not provided
-    if num_cpu is None:
-        num_cpu = psutil.cpu_count(logical=False) or psutil.cpu_count(logical=True)
+    logging.info(f"Loading TSS for organism '{organism}'")
+    tss_df = load_ensembl_tss_df(organism)
 
-    if total_memory_gb is None:
-        total_memory_gb = psutil.virtual_memory().total / (1024 ** 3)  # bytes → GB
+    logging.info(f"Filtering peaks to within ±{tss_distance} bp of any TSS")
+    atac_df_filtered = filter_peaks_within_distance(atac_df, tss_df, tss_distance)
 
-    # -------------------------------
-    # Tuning chunk size (gene side)
-    # -------------------------------
-    if total_memory_gb >= 512:
-        chunk_size = 50000
-    elif total_memory_gb >= 256:
-        chunk_size = 30000
-    elif total_memory_gb >= 128:
-        chunk_size = 20000
-    else:
-        chunk_size = 10000
+    logging.info("Checking and normalizing ATAC-seq data")
+    atac_df_norm = log2_cpm_normalize(atac_df_filtered, id_col_name="peak_id", label="scATAC-seq")
 
-    # -------------------------------
-    # Tuning batch size (peak side)
-    # -------------------------------
-    if num_cpu >= 64:
-        batch_size = 2000
-    elif num_cpu >= 32:
-        batch_size = 1000
-    elif num_cpu >= 16:
-        batch_size = 500
-    else:
-        batch_size = 200
+    logging.info("Checking and normalizing RNA-seq data")
+    rna_df_norm = log2_cpm_normalize(rna_df, id_col_name="gene_id", label="scRNA-seq")
 
-    # -------------------------------
-    # Tuning Dask number of workers
-    # -------------------------------
-    num_workers = max(1, num_cpu - 2)
+    # Deduplicate columns if necessary
+    atac_df_norm = deduplicate_columns(atac_df_norm, label="ATAC")
+    rna_df_norm = deduplicate_columns(rna_df_norm, label="RNA")
 
-    return {
-        "chunk_size": chunk_size,
-        "batch_size": batch_size,
-        "num_workers": num_workers
-    }
+    def update_name(filename):
+        base, ext = os.path.splitext(filename)
+        return f"{base}_processed.parquet"
 
-def calculate_significant_peak_to_gene_correlations(
-    atac_df,
-    gene_df,
-    output_file=None,
-    alpha=0.05,
-    chunk_size=25_000,
-    num_cpu=4,
-    batch_size=1500,
-    memory_threshold=1e8  # 100 million peak-gene pairs (default switch)
-):
-    """
-    Calculates significant peak-to-gene correlations (p < alpha).
+    new_atac_file = update_name(atac_data_file)
+    new_rna_file = update_name(rna_data_file)
 
-    If the number of peak × gene pairs is small enough (< memory_threshold),
-    computes everything in memory and returns a DataFrame.
-    If too large, streams to Parquet file on disk.
+    logging.info('\nWriting ATAC-seq dataset to Parquet')
+    atac_df_norm.to_parquet(new_atac_file, engine="pyarrow", compression="snappy", index=False)
+    logging.info("  Done!")
 
-    Parameters
-    ----------
-    atac_df : pandas.DataFrame or dask.DataFrame
-        ATAC matrix (peaks × cells)
-    gene_df : pandas.DataFrame or dask.DataFrame
-        RNA matrix (genes × cells)
-    output_file : str, optional
-        Output file path to save results (only required if streaming)
-    alpha : float
-        P-value threshold
-    chunk_size : int
-        Chunk size for dot products
-    num_cpu : int
-        Number of threads
-    batch_size : int
-        Batch size for Dask task execution
-    memory_threshold : int
-        Max number of peak-gene pairs to allow full-memory mode
+    logging.info('\nWriting RNA-seq dataset to Parquet')
+    rna_df_norm.to_parquet(new_rna_file, engine="pyarrow", compression="snappy", index=False)
+    logging.info("  Done!")
 
-    Returns
-    -------
-    pandas.DataFrame or str
-        If using memory mode, returns a DataFrame.
-        If using disk streaming mode, returns output_file path.
-    """
-    
-    if output_file is None:
-        raise ValueError("output_file must be provided.")
-
-    os.makedirs(os.path.dirname(output_file), exist_ok=True)
-
-    # Make sure dataframes are pandas
-    logging.info('\tConverting ATAC dask dataframe to pandas')
-    if isinstance(atac_df, dd.DataFrame):
-        atac_df = atac_df.compute()
-        
-    logging.info('\tConverting RNA dask dataframe to pandas')
-    if isinstance(gene_df, dd.DataFrame):
-        gene_df = gene_df.compute()
-
-    num_peaks, n = atac_df.shape
-    num_genes = gene_df.shape[0]
-    num_pairs = num_peaks * num_genes
-
-    logging.info(f"\t- Number of peaks: {num_peaks}")
-    logging.info(f"\t- Number of genes: {num_genes}")
-    logging.info(f"\t- Total peak-gene pairs: {num_pairs:,}")
-
-    # Convert to sparse
-    X = sp.csr_matrix(atac_df.select_dtypes(include=[np.number]).values.astype(float))
-    Y = sp.csr_matrix(gene_df.select_dtypes(include=[np.number]).values.astype(float))
-
-    df_degrees = n - 2
-
-    # Row-normalize
-    X_norm = row_normalize_sparse(X)
-    Y_norm = row_normalize_sparse(Y)
-
-    def process_peak_gene_chunked(i, X_norm, Y_norm, df_degrees, n, alpha, chunk_size, min_r=0.0):
-        results = []
-        peak_row = X_norm.getrow(i)
-        total_genes = Y_norm.shape[0]
-        for start in range(0, total_genes, chunk_size):
-            end = min(start + chunk_size, total_genes)
-            Y_chunk = Y_norm[start:end]
-
-            r_chunk = peak_row.dot(Y_chunk.T).toarray().ravel()
-            r_chunk = r_chunk / (n - 1)
-
-            # Optional rough correlation filtering
-            if min_r > 0:
-                keep = np.where(np.abs(r_chunk) >= min_r)[0]
-                if len(keep) == 0:
-                    continue
-                r_chunk = r_chunk[keep]
-                gene_indices = keep + start
-            else:
-                gene_indices = np.arange(start, end)
-
-            with np.errstate(divide='ignore', invalid='ignore'):
-                t_stat_chunk = r_chunk * np.sqrt(df_degrees / (1 - r_chunk**2))
-            p_chunk = 2 * stats.t.sf(np.abs(t_stat_chunk), df=df_degrees)
-
-            sig_indices = np.where(p_chunk < alpha)[0]
-            for local_idx in sig_indices:
-                results.append((i, gene_indices[local_idx], r_chunk[local_idx]))
-                
-        return results
-
-    if num_pairs <= memory_threshold:
-        # --- Version 2: Full Memory Mode ---
-        logging.info("\t- Using in-memory calculation (faster)")
-
-        tasks = [
-            delayed(process_peak_gene_chunked)(i, X_norm, Y_norm, df_degrees, n, alpha, chunk_size)
-            for i in range(num_peaks)
-        ]
-
-        with ProgressBar(dt=30, out=sys.stderr):
-            results = compute(*tasks, scheduler="threads", num_workers=num_cpu)
-
-        flat_results = [item for sublist in results for item in sublist]
-
-        df_corr = pd.DataFrame(flat_results, columns=["peak_i", "gene_j", "correlation"])
-        df_corr["peak_id"] = atac_df.index[df_corr["peak_i"]]
-        df_corr["gene_id"] = gene_df.index[df_corr["gene_j"]]
-        df_corr = df_corr[["peak_id", "gene_id", "correlation"]]
-
-        logging.info("    Done!")
-        
-        df_corr.to_parquet(output_file, engine="pyarrow", compression="snappy")
-
-        return df_corr
-
-    else:
-        # --- Version 1: Streaming-to-Parquet Mode ---
-        logging.info("    Too large for memory. Streaming results to disk.")
-
-        tasks = [
-            delayed(process_peak_gene_chunked)(i, X_norm, Y_norm, df_degrees, n, alpha, chunk_size, min_r=0.2)
-            for i in range(num_peaks)
-        ]
-
-        writer = None
-        schema = None
-        num_batches = (num_peaks + batch_size - 1) // batch_size
-
-        for batch_start in tqdm(range(0, num_peaks, batch_size), total=num_batches, desc="Computing peak-gene batches"):
-            batch = tasks[batch_start: batch_start + batch_size]
-            results = compute(*batch, scheduler="threads", num_workers=num_cpu)
-
-            for local_idx, sublist in enumerate(results):
-                peak_idx = batch_start + local_idx
-                if not sublist:
-                    continue
-
-                df_chunk = pd.DataFrame(sublist, columns=["peak_i", "gene_j", "correlation"])
-                df_chunk["peak_id"] = atac_df.index[df_chunk["peak_i"]]
-                df_chunk["gene_id"] = gene_df.index[df_chunk["gene_j"]]
-                df_chunk = df_chunk[["peak_id", "gene_id", "correlation"]]
-
-                table = pa.Table.from_pandas(df_chunk, preserve_index=False)
-
-                if writer is None:
-                    schema = table.schema
-                    writer = pq.ParquetWriter(output_file, schema)
-
-                writer.write_table(table)
-                del df_chunk, table
-
-            del results
-
-        if writer:
-            writer.close()
-            logging.info(f"    Wrote correlations to {output_file}")
-        else:
-            logging.warning("    No significant correlations found; no Parquet written.")
-
-        return output_file
-
-def load_atac_dataset(atac_data_file: str) -> dd.DataFrame:
-    atac_df: dd.DataFrame = dd.read_parquet(atac_data_file)
-    return atac_df
-
-def load_rna_dataset(rna_data_file: str) -> dd.DataFrame:
-    rna_df: dd.DataFrame = dd.read_parquet(rna_data_file)
-    return rna_df
-
-def main():
-    # Parse arguments
-    args: argparse.Namespace = parse_args()
-    
-    if args.species == "hg38":
-        ORGANISM = "hsapiens"
-    elif args.species == "mm10":
-        ORGANISM = "mmusculus"
-    else:
-        raise Exception(f'Organism not found, you entered {args.species} (must be one of: "hg38", "mm10")')
-    
-    ATAC_DATA_FILE = args.atac_data_file
-    RNA_DATA_FILE =  args.rna_data_file
-    OUTPUT_DIR = args.output_dir
-    TMP_DIR = f"{OUTPUT_DIR}/tmp"
-    NUM_CPU = int(args.num_cpu)
-    PEAK_DIST_LIMIT=args.peak_dist_limit
-    FIG_DIR=os.path.join(args.fig_dir, "peak_gene_correlation_figures")
-    
-    os.makedirs(FIG_DIR, exist_ok=True)
-    
-    # Auto-tune parameters based on system resources
-    tuned_params = auto_tune_parameters(num_cpu=NUM_CPU)
-    chunk_size = tuned_params["chunk_size"]
-    batch_size = tuned_params["batch_size"]
-    num_workers = tuned_params["num_workers"]
-
-    logging.info("Auto-tuned parameters:")
-    logging.info(f"  - chunk_size = {chunk_size:,}")
-    logging.info(f"  - batch_size = {batch_size:,}")
-    logging.info(f"  - num_workers = {num_workers}")
-    
-    # Make the tmp dir if it does not exist
-    if not os.path.exists(TMP_DIR):
-        os.makedirs(TMP_DIR)
-    
-    logging.info("Loading the scRNA-seq dataset.")
-    rna_df: dd.DataFrame = load_rna_dataset(RNA_DATA_FILE,)
-
-    logging.info("Loading and parsing the ATAC-seq peaks")
-    atac_df: dd.DataFrame = load_atac_dataset(ATAC_DATA_FILE)
-
-    if not os.path.exists(f"{TMP_DIR}/peak_df.parquet"):
-        logging.info(f"Extracting peak information and saving as a bed file")
-        extract_atac_peaks(atac_df, TMP_DIR)
-    else:
-        logging.info("ATAC-seq BED file exists, loading...")
-
-    if not os.path.exists(f"{TMP_DIR}/ensembl.parquet"):
-        logging.info(f"Extracting TSS locations for {ORGANISM} from Ensembl and saving as a bed file")
-        load_ensembl_organism_tss(ORGANISM, TMP_DIR)
-    else:
-        logging.info("Ensembl gene TSS BED file exists, loading...")
-
-    pybedtools.set_tempdir(TMP_DIR)
-    
-    # Load the peak and gene TSS BED files
-    peak_df = dd.read_parquet(f"{TMP_DIR}/peak_df.parquet").compute()
-    tss_df = dd.read_parquet(f"{TMP_DIR}/ensembl.parquet").compute()
-
-    peak_bed = pybedtools.BedTool.from_dataframe(peak_df)
-    tss_bed = pybedtools.BedTool.from_dataframe(tss_df)
-    
-    # ============ FINDING PEAKS NEAR GENES ============
-    # Dataframe with "peak_id", "target_id" and "TSS_dist"
-    if not os.path.exists(os.path.join(TMP_DIR, "peak_to_gene_map.parquet")):
-        find_genes_near_peaks(
-            peak_bed,
-            tss_bed,
-            rna_df,
-            PEAK_DIST_LIMIT,
-            TMP_DIR
-        )
-    else:
-        logging.info('TSS distance file exists, loading...')
-    
-    pybedtools.helpers.cleanup(verbose=False, remove_all=True)
-    
-    peak_gene_dd = dd.read_parquet(f"{TMP_DIR}/peak_to_gene_map.parquet")
-
-    # ============ PEAK TO GENE CORRELATION CALCULATION ============
-    PARQ = os.path.join(TMP_DIR, "sig_peak_to_gene_corr.parquet")
-    
-    def prepare_inputs_for_correlation():
-        logging.info("Subsetting ATAC and RNA matrices to relevant peaks/genes")
-
-        # Align by IDs
-        atac_sub = atac_df.merge(peak_gene_dd[["peak_id"]].drop_duplicates(), on="peak_id", how="inner")
-        rna_sub = rna_df.merge(peak_gene_dd[["target_id"]].drop_duplicates(),
-                            left_on="gene_id", right_on="target_id", how="inner")
-
-        # Use peak_id / target_id as index before dispersion selection
-        atac_sub = atac_sub.set_index("peak_id")
-        rna_sub = rna_sub.set_index("target_id")
-
-        # Compute dispersion and filter
-        logging.info("Filtering out peaks with high dispersion")
-        atac_sub = select_top_dispersion_auto(atac_sub, FIG_DIR, target_n_features=500_000, dispersion_quantile=0.75)
-        
-        logging.info("Filtering out genes with high dispersion")
-        rna_sub = select_top_dispersion_auto(rna_sub, FIG_DIR, target_n_features=50_000, dispersion_quantile=0.75)
-
-        logging.info(f"\nSelected {atac_sub.shape[0].compute()} ATAC features with highest dispersion")
-        logging.info(f"Selected {rna_sub.shape[0].compute()} RNA features with highest dispersion")
-        
-        logging.info('\nSubsetting datasets to shared cell barcodes')
-        # 1) find the common cell barcodes
-        common_cells = [cell for cell in atac_sub.columns if cell in rna_sub.columns]        
-        if len(common_cells) == 0:
-            raise ValueError("No shared cells between ATAC and RNA!")
-        else:
-            logging.info(f'\t- Found {len(common_cells):,} common cells between ATAC and RNA datasets')
-        
-        # 2) subset and reorder both DataFrames to that same list
-        atac_sub = atac_sub[common_cells]
-        rna_sub  = rna_sub[common_cells]
-
-        return atac_sub, rna_sub
-
-
-    def run_correlation_and_load():
-        atac_sub, rna_sub = prepare_inputs_for_correlation()
-        
-        logging.info("\nCalculating significant ATAC-seq peak-to-gene correlations")
-        result = calculate_significant_peak_to_gene_correlations(
-            atac_sub,
-            rna_sub,
-            output_file=PARQ,
-            alpha=0.5,
-            chunk_size=chunk_size,
-            num_cpu=num_workers,
-            batch_size=batch_size
-        )
-        if isinstance(result, str):
-            return dd.read_parquet(result)  # streaming mode
-        else:
-            return dd.from_pandas(result, npartitions=1)  # in-memory mode
-
-    if not os.path.exists(PARQ):
-        sig_peak_to_gene_corr = run_correlation_and_load()
-
-    else:
-        try:
-            logging.info("Loading existing Parquet")
-            sig_peak_to_gene_corr = dd.read_parquet(PARQ)
-        except pa_lib.ArrowInvalid:
-            logging.warning(f"Corrupt Parquet file detected at {PARQ}. Deleting and recalculating...")
-            os.remove(PARQ)
-            sig_peak_to_gene_corr = run_correlation_and_load()
-    
-    logging.info("DataFrame after calculating sig peak to gene correlations")
-    logging.info(f'Number of edges in sig_peak_to_gene_corr: {len(sig_peak_to_gene_corr)}')
-
-    if len(sig_peak_to_gene_corr["correlation"]) > 1_000_000:
-        quantile_threshold = 0.70
-        logging.info("More than 1,000,000 significantly correlated edges")
-        logging.info(f"Computing the {quantile_threshold*100:.0f}th percentile of correlation…")
-        cutoff = sig_peak_to_gene_corr["correlation"].quantile(quantile_threshold).compute()
-        logging.info(f"\tCutoff = {cutoff:.4f}")
-        
-    else:
-        logging.info("Less than 1,000,000 significant edges, skipping quantile thresholding")
-        cutoff = 0
-
-    # Filter to only peak to TG correlations ≥ cutoff
-    filtered = sig_peak_to_gene_corr[sig_peak_to_gene_corr["correlation"] >= cutoff]
-    
-    # logging.info("DataFrame after filtering 70th quantile")
-    logging.info(f'\t- Number of edges: {len(filtered)}')
-    
-    # Rename so both sides use "target_id"
-    filtered = filtered.rename(columns={"gene_id": "target_id"})
-
-    # Merge the TSS distance score and correlation DataFrames
-    logging.info('Merging the correlation and TSS distance score DataFrames')
-    logging.info(f'\t- Number of rows in the TSS DataFrame: {len(peak_gene_dd)}')
-    logging.info(f'\t- Number of rows in the correlation DataFrame: {len(filtered)}')
-    joined: dd.DataFrame = filtered.merge(
-        peak_gene_dd,
-        how="outer",
-        on=["peak_id", "target_id"]
-    )[["peak_id", "target_id", "correlation", "TSS_dist_score"]]
-    
-    logging.info(f'\t- Number of overlapping edges: {len(joined)}')
-    
-    logging.info(f'\nClipping to within the upper and lower 95th quantiles, log1p normalizing scores')
-    normalized_ddf = clip_and_normalize_log1p_dask(
-        ddf=joined,
-        score_cols=["correlation"],
-        quantiles=(0, 1),
-        apply_log1p=True,
-        dtype=np.float32
-    )
-    logging.info(f'\t- Number of edges after clipping and normalizing: {len(normalized_ddf)}')
-    
-    logging.info(f'\nMinmax normalizing scores between 0-1')
-    normalized_ddf = minmax_normalize_dask(
-        ddf=normalized_ddf, 
-        score_cols=["correlation", "TSS_dist_score"], 
-        dtype=np.float32
-    )
-    logging.info(f'\t- Number of edges: {len(normalized_ddf)}')
-        
-    out_path = f"{OUTPUT_DIR}/peak_to_gene_correlation.parquet"
-    normalized_ddf.to_parquet(out_path, engine="pyarrow", compression="snappy")
-    
-    logging.info(f"Wrote peak to gene correlation and TSS scores to {out_path}")
-    logging.info("\n-----------------------------------------\n")
-    
 if __name__ == "__main__":
-    # Configure logging
     logging.basicConfig(level=logging.INFO, format='%(message)s')
-    
-    main()
+    args = parse_args()
+    main(args.atac_data_file, args.rna_data_file, args.organism, args.tss_distance)
