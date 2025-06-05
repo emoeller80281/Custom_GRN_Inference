@@ -1,0 +1,48 @@
+[project]
+name = "2024-single-cell-grn-inference-moeller"
+version = "0.1.0"
+description = "Uses single-cell multiomic scRNAseq and scATACseq data to infer gene regulatory networks"
+authors = [
+    {name = "emoeller",email = "luminarada80@gmail.com"}
+]
+license = {text = "MIT License"}
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "anndata>=0.10.8",
+    "bokeh>=3.4.2",
+    "dask>=2024.8.0",
+    "dask-ml>=2024.4.4",
+    "matplotlib>=3.9.2",
+    "mudata>=0.2.4",
+    "muon>=0.1.6",
+    "mygene>=3.2.2",
+    "numpy>=1.26.4",
+    "pandas>=2.1.1",
+    "pandas-stubs>=2.2.2",
+    "pyranges>=0.1.4",
+    "pybiomart>=0.2.0",
+    "pyreadr>=0.5.3",
+    "pyarrow>=14.0.2",
+    "scanpy>=1.10.3",
+    "scikit-learn>=1.6.1",
+    "scipy>=1.13.1",
+    "seaborn>=0.13.2",
+    "shap>=0.46.0",
+    "statsmodels>=0.14.4",
+    "umap-learn>=0.5.7",
+    "xgboost>=2.1.4"
+]
+
+[tool.poetry]
+packages = [{include = "2024"}]
+
+
+[tool.poetry.group.dev.dependencies]
+mypy = "^1.16.0"
+isort = "^6.0.1"
+pylint = "^3.3.7"
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"

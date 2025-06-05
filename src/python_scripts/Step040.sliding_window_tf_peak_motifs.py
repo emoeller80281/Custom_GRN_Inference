@@ -1,31 +1,26 @@
 #!/usr/bin/env python3
-import sys
+import argparse
+import logging
 import os
-import pandas as pd
-from tqdm import tqdm
-import dask.dataframe as dd
-from Bio import SeqIO
-import numpy as np
-from typing import Any
-import matplotlib.pyplot as plt
-from matplotlib.ticker import FuncFormatter
-from numba import njit, prange
+import re
+import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from typing import Any
+
+import dask.dataframe as dd
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
-import dask.dataframe as dd
-import logging
-import argparse
-import re
-from scipy import stats
-from pyarrow.parquet import ParquetFile
+from Bio import SeqIO
+from matplotlib.ticker import FuncFormatter
+from normalization import clip_and_normalize_log1p_dask, minmax_normalize_dask
+from numba import njit, prange
 from pyarrow.lib import ArrowInvalid
-
-
-from normalization import (
-    minmax_normalize_dask,
-    clip_and_normalize_log1p_dask
-)
+from pyarrow.parquet import ParquetFile
+from scipy import stats
+from tqdm import tqdm
 
 # at module top‐level
 _global_chr_pos_to_seq = None

@@ -14,15 +14,15 @@ set -euo pipefail
 STEP010_CICERO_MAP_PEAKS_TO_TG=false
 STEP015_CICERO_PEAK_TO_TG_SCORE=true
 
-STEP020_PEAK_TO_TG_CORRELATION=true
+STEP020_PEAK_TO_TG_CORRELATION=false
 # STEP030_PEAK_TO_ENHANCER_DB=false # Deprecated, does not help model and no data for mouse
 
 # Run the TF to peak binding score calculation methods
-STEP040_SLIDING_WINDOW_TF_TO_PEAK_SCORE=true
-STEP050_HOMER_TF_TO_PEAK_SCORE=true
+STEP040_SLIDING_WINDOW_TF_TO_PEAK_SCORE=false
+STEP050_HOMER_TF_TO_PEAK_SCORE=false
 
 # Combine the score DataFrames
-STEP060_COMBINE_DATAFRAMES=true
+STEP060_COMBINE_DATAFRAMES=false
 SUBSAMPLE_PERCENT=50 # Percent of rows of the combined dataframe to subsample
 
 # Train a predictive model to infer the GRN
@@ -279,29 +279,7 @@ setup_directories() {
 }
 
 check_r_environment() {
-    # REQUIRED_R_VERSION="4.3.2"  # Replace with your required version
     echo "    [INFO] Checking R environment..."
-
-    # # Check if the 'module' command exists
-    # if ! command -v module &> /dev/null; then
-    #     echo "        [ERROR] 'module' command is not available. Ensure the environment module system is installed."
-    #     exit 1
-    # fi
-
-    # # Check if the 'rstudio' module is available
-    # if ! module avail rstudio &> /dev/null; then
-    #     echo "        [ERROR] 'rstudio' module is not available. Check your module system."
-    #     exit 1
-    # fi
-
-    # # Load the 'rstudio' module
-    # module load rstudio
-    # if [ $? -ne 0 ]; then
-    #     echo "        [ERROR] Failed to load 'rstudio' module."
-    #     exit 1
-    # else
-    #     echo "        [INFO] Successfully loaded 'rstudio' module."
-    # fi
 
     # Check R version
     if ! command -v R &> /dev/null; then
@@ -311,15 +289,9 @@ check_r_environment() {
 
     # Check if the installed version of R is different
     INSTALLED_R_VERSION=$(R --version | grep -oP "(?<=R version )\d+\.\d+\.\d+" | head -1)
-    # if [[ "$(printf '%s\n' "$REQUIRED_R_VERSION" "$INSTALLED_R_VERSION" | sort -V | head -1)" != "$REQUIRED_R_VERSION" ]]; then
-    #     echo "        [ERROR] Installed R version ($INSTALLED_R_VERSION) is older than required ($REQUIRED_R_VERSION). Please update R."
-    #     exit 1
-    # fi
+
     echo "        R version $INSTALLED_R_VERSION is installed."
 
-    # # Check for required R packages
-    # Rscript $R_SCRIPT_DIR/check_dependencies.r
-    # echo ""
 }
 
 download_file_if_missing() {
@@ -642,25 +614,6 @@ run_correlation_peak_to_tg_score() {
 
 } 2> "$LOG_DIR/Step020.peak_gene_correlation.log"
 
-# EnhancerDB is deprecated
-# run_peak_to_enhancer_db_score() {
-#     if [ ! -f $ENHANCERDB_FILE ]; then
-#         echo "EnhancerDB file not found, downloading..."
-#         mkdir -p "$BASE_DIR/enhancer_db"
-#         wget "https://lcbb.swjtu.edu.cn/EnhancerDB/_download/enhancer.gz" -P "$BASE_DIR/enhancer_db/"
-#         gunzip "$BASE_DIR/enhancer_db/enhancer.gz"
-#     fi
-
-#     echo ""
-#     echo "Python: Mapping peaks to known enhancer regions from EnhancerDB"
-#     /usr/bin/time -v \
-#     python3 "$PYTHON_SCRIPT_DIR/Step030.peak_to_enhancer_db.py" \
-#         --atac_data_file "$ATAC_FILE_NAME" \
-#         --enhancer_db_file "$ENHANCERDB_FILE" \
-#         --output_dir "$OUTPUT_DIR" \
-
-# } 2> "$LOG_DIR/Step030.peak_to_enhancer_db.log"
-
 run_sliding_window_tf_to_peak_score() {
     echo ""
     echo "Python: Calculating sliding window TF to peak scores"
@@ -793,6 +746,7 @@ check_for_running_jobs
 check_pipeline_steps
 check_tools
 determine_num_cpus
+check_processed_files
 check_input_files
 activate_conda_env
 setup_directories
@@ -800,9 +754,6 @@ setup_directories
 
 # ----- Execute selected pipeline steps -----
 if [ "$STEP010_CICERO_MAP_PEAKS_TO_TG" = true ]; then run_cicero; fi
-
-check_processed_files
-
 if [ "$STEP015_CICERO_PEAK_TO_TG_SCORE" = true ]; then run_cicero_peak_to_tg_score; fi
 if [ "$STEP020_PEAK_TO_TG_CORRELATION" = true ]; then run_correlation_peak_to_tg_score; fi
 # if [ "$STEP030_PEAK_TO_ENHANCER_DB" = true ]; then run_peak_to_enhancer_db_score; fi
