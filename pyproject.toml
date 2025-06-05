@@ -36,7 +36,7 @@ dependencies = [
 
 [tool.poetry]
 packages = [
-    { include = "python_scripts", from = "src" }
+    { include = "grn_inference", from = "src" }
 ]
 
 [tool.mypy]

@@ -15,12 +15,14 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from Bio import SeqIO
 from matplotlib.ticker import FuncFormatter
-from normalization import clip_and_normalize_log1p_dask, minmax_normalize_dask
+
 from numba import njit, prange
 from pyarrow.lib import ArrowInvalid
 from pyarrow.parquet import ParquetFile
 from scipy import stats
 from tqdm import tqdm
+
+from grn_inference.normalization import clip_and_normalize_log1p_dask, minmax_normalize_dask
 
 # at module top‐level
 _global_chr_pos_to_seq: Union[None, pd.DataFrame] = None

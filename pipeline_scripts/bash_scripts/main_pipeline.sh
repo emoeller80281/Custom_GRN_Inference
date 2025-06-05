@@ -11,21 +11,21 @@ set -euo pipefail
 #        SELECT PIPELINE STEPS TO RUN
 # =============================================
 # Run the peak to TG regulatory potential calculation methods
-STEP010_CICERO_MAP_PEAKS_TO_TG=false
-STEP015_CICERO_PEAK_TO_TG_SCORE=false
+CICERO_MAP_PEAKS_TO_TG=false
+CICERO_PEAK_TO_TG_SCORE=false
 
-STEP020_PEAK_TO_TG_CORRELATION=false
+PEAK_TO_TG_CORRELATION=false
 
 # Run the TF to peak binding score calculation methods
-STEP040_SLIDING_WINDOW_TF_TO_PEAK_SCORE=true
-STEP050_HOMER_TF_TO_PEAK_SCORE=false
+SLIDING_WINDOW_TF_TO_PEAK_SCORE=false
+HOMER_TF_TO_PEAK_SCORE=true
 
 # Combine the score DataFrames
-STEP060_COMBINE_DATAFRAMES=false
+COMBINE_DATAFRAMES=false
 SUBSAMPLE_PERCENT=50 # Percent of rows of the combined dataframe to subsample
 
 # Train a predictive model to infer the GRN
-STEP070_TRAIN_XGBOOST_CLASSIFIER=false
+TRAIN_XGBOOST_CLASSIFIER=false
 
 # =============================================
 #              USER PATH VARIABLES
@@ -40,7 +40,7 @@ RNA_FILE_NAME="$INPUT_DIR/$RNA_FILE_NAME"
 ATAC_FILE_NAME="$INPUT_DIR/$ATAC_FILE_NAME"
 
 # Other paths
-PYTHON_SCRIPT_DIR="$BASE_DIR/src/grn_inference/pipeline"
+PYTHON_SCRIPT_DIR="$BASE_DIR/src/grn_inference"
 R_SCRIPT_DIR="$BASE_DIR/pipeline_scripts/r_scripts"
 OUTPUT_DIR="$BASE_DIR/output/$CELL_TYPE/$SAMPLE_NAME"
 REFERENCE_GENOME_DIR="$BASE_DIR/data/reference_genome/$SPECIES"
@@ -132,14 +132,13 @@ validate_critical_variables() {
 check_pipeline_steps() {
     echo ""
     steps=(
-        "STEP010_CICERO_MAP_PEAKS_TO_TG"
-        "STEP015_CICERO_PEAK_TO_TG_SCORE"
-        "STEP020_PEAK_TO_TG_CORRELATION"
-        # "STEP030_PEAK_TO_ENHANCER_DB" # Deprecated
-        "STEP040_SLIDING_WINDOW_TF_TO_PEAK_SCORE"
-        "STEP050_HOMER_TF_TO_PEAK_SCORE"
-        "STEP060_COMBINE_DATAFRAMES"
-        "STEP070_TRAIN_XGBOOST_CLASSIFIER"
+        "CICERO_MAP_PEAKS_TO_TG"
+        "CICERO_PEAK_TO_TG_SCORE"
+        "PEAK_TO_TG_CORRELATION"
+        "SLIDING_WINDOW_TF_TO_PEAK_SCORE"
+        "HOMER_TF_TO_PEAK_SCORE"
+        "COMBINE_DATAFRAMES"
+        "TRAIN_XGBOOST_CLASSIFIER"
     )
 
     enabled=0
@@ -348,7 +347,7 @@ run_dataset_preprocessing() {
     echo ""
     echo "Python: Checking if the scATAC-seq and scRNA-seq data is normalized or raw counts"
     /usr/bin/time -v \
-    poetry run python "$PYTHON_SCRIPT_DIR/preprocess_datasets.py" \
+    poetry run python "$PYTHON_SCRIPT_DIR/pipeline/preprocess_datasets.py" \
         --atac_data_file "$ATAC_FILE_NAME" \
         --rna_data_file "$RNA_FILE_NAME" \
         --species "$SPECIES" \
@@ -448,8 +447,8 @@ check_string_db_files() {
 
 # -------------- HOMER FUNCTIONS --------------
 install_homer() {
-    mkdir -p "$BASE_DIR/homer"
-    wget "http://homer.ucsd.edu/homer/configureHomer.pl" -P "$BASE_DIR/homer"
+    mkdir -p "$BASE_DIR/data/homer"
+    wget "http://homer.ucsd.edu/homer/configureHomer.pl" -P "$BASE_DIR/data/homer"
     perl "$BASE_DIR/data/homer/configureHomer.pl" -install
 } 2> "$LOG_DIR/Homer_logs/01.install_homer.log"
 
@@ -577,7 +576,7 @@ run_cicero() {
 
     # Run your R script and pass PYTHON_PATH to the environment
     /usr/bin/time -v \
-        Rscript "$R_SCRIPT_DIR/Step010.run_cicero.r" \
+        Rscript "$R_SCRIPT_DIR/run_cicero.r" \
             "$OUTPUT_DIR/cicero_atac_input.txt" \
             "$OUTPUT_DIR" \
             "$CHROM_SIZES" \
@@ -595,7 +594,7 @@ run_cicero_peak_to_tg_score() {
     echo ""
     echo "Python: Parsing Cicero peak to TG scores"
     /usr/bin/time -v \
-    poetry run python "$PYTHON_SCRIPT_DIR/Step015.cicero_peak_to_tg_score.py" \
+    poetry run python "$PYTHON_SCRIPT_DIR/pipeline/cicero_peak_to_tg_score.py" \
         --output_dir "$OUTPUT_DIR" 
     
 } 2> "$LOG_DIR/Step015.cicero_peak_to_tg_score.log"
@@ -604,7 +603,7 @@ run_correlation_peak_to_tg_score() {
     echo ""
     echo "Python: Calculating correlation peak to TG score"
     /usr/bin/time -v \
-    poetry run python "$PYTHON_SCRIPT_DIR/Step020.peak_gene_correlation.py" \
+    poetry run python "$PYTHON_SCRIPT_DIR/pipeline/peak_gene_correlation.py" \
         --atac_data_file "$ATAC_FILE_NAME" \
         --rna_data_file "$RNA_FILE_NAME" \
         --output_dir "$OUTPUT_DIR" \
@@ -617,7 +616,7 @@ run_sliding_window_tf_to_peak_score() {
     echo ""
     echo "Python: Calculating sliding window TF to peak scores"
     /usr/bin/time -v \
-    poetry run python "$PYTHON_SCRIPT_DIR/Step040.sliding_window_tf_peak_motifs.py" \
+    poetry run python "$PYTHON_SCRIPT_DIR/pipeline/sliding_window_tf_peak_motifs.py" \
         --tf_names_file "$TF_NAMES_FILE"\
         --meme_dir "$MEME_DIR"\
         --reference_genome_dir "$REFERENCE_GENOME_DIR"\
@@ -636,9 +635,9 @@ run_homer() {
     echo "[HINT] Homer log files are found under Homer_logs in the sample log directory"
     mkdir -p "$LOG_DIR/Homer_logs/"
 
-    echo "Searching for '${BASE_DIR}/homer' directory..."
+    echo "Searching for '${BASE_DIR}/data/homer' directory..."
     # Check to make sure Homer is installed, else install it
-    if [ ! -d "$BASE_DIR/homer" ]; then
+    if [ ! -d "$BASE_DIR/data/homer" ]; then
         echo ""
         echo "    Homer installation not found, installing..."
         install_homer
@@ -649,8 +648,8 @@ run_homer() {
 
     # Make sure that the homer directory is part of the path
     echo "Adding the 'homer/bin' directory to PATH"
-    PATH="$PATH:$BASE_DIR/data/homer/bin"
-    export PATH
+    export PATH="$BASE_DIR/data/homer/bin:$PATH"
+    export PERL5LIB="$BASE_DIR/data/homer/bin:$PERL5LIB"
     
     echo "Checking for the Homer ${SPECIES} genome file..."
     # Check if the species Homer genome is installed
@@ -693,7 +692,7 @@ run_homer_tf_to_peak_score() {
     echo ""
     echo "Python: Calculating homer TF to peak scores"
     /usr/bin/time -v \
-    poetry run python "$PYTHON_SCRIPT_DIR/Step050.homer_tf_peak_motifs.py" \
+    poetry run python "$PYTHON_SCRIPT_DIR/pipeline/homer_tf_peak_motifs.py" \
         --input_dir "${OUTPUT_DIR}/homer_results/homer_tf_motif_scores" \
         --output_dir "$OUTPUT_DIR" \
         --cpu_count $NUM_CPU
@@ -704,7 +703,7 @@ run_combine_dataframes() {
     echo ""
     echo "Python: Creating TF to TG score DataFrame"
     /usr/bin/time -v \
-    poetry run python "$PYTHON_SCRIPT_DIR/Step060.combine_dataframes.py" \
+    poetry run python "$PYTHON_SCRIPT_DIR/pipeline/combine_dataframes.py" \
         --rna_data_file "$RNA_FILE_NAME" \
         --atac_data_file "$ATAC_FILE_NAME" \
         --output_dir "$OUTPUT_DIR" \
@@ -717,7 +716,7 @@ run_classifier_training() {
     echo ""
     echo "Python: Training XGBoost Classifier"
     /usr/bin/time -v \
-    poetry run python "$PYTHON_SCRIPT_DIR/Step070.train_xgboost.py" \
+    poetry run python "$PYTHON_SCRIPT_DIR/pipeline/train_xgboost.py" \
         --ground_truth_file "$GROUND_TRUTH_FILE" \
         --inferred_network_file "$INFERRED_NET_FILE" \
         --trained_model_dir "$TRAINED_MODEL_DIR" \
@@ -726,6 +725,11 @@ run_classifier_training() {
 
 
 } 2> "$LOG_DIR/Step070.train_xgboost.log"
+
+run_homer_and_score() {
+    run_homer
+    run_homer_tf_to_peak_score
+}
 
 # =============================================
 #               MAIN PIPELINE
@@ -752,10 +756,28 @@ setup_directories
 
 
 # ----- Execute selected pipeline steps -----
-if [ "$STEP010_CICERO_MAP_PEAKS_TO_TG" = true ]; then run_cicero; fi
-if [ "$STEP015_CICERO_PEAK_TO_TG_SCORE" = true ]; then run_cicero_peak_to_tg_score; fi
-if [ "$STEP020_PEAK_TO_TG_CORRELATION" = true ]; then run_correlation_peak_to_tg_score; fi
-if [ "$STEP040_SLIDING_WINDOW_TF_TO_PEAK_SCORE" = true ]; then run_sliding_window_tf_to_peak_score; fi
-if [ "$STEP050_HOMER_TF_TO_PEAK_SCORE" = true ]; then run_homer; run_homer_tf_to_peak_score; fi
-if [ "$STEP060_COMBINE_DATAFRAMES" = true ]; then check_string_db_files; run_combine_dataframes; fi
-if [ "$STEP070_TRAIN_XGBOOST_CLASSIFIER" = true ]; then run_classifier_training; fi
+if [ "$CICERO_MAP_PEAKS_TO_TG" = true ]; then run_cicero; fi
+
+# Map array index to function name
+parallel_jobs=()
+
+[ "$CICERO_PEAK_TO_TG_SCORE" = true ] && parallel_jobs+=("run_cicero_peak_to_tg_score")
+[ "$PEAK_TO_TG_CORRELATION" = true ] && parallel_jobs+=("run_correlation_peak_to_tg_score")
+[ "$SLIDING_WINDOW_TF_TO_PEAK_SCORE" = true ] && parallel_jobs+=("run_sliding_window_tf_to_peak_score")
+[ "$HOMER_TF_TO_PEAK_SCORE" = true ] && parallel_jobs+=("run_homer_and_score")
+
+# Run all selected steps in background
+for job in "${parallel_jobs[@]}"; do
+    echo "[INFO] Launching $job in background..."
+    $job &
+done
+
+# Wait for all to finish
+if [ ${#parallel_jobs[@]} -gt 0 ]; then
+    echo "[INFO] Waiting for parallel scoring steps to finish..."
+    wait
+    echo "[INFO] All parallel scoring steps completed."
+fi
+
+if [ "$COMBINE_DATAFRAMES" = true ]; then check_string_db_files; run_combine_dataframes; fi
+if [ "$TRAIN_XGBOOST_CLASSIFIER" = true ]; then run_classifier_training; fi
