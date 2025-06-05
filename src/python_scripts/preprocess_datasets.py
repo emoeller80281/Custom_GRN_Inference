@@ -1,6 +1,7 @@
 import argparse
 import logging
 import os
+from typing import Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -9,8 +10,15 @@ import pybedtools
 from pybiomart import Server
 from scipy import sparse
 from pyarrow.parquet import ParquetFile
+from scipy.sparse import csr_matrix
+import scanpy as sc
+import muon as mu
 import pyarrow as pa 
 import math
+from anndata import AnnData
+from matplotlib.axes import Axes
+
+from plotting import plot_feature_score_histogram
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Process TF motif binding potential.")
@@ -73,7 +81,7 @@ def load_atac_dataset(atac_data_file: str) -> pd.DataFrame:
         raise ValueError(f"ATAC data file must be .csv, .tsv or .parquet: got {atac_data_file}")
     
     if df.empty:
-        raise RuntimeError(f"Failed to load ATAC file: {args.atac_data_file}")
+        raise RuntimeError(f"Failed to load ATAC file: {atac_data_file}")
     
     df = df.rename(columns={df.columns[0]: "peak_id"})
     
@@ -98,7 +106,7 @@ def load_rna_dataset(rna_data_file: str) -> pd.DataFrame:
     df = df.rename(columns={df.columns[0]: "gene_id"})
     
     if df.empty:
-        raise RuntimeError(f"Failed to load RNA file: {args.rna_data_file}")
+        raise RuntimeError(f"Failed to load RNA file: {rna_data_file}")
     
     logging.info(f'\tNumber of genes: {df.shape[0]}')
     logging.info(f'\tNumber of cells: {df.shape[1]-1}')
@@ -128,9 +136,13 @@ def extract_atac_peaks(atac_df, tmp_dir):
         peak_df["peak_id"] = peak_pos
         
         # Write the peak DataFrame to a file
-        peak_df.to_parquet(f"{tmp_dir}/peak_df.parquet", engine="pyarrow", index=False, compression="snappy")
+        peak_df.to_parquet(os.path.join(tmp_dir, "peak_df.parquet"), engine="pyarrow", index=False, compression="snappy")
+        
     else:
         logging.info("ATAC-seq BED file exists, loading...")
+        peak_df = pd.read_parquet(os.path.join(tmp_dir, "peak_df.parquet"), engine="pyarrow")
+        
+    return peak_df
 
 def load_ensembl_organism_tss(organism, tmp_dir):
     if not os.path.exists(os.path.join(tmp_dir, "ensembl.parquet")):
@@ -175,9 +187,13 @@ def load_ensembl_organism_tss(organism, tmp_dir):
         ensembl_df["gene_id"] = ensembl_df["gene_id"].astype(str)
         
         # Write the peak DataFrame to a file
-        ensembl_df.to_parquet(f"{tmp_dir}/ensembl.parquet", engine="pyarrow", index=False, compression="snappy")
+        ensembl_df.to_parquet(os.path.join(tmp_dir, "ensembl.parquet"), engine="pyarrow", index=False, compression="snappy")
+        
     else:
         logging.info("Ensembl gene TSS BED file exists, loading...")
+        ensembl_df = pd.read_parquet(os.path.join(tmp_dir, "ensembl.parquet"), engine="pyarrow")
+    
+    return ensembl_df
 
 def find_genes_near_peaks(peak_bed, tss_bed, rna_df, peak_dist_limit, tmp_dir):
     """
@@ -260,41 +276,44 @@ def find_genes_near_peaks(peak_bed, tss_bed, rna_df, peak_dist_limit, tmp_dir):
         rna_genes = set(rna_df["gene_id"])
         peak_tss_subset_df = peak_tss_subset_df[peak_tss_subset_df["target_id"].isin(rna_genes)]
         
-        logging.info(f'\t- Number of peaks: {len(peak_tss_subset_df.drop_duplicates(subset="target_id"))}')
+        logging.info(f'\t- Number of peaks: {len(peak_tss_subset_df.drop_duplicates(subset="peak_id"))}')
             
-        peak_tss_subset_df.to_parquet(f"{tmp_dir}/peak_to_gene_map.parquet", index=False)
+        peak_tss_subset_df.to_parquet(f"{tmp_dir}/peak_to_gene_map.parquet", index=False, engine="pyarrow", compression="snappy")
+        
     else:
         logging.info('TSS distance file exists, loading...')
+        peak_tss_subset_df = pd.read_parquet(os.path.join(tmp_dir, "peak_to_gene_map.parquet"), engine="pyarrow")
+        
+    return peak_tss_subset_df
 
 def extract_atac_peaks_near_rna_genes(
     atac_df: pd.DataFrame, 
     rna_df: pd.DataFrame, 
     organism: str, 
     tss_distance_cutoff: int, 
-    tmp_dir: str
-    ) -> None:
+    output_dir: str
+    ) -> pd.DataFrame:
     
-    if not organism == "hsapiens" or not organism == "mmusculus":
+    tmp_dir = os.path.join(output_dir, "tmp")
+    os.makedirs(tmp_dir, exist_ok=True)
+    
+    if organism not in ("hsapiens", "mmusculus"):
         if organism == "hg38":
             organism = "hsapiens"
         elif organism == "mm10":
             organism = "mmusculus"
         else:
-            raise Exception(f'Organism not found, you entered {organism} (must be one of: "hg38", "mm10")')
+            raise ValueError(f"Organism not recognized: {organism} (must be 'hg38' or 'mm10').")
 
-    extract_atac_peaks(atac_df, tmp_dir)
-    load_ensembl_organism_tss(organism, tmp_dir)
+    peak_df: pd.DataFrame = extract_atac_peaks(atac_df, tmp_dir)
+    tss_df: pd.DataFrame = load_ensembl_organism_tss(organism, tmp_dir)
 
     pybedtools.set_tempdir(tmp_dir)
-    
-    # Load the peak and gene TSS BED files
-    peak_df = pd.read_parquet(os.path.join(tmp_dir, "peak_df.parquet"))
-    tss_df = pd.read_parquet(os.path.join(tmp_dir, "ensembl.parquet"))
 
     peak_bed = pybedtools.BedTool.from_dataframe(peak_df)
     tss_bed = pybedtools.BedTool.from_dataframe(tss_df)
     
-    find_genes_near_peaks(
+    peaks_near_genes_df = find_genes_near_peaks(
         peak_bed,
         tss_bed,
         rna_df,
@@ -303,40 +322,211 @@ def extract_atac_peaks_near_rna_genes(
     )
 
     pybedtools.helpers.cleanup(verbose=False, remove_all=True)
+    
+    plot_feature_score_histogram(peaks_near_genes_df, "TSS_dist_score", output_dir)
+    
+    return peaks_near_genes_df
+
+def ensure_matching_cell_barcodes(atac_df, rna_df):
+    atac_cells = atac_df.columns[1:]
+    rna_cells = rna_df.columns[1:]
+    
+    if len(atac_cells) == 0 or len(rna_cells) == 0:
+        raise RuntimeError("No cell columns found in one or both datasets.")
+    
+    num_matching_cells = len(atac_cells.intersection(rna_cells))
+    
+    atac_percent_overlap = num_matching_cells / len(atac_cells)
+    rna_percent_overlap = num_matching_cells / len(rna_cells)
+    
+    if atac_percent_overlap <= 0.1:
+        raise ValueError(f"Too few matching barcodes in ATAC (only {atac_percent_overlap*100:.2f}%).")
+    if rna_percent_overlap <= 0.1:
+        raise ValueError(f"Too few matching barcodes in RNA (only {rna_percent_overlap*100:.2f}%).")
+
+
+def filter_rna_seq_dataset(
+    rna_df: pd.DataFrame,
+    id_col_name: str = "gene_id",
+    min_genes: int = 200,
+    max_genes: int = 2500,
+    max_pct_mt: float = 5.0,
+) -> pd.DataFrame:
+    """
+    Given an RNA‐seq DataFrame in which rows are genes and columns are cells,
+    automatically filter cells based on:
+      - number of genes detected (min_genes <= n_genes_by_counts <= max_genes)
+      - mitochondrial percentage (pct_counts_mt < max_pct_mt)
+    """
+    # 1) Validate input
+    if id_col_name not in rna_df.columns:
+        raise ValueError(f"Identifier column '{id_col_name}' not found in DataFrame.")
+
+    # Separate gene IDs vs. raw count matrix
+    gene_ids = rna_df[id_col_name].astype(str).tolist()
+    counts_df = rna_df.drop(columns=[id_col_name]).copy()
+
+    # Ensure all other columns are numeric; coerce non‐numeric to NaN→0
+    counts_df = counts_df.apply(pd.to_numeric, errors="coerce").fillna(0).astype(int)
+
+    # Extract cell IDs from the DataFrame columns
+    cell_ids = counts_df.columns.astype(str).tolist()
+
+    # 2) Build AnnData with shape (cells × genes)
+    #    We must transpose counts so rows=cells, columns=genes
+    counts_matrix = csr_matrix(counts_df.values)           # shape: (n_genes, n_cells)
+    counts_matrix = counts_matrix.T                         # now (n_cells, n_genes)
+
+    adata = AnnData(X=counts_matrix)
+    adata.obs_names = cell_ids       # each row = one cell
+    adata.var_names = gene_ids       # each column = one gene
+
+    # 3) Annotate var (genes) with flags: mt, ribo, hb
+    #    Mitochondrial: genes whose name starts with "MT-" (case-insensitive).
+    #    Ribosomal:     genes whose name starts with "RPS" or "RPL".
+    #    Hemoglobin:    genes whose name matches "^HB(?!P)" (so HB* but not HBP).
+    var_names_lower = adata.var_names.str.lower()
+
+    adata.var["mt"] = var_names_lower.str.startswith("mt-")
+    adata.var["ribo"] = var_names_lower.str.startswith(("rps", "rpl"))
+    adata.var["hb"] = var_names_lower.str.contains(r"^hb(?!p)")
+
+    sc.pp.calculate_qc_metrics(
+        adata,
+        qc_vars=["mt", "ribo", "hb"],
+        percent_top=None,
+        log1p=False,
+        inplace=True,
+    )
+    
+    cell_mask = (
+        (adata.obs["n_genes_by_counts"] >= min_genes)
+        & (adata.obs["n_genes_by_counts"] <= max_genes)
+        & (adata.obs["pct_counts_mt"] < max_pct_mt)
+    )
+
+    n_before = adata.n_obs
+    n_after = cell_mask.sum()
+    logging.info(f"Cells before filtering: {n_before}")
+    logging.info(f"Cells after filtering : {n_after}  (kept those with {min_genes} ≤ n_genes ≤ {max_genes} and pct_counts_mt < {max_pct_mt}%)")
+
+    if n_after == 0:
+        raise RuntimeError("No cells passed the filtering criteria. "
+                           "Check `min_genes`, `max_genes`, `max_pct_mt` settings.")
+
+    filtered_adata = adata[cell_mask].copy()
+
+    filtered_counts = filtered_adata.X.T.toarray()
+    filtered_df = pd.DataFrame(
+        data=filtered_counts,
+        index=filtered_adata.var_names,    # genes
+        columns=filtered_adata.obs_names    # filtered cells
+    )
+    filtered_df.insert(loc=0, column=id_col_name, value=filtered_df.index.astype(str))
+    filtered_df = filtered_df.reset_index(drop=True)
+
+    return filtered_df
+
+def filter_atac_seq_dataset(
+    atac_df: pd.DataFrame,
+    id_col_name: str = "peak_id",
+    min_peaks: int = 2000,
+    max_peaks: int = 40000,
+    ) -> pd.DataFrame:
+    
+    df = atac_df.copy()
+    
+    df = df.set_index("peak_id")
+    counts = csr_matrix(df.values)
+    counts = counts.T
+    peak_names = df.index.to_list()
+    cell_names = df.columns.to_list()
+    
+    adata = AnnData(counts)
+    adata.obs_names = cell_names
+    adata.var_names = peak_names
+    
+    adata.obs["n_peaks"] = np.array((adata.X > 0).sum(axis=1)).ravel()
+    
+    keep_cells = (
+        (adata.obs["n_peaks"] > min_peaks) &
+        (adata.obs["n_peaks"] < max_peaks)
+    )
+    
+    filtered_adata = adata[keep_cells]
+    
+    n_before = adata.n_obs
+    n_after = keep_cells.sum()
+    
+    logging.info(f"Cells before filtering: {n_before}")
+    logging.info(f"Cells after filtering : {n_after}  (kept those with {min_peaks} ≤ n_genes ≤ {max_peaks}")
+
+    
+    filtered_counts = filtered_adata.X.T.toarray()
+    filtered_df = pd.DataFrame(
+        data=filtered_counts,
+        index=filtered_adata.var_names,    # genes
+        columns=filtered_adata.obs_names    # filtered cells
+    )
+    filtered_df.insert(loc=0, column=id_col_name, value=filtered_df.index.astype(str))
+    filtered_df = filtered_df.reset_index(drop=True)
+    return filtered_df
 
 def main(args):
     args.atac_data_file = os.path.abspath(args.atac_data_file)
     args.rna_data_file = os.path.abspath(args.rna_data_file)
     output_dir = os.path.abspath(args.output_dir)
-    tmp_dir = os.path.join(output_dir, "tmp")
-    
-    os.makedirs(tmp_dir, exist_ok=True)
     
     if not os.path.isfile(args.atac_data_file):
         raise FileNotFoundError(f"ATAC file not found: {args.atac_data_file}")
 
     if not os.path.isfile(args.rna_data_file):
-        raise FileNotFoundError(f"RNA file not found: {args.RNA_data_file}")
+        raise FileNotFoundError(f"RNA file not found: {args.rna_data_file}")
     
-    logging.info("Loading ATAC-seq dataset")
-    atac_df: pd.DataFrame = load_atac_dataset(args.atac_data_file)
+    logging.info("\nLoading ATAC-seq dataset")
+    raw_atac_df: pd.DataFrame = load_atac_dataset(args.atac_data_file)
 
-    logging.info("Loading RNA-seq dataset")
-    rna_df: pd.DataFrame = load_rna_dataset(args.rna_data_file)
-
-    extract_atac_peaks_near_rna_genes(atac_df, rna_df, args.species, args.tss_distance_cutoff, tmp_dir)
-        
-    peak_gene_df = pd.read_parquet(f"{tmp_dir}/peak_to_gene_map.parquet")
+    logging.info("\nLoading RNA-seq dataset")
+    raw_rna_df: pd.DataFrame = load_rna_dataset(args.rna_data_file)
     
-    peak_subset = set(peak_gene_df["peak_id"])
-    atac_df_filtered = atac_df[atac_df["peak_id"].isin(peak_subset)]
-    logging.info(f'\tNumber of peaks after filtering: {len(set(atac_df["peak_id"]))}')
-
-    logging.info("Checking and normalizing ATAC-seq data")
-    atac_df_norm: pd.DataFrame = log2_cpm_normalize(atac_df_filtered, label="scATAC-seq", id_col_name="peak_id")
+    logging.info("\nEnsuring that the cell barcodes match for the ATACseq and RNAseq datasets")
+    ensure_matching_cell_barcodes(raw_atac_df, raw_rna_df)
+    
+    logging.info("\nFiltering the scRNAseq dataset")
+    rna_df = filter_rna_seq_dataset(
+        raw_rna_df,
+        id_col_name="gene_id",
+        min_genes=200,
+        max_genes=2500,
+        max_pct_mt=5.0,
+    )
+    
+    logging.info("\nFiltering the scATACseq dataset")
+    atac_df = filter_atac_seq_dataset(
+        raw_atac_df,
+        id_col_name="peak_id",
+        min_peaks=2000,
+        max_peaks=40000,
+    )
+    
+    logging.info("\nChecking and normalizing ATAC-seq data")
+    atac_df_norm: pd.DataFrame = log2_cpm_normalize(atac_df, label="scATAC-seq", id_col_name="peak_id")
 
     logging.info("Checking and normalizing RNA-seq data")
     rna_df_norm: pd.DataFrame = log2_cpm_normalize(rna_df, label="scRNA-seq", id_col_name="gene_id")
+
+    logging.info("\nExtracting ATAC peaks within 1 MB of a gene from the RNA dataset")
+    peaks_near_genes_df = extract_atac_peaks_near_rna_genes(atac_df, rna_df, args.species, args.tss_distance_cutoff, output_dir)
+            
+    logging.info("\nFiltering for peaks with 1MB of a gene's TSS")
+    peak_subset = set(peaks_near_genes_df["peak_id"])
+    atac_df_filtered = atac_df_norm[atac_df_norm["peak_id"].isin(peak_subset)]
+    logging.info(f'\tNumber of peaks after filtering: {len(atac_df_filtered)} / {len(atac_df)}')
+    
+    logging.info("Filtering for genes with a TSS within 1 MB of a peak")
+    genes_subset = set(peaks_near_genes_df["target_id"])
+    rna_df_filtered = rna_df_norm[rna_df_norm["gene_id"].isin(genes_subset)]
+    logging.info(f'\tNumber of genes after filtering: {len(rna_df_filtered)} / {len(rna_df)}')
 
     def update_name(filename):
         base, ext = os.path.splitext(filename)
@@ -349,11 +539,11 @@ def main(args):
     print(f"Updated RNA file: {new_rna_file}", flush=True)
     
     logging.info('\nWriting ATAC-seq dataset to Parquet')
-    atac_df_norm.to_parquet(new_atac_file, engine="pyarrow", compression="snappy", index=False)
+    atac_df_filtered.to_parquet(new_atac_file, engine="pyarrow", compression="snappy", index=False)
     logging.info("  Done!")
         
     logging.info('\nWriting RNA-seq dataset to Parquet')
-    rna_df_norm.to_parquet(new_rna_file, engine="pyarrow", compression="snappy", index=False)
+    rna_df_filtered.to_parquet(new_rna_file, engine="pyarrow", compression="snappy", index=False)
     logging.info("  Done!")
 
 if __name__ == "__main__":

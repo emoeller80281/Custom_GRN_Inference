@@ -111,6 +111,25 @@ def plot_feature_score_histograms(features, inferred_network, fig_dir):
     plt.savefig(f"{fig_dir}/xgboost_feature_score_hist.png", dpi=300)
     plt.close()
     
+def plot_feature_score_histogram(df, score_col, fig_dir):
+    logging.info("\tPlotting feature score histogram")
+    
+    os.makedirs(fig_dir, exist_ok=True)
+
+    plt.figure(figsize=(8, 8))
+
+    plt.hist(df[score_col].dropna(), bins=50, alpha=0.7, edgecolor='black')
+    plt.title(f"{score_col}", fontsize=14)
+    plt.xlabel("Score", fontsize=14)
+    plt.ylabel("Frequency", fontsize=14)
+    plt.xlim((0, 1))
+    plt.xticks(fontsize=12)
+    plt.yticks(fontsize=12)
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(fig_dir, f"{score_col}_hist.png"), dpi=300)
+    plt.close()
+    
 def plot_multi_sample_feature_score_histograms(
     features,
     inferred_network1,
