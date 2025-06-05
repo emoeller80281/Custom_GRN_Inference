@@ -11,7 +11,7 @@ set -euo pipefail
 #        SELECT PIPELINE STEPS TO RUN
 # =============================================
 # Run the peak to TG regulatory potential calculation methods
-STEP010_CICERO_MAP_PEAKS_TO_TG=false
+STEP010_CICERO_MAP_PEAKS_TO_TG=true
 STEP015_CICERO_PEAK_TO_TG_SCORE=true
 
 STEP020_PEAK_TO_TG_CORRELATION=false
@@ -349,7 +349,7 @@ run_dataset_preprocessing() {
     echo ""
     echo "Python: Checking if the scATAC-seq and scRNA-seq data is normalized or raw counts"
     /usr/bin/time -v \
-    python3 "$PYTHON_SCRIPT_DIR/preprocess_datasets.py" \
+    poetry run python "$PYTHON_SCRIPT_DIR/preprocess_datasets.py" \
         --atac_data_file "$ATAC_FILE_NAME" \
         --rna_data_file "$RNA_FILE_NAME" \
         --species "$SPECIES" \
@@ -460,7 +460,7 @@ install_homer_species_genome() {
 
 create_homer_peak_file() {
     /usr/bin/time -v \
-    python3 "$PYTHON_SCRIPT_DIR/create_homer_peak_file.py" \
+    poetry run python "$PYTHON_SCRIPT_DIR/create_homer_peak_file.py" \
         --atac_data_file "$ATAC_FILE_NAME" \
         --output_dir "$OUTPUT_DIR"
 } 2> "$LOG_DIR/Homer_logs/03.create_homer_peak_file.log"
@@ -552,7 +552,7 @@ run_cicero() {
     if [ ! -f "$OUTPUT_DIR/cicero_atac_input.txt" ]; then
         {
             /usr/bin/time -v \
-                python3 "$PYTHON_SCRIPT_DIR/convert_atac_to_sparse_for_cicero.py" \
+                poetry run python "$PYTHON_SCRIPT_DIR/convert_atac_to_sparse_for_cicero.py" \
                     --atac_data_file "$ATAC_FILE_NAME" \
                     --output_dir "$OUTPUT_DIR"
         } &> "$LOG_DIR/convert_atac_to_sparse_for_cicero.log"
@@ -596,7 +596,7 @@ run_cicero_peak_to_tg_score() {
     echo ""
     echo "Python: Parsing Cicero peak to TG scores"
     /usr/bin/time -v \
-    python3 "$PYTHON_SCRIPT_DIR/Step015.cicero_peak_to_tg_score.py" \
+    poetry run python "$PYTHON_SCRIPT_DIR/Step015.cicero_peak_to_tg_score.py" \
         --output_dir "$OUTPUT_DIR" 
     
 } 2> "$LOG_DIR/Step015.cicero_peak_to_tg_score.log"
@@ -605,13 +605,11 @@ run_correlation_peak_to_tg_score() {
     echo ""
     echo "Python: Calculating correlation peak to TG score"
     /usr/bin/time -v \
-    python3 "$PYTHON_SCRIPT_DIR/Step020.peak_gene_correlation.py" \
+    poetry run python "$PYTHON_SCRIPT_DIR/Step020.peak_gene_correlation.py" \
         --atac_data_file "$ATAC_FILE_NAME" \
         --rna_data_file "$RNA_FILE_NAME" \
         --output_dir "$OUTPUT_DIR" \
-        --species "$SPECIES" \
         --num_cpu "$NUM_CPU" \
-        --peak_dist_limit 1000000 \
         --fig_dir "$FIG_DIR"
 
 } 2> "$LOG_DIR/Step020.peak_gene_correlation.log"
@@ -620,7 +618,7 @@ run_sliding_window_tf_to_peak_score() {
     echo ""
     echo "Python: Calculating sliding window TF to peak scores"
     /usr/bin/time -v \
-    python3 "$PYTHON_SCRIPT_DIR/Step040.sliding_window_tf_peak_motifs.py" \
+    poetry run python "$PYTHON_SCRIPT_DIR/Step040.sliding_window_tf_peak_motifs.py" \
         --tf_names_file "$TF_NAMES_FILE"\
         --meme_dir "$MEME_DIR"\
         --reference_genome_dir "$REFERENCE_GENOME_DIR"\
@@ -696,7 +694,7 @@ run_homer_tf_to_peak_score() {
     echo ""
     echo "Python: Calculating homer TF to peak scores"
     /usr/bin/time -v \
-    python3 src/python_scripts/Step050.homer_tf_peak_motifs.py \
+    poetry run python src/python_scripts/Step050.homer_tf_peak_motifs.py \
         --input_dir "${OUTPUT_DIR}/homer_results/homer_tf_motif_scores" \
         --output_dir "$OUTPUT_DIR" \
         --cpu_count $NUM_CPU
@@ -707,7 +705,7 @@ run_combine_dataframes() {
     echo ""
     echo "Python: Creating TF to TG score DataFrame"
     /usr/bin/time -v \
-    python3 "$PYTHON_SCRIPT_DIR/Step060.combine_dataframes.py" \
+    poetry run python "$PYTHON_SCRIPT_DIR/Step060.combine_dataframes.py" \
         --rna_data_file "$RNA_FILE_NAME" \
         --atac_data_file "$ATAC_FILE_NAME" \
         --output_dir "$OUTPUT_DIR" \
@@ -720,7 +718,7 @@ run_classifier_training() {
     echo ""
     echo "Python: Training XGBoost Classifier"
     /usr/bin/time -v \
-    python3 "$PYTHON_SCRIPT_DIR/Step070.train_xgboost.py" \
+    poetry run python "$PYTHON_SCRIPT_DIR/Step070.train_xgboost.py" \
         --ground_truth_file "$GROUND_TRUTH_FILE" \
         --inferred_network_file "$INFERRED_NET_FILE" \
         --trained_model_dir "$TRAINED_MODEL_DIR" \
