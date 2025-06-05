@@ -103,7 +103,7 @@ def clip_and_normalize_log1p_dask(
 def minmax_normalize_pandas(
     df: pd.DataFrame,
     score_cols: list[str],
-    dtype: np.dtype = np.float32
+    dtype: np.dtype = np.dtype(np.float32)
 ) -> pd.DataFrame:
     """
     Applies global min-max normalization to selected columns in a Pandas DataFrame.

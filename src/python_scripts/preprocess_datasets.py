@@ -19,6 +19,7 @@ from anndata import AnnData
 from matplotlib.axes import Axes
 
 from plotting import plot_feature_score_histogram
+from normalization import minmax_normalize_pandas
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Process TF motif binding potential.")
@@ -195,7 +196,7 @@ def load_ensembl_organism_tss(organism, tmp_dir):
     
     return ensembl_df
 
-def find_genes_near_peaks(peak_bed, tss_bed, rna_df, peak_dist_limit, tmp_dir):
+def find_genes_near_peaks(peak_bed, tss_bed, rna_df, peak_dist_limit, output_dir):
     """
     Identify genes whose transcription start sites (TSS) are near scATAC-seq peaks.
     
@@ -227,7 +228,7 @@ def find_genes_near_peaks(peak_bed, tss_bed, rna_df, peak_dist_limit, tmp_dir):
     gene_list : set
         A set of unique gene IDs (target_id) present in the DataFrame.
     """
-    if not os.path.exists(os.path.join(tmp_dir, "peak_to_gene_map.parquet")):
+    if not os.path.exists(os.path.join(output_dir, "tss_distance_score.parquet")):
         # 3) Find peaks that are within peak_dist_limit bp of each gene's TSS using BedTools
         logging.info(f"Locating peaks that are within {peak_dist_limit} bp of each gene's TSS")
         peak_tss_overlap = peak_bed.window(tss_bed, w=peak_dist_limit)
@@ -277,12 +278,17 @@ def find_genes_near_peaks(peak_bed, tss_bed, rna_df, peak_dist_limit, tmp_dir):
         peak_tss_subset_df = peak_tss_subset_df[peak_tss_subset_df["target_id"].isin(rna_genes)]
         
         logging.info(f'\t- Number of peaks: {len(peak_tss_subset_df.drop_duplicates(subset="peak_id"))}')
+        
+        peak_tss_subset_df = minmax_normalize_pandas(
+            df=peak_tss_subset_df, 
+            score_cols=["TSS_dist_score"], 
+        )
             
-        peak_tss_subset_df.to_parquet(f"{tmp_dir}/peak_to_gene_map.parquet", index=False, engine="pyarrow", compression="snappy")
+        peak_tss_subset_df.to_parquet(os.path.join(output_dir, "tss_distance_score.parquet"), index=False, engine="pyarrow", compression="snappy")
         
     else:
         logging.info('TSS distance file exists, loading...')
-        peak_tss_subset_df = pd.read_parquet(os.path.join(tmp_dir, "peak_to_gene_map.parquet"), engine="pyarrow")
+        peak_tss_subset_df = pd.read_parquet(os.path.join(output_dir, "tss_distance_score.parquet"), engine="pyarrow")
         
     return peak_tss_subset_df
 
@@ -318,7 +324,7 @@ def extract_atac_peaks_near_rna_genes(
         tss_bed,
         rna_df,
         tss_distance_cutoff,
-        tmp_dir
+        output_dir
     )
 
     pybedtools.helpers.cleanup(verbose=False, remove_all=True)
@@ -521,13 +527,35 @@ def main(args):
     logging.info("\nFiltering for peaks with 1MB of a gene's TSS")
     peak_subset = set(peaks_near_genes_df["peak_id"])
     atac_df_filtered = atac_df_norm[atac_df_norm["peak_id"].isin(peak_subset)]
-    logging.info(f'\tNumber of peaks after filtering: {len(atac_df_filtered)} / {len(atac_df)}')
+    logging.info(f'\tNumber of peaks after filtering: {len(atac_df_filtered)} / {len(atac_df_norm)}')
     
-    logging.info("Filtering for genes with a TSS within 1 MB of a peak")
+    logging.info("\nFiltering for genes with a TSS within 1 MB of a peak")
     genes_subset = set(peaks_near_genes_df["target_id"])
     rna_df_filtered = rna_df_norm[rna_df_norm["gene_id"].isin(genes_subset)]
-    logging.info(f'\tNumber of genes after filtering: {len(rna_df_filtered)} / {len(rna_df)}')
+    logging.info(f'\tNumber of genes after filtering: {len(rna_df_filtered)} / {len(rna_df_norm)}')
+    
+    logging.info("\nOnly keeping cells that are in both the RNAseq and ATACseq filtered datasets")
+    atac_cells = set(atac_df_filtered.columns) - {"peak_id"}
+    rna_cells = set(rna_df_filtered.columns) - {"gene_id"}
 
+    common_cells = sorted(rna_cells.intersection(atac_cells))
+
+    final_atac = atac_df_filtered[["peak_id"] + common_cells].copy()
+    final_rna = rna_df_filtered[["gene_id"] + common_cells].copy()
+    
+
+    # 4) (Optional) Log how many cells remain
+    print(f"Number of cells in RNA after intersect: {len(common_cells)}")
+    print(f"Number of cells in ATAC after intersect: {len(common_cells)}")
+    
+    logging.info(f"\nProcessed scATACseq dataset:")
+    logging.info(f"  - Peaks: {final_atac.shape[0]:,}")
+    logging.info(f"  - Cells: {final_atac.shape[1]:,}")
+    
+    logging.info(f"\nProcessed scRNAseq dataset:")
+    logging.info(f"  - Genes: {final_rna.shape[0]:,}")
+    logging.info(f"  - Cells: {final_rna.shape[1]:,}")
+    
     def update_name(filename):
         base, ext = os.path.splitext(filename)
         return f"{base}_processed.parquet"
@@ -539,11 +567,11 @@ def main(args):
     print(f"Updated RNA file: {new_rna_file}", flush=True)
     
     logging.info('\nWriting ATAC-seq dataset to Parquet')
-    atac_df_filtered.to_parquet(new_atac_file, engine="pyarrow", compression="snappy", index=False)
+    final_atac.to_parquet(new_atac_file, engine="pyarrow", compression="snappy", index=False)
     logging.info("  Done!")
         
     logging.info('\nWriting RNA-seq dataset to Parquet')
-    rna_df_filtered.to_parquet(new_rna_file, engine="pyarrow", compression="snappy", index=False)
+    final_rna.to_parquet(new_rna_file, engine="pyarrow", compression="snappy", index=False)
     logging.info("  Done!")
 
 if __name__ == "__main__":
