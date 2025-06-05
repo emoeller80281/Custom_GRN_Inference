@@ -37,6 +37,9 @@ dependencies = [
 [tool.poetry]
 packages = [{include = "2024"}]
 
+[tool.mypy]
+check_untyped_defs = true
+
 
 [tool.poetry.group.dev.dependencies]
 mypy = "^1.16.0"

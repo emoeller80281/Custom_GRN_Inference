@@ -351,7 +351,9 @@ run_dataset_preprocessing() {
     /usr/bin/time -v \
     python3 "$PYTHON_SCRIPT_DIR/preprocess_datasets.py" \
         --atac_data_file "$ATAC_FILE_NAME" \
-        --rna_data_file "$RNA_FILE_NAME"
+        --rna_data_file "$RNA_FILE_NAME" \
+        --species "$SPECIES" \
+        --output_dir "$OUTPUT_DIR"
     
     # After preprocessing, update the file names to the new processed files.
     # This assumes that the processed file name is constructed by replacing
