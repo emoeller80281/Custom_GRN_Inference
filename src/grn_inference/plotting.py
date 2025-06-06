@@ -257,6 +257,47 @@ def plot_feature_boxplots(features, inferred_network_ddf, fig_dir):
     plt.close()
     logging.info(f"Saved boxplots to {out}")
 
+def partition_hist(feature_series, bins):
+    counts, _ = np.histogram(feature_series.dropna().values, bins=bins)
+    return counts
+
+def plot_feature_score_histograms_dask(ddf, score_cols, fig_dir, df_name="inferred_net"):
+    logging.info(f"  - Plotting feature score histograms using Dask")
+
+    # Define common bins: assume normalized scores between 0 and 1
+    bins = np.linspace(0, 1, 51)  # 50 bins → 51 edges
+
+    ncols = 4
+    nrows = int(np.ceil(len(score_cols) / ncols))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 4 * nrows), squeeze=False)
+
+    axes_flat = axes.flat
+
+    for ax, feat in zip(axes_flat, score_cols):
+        logging.info(f"    → Computing histogram for {feat}")
+
+        counts_per_part = ddf.map_partitions(
+            lambda df, col=feat: partition_hist(df[col], bins),
+            meta=(None, "i8")
+        )
+
+        total_counts = counts_per_part.sum(axis=0).compute()
+
+        bin_centers = (bins[:-1] + bins[1:]) / 2
+        ax.bar(bin_centers, total_counts, width=(bins[1] - bins[0]), align="center")
+        ax.set_title(f"{feat} histogram", fontsize=14)
+        ax.set_xlabel(feat)
+        ax.set_ylabel("Frequency (count)")
+
+        # Hide unused axes
+        for j in range(len(score_cols), len(axes_flat)):
+            axes_flat[j].axis("off")
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(fig_dir, f"{df_name}_score_histograms.png"), dpi=300)
+    plt.close()
+    logging.info("  - Done plotting histograms")
+
 def plot_permutation_importance_plot(xgb_model, X_test, y_test, fig_dir):
     logging.info("\tPlotting permutation importance plot")
     

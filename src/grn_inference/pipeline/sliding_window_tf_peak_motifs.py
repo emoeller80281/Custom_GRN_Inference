@@ -290,7 +290,6 @@ def associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, rna_dat
     normalized_ddf = minmax_normalize_dask(
         ddf=normalized_ddf, 
         score_cols=["sliding_window_score"], 
-        dtype=np.float32
     )
     
     return normalized_ddf

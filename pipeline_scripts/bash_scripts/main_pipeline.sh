@@ -18,10 +18,10 @@ PEAK_TO_TG_CORRELATION=false
 
 # Run the TF to peak binding score calculation methods
 SLIDING_WINDOW_TF_TO_PEAK_SCORE=false
-HOMER_TF_TO_PEAK_SCORE=true
+HOMER_TF_TO_PEAK_SCORE=false
 
 # Combine the score DataFrames
-COMBINE_DATAFRAMES=false
+COMBINE_DATAFRAMES=true
 SUBSAMPLE_PERCENT=50 # Percent of rows of the combined dataframe to subsample
 
 # Train a predictive model to infer the GRN

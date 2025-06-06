@@ -2,8 +2,10 @@ import pandas as pd
 import numpy as np
 import dask.dataframe as dd
 import matplotlib.pyplot as plt
+import seaborn as sns
 import os
 import csv
+from typing import Union
 
 COMBINED_SCORE_DF_FEATURES = [
     "mean_TF_expression", 
@@ -213,10 +215,13 @@ def label_edges_with_ground_truth(inferred_network_dd, ground_truth_df):
         ground_truth_df["source_id"].str.upper(),
         ground_truth_df["target_id"].str.upper()
     ))
+    
+    inferred_network_dd["source_id"] = inferred_network_dd["source_id"].str.upper()
+    inferred_network_dd["target_id"] = inferred_network_dd["target_id"].str.upper()
 
 
     def label_partition(df):
-        df = df.copy()  # <-- avoids SettingWithCopyWarning
+        df = df.copy()
         tf_tg_tuples = list(zip(df["source_id"], df["target_id"]))
         df.loc[:, "label"] = [1 if pair in ground_truth_pairs else 0 for pair in tf_tg_tuples]
         return df
@@ -254,3 +259,27 @@ if not os.path.isfile(tf_tg_edges_save_file):
 else:
     print("Loading labeled TF-TG peak count parquet file")
     tf_tg_edges_in_gt = dd.read_parquet(tf_tg_edges_save_file, engine="pyarrow")
+
+def convert_true_false_to_string(value: Union[int, str]):
+    if type(value) == int:
+        if value == 0:
+            return "False"
+        elif value == 1:
+            return "True"
+        else:
+            raise ValueError(f"Value {value} in the ground truth label columns is not 0 or 1")
+    elif type(value) == str:
+        return value
+    else:
+        raise TypeError("Value must be either of type int or str, got %s" % value)
+        
+
+tf_tg_edges_in_gt["label"] = tf_tg_edges_in_gt["label"].apply(convert_true_false_to_string)
+tf_tg_pivoted: pd.DataFrame = tf_tg_edges_in_gt.pivot(columns="label", values="edge_count")
+
+plt.figure(figsize=(8,8))
+sns.histplot(data=tf_tg_edges_in_gt, x="edge_count", hue="label", bins=50, log_scale=True, element="step", stat="count")
+plt.title("Distribution of peak counts for TF-TG edges", fontsize=16)
+plt.xlabel("Number of peaks", fontsize=14)
+plt.ylabel("Frequency", fontsize=14)
+plt.show()

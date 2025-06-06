@@ -152,13 +152,11 @@ def main(input_dir: str, output_dir: str, cpu_count: int) -> None:
         score_cols=["homer_binding_score"],
         quantiles=(0.05, 0.95),
         apply_log1p=True,
-        dtype=np.float32
     )
     
     normalized_ddf = minmax_normalize_dask(
         ddf=normalized_ddf, 
         score_cols=["homer_binding_score"], 
-        dtype=np.float32
     )
     
     plot_feature_score_histogram(normalized_ddf, "homer_binding_score", output_dir)

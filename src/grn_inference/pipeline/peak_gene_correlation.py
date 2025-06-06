@@ -522,7 +522,6 @@ def main():
     normalized_ddf = minmax_normalize_dask(
         ddf=normalized_ddf, 
         score_cols=["correlation"], 
-        dtype=np.float32
     )
     logging.info(f'\t- Number of edges: {len(normalized_ddf)}')
     
