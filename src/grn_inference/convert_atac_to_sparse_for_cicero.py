@@ -23,7 +23,9 @@ def load_atac_dataset(atac_data_file: str) -> pd.DataFrame:
         df = pd.read_csv(atac_data_file, sep="\t", header=0, index_col=None)
         
     else:
-        logging.error("ERROR: ATAC data file must be a csv, tsv, or parquet format. Check column separators")
+        raise ValueError(
+            "ATAC data file must be a csv, tsv, or parquet format."
+        )
         
     logging.info(f'\tNumber of peaks: {df.shape[0]}')
     logging.info(f'\tNumber of cells: {df.shape[1]-1}')
@@ -49,7 +51,9 @@ def main():
     # Get nonzero indices
     row_idx, col_idx = np.nonzero(dense_mat)
     counts = dense_mat[row_idx, col_idx]
-    logging.info(f'\t\tNon-zero values: {len(counts)} / {len(dense_mat)}')
+    logging.info(
+        f"\t\tNon-zero values: {len(counts)} / {dense_mat.size}"
+    )
     
     logging.info('\t- Melting to peak_id, barcode, count long format')
     # Melt into long format
