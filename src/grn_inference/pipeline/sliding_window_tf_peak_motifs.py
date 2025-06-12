@@ -129,7 +129,7 @@ def score_all_peaks(seqs_plus, seqs_minus, pwm_values):
     return out
 
 def get_background_freq(species):
-    if species == "human" or species == "hg38":
+    if species == "human" or species == "hg38" or species == "mmusculus":
         background_freq = pd.Series({
             "A": 0.29182,
             "C": 0.20818,
@@ -137,7 +137,7 @@ def get_background_freq(species):
             "T": 0.29182
         })
     
-    elif species == "mouse" or species == "mm10":
+    elif species == "mouse" or species == "mm10" or species == "hsapiens":
         background_freq = pd.Series({
         "A": 0.2917,
         "C": 0.2083,
@@ -174,7 +174,7 @@ def process_motif_file_and_save(file, meme_dir, output_dir):
         tf_names = _global_tf_df.loc[mask]["TF_Name"].values
 
         peak_ids = _global_chr_pos_to_seq.apply(
-            lambda row: f'{row["chr"]}:{row["start"]}-{row["end"]}', axis=1
+            lambda row: f'{row["chromosome"]}:{row["start"]}-{row["end"]}', axis=1
         )
 
         tmp_dir = os.path.join(output_dir, "tmp", "sliding_window_tf_scores")
@@ -253,7 +253,7 @@ def associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, rna_dat
             if not all_cached:
                 filtered_motif_files.append(motif_file)
 
-    logging.info(f"\t- Number of motif files missing: {len(filtered_motif_files)} / {len(tf_motif_names)}")
+    logging.info(f"\t- Number of motif files found: {len(filtered_motif_files)} / {len(tf_motif_names)}")
 
     logging.info(f"\nCalculating sliding window motif scores for each ATAC-seq peak")
     logging.info(f"\tUsing {num_cpu} processors")
@@ -316,13 +316,13 @@ def format_peaks(peak_ids: pd.Series) -> pd.DataFrame:
         raise ValueError("Malformed peak IDs. Expect format 'chr:start-end'.")
 
     peak_df = pd.DataFrame({
-        "PeakID": [f"peak{i + 1}" for i in range(len(peak_ids))],
-        "chr": chromosomes,
-        "start": pd.to_numeric(starts, errors='coerce'),
-        "end": pd.to_numeric(ends, errors='coerce'),
+        "peak_id": [f"peak{i + 1}" for i in range(len(peak_ids))],
+        "chromosome": chromosomes,
+        "start": pd.to_numeric(starts, errors='coerce').astype(int),
+        "end": pd.to_numeric(ends, errors='coerce').astype(int),
         "strand": ["."] * len(peak_ids)
     })
-
+    
     return peak_df
 
 
@@ -349,7 +349,7 @@ def find_ATAC_peak_sequence(peak_df, reference_genome_dir, parsed_peak_file, fig
     
     logging.info(f'Extracting the peak sequences...')
     # Find the unique chromosomes in the peaks
-    peak_chr_ids = set(peak_df["chr"].unique())
+    peak_chr_ids = set(peak_df["chromosome"].unique())
     
     # Iterate through each fasta file (chromosome fastas for mouse, entire genome fasta for human)
     for file in tqdm(files_to_open):
@@ -362,7 +362,7 @@ def find_ATAC_peak_sequence(peak_df, reference_genome_dir, parsed_peak_file, fig
             if fasta_rec.id in peak_chr_ids:
                 chr_seq_plus = str(fasta_rec.seq).upper()
                 chr_seq_neg = str(fasta_rec.seq.complement()).upper()
-                chr_peaks = peak_df[peak_df["chr"] == fasta_rec.id][["chr", "start", "end"]]
+                chr_peaks = peak_df[peak_df["chromosome"] == fasta_rec.id][["chromosome", "start", "end"]]
                 starts = chr_peaks["start"].to_numpy()
                 ends = chr_peaks["end"].to_numpy()
                 
@@ -421,6 +421,7 @@ def main():
     fig_dir: str = args.fig_dir
     
     tmp_dir = f"{output_dir}/tmp"
+    os.makedirs(tmp_dir, exist_ok=True)
     
     # Alternative: Set file names manually
     # tf_names_file = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/motif_information/mm10/TF_Information_all_motifs.txt"
@@ -431,30 +432,37 @@ def main():
     # output_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output/mESC"
     # num_cpu = 4
         
-    logging.info('Reading scATACseq data')
-    atac_df: dd.DataFrame = dd.read_parquet(atac_data_file)
-
     logging.info('Reading gene names from scRNAseq data')
     rna_data: dd.DataFrame = dd.read_parquet(rna_data_file)
         
-    peak_ids = atac_df[atac_df.columns[0]].compute()
-    
-    logging.info(f'{len(peak_ids)} peak_ids overlapping between Cicero and ATAC')
-    
     # Get the set of unique gene_ids from the RNA dataset
     rna_data_genes = set(rna_data["gene_id"].compute().dropna())
     
     # Read in the peak dataframe containing genomic sequences    
     parsed_peak_file = f'{tmp_dir}/peak_sequences.pkl'
-    if os.path.exists(parsed_peak_file):
+    if os.path.isfile(parsed_peak_file):
         logging.info('Reading ATACseq peaks from pickle file')
         chr_pos_to_seq = pd.read_pickle(parsed_peak_file)
         
     # Create the peak dataframe containing genomic sequences if it doesn't exist
     else:
-        # Read in the ATACseq dataframe and parse the peak locations into a dataframe of genomic locations and peak IDs
-        logging.info(f'Identifying ATACseq peak sequences')
-        peak_df = format_peaks(peak_ids)
+        # If the homer peaks file has already been created, then we can re-use the peak info from there
+        homer_peak_file = os.path.join(tmp_dir, "homer_peaks.txt")
+        if os.path.isfile(homer_peak_file):
+            logging.info("Loading in peak information from homer_peaks.txt")
+            peak_df = pd.read_csv(homer_peak_file, sep="\t", header=0, index_col=None)
+        else:
+            logging.info("'homer_peaks.txt' file not found in 'tmp_dir', reading peak info from scATACseq data")
+            logging.info('  - Reading scATACseq data')
+            atac_df: dd.DataFrame = dd.read_parquet(atac_data_file)
+            
+            peak_ids = atac_df[atac_df.columns[0]].compute()
+            
+            logging.info(f'  - Identifying ATACseq peak sequences')
+            peak_df = format_peaks(peak_ids)
+            
+            logging.info("  - Saving peak_df to homer_peaks.txt")
+            peak_df.to_csv(homer_peak_file, sep="\t", header=True, index=False)
         
         # Get the genomic sequence from the reference genome to each ATACseq peak
         chr_pos_to_seq = find_ATAC_peak_sequence(peak_df, reference_genome_dir, parsed_peak_file, fig_dir)

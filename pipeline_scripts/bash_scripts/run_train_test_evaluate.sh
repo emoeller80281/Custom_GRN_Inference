@@ -36,18 +36,18 @@ determine_num_cpus
 source /gpfs/Home/esm5360/miniconda3/etc/profile.d/conda.sh
 
 # ----- MODIFY THE FOLLOWING SETTINGS -----
-COMPARE_FEATURE_SCORES=true
+COMPARE_FEATURE_SCORES=false
 RUN_TRAINING=false
-RUN_PREDICTION=false
-RUN_STATS_ANALYSIS=false
+RUN_PREDICTION=true
+RUN_STATS_ANALYSIS=true
 
 GROUND_TRUTH_NAME="RN111_ChIPSeq"
 
 MODEL_TRAINING_CELL_TYPE="DS011_mESC"
-MODEL_TRAINING_SAMPLE="DS011_mESC_sample1"
+MODEL_TRAINING_SAMPLE="DS011_mESC_sample1_old"
 
 PREDICTION_TARGET_CELL_TYPE="mESC"
-PREDICTION_TARGET_SAMPLE="filtered_L2_E7.5_rep2"
+PREDICTION_TARGET_SAMPLE="filtered_L2_E7.5_rep2_old"
 # ------------------------------------------
 
 PROJECT_BASE_DIR=$(readlink -f "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER")
@@ -55,7 +55,7 @@ STATS_BASE_DIR=$(readlink -f "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.GRN_BENCHMAR
 REF_NET_DIR=$(readlink -f "/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/REFERENCE_NETWORKS")
 STATS_OUTPUT_DIR="$PROJECT_BASE_DIR/output/"
 
-PROJECT_PYTHON_SCRIPT_DIR="$PROJECT_BASE_DIR/src/grn_inference"
+PROJECT_PYTHON_SCRIPT_DIR="$PROJECT_BASE_DIR/src/grn_inference/pipeline"
 
 MODEL_TRAINING_GROUND_TRUTH="$REF_NET_DIR/RN111_ChIPSeq_BEELINE_Mouse_ESC.tsv"
 STATS_ANALYSIS_GROUND_TRUTH="$REF_NET_DIR/RN111_ChIPSeq_BEELINE_Mouse_ESC.tsv"
@@ -82,7 +82,7 @@ create_overlapping_feature_score_histogram() {
 
     echo ""
     echo "Plotting overlapping feature score histogram between the model training dataset and the target dataset"
-    /usr/bin/time -v python3 "$PROJECT_PYTHON_SCRIPT_DIR/compare_score_distributions.py" \
+    /usr/bin/time -v poetry run python "$PROJECT_PYTHON_SCRIPT_DIR/compare_score_distributions.py" \
         --model_training_inferred_net "$MODEL_TRAINING_INFERRED_NET" \
         --prediction_target_inferred_net "$PREDICTION_TARGET_INFERRED_NET" \
         --model_training_sample_name "$MODEL_TRAINING_SAMPLE" \
@@ -99,7 +99,7 @@ run_xgboost_training() {
     echo "    Ground Truth = ${MODEL_TRAINING_GROUND_TRUTH_FILE}"
     echo "    Training Set = ${MODEL_TRAINING_SAMPLE}"
 
-    /usr/bin/time -v python3 "$PROJECT_PYTHON_SCRIPT_DIR/Step070.train_xgboost.py" \
+    /usr/bin/time -v poetry run python "$PROJECT_PYTHON_SCRIPT_DIR/train_xgboost.py" \
             --ground_truth_file "$MODEL_TRAINING_GROUND_TRUTH" \
             --inferred_network_file "$MODEL_TRAINING_INFERRED_NET" \
             --trained_model_dir "$MODEL_SAVE_DIR" \
@@ -118,7 +118,7 @@ run_model_predictions() {
     echo "    Trained Model = ${MODEL_SAVE_NAME}"
     echo "    Target = ${PREDICTION_TARGET_SAMPLE}"
 
-    /usr/bin/time -v python3 "$PROJECT_PYTHON_SCRIPT_DIR/Step090.apply_trained_xgboost.py" \
+    /usr/bin/time -v poetry run python "$PROJECT_PYTHON_SCRIPT_DIR/apply_trained_xgboost.py" \
         --output_dir "${MODEL_PREDICTION_DIR}" \
         --model "${MODEL_SAVE_DIR}/${MODEL_SAVE_NAME}.json" \
         --target "${PREDICTION_TARGET_INFERRED_NET}" \

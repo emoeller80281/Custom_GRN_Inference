@@ -728,6 +728,25 @@ sparse = ">=0.7.0"
 docs = ["jupyter", "nbsphinx", "notebook", "numpydoc", "sphinx", "sphinx-rtd-theme"]
 
 [[package]]
+name = "dask-jobqueue"
+version = "0.8.5"
+description = "Deploy Dask on job queuing systems like PBS, Slurm, SGE or LSF"
+optional = false
+python-versions = ">=3.8"
+groups = ["main"]
+files = [
+    {file = "dask-jobqueue-0.8.5.tar.gz", hash = "sha256:f6923f9d7ff894b96efbf706118b2cd37fd37751d567e91c22dfd3e2eaa93202"},
+    {file = "dask_jobqueue-0.8.5-py2.py3-none-any.whl", hash = "sha256:96a51083b93e5e66354bdb337840663202e45b20930071edeb41af07bbd5af26"},
+]
+
+[package.dependencies]
+dask = ">=2022.02.0"
+distributed = ">=2022.02.0"
+
+[package.extras]
+test = ["cryptography", "pytest", "pytest-asyncio"]
+
+[[package]]
 name = "dask-ml"
 version = "2024.4.4"
 description = "A library for distributed and parallel machine learning"
@@ -4036,4 +4055,4 @@ type = ["pytest-mypy"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.9"
-content-hash = "14b3668ce9f9f0e457c06fa6d0ebb68090056a079ec43b6fa5647c3f31e345d4"
+content-hash = "20dc00143b7ef755ea09f1675825458f339a50768cdd337eabd3c3bfadbf328a"

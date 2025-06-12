@@ -76,10 +76,10 @@ def main():
 
     # Convert to pandas (merging Dask DataFrame + Dask array)
     logging.info("Joining predictions back to source-target pairs")
-    result_df = inferred_dd[["source_id", "target_id"]].compute()
+    result_df = inferred_dd[["source_id", "peak_id", "target_id"]].compute()
     result_df["score"] = y_pred.compute()
     result_df = result_df.drop_duplicates()
-
+    
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 

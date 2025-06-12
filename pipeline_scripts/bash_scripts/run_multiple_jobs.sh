@@ -200,7 +200,7 @@ run_K562(){
     done
 }
 
-run_DS011_mESC
+# run_DS011_mESC
 # run_mouse_kidney
 run_mESC
 # run_K562

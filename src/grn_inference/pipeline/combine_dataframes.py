@@ -8,7 +8,8 @@ import dask.dataframe as dd
 from dask import compute
 from typing import Set, Tuple, Union
 from dask.distributed import Client, LocalCluster
-
+from dask_jobqueue import SLURMCluster
+import dask
 
 from grn_inference.normalization import (
     minmax_normalize_pandas,
@@ -17,6 +18,8 @@ from grn_inference.normalization import (
 )
 
 from grn_inference.plotting import plot_feature_score_histograms_dask
+
+dask.config.set({"dataframe.shuffle.method": "disk"})
 
 def parse_args() -> argparse.Namespace:
     """
@@ -121,71 +124,90 @@ def join_all_scores(full_edges_dd, score_dfs):
         df = df.merge(score_df, how="left", on=keys)
     return df
 
-def add_string_db_scores(inferred_net_dd, string_dir, full_edges_dd):
-    # Load STRING protein info and links (small)
-    logging.info("  - Reading STRING protein info")
+def add_string_db_scores(
+    inferred_net_dd: dd.DataFrame,
+    string_dir: str,
+    tf_peak_dd: dd.DataFrame,
+    peak_tg_dd: dd.DataFrame
+) -> dd.DataFrame:
+    logging.info("  - Reading STRING protein_info.txt")
     protein_info_df = pd.read_csv(f"{string_dir}/protein_info.txt", sep="\t")
-    
-    logging.info("  - Reading STRING protein links detailed")
+    logging.info("  - Reading STRING protein_links_detailed.txt")
     protein_links_df = pd.read_csv(f"{string_dir}/protein_links_detailed.txt", sep=" ")
-    
-    filtered_links_df = protein_links_df.loc[:, ["protein1","protein2","experimental","textmining","combined_score"]]
 
-    # Compute tf_string_ids/tg_string_ids as sets of numeric IDs
+    filtered_links_df = protein_links_df[[
+        "protein1", "protein2", "experimental", "textmining", "combined_score"
+    ]].copy()
+
     id_to_name = protein_info_df.set_index("#string_protein_id")["preferred_name"].to_dict()
     name_to_id = {v: k for k, v in id_to_name.items()}
 
-    tf_ids, tg_ids = compute(
-        full_edges_dd["source_id"].unique(),
-        full_edges_dd["target_id"].unique(),
-        scheduler="threads"
+    tf_names = tf_peak_dd["source_id"].drop_duplicates().compute()
+    tg_names = peak_tg_dd["target_id"].drop_duplicates().compute()
+    tf_set = set(tf_names.tolist())
+    tg_set = set(tg_names.tolist())
+
+    tf_string_ids = {name_to_id[nm] for nm in tf_set if nm in name_to_id}
+    tg_string_ids = {name_to_id[nm] for nm in tg_set if nm in name_to_id}
+
+    mask = (
+        filtered_links_df["protein1"].isin(tf_string_ids) &
+        filtered_links_df["protein2"].isin(tg_string_ids)
     )
-    tf_set = set(tf_ids)
-    tg_set = set(tg_ids)
+    filtered_links_df = filtered_links_df.loc[mask, :].copy()
+    if filtered_links_df.shape[0] == 0:
+        logging.info("No matching STRING edges found; skipping STRING step.")
+        return inferred_net_dd
 
-    # Map TF/TG names back to numeric IDs
-    tf_string_ids = { name_to_id[x] for x in tf_set if x in name_to_id }
-    tg_string_ids = { name_to_id[x] for x in tg_set if x in name_to_id }
-
-    # Filter using numeric IDs
-    mask = filtered_links_df["protein1"].isin(tf_string_ids) & filtered_links_df["protein2"].isin(tg_string_ids)
-    filtered_links_df = filtered_links_df.loc[mask, :]
-    
     filtered_links_df["protein1_name"] = filtered_links_df["protein1"].map(id_to_name)
     filtered_links_df["protein2_name"] = filtered_links_df["protein2"].map(id_to_name)
+
     filtered_links_df = filtered_links_df[[
         "protein1_name", "protein2_name", "experimental", "textmining", "combined_score"
-    ]]
-    filtered_links_df = filtered_links_df.rename(columns={
+    ]].rename(columns={
         "protein1_name": "protein1",
         "protein2_name": "protein2",
         "experimental": "string_experimental_score",
         "textmining": "string_textmining_score",
         "combined_score": "string_combined_score"
     })
-    
-    if filtered_links_df.shape[0] == 0:
-        logging.info("No matching STRING edges found; skipping STRING step.")
-        return inferred_net_dd
 
-    logging.info("  - Converting to Dask and normalizing STRING scores")
+    logging.info("  - Converting filtered STRING links to Dask DataFrame")
     nrows = filtered_links_df.shape[0]
     nparts = max(1, nrows // 100_000)
     string_dd = dd.from_pandas(filtered_links_df, npartitions=nparts)
 
     string_dd = clip_and_normalize_log1p_dask(
         ddf=string_dd,
-        score_cols=["string_experimental_score", "string_textmining_score", "string_combined_score"],
+        score_cols=[
+            "string_experimental_score",
+            "string_textmining_score",
+            "string_combined_score"
+        ],
         quantiles=(0.05, 0.95),
-        apply_log1p=True,
+        apply_log1p=True
     )
 
     string_dd = minmax_normalize_dask(
         ddf=string_dd,
-        score_cols=["string_experimental_score", "string_textmining_score", "string_combined_score"],
+        score_cols=[
+            "string_experimental_score",
+            "string_textmining_score",
+            "string_combined_score"
+        ]
     )
 
-    logging.info("  - Merging normalized STRING scores into inferred network")
+    cols_to_keep = [
+        "source_id", "peak_id", "target_id",
+        "sliding_window_score", "homer_binding_score",
+        "correlation", "cicero_score",
+        "TSS_dist_score",
+        "mean_TF_expression", "mean_TG_expression",
+        "mean_peak_accessibility"
+    ]
+    inferred_net_dd = inferred_net_dd[cols_to_keep]
+
+    logging.info("  - Merging normalized STRING scores into inferred_net_dd")
     merged_dd = inferred_net_dd.merge(
         string_dd,
         left_on=["source_id", "target_id"],
@@ -193,7 +215,8 @@ def add_string_db_scores(inferred_net_dd, string_dir, full_edges_dd):
         how="left"
     ).drop(columns=["protein1", "protein2"])
 
-    logging.info("  Done!")
+    merged_dd = merged_dd.persist()
+    logging.info("  Done merging STRING scores.")
     return merged_dd
 
 def filter_scored_edges(df, min_valid_scores=6, score_cols=None):
@@ -235,26 +258,30 @@ def main():
     # 1) Create a temporary local folder for Dask spill files (you already do this later)
     dask_tmp_dir = os.path.join(output_dir, "tmp/dask_tmp")
     os.makedirs(dask_tmp_dir, exist_ok=True)
-
-    # 2) Launch a LocalCluster with 4 workers, each worker has 2 threads and 8 GB memory
-    cluster = LocalCluster(
-        n_workers=4,
-        threads_per_worker=2,
-        memory_limit="8GB",               # cap per‐worker RAM
-        local_directory=dask_tmp_dir      # where each worker dumps temp files
-    )
-    client = Client(cluster)
-    logging.info(f"Dask dashboard: {client.dashboard_link}")
-
-    # 3) (Optional) Force the “tasks” shuffle method globally—lower disk‐spill overhead
-    import dask
-    dask.config.set({"dataframe.shuffle.method": "tasks"})
-    
-    dask_tmp_dir = os.path.join(output_dir, "tmp/dask_tmp")
-    os.makedirs(dask_tmp_dir, exist_ok=True)
     
     os.environ["TMPDIR"] = dask_tmp_dir
     os.environ["DASK_TEMPORARY_DIRECTORY"] = dask_tmp_dir
+
+    # 2) Launch a SLURMCluster
+    cluster = SLURMCluster(
+        cores=4,
+        memory="128GB",
+        queue="compute",
+        walltime="02:00:00",
+        interface="ib0",
+        local_directory=dask_tmp_dir,
+
+    )
+
+    # 3) Scale out to N workers (launch N SLURM jobs)
+    #    Change 10 → however many nodes/workers you want.
+    cluster.scale(15)
+
+    # 4) Connect a Dask Client to that cluster
+    client = Client(cluster)
+    logging.info(f"Dask dashboard: {client.dashboard_link}")
+    
+    
 
     logging.info("\n ============== Loading Score DataFrames ==============")
     # Load Dask DataFrames
@@ -343,45 +370,76 @@ def main():
         peak_tg_dd,
         how="inner",
         on="peak_id"  # both sides are categorical, so join is efficient
-    ).persist(scheduler="threads")
+    ).persist()
+    
+    logging.info("\n ============== Merging scores into full_edges_dd ==============")
 
-    logging.info("\n ============== Merging TF→peak score DataFrames ==============")
+    logging.info("  - Merging TF to peak score DataFrames")
     tf_scores_dd = sliding_window_dd.merge(
         homer_dd,
         how="outer",
         on=["source_id", "peak_id"]
     )
 
-    logging.info("\n ============== Merging peak→TG score DataFrames ==============")
+    logging.info("  - Merging peak to TG score DataFrames")
     ptg_scores_dd = peak_corr_dd.merge(
         cicero_dd,
         how="outer",
         on=["peak_id", "target_id"]
     )
-
-    logging.info("\n ============== Merging scores into full_edges_dd ==============")
-    combined_ddf = (
-        full_edges_dd
-        .merge(tf_scores_dd,  how="left", on=["source_id", "peak_id"])
-        .merge(ptg_scores_dd, how="left", on=["peak_id", "target_id"])
-        .merge(
-            tss_dist_dd,
-            how="left",
-            on=["peak_id", "target_id"],
-        )
+    
+    # ensure categories line up
+    tf_scores_dd = tf_scores_dd.assign(
+        peak_id=tf_scores_dd["peak_id"].astype("category"),
+        source_id=tf_scores_dd["source_id"].astype("category")
+    )
+    ptg_scores_dd = ptg_scores_dd.assign(
+        peak_id=ptg_scores_dd["peak_id"].astype("category"),
+        target_id=ptg_scores_dd["target_id"].astype("category")
     )
 
-    logging.info("\n ============== Joining RNA/ATAC mean expression/accessibility ==============")
-    tf_expr_pdf = dd_rna_tf.compute()  # Pandas lookup, small
+    logging.info("  - Merging TF→peak with peak→TG scores + TSS distance")
+    combined_ddf = (
+        full_edges_dd
+          .merge(tf_scores_dd, how="left", on=["source_id", "peak_id"])
+          .merge(ptg_scores_dd, how="left", on=["peak_id", "target_id"])
+          .merge(
+              tss_dist_dd,
+              how="left",
+              on=["peak_id", "target_id"]
+          )
+    ).persist()
+
+    logging.info("  - Joining mean RNA expression and ATAC accessibility")
+    tf_expr_pdf = dd_rna_tf.compute()   # small Pandas DF
     tg_expr_pdf = dd_rna_tg.compute()
     atac_pdf    = dd_atac.compute()
 
+    # Cast the Dask side’s keys back to plain strings (object) before merging:
+    combined_ddf = combined_ddf.assign(
+        source_id=combined_ddf["source_id"].astype("object"),
+        target_id=combined_ddf["target_id"].astype("object"),
+        peak_id=combined_ddf["peak_id"].astype("object"),
+    )
+    
+    # Cast the Pandas‐side join keys to object as well:
+    tf_expr_pdf["source_id"] = tf_expr_pdf["source_id"].astype(str)
+    tg_expr_pdf["target_id"] = tg_expr_pdf["target_id"].astype(str)
+    atac_pdf["peak_id"]      = atac_pdf["peak_id"].astype(str)
+
+    # Now the Pandas lookups can remain as object dtype:
+    # (no need to cast tf_expr_pdf["source_id"] to category)
     combined_ddf = combined_ddf.merge(tf_expr_pdf, how="left", on="source_id")
     combined_ddf = combined_ddf.merge(tg_expr_pdf, how="left", on="target_id")
     combined_ddf = combined_ddf.merge(atac_pdf,    how="left", on="peak_id")
     
     logging.info("\n ============== Adding STRING Scores ==============")
-    combined_string_ddf = add_string_db_scores(combined_ddf, args.string_dir, full_edges_dd)
+    combined_string_ddf = add_string_db_scores(
+        inferred_net_dd=combined_ddf,
+        string_dir=args.string_dir,
+        tf_peak_dd=tf_peak_dd,
+        peak_tg_dd=peak_tg_dd
+    )
     
     logging.info("\n ============== Filtering and Melting Combined Score DataFrame ==============")
     score_cols = [
@@ -399,25 +457,29 @@ def main():
         combined_string_ddf, 
          min_valid_scores=num_score_col_threshold,
          score_cols=score_cols
-         ).persist(scheduler="threads")
+         ).persist()
     logging.info("      Done!")
     
-    plot_feature_score_histograms_dask(filtered_combined_string_ddf, score_cols, output_dir)
+    # filtered_combined_string_ddf = filtered_combined_string_ddf.repartition(npartitions=100)
+    # plot_feature_score_histograms_dask(filtered_combined_string_ddf, score_cols, output_dir)
     
-    logging.info(f'  - Melting the combined DataFrame to reduce NaN values')
-    melted_df = filtered_combined_string_ddf.melt(
-        id_vars=["source_id", "peak_id", "target_id"],
-        value_vars=score_cols,
-        var_name="score_type",
-        value_name="score_value"
-    )
+    # logging.info(f'  - Melting the combined DataFrame to reduce NaN values')
+    # melted_df = filtered_combined_string_ddf.melt(
+    #     id_vars=["source_id", "peak_id", "target_id"],
+    #     value_vars=score_cols,
+    #     var_name="score_type",
+    #     value_name="score_value"
+    # )
 
-    non_null_scores_ddf = melted_df.dropna(subset=["score_value"])
-    logging.info("      Done!")    
+    # non_null_scores_ddf = filtered_combined_string_ddf.dropna(subset=["score_value"])
+    # logging.info("      Done!")    
     
     logging.info(f"Writing out inferred_score_df.parquet")
-    non_null_scores_ddf = non_null_scores_ddf.repartition(partition_size="100MB")
-    non_null_scores_ddf.to_parquet(
+    for col in ["source_id", "target_id", "peak_id"]:
+        filtered_combined_string_ddf[col] = filtered_combined_string_ddf[col].astype("string")
+
+    filtered_combined_string_ddf = filtered_combined_string_ddf.repartition(npartitions=200)
+    filtered_combined_string_ddf.to_parquet(
         os.path.join(inferred_grn_dir, "inferred_score_df.parquet"),
         engine="pyarrow",
         compression="snappy",

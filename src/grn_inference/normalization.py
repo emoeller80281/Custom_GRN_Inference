@@ -3,6 +3,7 @@ import pandas as pd
 import dask.dataframe as dd
 import logging
 from typing import Union
+from dask.dataframe.utils import is_dataframe_like
 
 def minmax_normalize_dask(
     ddf: dd.DataFrame,
@@ -24,6 +25,9 @@ def minmax_normalize_dask(
     col_maxs = stats_df.max().to_dict()
 
     def normalize_partition(df):
+        if not is_dataframe_like(df):
+            raise TypeError(f"Expected DataFrame, got {type(df)}")
+
         df = df.copy()
         for col in score_cols:
             min_val = col_mins[col]
@@ -81,6 +85,9 @@ def clip_and_normalize_log1p_dask(
     high = sample.quantile(q_hi).to_dict()
 
     def transform_partition(df):
+        if not is_dataframe_like(df):
+            raise TypeError(f"Expected DataFrame, got {type(df)}")
+
         df = df.copy()
         for col in score_cols:
             df[col] = df[col].clip(lower=low[col], upper=high[col])

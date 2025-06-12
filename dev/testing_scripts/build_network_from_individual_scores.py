@@ -223,7 +223,7 @@ def label_edges_with_ground_truth(inferred_network_dd, ground_truth_df):
     def label_partition(df):
         df = df.copy()
         tf_tg_tuples = list(zip(df["source_id"], df["target_id"]))
-        df.loc[:, "label"] = [1 if pair in ground_truth_pairs else 0 for pair in tf_tg_tuples]
+        df.loc[:, "label"] = ["True" if pair in ground_truth_pairs else "False" for pair in tf_tg_tuples]
         return df
 
     inferred_network_dd = inferred_network_dd.map_partitions(
@@ -260,23 +260,7 @@ else:
     print("Loading labeled TF-TG peak count parquet file")
     tf_tg_edges_in_gt = dd.read_parquet(tf_tg_edges_save_file, engine="pyarrow")
 
-def convert_true_false_to_string(value: Union[int, str]):
-    if type(value) == int:
-        if value == 0:
-            return "False"
-        elif value == 1:
-            return "True"
-        else:
-            raise ValueError(f"Value {value} in the ground truth label columns is not 0 or 1")
-    elif type(value) == str:
-        return value
-    else:
-        raise TypeError("Value must be either of type int or str, got %s" % value)
         
-
-tf_tg_edges_in_gt["label"] = tf_tg_edges_in_gt["label"].apply(convert_true_false_to_string)
-tf_tg_pivoted: pd.DataFrame = tf_tg_edges_in_gt.pivot(columns="label", values="edge_count")
-
 plt.figure(figsize=(8,8))
 sns.histplot(data=tf_tg_edges_in_gt, x="edge_count", hue="label", bins=50, log_scale=True, element="step", stat="count")
 plt.title("Distribution of peak counts for TF-TG edges", fontsize=16)

@@ -31,7 +31,8 @@ dependencies = [
     "shap>=0.46.0",
     "statsmodels>=0.14.4",
     "umap-learn>=0.5.7",
-    "xgboost>=2.1.4"
+    "xgboost>=2.1.4",
+    "dask-jobqueue (==0.8.5)"
 ]
 
 [tool.poetry]
