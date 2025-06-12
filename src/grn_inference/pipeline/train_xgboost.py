@@ -26,11 +26,18 @@ from grn_inference.model import (
 
 
 def parse_args() -> argparse.Namespace:
-    """
-    Parses command-line arguments.
+    """Parse command line arguments for model training.
 
-    Returns:
-        argparse.Namespace: Parsed arguments containing paths for input and output files.
+    Returns
+    -------
+    argparse.Namespace
+        Namespace containing all parsed options such as file paths and the
+        number of CPUs to use.
+
+    Notes
+    -----
+    This function is typically called from :func:`main` and has no parameters
+    of its own.
     """
     parser = argparse.ArgumentParser(description="Process TF motif binding potential.")
 
@@ -75,9 +82,25 @@ def parse_args() -> argparse.Namespace:
     return args
 
 def read_inferred_network(inferred_network_file: str) -> dd.DataFrame:
-    """
-    Loads a melted sparse inferred network from Parquet and pivots it into a Dask DataFrame
-    where each row is (source_id, target_id) and columns are score_types (mean-aggregated).
+    """Load and pivot a melted sparse inferred network.
+
+    Parameters
+    ----------
+    inferred_network_file : str
+        Path to a parquet file containing a "melted" network with columns
+        ``source_id``, ``peak_id``, ``target_id``, ``score_type`` and
+        ``score_value``.
+
+    Returns
+    -------
+    dask.dataframe.DataFrame
+        Network in wide format where score types form columns and the index is
+        ``(source_id, peak_id, target_id)``.
+
+    Notes
+    -----
+    The returned dataframe has a single partition which is usually sufficient
+    for moderate sized networks.  Adjust ``npartitions`` if necessary.
     """
     logging.info(f"Loading melted sparse network from: {inferred_network_file}")
     melted_ddf = dd.read_parquet(inferred_network_file, engine="pyarrow")
@@ -109,17 +132,68 @@ def read_inferred_network(inferred_network_file: str) -> dd.DataFrame:
     return dd.from_pandas(pivot_df, npartitions=1)
 
 def read_ground_truth(ground_truth_file):
+    """Read ground truth TF--target pairs from a tab-delimited file.
+
+    Parameters
+    ----------
+    ground_truth_file : str
+        File path to a TSV with columns ``Source`` and ``Target``.
+
+    Returns
+    -------
+    pandas.DataFrame
+        DataFrame with standardized column names ``source_id`` and ``target_id``.
+    """
     logging.info("Reading in the ground truth")
-    ground_truth = pd.read_csv(ground_truth_file, sep='\t', quoting=csv.QUOTE_NONE, on_bad_lines='skip', header=0)
+    ground_truth = pd.read_csv(
+        ground_truth_file,
+        sep='\t',
+        quoting=csv.QUOTE_NONE,
+        on_bad_lines='skip',
+        header=0
+    )
     ground_truth = ground_truth.rename(columns={"Source": "source_id", "Target": "target_id"})
     return ground_truth
 
 def read_merged_ground_truth(merged_ground_truth_file):
+    """Load the merged ground truth file used for evaluation.
+
+    Parameters
+    ----------
+    merged_ground_truth_file : str
+        Path to a TSV file produced by merging multiple ground truth datasets.
+
+    Returns
+    -------
+    pandas.DataFrame
+        The loaded DataFrame.
+    """
     merged_ground_truth = pd.read_csv(merged_ground_truth_file, sep='\t', header=0)
     logging.info(merged_ground_truth)
     return merged_ground_truth
 
 def label_edges_with_ground_truth(inferred_network_dd, ground_truth_df):
+    """Attach binary labels to the inferred network based on ground truth pairs.
+
+    Parameters
+    ----------
+    inferred_network_dd : dask.dataframe.DataFrame
+        DataFrame containing at least ``source_id`` and ``target_id`` columns.
+    ground_truth_df : pandas.DataFrame
+        DataFrame of known TF--target interactions with columns ``source_id``
+        and ``target_id``.
+
+    Returns
+    -------
+    dask.dataframe.DataFrame
+        The input network with an additional ``label`` column where 1 denotes a
+        known interaction.
+
+    Notes
+    -----
+    The labeling is performed partition-wise using ``map_partitions`` and thus
+    maintains the laziness of the original Dask dataframe.
+    """
     logging.info("Creating ground truth set")
     ground_truth_pairs = set(zip(
         ground_truth_df["source_id"].str.upper(),
@@ -129,7 +203,7 @@ def label_edges_with_ground_truth(inferred_network_dd, ground_truth_df):
     logging.info("Adding labels to inferred network")
 
     def label_partition(df):
-        df = df.copy()  # <-- avoids SettingWithCopyWarning
+        df = df.copy()  # avoid SettingWithCopyWarning
         tf_tg_tuples = list(zip(df["source_id"], df["target_id"]))
         df.loc[:, "label"] = [1 if pair in ground_truth_pairs else 0 for pair in tf_tg_tuples]
         return df
@@ -143,6 +217,13 @@ def label_edges_with_ground_truth(inferred_network_dd, ground_truth_df):
     
 
 def main():
+    """Entry point for training an XGBoost model on an inferred network.
+
+    The function orchestrates reading data, splitting train/test sets,
+    training the model using :func:`train_xgboost_dask` and producing a set
+    of diagnostic plots.  Results are written to the locations specified by the
+    command line arguments.
+    """
     args = parse_args()
 
     ground_truth_file: str = args.ground_truth_file

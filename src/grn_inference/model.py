@@ -21,11 +21,27 @@ import xgboost as xgb
 from dask.distributed import Client
 
 def undersample_training_set(X_dd, y_dd, seed=42):
-    """
-    Balance the dataset by undersampling the majority class.
+    """Undersample the majority class to balance positives and negatives.
 
-    Returns:
-        tuple of (X_balanced_dd, y_balanced_dd)
+    Parameters
+    ----------
+    X_dd : dask.dataframe.DataFrame
+        Feature matrix where rows correspond to observations.
+    y_dd : dask.dataframe.Series
+        Binary labels associated with ``X_dd``.
+    seed : int, optional
+        Random seed used when shuffling and sampling.  Defaults to ``42``.
+
+    Returns
+    -------
+    tuple (dask.dataframe.DataFrame, dask.dataframe.Series)
+        Balanced feature matrix and label vector.  The number of negative
+        examples is randomly reduced to match the count of positive examples.
+
+    Notes
+    -----
+    This function logs the number of positive/negative samples and may trigger
+    Dask computations when determining sample counts.
     """
     logging.info("Scaling the number of positive and negatives values for training")
     
@@ -61,17 +77,29 @@ def undersample_training_set(X_dd, y_dd, seed=42):
     return X_balanced_dd, y_balanced_dd
 
 def train_xgboost_dask(train_test_dir, feature_names, client=None):
-    """
-    Train an XGBoost model using DaskDMatrix (distributed).
-    
-    Args:
-        X_train_dd (dask.dataframe.DataFrame): Training features (Dask)
-        y_train_dd (dask.dataframe.Series): Training labels (Dask)
-        feature_names (list): List of feature column names
-        client (dask.distributed.Client or None): Optional Dask client
+    """Train an XGBoost model on data stored in ``train_test_dir`` using Dask.
 
-    Returns:
-        xgboost.Booster: Trained model
+    Parameters
+    ----------
+    train_test_dir : str
+        Directory containing ``X_train.parquet`` and ``y_train.parquet`` files
+        produced by :func:`dask_ml.model_selection.train_test_split`.
+    feature_names : list of str
+        Names of the feature columns in the training data.
+    client : dask.distributed.Client, optional
+        Existing Dask client.  If ``None`` a local threaded client is created
+        for the duration of the call.
+
+    Returns
+    -------
+    xgboost.Booster
+        The trained booster object.
+
+    Notes
+    -----
+    The function reads training data from disk, optionally starts a local Dask
+    client and logs progress messages.  Use ``booster.save_model`` to persist
+    the trained model.
     """
     logging.info("Training XGBoost model with Dask")
     logging.info("Reading X_train.parquet")
@@ -139,6 +167,33 @@ def parameter_grid_search(
     fig_dir: str,
     cpu_count: int,
 ):
+    """Perform a random parameter search for an XGBoost classifier.
+
+    Parameters
+    ----------
+    X_tr, y_tr : pandas.DataFrame, pandas.Series
+        Training features and labels.
+    X_val, y_val : pandas.DataFrame, pandas.Series
+        Validation features and labels used to score each parameter set.
+    out_dir : str
+        Directory where the search results will be written as a parquet file.
+    fig_dir : str
+        Directory for saving the summary scatter plot of AUROC vs. feature
+        importance entropy.
+    cpu_count : int
+        Number of parallel jobs to run.
+
+    Returns
+    -------
+    xgb.XGBClassifier
+        Model retrained using the best set of parameters found.
+
+    Notes
+    -----
+    This function performs the search using :class:`joblib.Parallel` and logs
+    progress.  A ``grid_search_results.parquet`` file and a PNG figure showing
+    performance are saved in ``out_dir`` and ``fig_dir`` respectively.
+    """
     param_dist = {
         'n_estimators':      randint(100, 500),
         'max_depth':         randint(4, 12),
@@ -285,22 +340,27 @@ def parameter_grid_search(
     
 
 def xgb_classifier_from_booster(booster: xgb.Booster, feature_names: Union[list, np.ndarray, pd.Index]) -> xgb.XGBClassifier:
-    """
-    Converts a trained XGBoost Booster (e.g., from Dask) to a scikit-learn XGBClassifier.
-    This allows use of sklearn-compatible APIs like predict_proba, permutation_importance, etc.
+    """Wrap a trained :class:`xgboost.Booster` in an ``XGBClassifier`` instance.
 
-    Parameters:
-    -----------
-    booster : xgb.Booster
-        Trained Booster object (e.g. from xgb.dask.train)
+    Parameters
+    ----------
+    booster : xgboost.Booster
+        Trained booster object, typically obtained from ``xgb.dask.train``.
+    feature_names : sequence of str
+        Names of the features that were used to train ``booster``.
 
-    feature_names : list or array
-        List of feature names used during training
+    Returns
+    -------
+    xgboost.XGBClassifier
+        Classifier instance with the booster attached so that scikit-learn
+        utilities such as ``predict_proba`` and ``permutation_importance`` can
+        be used.
 
-    Returns:
-    --------
-    xgb.XGBClassifier
-        Fully compatible sklearn-style classifier loaded from booster
+    Notes
+    -----
+    The returned classifier does not need to be fitted again.  Only the booster
+    attributes are set; therefore calls that rely on training data (e.g.
+    ``fit``) should be avoided.
     """
     clf = xgb.XGBClassifier()
     clf._Booster = booster
