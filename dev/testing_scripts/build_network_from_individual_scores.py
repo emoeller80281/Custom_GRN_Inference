@@ -24,10 +24,10 @@ TMP_DIR = os.path.join(PROJECT_DIR, "src/testing_scripts/tmp")
 os.makedirs(TMP_DIR, exist_ok=True)
 
 ds011_input_dir = os.path.join(PROJECT_DIR, "input/DS011_mESC/DS011_mESC_sample1")
-ds011_output_dir = os.path.join(PROJECT_DIR, "output/DS011_mESC/DS011_mESC_sample1")
+ds011_output_dir = os.path.join(PROJECT_DIR, "output/DS011_mESC/DS011_mESC_sample1_old")
 
 mesc_input_dir = os.path.join(PROJECT_DIR, "input/mESC/filtered_L2_E7.5_rep2")
-mesc_output_dir = os.path.join(PROJECT_DIR, "output/mESC/filtered_L2_E7.5_rep2")
+mesc_output_dir = os.path.join(PROJECT_DIR, "output/mESC/filtered_L2_E7.5_rep2_old")
 
 def read_ground_truth(ground_truth_file):
     ground_truth = pd.read_csv(ground_truth_file, sep='\t', quoting=csv.QUOTE_NONE, on_bad_lines='skip', header=0)
@@ -151,7 +151,9 @@ def build_tf_peak_tg_edge_dataframe():
 
         if len(combined_df_features) > 0:
             print('\nLoading combined feature score dataframe')
+            
             inferred_df_path = mesc_score_paths[combined_df_features[0]] # get path for the first feature name in combined_df_feature
+            print(f'  - Loading {inferred_df_path}')
             inferred_df = load_melted_inferred_grn_ddf(inferred_df_path, combined_df_features)
             print('\tDone!')
             
@@ -235,35 +237,47 @@ def label_edges_with_ground_truth(inferred_network_dd, ground_truth_df):
 
 
 tf_tg_edges_save_file = os.path.join(TMP_DIR, "tf_tg_edges.parquet")
+tf_peak_tg_edges_save_file = os.path.join(TMP_DIR, "tf_peak_tg_edges.parquet")
 if not os.path.isfile(tf_tg_edges_save_file):
     ground_truth_df = read_ground_truth(ground_truth_file)
 
     tf_peak_tg_edges: dd.DataFrame = build_tf_peak_tg_edge_dataframe()
 
-    print('\nBuilding TF to TG edges with peak counts')
-    tf_tg_edges = (
-        tf_peak_tg_edges
-        .groupby(["source_id", "target_id"])["peak_id"]
-        .count()
-        .reset_index()
-        .rename(columns={"peak_id": "edge_count"})
-    )
+    # print('\nBuilding TF to TG edges with peak counts')
+    # tf_tg_edges = (
+    #     tf_peak_tg_edges
+    #     .groupby(["source_id", "target_id"])["peak_id"]
+    #     .count()
+    #     .reset_index()
+    #     .rename(columns={"peak_id": "edge_count"})
+    # )
 
-    print("\nLabeling ground truth TF to TG edges")
-    tf_tg_edges_in_gt: dd.DataFrame = label_edges_with_ground_truth(tf_tg_edges, ground_truth_df)
-
-    print(tf_tg_edges_in_gt.head())
+    # print("\nLabeling ground truth TF to TG edges")
+    # tf_tg_edges_in_gt: dd.DataFrame = label_edges_with_ground_truth(tf_tg_edges, ground_truth_df)
     
-    print("\nSaving labeled peak counts for each TF-TG edge to parquet file")
-    tf_tg_edges_in_gt.to_parquet(tf_tg_edges_save_file, engine="pyarrow", compression="snappy")
+    # print(tf_tg_edges_in_gt.head())
+    
+    # print("\nSaving labeled peak counts for each TF-TG edge to parquet file")
+    # tf_tg_edges_in_gt.to_parquet(tf_tg_edges_save_file, engine="pyarrow", compression="snappy")
+    
+    print("\nLabeling ground truth TF-peak-TG edges")
+    tf_peak_tg_edges_in_gt: dd.DataFrame = label_edges_with_ground_truth(tf_peak_tg_edges, ground_truth_df)
+    
+    print(tf_peak_tg_edges_in_gt.head())
+    
+    print("\nSaving labeled peak counts for each TF-peak-TG edge to parquet file")
+    tf_peak_tg_edges_in_gt.to_parquet(tf_peak_tg_edges_save_file, engine="pyarrow", compression="snappy")
 else:
+    # print("Loading labeled TF-TG peak count parquet file")
+    # tf_tg_edges_in_gt = dd.read_parquet(tf_tg_edges_save_file, engine="pyarrow")
+    
     print("Loading labeled TF-TG peak count parquet file")
-    tf_tg_edges_in_gt = dd.read_parquet(tf_tg_edges_save_file, engine="pyarrow")
+    tf_peak_tg_edges_in_gt = dd.read_parquet(tf_peak_tg_edges_save_file, engine="pyarrow")
 
         
 plt.figure(figsize=(8,8))
-sns.histplot(data=tf_tg_edges_in_gt, x="edge_count", hue="label", bins=50, log_scale=True, element="step", stat="count")
-plt.title("Distribution of peak counts for TF-TG edges", fontsize=16)
+sns.histplot(data=tf_peak_tg_edges_in_gt, x="edge_count", hue="label", bins=50, log_scale=True, element="step", stat="count")
+plt.title("Distribution of peak counts for TF-peak-TG edges", fontsize=16)
 plt.xlabel("Number of peaks", fontsize=14)
 plt.ylabel("Frequency", fontsize=14)
 plt.show()

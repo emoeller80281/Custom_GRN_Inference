@@ -465,7 +465,7 @@ create_homer_peak_file() {
 
 homer_find_motifs() {
     mkdir -p "$OUTPUT_DIR/homer_results"
-    perl "$BASE_DIR/data/homer/bin/findMotifsGenome.pl" "$OUTPUT_DIR/homer_peaks.txt" "$SPECIES" "$OUTPUT_DIR/homer_results/" -size 200
+    perl "$BASE_DIR/data/homer/bin/findMotifsGenome.pl" "$OUTPUT_DIR/tmp/homer_peaks.txt" "$SPECIES" "$OUTPUT_DIR/homer_results/" -size 200 -p $NUM_CPU
     echo "    Done!"
 } 2> "$LOG_DIR/Homer_logs/04.homer_findMotifsGenome.log"
 
@@ -475,15 +475,6 @@ homer_process_motif_files() {
     echo "[INFO] Starting motif file processing"
 
     load_parallel
-
-    # Check for GNU parallel
-    if ! command -v parallel &> /dev/null; then
-        echo "[INFO] GNU parallel not found. Falling back to sequential processing."
-        use_parallel=false
-    else
-        use_parallel=true
-        echo "[INFO] GNU parallel detected."
-    fi
 
     # Look through the knownResults dir of the Homer findMotifsGenome.pl output
     MOTIF_DIR="$OUTPUT_DIR/homer_results/knownResults"

@@ -1,7 +1,9 @@
-import pandas as pd
 import argparse
 import logging
+import os
 from typing import Any
+
+import pandas as pd
 
 def parse_args() -> argparse.Namespace:
     """
@@ -85,6 +87,9 @@ def main() -> None:
     args: argparse.Namespace = parse_args()
     atac_data_file: str = args.atac_data_file
     output_dir: str = args.output_dir
+    
+    tmp_dir = os.path.join(output_dir, "tmp")
+    os.makedirs(tmp_dir, exist_ok=True)
 
     logging.info('Reading scATACseq data')
     atac_data: pd.DataFrame = pd.read_parquet(atac_data_file)
@@ -94,7 +99,7 @@ def main() -> None:
     homer_df: pd.DataFrame = convert_to_homer_peak_format(atac_data)
 
     logging.info('Saving Homer peak file')
-    homer_df.to_csv(f'{output_dir}/homer_peaks.txt', sep='\t', header=False, index=False)
+    homer_df.to_csv(f'{tmp_dir}/homer_peaks.txt', sep='\t', header=False, index=False)
 
 if __name__ == "__main__":
     # Configure logging

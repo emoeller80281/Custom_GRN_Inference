@@ -166,16 +166,13 @@ def process_motif_file_and_save(file, meme_dir, output_dir):
         # Look up TFs for this motif
         motif_name = file.replace('.txt', '')
         
-        
         assert _global_tf_df is not None, "Global TF‐to‐motif DataFrame was never initialized"
         assert _global_chr_pos_to_seq is not None, "Global peak position to sequence DataFrame was never initialized"
         
         mask = _global_tf_df["Motif_ID"] == motif_name
         tf_names = _global_tf_df.loc[mask]["TF_Name"].values
 
-        peak_ids = _global_chr_pos_to_seq.apply(
-            lambda row: f'{row["chromosome"]}:{row["start"]}-{row["end"]}', axis=1
-        )
+        peak_ids = _global_chr_pos_to_seq["peak_id"].reset_index(drop=True)
 
         tmp_dir = os.path.join(output_dir, "tmp", "sliding_window_tf_scores")
         os.makedirs(tmp_dir, exist_ok=True)
@@ -362,7 +359,12 @@ def find_ATAC_peak_sequence(peak_df, reference_genome_dir, parsed_peak_file, fig
             if fasta_rec.id in peak_chr_ids:
                 chr_seq_plus = str(fasta_rec.seq).upper()
                 chr_seq_neg = str(fasta_rec.seq.complement()).upper()
-                chr_peaks = peak_df[peak_df["chromosome"] == fasta_rec.id][["chromosome", "start", "end"]]
+                
+                chr_peaks = peak_df.loc[
+                    peak_df["chromosome"] == fasta_rec.id,
+                    ["peak_id", "chromosome", "start", "end"]
+                ].copy()
+                
                 starts = chr_peaks["start"].to_numpy()
                 ends = chr_peaks["end"].to_numpy()
                 
@@ -372,6 +374,7 @@ def find_ATAC_peak_sequence(peak_df, reference_genome_dir, parsed_peak_file, fig
                 
                 chr_peaks["+ seq"] = [chr_seq_plus_mapped[start:end] for start, end in zip(starts, ends)]
                 chr_peaks["- seq"] = [chr_seq_neg_mapped[start:end] for start, end in zip(starts, ends)]
+                
                 chr_peaks = chr_peaks.dropna()
                 chr_seq_list.append(chr_peaks)
 
@@ -450,7 +453,13 @@ def main():
         homer_peak_file = os.path.join(tmp_dir, "homer_peaks.txt")
         if os.path.isfile(homer_peak_file):
             logging.info("Loading in peak information from homer_peaks.txt")
-            peak_df = pd.read_csv(homer_peak_file, sep="\t", header=0, index_col=None)
+            peak_df = pd.read_csv(homer_peak_file, sep="\t", header=None, index_col=None, names=[
+                "peak_id",
+                "chromosome",
+                "start",
+                "end",
+                "strand"
+                ])
         else:
             logging.info("'homer_peaks.txt' file not found in 'tmp_dir', reading peak info from scATACseq data")
             logging.info('  - Reading scATACseq data')
@@ -462,7 +471,7 @@ def main():
             peak_df = format_peaks(peak_ids)
             
             logging.info("  - Saving peak_df to homer_peaks.txt")
-            peak_df.to_csv(homer_peak_file, sep="\t", header=True, index=False)
+            peak_df.to_csv(homer_peak_file, sep="\t", header=False, index=False)
         
         # Get the genomic sequence from the reference genome to each ATACseq peak
         chr_pos_to_seq = find_ATAC_peak_sequence(peak_df, reference_genome_dir, parsed_peak_file, fig_dir)
