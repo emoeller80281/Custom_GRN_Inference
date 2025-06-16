@@ -54,9 +54,9 @@ for known_motif_file in tqdm(os.listdir(homer_tf_motif_score_dir)):
     # Extract TF name robustly
     TF_name = TF_column.split('/')[0].split('(')[0].split(':')[0].upper()
 
-    if TF_name in ground_truth_tfs:
+    if TF_name in ground_truth_tfs:    
         print(TF_name)
-    
+
         homer_df = pd.read_csv(
             motif_path, 
             sep="\t", 
@@ -65,49 +65,66 @@ for known_motif_file in tqdm(os.listdir(homer_tf_motif_score_dir)):
             )
         homer_df.index.names = ["PeakID"]
         
-        homer_df["Peak Location"] = homer_df["Chr"].astype(str) + ":" + homer_df["Start"].astype(str) + "-" + homer_df["End"].astype(str)
-            
-        tf_to_nearest_gene_map = {
-            "source_id":[TF_name.upper() for i in range(len(homer_df))],
-            "target_id":homer_df.loc[:, "Gene Name"].str.upper().to_list()
-            }
-        index_col = np.arange(len(tf_to_nearest_gene_map["source_id"]))
-            
-        tf_to_nearest_gene = pd.DataFrame(tf_to_nearest_gene_map, index=index_col)
+        homer_df["peak_id"] = homer_df["Chr"].astype(str) + ":" + homer_df["Start"].astype(str) + "-" + homer_df["End"].astype(str)
+        homer_df["source_id"] = TF_name
+        homer_df = homer_df.rename(columns={"Gene Name":"target_id"})
         
-        shared_sources = set(tf_to_nearest_gene["source_id"]) & set(ground_truth_df["source_id"])
-        shared_targets = set(tf_to_nearest_gene["target_id"]) & set(ground_truth_df["target_id"])
+        cols_of_interest = [
+            "source_id",
+            "peak_id",
+            "target_id",
+            "Annotation",
+            "Distance to TSS",
+            "Gene Type",
+            "CpG%",
+            "GC%"
+        ]
+        homer_df = homer_df[cols_of_interest]
+        homer_df["target_id"] = homer_df["target_id"].str.upper()
 
-        tf_to_nearest_gene = tf_to_nearest_gene[
-            tf_to_nearest_gene["source_id"].isin(shared_sources) &
-            tf_to_nearest_gene["target_id"].isin(shared_targets)
+        valid_targets = set(ground_truth_df["target_id"]) & set(homer_df["target_id"])
+        valid_sources = set(ground_truth_df["source_id"]) & set(homer_df["source_id"])
+        
+        ground_truth_tf_edges = ground_truth_df[ground_truth_df["source_id"] == TF_name]
+
+        homer_shared_genes = homer_df[
+            homer_df["source_id"].isin(valid_sources) &
+            homer_df["target_id"].isin(valid_targets)
         ].reset_index(drop=True)
-
-        ground_truth_df = ground_truth_df[
-            ground_truth_df["source_id"].isin(shared_sources) &
-            ground_truth_df["target_id"].isin(shared_targets)
+        
+        ground_truth_shared_genes = ground_truth_tf_edges[
+            ground_truth_tf_edges["source_id"].isin(valid_sources) &
+            ground_truth_tf_edges["target_id"].isin(valid_targets)
         ].reset_index(drop=True)
-
+                
         tf_tg_overlap_w_ground_truth = pd.merge(
-            ground_truth_df,
-            tf_to_nearest_gene,
+            ground_truth_shared_genes,
+            homer_shared_genes,
             on=["source_id", "target_id"],
             how="outer",
             indicator=True
-        ).drop_duplicates()
+        )
         
         tf_targets.append(tf_tg_overlap_w_ground_truth)
     
 total_tf_to_tg = pd.concat(tf_targets)
 print(total_tf_to_tg)
+print(total_tf_to_tg.shape)
 
-ground_truth_only = total_tf_to_tg[total_tf_to_tg["_merge"] == "left_only"]
-homer_only = total_tf_to_tg[total_tf_to_tg["_merge"] == "right_only"]
-overlap = total_tf_to_tg[total_tf_to_tg["_merge"] == "both"]
+overlapping_edges = total_tf_to_tg[total_tf_to_tg["_merge"] == "both"]
+edges_only_in_homer = total_tf_to_tg[total_tf_to_tg["_merge"] == "right_only"]
+edges_only_in_ground_truth = total_tf_to_tg[total_tf_to_tg["_merge"] == "left_only"]
 
-print(f"Num edges only in ground truth = {ground_truth_only.shape[0]}")
-print(f"Num edges only in Homer = {homer_only.shape[0]}")
-print(f"Num edges in both = {overlap.shape[0]}")
+print(f"Number of edges in both Homer and ground truth: {len(overlapping_edges):,.0f}")
+print(f"Number of edges only in Homer: {len(edges_only_in_homer):,.0f}")
+print(f"Number of edges only in the ground truth: {len(edges_only_in_ground_truth):,.0f}")
+
+tp = (total_tf_to_tg["_merge"] == "both").sum()
+fn = (total_tf_to_tg["_merge"] == "left_only").sum()
+fp = (total_tf_to_tg["_merge"] == "right_only").sum()
+recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+print(f"Recall = {recall:.3f} ({tp} / {tp+fn})")
+
     
     
     
