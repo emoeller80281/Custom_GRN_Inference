@@ -5,7 +5,7 @@ from dask.delayed import Delayed
 import pandas as pd
 import os
 from dask.diagnostics import ProgressBar
-from typing import List
+from typing import List, Union
 import argparse
 import logging
 import numpy as np
@@ -53,7 +53,7 @@ def is_file_empty(file_path: str) -> bool:
     """
     return os.stat(file_path).st_size == 0
 
-def process_TF_motif_file(path_to_file: str, output_dir: str) -> str:
+def process_TF_motif_file(path_to_file: str, output_dir: str) -> Union[str,None]:
     """
     Processes a single Homer TF motif file and extracts TF-TG relationships and motif scores.
 
@@ -68,7 +68,7 @@ def process_TF_motif_file(path_to_file: str, output_dir: str) -> str:
     # Check if the file is empty
     if is_file_empty(path_to_file):
         print(f"Skipping empty file: {path_to_file}")
-        return pd.DataFrame()  # Return an empty DataFrame
+        return None  # Return an empty DataFrame
 
     try:
         # Read in the motif file; force "Start" and "End" to be strings
