@@ -250,13 +250,13 @@ def associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, rna_dat
             if not all_cached:
                 filtered_motif_files.append(motif_file)
 
-    logging.info(f"\t- Number of motif files found: {len(filtered_motif_files)} / {len(tf_motif_names)}")
-
-    logging.info(f"\nCalculating sliding window motif scores for each ATAC-seq peak")
-    logging.info(f"\tUsing {num_cpu} processors")
-    logging.info(f"\tSize of calculation: {len(filtered_motif_files)} motifs × {chr_pos_to_seq.shape[0]} peaks")
-
     if len(filtered_motif_files) > 0:
+        logging.info(f"\t- Number of motif files found: {len(filtered_motif_files)} / {len(tf_motif_names)}")
+
+        logging.info(f"\nCalculating sliding window motif scores for each ATAC-seq peak")
+        logging.info(f"\tUsing {num_cpu} processors")
+        logging.info(f"\tSize of calculation: {len(filtered_motif_files)} motifs × {chr_pos_to_seq.shape[0]} peaks")
+
         with ProcessPoolExecutor(
             max_workers=num_cpu,
             initializer=_init_worker,
@@ -272,7 +272,7 @@ def associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, rna_dat
                 _ = future.result()
         logging.info("Finished scoring all motifs. Reading TF motif parquet files...")
     else:
-        logging.info("All TFs have pre-existing parquet files in the tmp directory, reading cached parquet files...")
+        logging.info("\nAll TFs have pre-existing parquet files in the tmp directory, reading cached parquet files...")
     
     parquet_dir = os.path.join(output_dir, "tmp", "sliding_window_tf_scores")
     ddf = dd.read_parquet(os.path.join(parquet_dir, "*.parquet"))

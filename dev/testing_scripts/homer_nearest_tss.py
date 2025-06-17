@@ -3,6 +3,8 @@ import pandas as pd
 import numpy as np
 import csv
 from tqdm import tqdm
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
 
 from typing import Tuple
 
@@ -130,11 +132,10 @@ fp = (total_tf_to_tg["_merge"] == "right_only").sum()
 recall = tp / (tp + fn) if (tp + fn) > 0 else 0
 print(f"Recall = {recall:.3f} ({tp} / {tp+fn})")
  
-import matplotlib.pyplot as plt
-import matplotlib.patches as patches
+
 
 tss_reference = pd.read_csv(
-    "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/dev/testing_scripts/tmp/mm10_TSS.bed", 
+    "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data/genome_annotation/mm10/mm10_TSS.bed", 
     sep="\t", 
     header=None, 
     index_col=None,
@@ -143,14 +144,14 @@ tss_reference = pd.read_csv(
 tss_reference["tss"] = (tss_reference["Start"] + tss_reference["End"]) // 2
 
 gene_body_anno = pd.read_csv(
-    "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/dev/testing_scripts/tmp/mm10_gene_body_anno.bed", 
+    "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data/genome_annotation/mm10/mm10_gene_body_anno.bed", 
     sep="\t", 
     header=None, 
     index_col=None,
     names=["Chr", "Start", "End", "Name", "Strand", "Strand2"]
     )
 
-def plot_gene_enhancers(df, gene, gene_body_anno, tss_reference, figsize=(10, 2)):
+def plot_gene_enhancers(df, gene, tss_reference, gene_body_anno, figsize=(10, 2)):
     gene_df = df[df["target_id"] == gene].copy()
     if gene_df.empty:
         print(f"No enhancers found for {gene}")
@@ -160,13 +161,19 @@ def plot_gene_enhancers(df, gene, gene_body_anno, tss_reference, figsize=(10, 2)
     gene_df["peak_center"] = (gene_df["Start"] + gene_df["End"]) // 2
     
     def find_target_gene_tss(gene) -> Tuple[float, float]:
+        """Standardizes the target gene TSS using a reference dataset"""
         tss_entry = tss_reference[tss_reference["Name"].str.upper() == gene.upper()]
+        if tss_entry.empty:
+            raise ValueError(f"Gene '{gene}' not found in TSS reference.")
         tss_start = float(tss_entry["Start"].iloc[0])
         tss_end = float(tss_entry["End"].iloc[0])
         return tss_start, tss_end
     
     def find_target_gene_body(gene) -> Tuple[float, float]:
+        """Standardizes the target gene length using a reference dataset"""
         gene_entry = gene_body_anno[gene_body_anno["Name"].str.upper() == gene.upper()]
+        if gene_entry.empty:
+            raise ValueError(f"Gene '{gene}' not found in gene body reference")
         gene_start = float(gene_entry["Start"].iloc[0])
         gene_end = float(gene_entry["End"].iloc[0])
         return gene_start, gene_end
@@ -174,61 +181,79 @@ def plot_gene_enhancers(df, gene, gene_body_anno, tss_reference, figsize=(10, 2)
     gene_start, gene_end = find_target_gene_body(gene)
     tss_start, tss_end = find_target_gene_tss(gene)
 
-    MAX_DIST = 250000
-    
+    # Set a distance cutoff so the figure doesn't get too squished
+    max_dist = 250000
     gene_df["distance_to_gene"] = abs(gene_df["peak_center"] - ((gene_start + gene_end) / 2))
-    gene_df = gene_df[gene_df["distance_to_gene"] <= MAX_DIST]
+    gene_df = gene_df[gene_df["distance_to_gene"] <= max_dist]
     
     if gene_df.empty:
-        print(f"No enhancers within ±{MAX_DIST:,} bp of {gene}")
+        print(f"No enhancers within ±{max_dist:,} bp of {gene}")
         return
-
 
     fig, ax = plt.subplots(figsize=figsize)
     
     # Blue Rectangle the length of the gene body
-    gene_height = 15
+    start_height = 25
+    gene_height = 10
+    
     ax.add_patch(
-        patches.Rectangle((gene_start, 0), gene_end - gene_start, gene_height,
+        patches.Rectangle((gene_start, start_height), gene_end - gene_start, gene_height,
                           facecolor='skyblue', edgecolor='black', label=gene)
     )
     
-    # Green rectangle from TSS start to gene body start
+    if abs(tss_start - gene_start) < abs(tss_start - gene_end):
+        tss_rect_start = min(tss_start, gene_start)
+        tss_rect_width = abs(tss_start - gene_start)
+    else:
+        tss_rect_start = min(tss_start, gene_end)
+        tss_rect_width = abs(tss_start - gene_end)
+
     ax.add_patch(
-        patches.Rectangle((tss_start, 0), gene_start - tss_start, gene_height,
-                          facecolor='green', edgecolor='black')
+        patches.Rectangle((tss_rect_start, start_height), tss_rect_width, gene_height,
+                        facecolor='green', edgecolor='black')
     )
 
-
-    xmin = gene_df["peak_center"].min() - 1000
-    xmax = gene_df["peak_center"].max() + 1000
-    range = xmax - xmin
-    h = range * 0.02     # gene height
-    arc_height = range * 0.05
-    print(range)
+    xmin = int(np.ceil(tss_start - 25000))
+    xmax = int(np.ceil(gene_end + 25000))
+    xrange = xmax - xmin
+    h = xrange * 0.02     # gene height
+    arc_height = max(50, xrange * 0.001)
+    
+    # Add a line along the bottom to show the genomic position
+    plt.plot([xmin, xmax], [start_height, start_height], 'k-', lw=2)
+    
+    # Add 10 evenly spaced marks along the line to show the genomic position
+    mark_points = [int(np.ceil(np.mean(i))) for i in np.array_split(range(xmin, xmax), 10)]
+    for xloc in mark_points:
+        # Plots a vertical dash for each of the 10 points
+        plt.plot([xloc, xloc], [15, start_height], 'k-', lw=2)
+        # Plots the genomic position for each of the 10 points
+        plt.text(xloc, 0, s=f'{xloc}', ha='center', va='bottom', fontsize=10)
     
     for _, row in gene_df.iterrows():
         
+        # Plot a grey rectangle for the enhancer locations
         ax.add_patch(
-        patches.Rectangle((row["Start"], gene_height), row["End"] - row['Start'], -gene_height / 2,
+        patches.Rectangle((row["Start"], start_height), row["End"] - row['Start'], gene_height / 2,
                           facecolor='grey', edgecolor='black')
         )
         
         enh_center = row["peak_center"]
         tss = tss_start
         center = (enh_center + tss) / 2
-        radius = max(abs(enh_center - tss) / 2, range * 0.001)  # avoid tiny lines
+        
+        radius = max(abs(enh_center - tss) / 2, xrange * 0.001)  # avoid tiny lines
 
-        arc = patches.Arc((center, 15), radius * 2, arc_height,
+        arc = patches.Arc((center, start_height + 10), radius * 2, arc_height,
                           angle=0, theta1=0, theta2=180)
         ax.add_patch(arc)
 
-    ax.set_xlim(gene_df["peak_center"].min() - 1000, gene_df["peak_center"].max() + 1000)
-    ax.set_ylim(0, 150)
+    ax.set_xlim(tss_start - 25000, gene_end + 25000)
+    ax.set_ylim(0, 75)
     ax.set_title(f"Enhancers targeting {gene}")
     ax.axis("off")
+    
     plt.tight_layout()
     plt.show()
 
-plot_gene_enhancers(total_tf_to_tg, "MYC", gene_body_anno, tss_reference)
-    
+plot_gene_enhancers(homer_df, "KIF19A", tss_reference, gene_body_anno)
