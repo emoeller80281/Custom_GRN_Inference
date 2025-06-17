@@ -33,8 +33,6 @@ dependencies = [
     "umap-learn>=0.5.7",
     "xgboost>=2.1.4",
     "dask-jobqueue (==0.8.5)",
-    "refgenconf (>=0.12.2,<0.13.0)",
-    "refgenie (>=0.12.1,<0.13.0)"
 ]
 
 [tool.poetry]
