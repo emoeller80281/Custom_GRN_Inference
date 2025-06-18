@@ -24,7 +24,7 @@ export PATH="$BASE_DIR/data/homer/bin:$PATH"
 
 mkdir -p "$OUTPUT_DIR/homer_results"
 perl "$BASE_DIR/data/homer/bin/findMotifsGenome.pl" \
-    "$OUTPUT_DIR/tmp/homer_peaks_5_percent.txt" \
+    "$OUTPUT_DIR/tmp/homer_peaks.txt" \
     "$SPECIES" "$OUTPUT_DIR/homer_results/" \
     -size 200 \
     -p $NUM_CPU \
@@ -77,7 +77,7 @@ mkdir -p "$PROCESSED_MOTIF_DIR"
 
 # Process files in parallel
 echo "$motif_files" | /usr/bin/time -v parallel -j "$NUM_CPU" \
-    "perl $BASE_DIR/data/homer/bin/annotatePeaks.pl $OUTPUT_DIR/tmp/homer_peaks_5_percent.txt '$SPECIES' -m {} > $PROCESSED_MOTIF_DIR/{/}_tf_motifs.txt"
+    "perl $BASE_DIR/data/homer/bin/annotatePeaks.pl $OUTPUT_DIR/tmp/homer_peaks.txt '$SPECIES' -m {} > $PROCESSED_MOTIF_DIR/{/}_tf_motifs.txt"
 
 module unload parallel
 

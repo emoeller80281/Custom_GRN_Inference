@@ -204,7 +204,7 @@ def plot_multi_sample_feature_score_histograms(
         fontsize=14,
         bbox_to_anchor=(0.5, -0.02)
     )
-    fig.tight_layout(rect=[0, 0.05, 1, 1])
+    fig.tight_layout(rect=(0, 0.05, 1, 1))
     plt.show()
 
 def plot_feature_boxplots(features, inferred_network_ddf, fig_dir):
@@ -517,9 +517,9 @@ def plot_feature_ablation(feature_names, X_train, X_test, y_train, y_test, full_
     )
 
     # Sort and plot results
-    features, auroc_scores = zip(*results)
-    features = list(features)
-    auroc_scores = list(auroc_scores)
+    feature_set, auroc_score_set = zip(*results)
+    features: list = list(feature_set)
+    auroc_scores: list = list(auroc_score_set)
 
     plt.figure(figsize=(10, 6))
     bars = plt.bar(features, auroc_scores, color='steelblue')

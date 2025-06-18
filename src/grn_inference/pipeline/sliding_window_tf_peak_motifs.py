@@ -202,6 +202,18 @@ def is_valid_parquet(file_path):
     except (ArrowInvalid, OSError):
         return False
 
+def get_valid_parquet_files(directory: str) -> list[str]:
+    valid_files = []
+    for f in os.listdir(directory):
+        if f.endswith(".parquet"):
+            full_path = os.path.join(directory, f)
+            try:
+                _ = pq.ParquetFile(full_path).metadata  # trigger metadata read
+                valid_files.append(full_path)
+            except Exception as e:
+                logging.warning(f"Skipping corrupt Parquet file: {f}\n  Reason: {e}")
+    return valid_files
+
 def associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, rna_data_genes, species, num_cpu, output_dir):
     logging.info("Preparing for parallel motif scoring...")
 
@@ -275,7 +287,12 @@ def associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, rna_dat
         logging.info("\nAll TFs have pre-existing parquet files in the tmp directory, reading cached parquet files...")
     
     parquet_dir = os.path.join(output_dir, "tmp", "sliding_window_tf_scores")
-    ddf = dd.read_parquet(os.path.join(parquet_dir, "*.parquet"))
+    valid_parquet_files = get_valid_parquet_files(parquet_dir)
+
+    if not valid_parquet_files:
+        raise RuntimeError("No valid TF motif parquet files found after filtering.")
+
+    ddf = dd.read_parquet(valid_parquet_files)
 
     normalized_ddf = clip_and_normalize_log1p_dask(
         ddf=ddf,

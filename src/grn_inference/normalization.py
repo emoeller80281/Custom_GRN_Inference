@@ -8,7 +8,7 @@ from dask.dataframe.utils import is_dataframe_like
 def minmax_normalize_dask(
     ddf: dd.DataFrame,
     score_cols: list[str],
-    sample_frac: float = None,
+    sample_frac: Union[None, float] = None,
     random_state: int = 42
 ) -> dd.DataFrame:
     """
