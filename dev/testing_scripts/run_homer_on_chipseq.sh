@@ -29,7 +29,8 @@ perl "$BASE_DIR/data/homer/bin/findMotifsGenome.pl" \
     "$SPECIES" "$OUTPUT_DIR/homer_results/" \
     -size 200 \
     -p $NUM_CPU \
-    -redundant 0.5
+    -redundant 0.5 \
+    -nomotif
 echo "    Done!"
 
 echo ""
