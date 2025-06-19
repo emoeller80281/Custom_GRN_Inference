@@ -22,6 +22,7 @@ echo "Adding the 'homer/bin' directory to PATH"
 export PATH="$BASE_DIR/data/homer/bin:$PATH"
 # export PERL5LIB="$BASE_DIR/data/homer/bin:$PERL5LIB"
 
+echo "Running findMotifsGenome.pl"
 mkdir -p "$OUTPUT_DIR/homer_results"
 perl "$BASE_DIR/data/homer/bin/findMotifsGenome.pl" \
     "$OUTPUT_DIR/tmp/homer_peaks.txt" \
@@ -76,6 +77,7 @@ PROCESSED_MOTIF_DIR="$OUTPUT_DIR/homer_results/homer_tf_motif_scores"
 mkdir -p "$PROCESSED_MOTIF_DIR"
 
 # Process files in parallel
+echo "Running annotatePeaks.pl"
 echo "$motif_files" | /usr/bin/time -v parallel -j "$NUM_CPU" \
     "perl $BASE_DIR/data/homer/bin/annotatePeaks.pl $OUTPUT_DIR/tmp/homer_peaks.txt '$SPECIES' -m {} > $PROCESSED_MOTIF_DIR/{/}_tf_motifs.txt"
 
