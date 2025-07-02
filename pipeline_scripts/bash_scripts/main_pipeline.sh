@@ -14,14 +14,14 @@ set -euo pipefail
 CICERO_MAP_PEAKS_TO_TG=false
 CICERO_PEAK_TO_TG_SCORE=false
 
-PEAK_TO_TG_CORRELATION=false
+PEAK_TO_TG_CORRELATION=true
 
 # Run the TF to peak binding score calculation methods
 SLIDING_WINDOW_TF_TO_PEAK_SCORE=false
 HOMER_TF_TO_PEAK_SCORE=false
 
 # Combine the score DataFrames
-COMBINE_DATAFRAMES=true
+COMBINE_DATAFRAMES=false
 SUBSAMPLE_PERCENT=50 # Percent of rows of the combined dataframe to subsample
 
 # Train a predictive model to infer the GRN

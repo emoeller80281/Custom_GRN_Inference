@@ -223,7 +223,6 @@ def write_combined_dataframe(combined_ddf: dd.DataFrame, cell_type: str, output_
             
         logging.info('\tDONE!')
 
-
 def main():
     inferred_score_filename = "inferred_score_df.parquet"
     output_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output"

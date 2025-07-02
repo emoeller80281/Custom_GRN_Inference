@@ -5,18 +5,11 @@ from typing import Optional, Tuple
 
 import numpy as np
 import pandas as pd
-import pyranges as pr
 import pybedtools
 from pybiomart import Server
-from scipy import sparse
-from pyarrow.parquet import ParquetFile
 from scipy.sparse import csr_matrix
 import scanpy as sc
-import muon as mu
-import pyarrow as pa 
-import math
 from anndata import AnnData
-from matplotlib.axes import Axes
 
 from grn_inference.plotting import plot_feature_score_histogram
 from grn_inference.normalization import minmax_normalize_pandas
@@ -153,7 +146,7 @@ def load_ensembl_organism_tss(organism, tmp_dir):
 
         gene_ensembl_name = f'{organism}_gene_ensembl'
         
-        # Select the Ensembl Mart and the human dataset
+        # Select the Ensembl Mart dataset
         mart = server['ENSEMBL_MART_ENSEMBL']
         try:
             dataset = mart[gene_ensembl_name]
@@ -350,6 +343,35 @@ def ensure_matching_cell_barcodes(atac_df, rna_df):
     if rna_percent_overlap <= 0.1:
         raise ValueError(f"Too few matching barcodes in RNA (only {rna_percent_overlap*100:.2f}%).")
 
+def convert_anndata_to_pandas(adata: AnnData, id_col_name: str) -> pd.DataFrame:
+    """
+    Convert an AnnData object to a Pandas DataFrame.
+    
+    - **var_names** = gene / peak names
+    - **obs_names** = cell names / barcodes
+
+    Args:
+        adata (AnnData): AnnData object containing scATAC-seq or scRNA-seq data
+        id_col_name (str): Name for the peak / gene ID column ("peak_id" or "gene_id")
+
+    Returns:
+        pd.DataFrame: DataFrame of gene x cell expression data. Header contains cell names, column 0 
+        contains gene / peak names
+    """
+    adata = adata.copy()
+    
+    df = pd.DataFrame(
+        data=adata.X.T.toarray(),
+        index=adata.var_names,    # genes
+        columns=adata.obs_names    # filtered cells
+    )
+    
+    # Add the gene / peak names as column 0 rather than the index
+    df.insert(loc=0, column=id_col_name, value=df.index.astype(str))
+    df = df.reset_index(drop=True)
+
+    return df
+    
 
 def filter_rna_seq_dataset(
     rna_df: pd.DataFrame,
@@ -422,14 +444,7 @@ def filter_rna_seq_dataset(
 
     filtered_adata = adata[cell_mask].copy()
 
-    filtered_counts = filtered_adata.X.T.toarray()
-    filtered_df = pd.DataFrame(
-        data=filtered_counts,
-        index=filtered_adata.var_names,    # genes
-        columns=filtered_adata.obs_names    # filtered cells
-    )
-    filtered_df.insert(loc=0, column=id_col_name, value=filtered_df.index.astype(str))
-    filtered_df = filtered_df.reset_index(drop=True)
+    filtered_df = convert_anndata_to_pandas(filtered_adata, id_col_name)
 
     return filtered_df
 
@@ -523,6 +538,8 @@ def main(args):
 
     logging.info("\nExtracting ATAC peaks within 1 MB of a gene from the RNA dataset")
     peaks_near_genes_df = extract_atac_peaks_near_rna_genes(atac_df, rna_df, args.species, args.tss_distance_cutoff, output_dir)
+    
+    peaks_near_genes_df.to_parquet(os.path.join(output_dir, "peaks_near_genes.parquet"), engine="pyarrow", compression="snappy", index=False)
             
     logging.info("\nFiltering for peaks with 1MB of a gene's TSS")
     peak_subset = set(peaks_near_genes_df["peak_id"])

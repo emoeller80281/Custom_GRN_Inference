@@ -147,7 +147,8 @@ def plot_multi_sample_feature_score_histograms(
     inferred_network1,
     inferred_network2,
     label1_name,
-    label2_name
+    label2_name, 
+    ncols
 ):
     print("\tPlotting feature score histograms")
     
@@ -158,7 +159,6 @@ def plot_multi_sample_feature_score_histograms(
     if isinstance(inferred_network2, dd.DataFrame):
         inferred_network2 = inferred_network2[features].compute()
 
-    ncols = 4
     nrows = math.ceil(len(features) / ncols)
     fig, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 4 * nrows), squeeze=False)
 
@@ -199,10 +199,11 @@ def plot_multi_sample_feature_score_histograms(
     handles, labels = axes[0,0].get_legend_handles_labels()
     fig.legend(
         handles, labels,
-        loc="lower center",
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.01),
         ncol=2,
         fontsize=14,
-        bbox_to_anchor=(0.5, -0.02)
+        frameon=False
     )
     fig.tight_layout(rect=(0, 0.05, 1, 1))
     plt.show()
