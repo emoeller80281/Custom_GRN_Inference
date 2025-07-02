@@ -24,6 +24,7 @@ from tqdm import tqdm
 
 from grn_inference.normalization import clip_and_normalize_log1p_dask, minmax_normalize_dask
 from grn_inference.plotting import plot_feature_score_histogram
+from grn_inference.create_homer_peak_file import format_peaks
 
 # at module top‐level
 _global_chr_pos_to_seq: Union[None, pd.DataFrame] = None
@@ -295,38 +296,6 @@ def associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, gene_na
     )
     
     return normalized_ddf
-
-
-def format_peaks(peak_ids: pd.Series) -> pd.DataFrame:
-    """
-    Given a Series of peak IDs in the format 'chr:start-end', parse and return a formatted DataFrame.
-    """
-    if peak_ids.empty:
-        raise ValueError("Input peak ID list is empty.")
-
-    logging.info(f'Formatting {peak_ids.shape[0]} peaks')
-
-    # Extract chromosome, start, and end from peak ID strings
-    try:
-        chromosomes = peak_ids.str.extract(r'([^:]+):')[0]
-        starts = peak_ids.str.extract(r':(\d+)-')[0]
-        ends = peak_ids.str.extract(r'-(\d+)$')[0]
-    except Exception as e:
-        raise ValueError(f"Error parsing 'peak_id' values: {e}")
-
-    if chromosomes.isnull().any() or starts.isnull().any() or ends.isnull().any():
-        raise ValueError("Malformed peak IDs. Expect format 'chr:start-end'.")
-
-    peak_df = pd.DataFrame({
-        "peak_id": [f"peak{i + 1}" for i in range(len(peak_ids))],
-        "chromosome": chromosomes,
-        "start": pd.to_numeric(starts, errors='coerce').astype(int),
-        "end": pd.to_numeric(ends, errors='coerce').astype(int),
-        "strand": ["."] * len(peak_ids)
-    })
-    
-    return peak_df
-
 
 def find_ATAC_peak_sequence(peak_df, reference_genome_dir, parsed_peak_file, fig_dir):
     logging.info("Reading in ATACseq peak file")

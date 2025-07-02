@@ -13,13 +13,7 @@ def parse_args() -> argparse.Namespace:
     argparse.Namespace: Parsed arguments containing paths for input and output files.
     """
     parser = argparse.ArgumentParser(description="Create a formatted peak file for Homer")
-    parser.add_argument(
-        "--atac_data_file",
-        type=str,
-        required=True,
-        help="Path to the ATACseq data file"
-    )
-    
+
     parser.add_argument(
         "--output_dir",
         type=str,
@@ -31,52 +25,52 @@ def parse_args() -> argparse.Namespace:
 
     return args
 
-def convert_to_homer_peak_format(atac_data: pd.DataFrame) -> pd.DataFrame:
+def format_peaks(peak_ids: pd.Series) -> pd.DataFrame:
     """
-    Converts an ATAC-seq dataset into HOMER-compatible peak format.
-
-    Parameters:
-    atac_data (pd.DataFrame): DataFrame containing ATAC-seq data with a 'peak_id' column.
-
-    Returns:
-    pd.DataFrame: A DataFrame in HOMER-compatible format.
-    """
-    # Validate that the input DataFrame has the expected structure
-    if atac_data.empty:
-        raise ValueError("Input ATAC-seq data is empty.")
+    Splits peaks from `chrN:start-end` format into a DataFrame.
     
-    # Extract the peak ID column
-    peak_ids: pd.Series = atac_data.iloc[:, 0]
+    Creates a dataframe with the following columns:
+    1) "peak_id": peakN+1 where N is the index position of the peak
+    2) "chromosome": chrN
+    3) "start"
+    4) "end"
+    5) "strand": List of "." values, we dont have strand information for our peaks.
+    
+    Args:
+        peak_ids (pd.Series):
+            Series containing the peak locations in "chrN:start-end" format.
+            
+    Returns:
+        peak_df (pd.DataFrame):
+            DataFrame of peak locations in the correct format for Homer and the sliding window method
+    """
+    if peak_ids.empty:
+        raise ValueError("Input peak ID list is empty.")
+    
+    peak_ids = peak_ids.drop_duplicates()
 
-    # Split peak IDs into chromosome, start, and end
+    logging.info(f'Formatting {peak_ids.shape[0]} peaks')
+
+    # Extract chromosome, start, and end from peak ID strings
     try:
-        chromosomes: pd.Series = peak_ids.str.extract(r'([^:]+):')[0]
-        starts: pd.Series = peak_ids.str.extract(r':(\d+)-')[0]
-        ends: pd.Series = peak_ids.str.extract(r'-(\d+)$')[0]
+        chromosomes = peak_ids.str.extract(r'([^:]+):')[0]
+        starts = peak_ids.str.extract(r':(\d+)-')[0]
+        ends = peak_ids.str.extract(r'-(\d+)$')[0]
     except Exception as e:
         raise ValueError(f"Error parsing 'peak_id' values: {e}")
 
-    # Check for missing or invalid values
     if chromosomes.isnull().any() or starts.isnull().any() or ends.isnull().any():
-        raise ValueError("One or more peak IDs are malformed. Ensure all peak IDs are formatted as 'chr:start-end'.")
+        raise ValueError("Malformed peak IDs. Expect format 'chr:start-end'.")
 
-    # Create a dictionary for constructing the HOMER-compatible DataFrame
-    homer_dict: dict[str, Any] = {
-        "peak_id": [f"peak{i + 1}" for i in range(len(peak_ids))],  # Generate unique peak IDs
+    peak_df = pd.DataFrame({
+        "peak_id": [f"peak{i + 1}" for i in range(len(peak_ids))],
         "chromosome": chromosomes,
-        "start": pd.to_numeric(starts, errors='coerce'),  # Convert to numeric and handle errors
-        "end": pd.to_numeric(ends, errors='coerce'),      # Convert to numeric and handle errors
-        "strand": ["."] * len(peak_ids),                 # Set strand as "."
-    }
-
-    # Construct the DataFrame
-    homer_df: pd.DataFrame = pd.DataFrame(homer_dict)
-
-    # Final validation: Ensure no NaN values in the critical columns
-    if homer_df[['chromosome', 'start', 'end']].isnull().any().any():
-        raise ValueError("Parsed values contain NaNs. Check input 'peak_id' format.")
-
-    return homer_df
+        "start": pd.to_numeric(starts, errors='coerce').astype(int),
+        "end": pd.to_numeric(ends, errors='coerce').astype(int),
+        "strand": ["."] * len(peak_ids)
+    })
+    
+    return peak_df
 
 # ----- Input -----
 def main() -> None:
@@ -85,18 +79,19 @@ def main() -> None:
     """
     # Parse arguments
     args: argparse.Namespace = parse_args()
-    atac_data_file: str = args.atac_data_file
     output_dir: str = args.output_dir
     
     tmp_dir = os.path.join(output_dir, "tmp")
     os.makedirs(tmp_dir, exist_ok=True)
 
-    logging.info('Reading scATACseq data')
-    atac_data: pd.DataFrame = pd.read_parquet(atac_data_file)
-    logging.info(atac_data.head())
+    logging.info(f"Reading Peaks and Genes from 'peaks_near_genes.parquet'")
+    assert os.path.isfile(os.path.join(output_dir, "peaks_near_genes.parquet")), FileNotFoundError("peaks_near_genes.parquet not found in output_dir")
+    
+    peaks_near_genes_df: pd.DataFrame = pd.read_parquet(os.path.join(output_dir, "peaks_near_genes.parquet"))
+    peak_ids = peaks_near_genes_df["peak_id"].drop_duplicates()
 
     logging.info('Converting scATACseq peaks to Homer peak format')
-    homer_df: pd.DataFrame = convert_to_homer_peak_format(atac_data)
+    homer_df: pd.DataFrame = format_peaks(peak_ids)
 
     logging.info('Saving Homer peak file')
     homer_df.to_csv(f'{tmp_dir}/homer_peaks.txt', sep='\t', header=False, index=False)
