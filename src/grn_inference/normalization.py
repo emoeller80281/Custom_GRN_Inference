@@ -40,21 +40,20 @@ def minmax_normalize_dask(
 
     return ddf.map_partitions(normalize_partition, meta=ddf._meta.copy())
 
-def clip_and_normalize_log1p_dask(
-    ddf: dd.DataFrame,
+def clip_and_normalize_log1p_pandas(
+    df: pd.DataFrame,
     score_cols: list[str],
     quantiles: tuple[float, float] = (0.05, 0.95),
     apply_log1p: bool = True,
     sample_frac: Union[None, float] = None,
     random_state: int = 42
-) -> dd.DataFrame:
+) -> pd.DataFrame:
     """
-    Clips, normalizes, and optionally log1p-transforms selected columns in a Dask DataFrame.
-    Optionally samples a fraction of the data to estimate quantiles faster.
+    Clips, normalizes, and optionally log1p-transforms selected columns in a pandas DataFrame.
 
     Parameters
     ----------
-    ddf : dd.DataFrame
+    df : pd.DataFrame
         Input data.
     score_cols : list of str
         Column names to transform.
@@ -69,37 +68,34 @@ def clip_and_normalize_log1p_dask(
 
     Returns
     -------
-    dd.DataFrame
+    pd.DataFrame
         Transformed DataFrame.
     """
-    ddf = ddf.persist()
+    df = df.copy()
 
     if sample_frac:
-        logging.info(f"Sampling {sample_frac*100:.1f}% of data to estimate quantiles")
-        sample = ddf[score_cols].sample(frac=sample_frac, random_state=random_state).compute()
+        logging.info(f"Sampling {sample_frac * 100:.1f}% of data to estimate quantiles")
+        sample = df[score_cols].sample(frac=sample_frac, random_state=random_state)
     else:
-        sample = ddf[score_cols].compute()
+        sample = df[score_cols]
 
     q_lo, q_hi = quantiles
-    low = sample.quantile(q_lo).to_dict()
-    high = sample.quantile(q_hi).to_dict()
+    quantile_lows = sample.quantile(q_lo)
+    quantile_highs = sample.quantile(q_hi)
 
-    def transform_partition(df):
-        if not is_dataframe_like(df):
-            raise TypeError(f"Expected DataFrame, got {type(df)}")
+    for col in score_cols:
+        low, high = quantile_lows[col], quantile_highs[col]
+        df[col] = df[col].clip(lower=low, upper=high)
 
-        df = df.copy()
-        for col in score_cols:
-            df[col] = df[col].clip(lower=low[col], upper=high[col])
-            if high[col] != low[col]:
-                df[col] = (df[col] - low[col]) / (high[col] - low[col])
-            else:
-                df[col] = 0.0
-            if apply_log1p:
-                df[col] = np.log1p(df[col])
-        return df
+        if high != low:
+            df[col] = (df[col] - low) / (high - low)
+        else:
+            df[col] = 0.0
 
-    return ddf.map_partitions(transform_partition, meta=ddf._meta.copy())
+        if apply_log1p:
+            df[col] = np.log1p(df[col])
+
+    return df
 
 def minmax_normalize_pandas(
     df: pd.DataFrame,

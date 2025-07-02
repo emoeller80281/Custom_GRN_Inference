@@ -1,32 +1,20 @@
 import pandas as pd
-import pybedtools
 import numpy as np
-from pybiomart import Server
 import scipy.sparse as sp
 import scipy.stats as stats
 from dask import delayed, compute
 from dask.diagnostics import ProgressBar
-import dask.dataframe as dd
-from tqdm import tqdm
 import psutil
-import shutil
 
-import math
 import os
 import sys
 import argparse
 import logging
-from typing import Tuple, Union
-
-import pyarrow as pa
-import pyarrow.parquet as pq
-import pyarrow.lib as pa_lib
-import matplotlib.pyplot as plt
-import seaborn as sns
+from typing import Union
 
 from grn_inference.normalization import (
-    minmax_normalize_dask,
-    clip_and_normalize_log1p_dask
+    minmax_normalize_pandas,
+    clip_and_normalize_log1p_pandas
 )
 from grn_inference.plotting import plot_feature_score_histogram
 
@@ -101,64 +89,6 @@ def row_normalize_sparse(X):
             X_norm.data[i] = [0 for _ in X_norm.data[i]]
     return X_norm.tocsr()
 
-def select_top_dispersion_auto(df, fig_dir, target_n_features=5000, dispersion_quantile=0.75):
-    """
-    Automatically selects the top most dispersed features by:
-    1. Filtering features with dispersion above a dataset-driven threshold.
-    2. Selecting the top-N features with the highest dispersion.
-    """
-    def compute_dispersion(part):
-        numeric_part = part.select_dtypes(include=[np.number])
-        mean = numeric_part.mean(axis=1, skipna=True)
-        var = numeric_part.var(axis=1, skipna=True)
-        disp = var / (mean + 1e-8)
-        return disp
-
-    logging.info("    Computing feature dispersion across cells...")
-    dispersions = df.map_partitions(compute_dispersion, meta=('x', 'f8')).compute()
-    
-    os.makedirs(fig_dir, exist_ok=True)
-    thresh = dispersions.quantile(dispersion_quantile)
-
-    plt.figure(figsize=(8, 4))
-    sns.histplot(dispersions, bins=100, kde=True, stat="count", edgecolor=None)
-    plt.axvline(thresh, color="red", linestyle="--", label=f"{dispersion_quantile:.2f} quantile = {thresh:.2f}")
-    plt.title("Feature Dispersion Distribution")
-    plt.xlabel("Dispersion")
-    plt.ylabel("Count")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(os.path.join(fig_dir, "dispersion_histogram.png"), dpi=200)
-    plt.close()
-
-    total_features = len(dispersions)
-    min_disp = dispersions.quantile(dispersion_quantile)
-    filtered = dispersions[dispersions >= min_disp]
-    n_above_thresh = len(filtered)
-
-    if n_above_thresh > target_n_features:
-        top_features = filtered.nlargest(target_n_features)
-    else:
-        top_features = filtered
-
-    top_feature_names = top_features.index.to_list()
-
-    logging.info(f"\t  - Initial features: {total_features:,}")
-    logging.info(f"\t  - Features above dispersion threshold (quantile={dispersion_quantile}): {n_above_thresh:,}")
-    logging.info(f"\t  - Final selected features (after top-N limit): {len(top_feature_names):,}")
-    logging.info(f"\t  - Dispersion threshold (min_disp) used: {min_disp:.4f}")
-
-    # Explicitly create a new column from the index to preserve feature IDs
-    df = df.assign(feature_id=df.index)
-
-    # Filter rows based on selected feature IDs
-    df = df[df["feature_id"].isin(top_feature_names)]
-
-    # Set index back to feature_id (for clarity)
-    df = df.set_index("feature_id")         
-    
-    return df
-
 def auto_tune_parameters(
     num_cpu: Union[int,None] = None, 
     total_memory_gb: Union[int,None] = None
@@ -220,29 +150,26 @@ def auto_tune_parameters(
         "num_workers": num_workers
     }
 
-def calculate_significant_peak_to_gene_correlations(
+def calculate_peak_to_gene_correlations(
     atac_df,
     gene_df,
     output_dir,
     output_file=None,
-    alpha=0.05,
     num_cpu=4,
 ):
     """
-    Calculates significant peak-to-gene correlations (p < alpha).
+    Calculates peak-to-gene correlations (p < alpha).
 
     Parameters
     ----------
-    atac_df : pandas.DataFrame or dask.DataFrame
+    atac_df : pandas.DataFrame
         ATAC matrix (peaks × cells)
-    gene_df : pandas.DataFrame or dask.DataFrame
+    gene_df : pandas.DataFrame
         RNA matrix (genes × cells)
     output_dir : str
         Output directory for the sample
     output_file : str, optional
         Output file path to save results (only required if streaming)
-    alpha : float
-        P-value threshold
     num_cpu : int
         Number of threads
 
@@ -255,15 +182,6 @@ def calculate_significant_peak_to_gene_correlations(
         raise ValueError("output_file must be provided.")
 
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
-
-    # Make sure dataframes are pandas
-    logging.info('\tConverting ATAC dask dataframe to pandas')
-    if isinstance(atac_df, dd.DataFrame):
-        atac_df = atac_df.compute()
-        
-    logging.info('\tConverting RNA dask dataframe to pandas')
-    if isinstance(gene_df, dd.DataFrame):
-        gene_df = gene_df.compute()
         
     peaks_near_genes: pd.DataFrame = pd.read_parquet(os.path.join(output_dir, "peaks_near_genes.parquet"), engine="pyarrow")
     
@@ -275,34 +193,30 @@ def calculate_significant_peak_to_gene_correlations(
     peaks_near_genes = peaks_near_genes[
         peaks_near_genes["peak_id"].isin(peak_id_to_index) &
         peaks_near_genes["target_id"].isin(gene_id_to_index)
-    ].copy()
+    ].copy().drop_duplicates()
 
     # Replace IDs with matrix indices
     peaks_near_genes["peak_i"] = peaks_near_genes["peak_id"].map(peak_id_to_index)
     peaks_near_genes["gene_j"] = peaks_near_genes["target_id"].map(gene_id_to_index)
 
     pairs_to_compute = list(zip(peaks_near_genes["peak_i"], peaks_near_genes["gene_j"]))
+
     logging.info(f"\t- Number of peak-gene pairs to test: {len(pairs_to_compute):,}")
     
-    num_peaks, n = atac_df.shape
-    num_genes = gene_df.shape[0]
-    num_pairs = num_peaks * num_genes
-
-    logging.info(f"\t- Number of peaks: {num_peaks}")
-    logging.info(f"\t- Number of genes: {num_genes}")
-    logging.info(f"\t- Total peak-gene pairs: {num_pairs:,}")
+    assert len(pairs_to_compute) == len(peaks_near_genes)
 
     # Convert to sparse
     X = sp.csr_matrix(atac_df.select_dtypes(include=[np.number]).values.astype(float))
     Y = sp.csr_matrix(gene_df.select_dtypes(include=[np.number]).values.astype(float))
 
+    n = atac_df.shape[1]
     df_degrees = n - 2
 
     # Row-normalize
     X_norm = row_normalize_sparse(X)
     Y_norm = row_normalize_sparse(Y)
 
-    def compute_correlation_for_pair(pair, X_norm, Y_norm, df_degrees, n, alpha):
+    def compute_correlation_for_pair(pair, X_norm, Y_norm, df_degrees, n):
         i, j = pair
         r_val = X_norm.getrow(i).dot(Y_norm.getrow(j).T).toarray()[0][0]
         r_val = r_val / (n - 1)
@@ -312,13 +226,10 @@ def calculate_significant_peak_to_gene_correlations(
         with np.errstate(divide='ignore', invalid='ignore'):
             t_stat = r_val * np.sqrt(df_degrees / (1 - r_val**2))
         p_val = 2 * stats.t.sf(np.abs(t_stat), df=df_degrees)
-
-        if p_val < alpha:
-            return (i, j, r_val)
-        return None
+        return (i, j, r_val)
 
     tasks = [
-        delayed(compute_correlation_for_pair)(pair, X_norm, Y_norm, df_degrees, n, alpha)
+        delayed(compute_correlation_for_pair)(pair, X_norm, Y_norm, df_degrees, n)
         for pair in pairs_to_compute
     ]
 
@@ -334,40 +245,6 @@ def calculate_significant_peak_to_gene_correlations(
 
     df_corr.to_parquet(output_file, engine="pyarrow", compression="snappy")
     return df_corr
-
-def prepare_inputs_for_correlation(
-    atac_df: dd.DataFrame, 
-    rna_df: dd.DataFrame,
-    fig_dir: str
-    ) -> Tuple[dd.DataFrame, dd.DataFrame]:
-    
-    # Use peak_id / target_id as index before dispersion selection
-    atac_df = atac_df.set_index("peak_id")
-    rna_df = rna_df.set_index("gene_id")
-
-    # Compute dispersion and filter
-    logging.info("Filtering out peaks with high dispersion")
-    atac_df = select_top_dispersion_auto(atac_df, fig_dir, target_n_features=500_000, dispersion_quantile=0.75)
-    
-    logging.info("Filtering out genes with high dispersion")
-    rna_df = select_top_dispersion_auto(rna_df, fig_dir, target_n_features=50_000, dispersion_quantile=0.75)
-
-    logging.info(f"\nSelected {atac_df.shape[0].compute()} ATAC features with highest dispersion")
-    logging.info(f"Selected {rna_df.shape[0].compute()} RNA features with highest dispersion")
-    
-    logging.info('\nSubsetting datasets to shared cell barcodes')
-    # 1) find the common cell barcodes
-    common_cells = [cell for cell in atac_df.columns if cell in rna_df.columns]        
-    if len(common_cells) == 0:
-        raise ValueError("No shared cells between ATAC and RNA!")
-    else:
-        logging.info(f'\t- Found {len(common_cells):,} common cells between ATAC and RNA datasets')
-    
-    # 2) subset and reorder both DataFrames to that same list
-    atac_df = atac_df[common_cells]
-    rna_df  = rna_df[common_cells]
-
-    return atac_df, rna_df
 
 def main():
     # Parse arguments
@@ -394,43 +271,52 @@ def main():
     logging.info(f"  - num_workers = {num_workers}")
     
     logging.info("Loading the scRNA-seq dataset.")
-    rna_df: dd.DataFrame = dd.read_parquet(RNA_DATA_FILE, engine="pyarrow")
+    rna_df: pd.DataFrame = pd.read_parquet(RNA_DATA_FILE, engine="pyarrow")
 
     logging.info("Loading and parsing the ATAC-seq peaks")
-    atac_df: dd.DataFrame = dd.read_parquet(ATAC_DATA_FILE, engine="pyarrow")
+    atac_df: pd.DataFrame = pd.read_parquet(ATAC_DATA_FILE, engine="pyarrow")
     
     # ============ PEAK TO GENE CORRELATION CALCULATION ============
-    PARQ = os.path.join(TMP_DIR, "sig_peak_to_gene_corr.parquet")
+    PARQ = os.path.join(TMP_DIR, "peak_to_gene_corr.parquet")
 
     if not os.path.exists(PARQ):
-        atac_df, rna_df = prepare_inputs_for_correlation(atac_df, rna_df, FIG_DIR)
+        # Assuming peak-gene filtering has already been applied:
+        atac_df = atac_df.set_index("peak_id")
+        rna_df = rna_df.set_index("gene_id")
+
+        common_cells = [cell for cell in atac_df.columns if cell in rna_df.columns]
+        if len(common_cells) == 0:
+            raise ValueError("No shared cells between ATAC and RNA!")
+        logging.info(f'\t- Found {len(common_cells):,} shared cells')
+        
+        atac_df = atac_df[common_cells]
+        rna_df = rna_df[common_cells]
                 
         logging.info("\nCalculating significant ATAC-seq peak-to-gene correlations")
-        result = calculate_significant_peak_to_gene_correlations(
+        result = calculate_peak_to_gene_correlations(
             atac_df,
             rna_df,
             output_dir=OUTPUT_DIR,
             output_file=PARQ,
-            alpha=1e-4,
             num_cpu=num_workers,
         )
         if isinstance(result, str):
-            sig_peak_to_gene_corr = dd.read_parquet(result)  # streaming mode
+            peak_to_gene_corr = pd.read_parquet(result, engine="pyarrow")  # streaming mode
         else:
-            sig_peak_to_gene_corr = dd.from_pandas(result, npartitions=1)  # in-memory mode
+            peak_to_gene_corr = result  # in-memory mode
 
     else:
         logging.info("Loading existing Parquet")
-        sig_peak_to_gene_corr = dd.read_parquet(PARQ)
+        peak_to_gene_corr = pd.read_parquet(PARQ, engine="pyarrow")
     
-    logging.info("DataFrame after calculating sig peak to gene correlations")
-    logging.info(f'Number of edges in sig_peak_to_gene_corr: {len(sig_peak_to_gene_corr)}')
+    logging.info("DataFrame after calculating peak to gene correlations")
+    logging.info(f'Number of edges in peak_to_gene_corr: {len(peak_to_gene_corr)}')
 
-    if len(sig_peak_to_gene_corr["correlation"]) > 1_000_000:
+    if len(peak_to_gene_corr["correlation"]) > 1_000_000:
         quantile_threshold = 0.70
-        logging.info("More than 1,000,000 significantly correlated edges")
+        logging.info("More than 1,000,000 correlated edges")
         logging.info(f"Computing the {quantile_threshold*100:.0f}th percentile of correlation…")
-        cutoff = sig_peak_to_gene_corr["correlation"].quantile(quantile_threshold).compute()
+        cutoff = peak_to_gene_corr["correlation"].quantile(quantile_threshold)
         logging.info(f"\tCutoff = {cutoff:.4f}")
         
     else:
@@ -438,7 +324,7 @@ def main():
         cutoff = 0
 
     # Filter to only peak to TG correlations ≥ cutoff
-    filtered = sig_peak_to_gene_corr[sig_peak_to_gene_corr["correlation"] >= cutoff]
+    filtered = peak_to_gene_corr[peak_to_gene_corr["correlation"] >= cutoff]
     
     # logging.info("DataFrame after filtering 70th quantile")
     logging.info(f'\t- Number of edges: {len(filtered)}')
@@ -447,22 +333,22 @@ def main():
     filtered = filtered.rename(columns={"gene_id": "target_id"})
         
     logging.info(f'\nClipping to within the upper and lower 95th quantiles, log1p normalizing scores')
-    normalized_ddf = clip_and_normalize_log1p_dask(
-        ddf=filtered,
+    normalized_df = clip_and_normalize_log1p_pandas(
+        df=filtered,
         score_cols=["correlation"],
         quantiles=(0, 1),
         apply_log1p=True,
     )
-    logging.info(f'\t- Number of edges after clipping and normalizing: {len(normalized_ddf)}')
+    logging.info(f'\t- Number of edges after clipping and normalizing: {len(normalized_df)}')
     
     logging.info(f'\nMinmax normalizing scores between 0-1')
-    normalized_ddf = minmax_normalize_dask(
-        ddf=normalized_ddf, 
+    normalized_ddf = minmax_normalize_pandas(
+        df=normalized_df, 
         score_cols=["correlation"], 
     )
-    logging.info(f'\t- Number of edges: {len(normalized_ddf)}')
+    logging.info(f'\t- Number of edges: {len(normalized_df)}')
     
-    plot_feature_score_histogram(normalized_ddf, "correlation", OUTPUT_DIR)
+    plot_feature_score_histogram(normalized_df, "correlation", OUTPUT_DIR)
         
     out_path = f"{OUTPUT_DIR}/peak_to_gene_correlation.parquet"
     normalized_ddf.to_parquet(out_path, engine="pyarrow", compression="snappy")
