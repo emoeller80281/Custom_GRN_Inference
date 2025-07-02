@@ -67,18 +67,6 @@ def parse_args() -> argparse.Namespace:
         help="Path to the directory containing the chromosome fasta files for an organism"
     )
     parser.add_argument(
-        "--atac_data_file",
-        type=str,
-        required=True,
-        help="Path to the scATACseq data file"
-    )
-    parser.add_argument(
-        "--rna_data_file",
-        type=str,
-        required=True,
-        help="Path to the scRNAseq data file"
-    )
-    parser.add_argument(
         "--output_dir",
         type=str,
         required=True,
@@ -214,7 +202,7 @@ def get_valid_parquet_files(directory: str) -> list[str]:
                 logging.warning(f"Skipping corrupt Parquet file: {f}\n  Reason: {e}")
     return valid_files
 
-def associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, rna_data_genes, species, num_cpu, output_dir):
+def associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, gene_names, species, num_cpu, output_dir):
     logging.info("Preparing for parallel motif scoring...")
 
     # Background nucleotide frequencies
@@ -222,7 +210,7 @@ def associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, rna_dat
 
     # Load TF-to-motif mapping
     tf_df = pd.read_csv(tf_names_file, sep="\t", header=0)
-    tf_df = tf_df[tf_df["TF_Name"].isin(rna_data_genes)]
+    tf_df = tf_df[tf_df["TF_Name"].isin(gene_names)]
     logging.info(f"Number of TFs matching RNA dataset = {tf_df.shape[0]}")
 
     tf_motif_names = tf_df["Motif_ID"].unique().tolist()
@@ -433,8 +421,6 @@ def main():
     tf_names_file: str = args.tf_names_file
     meme_dir: str = args.meme_dir
     reference_genome_dir: str = args.reference_genome_dir
-    atac_data_file: str = args.atac_data_file
-    rna_data_file: str = args.rna_data_file
     output_dir: str = args.output_dir
     species: str = args.species
     num_cpu: int = int(args.num_cpu)
@@ -451,12 +437,14 @@ def main():
     # rna_data_file = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/mESC_filtered_L2_E7.5_merged_RNA.csv"
     # output_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output/mESC"
     # num_cpu = 4
-        
-    logging.info('Reading gene names from scRNAseq data')
-    rna_data: dd.DataFrame = dd.read_parquet(rna_data_file)
-        
-    # Get the set of unique gene_ids from the RNA dataset
-    rna_data_genes = set(rna_data["gene_id"].compute().dropna())
+    
+    # Use the peaks and gene names only for peaks that are within 1 MB of the gene's TSS (from preprocessing)
+    logging.info(f"Reading Peaks and Genes from 'peaks_near_genes.parquet'")
+    assert os.path.isfile(os.path.join(output_dir, "peaks_near_genes.parquet")), FileNotFoundError("peaks_near_genes.parquet not found in output_dir")
+    
+    peaks_near_genes_df: pd.DataFrame = pd.read_parquet(os.path.join(output_dir, "peaks_near_genes.parquet"))
+    peak_ids = peaks_near_genes_df["peak_id"].drop_duplicates()
+    gene_names = peaks_near_genes_df["target_id"].drop_duplicates()
     
     # Read in the peak dataframe containing genomic sequences    
     parsed_peak_file = f'{tmp_dir}/peak_sequences.pkl'
@@ -466,29 +454,9 @@ def main():
         
     # Create the peak dataframe containing genomic sequences if it doesn't exist
     else:
-        # If the homer peaks file has already been created, then we can re-use the peak info from there
-        homer_peak_file = os.path.join(tmp_dir, "homer_peaks.txt")
-        if os.path.isfile(homer_peak_file):
-            logging.info("Loading in peak information from homer_peaks.txt")
-            peak_df = pd.read_csv(homer_peak_file, sep="\t", header=None, index_col=None, names=[
-                "peak_id",
-                "chromosome",
-                "start",
-                "end",
-                "strand"
-                ])
-        else:
-            logging.info("'homer_peaks.txt' file not found in 'tmp_dir', reading peak info from scATACseq data")
-            logging.info('  - Reading scATACseq data')
-            atac_df: dd.DataFrame = dd.read_parquet(atac_data_file)
             
-            peak_ids = atac_df[atac_df.columns[0]].compute()
-            
-            logging.info(f'  - Identifying ATACseq peak sequences')
-            peak_df = format_peaks(peak_ids)
-            
-            logging.info("  - Saving peak_df to homer_peaks.txt")
-            peak_df.to_csv(homer_peak_file, sep="\t", header=False, index=False)
+        logging.info(f'  - Identifying ATACseq peak sequences')
+        peak_df = format_peaks(peak_ids)
         
         # Get the genomic sequence from the reference genome to each ATACseq peak
         chr_pos_to_seq = find_ATAC_peak_sequence(peak_df, reference_genome_dir, parsed_peak_file, fig_dir)
@@ -501,7 +469,7 @@ def main():
     # Associate the TFs from TF_Information_all_motifs.txt to the motif with the matching motifID
     ddf = associate_tf_with_motif_pwm(
         tf_names_file, meme_dir, chr_pos_to_seq,
-        rna_data_genes, species, num_cpu, output_dir
+        gene_names, species, num_cpu, output_dir
     )
     
     plot_feature_score_histogram(ddf, "sliding_window_score", output_dir)

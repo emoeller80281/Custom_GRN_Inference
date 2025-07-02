@@ -14,10 +14,10 @@ set -euo pipefail
 CICERO_MAP_PEAKS_TO_TG=false
 CICERO_PEAK_TO_TG_SCORE=false
 
-PEAK_TO_TG_CORRELATION=true
+PEAK_TO_TG_CORRELATION=false
 
 # Run the TF to peak binding score calculation methods
-SLIDING_WINDOW_TF_TO_PEAK_SCORE=false
+SLIDING_WINDOW_TF_TO_PEAK_SCORE=true
 HOMER_TF_TO_PEAK_SCORE=false
 
 # Combine the score DataFrames
@@ -611,8 +611,6 @@ run_sliding_window_tf_to_peak_score() {
         --tf_names_file "$TF_NAMES_FILE"\
         --meme_dir "$MEME_DIR"\
         --reference_genome_dir "$REFERENCE_GENOME_DIR"\
-        --atac_data_file "$ATAC_FILE_NAME" \
-        --rna_data_file "$RNA_FILE_NAME" \
         --output_dir "$OUTPUT_DIR" \
         --species "$SPECIES" \
         --num_cpu "$NUM_CPU" \
