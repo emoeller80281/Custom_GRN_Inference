@@ -464,7 +464,13 @@ create_homer_peak_file() {
 
 homer_find_motifs() {
     mkdir -p "$OUTPUT_DIR/homer_results"
-    perl "$BASE_DIR/data/homer/bin/findMotifsGenome.pl" "$OUTPUT_DIR/tmp/homer_peaks.txt" "$SPECIES" "$OUTPUT_DIR/homer_results/" -size 200 -p $NUM_CPU
+    perl "$BASE_DIR/data/homer/bin/findMotifsGenome.pl" \
+        "$OUTPUT_DIR/tmp/homer_peaks.txt" \
+        "$SPECIES" "$OUTPUT_DIR/homer_results/" \
+        -size 200 \
+        -p $NUM_CPU \
+        -redundant 0.5 \
+        -nomotif # <- Skips de novo motif finding
     echo "    Done!"
 } 2> "$LOG_DIR/Homer_logs/04.homer_findMotifsGenome.log"
 
@@ -494,26 +500,10 @@ homer_process_motif_files() {
     mkdir -p "$PROCESSED_MOTIF_DIR"
 
     # Process files in parallel
-    if [ "$use_parallel" = true ]; then
-        echo "$motif_files" | /usr/bin/time -v parallel -j "$NUM_CPU" \
-            "perl $BASE_DIR/data/homer/bin/annotatePeaks.pl $OUTPUT_DIR/homer_peaks.txt '$SPECIES' -m {} > $PROCESSED_MOTIF_DIR/{/}_tf_motifs.txt"
+    echo "$motif_files" | /usr/bin/time -v parallel -j "$NUM_CPU" \
+        "perl $BASE_DIR/data/homer/bin/annotatePeaks.pl $OUTPUT_DIR/tmp/homer_peaks.txt '$SPECIES' -m {} > $PROCESSED_MOTIF_DIR/{/}_tf_motifs.txt"
 
-        module unload parallel
-
-    # Process files sequentially
-    else
-        for file in $motif_files; do
-            local output_file="$PROCESSED_MOTIF_DIR/$(basename "$file" .motif)_tf_motifs.txt"
-            /usr/bin/time -v \
-            "perl $BASE_DIR/data/homer/bin/annotatePeaks.pl $OUTPUT_DIR/homer_peaks.txt '$SPECIES' -m $file > $output_file" \
-
-            if [ $? -ne 0 ]; then
-                echo "[ERROR] Failed to process motif file: $file" >> "$LOG_DIR/step05_sequential.err"
-            else
-                echo "[INFO] Successfully processed: $file"
-            fi
-        done
-    fi
+    module unload parallel
 
     # Check for errors
     if [ $? -ne 0 ]; then
@@ -651,7 +641,7 @@ run_homer() {
 
 
     echo "Checking for existing Homer peak file (created from the ATACseq dataset)"
-    if [ ! -f "$OUTPUT_DIR/homer_peaks.txt" ]; then
+    if [ ! -f "$OUTPUT_DIR/tmp/homer_peaks.txt" ]; then
         echo "    Homer peak file not found, creating..."
         create_homer_peak_file
         echo "    Done!"
