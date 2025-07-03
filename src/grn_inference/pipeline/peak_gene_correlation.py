@@ -140,7 +140,7 @@ def auto_tune_parameters(
         batch_size = 200
 
     # -------------------------------
-    # Tuning Dask number of workers
+    # Tuning number of workers
     # -------------------------------
     num_workers = max(1, num_cpu - 2)
 

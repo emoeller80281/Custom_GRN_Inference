@@ -2,7 +2,7 @@
 
 #SBATCH --partition compute
 #SBATCH --nodes=1
-#SBATCH --cpus-per-task=16
+#SBATCH --cpus-per-task=64
 #SBATCH --mem=128G
 
 set -euo pipefail
@@ -14,10 +14,10 @@ set -euo pipefail
 CICERO_MAP_PEAKS_TO_TG=false
 CICERO_PEAK_TO_TG_SCORE=false
 
-PEAK_TO_TG_CORRELATION=true
+PEAK_TO_TG_CORRELATION=false
 
 # Run the TF to peak binding score calculation methods
-SLIDING_WINDOW_TF_TO_PEAK_SCORE=false
+SLIDING_WINDOW_TF_TO_PEAK_SCORE=true
 HOMER_TF_TO_PEAK_SCORE=false
 
 # Combine the score DataFrames

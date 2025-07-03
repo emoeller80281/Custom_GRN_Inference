@@ -35,9 +35,11 @@ conda activate my_env
 
 # Set base directories and files
 BASE_DIR=$(readlink -f "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER")
-PYTHON_SCRIPT_DIR="$BASE_DIR/src/grn_inference"
+PYTHON_SCRIPT_DIR="$BASE_DIR/src/grn_inference/pipeline"
 
-GROUND_TRUTH="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/REFERENCE_NETWORKS/RN111_ChIPSeq_BEELINE_Mouse_ESC.tsv"
+# GROUND_TRUTH="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/REFERENCE_NETWORKS/RN111_ChIPSeq_BEELINE_Mouse_ESC.tsv"
+GROUND_TRUTH="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/REFERENCE_NETWORKS/RN115_LOGOF_ESCAPE_Mouse_ESC.tsv"
+
 # COMBINED_INFERRED_NET="$BASE_DIR/output/combined_inferred_dfs/mESC_combined_inferred_score_df.parquet"
 # COMBINED_OUTPUT_DIR="$BASE_DIR/output/combined_inferred_dfs/xgb_trained_models"
 # COMBINED_FIG_DIR="$BASE_DIR/figures/mm10/combined_samples_no_peak_agg"
@@ -82,7 +84,7 @@ mkdir -p "$DS011_OUTPUT_DIR"
 
 echo ""
 echo "Python: Training XGBoost Classifier"
-/usr/bin/time -v python3 "$PYTHON_SCRIPT_DIR/Step070.train_xgboost.py" \
+/usr/bin/time -v python3 "$PYTHON_SCRIPT_DIR/train_xgboost.py" \
         --ground_truth_file "$GROUND_TRUTH" \
         --inferred_network_file "$DS011_INFERRED_NET" \
         --trained_model_dir "$DS011_OUTPUT_DIR" \

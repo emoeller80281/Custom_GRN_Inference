@@ -22,7 +22,7 @@ from pyarrow.parquet import ParquetFile
 from scipy import stats
 from tqdm import tqdm
 
-from grn_inference.normalization import clip_and_normalize_log1p_dask, minmax_normalize_dask
+# from grn_inference.normalization import minmax_normalize_dask
 from grn_inference.plotting import plot_feature_score_histogram
 from grn_inference.create_homer_peak_file import format_peaks
 
@@ -161,7 +161,9 @@ def process_motif_file_and_save(file, meme_dir, output_dir):
         mask = _global_tf_df["Motif_ID"] == motif_name
         tf_names = _global_tf_df.loc[mask]["TF_Name"].values
 
-        peak_ids = _global_chr_pos_to_seq["peak_id"].reset_index(drop=True)
+        peak_ids = _global_chr_pos_to_seq.apply(
+            lambda row: f'{row["chromosome"]}:{row["start"]}-{row["end"]}', axis=1
+        )
 
         tmp_dir = os.path.join(output_dir, "tmp", "sliding_window_tf_scores")
         os.makedirs(tmp_dir, exist_ok=True)
@@ -282,20 +284,13 @@ def associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, gene_na
         raise RuntimeError("No valid TF motif parquet files found after filtering.")
 
     ddf = dd.read_parquet(valid_parquet_files)
-
-    normalized_ddf = clip_and_normalize_log1p_dask(
-        ddf=ddf,
-        score_cols=["sliding_window_score"],
-        quantiles=(0.05, 0.95),
-        apply_log1p=True,
-    )
     
-    normalized_ddf = minmax_normalize_dask(
-        ddf=normalized_ddf, 
-        score_cols=["sliding_window_score"], 
-    )
+    # normalized_ddf = minmax_normalize_dask(
+    #     ddf=normalized_ddf, 
+    #     score_cols=["sliding_window_score"], 
+    # )
     
-    return normalized_ddf
+    return ddf
 
 def find_ATAC_peak_sequence(peak_df, reference_genome_dir, parsed_peak_file, fig_dir):
     logging.info("Reading in ATACseq peak file")

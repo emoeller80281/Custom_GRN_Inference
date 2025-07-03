@@ -18,6 +18,8 @@ from grn_inference.plotting import (
     plot_permutation_importance_plot,
     plot_feature_ablation,
     plot_stability_boxplot,
+    plot_model_auroc_auprc,
+    plot_feature_score_histograms_split_by_label
 )
 from grn_inference.model import (
     train_xgboost_dask,
@@ -241,24 +243,33 @@ def main():
     # Drop unnecessary columns
     # drop_cols = ["source_id", "peak_id", "target_id", "label", "correlation", "cicero_score"]
     # feature_names = [col for col in inferred_network_dd.columns if col not in drop_cols]
+    # feature_names = [
+    #     'mean_TF_expression',
+    #     'mean_peak_accessibility',
+    #     'mean_TG_expression',
+    #     'cicero_score',
+    #     'TSS_dist_score', 
+    #     'correlation',
+    #     'homer_binding_score', 
+    #     'sliding_window_score', 
+    #     'string_combined_score', 
+    #     'string_experimental_score', 
+    #     'string_textmining_score'
+    #     ]
     feature_names = [
-        'mean_TF_expression',
-        'mean_peak_accessibility',
-        'mean_TG_expression',
-        'cicero_score',
-        'TSS_dist_score', 
-        'correlation',
-        'homer_binding_score', 
-        'sliding_window_score', 
-        'string_combined_score', 
-        'string_experimental_score', 
-        'string_textmining_score'
-        ]
+    'mean_tf_expr', 'mean_peak_expr', 'mean_tg_expr',
+    'cicero_score', 'TSS_dist_score', 'correlation',
+    'LITE_score', 'NITE_score', 'chromatin_differential', 
+    'sliding_window_score', 'homer_binding_score', 'string_experimental_score',
+    'string_textmining_score', 'string_combined_score'
+    ]
 
 
     # Only keep columns needed for modeling
     logging.info(f"Keeping {len(feature_names)} feature columns + labels")
     model_dd = inferred_network_dd[feature_names + ["label"]].persist()
+    
+    inferred_network_dd.compute().to_parquet("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/output/DS011_mESC/DS011_mESC_sample1/labeled_inferred_grn.parquet")
 
     logging.info(f"Splitting {model_dd.shape[0].compute():,} rows into train/test with stratification")
 
@@ -321,10 +332,12 @@ def main():
     y_test = y_test_dd.compute()
     model_df = model_dd.compute()
     
-    plot_feature_importance(feature_names, xgb_booster, fig_dir)
-    plot_feature_score_histograms(model_df, feature_names, fig_dir)
-    plot_feature_boxplots(feature_names, model_df, fig_dir)
-    plot_xgboost_prediction_histogram(xgb_booster, X_test, fig_dir)
+    plot_feature_score_histograms_split_by_label(model_df, feature_names, fig_dir)
+    # plot_model_auroc_auprc(X_test_dd, y_test_dd, xgb_booster, fig_dir)
+    # plot_feature_importance(feature_names, xgb_booster, fig_dir)
+    # plot_feature_score_histograms(model_df, feature_names, fig_dir)
+    # plot_feature_boxplots(feature_names, model_df, fig_dir)
+    # plot_xgboost_prediction_histogram(xgb_booster, X_test, fig_dir)
     
     # prarm_grid_out_dir = train_test_dir = os.path.join(trained_model_dir, f"parameter_grid_search/{model_save_name}")
     
@@ -349,7 +362,7 @@ def main():
 
     # --- Note: The following plots take a long time to run for large models, as they test re-training the model ---
 
-    # plot_overlapping_roc_pr_curves(X, y, feature_names, fig_dir)
+    # plot_overlapping_roc_pr_curves(X_dd, y_dd, feature_names, fig_dir)
     # plot_permutation_importance_plot(xgb_booster, X_test, y_test, fig_dir)
     # plot_feature_ablation(feature_names, X_train, X_test, y_train, y_test, xgb_booster, fig_dir)
     # plot_stability_boxplot(X, y, fig_dir)

@@ -104,7 +104,7 @@ def plot_feature_score_histograms(inferred_network, features, fig_dir):
 
     for i, feature in enumerate(features, 1):
         plt.subplot(nrows, ncols, i)
-        plt.hist(inferred_network_series.dropna(), bins=50, alpha=0.7, edgecolor='black')
+        plt.hist(inferred_network_series[feature].dropna(), bins=50, alpha=0.7, edgecolor='black')
         plt.title(f"{feature}", fontsize=14)
         plt.xlabel(feature, fontsize=14)
         plt.ylabel("Frequency", fontsize=14)
@@ -115,6 +115,67 @@ def plot_feature_score_histograms(inferred_network, features, fig_dir):
     plt.tight_layout()
     plt.savefig(f"{fig_dir}/xgboost_feature_score_hist.png", dpi=300)
     plt.close()
+    
+def plot_feature_score_histograms_split_by_label(inferred_network, features, fig_dir, label_col="label"):
+    """
+    Plot overlapping histograms of feature scores split by binary label (True vs False).
+    """
+    logging.info("\tPlotting split histograms by label")
+
+    os.makedirs(fig_dir, exist_ok=True)
+
+    # Convert to pandas if needed
+    if isinstance(inferred_network, dd.DataFrame):
+        logging.info("\tConverting Dask dataframe to pandas")
+        inferred_network_pd = inferred_network[features + [label_col]].compute()
+    else:
+        inferred_network_pd = inferred_network[features + [label_col]].copy()
+
+    # Separate true/false label subsets
+    true_df = inferred_network_pd[inferred_network_pd[label_col] == 1]
+    false_df = inferred_network_pd[inferred_network_pd[label_col] == 0]
+
+    ncols = 4
+    nrows = math.ceil(len(features) / ncols)
+
+    plt.figure(figsize=(5 * ncols, 4 * nrows))
+
+    for i, feature in enumerate(features, 1):
+        plt.subplot(nrows, ncols, i)
+        
+        # Drop NaNs
+        true_vals = true_df[feature].dropna()
+        false_vals = false_df[feature].dropna()
+
+        # Determine min count
+        min_len = min(len(true_vals), len(false_vals))
+
+        # Randomly sample both to the same size
+        true_vals_sampled = true_vals.sample(n=min_len, random_state=42)
+        false_vals_sampled = false_vals.sample(n=min_len, random_state=42)
+
+        # Compute common bin edges
+        combined_vals = pd.concat([true_vals_sampled, false_vals_sampled])
+        bins = np.linspace(combined_vals.min(), combined_vals.max(), 75)  # 150 equal-width bins
+
+        # Plot histograms using the same bin edges
+        plt.hist(false_vals_sampled, bins=bins, alpha=0.6, color='#dc8634', label="False (0)")
+        plt.hist(true_vals_sampled, bins=bins, alpha=0.6, color='#4195df', label="True (1)")
+
+        plt.title(feature, fontsize=14)
+        plt.xlabel("Score", fontsize=12)
+        plt.ylabel("Frequency", fontsize=12)
+        plt.legend(fontsize=10)
+        plt.xlim((0,1))
+        plt.xticks(fontsize=10)
+        plt.yticks(fontsize=10)
+
+    plt.tight_layout()
+    output_path = f"{fig_dir}/xgboost_feature_score_hist_by_label.png"
+    plt.savefig(output_path, dpi=300)
+    plt.close()
+
+    logging.info(f"\tSaved histogram figure to: {output_path}")
     
 def plot_feature_score_histogram(df, score_col, fig_dir):
     logging.info("\tPlotting feature score histogram")
@@ -415,6 +476,63 @@ def plot_stability_boxplot(X: pd.DataFrame, y: pd.Series, feature_names: list[st
     plt.savefig(f"{fig_dir}/xgboost_stability_boxplot_dask.png", dpi=300)
     plt.close()
     
+from sklearn.metrics import roc_curve, auc, precision_recall_curve, average_precision_score
+import matplotlib.pyplot as plt
+import os
+
+def plot_model_auroc_auprc(X_dd, y_dd, model, fig_dir):
+    """
+    Plot ROC and Precision-Recall curves for a trained model.
+    
+    Parameters
+    ----------
+    X_dd : dask.DataFrame
+        Input features (Dask).
+    y_dd : dask.Series
+        Ground truth labels (Dask).
+    model : xgboost.Booster or sklearn-style classifier
+        Trained model with a `.predict_proba()` or `.predict()` method.
+    fig_dir : str
+        Directory to save the plots.
+    """
+    os.makedirs(fig_dir, exist_ok=True)
+
+    # Convert Dask → pandas
+    X = X_dd.compute()
+    y = y_dd.compute()
+    
+    dtest = xgb.DMatrix(X)
+    y_scores = model.predict(dtest)
+
+    # Compute metrics
+    fpr, tpr, _ = roc_curve(y, y_scores)
+    precision, recall, _ = precision_recall_curve(y, y_scores)
+    roc_auc = auc(fpr, tpr)
+    avg_prec = average_precision_score(y, y_scores)
+
+    # Plot
+    fig, axes = plt.subplots(1, 2, figsize=(12, 6))
+
+    # ROC curve
+    axes[0].plot(fpr, tpr, color="darkorange", lw=2, label=f"AUC = {roc_auc:.3f}")
+    axes[0].plot([0, 1], [0, 1], color="navy", lw=1, linestyle="--")
+    axes[0].set_xlabel("False Positive Rate")
+    axes[0].set_ylabel("True Positive Rate")
+    axes[0].set_title("ROC Curve")
+    axes[0].legend(loc="lower right")
+
+    # Precision-Recall curve
+    axes[1].plot(recall, precision, color="darkgreen", lw=2, label=f"AP = {avg_prec:.3f}")
+    axes[1].set_xlabel("Recall")
+    axes[1].set_ylabel("Precision")
+    axes[1].set_title("Precision-Recall Curve")
+    axes[1].legend(loc="lower left")
+
+    plt.tight_layout()
+    plt.savefig(f"{fig_dir}/xgboost_model_auroc_auprc.png", dpi=300)
+    plt.close()
+
+    
 def plot_overlapping_roc_pr_curves(X_dd, y_dd, feature_names, fig_dir, n_runs=10, n_jobs=-1):
     """
     Plots overlapping ROC and Precision-Recall curves for multiple runs using Dask with parallel training.
@@ -426,7 +544,7 @@ def plot_overlapping_roc_pr_curves(X_dd, y_dd, feature_names, fig_dir, n_runs=10
     def run_single_split(i):
         logging.info(f"\t[Job {i+1}] Splitting and training")
         X_train_dd, X_test_dd, y_train_dd, y_test_dd = train_test_split(
-            X_dd, y_dd, test_size=0.2, shuffle=True, stratify=y_dd, random_state=i
+            X_dd, y_dd, test_size=0.2, shuffle=True, random_state=i
         )
 
         booster = train_xgboost_dask(X_train_dd, y_train_dd, feature_names)
