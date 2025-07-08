@@ -84,10 +84,10 @@ def main() -> None:
     tmp_dir = os.path.join(output_dir, "tmp")
     os.makedirs(tmp_dir, exist_ok=True)
 
-    logging.info(f"Reading Peaks and Genes from 'peaks_near_genes.parquet'")
-    assert os.path.isfile(os.path.join(output_dir, "peaks_near_genes.parquet")), FileNotFoundError("peaks_near_genes.parquet not found in output_dir")
+    logging.info(f"Reading Peaks and Genes from 'tss_distance_score.parquet'")
+    assert os.path.isfile(os.path.join(output_dir, "tss_distance_score.parquet")), FileNotFoundError("tss_distance_score.parquet not found in output_dir")
     
-    peaks_near_genes_df: pd.DataFrame = pd.read_parquet(os.path.join(output_dir, "peaks_near_genes.parquet"))
+    peaks_near_genes_df: pd.DataFrame = pd.read_parquet(os.path.join(output_dir, "tss_distance_score.parquet"))
     peak_ids = peaks_near_genes_df["peak_id"].drop_duplicates()
 
     logging.info('Converting scATACseq peaks to Homer peak format')

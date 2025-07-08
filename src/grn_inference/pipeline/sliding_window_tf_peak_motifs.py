@@ -415,17 +415,19 @@ def main():
     # num_cpu = 4
     
     # Use the peaks and gene names only for peaks that are within 1 MB of the gene's TSS (from preprocessing)
-    logging.info(f"Reading Peaks and Genes from 'peaks_near_genes.parquet'")
-    assert os.path.isfile(os.path.join(output_dir, "peaks_near_genes.parquet")), FileNotFoundError("peaks_near_genes.parquet not found in output_dir")
+    logging.info(f"Reading Peaks and Genes from 'tss_distance_score.parquet'")
+    assert os.path.isfile(os.path.join(output_dir, "tss_distance_score.parquet")), FileNotFoundError("tss_distance_score.parquet not found in output_dir")
     
-    atac_df = pd.read_parquet("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/DS011_mESC/DS011_mESC_sample1/DS011_mESC_ATAC_processed.parquet")
-    rna_df = pd.read_parquet("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/DS011_mESC/DS011_mESC_sample1/DS011_mESC_RNA_processed.parquet")
-    peak_ids = atac_df["peak_id"]
-    gene_names = set(rna_df["gene_id"].dropna())
+    # Runs using peak-gene pairs from the ATAC-seq and RNA-seq datasets
+    # atac_df = pd.read_parquet("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/DS011_mESC/DS011_mESC_sample1/DS011_mESC_ATAC_processed.parquet")
+    # rna_df = pd.read_parquet("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/DS011_mESC/DS011_mESC_sample1/DS011_mESC_RNA_processed.parquet")
+    # peak_ids = atac_df["peak_id"]
+    # gene_names = set(rna_df["gene_id"].dropna())
     
-    peaks_near_genes_df: pd.DataFrame = pd.read_parquet(os.path.join(output_dir, "peaks_near_genes.parquet"))
-    # peak_ids = peaks_near_genes_df["peak_id"].drop_duplicates()
-    # gene_names = peaks_near_genes_df["target_id"].drop_duplicates()
+    # Runs using the pre-processed peaks within 1 Mb of a gene's TSS
+    peaks_near_genes_df: pd.DataFrame = pd.read_parquet(os.path.join(output_dir, "tss_distance_score.parquet"))
+    peak_ids = peaks_near_genes_df["peak_id"].drop_duplicates()
+    gene_names = peaks_near_genes_df["target_id"].drop_duplicates()
     
     # Read in the peak dataframe containing genomic sequences    
     parsed_peak_file = f'{tmp_dir}/peak_sequences.pkl'

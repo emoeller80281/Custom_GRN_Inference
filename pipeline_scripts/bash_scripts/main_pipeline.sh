@@ -17,7 +17,7 @@ CICERO_PEAK_TO_TG_SCORE=false
 PEAK_TO_TG_CORRELATION=false
 
 # Run the TF to peak binding score calculation methods
-SLIDING_WINDOW_TF_TO_PEAK_SCORE=true
+SLIDING_WINDOW_TF_TO_PEAK_SCORE=false
 HOMER_TF_TO_PEAK_SCORE=false
 
 # Combine the score DataFrames
@@ -26,6 +26,15 @@ SUBSAMPLE_PERCENT=50 # Percent of rows of the combined dataframe to subsample
 
 # Train a predictive model to infer the GRN
 TRAIN_XGBOOST_CLASSIFIER=false
+
+# =============================================
+#                   OPTIONS
+# =============================================
+# If "True", runs preprocessing for the dataset files even if the preprocessed files exist
+OVERWRITE_PREPROCESSING_FILES="True"
+
+# Distance in base pairs to map peaks to potential target genes (default 1_000_000)
+TSS_DISTANCE_CUTOFF=1_000_000
 
 # =============================================
 #              USER PATH VARIABLES
@@ -56,6 +65,8 @@ STRING_DB_DIR="$BASE_DIR/data/string_database/$SPECIES/"
 # ENHANCERDB_FILE="$BASE_DIR/enhancer_db/enhancer" # Deprecated
 TF_NAMES_FILE="$BASE_DIR/data/motif_information/$SPECIES/TF_Information_all_motifs.txt"
 MEME_DIR="$BASE_DIR/data/motif_information/$SPECIES/${SPECIES}_motif_meme_files"
+
+
 
 # LOG_DIR="$BASE_DIR/LOGS/${SAMPLE_NAME}/"
 FIG_DIR="$BASE_DIR/figures/$SPECIES/$SAMPLE_NAME"
@@ -141,7 +152,7 @@ check_pipeline_steps() {
         "TRAIN_XGBOOST_CLASSIFIER"
     )
 
-    enabled=0
+    enabled=1
     echo "[INFO] Enabled pipeline steps:"
 
     # Echo which steps are enabled
@@ -347,11 +358,14 @@ run_dataset_preprocessing() {
     echo ""
     echo "Python: Checking if the scATAC-seq and scRNA-seq data is normalized or raw counts"
     /usr/bin/time -v \
-    poetry run python "$PYTHON_SCRIPT_DIR/pipeline/preprocess_datasets.py" \
+    poetry run python "$PYTHON_SCRIPT_DIR/pipeline/data_processing.py" \
         --atac_data_file "$ATAC_FILE_NAME" \
         --rna_data_file "$RNA_FILE_NAME" \
         --species "$SPECIES" \
-        --output_dir "$OUTPUT_DIR"
+        --tss_distance_cutoff $TSS_DISTANCE_CUTOFF \
+        --output_dir "$OUTPUT_DIR" \
+        --fig_dir "$FIG_DIR" \
+        --overwrite_files "$OVERWRITE_PREPROCESSING_FILES"
     
     # After preprocessing, update the file names to the new processed files.
     # This assumes that the processed file name is constructed by replacing
@@ -367,19 +381,17 @@ run_dataset_preprocessing() {
 check_processed_files() {
     echo ""
 
-    # Derive the expected processed filenames from the original file names.
     new_atac_file="$(dirname "$ATAC_FILE_NAME")/$(basename "$ATAC_FILE_NAME" | sed 's/\.[^.]*$/_processed.parquet/')"
     new_rna_file="$(dirname "$RNA_FILE_NAME")/$(basename "$RNA_FILE_NAME" | sed 's/\.[^.]*$/_processed.parquet/')"
 
-    if [ -f "$new_atac_file" ] && [ -f "$new_rna_file" ]; then
+    if [ -f "$new_atac_file" ] && [ -f "$new_rna_file" ] && [ "$OVERWRITE_PREPROCESSING_FILES" != "True" ]; then
         echo "[INFO] Processed files found:"
         echo "    - ATAC: $new_atac_file"
         echo "    - RNA:  $new_rna_file"
-        # Update global variables so downstream steps use the processed files
         ATAC_FILE_NAME="$new_atac_file"
         RNA_FILE_NAME="$new_rna_file"
     else
-        echo "[INFO] Processed files not found. Running dataset preprocessing..."
+        echo "[INFO] Processed files not found or overwrite requested. Running dataset preprocessing..."
         run_dataset_preprocessing
     fi
 }

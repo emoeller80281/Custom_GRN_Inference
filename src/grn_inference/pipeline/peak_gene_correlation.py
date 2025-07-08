@@ -183,7 +183,7 @@ def calculate_peak_to_gene_correlations(
 
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
         
-    peaks_near_genes: pd.DataFrame = pd.read_parquet(os.path.join(output_dir, "peaks_near_genes.parquet"), engine="pyarrow")
+    peaks_near_genes: pd.DataFrame = pd.read_parquet(os.path.join(output_dir, "tss_distance_score.parquet"), engine="pyarrow")
     
     # Map peak_id and gene_id to matrix indices
     peak_id_to_index = {pid: i for i, pid in enumerate(atac_df.index)}

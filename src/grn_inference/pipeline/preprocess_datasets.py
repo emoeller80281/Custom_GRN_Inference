@@ -120,7 +120,7 @@ def load_ensembl_organism_tss(organism, tmp_dir):
 def calculate_tss_distance_score(
     peak_bed: pybedtools.BedTool, 
     tss_bed: pybedtools.BedTool, 
-    rna_df: pd.DataFrame, 
+    gene_names: set[str], 
     tss_distance_cutoff: Union[int, float] = 1e6
     ):
     """
@@ -138,8 +138,8 @@ def calculate_tss_distance_score(
             BedTool object representing scATAC-seq peaks.
         tss_bed (pybedtools.BedTool):
             BedTool object representing gene TSS locations.
-        rna_df (pd.DataFrame):
-            RNA-seq dataset, must have a "gene_id" column.
+        gene_names (set[str]):
+            Set of gene names from the scRNA-seq dataset.
         tss_distance_cutoff (int): 
             The maximum distance (in bp) from a TSS to consider a peak as potentially regulatory.
         
@@ -161,8 +161,9 @@ def calculate_tss_distance_score(
     peak_tss_subset_df: pd.DataFrame = peak_tss_overlap_df[["peak_id", "target_id", "TSS_dist_score"]]
     
     # Filter out any genes not found in the RNA-seq dataset.
-    rna_genes = set(rna_df["gene_id"])
-    peak_tss_subset_df = peak_tss_subset_df[peak_tss_subset_df["target_id"].isin(rna_genes)]
+    gene_names_upper = set(g.upper() for g in gene_names)
+    mask = peak_tss_subset_df["target_id"].str.upper().isin(gene_names_upper)
+    peak_tss_subset_df = peak_tss_subset_df[mask]
     
     logging.info(f'\t- Number of peaks: {len(peak_tss_subset_df.drop_duplicates(subset="peak_id"))}')
     
@@ -205,33 +206,33 @@ def extract_atac_peaks_near_rna_genes(
         
         assert list(peak_df.columns) == ["chrom", "start", "end", "name", "strand"], \
             "peak_df must have columns: chrom, start, end, name, strand"
-        
-    
-    tss_df: pd.DataFrame = load_ensembl_organism_tss(organism, tmp_dir)
-
-    pybedtools.set_tempdir(tmp_dir)
-
-    peak_bed = pybedtools.BedTool.from_dataframe(bedtool_df)
-    tss_bed = pybedtools.BedTool.from_dataframe(tss_df)
-    
-    assert os.path.isdir(output_dir), "`output_dir` is not a directory"
-    
+            
     if not os.path.exists(os.path.join(output_dir, "tss_distance_score.parquet")):
+    
+        tss_df: pd.DataFrame = load_ensembl_organism_tss(organism, tmp_dir)
 
-        peak_tss_subset_df = calculate_tss_distance_score(
-            peak_bed,
-            tss_bed,
-            rna_df,
-            tss_distance_cutoff
-        )
-        
-        peak_tss_subset_df = minmax_normalize_pandas(
-            df=peak_tss_subset_df, 
-            score_cols=["TSS_dist_score"], 
+        pybedtools.set_tempdir(tmp_dir)
+        try:
+            peak_bed = pybedtools.BedTool.from_dataframe(bedtool_df)
+            tss_bed = pybedtools.BedTool.from_dataframe(tss_df)
+            
+            assert os.path.isdir(output_dir), "`output_dir` is not a directory"
+
+            peak_tss_subset_df = calculate_tss_distance_score(
+                peak_bed,
+                tss_bed,
+                gene_names,
+                tss_distance_cutoff
             )
             
-        peak_tss_subset_df.to_parquet(os.path.join(output_dir, "tss_distance_score.parquet"), index=False, engine="pyarrow", compression="snappy")
-        
+            peak_tss_subset_df = minmax_normalize_pandas(
+                df=peak_tss_subset_df, 
+                score_cols=["TSS_dist_score"], 
+                )
+                
+            peak_tss_subset_df.to_parquet(os.path.join(output_dir, "tss_distance_score.parquet"), index=False, engine="pyarrow", compression="snappy")
+        finally:
+            pybedtools.helpers.cleanup(verbose=False, remove_all=True) 
     else:
         logging.info('TSS distance file exists, loading...')
         peak_tss_subset_df = pd.read_parquet(os.path.join(output_dir, "tss_distance_score.parquet"), engine="pyarrow")
@@ -289,7 +290,6 @@ def convert_anndata_to_pandas(adata: AnnData, id_col_name: str) -> pd.DataFrame:
 
     return df
     
-
 def filter_rna_seq_dataset(
     rna_df: pd.DataFrame,
     id_col_name: str = "gene_id",
@@ -455,9 +455,7 @@ def main(args):
 
     logging.info("\nExtracting ATAC peaks within 1 MB of a gene from the RNA dataset")
     peaks_near_genes_df = extract_atac_peaks_near_rna_genes(atac_df, rna_df, args.species, args.tss_distance_cutoff, output_dir)
-    
-    peaks_near_genes_df.to_parquet(os.path.join(output_dir, "peaks_near_genes.parquet"), engine="pyarrow", compression="snappy", index=False)
-            
+                
     logging.info("\nFiltering for peaks with 1MB of a gene's TSS")
     peak_subset = set(peaks_near_genes_df["peak_id"])
     atac_df_filtered = atac_df_norm[atac_df_norm["peak_id"].isin(peak_subset)]

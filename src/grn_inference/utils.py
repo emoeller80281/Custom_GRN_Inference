@@ -110,16 +110,16 @@ def load_atac_dataset(atac_data_file: str) -> pd.DataFrame:
     """
     Loads an ATAC-seq dataset from a csv, tsv, or parquet file
     
-    **csv and tsv files**:
-    - header = row 0
-    - index = None
+    - **Cell Names** should be in the **first row**, set as header
+    - **Peak Location** should be in the **first column**
+    - No index column
 
     Args:
-        atac_data_file (str): csv, tsv, or parquet file
+        atac_data_file (str): Path to the scATAC-seq csv, tsv, or parquet file
 
     Returns:
         df (pd.DataFrame): 
-            DataFrame where column 0 = `"peak_id"` and header = row 0
+            DataFrame where column 0 = `"peak_id"` and row 0 as the header
     """
     
     df = load_dataset(atac_data_file)
@@ -135,27 +135,21 @@ def load_rna_dataset(rna_data_file: str) -> pd.DataFrame:
     """
     Loads an RNA-seq dataset from a csv, tsv, or parquet file.
     
+    - **Cell names** should be in the **first row**, set as header
     - **Gene names** should be in the **first column**
-    - **Cell names** should be in the **first row**
-    
-    **csv and tsv files**:
-    - header = row 0
-    - index = None
+    - No index column
 
     Args:
-        rna_data_file (str): csv, tsv, or parquet file
+        rna_data_file (str): Path to the scRNA-seq csv, tsv, or parquet file
 
     Returns:
         df (pd.DataFrame): 
-            DataFrame where column 0 = `"gene_id"` and header = row 0
+            DataFrame where column 0 = `"gene_id"` and row 0 as the header
     """
     
     df = load_dataset(rna_data_file)
     
     df = df.rename(columns={df.columns[0]: "gene_id"})
-    
-    logging.info(f'\tNumber of peaks: {df.shape[0]}')
-    logging.info(f'\tNumber of cells: {df.shape[1]-1}')
     
     return df
 
@@ -283,8 +277,6 @@ def find_genes_near_peaks(
         peak_tss_subset_df (pandas.DataFrame): 
             A DataFrame containing columns "peak_id", "target_id", and the scaled TSS distance "TSS_dist"
             for peak–gene pairs.
-        gene_list (set):
-            A set of unique gene IDs (target_id) present in the DataFrame.
     """
     
     logging.info(f"Locating peaks that are within {tss_distance_cutoff} bp of each gene's TSS")
