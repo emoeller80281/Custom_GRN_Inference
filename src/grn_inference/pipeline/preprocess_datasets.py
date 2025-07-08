@@ -1,7 +1,7 @@
 import argparse
 import logging
 import os
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -13,6 +13,12 @@ from anndata import AnnData
 
 from grn_inference.plotting import plot_feature_score_histogram
 from grn_inference.normalization import minmax_normalize_pandas
+from grn_inference.utils import (
+    load_atac_dataset,
+    load_rna_dataset,
+    find_genes_near_peaks,
+    format_peaks
+)
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Process TF motif binding potential.")
@@ -59,84 +65,6 @@ def log2_cpm_normalize(df: pd.DataFrame, id_col_name: str, label: str = "dataset
     log2_cpm = np.log2(cpm).reset_index(drop=True)
 
     return pd.concat([id_col, log2_cpm], axis=1)
-
-def load_atac_dataset(atac_data_file: str) -> pd.DataFrame:
-    df: pd.DataFrame = pd.DataFrame()
-    if atac_data_file.lower().endswith('.parquet'):
-        df = pd.read_parquet(atac_data_file)
-        
-    elif atac_data_file.lower().endswith('.csv'):
-        df = pd.read_csv(atac_data_file, sep=",", header=0, index_col=None)
-        
-    elif atac_data_file.lower().endswith('.tsv'):
-        df = pd.read_csv(atac_data_file, sep="\t", header=0, index_col=None)
-        
-    else:
-        raise ValueError(f"ATAC data file must be .csv, .tsv or .parquet: got {atac_data_file}")
-    
-    if df.empty:
-        raise RuntimeError(f"Failed to load ATAC file: {atac_data_file}")
-    
-    df = df.rename(columns={df.columns[0]: "peak_id"})
-    
-    logging.info(f'\tNumber of peaks: {df.shape[0]}')
-    logging.info(f'\tNumber of cells: {df.shape[1]-1}')
-    
-    return df
-
-def load_rna_dataset(rna_data_file: str) -> pd.DataFrame:
-    if rna_data_file.lower().endswith('.parquet'):
-        df = pd.read_parquet(rna_data_file)
-        
-    elif rna_data_file.lower().endswith('.csv'):
-        df = pd.read_csv(rna_data_file, sep=",", header=0, index_col=None)
-        
-    elif rna_data_file.lower().endswith('.tsv'):
-        df = pd.read_csv(rna_data_file, sep="\t", header=0, index_col=None)
-        
-    else:
-        raise ValueError(f"RNA data file must be .csv, .tsv or .parquet: got {rna_data_file}")
-    
-    df = df.rename(columns={df.columns[0]: "gene_id"})
-    
-    if df.empty:
-        raise RuntimeError(f"Failed to load RNA file: {rna_data_file}")
-    
-    logging.info(f'\tNumber of genes: {df.shape[0]}')
-    logging.info(f'\tNumber of cells: {df.shape[1]-1}')
-    
-    return df
-
-def extract_atac_peaks(atac_df, tmp_dir):
-    
-    if not os.path.exists(f"{tmp_dir}/peak_df.parquet"):
-        logging.info(f"Extracting peak information and saving as a bed file")
-        def parse_peak_str(s):
-            try:
-                chrom, coords = s.split(":")
-                start_s, end_s = coords.split("-")
-                return chrom.replace("chr", ""), int(start_s), int(end_s)
-            except Exception:
-                raise ValueError(f"Malformed peak_id '{s}'; expected 'chrN:start-end'.")
-
-        # List of peak strings
-        peak_pos = atac_df["peak_id"].tolist()
-
-        # Apply parsing function to all peak strings
-        parsed = [parse_peak_str(s) for s in peak_pos]
-
-        # Construct DataFrame
-        peak_df = pd.DataFrame(parsed, columns=["chr", "start", "end"])
-        peak_df["peak_id"] = peak_pos
-        
-        # Write the peak DataFrame to a file
-        peak_df.to_parquet(os.path.join(tmp_dir, "peak_df.parquet"), engine="pyarrow", index=False, compression="snappy")
-        
-    else:
-        logging.info("ATAC-seq BED file exists, loading...")
-        peak_df = pd.read_parquet(os.path.join(tmp_dir, "peak_df.parquet"), engine="pyarrow")
-        
-    return peak_df
 
 def load_ensembl_organism_tss(organism, tmp_dir):
     if not os.path.exists(os.path.join(tmp_dir, "ensembl.parquet")):
@@ -189,102 +117,57 @@ def load_ensembl_organism_tss(organism, tmp_dir):
     
     return ensembl_df
 
-def find_genes_near_peaks(peak_bed, tss_bed, rna_df, peak_dist_limit, output_dir):
+def calculate_tss_distance_score(
+    peak_bed: pybedtools.BedTool, 
+    tss_bed: pybedtools.BedTool, 
+    rna_df: pd.DataFrame, 
+    tss_distance_cutoff: Union[int, float] = 1e6
+    ):
     """
     Identify genes whose transcription start sites (TSS) are near scATAC-seq peaks.
     
     This function:
-        1. Uses BedTools to find peaks that are within peak_dist_limit bp of each gene's TSS.
-        2. Converts the BedTool result to a pandas DataFrame.
-        3. Computes the absolute distance between the peak end and gene start (as a proxy for TSS distance).
-        4. Scales these distances using an exponential drop-off function (e^-dist/250000),
+        1. Calculates the absolute distances between peaks and gene TSSs within `tss_distance_cutoff`.
+        2. Scales peak to gene distances using an exponential drop-off function (e^-dist/250000),
            the same method used in the LINGER cis-regulatory potential calculation.
-        5. Deduplicates the data to keep the minimum (i.e., best) peak-to-gene connection.
-        6. Only keeps genes that are present in the RNA-seq dataset.
+        3. Deduplicates the data to keep the minimum (i.e., best) peak-to-gene connection.
+        4. Only keeps genes that are present in the RNA-seq dataset.
         
-    Parameters
-    ----------
-    peak_bed : BedTool
-        A BedTool object representing scATAC-seq peaks.
-    tss_bed : BedTool
-        A BedTool object representing gene TSS locations.
-    rna_df : pandas.DataFrame
-        The RNA-seq dataset, which must have a "gene_id" column.
-    peak_dist_limit : int
-        The maximum distance (in bp) from a TSS to consider a peak as potentially regulatory.
+    Args:
+        peak_bed (pybedtools.BedTool):
+            BedTool object representing scATAC-seq peaks.
+        tss_bed (pybedtools.BedTool):
+            BedTool object representing gene TSS locations.
+        rna_df (pd.DataFrame):
+            RNA-seq dataset, must have a "gene_id" column.
+        tss_distance_cutoff (int): 
+            The maximum distance (in bp) from a TSS to consider a peak as potentially regulatory.
         
-    Returns
-    -------
-    peak_tss_subset_df : pandas.DataFrame
-        A DataFrame containing columns "peak_id", "target_id", and the scaled TSS distance "TSS_dist"
-        for peak–gene pairs.
-    gene_list : set
-        A set of unique gene IDs (target_id) present in the DataFrame.
+    Returns:
+        peak_tss_subset_df (pandas.DataFrame): 
+            A DataFrame containing columns "peak_id", "target_id", and the scaled TSS distance "TSS_dist"
+            for peak–gene pairs.
     """
-    if not os.path.exists(os.path.join(output_dir, "tss_distance_score.parquet")):
-        # 3) Find peaks that are within peak_dist_limit bp of each gene's TSS using BedTools
-        logging.info(f"Locating peaks that are within {peak_dist_limit} bp of each gene's TSS")
-        peak_tss_overlap = peak_bed.window(tss_bed, w=peak_dist_limit)
-        
-        # Define the column types for conversion to DataFrame
-        dtype_dict = {
-            "peak_chr": str,
-            "peak_start": int,
-            "peak_end": int,
-            "peak_id": str,
-            "gene_chr": str,
-            "gene_start": int,
-            "gene_end": int,
-            "gene_id": str
-        }
-        
-        # Convert the BedTool result to a DataFrame for further processing.
-        peak_tss_overlap_df = peak_tss_overlap.to_dataframe(
-            names = [
-                "peak_chr", "peak_start", "peak_end", "peak_id",
-                "gene_chr", "gene_start", "gene_end", "gene_id"
-            ],
-            dtype=dtype_dict,
-            low_memory=False  # ensures the entire file is read in one go
-        ).rename(columns={"gene_id": "target_id"}).dropna()
-        
-        # Calculate the absolute distance between the peak's end and gene's start.
-        # This serves as a proxy for the TSS distance for the peak-to-gene pair.
-        distances = np.abs(peak_tss_overlap_df["peak_end"].values - peak_tss_overlap_df["gene_start"].values)
-        peak_tss_overlap_df["TSS_dist"] = distances
-        
-        # Sort by the TSS distance (lower values imply closer proximity and therefore stronger association)
-        # and drop duplicates keeping only the best association for each peak-target pair.
-        peak_tss_overlap_df = peak_tss_overlap_df.sort_values("TSS_dist")
-        peak_tss_overlap_df = peak_tss_overlap_df.drop_duplicates(subset=["peak_id", "target_id"], keep="first")
-        
-        # Scale the TSS distance using an exponential drop-off function
-        # e^-dist/25000, same scaling function used in LINGER Cis-regulatory potential calculation
-        # https://github.com/Durenlab/LINGER
-        peak_tss_overlap_df["TSS_dist_score"] = np.exp(-peak_tss_overlap_df["TSS_dist"] / 250000)
-        
-        # Keep only the necessary columns.
-        peak_tss_subset_df: pd.DataFrame = peak_tss_overlap_df[["peak_id", "target_id", "TSS_dist_score"]]
-        
-        # Filter out any genes not found in the RNA-seq dataset.
-        rna_genes = set(rna_df["gene_id"])
-        peak_tss_subset_df = peak_tss_subset_df[peak_tss_subset_df["target_id"].isin(rna_genes)]
-        
-        logging.info(f'\t- Number of peaks: {len(peak_tss_subset_df.drop_duplicates(subset="peak_id"))}')
-        
-        peak_tss_subset_df = minmax_normalize_pandas(
-            df=peak_tss_subset_df, 
-            score_cols=["TSS_dist_score"], 
+    peak_tss_overlap_df = find_genes_near_peaks(
+        peak_bed, tss_bed, tss_distance_cutoff
         )
-            
-        peak_tss_subset_df.to_parquet(os.path.join(output_dir, "tss_distance_score.parquet"), index=False, engine="pyarrow", compression="snappy")
-        
-    else:
-        logging.info('TSS distance file exists, loading...')
-        peak_tss_subset_df = pd.read_parquet(os.path.join(output_dir, "tss_distance_score.parquet"), engine="pyarrow")
-        
-    return peak_tss_subset_df
 
+    # Scale the TSS distance using an exponential drop-off function
+    # e^-dist/25000, same scaling function used in LINGER Cis-regulatory potential calculation
+    # https://github.com/Durenlab/LINGER
+    peak_tss_overlap_df["TSS_dist_score"] = np.exp(-peak_tss_overlap_df["TSS_dist"] / 250000)
+    
+    # Keep only the necessary columns.
+    peak_tss_subset_df: pd.DataFrame = peak_tss_overlap_df[["peak_id", "target_id", "TSS_dist_score"]]
+    
+    # Filter out any genes not found in the RNA-seq dataset.
+    rna_genes = set(rna_df["gene_id"])
+    peak_tss_subset_df = peak_tss_subset_df[peak_tss_subset_df["target_id"].isin(rna_genes)]
+    
+    logging.info(f'\t- Number of peaks: {len(peak_tss_subset_df.drop_duplicates(subset="peak_id"))}')
+    
+    return peak_tss_subset_df
+    
 def extract_atac_peaks_near_rna_genes(
     atac_df: pd.DataFrame, 
     rna_df: pd.DataFrame, 
@@ -304,27 +187,61 @@ def extract_atac_peaks_near_rna_genes(
         else:
             raise ValueError(f"Organism not recognized: {organism} (must be 'hg38' or 'mm10').")
 
-    peak_df: pd.DataFrame = extract_atac_peaks(atac_df, tmp_dir)
+    # Format the ATAC peaks in BED format or load a cached file
+    if not os.path.exists(f"{tmp_dir}/peak_df.parquet"):
+        logging.info(f"Extracting peak information and saving as a bed file")
+        
+        peak_df = format_peaks(atac_df["peak_id"])
+    
+        # Set the peak location dataframe to the correct BED format
+        bedtool_df = peak_df.rename(columns={
+            "chromosome": "chrom",
+            "peak_id": "name"
+        })[["chrom", "start", "end", "name", "strand"]]
+    
+    else:
+        logging.info("ATAC-seq BED file exists, loading...")
+        peak_df = pd.read_parquet(os.path.join(tmp_dir, "peak_df.parquet"), engine="pyarrow")
+        
+        assert list(peak_df.columns) == ["chrom", "start", "end", "name", "strand"], \
+            "peak_df must have columns: chrom, start, end, name, strand"
+        
+    
     tss_df: pd.DataFrame = load_ensembl_organism_tss(organism, tmp_dir)
 
     pybedtools.set_tempdir(tmp_dir)
 
-    peak_bed = pybedtools.BedTool.from_dataframe(peak_df)
+    peak_bed = pybedtools.BedTool.from_dataframe(bedtool_df)
     tss_bed = pybedtools.BedTool.from_dataframe(tss_df)
     
-    peaks_near_genes_df = find_genes_near_peaks(
-        peak_bed,
-        tss_bed,
-        rna_df,
-        tss_distance_cutoff,
-        output_dir
-    )
+    assert os.path.isdir(output_dir), "`output_dir` is not a directory"
+    
+    if not os.path.exists(os.path.join(output_dir, "tss_distance_score.parquet")):
+
+        peak_tss_subset_df = calculate_tss_distance_score(
+            peak_bed,
+            tss_bed,
+            rna_df,
+            tss_distance_cutoff
+        )
+        
+        peak_tss_subset_df = minmax_normalize_pandas(
+            df=peak_tss_subset_df, 
+            score_cols=["TSS_dist_score"], 
+            )
+            
+        peak_tss_subset_df.to_parquet(os.path.join(output_dir, "tss_distance_score.parquet"), index=False, engine="pyarrow", compression="snappy")
+        
+    else:
+        logging.info('TSS distance file exists, loading...')
+        peak_tss_subset_df = pd.read_parquet(os.path.join(output_dir, "tss_distance_score.parquet"), engine="pyarrow")
+    
 
     pybedtools.helpers.cleanup(verbose=False, remove_all=True)
     
-    plot_feature_score_histogram(peaks_near_genes_df, "TSS_dist_score", output_dir)
+    plot_feature_score_histogram(peak_tss_subset_df, "TSS_dist_score", output_dir)
     
-    return peaks_near_genes_df
+    return peak_tss_subset_df
 
 def ensure_matching_cell_barcodes(atac_df, rna_df):
     atac_cells = atac_df.columns[1:]

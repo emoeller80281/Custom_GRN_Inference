@@ -24,6 +24,10 @@ from tqdm import tqdm
 
 # from grn_inference.normalization import minmax_normalize_dask
 from grn_inference.plotting import plot_feature_score_histogram
+from grn_inference.normalization import (
+    clip_and_normalize_log1p_pandas,
+    minmax_normalize_pandas
+)
 from grn_inference.create_homer_peak_file import format_peaks
 
 # at module top‐level
@@ -284,13 +288,21 @@ def associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, gene_na
         raise RuntimeError("No valid TF motif parquet files found after filtering.")
 
     ddf = dd.read_parquet(valid_parquet_files)
+    df = ddf.compute()
     
-    # normalized_ddf = minmax_normalize_dask(
-    #     ddf=normalized_ddf, 
-    #     score_cols=["sliding_window_score"], 
-    # )
+    normalized_df = clip_and_normalize_log1p_pandas(
+        df=df,
+        score_cols=["sliding_window_score"],
+        quantiles=(0.05, 0.95),
+        apply_log1p=True,
+    )
     
-    return ddf
+    normalized_df = minmax_normalize_pandas(
+        df=normalized_df, 
+        score_cols=["sliding_window_score"], 
+    )
+    
+    return normalized_df
 
 def find_ATAC_peak_sequence(peak_df, reference_genome_dir, parsed_peak_file, fig_dir):
     logging.info("Reading in ATACseq peak file")
@@ -406,9 +418,14 @@ def main():
     logging.info(f"Reading Peaks and Genes from 'peaks_near_genes.parquet'")
     assert os.path.isfile(os.path.join(output_dir, "peaks_near_genes.parquet")), FileNotFoundError("peaks_near_genes.parquet not found in output_dir")
     
+    atac_df = pd.read_parquet("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/DS011_mESC/DS011_mESC_sample1/DS011_mESC_ATAC_processed.parquet")
+    rna_df = pd.read_parquet("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/DS011_mESC/DS011_mESC_sample1/DS011_mESC_RNA_processed.parquet")
+    peak_ids = atac_df["peak_id"]
+    gene_names = set(rna_df["gene_id"].dropna())
+    
     peaks_near_genes_df: pd.DataFrame = pd.read_parquet(os.path.join(output_dir, "peaks_near_genes.parquet"))
-    peak_ids = peaks_near_genes_df["peak_id"].drop_duplicates()
-    gene_names = peaks_near_genes_df["target_id"].drop_duplicates()
+    # peak_ids = peaks_near_genes_df["peak_id"].drop_duplicates()
+    # gene_names = peaks_near_genes_df["target_id"].drop_duplicates()
     
     # Read in the peak dataframe containing genomic sequences    
     parsed_peak_file = f'{tmp_dir}/peak_sequences.pkl'
@@ -431,14 +448,14 @@ def main():
         logging.info(f'\tDone!')
         
     # Associate the TFs from TF_Information_all_motifs.txt to the motif with the matching motifID
-    ddf = associate_tf_with_motif_pwm(
+    df = associate_tf_with_motif_pwm(
         tf_names_file, meme_dir, chr_pos_to_seq,
         gene_names, species, num_cpu, output_dir
     )
     
-    plot_feature_score_histogram(ddf, "sliding_window_score", output_dir)
+    plot_feature_score_histogram(df, "sliding_window_score", output_dir)
 
-    ddf.to_parquet(f"{output_dir}/sliding_window_tf_to_peak_score.parquet", engine="pyarrow", compression="snappy")
+    df.to_parquet(f"{output_dir}/sliding_window_tf_to_peak_score.parquet", engine="pyarrow", compression="snappy")
     logging.info(f"Wrote final TF–peak sliding window scores to sliding_window_tf_to_peak_score.parquet")
 
     
