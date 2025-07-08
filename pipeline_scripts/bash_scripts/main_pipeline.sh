@@ -17,7 +17,7 @@ CICERO_PEAK_TO_TG_SCORE=false
 PEAK_TO_TG_CORRELATION=false
 
 # Run the TF to peak binding score calculation methods
-SLIDING_WINDOW_TF_TO_PEAK_SCORE=false
+SLIDING_WINDOW_TF_TO_PEAK_SCORE=true
 HOMER_TF_TO_PEAK_SCORE=false
 
 # Combine the score DataFrames
@@ -152,7 +152,7 @@ check_pipeline_steps() {
         "TRAIN_XGBOOST_CLASSIFIER"
     )
 
-    enabled=1
+    enabled=0
     echo "[INFO] Enabled pipeline steps:"
 
     # Echo which steps are enabled
