@@ -37,14 +37,41 @@ def plot_scores_grouped_by_tf_tg(df, title, score_col):
     plt.show()
     
 def plot_score_distribution_by_tf(
-    df,
-    feature_col,
-    tfs_of_interest,
-    limit_x = True
+    df: pd.DataFrame,
+    feature_col: str,
+    tfs_of_interest: list[str],
+    limit_x: bool = True,
+    top_tf_limit: int = 40
 ):
     fig = plt.figure(figsize=(7, 5))
     y_cmap = plt.get_cmap("tab20c")
     
+    # Limit the number of TFs to plot
+    if len(tfs_of_interest) > top_tf_limit:
+        print(f"Limiting to scores from the top {top_tf_limit} TFs, found {len(tfs_of_interest)}")
+        tf_rows_in_df = df[df["source_id"].isin(tfs_of_interest)]
+        df_by_tf = (
+            tf_rows_in_df
+            .groupby("source_id")
+            .count()
+            .sort_values(feature_col, ascending=False)
+            .reset_index()
+            .iloc[:top_tf_limit]
+            )
+        tfs_of_interest = df_by_tf["source_id"].drop_duplicates().to_list()
+        
+    # Orders by the TF with the most scores -> least scores
+    else:
+        tf_rows_in_df = df[df["source_id"].isin(tfs_of_interest)]
+        df_by_tf = (
+            tf_rows_in_df
+            .groupby("source_id")
+            .count()
+            .sort_values(feature_col, ascending=False)
+            .reset_index()
+            )
+        tfs_of_interest = df_by_tf["source_id"].drop_duplicates().to_list()
+        
     for x, tf in enumerate(tfs_of_interest):
         tfs = df[df["source_id"] == tf]
         percent_total_true_edges = len(tfs[feature_col]) / len(df[feature_col])
