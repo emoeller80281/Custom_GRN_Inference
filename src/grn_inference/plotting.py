@@ -159,8 +159,8 @@ def plot_feature_score_histograms_split_by_label(inferred_network, features, fig
         bins = np.linspace(combined_vals.min(), combined_vals.max(), 75)  # 150 equal-width bins
 
         # Plot histograms using the same bin edges
-        plt.hist(false_vals_sampled, bins=bins, alpha=0.6, color='#dc8634', label="False (0)")
-        plt.hist(true_vals_sampled, bins=bins, alpha=0.6, color='#4195df', label="True (1)")
+        plt.hist(false_vals_sampled, bins=bins, alpha=0.6, color="#747474", label="False Scores")
+        plt.hist(true_vals_sampled, bins=bins, alpha=0.6, color='#4195df', label="True Scores")
 
         plt.title(feature, fontsize=14)
         plt.xlabel("Score", fontsize=12)
@@ -231,7 +231,7 @@ def plot_multi_sample_feature_score_histograms(
         sns.histplot(
             inferred_network1[feature].dropna(),
             bins=50, alpha=0.7,
-            color='#1682b1', edgecolor="#032b5f",
+            color='#4195df', edgecolor="#032b5f",
             stat='proportion',
             label=label1_name,
             ax=ax
@@ -239,7 +239,7 @@ def plot_multi_sample_feature_score_histograms(
         sns.histplot(
             inferred_network2[feature].dropna(),
             bins=50, alpha=0.7,
-            color="#cb5f17", edgecolor="#b13301",
+            color="#747474", edgecolor="#2D2D2D",
             stat='proportion',
             label=label2_name,
             ax=ax
@@ -401,7 +401,7 @@ def plot_permutation_importance_plot(xgb_model, X_test, y_test, fig_dir):
         width=importances[sorted_idx],
         xerr=std[sorted_idx],
         align='center',
-        color='skyblue',
+        color='#747474',
         edgecolor='black'
     )
     plt.yticks(ticks=range(len(importances)), labels=feature_names[sorted_idx], fontsize=12)
@@ -468,7 +468,7 @@ def plot_stability_boxplot(X: pd.DataFrame, y: pd.Series, feature_names: list[st
 
     # Plotting AUROC distribution
     plt.figure(figsize=(8, 6))
-    plt.boxplot(auroc_scores, patch_artist=True, boxprops=dict(facecolor="blue"))
+    plt.boxplot(auroc_scores, patch_artist=True, boxprops=dict(facecolor="#4195df"))
     plt.ylabel("AUROC", fontsize=16)
     plt.title(f"Stability Analysis of AUROC over {n_runs} runs", fontsize=18)
     plt.ylim((0, 1))
@@ -514,7 +514,7 @@ def plot_model_auroc_auprc(X_dd, y_dd, model, fig_dir):
     fig, axes = plt.subplots(1, 2, figsize=(12, 6))
 
     # ROC curve
-    axes[0].plot(fpr, tpr, color="darkorange", lw=2, label=f"AUC = {roc_auc:.3f}")
+    axes[0].plot(fpr, tpr, color="#4195df", lw=2, label=f"AUC = {roc_auc:.3f}")
     axes[0].plot([0, 1], [0, 1], color="navy", lw=1, linestyle="--")
     axes[0].set_xlabel("False Positive Rate")
     axes[0].set_ylabel("True Positive Rate")
@@ -522,7 +522,7 @@ def plot_model_auroc_auprc(X_dd, y_dd, model, fig_dir):
     axes[0].legend(loc="lower right")
 
     # Precision-Recall curve
-    axes[1].plot(recall, precision, color="darkgreen", lw=2, label=f"AP = {avg_prec:.3f}")
+    axes[1].plot(recall, precision, color="#4195df", lw=2, label=f"AP = {avg_prec:.3f}")
     axes[1].set_xlabel("Recall")
     axes[1].set_ylabel("Precision")
     axes[1].set_title("Precision-Recall Curve")
@@ -572,7 +572,7 @@ def plot_overlapping_roc_pr_curves(X_dd, y_dd, feature_names, fig_dir, n_runs=10
         roc_auc = auc(fpr, tpr)
         axes[0].plot(fpr, tpr, lw=1, alpha=0.8, label=f"{labels[i]} (AUC={roc_auc:.2f})")
 
-    axes[0].plot([0, 1], [0, 1], color="navy", lw=1, linestyle="--")
+    axes[0].plot([0, 1], [0, 1], color="#4195df", lw=1, linestyle="--")
     axes[0].set_xlim([0.0, 1.0])
     axes[0].set_ylim([0.0, 1.0])
     axes[0].set_xlabel("False Positive Rate", fontsize=14)
@@ -584,7 +584,7 @@ def plot_overlapping_roc_pr_curves(X_dd, y_dd, feature_names, fig_dir, n_runs=10
     for i, (y_true, y_score) in enumerate(zip(y_true_list, y_score_list)):
         precision, recall, _ = precision_recall_curve(y_true, y_score)
         avg_prec = average_precision_score(y_true, y_score)
-        axes[1].plot(recall, precision, lw=1, alpha=0.8, label=f"{labels[i]} (PR={avg_prec:.2f})")
+        axes[1].plot(recall, precision, lw=1, alpha=0.8, color="4195df", label=f"{labels[i]} (PR={avg_prec:.2f})")
 
     axes[1].set_xlim([0.0, 1.0])
     axes[1].set_ylim([0.0, 1.05])
@@ -641,7 +641,7 @@ def plot_feature_ablation(feature_names, X_train, X_test, y_train, y_test, full_
     auroc_scores: list = list(auroc_score_set)
 
     plt.figure(figsize=(10, 6))
-    bars = plt.bar(features, auroc_scores, color='steelblue')
+    bars = plt.bar(features, auroc_scores, color='#4195df')
     plt.axhline(full_auroc, color='black', linestyle='--', label=f'Full model AUROC = {full_auroc:.2f}')
     plt.xlabel("Removed Feature", fontsize=14)
     plt.ylabel("AUROC", fontsize=14)

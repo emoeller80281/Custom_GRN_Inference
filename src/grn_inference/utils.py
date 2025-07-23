@@ -51,16 +51,18 @@ def label_edges_with_ground_truth(df_to_label: pd.DataFrame, ground_truth_df: pd
 
     logging.info("Adding labels to inferred network")
     
-    df_to_label["source_id"].str.upper()
-    df_to_label["target_id"].str.upper()
+    df_to_label["source_id"] = df_to_label["source_id"].str.upper()
+    df_to_label["target_id"] = df_to_label["target_id"].str.upper()
 
     def label_partition(df):
+        if isinstance(df, pd.Series):
+            raise ValueError("Expected DataFrame but got Series — check apply usage.")
         df = df.copy()  # <-- avoids SettingWithCopyWarning
         tf_tg_tuples = list(zip(df["source_id"], df["target_id"]))
         df.loc[:, "label"] = [1 if pair in ground_truth_pairs else 0 for pair in tf_tg_tuples]
         return df
 
-    labeled_df = df_to_label.apply(label_partition)
+    labeled_df = label_partition(df_to_label)
 
     return labeled_df
 

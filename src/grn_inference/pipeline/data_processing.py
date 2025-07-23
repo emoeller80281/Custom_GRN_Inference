@@ -321,6 +321,8 @@ def extract_atac_peaks_near_rna_genes(
                 "chromosome": "chrom",
                 "peak_id": "name"
             })[["chrom", "start", "end", "name", "strand"]]
+            
+            bedtool_df.to_parquet(os.path.join(tmp_dir, "peak_df.parquet"), engine="pyarrow", compression="snappy")
         
         else:
             logging.info("ATAC-seq BED file exists, loading...")

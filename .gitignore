@@ -22,7 +22,9 @@ reference_networks/
 *.tmp
 *.bed
 *.pairs
+*.npz
 *.out
+*.parquet
 motif_pwms/*
 other_method_grns
 figures

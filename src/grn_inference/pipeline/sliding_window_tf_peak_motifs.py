@@ -290,19 +290,19 @@ def associate_tf_with_motif_pwm(tf_names_file, meme_dir, chr_pos_to_seq, gene_na
     ddf = dd.read_parquet(valid_parquet_files)
     df = ddf.compute()
     
-    normalized_df = clip_and_normalize_log1p_pandas(
-        df=df,
-        score_cols=["sliding_window_score"],
-        quantiles=(0.05, 0.95),
-        apply_log1p=True,
-    )
+    # normalized_df = clip_and_normalize_log1p_pandas(
+    #     df=df,
+    #     score_cols=["sliding_window_score"],
+    #     quantiles=(0.05, 0.95),
+    #     apply_log1p=True,
+    # )
     
-    normalized_df = minmax_normalize_pandas(
-        df=normalized_df, 
-        score_cols=["sliding_window_score"], 
-    )
+    # normalized_df = minmax_normalize_pandas(
+    #     df=normalized_df, 
+    #     score_cols=["sliding_window_score"], 
+    # )
     
-    return normalized_df
+    return df
 
 def find_ATAC_peak_sequence(peak_df, reference_genome_dir, parsed_peak_file, fig_dir):
     logging.info("Reading in ATACseq peak file")
