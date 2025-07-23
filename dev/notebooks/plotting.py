@@ -21,7 +21,7 @@ def balance_dataset(
 
 def plot_scores_grouped_by_tf(df, title, height_col):
     plt.figure(figsize=(10,3))
-    plt.bar(x=df['source_id'], height=df[height_col], color="blue")
+    plt.bar(x=df['source_id'], height=df[height_col], color="#4195df")
     plt.title(title)
     plt.ylabel("Number of Targets", fontsize=10)
     plt.xticks(rotation=55, fontsize=10)
@@ -48,18 +48,27 @@ def plot_score_distribution_by_tf(
     fig = plt.figure(figsize=(7, 5))
     y_cmap = plt.get_cmap("tab20c")
     
-    assert tf_col_name in df.columns, f"tf_col_name {tf_col_name} not in df.columns {df.columns}"
+    # TF column exists
+    assert tf_col_name in df.columns, f"ERROR: tf_col_name {tf_col_name} not in df.columns {df.columns}"
     
-    if len(tfs_of_interest) == 0:
-        print(f"No TFs specified by tfs_of_interest, plotting top top_tf_limit ({top_tf_limit}) TFs")
-        tfs_of_interest = df[tf_col_name].drop_duplicates().to_list()
-        
+    # All TFs are in the df
     assert all(x in df[tf_col_name].to_list() for x in tfs_of_interest), \
-        f"Found items in tfs_of_interest not in df: {[i for i in tfs_of_interest if i not in df[tf_col_name].to_list()]}"
-        
+        f"ERROR: Found items in tfs_of_interest not in df: {[i for i in tfs_of_interest if i not in df[tf_col_name].to_list()]}"
+    
+    # Set top_tf_limit to the number of TFs if it's too high
+    if df[tf_col_name].nunique() < top_tf_limit:
+        print(f"INFO: top_tf_limit set to {top_tf_limit}, but only {df[tf_col_name].nunique()} unique TFs in the df.\n\t- Setting top_tf_limit = {df[tf_col_name].nunique()}")
+        top_tf_limit = df[tf_col_name].nunique()
+    
+    # Use all TFs if none are specified
+    if len(tfs_of_interest) == 0:
+        print(f"INFO: No TFs of interest specified, defaulting to the top_tf_limit ({top_tf_limit}) TFs")
+        tfs_of_interest = df[tf_col_name].drop_duplicates().to_list()
+
     # Limit the number of TFs to plot
     if len(tfs_of_interest) > top_tf_limit:
-        print(f"Limiting to scores from the top {top_tf_limit} TFs, found {len(tfs_of_interest)}")
+
+        print(f"INFO: Limiting to scores from the top {top_tf_limit} TFs, found {len(tfs_of_interest)}")
         tf_rows_in_df = df[df[tf_col_name].isin(tfs_of_interest)]
         df_by_tf = (
             tf_rows_in_df
