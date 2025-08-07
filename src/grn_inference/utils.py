@@ -281,8 +281,14 @@ def find_genes_near_peaks(
             for peak–gene pairs.
     """
     
+    logging.info("peak_bed")
+    logging.info(peak_bed.head())
+    logging.info("\nTSS bed")
+    logging.info(tss_bed.head())
+    
     logging.info(f"Locating peaks that are within {tss_distance_cutoff} bp of each gene's TSS")
     peak_tss_overlap = peak_bed.window(tss_bed, w=tss_distance_cutoff)
+    
     
     # Define the column types for conversion to DataFrame
     dtype_dict = {
@@ -305,6 +311,8 @@ def find_genes_near_peaks(
         dtype=dtype_dict,
         low_memory=False  # ensures the entire file is read in one go
     ).rename(columns={"gene_id": "target_id"}).dropna()
+    
+    logging.info(peak_tss_overlap_df.head())
     
     # Calculate the absolute distance in basepairs between the peak's end and gene's start.
     distances = np.abs(peak_tss_overlap_df["peak_end"].values - peak_tss_overlap_df["gene_start"].values)

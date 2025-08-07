@@ -148,6 +148,9 @@ def calculate_tss_distance_score(
             A DataFrame containing columns "peak_id", "target_id", and the scaled TSS distance "TSS_dist"
             for peak–gene pairs.
     """
+                
+
+    
     peak_tss_overlap_df = find_genes_near_peaks(
         peak_bed, tss_bed, tss_distance_cutoff
         )
@@ -217,6 +220,9 @@ def extract_atac_peaks_near_rna_genes(
             tss_bed = pybedtools.BedTool.from_dataframe(tss_df)
             
             assert os.path.isdir(output_dir), "`output_dir` is not a directory"
+            
+            gene_names = set([gene for gene in rna_df["gene_id"]])
+
 
             peak_tss_subset_df = calculate_tss_distance_score(
                 peak_bed,

@@ -143,7 +143,6 @@ def get_background_freq(species):
 
     return background_freq
     
-
 def process_motif_file_and_save(file, meme_dir, output_dir):
     try:
         # Load the PWM
@@ -457,7 +456,7 @@ def main():
     
     plot_feature_score_histogram(df, "sliding_window_score", output_dir)
 
-    df.to_parquet(f"{output_dir}/sliding_window_tf_to_peak_score.parquet", engine="pyarrow", compression="snappy")
+    df.to_parquet(f"{output_dir}/no_norm_sliding_window_tf_to_peak_score.parquet", engine="pyarrow", compression="snappy")
     logging.info(f"Wrote final TF–peak sliding window scores to sliding_window_tf_to_peak_score.parquet")
 
     

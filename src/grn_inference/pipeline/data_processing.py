@@ -328,15 +328,25 @@ def extract_atac_peaks_near_rna_genes(
             logging.info("ATAC-seq BED file exists, loading...")
             peak_df = pd.read_parquet(os.path.join(tmp_dir, "peak_df.parquet"), engine="pyarrow")
             
+            logging.info(peak_df.head())
+            
             assert list(peak_df.columns) == ["chrom", "start", "end", "name", "strand"], \
                 "peak_df must have columns: chrom, start, end, name, strand"
                 
         tss_df: pd.DataFrame = load_ensembl_organism_tss(organism, tmp_dir)
+        
+        logging.info(tss_df.head())
 
         pybedtools.set_tempdir(tmp_dir)
         try:
-            peak_bed = pybedtools.BedTool.from_dataframe(peak_df)
-            tss_bed = pybedtools.BedTool.from_dataframe(tss_df)
+            logging.info("peak_df.head()")
+            logging.info(peak_df.head())
+            logging.info("\n")
+            logging.info("tss_df.head()")
+            logging.info(tss_df.head())
+            
+            peak_bed = pybedtools.BedTool.from_dataframe(peak_df[["chr", "start", "end", "peak_id"]])
+            tss_bed = pybedtools.BedTool.from_dataframe(tss_df[["chr", "start", "end", "gene_id"]])
             
             peak_tss_subset_df = calculate_tss_distance_score(
                 peak_bed,
