@@ -281,11 +281,6 @@ def find_genes_near_peaks(
             for peak–gene pairs.
     """
     
-    logging.info("peak_bed")
-    logging.info(peak_bed.head())
-    logging.info("\nTSS bed")
-    logging.info(tss_bed.head())
-    
     logging.info(f"Locating peaks that are within {tss_distance_cutoff} bp of each gene's TSS")
     peak_tss_overlap = peak_bed.window(tss_bed, w=tss_distance_cutoff)
     

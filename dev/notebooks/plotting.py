@@ -6,6 +6,8 @@ import numpy as np
 from typing import Union
 from tqdm import tqdm
 from sklearn.metrics import roc_curve, auc
+import matplotlib.patches as mpatches
+
 
 def balance_dataset(
     df1: Union[pd.DataFrame, pd.Series], 
@@ -229,8 +231,9 @@ def plot_true_false_distribution(
     title: str = "", 
     log: bool = False,
     balance: bool = False,
-    density: bool = False
-    ):
+    density: bool = False,
+    ax: Union[plt.Axes, None] = None
+    ) -> plt.Figure:
     
     if balance and not density: # Don't balance if using the density plot, it normalizes
         true_series, false_series = balance_dataset(true_series, false_series)
@@ -243,54 +246,71 @@ def plot_true_false_distribution(
             print("WARNING: Number of score are unbalanced, consider setting balance=True or density=True")
     
     combined = pd.concat([true_series, false_series]).dropna()
+    if combined.empty:
+        fig, ax2 = plt.subplots(figsize=(5, 3))
+        ax2.set_title(title or "No data")
+        ax2.set_xlabel(xlabel)
+        ax2.set_ylabel(ylabel or ("Density" if density else "Frequency"))
+        return fig
+    
     min_score = combined.min()
     max_score = combined.max()
     bin_width = max((max_score - min_score) / 85, 1e-3)
     bins = np.arange(min_score, max_score + bin_width, bin_width).tolist()
     
-    plt.figure(figsize=(5,3))
-    plt.hist(
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(5, 3))
+    elif isinstance(ax, plt.Axes):
+        fig = ax.figure
+    else:
+        raise ValueError("ax must be a matplotlib Axes or None")
+    
+    ax.hist(
         true_series,
         bins=bins,
         alpha=0.5,
         color="#4195df",
-        label="Edge in\nGround Truth",
+        # label="Edge in\nGround Truth",
         density=density,
         log=log
     )
-    plt.hist(
+    ax.hist(
         false_series,
         bins=bins,
         alpha=0.5,
         color="#747474",
-        label="Edge not in\nGround Truth",
+        # label="Edge not in\nGround Truth",
         density=density,
         log=log
     )
     
     if len(ylabel) == 0:
-        if not density:
-            ylabel = "Frequency"
-        if density:
-            ylabel = "Density"
+        ylabel = "Density" if density else "Frequency"
             
+    ax.set_title(title, fontsize=10)
+    ax.set_xlabel(xlabel, fontsize=10)
+    ax.set_ylabel(ylabel, fontsize=10)
+    ax.tick_params(axis='x', labelsize=10)
+    ax.tick_params(axis='y', labelsize=10)
+    ax.set_xlim((0, max_score))
+    # fig.legend(bbox_to_anchor=(1.05, 1), loc='upper left', borderaxespad=0., fontsize=9)
+    fig.tight_layout()
     
-    plt.title(title, fontsize=10)
-    plt.xlabel(xlabel, fontsize=10)
-    plt.ylabel(ylabel, fontsize=10)
-    plt.xticks(fontsize=10)
-    plt.yticks(fontsize=10)
-    plt.xlim((0, max_score))
-    # plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', borderaxespad=0., fontsize=9)
-    plt.tight_layout()
-    plt.show()
+    return fig
     
-def plot_auroc(df: pd.DataFrame, score_col: str, title: str):
+def plot_auroc(df: pd.DataFrame, score_col: str, title: str="", ax: Union[plt.Axes, None]=None):
     assert score_col in df.columns, \
         f"{score_col} not in df columns. Columns: {df.columns}"
         
     assert "label" in df.columns, \
         f"label not in df columns. Columns: {df.columns}"
+        
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(5, 3))
+    elif isinstance(ax, plt.Axes):
+        fig = ax.figure
+    else:
+        raise ValueError("ax must be a matplotlib Axes or None")
     
     df = df.copy()
     df = df.dropna(subset=["label", score_col])
@@ -299,11 +319,74 @@ def plot_auroc(df: pd.DataFrame, score_col: str, title: str):
 
     fpr, tpr, _ = roc_curve(y_true, y_score)
     roc_auc = auc(fpr, tpr)
+        
+    ax.plot(fpr, tpr, lw=1, alpha=0.8, color="#4195df", label=f"AUROC = {roc_auc:.2f}")
+    ax.plot([0, 1], [0, 1], color="black", lw=1, linestyle="--")
+    # ax.title(title, fontsize=10)
+    ax.legend(bbox_to_anchor=(0.5, -0.25), loc="lower center", borderaxespad=0., fontsize=9)
+    
+    return fig
 
-    plt.figure(figsize=(5, 3))
-    plt.plot(fpr, tpr, lw=1, alpha=0.8, color="#4195df", label=f"AUROC = {roc_auc:.2f}")
-    plt.plot([0, 1], [0, 1], color="black", lw=1, linestyle="--")
-    # plt.title(title, fontsize=10)
-    plt.legend(bbox_to_anchor=(0.5, -0.25), loc="lower center", borderaxespad=0., fontsize=9)
-    plt.show()
+def plot_scores_distribution(df: pd.DataFrame, title: str, ax: Union[plt.Axes, None]):
+    """Extract the true and false scores by the value of each row in the 'label' column"""
+    assert "label" in df.columns, f"label column does not exist, columns: {df.columns}"
+    
+    true_scores = df[df["label"] == True]
+    false_scores = df[df["label"] == False]
+
+    fig = plot_true_false_distribution(
+        true_series=true_scores["sliding_window_score"], 
+        false_series=false_scores["sliding_window_score"],
+        xlabel="Sliding Window Score",
+        title=title,
+        balance=True,
+        log=False,
+        ax=ax
+        )
+    
+    return fig
+
+def tg_assignment_multiplot(nearest_tss_df, mira_df, cicero_df, suptitle):
+    fig, axes = plt.subplots(2, 3, figsize=(12, 6))
+
+    # Column 1: gene TSS
+    plot_scores_distribution(nearest_tss_df,
+                            title="Nearest gene TSS to peak",
+                            ax=axes[0, 0])
+    plot_auroc(nearest_tss_df,
+                        score_col="sliding_window_score",
+                        ax=axes[1, 0])
+
+    # Column 2: MIRA peak-TG
+    plot_scores_distribution(mira_df,
+                            title="MIRA peak-TG",
+                            ax=axes[0, 1])
+    plot_auroc(mira_df,
+                        score_col="sliding_window_score",
+                        ax=axes[1, 1])
+
+    # Column 3: Cicero peak-TG
+    plot_scores_distribution(cicero_df,
+                            title="Cicero peak-TG",
+                            ax=axes[0, 2])
+    plot_auroc(cicero_df,
+                        score_col="sliding_window_score",
+                        ax=axes[1, 2])
+
+    legend_handles = [
+        mpatches.Patch(color="#4195df", alpha=0.5, label="Edge in Ground Truth"),
+        mpatches.Patch(color="#747474", alpha=0.5, label="Edge not in Ground Truth")
+    ]
+    fig.legend(handles=legend_handles,
+            loc="lower center",
+            bbox_to_anchor=(0.5, -0.04),  # centered below plots
+            ncol=2,
+            fontsize=9)
+
+    plt.suptitle(suptitle)
+
+    plt.tight_layout()
+    return fig
+
+
     
