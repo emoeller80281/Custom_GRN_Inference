@@ -329,7 +329,7 @@ def extract_atac_peaks_near_rna_genes(
             logging.info("ATAC-seq BED file exists, loading...")
             peak_df = pd.read_parquet(os.path.join(tmp_dir, "peak_df.parquet"), engine="pyarrow")
             
-            logging.info(peak_df.head())
+            logging.debug(peak_df.head())
             
             assert list(peak_df.columns) == ["chrom", "start", "end", "name", "strand"], \
                 "peak_df must have columns: chrom, start, end, name, strand"
@@ -341,7 +341,8 @@ def extract_atac_peaks_near_rna_genes(
                 
         tss_df: pd.DataFrame = load_ensembl_organism_tss(organism, tmp_dir)
         
-        logging.info(tss_df.head())
+        logging.debug("\ntss_df.head()")
+        logging.debug(tss_df.head())
 
         pybedtools.set_tempdir(tmp_dir)
         try:
@@ -349,6 +350,9 @@ def extract_atac_peaks_near_rna_genes(
             for col in ["start", "end"]:
                 peak_df[col] = pd.to_numeric(peak_df[col], errors="coerce")
 
+            logging.debug("\npeak_df.head")
+            logging.debug(peak_df.head())
+            
             # Drop rows with invalid values
             peak_df = peak_df.dropna(subset=["chr", "start", "end", "peak_id"])
 
@@ -373,11 +377,11 @@ def extract_atac_peaks_near_rna_genes(
             tss_df["chr"]  = tss_df["chr"].map(add_chr_prefix)
             peak_df["chr"] = peak_df["chr"].map(add_chr_prefix)
             
-            logging.info("peak_df.head()")
-            logging.info(peak_df.head())
-            logging.info("\n")
-            logging.info("tss_df.head()")
-            logging.info(tss_df.head())
+            logging.debug("peak_df.head()")
+            logging.debug(peak_df.head())
+            logging.debug("\n")
+            logging.debug("tss_df.head()")
+            logging.debug(tss_df.head())
             
             peak_bed = pybedtools.BedTool.from_dataframe(peak_df[["chr", "start", "end", "peak_id"]])
             tss_bed = pybedtools.BedTool.from_dataframe(tss_df[["chr", "start", "end", "gene_id"]])
@@ -397,6 +401,8 @@ def extract_atac_peaks_near_rna_genes(
                 score_cols=["TSS_dist_score"], 
                 )
             
+            
+            
             print(peaks_near_genes_df)
             
             logging.info(f"    - Saving peak to TSS distances to: {os.path.join(output_dir, 'tss_distance_score.parquet')}")
@@ -413,9 +419,9 @@ def extract_atac_peaks_near_rna_genes(
         logging.info('    - tss_distance_score.parquet TSS distance file exists, loading...')
         peaks_near_genes_df = pd.read_parquet(os.path.join(output_dir, "tss_distance_score.parquet"), engine="pyarrow")
     
-    plot_feature_score_histogram(peaks_near_genes_df, "TSS_dist_score", output_dir)
+        plot_feature_score_histogram(peaks_near_genes_df, "TSS_dist_score", output_dir)
     
-    return peaks_near_genes_df
+        return peaks_near_genes_df
 
 
 def atac_data_preprocessing(
@@ -736,11 +742,18 @@ def filter_atac_by_distance_to_tss(
         tss_distance_cutoff, 
         output_dir
         )
-    
-    plot_feature_score_histogram(peaks_near_genes_df, "TSS_dist_score", fig_dir)
-    
-    logging.info("    - Filtering for peaks with 1MB of a gene's TSS")
+        
+    logging.info("    - Filtering for peaks within 1MB of a gene's TSS")
     peak_subset = set(peaks_near_genes_df["peak_id"])
+    
+    logging.debug("\n")
+    logging.debug("peaks_near_genes_df['peak_id']:")
+    logging.debug(peaks_near_genes_df.head())
+    logging.debug("\n")
+    logging.debug("atac_df['peak_id']")
+    logging.debug(atac_df.head())
+    logging.debug("\n")
+    
     atac_df_filtered = atac_df[atac_df["peak_id"].isin(peak_subset)]
     logging.info(f'    - Number of peaks after filtering: {len(atac_df_filtered)} / {len(atac_df)}')
     

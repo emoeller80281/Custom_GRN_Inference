@@ -142,6 +142,7 @@ def plot_score_distribution_by_tf(
     title: str = "",
     limit_x: bool = False,
     top_tf_limit: int = 40,
+    log: bool = False
 ):
     fig = plt.figure(figsize=(7, 5))
     y_cmap = plt.get_cmap("tab20c")
@@ -204,21 +205,23 @@ def plot_score_distribution_by_tf(
             bins=bins, alpha=0.5,
             color=y_cmap(x / len(tfs_of_interest)),
             label=tf,
+            log=log
         )
 
     # set titles/labels on the same ax
     plt.title(title, fontsize=12)
     plt.xlabel("Sliding Window Score", fontsize=12)
     plt.ylabel("Frequency", fontsize=12)
-    plt.xlim(0, 50000)
+    plt.xlim(0, max_score)
     if limit_x:
         plt.xlim(0, 1)
 
     fig.legend(
         loc="lower center",
         ncol=2,
-        fontsize=10,
+        fontsize=9,
         bbox_to_anchor=(1.15, 0.10),
+
     )
     fig.tight_layout(rect=(0.0, 0.0, 1.0, 1.0))
     plt.show()

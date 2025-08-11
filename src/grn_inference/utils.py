@@ -245,12 +245,18 @@ def format_peaks(peak_ids: pd.Series) -> pd.DataFrame:
         raise ValueError("Malformed peak IDs. Expect format 'chr:start-end'.")
 
     peak_df = pd.DataFrame({
-        "peak_id": [f"peak{i + 1}" for i in range(len(peak_ids))],
+        # "peak_id": [f"peak{i + 1}" for i in range(len(peak_ids))],
         "chromosome": chromosomes,
         "start": pd.to_numeric(starts, errors='coerce').astype(int),
         "end": pd.to_numeric(ends, errors='coerce').astype(int),
         "strand": ["."] * len(peak_ids)
     })
+    
+    peak_df["peak_id"] = (
+        peak_df["chromosome"].astype(str) + ":" +
+        peak_df["start"].astype(str) + "-" +
+        peak_df["end"].astype(str)
+    )
     
     return peak_df
 
@@ -307,7 +313,7 @@ def find_genes_near_peaks(
         low_memory=False  # ensures the entire file is read in one go
     ).rename(columns={"gene_id": "target_id"}).dropna()
     
-    logging.info(peak_tss_overlap_df.head())
+    logging.debug(peak_tss_overlap_df.head())
     
     # Calculate the absolute distance in basepairs between the peak's end and gene's start.
     distances = np.abs(peak_tss_overlap_df["peak_end"].values - peak_tss_overlap_df["gene_start"].values)
