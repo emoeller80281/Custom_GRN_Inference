@@ -218,9 +218,9 @@ def plot_score_distribution_by_tf(
 
     fig.legend(
         loc="lower center",
-        ncol=2,
+        ncol=1,
         fontsize=9,
-        bbox_to_anchor=(1.15, 0.10),
+        bbox_to_anchor=(1.10, 0.2),
 
     )
     fig.tight_layout(rect=(0.0, 0.0, 1.0, 1.0))
@@ -325,12 +325,12 @@ def plot_auroc(df: pd.DataFrame, score_col: str, title: str="", ax: Union[plt.Ax
         
     ax.plot(fpr, tpr, lw=1, alpha=0.8, color="#4195df", label=f"AUROC = {roc_auc:.2f}")
     ax.plot([0, 1], [0, 1], color="black", lw=1, linestyle="--")
-    # ax.title(title, fontsize=10)
+    ax.set_title(title, fontsize=10)
     ax.legend(bbox_to_anchor=(0.5, -0.25), loc="lower center", borderaxespad=0., fontsize=9)
     
     return fig
 
-def plot_scores_distribution(df: pd.DataFrame, title: str, ax: Union[plt.Axes, None]):
+def plot_scores_distribution(df: pd.DataFrame, title: str="", ax: Union[plt.Axes, None]=None):
     """Extract the true and false scores by the value of each row in the 'label' column"""
     assert "label" in df.columns, f"label column does not exist, columns: {df.columns}"
     
@@ -350,31 +350,75 @@ def plot_scores_distribution(df: pd.DataFrame, title: str, ax: Union[plt.Axes, N
     return fig
 
 def tg_assignment_multiplot(nearest_tss_df, mira_df, cicero_df, suptitle):
-    fig, axes = plt.subplots(2, 3, figsize=(12, 6))
+    fig, axes = plt.subplots(3, 3, figsize=(11, 8))
 
     # Column 1: gene TSS
     plot_scores_distribution(nearest_tss_df,
                             title="Nearest gene TSS to peak",
                             ax=axes[0, 0])
+    
+    plot_grouped_score_boxplot(
+        mira_df,
+        group_col="target_id",
+        score_col="sliding_window_score",
+        title=f"Nearest gene TSS top scores by TG",
+        ylabel="Sliding Window Score",
+        n_top_groups=15,
+        ax=axes[1,0]
+        )
+    
     plot_auroc(nearest_tss_df,
                         score_col="sliding_window_score",
-                        ax=axes[1, 0])
+                        title="Nearest gene TSS AUROC",
+                        ax=axes[2, 0])
+    
+    
 
     # Column 2: MIRA peak-TG
     plot_scores_distribution(mira_df,
                             title="MIRA peak-TG",
                             ax=axes[0, 1])
+    
+    plot_grouped_score_boxplot(
+        mira_df,
+        group_col="target_id",
+        score_col="sliding_window_score",
+        title=f"MIRA top scores by TG",
+        ylabel="Sliding Window Score",
+        n_top_groups=15,
+        ax=axes[1,1]
+        )
+    
     plot_auroc(mira_df,
                         score_col="sliding_window_score",
-                        ax=axes[1, 1])
+                        title="MIRA AUROC",
+                        ax=axes[2, 1])
+    
+    
 
     # Column 3: Cicero peak-TG
     plot_scores_distribution(cicero_df,
                             title="Cicero peak-TG",
                             ax=axes[0, 2])
-    plot_auroc(cicero_df,
-                        score_col="sliding_window_score",
-                        ax=axes[1, 2])
+    
+    plot_grouped_score_boxplot(
+        cicero_df,
+        group_col="target_id",
+        score_col="sliding_window_score",
+        title=f"Cicero top scores by TG",
+        ylabel="Sliding Window Score",
+        n_top_groups=15,
+        ax=axes[1,2]
+        )
+    
+    plot_auroc(
+        cicero_df,
+        score_col="sliding_window_score",
+        title="Cicero AUROC",
+        ax=axes[2, 2]
+        )
+    
+
 
     legend_handles = [
         mpatches.Patch(color="#4195df", alpha=0.5, label="Edge in Ground Truth"),
@@ -396,6 +440,9 @@ def plot_grouped_score_boxplot(
     group_col: str, 
     score_col: str, 
     n_top_groups: int=10, 
+    title: str="",
+    xlabel: Union[str, None]=None,
+    ylabel: Union[str, None]=None,
     ax: Union[plt.Axes, None]=None
     ):
     
@@ -407,13 +454,14 @@ def plot_grouped_score_boxplot(
         
     if ax is None:
         fig, ax = plt.subplots(figsize=(8, 5))
+        fontsize = 15
 
     elif isinstance(ax, plt.Axes):
         fig = ax.figure
+        fontsize = 9
     else:
         raise ValueError("ax must be a matplotlib Axes or None")
     
-    n_top_groups = 25
     top_ids = (
         df
         .groupby(group_col)[score_col]
@@ -438,10 +486,20 @@ def plot_grouped_score_boxplot(
         ax=ax
     )
 
-    ax.set_title(f"Top {n_top_groups} {group_col} by Median Sliding Window Score", fontsize=12)
-    ax.set_xlabel(group_col, fontsize=11)
-    ax.set_ylabel(score_col, fontsize=11)
-    ax.set_xticklabels(top_tg_df[group_col], rotation=45, fontsize=10)
+    ax.set_title(title, fontsize=fontsize+1)
+    
+    if ylabel is None:
+        ax.set_ylabel(score_col, fontsize=fontsize)
+    else:
+        ax.set_ylabel(ylabel, fontsize=fontsize)
+    
+    if xlabel is None:
+        ax.set_xlabel('')
+    else:
+        ax.set_xlabel(xlabel, fontsize=fontsize)
+    
+    ax.set_yticklabels(ax.get_yticklabels(),fontsize=fontsize-1)
+    plt.setp(ax.get_xticklabels(), rotation=45, ha="right", fontsize=fontsize-1)
     fig.tight_layout()
     return fig
     
