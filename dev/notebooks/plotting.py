@@ -391,5 +391,57 @@ def tg_assignment_multiplot(nearest_tss_df, mira_df, cicero_df, suptitle):
     plt.tight_layout()
     return fig
 
+def plot_grouped_score_boxplot(
+    df: pd.DataFrame, 
+    group_col: str, 
+    score_col: str, 
+    n_top_groups: int=10, 
+    ax: Union[plt.Axes, None]=None
+    ):
+    
+    assert score_col in df.columns, \
+        f"{score_col} not in df columns. Columns: {df.columns}"
+    
+    assert group_col in df.columns, \
+        f"{group_col} not in df columns. Columns: {df.columns}"
+        
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(8, 5))
 
+    elif isinstance(ax, plt.Axes):
+        fig = ax.figure
+    else:
+        raise ValueError("ax must be a matplotlib Axes or None")
+    
+    n_top_groups = 25
+    top_ids = (
+        df
+        .groupby(group_col)[score_col]
+        .median()
+        .sort_values(ascending=False)
+        .head(n_top_groups)
+        .index
+    )
+
+    # Filter and preserve order
+    top_tg_df = df[
+        df[group_col].isin(top_ids)
+    ]
+
+    # Boxplot with preserved order
+    sns.boxplot(
+        data=top_tg_df,
+        x=group_col,
+        y=score_col,
+        order=top_ids,
+        showfliers=False,
+        ax=ax
+    )
+
+    ax.set_title(f"Top {n_top_groups} {group_col} by Median Sliding Window Score", fontsize=12)
+    ax.set_xlabel(group_col, fontsize=11)
+    ax.set_ylabel(score_col, fontsize=11)
+    ax.set_xticklabels(top_tg_df[group_col], rotation=45, fontsize=10)
+    fig.tight_layout()
+    return fig
     
