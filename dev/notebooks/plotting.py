@@ -262,18 +262,30 @@ def plot_true_false_distribution(
     bins = np.arange(min_score, max_score + bin_width, bin_width).tolist()
     
     if ax is None:
-        fig, ax = plt.subplots(figsize=(5, 3))
+        fig, ax = plt.subplots(figsize=(6, 4))
+        fontsize = 12
+        use_legend = True
+
     elif isinstance(ax, plt.Axes):
         fig = ax.figure
+        fontsize = 10
+        use_legend = False
     else:
         raise ValueError("ax must be a matplotlib Axes or None")
+    
+    if use_legend:
+        true_label = "Edge in\nGround Truth"
+        false_label = "Edge not in\nGround Truth"
+    else:
+        true_label = None
+        false_label = None
     
     ax.hist(
         true_series,
         bins=bins,
         alpha=0.5,
         color="#4195df",
-        # label="Edge in\nGround Truth",
+        label=true_label,
         density=density,
         log=log
     )
@@ -282,21 +294,22 @@ def plot_true_false_distribution(
         bins=bins,
         alpha=0.5,
         color="#747474",
-        # label="Edge not in\nGround Truth",
+        label=false_label,
         density=density,
         log=log
     )
     
-    if len(ylabel) == 0:
+    if ylabel is not None and len(ylabel) == 0:
         ylabel = "Density" if density else "Frequency"
             
-    ax.set_title(title, fontsize=10)
-    ax.set_xlabel(xlabel, fontsize=10)
-    ax.set_ylabel(ylabel, fontsize=10)
-    ax.tick_params(axis='x', labelsize=10)
-    ax.tick_params(axis='y', labelsize=10)
-    ax.set_xlim((0, max_score))
-    # fig.legend(bbox_to_anchor=(1.05, 1), loc='upper left', borderaxespad=0., fontsize=9)
+    ax.set_title(title, fontsize=fontsize)
+    ax.set_xlabel(xlabel, fontsize=fontsize)
+    ax.set_ylabel(ylabel, fontsize=fontsize)
+    ax.tick_params(axis='x', labelsize=fontsize-1)
+    ax.tick_params(axis='y', labelsize=fontsize-1)
+    ax.set_xlim((min_score, max_score))
+    if use_legend:
+        fig.legend(bbox_to_anchor=(1.03, 0.5), loc='upper left', borderaxespad=0., fontsize=fontsize-2)
     fig.tight_layout()
     
     return fig
