@@ -223,7 +223,6 @@ def extract_atac_peaks_near_rna_genes(
             
             gene_names = set([gene for gene in rna_df["gene_id"]])
 
-
             peak_tss_subset_df = calculate_tss_distance_score(
                 peak_bed,
                 tss_bed,

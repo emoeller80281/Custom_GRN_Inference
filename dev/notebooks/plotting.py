@@ -131,8 +131,6 @@ def plot_score_heatmap_by_tf_tg(
     plt.yticks(rotation=0)
     plt.tight_layout()
     plt.show()
-
-
     
 def plot_score_distribution_by_tf(
     df: pd.DataFrame,
@@ -362,8 +360,59 @@ def plot_scores_distribution(df: pd.DataFrame, title: str="", ax: Union[plt.Axes
     
     return fig
 
+def plot_true_false_boxplots(
+    df: pd.DataFrame, 
+    xlabel: str = "label", 
+    ylabel: str = "Sliding Window Score", 
+    title: str = "True/False Scores", 
+    ax: Union[plt.Axes, None] = None
+    ) -> plt.Figure:
+    
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(6, 4))
+        fontsize = 12
+        use_legend = True
+
+    elif isinstance(ax, plt.Axes):
+        fig = ax.figure
+        fontsize = 10
+        use_legend = False
+    else:
+        raise ValueError("ax must be a matplotlib Axes or None")
+    
+    sns.boxplot(
+        data=df, 
+        x="label", 
+        y="sliding_window_score", 
+        hue="label", 
+        order=["True", "False"],
+        palette={
+            True:"#4195df",
+            False:"#747474"
+            },
+        legend=False, 
+        showfliers=False,
+        ax=ax
+        )
+    
+    ax.set_ylabel("Sliding Window Score", fontsize=9)
+    ax.set_title("True/False Scores", fontsize=10)
+    
+    ax.set_title(title, fontsize=fontsize)
+    ax.set_xlabel(xlabel, fontsize=fontsize)
+    ax.set_ylabel(ylabel, fontsize=fontsize)
+    ax.tick_params(axis='x', labelsize=fontsize-1)
+    ax.tick_params(axis='y', labelsize=fontsize-1)
+    
+    if use_legend:
+        fig.legend(bbox_to_anchor=(1.03, 0.5), loc='upper left', borderaxespad=0., fontsize=fontsize-2)
+        
+    fig.tight_layout()
+    
+    return fig
+
 def tg_assignment_multiplot(nearest_tss_df, mira_df, cicero_df, suptitle):
-    fig, axes = plt.subplots(3, 3, figsize=(11, 8))
+    fig, axes = plt.subplots(4, 3, figsize=(11, 12))
 
     # Column 1: gene TSS
     plot_scores_distribution(nearest_tss_df,
@@ -371,7 +420,7 @@ def tg_assignment_multiplot(nearest_tss_df, mira_df, cicero_df, suptitle):
                             ax=axes[0, 0])
     
     plot_grouped_score_boxplot(
-        mira_df,
+        nearest_tss_df,
         group_col="target_id",
         score_col="sliding_window_score",
         title=f"Nearest gene TSS top scores by TG",
@@ -385,8 +434,11 @@ def tg_assignment_multiplot(nearest_tss_df, mira_df, cicero_df, suptitle):
                         title="Nearest gene TSS AUROC",
                         ax=axes[2, 0])
     
-    
-
+    plot_true_false_boxplots(
+        nearest_tss_df,
+        ax=axes[3, 0]
+        )
+   
     # Column 2: MIRA peak-TG
     plot_scores_distribution(mira_df,
                             title="MIRA peak-TG",
@@ -406,6 +458,10 @@ def tg_assignment_multiplot(nearest_tss_df, mira_df, cicero_df, suptitle):
                         score_col="sliding_window_score",
                         title="MIRA AUROC",
                         ax=axes[2, 1])
+    
+    plot_true_false_boxplots(
+        mira_df,
+        ax=axes[3, 1])
     
     
 
@@ -430,6 +486,10 @@ def tg_assignment_multiplot(nearest_tss_df, mira_df, cicero_df, suptitle):
         title="Cicero AUROC",
         ax=axes[2, 2]
         )
+    
+    plot_true_false_boxplots(
+        cicero_df,
+        ax=axes[3, 2])
     
 
 
