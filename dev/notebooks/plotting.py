@@ -576,3 +576,126 @@ def plot_grouped_score_boxplot(
     fig.tight_layout()
     return fig
     
+def plot_mean_score_differences_grouped(
+    df: pd.DataFrame, 
+    group_col: str,
+    sample_name: str = "",
+    ground_truth_name: str = "",
+    tg_label_name: str = "",
+    top_n: Union[int, None] = 75,
+    order_by: Union[str, None] = None,
+    ):
+    # Pretty axis label
+    group_name = {"source_id": "TF", "target_id": "TG"}.get(group_col, group_col)
+
+    # Decide ordering metric
+    if order_by is None:
+        order_by = "p_value" if "p_value" in df.columns else "abs_diff"
+
+    if order_by == "p_value":
+        if "p_value" not in df.columns:
+            raise ValueError("order_by='p_value' but 'p_value' not in df.columns")
+        sorter = df[[group_col, "p_value"]].copy()
+        sorter = sorter.sort_values("p_value", ascending=True)  # most significant first
+    elif order_by == "abs_diff":
+        if not {"mean_True", "mean_False"}.issubset(df.columns):
+            raise ValueError("Need columns 'mean_True' and 'mean_False' for abs_diff ordering")
+        sorter = df[[group_col]].copy()
+        sorter["abs_diff"] = np.abs(df["mean_True"] - df["mean_False"])
+        sorter = sorter.sort_values("abs_diff", ascending=False)
+    else:
+        raise ValueError("order_by must be 'p_value' or 'abs_diff'")
+
+    # If top_n requested, select top-N groups BEFORE melting
+    if top_n is not None:
+        keep_groups = sorter[group_col].head(top_n).tolist()
+        df = df[df[group_col].isin(keep_groups)]
+        sorter = sorter[sorter[group_col].isin(keep_groups)]
+
+    # Long format for plotting
+    plot_df = df.melt(
+        id_vars=group_col,
+        value_vars=["mean_True", "mean_False"],
+        var_name="label",
+        value_name="mean_score"
+    )
+    plot_df["label"] = plot_df["label"].str.replace("mean_", "", regex=False)
+
+    # Apply categorical order
+    order = sorter[group_col].tolist()
+    plot_df[group_col] = pd.Categorical(plot_df[group_col], categories=order, ordered=True)
+    plot_df = plot_df.sort_values(group_col)
+
+    # Colors
+    label_colors = {"True": "#4195df", "False": "#747474"}
+
+    fig, ax = plt.subplots(figsize=(14,5))
+
+    # Points
+    sns.scatterplot(
+        data=plot_df,
+        x=group_col,
+        y="mean_score",
+        hue="label",
+        palette=label_colors,
+        s=80,
+        zorder=2,
+        ax=ax
+    )
+
+    # Connect True/False within each group
+    for _, g in plot_df.groupby(group_col, sort=False, observed=True):
+        ax.plot(g[group_col], g["mean_score"], color="gray", linewidth=1, zorder=1)
+
+    # Labels & layout
+    plt.setp(ax.get_xticklabels(), rotation=90, ha="right", fontsize=10)
+    ax.set_xlabel(group_name, fontsize=14)
+    ax.set_ylabel("Mean log1p Sliding Window Score", fontsize=14)
+    title_main = f"{sample_name}, {ground_truth_name}, {tg_label_name}".strip(", ").strip()
+    ax.set_title(f"{title_main}\nMean log1p True/False Scores by {group_name}", fontsize=14)
+    ax.legend(title="Label", bbox_to_anchor=(1.01, 0.5), loc="center left", borderaxespad=0., fontsize=12)
+    fig.tight_layout()
+    return fig
+
+def plot_individual_true_false_distributions(
+    mean_diff_df: pd.DataFrame, 
+    original_score_df: pd.DataFrame,
+    group_col: str,
+    sample_name: str="",
+    ground_truth_name: str="",
+    tg_label_name: str=""
+    ):
+    if group_col == "source_id":
+        group_name = "TF"
+    elif group_col == "target_id":
+        group_name = "TG"
+    else:
+        group_name = group_col
+
+    fig, axes = plt.subplots(4, 4, figsize=(11, 8))
+
+    ax = axes.flatten()
+    for i in range(16):
+        selected = mean_diff_df.iloc[i, :][group_col]
+
+        selected_data = original_score_df[original_score_df[group_col] == selected]
+
+        true_series = selected_data[selected_data["label"] == True]["sliding_window_score"]
+        false_series = selected_data[selected_data["label"] == False]["sliding_window_score"]
+
+        plot_true_false_distribution(
+            true_series=true_series,
+            false_series=false_series,
+            balance=True,
+            xlabel="",
+            ylabel=None,
+            title=selected,
+            ax=ax[i]
+        )
+        
+    fig.suptitle(f"{sample_name}, {ground_truth_name}, {tg_label_name}\nTrue / False Score Distributions by {group_name}")
+    fig.supylabel("Frequency")
+    fig.supxlabel("Sliding Window Score")
+    fig.tight_layout()
+    
+    return fig
