@@ -1,8 +1,9 @@
 #!/bin/bash -l
-#SBATCH --partition=memory
+#SBATCH --partition=compute
 #SBATCH --nodes=1
 #SBATCH -c 32
 #SBATCH --mem=124G
+#SBATCH --time=02:00:00
 #SBATCH -o /gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/LOGS/chipseq_sliding_window.log
 #SBATCH -e /gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/LOGS/chipseq_sliding_window.err
 

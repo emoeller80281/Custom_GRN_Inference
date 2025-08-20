@@ -49,7 +49,7 @@ def merge_dataset_with_ground_truth(df: pd.DataFrame, ground_truth: pd.DataFrame
         print(f"\t\t- TGs: {len(tgs_only_in_sliding_window):,}")
         print(f"\t\t- TF-TG Edges: {len(df_not_ground_truth_edges.drop_duplicates(subset=['source_id', 'target_id'])):,}")
         
-        tfs_only_in_ground_truth = ground_truth[~ground_truth["source_col"].isin(df["source_id"])]["source_col"].drop_duplicates()
+        tfs_only_in_ground_truth = ground_truth[~ground_truth["source_id"].isin(df["source_id"])]["source_id"].drop_duplicates()
         tgs_only_in_ground_truth = ground_truth[~ground_truth["target_id"].isin(df["target_id"])]["target_id"].drop_duplicates()
 
         print(f"\t- **Only {gt_name}**")
