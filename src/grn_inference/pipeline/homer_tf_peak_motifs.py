@@ -147,22 +147,29 @@ def main(input_dir: str, output_dir: str, cpu_count: int) -> None:
     
     combined_out = os.path.join(output_dir, "homer_tf_to_peak.parquet")
     
-    normalized_ddf = clip_and_normalize_log1p_dask(
-        ddf=ddf,
-        score_cols=["homer_binding_score"],
-        quantiles=(0.05, 0.95),
-        apply_log1p=True,
-    )
+    # normalized_ddf = clip_and_normalize_log1p_dask(
+    #     ddf=ddf,
+    #     score_cols=["homer_binding_score"],
+    #     quantiles=(0.05, 0.95),
+    #     apply_log1p=True,
+    # )
     
-    normalized_ddf = minmax_normalize_dask(
-        ddf=normalized_ddf, 
-        score_cols=["homer_binding_score"], 
-    )
+    # normalized_ddf = minmax_normalize_dask(
+    #     ddf=normalized_ddf, 
+    #     score_cols=["homer_binding_score"], 
+    # )
     
-    plot_feature_score_histogram(normalized_ddf, "homer_binding_score", output_dir)
+    # plot_feature_score_histogram(normalized_ddf, "homer_binding_score", output_dir)
 
+    # # Then continue on—e.g. write back out:
+    # normalized_ddf.to_parquet(
+    #     combined_out,
+    #     engine="pyarrow",
+    #     compression="snappy",
+    # )
+    
     # Then continue on—e.g. write back out:
-    normalized_ddf.to_parquet(
+    ddf.to_parquet(
         combined_out,
         engine="pyarrow",
         compression="snappy",
