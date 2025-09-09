@@ -91,7 +91,7 @@ def plot_score_heatmap_by_tf_tg(
     figsize: tuple = (10, 8),
     cmap: str = "coolwarm",
     title: str = "TF–TG Score Heatmap"
-):
+    ):
     assert score_col in df.columns, f"{score_col} not in df"
     assert tf_col_name in df.columns, f"{tf_col_name} not in df"
     assert tg_col_name in df.columns, f"{tg_col_name} not in df"
@@ -141,7 +141,7 @@ def plot_score_distribution_by_tf(
     limit_x: bool = False,
     top_tf_limit: int = 40,
     log: bool = False
-):
+    ):
     fig = plt.figure(figsize=(7, 5))
     y_cmap = plt.get_cmap("tab20c")
     

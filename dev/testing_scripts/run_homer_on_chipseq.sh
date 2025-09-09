@@ -1,7 +1,7 @@
 #!/bin/bash -l
 #SBATCH --partition=compute
 #SBATCH --nodes=1
-#SBATCH -c 32
+#SBATCH -c 64
 #SBATCH --mem=256G
 #SBATCH -o /gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/LOGS/chipseq_homer.log
 #SBATCH -e /gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/LOGS/chipseq_homer.err
@@ -10,10 +10,12 @@ set -euo pipefail
 
 source activate my_env
 
+module load blat # Homer uses this to remove duplicate peaks
+
 BASE_DIR="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
 OUTPUT_DIR="$BASE_DIR/output/chipseq_homer"
 SPECIES="mm10"
-NUM_CPU=32
+NUM_CPU=64
 
 cd "$OUTPUT_DIR"
 
@@ -29,8 +31,8 @@ perl "$BASE_DIR/data/homer/bin/findMotifsGenome.pl" \
     "$SPECIES" "$OUTPUT_DIR/homer_results/" \
     -size 200 \
     -p $NUM_CPU \
-    -redundant 0.5 \
     -nomotif
+    # -redundant 0.5 \
 echo "    Done!"
 
 echo ""
