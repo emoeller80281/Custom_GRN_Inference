@@ -1,7 +1,7 @@
 #!/bin/bash -l
 #SBATCH --partition=compute
 #SBATCH --nodes=1
-#SBATCH -c 64
+#SBATCH -c 8
 #SBATCH --mem=256G
 #SBATCH -o /gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/LOGS/chipseq_homer.log
 #SBATCH -e /gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/LOGS/chipseq_homer.err
@@ -15,7 +15,7 @@ module load blat # Homer uses this to remove duplicate peaks
 BASE_DIR="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
 OUTPUT_DIR="$BASE_DIR/output/chipseq_homer"
 SPECIES="mm10"
-NUM_CPU=64
+NUM_CPU=8
 
 cd "$OUTPUT_DIR"
 
@@ -24,16 +24,16 @@ echo "Adding the 'homer/bin' directory to PATH"
 export PATH="$BASE_DIR/data/homer/bin:$PATH"
 # export PERL5LIB="$BASE_DIR/data/homer/bin:$PERL5LIB"
 
-echo "Running findMotifsGenome.pl"
-mkdir -p "$OUTPUT_DIR/homer_results"
-perl "$BASE_DIR/data/homer/bin/findMotifsGenome.pl" \
-    "$OUTPUT_DIR/tmp/homer_peaks.txt" \
-    "$SPECIES" "$OUTPUT_DIR/homer_results/" \
-    -size 200 \
-    -p $NUM_CPU \
-    -nomotif
-    # -redundant 0.5 \
-echo "    Done!"
+# echo "Running findMotifsGenome.pl"
+# mkdir -p "$OUTPUT_DIR/homer_results"
+# perl "$BASE_DIR/data/homer/bin/findMotifsGenome.pl" \
+#     "$OUTPUT_DIR/tmp/homer_peaks.txt" \
+#     "$SPECIES" "$OUTPUT_DIR/homer_results/" \
+#     -size 200 \
+#     -p $NUM_CPU \
+#     -nomotif
+#     # -redundant 0.5 \
+# echo "    Done!"
 
 echo ""
 echo "----- Homer annotatePeaks.pl -----"
@@ -60,7 +60,7 @@ load_parallel() {
     fi
 }
 
-load_parallel
+# load_parallel
 
 # Look through the knownResults dir of the Homer findMotifsGenome.pl output
 MOTIF_DIR="$OUTPUT_DIR/homer_results/knownResults"
@@ -71,20 +71,22 @@ if [ -z "$motif_files" ]; then
     exit 1
 fi
 
-# Log number of files to process
-file_count=$(echo "$motif_files" | wc -l)
-echo "[INFO] Found $file_count motif files to process."
+# # Log number of files to process
+# file_count=$(echo "$motif_files" | wc -l)
+# echo "[INFO] Found $file_count motif files to process."
 
 # Create output directory if it doesn't exist
 PROCESSED_MOTIF_DIR="$OUTPUT_DIR/homer_results/homer_tf_motif_scores"
 mkdir -p "$PROCESSED_MOTIF_DIR"
 
-# Process files in parallel
-echo "Running annotatePeaks.pl"
-echo "$motif_files" | /usr/bin/time -v parallel -j "$NUM_CPU" \
-    "perl $BASE_DIR/data/homer/bin/annotatePeaks.pl $OUTPUT_DIR/tmp/homer_peaks.txt '$SPECIES' -m {} > $PROCESSED_MOTIF_DIR/{/}_tf_motifs.txt"
-
-module unload parallel
+# # Process files in parallel
+# echo "Running annotatePeaks.pl"
+# find "$MOTIF_DIR" -type f -name '*.motif' -print0 | \
+# /usr/bin/time -v parallel -0 -j "$NUM_CPU" --will-cite \
+#   "perl \"$BASE_DIR/data/homer/bin/annotatePeaks.pl\" \
+#    \"$OUTPUT_DIR/tmp/homer_peaks.txt\" \"$SPECIES\" \
+#    -m {} > \"$PROCESSED_MOTIF_DIR\"/{/}_tf_motifs.txt"
+# module unload parallel
 
 PYTHON_SCRIPT_DIR="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/src/grn_inference"
 

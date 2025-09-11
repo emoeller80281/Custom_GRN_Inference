@@ -4,6 +4,7 @@ import logging
 import csv
 import os
 import pybedtools
+from pandas.api.types import is_numeric_dtype
 
 from typing import Union
 
@@ -66,7 +67,23 @@ def label_edges_with_ground_truth(df_to_label: pd.DataFrame, ground_truth_df: pd
 
     return labeled_df
 
-def merge_dataset_with_ground_truth(df: pd.DataFrame, ground_truth: pd.DataFrame, method:str="", gt_name: str="", show_network_size: bool=False):
+def merge_dataset_with_ground_truth(
+    df: pd.DataFrame, 
+    ground_truth: pd.DataFrame, 
+    tf_col_name: str = "source_id",
+    tg_col_name: str = "target_id",
+    gt_tf_col_name: str = "source_id",
+    gt_tg_col_name: str = "target_id",
+    method:str="", 
+    gt_name: str="", 
+    show_network_size: bool=False
+    ):
+    df = df.copy()
+    ground_truth = ground_truth.copy()
+    
+    df = df.rename(columns={tf_col_name: "source_id", tg_col_name: "target_id"})
+    ground_truth = ground_truth.rename(columns={gt_tf_col_name: "source_id", gt_tg_col_name: "target_id"})
+    
     df['source_id'] = df['source_id'].str.capitalize()
     df['target_id'] = df['target_id'].str.capitalize()
     
@@ -124,6 +141,8 @@ def merge_dataset_with_ground_truth(df: pd.DataFrame, ground_truth: pd.DataFrame
     df_merged["label"] = df_merged["_merge"] == "both"
     
     df_labeled = df_merged.drop(columns=["_merge"])
+    
+    df_labeled = df_labeled.rename(columns={"source_id": tf_col_name, "target_id": tg_col_name})
     
     return df_labeled
 
@@ -321,6 +340,19 @@ def format_peaks(peak_ids: pd.Series) -> pd.DataFrame:
     
     return peak_df
 
+def find_peak_length(peak_id_col: pd.Series) -> pd.Series:    
+    """
+    Finds the base pair lengths for a Series of genomic ranges in chr:start-end format.
+
+    Args:
+        peak_id_col (pd.Series): Series of genomic locations in chr:start-end format.
+
+    Returns:
+        pd.Series: base pair lengths of the genomic ranges proviced.
+    """
+    peak_col_split = peak_id_col.str.extract(r'(chr[\w]+):([0-9]+)-([0-9]+)').dropna()
+    return np.abs(peak_col_split[2].astype(int) - peak_col_split[1].astype(int))
+
 def find_genes_near_peaks(
     peak_bed: pybedtools.BedTool, 
     tss_bed: pybedtools.BedTool, 
@@ -384,3 +416,120 @@ def find_genes_near_peaks(
     peak_tss_overlap_df = peak_tss_overlap_df.sort_values("TSS_dist")
     
     return peak_tss_overlap_df
+
+def minmax_norm_col(scores: pd.Series) -> pd.Series:
+    """
+    Min-max normalizes the scores to a value between 0-1 without changing the shape of the distribution.
+
+    Args:
+        scores (pd.Series): Score column or series to be normalized.
+
+    Returns:
+        pd.Series: Min-max normalized score column.
+    """
+    
+    assert is_numeric_dtype(scores), \
+        f"scores are not numeric, type {scores.dtype}"
+    
+    return (scores - min(scores)) / (max(scores) - min(scores))
+
+def calculate_summed_tf_tg_score(
+    df: pd.DataFrame, 
+    score_col: str, 
+    tf_col_name: str = "source_id",
+    tg_col_name: str = "target_id"
+    ) -> pd.DataFrame:
+    # Group by TF and sum all scores
+    sum_of_tf_peaks = (
+        df
+        .groupby(tf_col_name)[score_col]
+        .sum()
+        .reset_index()
+        .rename(columns={score_col:"total_tf_score"})
+        )
+    
+    # Group by TF-TG edge and sum for all peaks for that edge
+    sum_of_tf_tg_peak_scores = (
+        df
+        .groupby([tf_col_name, tg_col_name])[score_col]
+        .sum()
+        .reset_index()
+        .rename(columns={score_col:"tf_to_tg_peak_scores_summed"})
+        )
+    
+    # Merge the total TF peaks and summed TF-TG edges
+    sum_calculation_df = pd.merge(
+        sum_of_tf_tg_peak_scores, 
+        sum_of_tf_peaks, 
+        how="left", 
+        on=tf_col_name
+        )
+    
+    
+    sum_calculation_df[score_col] = (
+        sum_calculation_df["tf_to_tg_peak_scores_summed"] / sum_calculation_df["total_tf_score"]
+        ) * 1e6
+    
+    return sum_calculation_df
+
+def calculate_tf_peak_tg_score(
+    df: pd.DataFrame, 
+    score_col: str, 
+    tf_col_name: str = "source_id",
+    ) -> pd.DataFrame:
+    # Group by TF and sum all sliding window scores
+    sum_of_tf_peaks = (
+        df
+        .groupby(tf_col_name)[score_col]
+        .sum()
+        .reset_index()
+        .rename(columns={score_col:"total_tf_score"})
+        )
+    
+    # Merge the total TF peaks with the TF-peak-TG scores
+    individual_calculation_df = pd.merge(
+        df, 
+        sum_of_tf_peaks, 
+        how="left", 
+        on=tf_col_name
+        ).rename(columns={score_col:"tf_peak_tg_score"})
+    
+    # Calculate the final sliding window score by dividing each TF-peak-TG score by the sum of scores for the TF
+    individual_calculation_df[score_col] = (
+        individual_calculation_df["tf_peak_tg_score"] / individual_calculation_df["total_tf_score"]
+        ) * 1e6
+    
+    return individual_calculation_df
+
+def set_tg_as_closest_gene_tss(df: pd.DataFrame, peaks_gene_distance_file: str):
+    
+    assert "peak_id" in df.columns, \
+        f"'peak_id' column not in df. Columns: {df.columns}"
+    
+    # Read in the peaks to TG data and pick the closest gene for each peak (maximum TSS distance score)
+    peaks_near_genes_df = pd.read_parquet(peaks_gene_distance_file, engine="pyarrow")
+    
+    assert "target_id" in peaks_near_genes_df.columns, \
+        f"'target_id' column not in peaks_gene_distance_file DataFrame. Columns: {peaks_near_genes_df.columns}"
+        
+    assert "TSS_dist_score" in peaks_near_genes_df.columns, \
+        f"'TSS_dist_score' column not in peaks_gene_distance_file DataFrame. Columns: {peaks_near_genes_df.columns}"
+
+    closest_gene_to_peak_df = peaks_near_genes_df.sort_values("TSS_dist_score", ascending=False).groupby("peak_id").first()
+    closest_gene_to_peak_df = closest_gene_to_peak_df[["target_id"]].reset_index()
+
+    # Set the TG for each TF-peak edge as the closest gene to the peak
+    sliding_window_closest_gene_df = pd.merge(df, closest_gene_to_peak_df, on=["peak_id"], how="left")
+    return sliding_window_closest_gene_df
+
+def set_tg_using_mira_peak_tg_edges(raw_sliding_window_scores: pd.DataFrame, mira_df: pd.DataFrame):
+    sliding_window_mira_df = pd.merge(raw_sliding_window_scores, mira_df, on=["peak_id"], how="left")
+    sliding_window_mira_df = sliding_window_mira_df[["source_id", "peak_id", "target_id", "sliding_window_score"]].dropna(subset="target_id")
+    
+    return sliding_window_mira_df
+
+def set_tg_using_cicero_peak_tg_edges(raw_sliding_window_scores: pd.DataFrame, cicero_df: pd.DataFrame):
+    sliding_window_cicero_df = pd.merge(raw_sliding_window_scores, cicero_df, on=["peak_id"], how="left")
+    sliding_window_cicero_df = sliding_window_cicero_df[["source_id", "peak_id", "target_id", "sliding_window_score"]].dropna(subset="target_id")
+    
+    return sliding_window_cicero_df

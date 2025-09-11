@@ -7,7 +7,8 @@ from typing import Union
 from tqdm import tqdm
 from sklearn.metrics import roc_curve, auc
 import matplotlib.patches as mpatches
-
+from pandas.api.types import is_numeric_dtype, is_integer_dtype, is_bool_dtype
+from scipy.stats import linregress
 
 def balance_dataset(
     df1: Union[pd.DataFrame, pd.Series], 
@@ -223,7 +224,121 @@ def plot_score_distribution_by_tf(
     )
     fig.tight_layout(rect=(0.0, 0.0, 1.0, 1.0))
     plt.show()
+
+def plot_true_false_scores_by_tf_barplots(
+    df: pd.DataFrame,
+    score_col: str,
+    tf_name_col: str,
+    agg: str = "median",
+    top_n: int = 20,
+    title: Union[str, None] = None,
+) -> plt.Figure:
     
+    assert all(c in df.columns for c in [score_col, tf_name_col, "label"])
+    sub = df[[score_col, tf_name_col, "label"]].dropna().copy()
+    sub["label"] = sub["label"].astype(bool)
+
+    # pick top TFs by count
+    top_tfs = sub[tf_name_col].value_counts().head(top_n).index
+    sub = sub[sub[tf_name_col].isin(top_tfs)]
+
+    aggfunc = np.median if agg == "median" else np.mean
+    wide = (
+        sub.groupby([tf_name_col, "label"])[score_col]
+        .agg(aggfunc)
+        .unstack("label")
+        .reindex(top_tfs)
+        .rename(columns={True: "True", False: "False"})
+    ).sort_values(by="True", axis=0, ascending=False)
+
+    x = np.arange(len(wide))
+    width = 0.4
+
+    fig, ax = plt.subplots(figsize=(min(1.2*top_n, 18), 6))
+    ax.bar(x - width/2, wide["True"],  width, color="#4195df", label="Edge in Ground Truth")
+    ax.bar(x + width/2, wide["False"], width, color="#747474", label="Edge Not in Ground Truth")
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(wide.index, rotation=65, ha="right", fontsize=16)
+    ax.set_yticklabels(ax.get_yticklabels(), fontsize=16)
+    ax.set_ylabel(f"Median TF-Peak Binding Score", fontsize=16)
+    ax.set_xlabel("TF", fontsize=16)
+    if title is None:
+        title = f"{agg.title()} {score_col} by TF (True vs False)"
+    ax.set_title(title, fontsize=18)
+    ax.legend(loc="upper center", bbox_to_anchor=(1.15, 0.50), ncol=1, fontsize=14)
+    fig.tight_layout()
+    return fig
+
+def plot_true_false_scores_by_tf_boxplots(
+    df: pd.DataFrame, 
+    score_col: str, 
+    tf_name_col: str,
+    title: Union[str, None] = None,
+    top_n: int = 20,
+    order_by: str = "median",
+    ) -> plt.Figure:
+    
+    # Validate columns
+    assert all(c in df.columns for c in [score_col, tf_name_col, "label"]), \
+        f"Missing required columns. Have: {df.columns.tolist()}"
+
+    sub = df[[score_col, tf_name_col, "label"]].dropna().copy()
+
+    # Ensure label is boolean-like
+    if not (is_bool_dtype(sub["label"]) or is_integer_dtype(sub["label"])):
+        # Try to coerce common string cases
+        sub["label"] = sub["label"].map({"True": 1, "False": 0, "true": 1, "false": 0}).fillna(sub["label"])
+        sub["label"] = sub["label"].astype(int)
+    sub["label"] = sub["label"].astype(bool)
+
+    assert is_numeric_dtype(sub[score_col]), f"{score_col} must be numeric"
+
+    # Choose top TFs by either median or count
+    if order_by == "median":
+        tf_order = (
+            sub.groupby(tf_name_col)[score_col]
+            .median()
+            .sort_values(ascending=False)
+            .head(top_n)
+            .index
+            .tolist()
+        )
+    else:  # count
+        tf_order = (
+            sub[tf_name_col]
+            .value_counts()
+            .head(top_n)
+            .index
+            .tolist()
+        )
+    sub = sub[sub[tf_name_col].isin(tf_order)]
+    # lock the order
+    sub[tf_name_col] = pd.Categorical(sub[tf_name_col], categories=tf_order, ordered=True)
+
+    # Plot
+    fig, ax = plt.subplots(figsize=(min(1.2*top_n, 18), 6))
+    sns.boxplot(
+        data=sub,
+        x=tf_name_col,
+        y=score_col,
+        hue="label",
+        order=tf_order,
+        showfliers=False,
+        palette={True:"#4195df", False:"#747474"},
+        ax=ax,
+    )
+
+    if title is None:
+        title = "TF Binding Scores by TF (True vs False)"
+    ax.set_title(title, fontsize=14)
+    ax.set_xlabel("TF", fontsize=12)
+    ax.set_ylabel(score_col, fontsize=12)
+    ax.tick_params(axis="x", rotation=45)
+    ax.legend(labels=["Edges in Ground Truth", "Edges Not in Ground Truth"])
+    fig.tight_layout()
+    return fig
+
 def plot_true_false_distribution(
     true_series: pd.Series, 
     false_series: pd.Series, 
@@ -233,7 +348,9 @@ def plot_true_false_distribution(
     log: bool = False,
     balance: bool = False,
     density: bool = False,
-    ax: Union[plt.Axes, None] = None
+    ax: Union[plt.Axes, None] = None,
+    use_default_legend: bool = False,
+    silence_legend: bool = False
     ) -> plt.Figure:
     
     if balance and not density: # Don't balance if using the density plot, it normalizes
@@ -256,27 +373,38 @@ def plot_true_false_distribution(
     
     min_score = combined.min()
     max_score = combined.max()
-    bin_width = max((max_score - min_score) / 85, 1e-3)
+    
+    if max_score < 1:
+        bin_width = max_score - min_score / 85
+    else:
+        bin_width = max((max_score - min_score) / 85, 1e-3)
     bins = np.arange(min_score, max_score + bin_width, bin_width).tolist()
     
     if ax is None:
         fig, ax = plt.subplots(figsize=(6, 4))
         fontsize = 12
-        use_legend = True
 
     elif isinstance(ax, plt.Axes):
         fig = ax.figure
         fontsize = 10
-        use_legend = False
     else:
         raise ValueError("ax must be a matplotlib Axes or None")
     
-    if use_legend:
-        true_label = "Edge in\nGround Truth"
-        false_label = "Edge not in\nGround Truth"
-    else:
+    if silence_legend == True:
         true_label = None
         false_label = None
+    else:
+        if use_default_legend:
+            true_label = "Edge in\nGround Truth"
+            false_label = "Edge not in\nGround Truth"
+        else:
+            if isinstance(true_series.name, str):
+                true_label = true_series.name
+            if isinstance(true_series.name, str):
+                false_label = false_series.name
+            else:
+                true_label = None
+                false_label = None
     
     ax.hist(
         true_series,
@@ -306,8 +434,8 @@ def plot_true_false_distribution(
     ax.tick_params(axis='x', labelsize=fontsize-1)
     ax.tick_params(axis='y', labelsize=fontsize-1)
     ax.set_xlim((min_score, max_score))
-    if use_legend:
-        fig.legend(bbox_to_anchor=(1.03, 0.5), loc='upper left', borderaxespad=0., fontsize=fontsize-2)
+    # if use_default_legend:
+    fig.legend(bbox_to_anchor=(1.03, 0.5), loc='upper left', borderaxespad=0., fontsize=fontsize-2)
     fig.tight_layout()
     
     return fig
@@ -329,7 +457,7 @@ def plot_auroc(df: pd.DataFrame, score_col: str, title: str="", ax: Union[plt.Ax
     df = df.copy()
     df = df.dropna(subset=["label", score_col])
     y_true = df["label"]
-    y_score = df["sliding_window_score"]
+    y_score = df[score_col]
 
     fpr, tpr, _ = roc_curve(y_true, y_score)
     roc_auc = auc(fpr, tpr)
@@ -341,7 +469,7 @@ def plot_auroc(df: pd.DataFrame, score_col: str, title: str="", ax: Union[plt.Ax
     
     return fig
 
-def plot_scores_distribution(df: pd.DataFrame, title: str="", ax: Union[plt.Axes, None]=None):
+def plot_scores_distribution(df: pd.DataFrame, score_col: str, title: str="", log: bool = False, ax: Union[plt.Axes, None]=None):
     """Extract the true and false scores by the value of each row in the 'label' column"""
     assert "label" in df.columns, f"label column does not exist, columns: {df.columns}"
     
@@ -349,66 +477,94 @@ def plot_scores_distribution(df: pd.DataFrame, title: str="", ax: Union[plt.Axes
     false_scores = df[df["label"] == False]
 
     fig = plot_true_false_distribution(
-        true_series=true_scores["sliding_window_score"], 
-        false_series=false_scores["sliding_window_score"],
-        xlabel="Sliding Window Score",
+        true_series=true_scores[score_col], 
+        false_series=false_scores[score_col],
+        xlabel=score_col,
         title=title,
         balance=True,
-        log=False,
-        ax=ax
+        log=log,
+        ax=ax,
+        silence_legend=True
         )
     
     return fig
 
 def plot_true_false_boxplots(
     df: pd.DataFrame, 
+    x_axis_group_col: str = "label",
+    score_col: str = "sliding_window_score",
     xlabel: str = "label", 
-    ylabel: str = "Sliding Window Score", 
+    ylabel: str = "TF-Peak Binding Score", 
     title: str = "True/False Scores", 
-    ax: Union[plt.Axes, None] = None
-    ) -> plt.Figure:
-    
+    ax: Union[plt.Axes, None] = None,
+    add_side_legend: bool = False
+) -> plt.Figure:
+
+    df2 = df.dropna(subset=[x_axis_group_col, score_col]).copy()
+
+    # Ensure exactly 2 groups
+    assert df2[x_axis_group_col].nunique() == 2, \
+        f"{x_axis_group_col} has {df2[x_axis_group_col].nunique()} unique values; expected 2"
+
+    # Make order & palette match the dtype of the column
+    if pd.api.types.is_bool_dtype(df2[x_axis_group_col]):
+        order = [True, False]
+        palette = {True: "#4195df", False: "#747474"}
+    elif pd.api.types.is_integer_dtype(df2[x_axis_group_col]):
+        order = [1, 0] if set([1,0]).issubset(set(df2[x_axis_group_col].unique())) \
+                else sorted(df2[x_axis_group_col].unique())
+        palette = {1: "#4195df", 0: "#747474"}
+    else:
+        # cast to string to be safe
+        df2[x_axis_group_col] = df2[x_axis_group_col].astype(str)
+        order = ["True", "False"] if set(["True","False"]).issubset(set(df2[x_axis_group_col].unique())) \
+                else sorted(df2[x_axis_group_col].unique())
+        palette = {"True": "#4195df", "False": "#747474"} if set(["True","False"]).issubset(set(order)) else None
+
+    # Figure/Axes
     if ax is None:
         fig, ax = plt.subplots(figsize=(6, 4))
         fontsize = 12
-        use_legend = True
-
-    elif isinstance(ax, plt.Axes):
+        add_legend = True
+    else:
         fig = ax.figure
         fontsize = 10
-        use_legend = False
-    else:
-        raise ValueError("ax must be a matplotlib Axes or None")
-    
+        add_legend = True
+
     sns.boxplot(
-        data=df, 
-        x="label", 
-        y="sliding_window_score", 
-        hue="label", 
-        order=["True", "False"],
-        palette={
-            True:"#4195df",
-            False:"#747474"
-            },
-        legend=False, 
+        data=df2,
+        x=x_axis_group_col,
+        y=score_col,
+        hue=x_axis_group_col,
+        order=order,
+        palette=palette,
         showfliers=False,
         ax=ax
-        )
-    
-    ax.set_ylabel("Sliding Window Score", fontsize=9)
-    ax.set_title("True/False Scores", fontsize=10)
-    
+    )
+
+    ax.get_legend().set_visible(False) # We set up our own legend below
     ax.set_title(title, fontsize=fontsize)
     ax.set_xlabel(xlabel, fontsize=fontsize)
     ax.set_ylabel(ylabel, fontsize=fontsize)
     ax.tick_params(axis='x', labelsize=fontsize-1)
     ax.tick_params(axis='y', labelsize=fontsize-1)
-    
-    if use_legend:
-        fig.legend(bbox_to_anchor=(1.03, 0.5), loc='upper left', borderaxespad=0., fontsize=fontsize-2)
+
+    if add_side_legend:
+        handles = [
+            mpatches.Patch(facecolor="#4195df", edgecolor="#032b5f", label="Edges in Ground Truth"),
+            mpatches.Patch(facecolor="#747474", edgecolor="#2D2D2D", label="Edges Not in Ground Truth")
+        ]
+        fig.legend(handles=handles, bbox_to_anchor=(1.03, 0.5), loc='upper left', borderaxespad=0., fontsize=fontsize-2)
         
+        # If there is a legend to the side, dont label the bottom
+        ax.tick_params(axis='x', which="both", bottom=False, top=False, labelbottom=False)
+    elif add_legend:
+        ax.set_xticks(ticks=[0, 1], labels=["Edges in Ground Truth", "Edges Not in Ground Truth"])
+    else:
+        ax.tick_params(axis='x', which="both", bottom=False, top=False, labelbottom=False)
+
+
     fig.tight_layout()
-    
     return fig
 
 def tg_assignment_multiplot(nearest_tss_df, mira_df, cicero_df, suptitle):
@@ -661,6 +817,7 @@ def plot_individual_true_false_distributions(
     mean_diff_df: pd.DataFrame, 
     original_score_df: pd.DataFrame,
     group_col: str,
+    score_col: str = "sliding_window_score",
     sample_name: str="",
     ground_truth_name: str="",
     tg_label_name: str=""
@@ -680,8 +837,8 @@ def plot_individual_true_false_distributions(
 
         selected_data = original_score_df[original_score_df[group_col] == selected]
 
-        true_series = selected_data[selected_data["label"] == True]["sliding_window_score"]
-        false_series = selected_data[selected_data["label"] == False]["sliding_window_score"]
+        true_series = selected_data[selected_data["label"] == True][score_col]
+        false_series = selected_data[selected_data["label"] == False][score_col]
 
         plot_true_false_distribution(
             true_series=true_series,
@@ -690,6 +847,7 @@ def plot_individual_true_false_distributions(
             xlabel="",
             ylabel=None,
             title=selected,
+            silence_legend=True,
             ax=ax[i]
         )
         
@@ -698,4 +856,145 @@ def plot_individual_true_false_distributions(
     fig.supxlabel("Sliding Window Score")
     fig.tight_layout()
     
+    return fig
+
+def plot_peak_length_vs_score_scatterplot(
+    df: pd.DataFrame, 
+    score_col: str,
+    title: Union[str, None] = None,
+    ylabel: Union[str, None] = None,
+) -> plt.Figure:
+    # --- validations ---
+    assert "label" in df.columns, \
+        f"'label' column required. Columns = {df.columns.tolist()}"
+    assert score_col in df.columns, \
+        f"'{score_col}' column not found in df."
+    assert "peak_length" in df.columns, \
+        f"'peak_length' column not found in df."
+
+    assert is_numeric_dtype(df["peak_length"]), \
+        f"'peak_length' must be numeric, found {df['peak_length'].dtype}"
+    assert is_numeric_dtype(df[score_col]), \
+        f"'{score_col}' must be numeric, found {df[score_col].dtype}"
+
+    # allow bool or integer labels
+    assert is_bool_dtype(df["label"]) or is_integer_dtype(df["label"]), \
+        f"'label' must be bool or integer-like, found {df['label'].dtype}"
+
+    # --- prep & split ---
+    sub = df.dropna(subset=["peak_length", score_col]).copy()
+    # build a boolean mask regardless of dtype
+    is_true = sub["label"].astype(bool)
+
+    true_df  = sub[is_true]
+    false_df = sub[~is_true]
+
+    # need at least 2 points and non-constant x for linregress
+    for name, d in {"True": true_df, "False": false_df}.items():
+        assert len(d) >= 2 and d["peak_length"].nunique() >= 2, \
+            f"{name} group has too few points or constant x for regression."
+
+    # --- regressions ---
+    t_slope, t_int, t_r, t_p, t_stderr = linregress(true_df["peak_length"],  true_df[score_col])
+    f_slope, f_int, f_r, f_p, f_stderr = linregress(false_df["peak_length"], false_df[score_col])
+
+    t_label = f"Edges in Ground Truth: y = {t_slope:.2e}x + {t_int:.2e}, r={t_r:.2f}, p={t_p:.2e}"
+    f_label = f"Edges Not in Ground Truth: y = {f_slope:.2e}x + {f_int:.2e}, r={f_r:.2f}, p={f_p:.2e}"
+
+    # --- plot ---
+    fig, ax = plt.subplots(figsize=(8, 8))
+    ax.scatter(false_df["peak_length"], false_df[score_col],
+               s=28, c="#747474", edgecolors="#2D2D2D", alpha=0.30,
+               label=f_label, rasterized=True)
+    ax.scatter(true_df["peak_length"],  true_df[score_col],
+               s=28, c="#4195df", edgecolors="#032b5f", alpha=0.90,
+               label=t_label, rasterized=True)
+
+    x_min = 0.0
+    x_max = max(true_df["peak_length"].max(), false_df["peak_length"].max()) * 1.05
+    xs = np.linspace(x_min, x_max, 200)
+
+    ax.plot(xs, t_int + t_slope * xs, c="#4195df",  lw=2, ls="--")
+    ax.plot(xs, f_int + f_slope * xs, c="#2D2D2D", lw=2, ls="--")
+
+    # labels/titles
+    if ylabel is None:
+        ylabel = "TF–Peak Binding Score"
+    if title is None:
+        title = "TF–Peak Binding Score vs Peak Length"
+
+    ax.set_title(title, fontsize=16)
+    ax.set_xlabel("Peak Length (bp)", fontsize=14)
+    ax.set_ylabel(ylabel, fontsize=14)
+    ax.legend(loc="lower center", bbox_to_anchor=(0.5, -0.20), ncol=1, fontsize=11)
+    fig.tight_layout()
+    return fig
+
+def plot_calculation_method_overview(
+    chipseq_plot_df,
+    score_col,
+    tf_col_name,
+    method_name,
+    calculation_method,
+    log_dist= False,
+    ):
+    fig, axes = plt.subplots(2, 3, figsize=(13, 8))
+
+    plot_scores_distribution(
+        chipseq_plot_df,
+        score_col=score_col,
+        title="Distribution of True/False scores",
+        log=log_dist,
+        ax=axes[0, 0]
+        )
+
+    plot_grouped_score_boxplot(
+        chipseq_plot_df,
+        group_col=tf_col_name,
+        score_col=score_col,
+        title=f"Scores grouped by TF",
+        ylabel=f"{method_name} Score",
+        n_top_groups=15,
+        ax=axes[1, 0]
+        )
+
+    plot_grouped_score_boxplot(
+        chipseq_plot_df,
+        group_col="target_id",
+        score_col=score_col,
+        title=f"Scores grouped by TG",
+        ylabel=f"{method_name} Score",
+        n_top_groups=15,
+        ax=axes[1, 1]
+        )
+
+
+    plot_auroc(chipseq_plot_df,
+                        score_col=score_col,
+                        title="AUROC",
+                        ax=axes[0, 1])
+
+    plot_true_false_boxplots(
+        chipseq_plot_df,
+        score_col=score_col,
+        ylabel=f"{method_name} Score",
+        ax=axes[0, 2]
+        )
+
+    fig.delaxes(axes[1, 2])
+
+    legend_handles = [
+        mpatches.Patch(color="#4195df", alpha=0.5, label="Edge in Ground Truth"),
+        mpatches.Patch(color="#747474", alpha=0.5, label="Edge not in Ground Truth")
+    ]
+    fig.legend(handles=legend_handles,
+            loc="lower center",
+            bbox_to_anchor=(0.5, -0.04),  # centered below plots
+            ncol=2,
+            fontsize=9)
+
+    plt.suptitle(f"{method_name} ChIP-Seq {calculation_method}, Chip-Atlas Ground Truth")
+
+    plt.tight_layout()
+
     return fig

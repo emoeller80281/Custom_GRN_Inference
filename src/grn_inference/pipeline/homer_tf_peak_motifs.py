@@ -8,11 +8,11 @@ from dask.diagnostics import ProgressBar
 from typing import List, Union
 import argparse
 import logging
+from logging import StreamHandler
 import numpy as np
 
 from grn_inference.normalization import (
-    minmax_normalize_dask,
-    clip_and_normalize_log1p_dask
+    minmax_normalize_dask
 )
 
 from grn_inference.plotting import plot_feature_score_histogram
@@ -131,9 +131,13 @@ def main(input_dir: str, output_dir: str, cpu_count: int) -> None:
     delayed_tasks = [delayed(process_TF_motif_file)(f, output_dir) for f in file_paths]
     
     # Get the stream used by the root logger or your custom logger
-    log_stream = logging.getLogger().handlers[0].stream
+    handler = logging.getLogger().handlers[0]
+    if isinstance(handler, StreamHandler):
+        log_stream = handler.stream
+    else:
+        raise TypeError("First handler is not a StreamHandler")
 
-    with ProgressBar(dt=5.0, minimum=1, width=80, out=log_stream):
+    with ProgressBar(dt=30.0, minimum=1, width=80, out=log_stream):
         all_parquet_paths = compute(*delayed_tasks, scheduler="processes", num_workers=cpu_count)
         
     parquet_paths = [p for p in all_parquet_paths if isinstance(p, str) or isinstance(p, Delayed)]
