@@ -9,6 +9,8 @@ import pandas as pd
 import pybedtools
 from grn_inference import utils
 from typing import Tuple
+from scipy import sparse
+from contextlib import nullcontext
 
 torch.manual_seed(1)
 np.random.seed(42)
@@ -94,12 +96,10 @@ os.makedirs(os.path.join(output_dir, "tmp"), exist_ok=True)
 homer_peak_path = os.path.join(output_dir, "tmp/homer_peaks.txt")
 homer_peaks.to_csv(homer_peak_path, sep="\t", header=False, index=False)
 
-print("Loading Homer output")
 homer_results = pd.read_parquet(os.path.join(output_dir, "homer_tf_to_peak.parquet"), engine="pyarrow")
 homer_results = homer_results.reset_index(drop=True)
 homer_results["source_id"] = homer_results["source_id"].str.capitalize()
 
-print("Ensuring shared cell barcodes between ATAC and RNA datasets")
 atac_cell_barcodes = mesc_atac_data_chr1.columns.to_list()
 rna_cell_barcodes = mesc_rna_data.columns.to_list()
 atac_in_rna_shared_barcodes = [i for i in atac_cell_barcodes if i in rna_cell_barcodes]
@@ -110,233 +110,202 @@ shared_barcodes = sorted(set(atac_in_rna_shared_barcodes))
 mesc_atac_data_chr1_shared = mesc_atac_data_chr1[shared_barcodes]
 mesc_rna_data_shared = mesc_rna_data[shared_barcodes]
 
-# TEMPORARY: Set to the first cell in the dataset
-rna_first_cell = mesc_rna_data_shared.iloc[:, 0]
-atac_first_cell = mesc_atac_data_chr1_shared.loc[:, rna_first_cell.name]
+print("Preparing sparse components (TF×Peak and Peak×Gene)")
 
-# Print out the dimensionality 
-potential_tgs = genes_near_peaks["target_id"].unique()
-print(f"Number of potential TGs: {len(potential_tgs)}")
+# Universe/order
+tfs   = homer_results["source_id"].astype(str).str.capitalize().unique()
+genes = genes_near_peaks["target_id"].astype(str).unique()
+# union of peaks that appear in either table
+peaks = np.unique(np.concatenate([
+    homer_results["peak_id"].astype(str).values,
+    genes_near_peaks["peak_id"].astype(str).values
+]))
 
-unique_tfs = homer_results["source_id"].unique()
-print(f"Number of unique TFs: {len(unique_tfs)}")
+tf_i   = {t:i for i,t in enumerate(tfs)}
+peak_i = {p:i for i,p in enumerate(peaks)}
+gene_i = {g:i for i,g in enumerate(genes)}
 
-unique_peaks = homer_results["peak_id"].unique()
-print(f"Number of unique peaks: {len(unique_peaks)}")
+# H: TF x Peak (HOMER). Missing -> 0 (sparse).
+Hr = homer_results[["source_id","peak_id","homer_binding_score"]].copy()
+Hr["source_id"] = Hr["source_id"].astype(str).str.capitalize().map(tf_i)
+Hr["peak_id"]   = Hr["peak_id"].astype(str).map(peak_i)
+Hr = Hr.dropna(subset=["source_id","peak_id"])
+H = sparse.coo_matrix(
+    (Hr["homer_binding_score"].astype(np.float32).values,
+     (Hr["source_id"].astype(int).values, Hr["peak_id"].astype(int).values)),
+    shape=(len(tfs), len(peaks))
+).tocsr()
 
-print("\nCalculating TF-peak Binding Potential")
-tf_peak_binding_potential = pd.merge(homer_results, rna_first_cell, left_on="source_id", right_index=True, how="inner")
-tf_peak_binding_potential["tf_peak_binding_potential"] = tf_peak_binding_potential["homer_binding_score"] * tf_peak_binding_potential.iloc[:,-1]
-tf_peak_binding_potential = tf_peak_binding_potential[["source_id", "peak_id", "tf_peak_binding_potential"]]
+# D: Peak x Gene (distance score). Missing -> 0 (sparse).
+Dr = genes_near_peaks[["peak_id","target_id","TSS_dist_score"]].copy()
+Dr["peak_id"]   = Dr["peak_id"].astype(str).map(peak_i)
+Dr["target_id"] = Dr["target_id"].astype(str).map(gene_i)
+Dr = Dr.dropna(subset=["peak_id","target_id"])
+D = sparse.coo_matrix(
+    (Dr["TSS_dist_score"].astype(np.float32).values,
+     (Dr["peak_id"].astype(int).values, Dr["target_id"].astype(int).values)),
+    shape=(len(peaks), len(genes))
+).tocsr()
 
-print("\nCalculating Peak-TG Regulatory Potential")
-peak_tg_regulatory_potential = pd.merge(genes_near_peaks, atac_first_cell, left_on="peak_id", right_index=True, how="inner")
-peak_tg_regulatory_potential["peak_tg_regulatory_potential"] = peak_tg_regulatory_potential["TSS_dist_score"] * peak_tg_regulatory_potential.iloc[:, -1]
-peak_tg_regulatory_potential = peak_tg_regulatory_potential[["peak_id", "target_id", "peak_tg_regulatory_potential"]]
+# ----- peak -> window assignment (max-overlap; random ties) -----
+print("Assigning peaks to windows")
 
-print("\nJoining to create TF-Peak-TG Regulatory Potential DataFrame")
-tf_peak_tg_regulatory_potential = pd.merge(tf_peak_binding_potential, peak_tg_regulatory_potential, on="peak_id", how="outer")
-tf_peak_tg_regulatory_potential["tf_peak_tg_score"] = tf_peak_tg_regulatory_potential["tf_peak_binding_potential"] * tf_peak_tg_regulatory_potential["peak_tg_regulatory_potential"]
-tf_peak_tg_regulatory_potential = tf_peak_tg_regulatory_potential[["source_id", "peak_id", "target_id", "tf_peak_tg_score"]]
-print(tf_peak_tg_regulatory_potential.head())
+# Make a Series with peak start/end by peak_id
+peak_coord_df = mesc_atac_peak_loc.loc[mesc_atac_peak_loc["peak_id"].isin(peaks), ["peak_id","chrom","start","end"]].copy()
+peak_coord_df = peak_coord_df[peak_coord_df["chrom"] == "chr1"]  # keep chr1
+coord_map = peak_coord_df.set_index("peak_id")[["start","end"]].to_dict(orient="index")
 
-print("\nAggregating peaks into genomic windows")
-def peaks_to_windows(
-    tf_peak_tg_regulatory_potential: pd.DataFrame, 
-    mm10_chr1_windows: pd.DataFrame
-    )-> pd.DataFrame:
-    # Parse peak_id into genomic coords (chrom, start, end)
-    coords = tf_peak_tg_regulatory_potential["peak_id"].str.extract(
-        r"(?P<chrom>[^:]+):(?P<start>\d+)-(?P<end>\d+)"
-    ).astype({"start":"int64","end":"int64"})
+w = int((mm10_chr1_windows["end"] - mm10_chr1_windows["start"]).mode().iloc[0])
+win_lut = {}  # window_idx -> window_id string
+for _, row in mm10_chr1_windows.iterrows():
+    k = row["start"] // w
+    win_lut[k] = f'{row["chrom"]}:{row["start"]}-{row["end"]}'
+nW = len(win_lut)
 
-    df = pd.concat([tf_peak_tg_regulatory_potential, coords], axis=1)
+rng = np.random.default_rng(0)
+def assign_best_window(start, end, w):
+    i0 = start // w
+    i1 = (end - 1) // w
+    if i1 < i0: i1 = i0
+    best_k = i0
+    best_ov = -1
+    ties = []
+    for k in range(i0, i1 + 1):
+        bs, be = k * w, (k + 1) * w
+        ov = max(0, min(end, be) - max(start, bs))
+        if ov > best_ov:
+            best_ov, best_k = ov, k
+            ties = [k]
+        elif ov == best_ov:
+            ties.append(k)
+    return best_k if len(ties) == 1 else int(rng.choice(ties))
 
-    df = df[df["chrom"] == "chr1"].copy()
+# map each peak to a window_idx (or -1 if we lack coords)
+peak_to_window_idx = np.full(len(peaks), -1, dtype=np.int32)
+for p, idx in peak_i.items():
+    info = coord_map.get(p)
+    if info is None: 
+        continue
+    peak_to_window_idx[idx] = assign_best_window(int(info["start"]), int(info["end"]), w)
 
-    window_size = int((mm10_chr1_windows["end"] - mm10_chr1_windows["start"]).mode().iloc[0])
+# build list of peak indices per window
+peaks_by_window = [np.where(peak_to_window_idx == k)[0] for k in range(nW)]
+window_ids = np.array([win_lut[k] for k in range(nW)], dtype=object)
 
-    # Build a quick lookup of window_id strings from window indices
-    # window index k -> [start=k*w, end=(k+1)*w)
-    win_lut = {}
-    for _, row in mm10_chr1_windows.iterrows():
-        k = row["start"] // window_size
-        win_lut[k] = f'{row["chrom"]}:{row["start"]}-{row["end"]}'
+print("\nBuilding Transformer Model")
+TF = len(tfs)               # number of TFs
+TG = len(genes)             # number of target genes
+Wn = len(peaks_by_window)   # number of windows
 
-    # --- Assign each unique peak to the window with maximal overlap (random ties) ---
-    rng = np.random.default_rng(0)  # set a seed for reproducibility; change/remove if you want different random choices
-
-    peaks_unique = (
-        df.loc[:, ["peak_id", "chrom", "start", "end"]]
-        .drop_duplicates(subset=["peak_id"])
-        .reset_index(drop=True)
-    )
-
-    def assign_best_window(start, end, w):
-        # windows indices spanned by the peak (inclusive)
-        i0 = start // w
-        i1 = (end - 1) // w  # subtract 1 so exact boundary end==k*w goes to k-1 window
-        if i1 < i0:
-            i1 = i0
-        # compute overlaps with all spanned windows
-        overlaps = []
-        for k in range(i0, i1 + 1):
-            bin_start = k * w
-            bin_end = bin_start + w
-            ov = max(0, min(end, bin_end) - max(start, bin_start))
-            overlaps.append((k, ov))
-        # choose the k with max overlap; break ties randomly
-        ov_vals = [ov for _, ov in overlaps]
-        max_ov = max(ov_vals)
-        candidates = [k for (k, ov) in overlaps if ov == max_ov]
-        if len(candidates) == 1:
-            return candidates[0]
-        else:
-            return rng.choice(candidates)
-
-    peak_to_window_idx = peaks_unique.apply(
-        lambda r: assign_best_window(r["start"], r["end"], window_size), axis=1
-    )
-    peaks_unique["window_idx"] = peak_to_window_idx
-    peaks_unique["window_id"] = peaks_unique["window_idx"].map(win_lut)
-
-    # Map window assignment back to the full TF–peak–gene table and aggregate
-    df = df.merge(
-        peaks_unique.loc[:, ["peak_id", "window_id"]],
-        on="peak_id",
-        how="left"
-    )
-
-    # Aggregate scores per TF × window × gene
-    binned_scores = (
-        df.groupby(["source_id", "window_id", "target_id"], observed=True)["tf_peak_tg_score"]
-        .sum()
-        .reset_index()
-    ).rename(columns={"tf_peak_tg_score":"tf_window_tg_score"})
-
-    print(binned_scores.head())
-    
-    return binned_scores
-
-tf_window_tg_regulatory_potential = peaks_to_windows(tf_peak_tg_regulatory_potential, mm10_chr1_windows)
-
-print("Converting dataframe to numpy matrix")
-def convert_tf_window_tg_df_to_numpy(tf_window_tg_df: pd.DataFrame) -> Tuple(np.ndarray, dict):
-    # Get unique IDs
-    tfs = tf_window_tg_df["source_id"].unique()
-    windows = tf_window_tg_df["window_id"].unique()
-    genes = tf_window_tg_df["target_id"].unique()
-
-    # Create index maps
-    tf_idx = {tf: i for i, tf in enumerate(tfs)}
-    window_idx = {p: i for i, p in enumerate(windows)}
-    gene_idx = {g: i for i, g in enumerate(genes)}
-
-    # Initialize 3D matrix
-    data_array = np.zeros((len(tfs), len(windows), len(genes)), dtype=float)
-
-    # Fill values
-    for _, row in tf_window_tg_df.iterrows():
-        i = tf_idx[row["source_id"]]
-        j = window_idx[row["window_id"]]
-        k = gene_idx[row["target_id"]]
-        data_array[i, j, k] = row["tf_window_tg_score"]
-
-    print(data_array.shape)  # (n_TFs, n_windows, n_genes)
-    print(f"Saving to {os.path.join(output_dir, 'tf_window_gene_tensor.npz')}")
-    
-    np.savez_compressed(
-        os.path.join(output_dir, "tf_window_gene_tensor.npz"),
-        tensor=data_array,
-        tfs=tfs,
-        windows=windows,
-        genes=genes
-    )
-    
-    return data_array, genes
-
-tf_window_tg_regulatory_potential_numpy, genes = convert_tf_window_tg_df_to_numpy(tf_window_tg_regulatory_potential)
-
-X = torch.from_numpy(tf_window_tg_regulatory_potential_numpy).float()     # 106 TF x 12,480 windows x 1,425 TGs
-
-# Standardizing the window data per TF across the TGs
-print("Standardizing data distribution")
-X = (X - X.mean(dim=2, keepdim=True)) / (X.std(dim=2, keepdim=True) + 1e-6)
-X = torch.clamp(X, -5, 5)
-
-TF, W, TG = X.shape
 d_model = 256
 tf_channels = 32
-tg_channels = 64
+tg_channels = 64 
+window_channels = tg_channels * tf_channels
 
-# Project the TF, window, and TG dimensions down to a size of 
+# Dimensionality reduction using linear projections
 proj_tg = nn.Linear(TG, tg_channels, bias=False)
-Xg = proj_tg(X)             # TF, W, 64
-
 proj_tf = nn.Linear(TF, tf_channels, bias=False)
-Xg = Xg.permute(1, 2, 0)    # W, 64, TF
-Xg = proj_tf(Xg)            # W, 64, 32
+proj_window = nn.Linear(window_channels, d_model)
 
-window_features = Xg.reshape(W, tg_channels * tf_channels) 
-proj_window = nn.Linear(tg_channels * tf_channels, d_model)
-tokens = proj_window(window_features)   # W, 256
+# Pool window data by averaging bins of 8
+pool = nn.AvgPool1d(kernel_size=8, stride=8)
 
-# Downsample window dimension by average pooling across windows
-pool = nn.AvgPool1d(kernel_size=8, stride=8)  # along sequence length, bins and pools the data
-tokens = tokens.unsqueeze(0)
-tokens_ds = pool(tokens.transpose(1,2)).transpose(1,2)   # [1, W', d_model]
-W_ds = tokens_ds.size(1)
-
-# Set up the encoder
-encoder_layer = nn.TransformerEncoderLayer(
-    d_model=d_model, nhead=8, dim_feedforward=512, batch_first=True
-)
+# Set up the Key, Query, Value self-attention layers
+encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=8, dim_feedforward=512, batch_first=True)
 encoder = nn.TransformerEncoder(encoder_layer, num_layers=4)
 
-window_key_values_encoding = encoder(tokens_ds)   # [1, W', d_model]
-
+# Set up the multi-headed cross-attention layers
 n_genes = len(genes)  # 1425
 gene_embed = nn.Embedding(n_genes, d_model)
-
-# Create the multi-headed attention block
 cross_attn = nn.MultiheadAttention(embed_dim=d_model, num_heads=8, batch_first=True)
 readout = nn.Sequential(
     nn.LayerNorm(d_model),
     nn.Linear(d_model, 1)
 )
 
-# Build gene queries (index 0..n_genes-1)
-gene_ids = torch.arange(n_genes)
-gene_queries = gene_embed(gene_ids).unsqueeze(0)  # [1, n_genes, d_model]
+def build_tokens_sparse_for_cells(
+    cell_ids,
+    H, D,               # sparse CSR: [TF×P], [P×G]
+    peaks_by_window,    # list of np.array peak indices per window
+    tfs, peaks, genes,  # ID arrays
+    mesc_rna_data_shared, mesc_atac_data_chr1_shared,
+    proj_tg: nn.Linear, proj_tf: nn.Linear, proj_window: nn.Linear,
+    pool: nn.AvgPool1d,
+    device,
+    clamp_val: float = 5.0,
+):
+    """
+    Returns tokens_ds: [B, W', d_model]  (pooled along windows)
+    """
+    TF = H.shape[0]; G = D.shape[1]; Wn = len(peaks_by_window)
+    out_tokens = []
 
-# Cross-attention: (Q=genes, K/V=windows)
-Z, _ = cross_attn(
-    query=gene_queries, 
-    key=window_key_values_encoding, 
-    value=window_key_values_encoding
-    )  # [1, n_genes, d_model]
+    for cell in cell_ids:
+        # 1) Per-cell scalars
+        e = mesc_rna_data_shared.reindex(index=tfs)[cell].fillna(0).to_numpy(np.float32)
+        a = mesc_atac_data_chr1_shared.reindex(index=peaks)[cell].fillna(0).to_numpy(np.float32)
+        # 2) Scale sparse matrices
+        B = H.multiply(e[:, None]).tocsr()   # TF×P
+        R = D.multiply(a[:, None]).tocsr()   # P×G
 
-pred_expr = readout(Z).squeeze(-1)           # [1, n_genes]
+        # 3) For each window: M_w = B[:, Pw] @ R[Pw, :]
+        #    Project TF×G -> d_model to get a token per window
+        toks_w = []
+        for p_idx in peaks_by_window:
+            if p_idx.size == 0:
+                # empty window -> zero token
+                M = torch.zeros((TF, G), dtype=torch.float32, device=device)
+            else:
+                Mw = (B[:, p_idx] @ R[p_idx, :]).toarray()    # [TF, G]
+                M  = torch.from_numpy(Mw).to(device)
 
-# Register the parameters
-params = (
-    list(proj_tg.parameters()) +
-    list(proj_tf.parameters()) +
-    list(proj_window.parameters()) +
-    list(encoder.parameters()) +
-    list(gene_embed.parameters()) +
-    list(cross_attn.parameters()) +
-    list(readout.parameters())
-    # + list(rpb.parameters())  # if you use the custom RPB blocks
-)
-opt = torch.optim.AdamW(params, lr=1e-3, weight_decay=1e-4)
+            # per-window stabilization (per TF across genes)
+            M = (M - M.mean(dim=1, keepdim=True)) / (M.std(dim=1, keepdim=True) + 1e-6)
+            M = torch.clamp(M, -clamp_val, clamp_val)  # [TF, G]
 
-def get_true_tg_expr_vector_from_data(rna_dataset: pd.Series, genes: dict):
+            # projections (match your pipeline)
+            Xg = proj_tg(M.unsqueeze(0))               # [1, TF, tg]
+            Xg = Xg.permute(0, 2, 1)                   # [1, tg, TF]
+            Xg = proj_tf(Xg)                           # [1, tg, tf]
+            feat = Xg.reshape(1, -1)                   # [1, tg*tf]
+            tok = proj_window(feat)                    # [1, d_model]
+            toks_w.append(tok)
+
+        tokens = torch.cat(toks_w, dim=0).unsqueeze(0)   # [1, W, d_model]
+
+        # 4) pool along windows to reduce seq length
+        tokens_ds = pool(tokens.transpose(1, 2)).transpose(1, 2)  # [1, W', d_model]
+        out_tokens.append(tokens_ds)
+
+    return torch.cat(out_tokens, dim=0)   # [B, W', d_model]
+
+def forward_tokens_to_pred(
+    tokens_batch: torch.Tensor,      # [B, W', d_model]
+    encoder,                         # nn.TransformerEncoder or your custom RPB blocks
+    gene_embed: nn.Embedding,
+    cross_attn: nn.MultiheadAttention,
+    readout: nn.Module,
+) -> torch.Tensor:
+    H = encoder(tokens_batch)                            # [B, W', d_model]
+    B = H.size(0)
+    n_genes = gene_embed.num_embeddings
+    gene_ids = torch.arange(n_genes, device=H.device)
+    GQ = gene_embed(gene_ids).unsqueeze(0).expand(B, -1, -1)  # [B, n_genes, d_model]
+    Z, _ = cross_attn(query=GQ, key=H, value=H)         # [B, n_genes, d_model]
+    pred_expr = readout(Z).squeeze(-1)                  # [B, n_genes]
+    return pred_expr
+
+def masked_mse(pred, y, m):
+    diff2 = (pred - y)**2
+    diff2 = diff2[m]
+    return diff2.mean() if diff2.numel() > 0 else torch.tensor(0.0, device=pred.device)
+
+def get_true_tg_expr_vector_from_data(rna_data, genes):
     dup = pd.Index(genes).duplicated()
     assert not dup.any(), f"Duplicate gene IDs in prediction axis at: {np.where(dup)[0][:10]}"
 
     # Align counts to prediction order from the gene to index mapping (same length and order as genes)
-    true_counts = rna_dataset.reindex(genes)
+    true_counts = rna_data.reindex(genes)
 
     # build mask for missing genes (not present in RNA)
     mask = ~true_counts.isna().to_numpy()
@@ -349,12 +318,155 @@ def get_true_tg_expr_vector_from_data(rna_dataset: pd.Series, genes: dict):
     
     return y_true, mask_t
 
-y_true, mask_t = get_true_tg_expr_vector_from_data(rna_first_cell, genes)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-def masked_mse(pred, y, m):
-    diff2 = (pred - y)**2
-    return diff2[m].mean()
+# move modules to device
+for m in [proj_tg, proj_tf, proj_window, encoder, gene_embed, cross_attn, readout]:
+    m.to(device)
 
-# pred_expr: [1, n_genes] from the model
-loss = masked_mse(pred_expr, y_true, mask_t)
-print(loss)
+def iter_batches(items, bs):
+    for i in range(0, len(items), bs):
+        yield items[i:i+bs]
+
+# Train/val split on barcodes you already computed
+all_cells = shared_barcodes
+rng = np.random.default_rng(0)
+rng.shuffle(all_cells)
+val_frac = 0.15
+n_val = max(1, int(len(all_cells)*val_frac))
+val_cells = all_cells[:n_val]
+train_cells = all_cells[n_val:]
+
+opt = torch.optim.AdamW(
+    list(proj_tg.parameters()) +
+    list(proj_tf.parameters()) +
+    list(proj_window.parameters()) +
+    list(encoder.parameters()) +
+    list(gene_embed.parameters()) +
+    list(cross_attn.parameters()) +
+    list(readout.parameters()),
+    lr=1e-3, weight_decay=1e-4
+)
+sched  = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=20)
+scaler = torch.amp.GradScaler(enabled=torch.cuda.is_available())
+
+epochs, batch_size = 20, 8
+best_val, patience, pat = float("inf"), 5, 0
+
+use_amp = torch.cuda.is_available()
+autocast_ctx = (lambda: torch.amp.autocast(device_type="cuda")) if use_amp else (lambda: nullcontext())
+scaler = torch.amp.GradScaler(device="cuda") if use_amp else None
+
+print("\n ----- Starting Training -----")
+for epoch in range(1, epochs+1):
+    # ---- TRAIN ----
+    for m in [encoder, gene_embed, cross_attn, readout]:
+        m.train()
+    train_loss, n_train = 0.0, 0
+
+    for cell_batch in iter_batches(train_cells, batch_size):
+        opt.zero_grad(set_to_none=True)
+
+        with autocast_ctx():
+            tokens_b = build_tokens_sparse_for_cells(
+                cell_batch, H, D, peaks_by_window, tfs, peaks, genes,
+                mesc_rna_data_shared, mesc_atac_data_chr1_shared,
+                proj_tg, proj_tf, proj_window, pool, device
+            )
+            Henc = encoder(tokens_b)
+            n_genes = len(genes)
+            gene_ids = torch.arange(n_genes, device=device)
+            GQ = gene_embed(gene_ids).unsqueeze(0).expand(tokens_b.size(0), -1, -1)
+            Z, _ = cross_attn(query=GQ, key=Henc, value=Henc)
+            pred = readout(Z).squeeze(-1)
+
+            # targets/masks for this batch
+            y_list, m_list = [], []
+            for c in cell_batch:
+                y, m = get_true_tg_expr_vector_from_data(mesc_rna_data_shared[c], genes)
+                y_list.append(y); m_list.append(m)
+            y_true = torch.cat(y_list, dim=0).to(device)
+            mask_t = torch.cat(m_list, dim=0).to(device)
+
+            # masked loss
+            diff2 = (pred - y_true)**2
+            loss = (diff2[mask_t]).mean() if (mask_t.sum() > 0) else torch.tensor(0.0, device=device)
+
+        if scaler is not None:
+            scaler.scale(loss).backward()
+            torch.nn.utils.clip_grad_norm_(
+                list(proj_tg.parameters()) + list(proj_tf.parameters()) +
+                list(proj_window.parameters()) + list(encoder.parameters()) +
+                list(gene_embed.parameters()) + list(cross_attn.parameters()) +
+                list(readout.parameters()), 1.0
+            )
+            scaler.step(opt)
+            scaler.update()
+        else:
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(
+                list(proj_tg.parameters()) + list(proj_tf.parameters()) +
+                list(proj_window.parameters()) + list(encoder.parameters()) +
+                list(gene_embed.parameters()) + list(cross_attn.parameters()) +
+                list(readout.parameters()), 1.0
+            )
+            opt.step()
+        
+        # accumulate training loss
+        train_loss += loss.item() * len(cell_batch)
+        n_train    += len(cell_batch)
+    
+    train_loss /= max(1, n_train)
+    sched.step()
+    
+    # ---- VAL ----
+    for m in [encoder, gene_embed, cross_attn, readout]:
+        m.eval()
+    val_loss, n_valtot = 0.0, 0
+    with torch.no_grad(), autocast_ctx():
+        for cell_batch in iter_batches(val_cells, batch_size):
+            tokens_b = build_tokens_sparse_for_cells(
+                cell_batch, H, D, peaks_by_window, tfs, peaks, genes,
+                mesc_rna_data_shared, mesc_atac_data_chr1_shared,
+                proj_tg, proj_tf, proj_window, pool, device
+            )
+            Henc = encoder(tokens_b)
+            n_genes = len(genes)
+            gene_ids = torch.arange(n_genes, device=device)
+            GQ = gene_embed(gene_ids).unsqueeze(0).expand(tokens_b.size(0), -1, -1)
+            Z, _ = cross_attn(query=GQ, key=Henc, value=Henc)
+            pred = readout(Z).squeeze(-1)
+
+            y_list, m_list = [], []
+            for c in cell_batch:
+                y, m = get_true_tg_expr_vector_from_data(mesc_rna_data_shared[c], genes)
+                y_list.append(y); m_list.append(m)
+            y_true = torch.cat(y_list, dim=0).to(device)
+            mask_t = torch.cat(m_list, dim=0).to(device)
+
+            diff2 = (pred - y_true)**2
+            loss = (diff2[mask_t]).mean() if (mask_t.sum() > 0) else torch.tensor(0.0, device=device)
+            val_loss += loss.item() * len(cell_batch)
+            n_valtot += len(cell_batch)
+
+    val_loss /= max(1, n_valtot)
+    print(f"[Epoch {epoch:02d}] train_loss={train_loss:.4f}  val_loss={val_loss:.4f}")
+
+    # early stopping + checkpoint
+    if val_loss < best_val - 1e-5:
+        best_val, pat = val_loss, 0
+        torch.save({
+            "proj_tg": proj_tg.state_dict(),
+            "proj_tf": proj_tf.state_dict(),
+            "proj_window": proj_window.state_dict(),
+            "encoder": encoder.state_dict(),
+            "gene_embed": gene_embed.state_dict(),
+            "cross_attn": cross_attn.state_dict(),
+            "readout": readout.state_dict(),
+            "tfs": np.array(tfs), "genes": np.array(genes), "window_ids": window_ids,
+        }, os.path.join(output_dir, "expr_predictor_best.ckpt"))
+    else:
+        pat += 1
+        if pat >= patience:
+            print(f"Early stopping at epoch {epoch} (no val improvement for {patience} epochs).")
+            break

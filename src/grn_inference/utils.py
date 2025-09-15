@@ -287,7 +287,7 @@ def load_and_pivot_melted_score_dataframe(melted_score_file_path: str) -> pd.Dat
 
     return wide_df
 
-def format_peaks(peak_ids: pd.Series) -> pd.DataFrame:
+def format_peaks(peak_ids: Union[pd.Series, pd.Index]) -> pd.DataFrame:
     """
     Splits peaks from `chrN:start-end` format into a DataFrame.
     
