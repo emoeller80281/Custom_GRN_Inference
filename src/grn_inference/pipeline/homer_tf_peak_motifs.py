@@ -107,7 +107,7 @@ def process_TF_motif_file(path_to_file: str, output_dir: str) -> Union[str,None]
         motif_to_peak['homer_binding_score'] = motif_to_peak['tf_motifs_in_peak'] / total_tf_binding_sites
         
         # Select only the columns of interest and drop any rows with missing values
-        df = motif_to_peak[['peak_id', 'source_id', 'homer_binding_score']].dropna()
+        df = motif_to_peak[['peak_id', 'source_id', 'tf_motifs_in_peak', 'homer_binding_score']].dropna()
         
         df.to_parquet(output_path, engine="pyarrow", compression="snappy", index=False)
         
