@@ -1,17 +1,21 @@
 
 import os
+import glob
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+import torch.distributed as dist
 import numpy as np
 import pandas as pd
 import pybedtools
 from grn_inference import utils
-from typing import Tuple
+from typing import Optional, Tuple, Any, Dict
 from scipy import sparse
 from contextlib import nullcontext
+from collections import OrderedDict
 import logging
+import time
 
 torch.manual_seed(1)
 np.random.seed(42)
@@ -30,13 +34,176 @@ output_dir = os.path.join(project_dir, "output/transformer_testing_output")
 mm10_fasta_file = os.path.join(mm10_genome_dir, "chr1.fa")
 mm10_chrom_sizes_file = os.path.join(mm10_genome_dir, "chrom.sizes")
 
+load_model = False
+
 CHECKPOINT_DIR = os.path.join(output_dir, "checkpoints")
 os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 
-window_size = 1000
+window_size = 5000
 
-print("\n ----- Loading and Formatting Input Data -----")
-print("Reading and formatting TSS bed file")
+num_cells = 50
+
+import os, glob, logging, torch, torch.distributed as dist, numpy as np
+from collections import OrderedDict
+from typing import Optional, Tuple, Any, Dict
+
+CHECKPOINT_DIR = os.path.join(output_dir, "checkpoints")
+os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+
+def _rank0() -> bool:
+    return (dist.is_available() and dist.is_initialized() and dist.get_rank() == 0) or not dist.is_initialized()
+
+def _atomic_save(obj: Dict[str, Any], path: str) -> None:
+    tmp = f"{path}.tmp"
+    torch.save(obj, tmp)
+    os.replace(tmp, path)
+
+def save_checkpoint(model, optimizer, scheduler, epoch: int, loss: float,
+                    best_val: float, fname: str) -> str:
+    """Always safe to call from any rank; only rank0 writes."""
+    if not _rank0():
+        if dist.is_initialized(): dist.barrier()
+        return fname
+
+    logging.debug(f"Saving checkpoint -> {fname}")
+    # unwrap DDP
+    raw_model = model.module if hasattr(model, "module") else model
+    state = {
+        "epoch": epoch,
+        "loss": loss,
+        "best_val": best_val,
+        "state_dict": raw_model.state_dict(),
+        "optimizer": optimizer.state_dict() if optimizer is not None else None,
+        "scheduler": scheduler.state_dict() if scheduler is not None else None,
+        "rng_state": torch.get_rng_state(),
+        "cuda_rng_state": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+        "numpy_rng_state": np.random.get_state(),
+        "torch_version": torch.__version__,
+    }
+    _atomic_save(state, fname)
+    if dist.is_initialized(): dist.barrier()
+    return fname
+
+def save_regular(model, optimizer, scheduler, epoch: int, loss: float, best_val: float) -> str:
+    path = os.path.join(CHECKPOINT_DIR, f"checkpoint_epoch_{epoch:04d}.pth.tar")
+    return save_checkpoint(model, optimizer, scheduler, epoch, loss, best_val, path)
+
+def save_best(model, optimizer, scheduler, epoch: int, loss: float, best_val: float) -> str:
+    path = os.path.join(CHECKPOINT_DIR, "best_model.pth.tar")
+    return save_checkpoint(model, optimizer, scheduler, epoch, loss, best_val, path)
+
+def strip_module_prefix(state_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    if any(k.startswith("module.") for k in state_dict.keys()):
+        return OrderedDict((k.replace("module.", "", 1), v) for k, v in state_dict.items())
+    return state_dict
+
+def load_checkpoint_into(model, optimizer=None, scheduler=None, path: str = "") -> Tuple[int, float, float]:
+    """Returns (epoch, last_loss, best_val). Loads onto CPU; move model to device after."""
+    assert os.path.isfile(path), f"Checkpoint not found: {path}"
+    logging.info(f"Loading checkpoint: {path}")
+    ckpt = torch.load(path, map_location="cpu")
+
+    sd = strip_module_prefix(ckpt["state_dict"])
+    raw_model = model.module if hasattr(model, "module") else model
+    raw_model.load_state_dict(sd)
+
+    if optimizer is not None and ckpt.get("optimizer") is not None:
+        optimizer.load_state_dict(ckpt["optimizer"])
+    if scheduler is not None and ckpt.get("scheduler") is not None:
+        scheduler.load_state_dict(ckpt["scheduler"])
+
+    # (Optional) restore RNG for exact reproducibility
+    if "rng_state" in ckpt: torch.set_rng_state(ckpt["rng_state"])
+    if torch.cuda.is_available() and ckpt.get("cuda_rng_state") is not None:
+        torch.cuda.set_rng_state_all(ckpt["cuda_rng_state"])
+    if "numpy_rng_state" in ckpt: np.random.set_state(ckpt["numpy_rng_state"])
+
+    epoch = int(ckpt.get("epoch", 0))
+    loss  = float(ckpt.get("loss", float("inf")))
+    best  = float(ckpt.get("best_val", float("inf")))
+    return epoch, loss, best
+
+def get_latest_checkpoint() -> Optional[str]:
+    files = sorted(glob.glob(os.path.join(CHECKPOINT_DIR, "checkpoint_epoch_*.pth.tar")), key=os.path.getmtime)
+    return files[-1] if files else None
+
+def load_best_checkpoint(model, optimizer=None, scheduler=None) -> Tuple[int, float]:
+    best_path = os.path.join(CHECKPOINT_DIR, "best_model.pth.tar")
+    if os.path.isfile(best_path):
+        epoch, last_loss, best_val = load_checkpoint_into(model, optimizer, scheduler, best_path)
+        return epoch, best_val
+    logging.info("No best_model.pth.tar found.")
+    return 0, float("inf")
+
+def clean_old_checkpoints(keep_last: int = 3) -> None:
+    if not _rank0(): 
+        if dist.is_initialized(): dist.barrier()
+        return
+    pattern = os.path.join(CHECKPOINT_DIR, "checkpoint_epoch_*.pth.tar")
+    files = sorted(glob.glob(pattern), key=os.path.getmtime)
+    for f in files[:-keep_last]:
+        try:
+            logging.debug(f"Removing old checkpoint: {f}")
+            os.remove(f)
+        except OSError:
+            pass
+    if dist.is_initialized(): dist.barrier()
+
+def setup_logging():
+    rank = dist.get_rank() if (dist.is_available() and dist.is_initialized()) else 0
+    handlers = []
+    if rank == 0:
+        handlers.append(logging.StreamHandler())
+    logging.basicConfig(level=logging.INFO if rank == 0 else logging.ERROR,
+                        handlers=handlers, format="%(message)s")
+
+def init_distributed():
+    """
+    Initialize torch.distributed from torchrun or SLURM env.
+    Returns (rank, world_size, local_rank).
+    """
+    if all(k in os.environ for k in ["RANK", "WORLD_SIZE", "LOCAL_RANK"]):
+        rank       = int(os.environ["RANK"])
+        world_size = int(os.environ["WORLD_SIZE"])
+        local_rank = int(os.environ["LOCAL_RANK"])
+    else:                                                               # srun --mpi=pmi2
+        rank       = int(os.environ["SLURM_PROCID"])
+        world_size = int(os.environ["SLURM_NTASKS"])
+        local_rank = int(os.environ["SLURM_LOCALID"])
+
+    if torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
+    
+    backend = "nccl" if torch.cuda.is_available() else "gloo"
+    dist.init_process_group(
+        backend=backend,
+        init_method="env://",
+        rank=rank,
+        world_size=world_size,
+    )
+    
+    print(f"[rank {rank}] CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES')}")
+    print(f"[rank {rank}] torch.cuda.device_count(): {torch.cuda.device_count()}")
+    print(f"[rank {rank}] Setting CUDA device to local_rank = {local_rank}")
+    
+    return rank, world_size, local_rank
+
+ddp = int(os.environ.get("WORLD_SIZE", "1")) > 1 or int(os.environ.get("SLURM_NTASKS", "1")) > 1
+
+# Initialize the distributed computing to utilize training across multiple GPUs
+if ddp:
+    rank, world_size, local_rank = init_distributed()
+else:
+    rank, world_size, local_rank = 0, 1, 0
+    
+setup_logging()
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+if rank==0:
+    logging.info("\n ----- Loading and Formatting Input Data -----")
+    logging.info("Reading and formatting TSS bed file")
+    
 mm10_gene_tss_bed = pybedtools.BedTool(mm10_gene_tss_file)
 gene_tss_df = (
     mm10_gene_tss_bed
@@ -45,8 +212,8 @@ gene_tss_df = (
     .to_dataframe()
     .sort_values(by="start", ascending=True)
     )
-
-print("Reading processed scATAC-seq dataset")
+if rank==0:
+    logging.info("Reading processed scATAC-seq dataset")
 mesc_atac_data = pd.read_parquet(os.path.join(sample_input_dir, "mESC_filtered_L2_E7.5_rep1_ATAC_processed.parquet")).set_index("peak_id")
 mesc_atac_peak_loc = mesc_atac_data.index
 
@@ -58,13 +225,15 @@ mesc_atac_peak_loc_df = mesc_atac_peak_loc_df.rename(columns={"chromosome":"chro
 # TEMPORARY Restrict to Chr1 for testing
 mesc_atac_data_chr1 = mesc_atac_data[mesc_atac_data.index.isin(mesc_atac_peak_loc_df.peak_id)]
 
-print("Reading in the scRNA-seq dataset")
+if rank==0:
+    logging.info("Reading in the scRNA-seq dataset")
 mesc_rna_data = pd.read_parquet(
     os.path.join(sample_input_dir, "mESC_filtered_L2_E7.5_rep1_RNA_processed.parquet")).set_index("gene_id")
 
 genome_window_file = os.path.join(mm10_genome_dir, f"mm10_chr1_windows_{window_size // 1000}kb.bed")
 if not os.path.exists(genome_window_file):
-    print("Creating genomic windows")
+    if rank==0:
+        logging.info("Creating genomic windows")
 
     mm10_genome_windows = pybedtools.bedtool.BedTool().window_maker(g=mm10_chrom_sizes_file, w=window_size)
     mm10_chr1_windows = (
@@ -74,15 +243,17 @@ if not os.path.exists(genome_window_file):
         .to_dataframe()
     )
 else:
-    print("Loading existing genomic windows")
+    if rank==0:
+        logging.info("Loading existing genomic windows")
     mm10_chr1_windows = pybedtools.BedTool(genome_window_file).to_dataframe()
 
 
 
 if "peak_tmp.bed" not in os.listdir(output_dir) or "tss_tmp.bed" not in os.listdir(output_dir):
-    print("Calculating peak to TG distance score")
+    if rank==0:
+        logging.info("Calculating peak to TG distance score")
     peak_bed = pybedtools.BedTool.from_dataframe(
-        mesc_atac_peak_loc[["chrom", "start", "end", "peak_id"]]
+        mesc_atac_peak_loc_df[["chrom", "start", "end", "peak_id"]]
         ).saveas(os.path.join(output_dir, "peak_tmp.bed"))
 
     tss_bed = pybedtools.BedTool.from_dataframe(
@@ -106,7 +277,8 @@ genes_near_peaks.to_parquet(os.path.join(output_dir, "genes_near_peaks.parquet")
 genes_near_peaks = pd.read_parquet(os.path.join(output_dir, "genes_near_peaks.parquet"), engine="pyarrow")
 
 
-# print("Building Homer peaks file")
+# if rank==0:
+#    logging.info("Building Homer peaks file")
 # homer_peaks = genes_near_peaks[["peak_id", "peak_chr", "peak_start", "peak_end"]]
 # homer_peaks = homer_peaks.rename(columns={
 #     "peak_id":"PeakID", 
@@ -132,12 +304,13 @@ rna_cell_barcodes = mesc_rna_data.columns.to_list()
 atac_in_rna_shared_barcodes = [i for i in atac_cell_barcodes if i in rna_cell_barcodes]
 
 # Make sure that the cell names are in the same order and in both datasets
-shared_barcodes = sorted(set(atac_in_rna_shared_barcodes))[:25]
+shared_barcodes = sorted(set(atac_in_rna_shared_barcodes))[:num_cells]
 
 mesc_atac_data_chr1_shared = mesc_atac_data_chr1[shared_barcodes]
 mesc_rna_data_shared = mesc_rna_data[shared_barcodes]
 
-print("Preparing sparse components (TF×Peak and Peak×Gene)")
+if rank==0:
+    logging.info("Preparing sparse components (TF×Peak and Peak×Gene)")
 
 # Universe/order
 tfs   = homer_results["source_id"].astype(str).str.capitalize().unique()
@@ -175,10 +348,11 @@ D = sparse.coo_matrix(
 ).tocsr()
 
 # ----- peak -> window assignment (max-overlap; random ties) -----
-print("Assigning peaks to windows")
+if rank==0:
+    logging.info("Assigning peaks to windows")
 
 # Make a Series with peak start/end by peak_id
-peak_coord_df = mesc_atac_peak_loc.loc[mesc_atac_peak_loc["peak_id"].isin(peaks), ["peak_id","chrom","start","end"]].copy()
+peak_coord_df = mesc_atac_peak_loc_df.loc[mesc_atac_peak_loc_df["peak_id"].isin(peaks), ["peak_id","chrom","start","end"]].copy()
 peak_coord_df = peak_coord_df[peak_coord_df["chrom"] == "chr1"]  # keep chr1
 coord_map = peak_coord_df.set_index("peak_id")[["start","end"]].to_dict(orient="index")
 
@@ -219,16 +393,17 @@ for p, idx in peak_i.items():
 peaks_by_window = [np.where(peak_to_window_idx == k)[0] for k in range(nW)]
 window_ids = np.array([win_lut[k] for k in range(nW)], dtype=object)
 
-print("\nBuilding Transformer Model")
+if rank==0:
+    logging.info("\nBuilding Transformer Model")
 TF = len(tfs)               # number of TFs
 TG = len(genes)             # number of target genes
 Wn = len(peaks_by_window)   # number of windows
 
 # ----- Configurations -----
-d_model = 96
-tf_channels = 12
-tg_channels = 24 
-batch_size = 1
+d_model = 256
+tf_channels = 32
+tg_channels = 64 
+batch_size = 5
 epochs = 20
 kernel_and_stride_size = 32
 window_channels = tg_channels * tf_channels
@@ -236,7 +411,7 @@ window_channels = tg_channels * tf_channels
 # Encoder Settings
 encoder_nhead = 8
 encoder_dim_feedforward = 512
-encoder_num_layers = 4
+encoder_num_layers = 3
 
 # Model Architecture overview
 # proj_tg -> proj_tf -> proj_window -> encoder -> cross-attention -> readout
@@ -253,24 +428,26 @@ pool = nn.AvgPool1d(
     )
 
 nonempty = sum(1 for p in peaks_by_window if p.size > 0)
-print(f"Data Size:")
-print(f"  - Windows: {len(peaks_by_window):,} | non-empty: {nonempty:,}")
-print(f"  - Num TFs = {len(tfs):,}")
-print(f"  - Num Peaks = {len(peaks):,}")
-print(f"  - Num TGs = {len(genes):,}")
-print(f"  - Num Cells = {len(shared_barcodes)}")
+if rank==0:
+    logging.info(f"Data Size:")
+    logging.info(f"   - Window Size: {window_size} bp")
+    logging.info(f"  - Windows: {len(peaks_by_window):,} | non-empty: {nonempty:,}")
+    logging.info(f"  - Num TFs = {len(tfs):,}")
+    logging.info(f"  - Num Peaks = {len(peaks):,}")
+    logging.info(f"  - Num TGs = {len(genes):,}")
+    logging.info(f"  - Num Cells = {len(shared_barcodes)}")
 
-print(f"\nModel Parameters:")
-print(f"  - Model Dimensions = {d_model}")
-print(f"  - TF Linear Projection = {TF:,} -> {tf_channels}")
-print(f"  - TG Linear Projection = {TG:,} -> {tg_channels}")
-print(f"  - TF x TG Features Per Window = {window_channels} -> Model Dimension of {d_model}")
-print(f"  - Window Data Pooling: kernel={kernel_and_stride_size}, stride={kernel_and_stride_size}")
+    logging.info(f"\nModel Parameters:")
+    logging.info(f"  - Model Dimensions = {d_model}")
+    logging.info(f"  - TF Linear Projection = {TF:,} -> {tf_channels}")
+    logging.info(f"  - TG Linear Projection = {TG:,} -> {tg_channels}")
+    logging.info(f"  - TF x TG Features Per Window = {window_channels} -> Model Dimension of {d_model}")
+    logging.info(f"  - Window Data Pooling: kernel={kernel_and_stride_size}, stride={kernel_and_stride_size}")
 
-print(f"\nEncoder Settings")
-print(f"  - Encoder Layers - {encoder_num_layers}")
-print(f"  - Number of Heads = {encoder_nhead}")
-print(f"  - Feedforward Layer Neurons = {encoder_dim_feedforward}")
+    logging.info(f"\nEncoder Settings")
+    logging.info(f"  - Encoder Layers = {encoder_num_layers}")
+    logging.info(f"  - Number of Heads = {encoder_nhead}")
+    logging.info(f"  - Feedforward Layer Neurons = {encoder_dim_feedforward}")
 
 # Set up the Key, Query, Value self-attention layers
 encoder_layer = nn.TransformerEncoderLayer(
@@ -417,8 +594,6 @@ def get_true_tg_expr_vector_from_data(rna_data, genes):
     
     return y_true, mask_t
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
 # move modules to device
 for m in [proj_tg, proj_tf, proj_window, encoder, gene_embed, cross_attn, readout]:
     m.to(device)
@@ -436,6 +611,20 @@ n_val = max(1, int(len(all_cells)*val_frac))
 val_cells = all_cells[:n_val]
 train_cells = all_cells[n_val:]
 
+def shard_list_per_rank(items, rank, world_size, pad=True):
+    # simple equal split with optional padding (repeat last) so lengths match
+    n = len(items)
+    per = (n + world_size - 1) // world_size  # ceil
+    start = rank * per
+    end = min(start + per, n)
+    shard = items[start:end]
+    if pad and len(shard) < per and len(shard) > 0:
+        shard = shard + [shard[-1]] * (per - len(shard))
+    return shard
+
+train_cells_rank = shard_list_per_rank(train_cells, rank, world_size, pad=True)
+val_cells_rank   = shard_list_per_rank(val_cells,   rank, world_size, pad=True)
+
 opt = torch.optim.AdamW(
     list(proj_tg.parameters()) +
     list(proj_tf.parameters()) +
@@ -446,42 +635,86 @@ opt = torch.optim.AdamW(
     list(readout.parameters()),
     lr=1e-3, weight_decay=1e-4
 )
-sched  = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=20)
-scaler = torch.amp.GradScaler(enabled=torch.cuda.is_available())
 
 best_val, patience, pat = float("inf"), 5, 0
 
+class ExprPredictor(nn.Module):
+    def __init__(self, proj_tg, proj_tf, proj_window, encoder, gene_embed, cross_attn, readout):
+        super().__init__()
+        self.proj_tg = proj_tg
+        self.proj_tf = proj_tf
+        self.proj_window = proj_window
+        self.encoder = encoder
+        self.gene_embed = gene_embed
+        self.cross_attn = cross_attn
+        self.readout = readout
+
+model = ExprPredictor(proj_tg, proj_tf, proj_window, encoder, gene_embed, cross_attn, readout).to(device)
+if ddp:
+    model = torch.nn.parallel.DistributedDataParallel(
+        model, device_ids=[local_rank] if torch.cuda.is_available() else None,
+        output_device=local_rank if torch.cuda.is_available() else None,
+        find_unused_parameters=False
+    )
+opt = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
+sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=20)
 use_amp = torch.cuda.is_available()
 autocast_ctx = (lambda: torch.amp.autocast(device_type="cuda")) if use_amp else (lambda: nullcontext())
-scaler = torch.amp.GradScaler(device="cuda") if use_amp else None
+scaler = torch.amp.GradScaler(enabled=use_amp)
 
-print("\n ----- Starting Training -----")
-for epoch in range(1, epochs+1):
+def unwrap(m):
+    return m.module if isinstance(m, torch.nn.parallel.DistributedDataParallel) else m
+
+setup_logging()
+
+best_val = float("inf")
+start_epoch = 1
+
+# (optional) resume:
+if load_model:
+    latest = get_latest_checkpoint()
+    if latest:
+        e, last_loss, best_val = load_checkpoint_into(
+            model=model,  # or pass a simple object with your modules
+            optimizer=opt, scheduler=sched, path=latest
+        )
+        start_epoch = e + 1
+    else:
+        start_epoch = 1
+else:
+    start_epoch = 1
+
+gene_ids = torch.arange(n_genes, device=device)
+
+if rank==0:
+    logging.info("\n ----- Starting Training -----")
+for epoch in range(start_epoch, epochs+1):
     # ---- TRAIN ----
-    for m in [encoder, gene_embed, cross_attn, readout]:
-        m.train()
-    train_loss, n_train = 0.0, 0
-    print("  - Running Cell Batch:")
-    cell_num = 1
-    for cell_batch in iter_batches(train_cells, batch_size):
-        print(f"    {cell_num}/{(len(train_cells) // batch_size)+1}")
-        opt.zero_grad()
+    model.train()  # <— instead of toggling each submodule
+    inner = unwrap(model)
+    train_loss_sum, n_train = 0.0, 0
+    if rank == 0:
+        logging.info("  - Running Training:")
+    for bi, cell_batch in enumerate(iter_batches(train_cells_rank, batch_size), start=1):
+        if rank == 0:
+            logging.info(f"       {bi}/{(len(train_cells_rank) + batch_size - 1)//batch_size}")
+        opt.zero_grad(set_to_none=True)
 
         with autocast_ctx():
+            
             tokens_b = build_tokens_sparse_for_cells(
                 cell_batch, H, D, peaks_by_window, tfs, peaks, genes,
                 mesc_rna_data_shared, mesc_atac_data_chr1_shared,
-                proj_tg, proj_tf, proj_window, pool, device
+                inner.proj_tg, inner.proj_tf, inner.proj_window, pool, device
             )
-            print(f"      - Tokens batch shape: {tuple(tokens_b.shape)}")  # [B, W', d_model]
-            Henc = encoder(tokens_b)
-            n_genes = len(genes)
-            gene_ids = torch.arange(n_genes, device=device)
-            GQ = gene_embed(gene_ids).unsqueeze(0).expand(tokens_b.size(0), -1, -1)
-            Z, _ = cross_attn(query=GQ, key=Henc, value=Henc)
-            pred = readout(Z).squeeze(-1)
 
-            # targets/masks for this batch
+            Henc = inner.encoder(tokens_b)
+            n_genes = len(genes)
+            
+            GQ = inner.gene_embed(gene_ids).unsqueeze(0).expand(tokens_b.size(0), -1, -1)
+            Z, _ = inner.cross_attn(query=GQ, key=Henc, value=Henc)
+            pred = inner.readout(Z).squeeze(-1)
+
             y_list, m_list = [], []
             for c in cell_batch:
                 y, m = get_true_tg_expr_vector_from_data(mesc_rna_data_shared[c], genes)
@@ -489,56 +722,45 @@ for epoch in range(1, epochs+1):
             y_true = torch.cat(y_list, dim=0).to(device)
             mask_t = torch.cat(m_list, dim=0).to(device)
 
-            # masked loss
             diff2 = (pred - y_true)**2
             loss = (diff2[mask_t]).mean() if (mask_t.sum() > 0) else torch.tensor(0.0, device=device)
 
         if scaler is not None:
             scaler.scale(loss).backward()
-            torch.nn.utils.clip_grad_norm_(
-                list(proj_tg.parameters()) + list(proj_tf.parameters()) +
-                list(proj_window.parameters()) + list(encoder.parameters()) +
-                list(gene_embed.parameters()) + list(cross_attn.parameters()) +
-                list(readout.parameters()), 1.0
-            )
+            scaler.unscale_(opt)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             scaler.step(opt)
             scaler.update()
         else:
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(
-                list(proj_tg.parameters()) + list(proj_tf.parameters()) +
-                list(proj_window.parameters()) + list(encoder.parameters()) +
-                list(gene_embed.parameters()) + list(cross_attn.parameters()) +
-                list(readout.parameters()), 1.0
-            )
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
-        
-        # accumulate training loss
-        train_loss += loss.item() * len(cell_batch)
-        n_train    += len(cell_batch)
-        
-        cell_num += 1
-    
-    train_loss /= max(1, n_train)
-    sched.step()
-    
+
+        train_loss_sum += loss.item() * len(cell_batch)
+        n_train        += len(cell_batch)
+
     # ---- VAL ----
-    for m in [encoder, gene_embed, cross_attn, readout]:
-        m.eval()
-    val_loss, n_valtot = 0.0, 0
+    model.eval()
+    val_loss_sum, n_valtot = 0.0, 0
     with torch.no_grad(), autocast_ctx():
-        for cell_batch in iter_batches(val_cells, batch_size):
+        if rank == 0:
+            logging.info("  - Running Validation:")
+        for bi, cell_batch in enumerate(iter_batches(val_cells_rank, batch_size), start=1):
+            if rank == 0:
+                logging.info(f"       {bi}/{(len(val_cells_rank) + batch_size - 1)//batch_size}")
+            
             tokens_b = build_tokens_sparse_for_cells(
                 cell_batch, H, D, peaks_by_window, tfs, peaks, genes,
                 mesc_rna_data_shared, mesc_atac_data_chr1_shared,
-                proj_tg, proj_tf, proj_window, pool, device
+                inner.proj_tg, inner.proj_tf, inner.proj_window, pool, device
             )
-            Henc = encoder(tokens_b)
+
+            Henc = inner.encoder(tokens_b)
             n_genes = len(genes)
             gene_ids = torch.arange(n_genes, device=device)
-            GQ = gene_embed(gene_ids).unsqueeze(0).expand(tokens_b.size(0), -1, -1)
-            Z, _ = cross_attn(query=GQ, key=Henc, value=Henc)
-            pred = readout(Z).squeeze(-1)
+            GQ = inner.gene_embed(gene_ids).unsqueeze(0).expand(tokens_b.size(0), -1, -1)
+            Z, _ = inner.cross_attn(query=GQ, key=Henc, value=Henc)
+            pred = inner.readout(Z).squeeze(-1)
 
             y_list, m_list = [], []
             for c in cell_batch:
@@ -549,27 +771,91 @@ for epoch in range(1, epochs+1):
 
             diff2 = (pred - y_true)**2
             loss = (diff2[mask_t]).mean() if (mask_t.sum() > 0) else torch.tensor(0.0, device=device)
-            val_loss += loss.item() * len(cell_batch)
-            n_valtot += len(cell_batch)
+            val_loss_sum += loss.item() * len(cell_batch)
+            n_valtot     += len(cell_batch)
+    if rank == 0:
+        logging.info("  - Validation complete, updating calculating train/val average loss")
+    # ---- per-rank sums -> global weighted averages ----
+    train_sum_t = torch.tensor([train_loss_sum], device=device, dtype=torch.float32)
+    train_cnt_t = torch.tensor([n_train],        device=device, dtype=torch.float32)
+    val_sum_t   = torch.tensor([val_loss_sum],   device=device, dtype=torch.float32)
+    val_cnt_t   = torch.tensor([n_valtot],       device=device, dtype=torch.float32)
 
-    val_loss /= max(1, n_valtot)
-    print(f"[Epoch {epoch:02d}] train_loss={train_loss:.4f}  val_loss={val_loss:.4f}")
+    if dist.is_available() and dist.is_initialized():
+        dist.all_reduce(train_sum_t, op=dist.ReduceOp.SUM)
+        dist.all_reduce(train_cnt_t, op=dist.ReduceOp.SUM)
+        dist.all_reduce(val_sum_t,   op=dist.ReduceOp.SUM)
+        dist.all_reduce(val_cnt_t,   op=dist.ReduceOp.SUM)
 
-    # early stopping + checkpoint
-    if val_loss < best_val - 1e-5:
-        best_val, pat = val_loss, 0
-        torch.save({
-            "proj_tg": proj_tg.state_dict(),
-            "proj_tf": proj_tf.state_dict(),
-            "proj_window": proj_window.state_dict(),
-            "encoder": encoder.state_dict(),
-            "gene_embed": gene_embed.state_dict(),
-            "cross_attn": cross_attn.state_dict(),
-            "readout": readout.state_dict(),
-            "tfs": np.array(tfs), "genes": np.array(genes), "window_ids": window_ids,
-        }, os.path.join(output_dir, "expr_predictor_best.ckpt"))
+    train_loss_avg = (train_sum_t / torch.clamp(train_cnt_t, min=1)).item()
+    val_loss_avg   = (val_sum_t   / torch.clamp(val_cnt_t,   min=1)).item()
+    
+    is_best = (val_loss_avg < best_val - 1e-5)
+    stop    = (pat+1 >= patience) if not is_best else False
+
+    if dist.is_available() and dist.is_initialized():
+        if rank == 0:
+            is_best = float(val_loss_avg < best_val - 1e-5)     # 1.0 or 0.0 for easy tensor packing
+            # update patience using NEW best decision
+            new_best_val = min(best_val, val_loss_avg)
+            pat = 0 if is_best == 1.0 else (pat + 1)
+            stop = float(pat >= patience)
+            ctrl = torch.tensor(
+                [is_best, stop, new_best_val, val_loss_avg, float(pat)],
+                dtype=torch.float32, device=device
+            )
+        else:
+            ctrl = torch.zeros(5, dtype=torch.float32, device=device)
+
+        dist.broadcast(ctrl, src=0)
+
+        # unpack shared decisions/values
+        is_best = bool(int(ctrl[0].item()))
+        stop    = bool(int(ctrl[1].item()))
+        best_val = float(ctrl[2].item())          # <-- synchronized NEW best_val for all ranks
+        val_loss_avg = float(ctrl[3].item())      # (same as above; just making explicit)
+        pat = int(ctrl[4].item())
     else:
-        pat += 1
-        if pat >= patience:
-            print(f"Early stopping at epoch {epoch} (no val improvement for {patience} epochs).")
-            break
+        # single-process fallback
+        is_best = (val_loss_avg < best_val - 1e-5)
+        best_val = min(best_val, val_loss_avg)
+        pat = 0 if is_best else (pat + 1)
+        stop = (pat >= patience)
+
+    # ---- logging (rank 0 only) ----
+    if rank == 0:
+        print(f"[Epoch {epoch:02d}] train_loss={train_loss_avg:.4f}  val_loss={val_loss_avg:.4f}")
+
+    # ---- checkpointing (rank 0 only), using GLOBAL val_loss_avg and best_val ----
+    if rank == 0:
+        save_regular(model, opt, sched, epoch, loss=train_loss_avg, best_val=best_val)
+        if is_best:
+            logging.info(f"New best: {val_loss_avg:.4f} at epoch {epoch}")
+            save_best(model, opt, sched, epoch, loss=val_loss_avg, best_val=best_val)
+            clean_old_checkpoints(keep_last=3)
+        else:
+            logging.info(f"No improvement ({pat}/{patience}) — val {val_loss_avg:.4f} ≥ best {best_val:.4f}")
+
+    if rank == 0:
+        logging.info("Waiting for other ranks to catch up...")
+        start = time.time()
+    
+    # ensure all ranks reach the same point before next epoch (one barrier per epoch)
+    if dist.is_available() and dist.is_initialized():
+        dist.barrier(device_ids=[local_rank])
+        
+    if rank == 0:
+        logging.info("    - Synchronized, continuing")
+        logging.info(f"    - Time at barrier: {time.time() - start:.0f} seconds")
+
+    # early stop: everyone uses the SAME 'stop'
+    if stop:
+        if rank == 0:
+            logging.info(f"Early stopping at epoch {epoch} (no val improvement for {patience} epochs).")
+        break
+
+    # step the scheduler once per epoch on every rank (keeps LR in sync)
+    sched.step()
+
+if rank == 0:
+    logging.info("\nTRAINING COMPLETE, ENDING PROCESS")
