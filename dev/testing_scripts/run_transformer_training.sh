@@ -3,42 +3,45 @@
 #SBATCH --output=LOGS/%x.log
 #SBATCH --error=LOGS/%x.err
 #SBATCH -p dense
-#SBATCH -N 1                      # Number of nodes
-#SBATCH --gres=gpu:2             # GPUs per node
-#SBATCH -c 16                    # CPU cores
+#SBATCH -N 1
+#SBATCH --gres=gpu:a100:2
+#SBATCH --ntasks-per-node=1
+#SBATCH -c 8
 #SBATCH --mem=128G
 
 set -euo pipefail
 
-echo "Running on host: $(hostname)"
-echo "CUDA_VISIBLE_DEVICES: $CUDA_VISIBLE_DEVICES"
+echo "Host: $(hostname)"
+echo "CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-unset}"
 echo "SLURM_JOB_ID: $SLURM_JOB_ID"
-echo "SLURM_PROCID: $SLURM_PROCID"
 
-# Go to project root
 cd /gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER
 
-# Limit GPU memory fragmentation
+# --- Memory + math ---
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,max_split_size_mb:32
-export OMP_NUM_THREADS=16
-export MKL_NUM_THREADS=$OMP_NUM_THREADS
 export TORCH_ALLOW_TF32=1
 export NVIDIA_TF32_OVERRIDE=1
+
+# --- Threading: 8 threads per rank (since -c 8) ---
+export OMP_NUM_THREADS=8
+export MKL_NUM_THREADS=8
+export OPENBLAS_NUM_THREADS=8
+export NUMEXPR_NUM_THREADS=8
+export BLIS_NUM_THREADS=8
+export KMP_AFFINITY=granularity=fine,compact,1,0
+
+# --- NCCL / DDP diagnostics ---
+export TORCH_NCCL_DEBUG=INFO
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export TORCH_NCCL_BLOCKING_WAIT=1
-export TORCH_NCCL_TIMEOUT=600
+export TORCH_DISTRIBUTED_DEBUG=INFO
 
-# Keep track of the resource requirements needed by the GPUs every 30 seconds in a csv file
+# Create logs & start GPU sampler
+mkdir -p LOGS
 trap 'pkill -P $$ || true' EXIT
-nvidia-smi --query-gpu=timestamp,index,name,utilization.gpu,memory.used,memory.total --format=csv -l 30 > LOGS/gpu_usage_transformer_training.log &
+nvidia-smi -L
+nvidia-smi --query-gpu=timestamp,index,name,utilization.gpu,memory.used,memory.total \
+  --format=csv -l 30 > LOGS/gpu_usage_transformer_training.log &
 
-# Ensure logs/ directory exists
-mkdir -p logs
-
-# # Single GPU Training
-# srun --unbuffered \
-#   torchrun --standalone --nproc_per_node=1 ./dev/testing_scripts/transformer.py
-
-# Multiple GPU Training
-srun --unbuffered \
-  torchrun --nproc_per_node=2 --nnodes=1 ./dev/testing_scripts/transformer.py
+# Launch: 2 ranks on this node, bind ranks to cores
+torchrun --standalone --nproc_per_node=2 ./dev/testing_scripts/transformer.py

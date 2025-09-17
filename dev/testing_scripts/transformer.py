@@ -6,6 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import torch.distributed as dist
+from torch.utils.checkpoint import checkpoint
 import numpy as np
 import pandas as pd
 import pybedtools
@@ -16,6 +17,10 @@ from contextlib import nullcontext
 from collections import OrderedDict
 import logging
 import time
+import multiprocessing as mp
+import warnings
+
+warnings.filterwarnings("ignore", message="No device id is provided via `init_process_group` or `barrier `")
 
 torch.manual_seed(1)
 np.random.seed(42)
@@ -23,6 +28,15 @@ np.random.seed(42)
 torch.backends.cuda.matmul.allow_tf32 = True
 os.environ["TORCH_ALLOW_TF32"] = "1"
 os.environ["NVIDIA_TF32_OVERRIDE"] = "1"
+
+world = int(os.environ.get("WORLD_SIZE", "1"))
+per = max(1, mp.cpu_count() // world)
+
+for var in ["OMP_NUM_THREADS","MKL_NUM_THREADS","OPENBLAS_NUM_THREADS","NUMEXPR_NUM_THREADS"]:
+    os.environ[var] = str(per)
+
+torch.set_num_threads(per)
+torch.set_num_interop_threads(1)
 
 project_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
 mm10_genome_dir = os.path.join(project_dir, "data/reference_genome/mm10")
@@ -39,9 +53,9 @@ load_model = False
 CHECKPOINT_DIR = os.path.join(output_dir, "checkpoints")
 os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 
-window_size = 5000
+window_size = 1000 # 1000
 
-num_cells = 50
+num_cells = 100
 
 import os, glob, logging, torch, torch.distributed as dist, numpy as np
 from collections import OrderedDict
@@ -101,7 +115,7 @@ def load_checkpoint_into(model, optimizer=None, scheduler=None, path: str = "") 
     """Returns (epoch, last_loss, best_val). Loads onto CPU; move model to device after."""
     assert os.path.isfile(path), f"Checkpoint not found: {path}"
     logging.info(f"Loading checkpoint: {path}")
-    ckpt = torch.load(path, map_location="cpu")
+    ckpt = torch.load(path, map_location="cpu", weights_only=False)
 
     sd = strip_module_prefix(ckpt["state_dict"])
     raw_model = model.module if hasattr(model, "module") else model
@@ -399,22 +413,60 @@ TF = len(tfs)               # number of TFs
 TG = len(genes)             # number of target genes
 Wn = len(peaks_by_window)   # number of windows
 
+class CheckpointedEncoder(nn.Module):
+    """
+    Wrap a stack of encoder layers, checkpointing each layer during training.
+    Works with batch_first=True (input [B, S, D]).
+    """
+    def __init__(self, layers, norm=None, use_checkpoint=True, use_reentrant=False):
+        super().__init__()
+        self.layers = nn.ModuleList(layers)
+        self.norm = norm
+        self.use_checkpoint = use_checkpoint
+        self.use_reentrant = use_reentrant
+
+    def forward(self, x):
+        for layer in self.layers:
+            if self.use_checkpoint and self.training:
+                # pass the flag explicitly and avoid the lambda
+                x = checkpoint(layer, x, use_reentrant=self.use_reentrant)
+            else:
+                x = layer(x)
+        return self.norm(x) if self.norm is not None else x
+
 # ----- Configurations -----
-d_model = 256
+d_model = 192
 tf_channels = 32
 tg_channels = 64 
-batch_size = 5
+batch_size = 1
 epochs = 20
 kernel_and_stride_size = 32
 window_channels = tg_channels * tf_channels
 
 # Encoder Settings
-encoder_nhead = 8
-encoder_dim_feedforward = 512
+encoder_nhead = 6
+encoder_dim_feedforward = 1024
 encoder_num_layers = 3
 
-# Model Architecture overview
-# proj_tg -> proj_tf -> proj_window -> encoder -> cross-attention -> readout
+assert d_model % encoder_nhead == 0, \
+    "Dimension of the model must be divisible by the number of heads"
+
+# Create individual layers
+encoder_layers = [
+    nn.TransformerEncoderLayer(
+        d_model=d_model,
+        nhead=encoder_nhead,
+        dim_feedforward=encoder_dim_feedforward,
+        batch_first=True,    # important: your tokens are [B, W', D]
+        norm_first=True
+    )
+    for _ in range(encoder_num_layers)
+]
+
+encoder_norm = nn.LayerNorm(d_model)
+
+# Wrap with checkpointing
+encoder = CheckpointedEncoder(encoder_layers, norm=encoder_norm, use_checkpoint=True, use_reentrant=False).to(device)
 
 # Dimensionality reduction using linear projections
 proj_tg = nn.Linear(TG, tg_channels, bias=False)
@@ -430,7 +482,7 @@ pool = nn.AvgPool1d(
 nonempty = sum(1 for p in peaks_by_window if p.size > 0)
 if rank==0:
     logging.info(f"Data Size:")
-    logging.info(f"   - Window Size: {window_size} bp")
+    logging.info(f"  - Window Size: {window_size} bp")
     logging.info(f"  - Windows: {len(peaks_by_window):,} | non-empty: {nonempty:,}")
     logging.info(f"  - Num TFs = {len(tfs):,}")
     logging.info(f"  - Num Peaks = {len(peaks):,}")
@@ -449,19 +501,10 @@ if rank==0:
     logging.info(f"  - Number of Heads = {encoder_nhead}")
     logging.info(f"  - Feedforward Layer Neurons = {encoder_dim_feedforward}")
 
-# Set up the Key, Query, Value self-attention layers
-encoder_layer = nn.TransformerEncoderLayer(
-    d_model=d_model, 
-    nhead=encoder_nhead, 
-    dim_feedforward=512, 
-    batch_first=True
-    )
-encoder = nn.TransformerEncoder(encoder_layer, num_layers=encoder_num_layers)
-
 # Set up the multi-headed cross-attention layers
 n_genes = len(genes)  # 1425
 gene_embed = nn.Embedding(n_genes, d_model)
-cross_attn = nn.MultiheadAttention(embed_dim=d_model, num_heads=8, batch_first=True)
+cross_attn = nn.MultiheadAttention(embed_dim=d_model, num_heads=encoder_nhead, batch_first=True)
 readout = nn.Sequential(
     nn.LayerNorm(d_model),
     nn.Linear(d_model, 1)
@@ -471,8 +514,8 @@ def build_tokens_sparse_for_cells(
     cell_ids,
     H, D,               # CSR: [TF×P], [P×G]
     peaks_by_window,    # list of np.array peak indices per window
-    tfs, peaks, genes,  # ID arrays
-    mesc_rna_data_shared, mesc_atac_data_chr1_shared,
+    col_of,
+    rna_arr, atac_arr,
     proj_tg: nn.Linear, proj_tf: nn.Linear, proj_window: nn.Linear,
     pool: nn.AvgPool1d,
     device,
@@ -482,14 +525,15 @@ def build_tokens_sparse_for_cells(
     Returns [B, W', d_model] with W' ≈ ceil(n_nonempty_windows / pool_ks).
     Streaming: never builds a [W, d_model] tensor, no concatenations.
     """
-    TF = H.shape[0]; G = D.shape[1]
     pool_ks = pool.kernel_size if isinstance(pool.kernel_size, int) else pool.kernel_size[0]
     out_batches = []
 
     for cell in cell_ids:
+        col = col_of[cell]
+        
         # Per-cell vectors (safe reindex; CPU)
-        e = mesc_rna_data_shared.reindex(index=tfs)[cell].fillna(0).to_numpy(np.float32)
-        a = mesc_atac_data_chr1_shared.reindex(index=peaks)[cell].fillna(0).to_numpy(np.float32)
+        e = rna_arr[:, col]
+        a = atac_arr[:, col]
 
         # Scale sparse and keep CSR for slicing (CPU)
         B = H.multiply(e[:, None]).tocsr()   # [TF, P]
@@ -501,24 +545,23 @@ def build_tokens_sparse_for_cells(
         cnt = 0
 
         for p_idx in peaks_by_window:
-            if p_idx.size == 0:
-                # skip empty windows entirely; if you need positional density, create a learned "empty" token here
-                continue
+            p_active = p_idx[a[p_idx] > 0]
+            if p_active.size == 0:
+                continue  # no work, no token
 
-            # Sparse @ sparse → dense once (CPU), then to GPU
-            Mw = (B[:, p_idx] @ R[p_idx, :]).toarray()   # [TF, G], CPU
-            M  = torch.from_numpy(Mw).to(device)
+            Mw = (B[:, p_active] @ R[p_active, :]).toarray()
+            M  = torch.as_tensor(Mw, device=device, dtype=torch.float32)
 
             # stabilize per TF across genes
             M = (M - M.mean(dim=1, keepdim=True)) / (M.std(dim=1, keepdim=True) + 1e-6)
             M = torch.clamp(M, -clamp_val, clamp_val)
 
             # projections on device, tracked by autograd
-            Xg  = proj_tg(M.unsqueeze(0))   # [1, TF, tg]
-            Xg  = Xg.permute(0, 2, 1)       # [1, tg, TF]
-            Xg  = proj_tf(Xg)               # [1, tg, tf]
-            feat = Xg.reshape(1, -1)        # [1, tg*tf]
-            tok  = proj_window(feat)        # [1, d_model]
+            # Project TF first, then G (genes)
+            Xtf = proj_tf(M.t().unsqueeze(0))      # M.t(): [G, TF] -> [1, G, tf]
+            Xtg = proj_tg(Xtf.transpose(1, 2))     # [1, tf, G] -> [1, tf, tg]
+            feat = Xtg.reshape(1, -1)              # [1, tf*tg]
+            tok  = proj_window(feat)               # [1, d_model]
 
             # rolling sum
             if sum_tok is None:
@@ -536,8 +579,7 @@ def build_tokens_sparse_for_cells(
                 cnt = 0
 
             # free big intermediates quickly
-            del M, Xg, feat, tok
-            torch.cuda.empty_cache()
+            del M, Xtg, feat, tok
 
         # tail: if we have leftovers < pool_ks, average them as-is
         if cnt > 0 and sum_tok is not None:
@@ -665,8 +707,6 @@ scaler = torch.amp.GradScaler(enabled=use_amp)
 def unwrap(m):
     return m.module if isinstance(m, torch.nn.parallel.DistributedDataParallel) else m
 
-setup_logging()
-
 best_val = float("inf")
 start_epoch = 1
 
@@ -686,6 +726,18 @@ else:
 
 gene_ids = torch.arange(n_genes, device=device)
 
+rna_TF  = mesc_rna_data_shared.reindex(index=tfs).fillna(0).astype("float32")          # rows: TFs, cols: cells
+atac_P  = mesc_atac_data_chr1_shared.reindex(index=peaks).fillna(0).astype("float32")   # rows: peaks, cols: cells
+
+assert set(rna_TF.columns) == set(atac_P.columns), "RNA/ATAC barcode sets differ"
+rna_arr  = rna_TF.values          # shape [TF, n_cells]
+atac_arr = atac_P.values          # shape [P,  n_cells]
+col_of   = {c:i for i,c in enumerate(rna_TF.columns)}
+
+did_optim_step = False
+
+loss_by_epoch: pd.DataFrame = pd.DataFrame({"epoch": [], "train_loss": [], "val_loss": []}).set_index("epoch")
+
 if rank==0:
     logging.info("\n ----- Starting Training -----")
 for epoch in range(start_epoch, epochs+1):
@@ -703,8 +755,7 @@ for epoch in range(start_epoch, epochs+1):
         with autocast_ctx():
             
             tokens_b = build_tokens_sparse_for_cells(
-                cell_batch, H, D, peaks_by_window, tfs, peaks, genes,
-                mesc_rna_data_shared, mesc_atac_data_chr1_shared,
+                cell_batch, H, D, peaks_by_window, col_of, rna_arr, atac_arr,
                 inner.proj_tg, inner.proj_tf, inner.proj_window, pool, device
             )
 
@@ -731,10 +782,12 @@ for epoch in range(start_epoch, epochs+1):
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             scaler.step(opt)
             scaler.update()
+            did_optim_step = True
         else:
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
+            did_optim_step = True
 
         train_loss_sum += loss.item() * len(cell_batch)
         n_train        += len(cell_batch)
@@ -750,8 +803,7 @@ for epoch in range(start_epoch, epochs+1):
                 logging.info(f"       {bi}/{(len(val_cells_rank) + batch_size - 1)//batch_size}")
             
             tokens_b = build_tokens_sparse_for_cells(
-                cell_batch, H, D, peaks_by_window, tfs, peaks, genes,
-                mesc_rna_data_shared, mesc_atac_data_chr1_shared,
+                cell_batch, H, D, peaks_by_window, col_of, rna_arr, atac_arr,
                 inner.proj_tg, inner.proj_tf, inner.proj_window, pool, device
             )
 
@@ -773,8 +825,13 @@ for epoch in range(start_epoch, epochs+1):
             loss = (diff2[mask_t]).mean() if (mask_t.sum() > 0) else torch.tensor(0.0, device=device)
             val_loss_sum += loss.item() * len(cell_batch)
             n_valtot     += len(cell_batch)
+
+        
+    torch.cuda.synchronize(device)
+    
     if rank == 0:
         logging.info("  - Validation complete, updating calculating train/val average loss")
+    
     # ---- per-rank sums -> global weighted averages ----
     train_sum_t = torch.tensor([train_loss_sum], device=device, dtype=torch.float32)
     train_cnt_t = torch.tensor([n_train],        device=device, dtype=torch.float32)
@@ -793,46 +850,54 @@ for epoch in range(start_epoch, epochs+1):
     is_best = (val_loss_avg < best_val - 1e-5)
     stop    = (pat+1 >= patience) if not is_best else False
 
+    # compute early-stop control on rank 0, then broadcast a small CPU object
+    is_best = (val_loss_avg < best_val - 1e-5)
     if dist.is_available() and dist.is_initialized():
-        if rank == 0:
-            is_best = float(val_loss_avg < best_val - 1e-5)     # 1.0 or 0.0 for easy tensor packing
-            # update patience using NEW best decision
-            new_best_val = min(best_val, val_loss_avg)
-            pat = 0 if is_best == 1.0 else (pat + 1)
-            stop = float(pat >= patience)
-            ctrl = torch.tensor(
-                [is_best, stop, new_best_val, val_loss_avg, float(pat)],
-                dtype=torch.float32, device=device
-            )
+        payload = [is_best, best_val, val_loss_avg, pat]
+        if rank != 0:
+            payload = [None, None, None, None]
+        # broadcast the decision using object list to avoid extra CUDA traffic here
+        dist.broadcast_object_list(payload, src=0)
+        is_best, best_val_b, val_loss_avg_b, pat_b = payload
+        # sync the scalars we use
+        val_loss_avg = float(val_loss_avg_b)
+        if is_best:
+            best_val = min(best_val, val_loss_avg)
+            pat = 0
         else:
-            ctrl = torch.zeros(5, dtype=torch.float32, device=device)
-
-        dist.broadcast(ctrl, src=0)
-
-        # unpack shared decisions/values
-        is_best = bool(int(ctrl[0].item()))
-        stop    = bool(int(ctrl[1].item()))
-        best_val = float(ctrl[2].item())          # <-- synchronized NEW best_val for all ranks
-        val_loss_avg = float(ctrl[3].item())      # (same as above; just making explicit)
-        pat = int(ctrl[4].item())
+            pat = int(pat_b) + 1
     else:
-        # single-process fallback
-        is_best = (val_loss_avg < best_val - 1e-5)
-        best_val = min(best_val, val_loss_avg)
+        best_val = min(best_val, val_loss_avg) if is_best else best_val
         pat = 0 if is_best else (pat + 1)
-        stop = (pat >= patience)
+
+    stop = (pat >= patience)
 
     # ---- logging (rank 0 only) ----
     if rank == 0:
         print(f"[Epoch {epoch:02d}] train_loss={train_loss_avg:.4f}  val_loss={val_loss_avg:.4f}")
+        new_row_df = pd.DataFrame({"epoch":[epoch], "train_loss":[train_loss_avg], "val_loss":[val_loss_avg]}).set_index("epoch")
+        loss_by_epoch = pd.concat([loss_by_epoch, new_row_df])
+        loss_by_epoch.to_csv(os.path.join(output_dir, f"training_loss_window_{window_size // 1000}kb_{num_cells}_cells.csv"), header=True, index=True)
+        
+        
+    if dist.is_available() and dist.is_initialized():
+        dist.barrier() 
 
     # ---- checkpointing (rank 0 only), using GLOBAL val_loss_avg and best_val ----
     if rank == 0:
-        save_regular(model, opt, sched, epoch, loss=train_loss_avg, best_val=best_val)
+        # save_regular(model, opt, sched, epoch, loss=train_loss_avg, best_val=best_val)
         if is_best:
             logging.info(f"New best: {val_loss_avg:.4f} at epoch {epoch}")
-            save_best(model, opt, sched, epoch, loss=val_loss_avg, best_val=best_val)
-            clean_old_checkpoints(keep_last=3)
+            model_cpu_state = {k: v.cpu() for k, v in unwrap(model).state_dict().items()}
+            ckpt = {
+                "epoch": epoch,
+                "model": model_cpu_state,
+                "optimizer": opt.state_dict(),
+                "scheduler": sched.state_dict(),
+                "best_val": best_val,
+            }
+            torch.save(ckpt, os.path.join(output_dir, "checkpoints/best_model.pth.tar"))
+            # clean_old_checkpoints(keep_last=3)
         else:
             logging.info(f"No improvement ({pat}/{patience}) — val {val_loss_avg:.4f} ≥ best {best_val:.4f}")
 
@@ -842,7 +907,7 @@ for epoch in range(start_epoch, epochs+1):
     
     # ensure all ranks reach the same point before next epoch (one barrier per epoch)
     if dist.is_available() and dist.is_initialized():
-        dist.barrier(device_ids=[local_rank])
+        dist.barrier()
         
     if rank == 0:
         logging.info("    - Synchronized, continuing")
@@ -855,7 +920,10 @@ for epoch in range(start_epoch, epochs+1):
         break
 
     # step the scheduler once per epoch on every rank (keeps LR in sync)
-    sched.step()
+    if did_optim_step:
+        sched.step()
 
 if rank == 0:
     logging.info("\nTRAINING COMPLETE, ENDING PROCESS")
+    
+
