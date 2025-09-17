@@ -530,7 +530,7 @@ def build_tokens_sparse_for_cells(
     for cell in cell_ids:
         col = col_of[cell]
         
-        # Per-cell vectors (safe reindex; CPU)
+        # Gets the RNA and ATAC data for the cells in the batch
         e = rna_arr[:, col]
         a = atac_arr[:, col]
 
@@ -602,22 +602,6 @@ def build_tokens_sparse_for_cells(
         del B, R
 
     return torch.cat(out_batches, dim=0)  # [B, W', d_model]
-
-def forward_tokens_to_pred(
-    tokens_batch: torch.Tensor,      # [B, W', d_model]
-    encoder,                         # nn.TransformerEncoder or your custom RPB blocks
-    gene_embed: nn.Embedding,
-    cross_attn: nn.MultiheadAttention,
-    readout: nn.Module,
-) -> torch.Tensor:
-    H = encoder(tokens_batch)                            # [B, W', d_model]
-    B = H.size(0)
-    n_genes = gene_embed.num_embeddings
-    gene_ids = torch.arange(n_genes, device=H.device)
-    GQ = gene_embed(gene_ids).unsqueeze(0).expand(B, -1, -1)  # [B, n_genes, d_model]
-    Z, _ = cross_attn(query=GQ, key=H, value=H)         # [B, n_genes, d_model]
-    pred_expr = readout(Z).squeeze(-1)                  # [B, n_genes]
-    return pred_expr
 
 def masked_mse(pred, y, m):
     diff2 = (pred - y)**2
@@ -933,7 +917,7 @@ for epoch in range(start_epoch, epochs+1):
     torch.cuda.synchronize(device)
     
     if rank == 0:
-        logging.info("  - Validation complete, updating calculating train/val average loss")
+        logging.debug("  - Validation complete, updating calculating train/val average loss")
     
     # ---- per-rank sums -> global weighted averages ----
     train_sum_t = torch.tensor([train_loss_sum], device=device, dtype=torch.float32)
@@ -954,7 +938,6 @@ for epoch in range(start_epoch, epochs+1):
     stop    = (pat+1 >= patience) if not is_best else False
 
     # compute early-stop control on rank 0, then broadcast a small CPU object
-    is_best = (val_loss_avg < best_val - 1e-5)
     if dist.is_available() and dist.is_initialized():
         payload = [is_best, best_val, val_loss_avg, pat]
         if rank != 0:
@@ -972,8 +955,6 @@ for epoch in range(start_epoch, epochs+1):
     else:
         best_val = min(best_val, val_loss_avg) if is_best else best_val
         pat = 0 if is_best else (pat + 1)
-
-    stop = (pat >= patience)
 
     # ---- logging (rank 0 only) ----
     if rank == 0:
