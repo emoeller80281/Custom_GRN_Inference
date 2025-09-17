@@ -61,12 +61,12 @@ class MultiomicTransformer(nn.Module):
         super().__init__()
 
         # Linear projections of TF, TG, and the windows, with dropout
-        self.proj_tg = nn.Linear(tg_in_dim, d_model, bias=False)
-        self.proj_tf = nn.Linear(tf_in_dim, d_model, bias=False)
-        self.proj_window = nn.Sequential(
-            nn.Linear(window_in_dim, d_model, bias=False),
-            nn.Dropout(dropout),
-        )
+        self.tf_channels = 32
+        self.tg_channels = 64
+        self.proj_tf = nn.Linear(tf_in_dim, self.tf_channels, bias=False)  # TF -> 32
+        self.proj_tg = nn.Linear(tg_in_dim, self.tg_channels, bias=False)  # G  -> 64
+
+        self.proj_window = nn.Linear(self.tf_channels * self.tg_channels, d_model, bias=False)
 
         # Pool windows to reduce the dimensionality, helps with computational efficiency
         # at the cost of decreased resolution
@@ -130,6 +130,9 @@ class MultiomicTransformer(nn.Module):
         self.atac_arr = atac_arr
         self.token_device = device or next(self.parameters()).device
 
+    def _module_device(self) -> torch.device:
+        return next(self.parameters()).device
+
     def build_tokens_streaming_for_cells(
         self,
         cell_ids: Sequence[int],
@@ -145,7 +148,7 @@ class MultiomicTransformer(nn.Module):
         Preserves streaming behavior: never materializes [W, d_model].
         """
         assert hasattr(self, "H") and hasattr(self, "D"), "Call attach_sparse_sources(...) first."
-        device = self.token_device
+        device = self._module_device()
 
         # pool kernel size (int)
         ks = self.pool.kernel_size if isinstance(self.pool.kernel_size, int) else self.pool.kernel_size[0]
@@ -196,11 +199,12 @@ class MultiomicTransformer(nn.Module):
                 # projections on device (keep fp32 to avoid overflow)
                 with torch.amp.autocast(device_type="cuda", enabled=False):
                     # M.t(): [G, TF] -> proj_tf: Linear(TF -> tf_channels)
-                    Xtf  = self.proj_tf(M.t().unsqueeze(0))      # [1, G, tf_ch]
-                    # transpose to [1, tf_ch, G] -> proj_tg: Linear(G -> tg_channels)
-                    Xtg  = self.proj_tg(Xtf.transpose(1, 2))     # [1, tf_ch, tg_ch]
-                    feat = Xtg.reshape(1, -1)                    # [1, tf_ch * tg_ch]
-                    tok  = self.proj_window(feat)                # [1, d_model]
+                    Xtf  = self.proj_tf(M.t().unsqueeze(0))        # [1, G, 32]
+                    Xtg  = self.proj_tg(Xtf.transpose(1, 2))       # [1, 32, 64]
+                    feat = Xtg.reshape(1, -1)                      # [1, 2048]
+                    assert feat.size(-1) == self.proj_window.in_features, \
+                        f"feat={feat.size(-1)} vs proj_window.in_features={self.proj_window.in_features}"
+                    tok  = self.proj_window(feat)           # [1, 192]
 
                 # rolling sum for avg pooling over windows
                 sum_tok = tok if sum_tok is None else (sum_tok + tok)
