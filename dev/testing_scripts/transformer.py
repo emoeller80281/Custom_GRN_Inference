@@ -57,7 +57,7 @@ os.makedirs(os.path.join(output_dir, "training_stats"), exist_ok=True)
 
 window_size = 1000 # 1000
 
-num_cells = 100
+num_cells = 300
 
 CHECKPOINT_DIR = os.path.join(output_dir, "checkpoints")
 os.makedirs(CHECKPOINT_DIR, exist_ok=True)
@@ -740,8 +740,6 @@ rna_arr  = rna_TF.values          # shape [TF, n_cells]
 atac_arr = atac_P.values          # shape [P,  n_cells]
 col_of   = {c:i for i,c in enumerate(rna_TF.columns)}
 
-did_optim_step = False
-
 loss_by_epoch: dict =  {"epoch": [], "train_loss": [], "val_loss": [], "epoch_sec": []}
 
 # --- build robust per-gene stats on the TRAIN SPLIT only ---
@@ -771,7 +769,8 @@ sd[never_seen] = 1.0
 
 seen = (count > 0).sum().item()
 logging.info(f"Genes seen in training: {seen}/{len(genes)}")
-    
+
+# Keep ggenes that are seen in the training dataset
 seen_genes_mask = (count.to(torch.int32) > 0).to(device)  # [n_genes], True for 532 seen genes
 mu = mu.to(device); sd = sd.to(device)
 sd = torch.clamp(sd, min=1e-6)
@@ -790,11 +789,14 @@ mu, sd = stats[0], stats[1]                   # both [n_genes], on device
 
 # after you compute mu, sd from TRAIN only
 mu = mu.to(device)
-sd = torch.clamp(sd.to(device), min=1e-6)
+sd = torch.clamp(sd.to(device), min=1e-2)
+
+assert len(genes) == gene_ids.numel()
 
 if rank==0:
     logging.info("\n ----- Starting Training -----")
 for epoch in range(start_epoch, epochs+1):
+    did_optim_step = False
     
     p0 = {k: v.detach().clone() for k, v in model.named_parameters() if v.requires_grad}
     
@@ -810,7 +812,6 @@ for epoch in range(start_epoch, epochs+1):
             logging.info(f"       {bi}/{(len(train_cells_rank) + batch_size - 1)//batch_size}")
         opt.zero_grad(set_to_none=True)
 
-        
         tokens_b = build_tokens_sparse_for_cells(
             cell_batch, H, D, peaks_by_window, col_of, rna_arr, atac_arr,
             inner.proj_tg, inner.proj_tf, inner.proj_window, pool, device
@@ -831,45 +832,27 @@ for epoch in range(start_epoch, epochs+1):
 
         y_true = torch.cat(y_list, dim=0).to(device)     # [B, n_genes]
         mask_t = torch.cat(m_list, dim=0).to(device)     # [B, n_genes] (True where target exists)
-
-        # normalize with train stats
+        
         y_norm = (y_true - mu) / sd
-
+        y_norm = torch.clamp(y_norm, -8.0, 8.0)  # optional, very stabilizing
+        
         # final mask: seen in training, present in this cell, and finite
         mask_eff = mask_t & seen_genes_mask.unsqueeze(0) & torch.isfinite(y_norm)
         pred     = torch.nan_to_num(pred, 0.0)           # guard against rare NaNs anyway
-        y_norm   = torch.nan_to_num(y_norm, 0.0)
-        
-        if not torch.isfinite(tokens_b).all():
-            logging.error("tokens_b non-finite; skipping"); continue
-        if not torch.isfinite(pred).all():
-            logging.error("pred non-finite; skipping"); continue
-        if not torch.isfinite(y_norm).all():
-            logging.error("y_norm non-finite after norm; skipping"); continue
-            
-        if rank == 0:
-            logging.debug(f"mu finite={torch.isfinite(mu).all().item()}, sd finite={torch.isfinite(sd).all().item()}")
 
         if not mask_eff.any():
-            # nothing to learn from this batch; skip safely
-            opt.zero_grad(set_to_none=True)
             continue
 
-        diff2 = (pred - y_norm)**2
-        loss  = diff2[mask_eff].mean()
-
-        if not torch.isfinite(loss):
-            logging.error(
-                f"Non-finite loss: {loss.item()} | "
-                f"mask_sum={int(mask_t.sum().item())} | "
-                f"pred_finite={torch.isfinite(pred).all().item()} | "
-                f"Henc_finite={torch.isfinite(Henc).all().item()} | "
-                f"tokens_finite={torch.isfinite(tokens_b).all().item()}"
-            )
-            # Skip this batch safely
-            opt.zero_grad(set_to_none=True)
-            continue
+        loss = torch.nn.functional.huber_loss(pred[mask_eff], y_norm[mask_eff], delta=1.0)
         
+        if rank == 0 and epoch == start_epoch and bi == 1:
+            print("dbg:",
+                "seen_genes", int(seen_genes_mask.sum()),
+                "sd_min", float(sd.min()),
+                "sd_p1",  float(torch.quantile(sd, 0.01)),
+                "absmax(y_norm)", float(y_norm.abs().max()),
+                "mask_eff_sum", int(mask_eff.sum()))
+
         scale_before = scaler.get_scale()
         scaler.scale(loss).backward()
         scaler.unscale_(opt)
@@ -880,6 +863,7 @@ for epoch in range(start_epoch, epochs+1):
         scaler.step(opt)
         scaler.update()
         scale_after = scaler.get_scale()
+        did_optim_step = True
 
         if rank == 0 and bi % 5 == 0:
             logging.debug(f"[b{bi}] loss={loss.item():.4f} mask_sum={int(mask_t.sum())} "
@@ -887,38 +871,6 @@ for epoch in range(start_epoch, epochs+1):
 
         train_loss_sum += loss.item() * len(cell_batch)
         n_train        += len(cell_batch)
-
-    # Test that the gradients and parameters are updating    
-    with torch.no_grad():
-        delta = []
-        for k, v in model.named_parameters():
-            if v.requires_grad and k in p0:
-                delta.append((v - p0[k]).norm().item())
-        delta_norm = sum(delta)
-    if rank == 0:
-        logging.debug(f"Param update L2 sum this epoch: {delta_norm:.6f}")
-        
-    if rank == 0 and bi == 1:
-        any_nan = False
-        for n, p in model.named_parameters():
-            if p.grad is not None and not torch.isfinite(p.grad).all():
-                logging.error(f"NaNs in grad of {n}")
-                any_nan = True
-                break
-        if not any_nan:
-            # pick a representative param for a number
-            for n, p in model.named_parameters():
-                if p.grad is not None:
-                    logging.info(f"Example grad norm (pre-step): {p.grad.norm().item():.6f}")
-                    break
-        
-    if rank == 0:
-        pnames = set(n for n,_ in model.named_parameters())
-        onames = set(id(p) for g in opt.param_groups for p in g['params'])
-        missing = [n for n,p in model.named_parameters() if id(p) not in onames]
-        logging.debug(f"Params NOT in optimizer: {len(missing)} (showing up to 10): {missing[:10]}")
-    
-    
 
     # ---- VAL ----
     model.eval()
@@ -953,31 +905,25 @@ for epoch in range(start_epoch, epochs+1):
             y_true = torch.cat(y_list, dim=0).to(device)     # [B, n_genes]
             mask_t = torch.cat(m_list, dim=0).to(device)     # [B, n_genes] (True where target exists)
 
-            # normalize with train stats
             y_norm = (y_true - mu) / sd
-
+            y_norm = torch.clamp(y_norm, -8.0, 8.0)  # optional, very stabilizing
+            
             # final mask: seen in training, present in this cell, and finite
             mask_eff = mask_t & seen_genes_mask.unsqueeze(0) & torch.isfinite(y_norm)
             pred     = torch.nan_to_num(pred, 0.0)           # guard against rare NaNs anyway
-            y_norm   = torch.nan_to_num(y_norm, 0.0)
-            
-            if not torch.isfinite(tokens_b).all():
-                logging.error("tokens_b non-finite; skipping"); continue
-            if not torch.isfinite(pred).all():
-                logging.error("pred non-finite; skipping"); continue
-            if not torch.isfinite(y_norm).all():
-                logging.error("y_norm non-finite after norm; skipping"); continue
-                
-            if rank == 0:
-                logging.debug(f"mu finite={torch.isfinite(mu).all().item()}, sd finite={torch.isfinite(sd).all().item()}")
 
             if not mask_eff.any():
-                # nothing to learn from this batch; skip safely
-                opt.zero_grad(set_to_none=True)
                 continue
 
-            diff2 = (pred - y_norm)**2
-            loss  = diff2[mask_eff].mean()
+            loss = torch.nn.functional.huber_loss(pred[mask_eff], y_norm[mask_eff], delta=1.0)
+            
+            if rank == 0 and epoch == start_epoch and bi == 1:
+                print("dbg:",
+                    "seen_genes", int(seen_genes_mask.sum()),
+                    "sd_min", float(sd.min()),
+                    "sd_p1",  float(torch.quantile(sd, 0.01)),
+                    "absmax(y_norm)", float(y_norm.abs().max()),
+                    "mask_eff_sum", int(mask_eff.sum()))
 
             # accumulate like training
             val_loss_sum += loss.item() * len(cell_batch)
