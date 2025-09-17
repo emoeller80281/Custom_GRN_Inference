@@ -4,7 +4,7 @@
 #SBATCH --error=LOGS/%x.err
 #SBATCH -p dense
 #SBATCH -N 1
-#SBATCH --gres=gpu:a100:1
+#SBATCH --gres=gpu:a100:4
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 8
 #SBATCH --mem=128G
@@ -43,8 +43,8 @@ nvidia-smi -L
 nvidia-smi --query-gpu=timestamp,index,name,utilization.gpu,memory.used,memory.total \
   --format=csv -l 30 > LOGS/gpu_usage_transformer_training.log &
 
-# Launch: 2 ranks on this node, bind ranks to cores
-torchrun --standalone --nproc_per_node=1 ./dev/testing_scripts/transformer_cleaned.py
+# Launch: 4 ranks on this node, bind ranks to cores
+torchrun --standalone --nproc_per_node=4 ./dev/testing_scripts/transformer_cleaned.py
 
 # Launch: 2 ranks on this node, bind ranks to cores
 # torchrun --standalone --nproc_per_node=2 ./dev/testing_scripts/transformer.py

@@ -22,8 +22,6 @@ import warnings
 from sc_multi_transformer import MultiomicTransformer
 
 # ------ PyTorch Configurations ------
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
 warnings.filterwarnings("ignore", message="No device id is provided via `init_process_group` or `barrier `")
 torch.autograd.set_detect_anomaly(True)
 
@@ -50,7 +48,7 @@ torch.set_num_interop_threads(1)
 # ----- User Settings -----
 load_model = False
 window_size = 1000 # 1000
-num_cells = 50
+num_cells = 500
 
 atac_data_filename = "mESC_filtered_L2_E7.5_rep1_ATAC_processed.parquet"
 rna_data_filename = "mESC_filtered_L2_E7.5_rep1_RNA_processed.parquet"
@@ -68,6 +66,65 @@ MM10_CHROM_SIZES_FILE = os.path.join(MM10_GENOME_DIR, "chrom.sizes")
 CHECKPOINT_DIR = os.path.join(OUTPUT_DIR, "checkpoints")
 os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 os.makedirs(os.path.join(OUTPUT_DIR, "training_stats"), exist_ok=True)
+
+def init_ddp():
+    # torchrun sets these
+    rank       = int(os.environ["RANK"])
+    world_size = int(os.environ["WORLD_SIZE"])
+    local_rank = int(os.environ["LOCAL_RANK"])
+    torch.cuda.set_device(local_rank)
+    dist.init_process_group(backend="nccl", init_method="env://",
+                            rank=rank, world_size=world_size)
+    return rank, world_size, local_rank
+
+def setup_logging():
+    rank = dist.get_rank() if (dist.is_available() and dist.is_initialized()) else 0
+    handlers = []
+    if rank == 0:
+        handlers.append(logging.StreamHandler())
+    logging.basicConfig(level=logging.INFO if rank == 0 else logging.ERROR,
+                        handlers=handlers, format="%(message)s")
+
+def _rank0() -> bool:
+    return (dist.is_available() and dist.is_initialized() and dist.get_rank() == 0) or not dist.is_initialized()
+
+def _atomic_save(obj: Dict[str, Any], path: str) -> None:
+    tmp = f"{path}.tmp"
+    torch.save(obj, tmp)
+    os.replace(tmp, path)
+
+def save_checkpoint(model, optimizer, scheduler, epoch: int, loss: float,
+                    best_val: float, fname: str) -> str:
+    """Always safe to call from any rank; only rank0 writes."""
+    if not _rank0():
+        if dist.is_initialized(): dist.barrier()
+        return fname
+
+    logging.debug(f"Saving checkpoint -> {fname}")
+    # unwrap DDP
+    raw_model = model.module if hasattr(model, "module") else model
+    state = {
+        "epoch": epoch,
+        "loss": loss,
+        "best_val": best_val,
+        "state_dict": raw_model.state_dict(),
+        "optimizer": optimizer.state_dict() if optimizer is not None else None,
+        "scheduler": scheduler.state_dict() if scheduler is not None else None,
+        "rng_state": torch.get_rng_state(),
+        "cuda_rng_state": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+        "numpy_rng_state": np.random.get_state(),
+        "torch_version": torch.__version__,
+    }
+    _atomic_save(state, fname)
+    if dist.is_initialized(): dist.barrier()
+    return fname
+
+def save_regular(model, optimizer, scheduler, epoch: int, loss: float, best_val: float) -> str:
+    path = os.path.join(CHECKPOINT_DIR, f"checkpoint_epoch_{epoch:04d}.pth.tar")
+    return save_checkpoint(model, optimizer, scheduler, epoch, loss, best_val, path)
+
+def unwrap(m):
+    return m.module if isinstance(m, torch.nn.parallel.DistributedDataParallel) else m
 
 def load_or_create_gene_tss_df():
     gene_tss_outfile = os.path.join(MM10_GENOME_DIR, "mm10_ch1_gene_tss.bed")
@@ -350,7 +407,6 @@ def build_train_gene_stats(rna_data_shared_barcodes, train_cells, genes, device)
     sd[never_seen] = 1.0
 
     seen = (count > 0).sum().item()
-    logging.info(f"Genes seen in training: {seen}/{len(genes)}")
 
     # Keep ggenes that are seen in the training dataset
     seen_genes_mask = (count.to(torch.int32) > 0).to(device)  # [n_genes], True for 532 seen genes
@@ -377,8 +433,20 @@ def build_train_gene_stats(rna_data_shared_barcodes, train_cells, genes, device)
 
 
 def main():
+    multi_gpu = torch.cuda.device_count() > 1 and os.environ.get("WORLD_SIZE", "1") != "1"
+    if multi_gpu:
+        rank, world, local = init_ddp()
+    else:
+        rank, world, local = 0, 1, 0
+
+    device = torch.device(f"cuda:{local}" if torch.cuda.is_available() else "cpu")
+    
+    setup_logging()
+
+    
     # ----- Input Data Setup -----
-    logging.info("Reading processed scATAC-seq dataset")
+    if rank == 0:
+        logging.info("Reading processed scATAC-seq dataset")
     mesc_atac_data_chr1, mesc_atac_peak_loc_df = load_atac_dataset(atac_data_filename)
     mesc_rna_data = load_rna_data(rna_data_filename)
 
@@ -399,19 +467,21 @@ def main():
 
     tfs, peaks, genes = get_unique_tfs_peaks_genes(homer_results, genes_near_peaks)
     tf_i, peak_i, gene_i = create_tf_peak_gene_mapping_dicts(tfs, peaks, genes)
-
-    logging.info("Preparing sparse components (TF×Peak and Peak×Gene)")
+    
+    if rank == 0:
+        logging.info("Preparing sparse components (TF×Peak and Peak×Gene)")
     homer_tf_peak_sparse = cast_homer_tf_to_peak_df_sparse(homer_results, tf_i, peak_i)
     gene_distance_sparse = cast_peak_to_tg_distance_sparse(genes_near_peaks, peak_i, gene_i)
     peaks_by_window, window_ids = assign_peaks_to_windows(mesc_atac_peak_loc_df, peaks, peak_i, mm10_chr1_windows)
 
-    logging.info("\nBuilding Transformer Model")
+    if rank == 0:
+        logging.info("\nBuilding Transformer Model")
     TF = len(tfs)               # number of TFs
     TG = len(genes)             # number of target genes
     Wn = len(peaks_by_window)   # number of windows
 
     # ----- Configurations -----
-    d_model = 192
+    d_model = 256
     tf_channels = 32
     tg_channels = 64 
     batch_size = 1
@@ -420,35 +490,39 @@ def main():
     window_channels = tg_channels * tf_channels
 
     # Encoder Settings
-    encoder_nhead = 6
+    encoder_nhead = 8
     encoder_dim_feedforward = 1024
     encoder_num_layers = 3
     dropout = 0.1
+    
+    # Train-test split
+    validation_fraction = 0.15
 
     assert d_model % encoder_nhead == 0, \
         "Dimension of the model must be divisible by the number of heads"
 
     nonempty = sum(1 for p in peaks_by_window if p.size > 0)
 
-    logging.info(f"Data Size:")
-    logging.info(f"  - Window Size: {window_size} bp")
-    logging.info(f"  - Windows: {len(peaks_by_window):,} | non-empty: {nonempty:,}")
-    logging.info(f"  - Num TFs = {len(tfs):,}")
-    logging.info(f"  - Num Peaks = {len(peaks):,}")
-    logging.info(f"  - Num TGs = {len(genes):,}")
-    logging.info(f"  - Num Cells = {len(shared_barcodes)}")
+    if rank == 0:
+        logging.info(f"Data Size:")
+        logging.info(f"  - Window Size: {window_size} bp")
+        logging.info(f"  - Windows: {len(peaks_by_window):,} | non-empty: {nonempty:,}")
+        logging.info(f"  - Num TFs = {len(tfs):,}")
+        logging.info(f"  - Num Peaks = {len(peaks):,}")
+        logging.info(f"  - Num TGs = {len(genes):,}")
+        logging.info(f"  - Num Cells = {len(shared_barcodes)}")
 
-    logging.info(f"\nModel Parameters:")
-    logging.info(f"  - Model Dimensions = {d_model}")
-    logging.info(f"  - TF Linear Projection = {TF:,} -> {tf_channels}")
-    logging.info(f"  - TG Linear Projection = {TG:,} -> {tg_channels}")
-    logging.info(f"  - TF x TG Features Per Window = {window_channels} -> Model Dimension of {d_model}")
-    logging.info(f"  - Window Data Pooling: kernel={kernel_and_stride_size}, stride={kernel_and_stride_size}")
+        logging.info(f"\nModel Parameters:")
+        logging.info(f"  - Model Dimensions = {d_model}")
+        logging.info(f"  - TF Linear Projection = {TF:,} -> {tf_channels}")
+        logging.info(f"  - TG Linear Projection = {TG:,} -> {tg_channels}")
+        logging.info(f"  - TF x TG Features Per Window = {window_channels} -> Model Dimension of {d_model}")
+        logging.info(f"  - Window Data Pooling: kernel={kernel_and_stride_size}, stride={kernel_and_stride_size}")
 
-    logging.info(f"\nEncoder Settings")
-    logging.info(f"  - Encoder Layers = {encoder_num_layers}")
-    logging.info(f"  - Number of Heads = {encoder_nhead}")
-    logging.info(f"  - Feedforward Layer Neurons = {encoder_dim_feedforward}")
+        logging.info(f"\nEncoder Settings")
+        logging.info(f"  - Encoder Layers = {encoder_num_layers}")
+        logging.info(f"  - Number of Heads = {encoder_nhead}")
+        logging.info(f"  - Feedforward Layer Neurons = {encoder_dim_feedforward}")
 
     model = MultiomicTransformer(
         n_genes = len(genes),
@@ -458,10 +532,15 @@ def main():
         d_model=d_model,
         nhead=encoder_nhead,
         dff=encoder_dim_feedforward,
-        dropout=0.1,
+        dropout=dropout,
         n_layers=encoder_num_layers,
         kernel_stride_size=kernel_and_stride_size,
     ).to(device)
+    
+    if multi_gpu:
+        model = torch.nn.parallel.DistributedDataParallel(
+            model, device_ids=[local], output_device=local, find_unused_parameters=False
+        )
 
     gene_ids = torch.arange(len(genes), device=device)
 
@@ -477,21 +556,18 @@ def main():
     all_cells = shared_barcodes
     rng = np.random.default_rng(0)
     rng.shuffle(all_cells)
-    val_frac = 0.15
-    n_val = max(1, int(len(all_cells)*val_frac))
+    n_val = max(1, int(len(all_cells)*validation_fraction))
     val_cells = all_cells[:n_val]
     train_cells = all_cells[n_val:]
 
-    model.attach_sparse_sources(
+    target = model.module if multi_gpu else model
+    target.attach_sparse_sources(
         H=homer_tf_peak_sparse, D=gene_distance_sparse,
-        peaks_by_window=peaks_by_window,
-        col_of=col_of,
-        rna_arr=rna_arr,
-        atac_arr=atac_arr,
-        device=device,
+        peaks_by_window=peaks_by_window, col_of=col_of,
+        rna_arr=rna_arr, atac_arr=atac_arr,
     )
 
-    best_val, patience, pat = float("inf"), 5, 0
+    best_val, patience, pat = float("inf"), 10, 0
 
     best_val = float("inf")
     start_epoch = 1
@@ -505,28 +581,32 @@ def main():
     scaler = torch.amp.GradScaler(enabled=use_amp)
 
     loss_by_epoch: dict =  {"epoch": [], "train_loss": [], "val_loss": [], "epoch_sec": []}
+    
+    train_cells_rank = shard_list_per_rank(train_cells, rank, world, pad=True)
+    val_cells_rank   = shard_list_per_rank(val_cells,   rank, world, pad=True)
 
     for epoch in range(start_epoch, epochs + 1):
         epoch_start_time = time.time()
-
-        model.train()
+        inner = unwrap(model)
+        inner.train()
         train_loss_sum, n_train = 0.0, 0
-        logging.info("  - Running Training")
-        for bi, cell_batch in enumerate(iter_batches(train_cells, batch_size), start=1):
-            if bi % 5 == 0:
-                logging.info(f"       {bi}/{(len(train_cells) + batch_size - 1)//batch_size}")
+        if rank == 0:
+            logging.info("  - Running Training")
+        for bi, cell_batch in enumerate(iter_batches(train_cells_rank, batch_size), start=1):
+            if rank == 0 and bi % 5 == 0:
+                logging.info(f"       {bi}/{(len(train_cells_rank) + batch_size - 1)//batch_size}")
             opt.zero_grad(set_to_none=True)
 
-            tokens_b, key_mask = model.build_tokens_streaming_for_cells(
+            tokens_b, key_mask = inner.build_tokens_streaming_for_cells(
                 cell_batch, clamp_val=3.0, pad_to_max_in_batch=True
             )
 
             # ---- forward + loss (bf16 autocast; stable, no GradScaler needed) ----
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=torch.cuda.is_available()):
-                Henc = model.encoder(tokens_b)  # already bf16 under autocast if CUDA
-                GQ   = model.gene_embed(gene_ids).unsqueeze(0).expand(tokens_b.size(0), -1, -1).to(Henc.dtype)
-                Z, _ = model.cross_attn(query=GQ, key=Henc, value=Henc, key_padding_mask=key_mask)
-                pred = model.readout(Z).squeeze(-1)  # [B, n_genes], bf16
+                Henc = inner.encoder(tokens_b)  # already bf16 under autocast if CUDA
+                GQ   = inner.gene_embed(gene_ids).unsqueeze(0).expand(tokens_b.size(0), -1, -1).to(Henc.dtype)
+                Z, _ = inner.cross_attn(query=GQ, key=Henc, value=Henc, key_padding_mask=key_mask)
+                pred = inner.readout(Z).squeeze(-1)  # [B, n_genes], bf16
 
                 # targets
                 y_list, m_list = [], []
@@ -551,7 +631,7 @@ def main():
 
             # ---- backward/step (bf16 -> no GradScaler) ----
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_(inner.parameters(), 1.0)
             opt.step()
 
             train_loss_sum += float(loss.item()) * len(cell_batch)
@@ -559,23 +639,25 @@ def main():
 
         # --- VAL ---
         model.eval()
+        inner = unwrap(model)
         val_loss_sum, n_valtot = 0.0, 0
         with torch.no_grad():
-            logging.info("  - Running Validation:")
+            if rank == 0:
+                logging.info("  - Running Validation:")
 
-            for bi, cell_batch in enumerate(iter_batches(val_cells, batch_size), start=1):
-                if bi % 5 == 0:
-                    logging.info(f"       {bi}/{(len(val_cells) + batch_size - 1)//batch_size}")
+            for bi, cell_batch in enumerate(iter_batches(val_cells_rank, batch_size), start=1):
+                if rank == 0 and bi % 5 == 0:
+                    logging.info(f"       {bi}/{(len(val_cells_rank) + batch_size - 1)//batch_size}")
 
-                tokens_b, key_mask = model.build_tokens_streaming_for_cells(
+                tokens_b, key_mask = inner.build_tokens_streaming_for_cells(
                     cell_batch, clamp_val=3.0, pad_to_max_in_batch=True
                 )
 
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=torch.cuda.is_available()):
-                    Henc = model.encoder(tokens_b)
-                    GQ   = model.gene_embed(gene_ids).unsqueeze(0).expand(tokens_b.size(0), -1, -1).to(Henc.dtype)
-                    Z, _ = model.cross_attn(query=GQ, key=Henc, value=Henc, key_padding_mask=key_mask)
-                    pred = model.readout(Z).squeeze(-1)
+                    Henc = inner.encoder(tokens_b)
+                    GQ   = inner.gene_embed(gene_ids).unsqueeze(0).expand(tokens_b.size(0), -1, -1).to(Henc.dtype)
+                    Z, _ = inner.cross_attn(query=GQ, key=Henc, value=Henc, key_padding_mask=key_mask)
+                    pred = inner.readout(Z).squeeze(-1)
 
                     y_list, m_list = [], []
                     for c in cell_batch:
@@ -600,10 +682,29 @@ def main():
                 val_loss_sum += float(loss.item()) * len(cell_batch)
                 n_valtot     += len(cell_batch)
 
+        torch.cuda.synchronize(device)
+        
         # --- epoch metrics ---
-        train_loss_avg = train_loss_sum / max(1, n_train)
-        val_loss_avg   = val_loss_sum   / max(1, n_valtot)
+        sum_t = torch.tensor([train_loss_sum], device=device)
+        cnt_t = torch.tensor([n_train],        device=device)
+        sum_v = torch.tensor([val_loss_sum],   device=device)
+        cnt_v = torch.tensor([n_valtot],       device=device)
 
+        if multi_gpu:
+            dist.all_reduce(sum_t, op=dist.ReduceOp.SUM)
+            dist.all_reduce(cnt_t, op=dist.ReduceOp.SUM)
+            dist.all_reduce(sum_v, op=dist.ReduceOp.SUM)
+            dist.all_reduce(cnt_v, op=dist.ReduceOp.SUM)
+
+        train_loss_avg = (sum_t / cnt_t.clamp(min=1)).item()
+        val_loss_avg   = (sum_v / cnt_v.clamp(min=1)).item()
+
+        if rank == 0:
+            print(f"[Epoch {epoch:02d}] train_loss={train_loss_avg:.4f}  val_loss={val_loss_avg:.4f}")
+
+        if dist.is_available() and dist.is_initialized():
+            dist.barrier() 
+        
         # Calculate early stopping (best val hasnt improved in several epochs)
         is_best = val_loss_avg < best_val - 1e-5
         if is_best:
@@ -611,22 +712,29 @@ def main():
             pat = 0
         else:
             pat += 1
+            logging.info(f"No improvement ({pat}/{patience}) — val {val_loss_avg:.4f} ≥ best {best_val:.4f}")
         stop = pat >= patience
         
-        if stop:
-            logging.info(f"Early stopping at epoch {epoch} (no val improvement for {patience} epochs).")
-            training_stats = pd.DataFrame(loss_by_epoch).set_index("epoch")
-            training_stats.to_csv(os.path.join(OUTPUT_DIR, f"training_stats/training_loss_window_{window_size // 1000}kb_{num_cells}_cells.csv"), header=True, index=True)
-
-            break
+        if rank == 0:
+            save_regular(model, opt, sched, epoch, loss=train_loss_avg, best_val=best_val)
         
-        print(f"[Epoch {epoch:02d}] train_loss={train_loss_avg:.4f}  val_loss={val_loss_avg:.4f}")
+        if dist.is_available() and dist.is_initialized():
+            dist.barrier()
+        
+        if stop:
+            if rank == 0:
+                logging.info(f"Early stopping at epoch {epoch} (no val improvement for {patience} epochs).")
+                training_stats = pd.DataFrame(loss_by_epoch).set_index("epoch")
+                training_stats.to_csv(os.path.join(OUTPUT_DIR, f"training_stats/training_loss_window_{window_size // 1000}kb_{num_cells}_cells.csv"), header=True, index=True)
 
-        time_sec = time.time() - epoch_start_time
-        loss_by_epoch["epoch"].append(epoch)
-        loss_by_epoch["train_loss"].append(train_loss_avg)
-        loss_by_epoch["val_loss"].append(val_loss_avg)      
-        loss_by_epoch["epoch_sec"].append(time_sec)  
+                break
+
+        if rank == 0:
+            time_sec = time.time() - epoch_start_time
+            loss_by_epoch["epoch"].append(epoch)
+            loss_by_epoch["train_loss"].append(train_loss_avg)
+            loss_by_epoch["val_loss"].append(val_loss_avg)      
+            loss_by_epoch["epoch_sec"].append(time_sec)  
 
         sched.step()
             
@@ -634,8 +742,9 @@ def main():
     training_stats = pd.DataFrame(loss_by_epoch).set_index("epoch")
     training_stats.to_csv(os.path.join(OUTPUT_DIR, f"training_stats/training_loss_window_{window_size // 1000}kb_{num_cells}_cells.csv"), header=True, index=True)
 
+    if dist.is_available() and dist.is_initialized():
+        dist.barrier()
+        dist.destroy_process_group()
+
 if __name__ == "__main__":
-    # Configure logging
-    logging.basicConfig(level=logging.INFO, format='%(message)s')
-    
     main()
