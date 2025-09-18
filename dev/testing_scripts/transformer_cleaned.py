@@ -48,7 +48,7 @@ torch.set_num_interop_threads(1)
 # ----- User Settings -----
 load_model = False
 window_size = 1000 # 1000
-num_cells = 100
+num_cells = 500
 chrom_id = "chr1"
 
 atac_data_filename = "mESC_filtered_L2_E7.5_rep1_ATAC_processed.parquet"
@@ -500,7 +500,7 @@ def main():
     tg_channels = 64 
     batch_size = 1
     epochs = 20
-    kernel_and_stride_size = 8
+    kernel_and_stride_size = 4
     window_channels = tg_channels * tf_channels
 
     # Encoder Settings
@@ -574,14 +574,14 @@ def main():
     val_cells = all_cells[:n_val]
     train_cells = all_cells[n_val:]
 
-    inner = unwrap(model)
-    inner.attach_sparse_sources(
+    target = unwrap(model)
+    target.attach_sparse_sources(
         tf_peak_matrix=homer_tf_peak_sparse, peak_gene_matrix=gene_distance_sparse,
         peaks_by_window=peaks_by_window, col_of=col_of,
         rna_arr=rna_arr, atac_arr=atac_arr,
     )
 
-    best_val, patience, pat = float("inf"), 10, 0
+    best_val, patience, pat = float("inf"), 5, 0
 
     best_val = float("inf")
     start_epoch = 1
@@ -590,9 +590,6 @@ def main():
 
     opt = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=20)
-    use_amp = torch.cuda.is_available()
-    autocast_ctx = (lambda: torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16)) if use_amp else (lambda: nullcontext())
-    scaler = torch.amp.GradScaler(enabled=use_amp)
 
     loss_by_epoch: dict =  {"epoch": [], "train_loss": [], "val_loss": [], "epoch_sec": []}
     
@@ -611,7 +608,7 @@ def main():
                 logging.info(f"       {bi}/{(len(train_cells_rank) + batch_size - 1)//batch_size}")
             opt.zero_grad(set_to_none=True)
 
-            tokens_b, key_mask = inner.build_tokens_streaming_for_cells(
+            tokens_b, key_mask, bias_b = inner.build_tokens_streaming_for_cells(
                 cell_batch, clamp_val=3.0, pad_to_max_in_batch=True
             )
 
@@ -621,7 +618,7 @@ def main():
                     windows=tokens_b, 
                     gene_ids=gene_ids, 
                     key_padding_mask=key_mask,
-                    attn_mask=None,
+                    attn_bias=bias_b,
                     already_pooled=True
                     )
 
@@ -639,10 +636,12 @@ def main():
                 mask_eff = mask_t & seen_genes_mask.unsqueeze(0) & torch.isfinite(y_norm)
                 if not mask_eff.any():
                     continue
-                pred = torch.clamp(pred, -10, 10)
+                
+                limit = 10
+                pred_for_loss = limit * torch.tanh(pred / limit)
 
                 loss = F.huber_loss(
-                    pred[mask_eff].float(),
+                    pred_for_loss[mask_eff].float(),
                     y_norm[mask_eff].float(),
                     delta=1.0,
                 )
@@ -670,10 +669,10 @@ def main():
                 logging.info("  - Running Validation:")
 
             for bi, cell_batch in enumerate(iter_batches(val_cells_rank, batch_size), start=1):
-                if rank == 0 and bi % 5 == 0:
+                if rank == 0 and bi % 2 == 0:
                     logging.info(f"       {bi}/{(len(val_cells_rank) + batch_size - 1)//batch_size}")
 
-                tokens_b, key_mask = inner.build_tokens_streaming_for_cells(
+                tokens_b, key_mask, bias_b = inner.build_tokens_streaming_for_cells(
                     cell_batch, clamp_val=3.0, pad_to_max_in_batch=True
                 )
 
@@ -682,7 +681,7 @@ def main():
                         windows=tokens_b, 
                         gene_ids=gene_ids, 
                         key_padding_mask=key_mask,
-                        attn_mask=None,
+                        attn_bias=bias_b,
                         already_pooled=True
                         )
 
@@ -700,10 +699,12 @@ def main():
                     mask_eff = mask_t & seen_genes_mask.unsqueeze(0) & torch.isfinite(y_norm)
                     if not mask_eff.any():
                         continue
-                    pred = torch.clamp(pred, -10, 10)
+                    
+                    limit = 10
+                    pred_for_loss = limit * torch.tanh(pred / limit)
 
                     loss = F.huber_loss(
-                        pred[mask_eff].float(),
+                        pred_for_loss[mask_eff].float(),
                         y_norm[mask_eff].float(),
                         delta=1.0,
                     )
