@@ -48,7 +48,7 @@ torch.set_num_interop_threads(1)
 # ----- User Settings -----
 load_model = False
 window_size = 1000 # 1000
-num_cells = 500
+num_cells = 100
 chrom_id = "chr1"
 
 atac_data_filename = "mESC_filtered_L2_E7.5_rep1_ATAC_processed.parquet"
@@ -460,9 +460,9 @@ def main():
     # Restrict gene TSS dataframe to only use the selected chromosome
     gene_tss_df = gene_tss_df[gene_tss_df["chrom"] == chrom_id]
     
-    mesc_rna_data = mesc_rna_data[mesc_rna_data["gene_id"].isin(gene_tss_df["name"])]
+    mesc_rna_data = mesc_rna_data[mesc_rna_data.index.isin(gene_tss_df["name"])]
     if rank == 0:
-        logging.info(f"Using {mesc_rna_data['gene_id'].nunique()} genes (scRNA-seq data df)")
+        logging.info(f"Using {mesc_rna_data.index.nunique()} genes (scRNA-seq data df)")
     
     mm10_chr1_windows = create_or_load_genomic_windows(force_recalculate=False)
 
@@ -618,10 +618,13 @@ def main():
 
             # ---- forward + loss (bf16 autocast; stable, no GradScaler needed) ----
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=torch.cuda.is_available()):
-                Henc = inner.encoder(tokens_b)  # already bf16 under autocast if CUDA
-                GQ   = inner.gene_embed(gene_ids).unsqueeze(0).expand(tokens_b.size(0), -1, -1).to(Henc.dtype)
-                Z, _ = inner.cross_attn(query=GQ, key=Henc, value=Henc, key_padding_mask=key_mask)
-                pred = inner.readout(Z).squeeze(-1)  # [B, n_genes], bf16
+                pred, Z = inner.forward(
+                    windows=tokens_b, 
+                    gene_ids=gene_ids, 
+                    key_padding_mask=key_mask,
+                    attn_mask=None,
+                    already_pooled=True
+                    )
 
                 # targets
                 y_list, m_list = [], []
@@ -642,11 +645,15 @@ def main():
                 if not mask_eff.any():
                     continue
 
-                loss = F.huber_loss(pred[mask_eff], y_norm[mask_eff], delta=1.0)
+                loss = F.huber_loss(pred[mask_eff], y_norm.to(pred.dtype)[mask_eff], delta=1.0)
+
 
             # ---- backward/step (bf16 -> no GradScaler) ----
             loss.backward()
+                
             torch.nn.utils.clip_grad_norm_(inner.parameters(), 1.0)
+            loss = torch.nan_to_num(loss, nan=0.0, posinf=1e6, neginf=-1e6)
+            
             opt.step()
 
             train_loss_sum += float(loss.item()) * len(cell_batch)
@@ -669,10 +676,13 @@ def main():
                 )
 
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=torch.cuda.is_available()):
-                    Henc = inner.encoder(tokens_b)
-                    GQ   = inner.gene_embed(gene_ids).unsqueeze(0).expand(tokens_b.size(0), -1, -1).to(Henc.dtype)
-                    Z, _ = inner.cross_attn(query=GQ, key=Henc, value=Henc, key_padding_mask=key_mask)
-                    pred = inner.readout(Z).squeeze(-1)
+                    pred, Z = inner.forward(
+                        windows=tokens_b, 
+                        gene_ids=gene_ids, 
+                        key_padding_mask=key_mask,
+                        attn_mask=None,
+                        already_pooled=True
+                        )
 
                     y_list, m_list = [], []
                     for c in cell_batch:
@@ -692,7 +702,7 @@ def main():
                     if not mask_eff.any():
                         continue
 
-                    loss = F.huber_loss(pred[mask_eff], y_norm[mask_eff], delta=1.0)
+                    loss = F.huber_loss(pred[mask_eff], y_norm.to(pred.dtype)[mask_eff], delta=1.0)
 
                 val_loss_sum += float(loss.item()) * len(cell_batch)
                 n_valtot     += len(cell_batch)
@@ -731,7 +741,7 @@ def main():
         stop = pat >= patience
         
         # Save a checkpoint every 5 epochs
-        if rank == 0 and epoch % == 0:
+        if rank == 0 and epoch % 5 == 0:
             save_regular(model, opt, sched, epoch, loss=train_loss_avg, best_val=best_val)
         
         if dist.is_available() and dist.is_initialized():

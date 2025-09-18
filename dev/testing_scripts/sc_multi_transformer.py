@@ -65,12 +65,13 @@ class MultiomicTransformer(nn.Module):
         self.tg_channels = 64
         self.proj_tf = nn.Linear(tf_in_dim, self.tf_channels, bias=False)  # TF -> 32
         self.proj_tg = nn.Linear(tg_in_dim, self.tg_channels, bias=False)  # G  -> 64
+        self.kernel_stride_size = kernel_stride_size
 
         self.proj_window = nn.Linear(self.tf_channels * self.tg_channels, d_model, bias=False)
 
         # Pool windows to reduce the dimensionality, helps with computational efficiency
         # at the cost of decreased resolution
-        self.pool = nn.AvgPool1d(kernel_size=kernel_stride_size, stride=kernel_stride_size)
+        self.pool = nn.AvgPool1d(kernel_size=self.kernel_stride_size, stride=self.kernel_stride_size)
 
         # Positional encoding over window sequence
         # Helps to keep track of where the peak accessibility is in relation to genes
@@ -92,6 +93,10 @@ class MultiomicTransformer(nn.Module):
         # Cross-attention
         # Creates an embedding of potential TGs to the same dimension of the model
         self.gene_embed = nn.Embedding(n_genes, d_model)  # queries
+        
+        # Layer normalize before passing to the decoder (keep )
+        self.layer_norm_gene_queries = nn.LayerNorm(d_model)
+        self.layer_norm_encoder_keys_values = nn.LayerNorm(d_model)
         
         # Each gene queries the window embeddings for context about its expression
         self.cross_attn = nn.MultiheadAttention(embed_dim=d_model, num_heads=nhead, dropout=dropout, batch_first=True)
@@ -132,6 +137,32 @@ class MultiomicTransformer(nn.Module):
 
     def _module_device(self) -> torch.device:
         return next(self.parameters()).device
+
+    def _pool_mask(self, key_padding_mask: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+        """
+        Downsample [batch_size, num_windows] -> [batch_size, num_windows_pooled] to match AvgPool1d(kernel=stride=K).
+        Rule: a pooled position is PAD=True only if **all** covered positions were pad.
+        """
+        if key_padding_mask is None:
+            return None
+        batch_size, num_windows = key_padding_mask.shape
+        
+        # Trim to multiple of the kernel stride size to avoid ragged pooling
+        windows_trimmed = (num_windows // self.kernel_stride_size) * self.kernel_stride_size
+        
+        # Reshape the windows into groups of size kernel stride size
+        mask = key_padding_mask[:, :windows_trimmed].float()  # [batch, windows_trimmed]
+        mask = mask.view(
+            batch_size, 
+            windows_trimmed // self.kernel_stride_size, 
+            self.kernel_stride_size
+            ).all(dim=-1)  # [batch, windows_trimmed // kernel size]
+        
+        # Handle tail (<pooling size): if exists, pad if all were pad
+        if self.kernel_stride_size < num_windows:
+            tail = key_padding_mask[:, self.kernel_stride_size:].all(dim=-1, keepdim=True)  # [batch,1]
+            mask = torch.cat([mask, tail], dim=1)
+        return mask.bool()
 
     def build_tokens_streaming_for_cells(
         self,
@@ -253,7 +284,12 @@ class MultiomicTransformer(nn.Module):
 
         return tokens, key_padding_mask
 
-    def encode_windows(self, windows: torch.Tensor) -> torch.Tensor:
+    def encode_windows(
+        self, 
+        windows: torch.Tensor, 
+        key_padding_mask: Optional[torch.Tensor] = None,
+        already_pooled: Optional[bool] = True
+        ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         
         windows: Raw window features [batch, windows, window features]
@@ -261,12 +297,22 @@ class MultiomicTransformer(nn.Module):
         """
         # Linear project windows to [batch, windows, d_model]
         # Adds dropout
-        x = self.proj_window(windows)     
+        x = windows
         
-        # AvgPool1d the windows
-        x = x.transpose(1, 2)   # Transpose to get the windows as the last dim
-        x = self.pool(x)        # AvgPool1d the windows (must be the last dimension)
-        x = x.transpose(1, 2)    # Transpose back to the original shape
+        if x.size(-1) != self.d_model:
+            x = self.proj_window(x)
+        
+        # Pooling already occurs in the token builder. Can pool here if needed
+        if not already_pooled:
+            # AvgPool1d the windows
+            x = x.transpose(1, 2)   # Transpose to get the windows as the last dim
+            x = self.pool(x)        # AvgPool1d the windows (must be the last dimension)
+            x = x.transpose(1, 2)    # Transpose back to the original shape
+            pooled_mask = self._pool_mask(key_padding_mask)
+        else:
+            pooled_mask = key_padding_mask
+        
+        
         
         # Add the positional encoding  
         x = self.posenc(x)                
@@ -275,16 +321,15 @@ class MultiomicTransformer(nn.Module):
         # Attend to all other windows to gain global context
         encoded_windows = self.encoder(x) 
         
-        return encoded_windows
+        return encoded_windows, pooled_mask
 
     def forward(
         self,
         windows: torch.Tensor,          # [B, S, Fw] window features (already pooled OR raw per-bin -> you pool before passing here)
         gene_ids: torch.Tensor,          # [G] LongTensor (0..n_genes-1)
-        tf_token: Optional[torch.Tensor] = None,   # [B, Ftf]
-        tg_token: Optional[torch.Tensor] = None,   # [B, Ftg]
         key_padding_mask: Optional[torch.Tensor] = None,  # [B, S] True for PAD
         attn_mask: Optional[torch.Tensor] = None,         # [S, S] or [B, S, S]
+        already_pooled: Optional[bool] = True
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Returns:
@@ -292,7 +337,7 @@ class MultiomicTransformer(nn.Module):
             Z:    [B, G, D] attended gene representations (for analysis)
         """
         # Encode window sequence
-        encoded_windows = self.encode_windows(windows)  # [B, S, D]
+        encoded_windows, pooled_mask = self.encode_windows(windows, key_padding_mask, already_pooled)  # [B, S, D]
 
         batch_size = encoded_windows.size(0)    # Get the batch size from the window embeddings
         gene_indices = gene_ids.numel()         # Get the number of elements in gene_ids
@@ -303,15 +348,20 @@ class MultiomicTransformer(nn.Module):
             .unsqueeze(0)                           # Get the embeddings into the same size 
             .expand(batch_size, gene_indices, -1)
             )  # [B, G, D]
+        
+        # Layer normalize the window embeddings from the encoder and the gene
+        # embeddings from the decoder to stabilize activations
+        gene_queries_layernorm = self.layer_norm_gene_queries(gene_queries)
+        encoded_windows_layernorm = self.layer_norm_encoder_keys_values(encoded_windows)
 
         # Run Cross-Attention
         # Each gene queries the window embeddings to find most relevant
         # windows for its expression
         gene_embeddings, _ = self.cross_attn(
-            query=gene_queries, 
-            key=encoded_windows, 
-            value=encoded_windows,
-            key_padding_mask=key_padding_mask,
+            query=gene_queries_layernorm, 
+            key=encoded_windows_layernorm, 
+            value=encoded_windows_layernorm,
+            key_padding_mask=(pooled_mask.to(encoded_windows_layernorm.device) if pooled_mask is not None else None),
             attn_mask=attn_mask
             )  # [B, G, D]
 
