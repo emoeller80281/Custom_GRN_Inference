@@ -46,9 +46,7 @@ class MultiomicTransformer(nn.Module):
         self,
         *,
         n_genes: int,           # number of genes to predict (query length)
-        tg_in_dim: int,         # input feature size for TG token
         tf_in_dim: int,         # input feature size for TF token
-        window_in_dim: int,     # per-window feature size (ATAC/etc.)
         d_model: int,
         nhead: int,
         dff: int,
@@ -56,18 +54,17 @@ class MultiomicTransformer(nn.Module):
         n_layers: int,
         kernel_stride_size: int,
         max_windows: int = 4096,
-        use_checkpoint_encoder: bool = False,
     ):
         super().__init__()
 
         # Linear projections of TF, TG, and the windows, with dropout
         self.d_model = d_model
-        self.tf_channels = 32
-        self.tg_channels = 64
+        self.tf_channels = 64
         self.attn_bias_scale = 0.1
         
         self.kernel_stride_size = kernel_stride_size
         
+        # Projects the TF vector to a smaller dimension, then 
         self.window_from_tf = nn.Sequential(
             nn.Linear(tf_in_dim, self.tf_channels, bias=False),  # TF -> 32
             nn.GELU(),
@@ -205,7 +202,7 @@ class MultiomicTransformer(nn.Module):
             atac_col = self.atac_arr[:, col_index]  # [P]
 
             # TF-peak binding scaled by TF expression (CSR)
-            tf_by_peak_scaled = self.tf_peak_matrix.multiply(rna_col[:, None]).tocsr()  # [TF, P]
+            tf_peak_binding = self.tf_peak_matrix.multiply(rna_col[:, None]).tocsr()  # [TF, P]
 
             pooled_token_chunks: List[torch.Tensor] = []   # each [1, 1, d_model]
             pooled_bias_chunks:  List[torch.Tensor] = []   # each [1, 1, G]
@@ -223,7 +220,7 @@ class MultiomicTransformer(nn.Module):
                 # Weighted sum of TF contributions across peaks in this window
                 w = atac_col[active_peak_idx]  # np array of weights [|p|]
                 # (TF x |p|) @ (|p|) -> [TF]
-                tf_window = (tf_by_peak_scaled[:, active_peak_idx] @ w)  # np array [TF]
+                tf_window = (tf_peak_binding[:, active_peak_idx] @ w)  # np array [TF]
 
                 tf_window_t = torch.as_tensor(tf_window, device=device, dtype=torch.float32)
                 # stabilize
@@ -284,7 +281,7 @@ class MultiomicTransformer(nn.Module):
             pooled_lengths.append(tokens_for_cell.size(1))
 
             # free per-cell CSR
-            del tf_by_peak_scaled
+            del tf_peak_binding
 
         # no padding
         if not pad_to_max_in_batch:
@@ -425,7 +422,6 @@ class MultiomicTransformer(nn.Module):
             )
 
             expanded_attention_bias = expanded_attention_bias.masked_fill(expanded_padding, very_negative)
-
             
         # Run Cross-Attention
         # Each gene queries the window embeddings to find most relevant
@@ -436,7 +432,7 @@ class MultiomicTransformer(nn.Module):
             value=encoded_windows_layernorm,
             attn_mask=expanded_attention_bias
             )  # [batch_size, num_genes, d_model]
-
+        
         # Final prediction is one expression prediction per gene per batch
         pred = self.readout(gene_embeddings).squeeze(-1)  # [B, G]
         return pred, gene_embeddings
