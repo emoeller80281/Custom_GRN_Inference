@@ -3,7 +3,7 @@ import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
 import numpy as np
 import math
-from typing import Optional, Union, Tuple, Sequence
+from typing import Optional, Union, Tuple, Sequence, cast
 
 class SinusoidalPositionalEncoding(nn.Module):
     def __init__(self, d_model: int, max_len: int = 10000):
@@ -61,6 +61,7 @@ class MultiomicTransformer(nn.Module):
         super().__init__()
 
         # Linear projections of TF, TG, and the windows, with dropout
+        self.d_model = d_model
         self.tf_channels = 32
         self.tg_channels = 64
         self.proj_tf = nn.Linear(tf_in_dim, self.tf_channels, bias=False)  # TF -> 32
@@ -75,36 +76,41 @@ class MultiomicTransformer(nn.Module):
 
         # Positional encoding over window sequence
         # Helps to keep track of where the peak accessibility is in relation to genes
-        self.posenc = SinusoidalPositionalEncoding(d_model, max_len=max_windows)
+        self.posenc = SinusoidalPositionalEncoding(self.d_model, max_len=max_windows)
 
         # Encoder stack
         # Each window attends to other windows + feedforward layer
         enc_layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
+            d_model=self.d_model,
             nhead=nhead,
             dim_feedforward=dff,
             dropout=dropout,
             batch_first=True,
             norm_first=True,
         )
+        
         # Build an encoder with multiple layers
-        self.encoder = nn.TransformerEncoder(enc_layer, num_layers=n_layers)
+        self.encoder = nn.TransformerEncoder(
+            enc_layer, 
+            num_layers=n_layers, 
+            enable_nested_tensor=False
+            )
 
         # Cross-attention
         # Creates an embedding of potential TGs to the same dimension of the model
-        self.gene_embed = nn.Embedding(n_genes, d_model)  # queries
+        self.gene_embed = nn.Embedding(n_genes, self.d_model)  # queries
         
         # Layer normalize before passing to the decoder (keep )
-        self.layer_norm_gene_queries = nn.LayerNorm(d_model)
-        self.layer_norm_encoder_keys_values = nn.LayerNorm(d_model)
+        self.layer_norm_gene_queries = nn.LayerNorm(self.d_model)
+        self.layer_norm_encoder_keys_values = nn.LayerNorm(self.d_model)
         
         # Each gene queries the window embeddings for context about its expression
-        self.cross_attn = nn.MultiheadAttention(embed_dim=d_model, num_heads=nhead, dropout=dropout, batch_first=True)
+        self.cross_attn = nn.MultiheadAttention(embed_dim=self.d_model, num_heads=nhead, dropout=dropout, batch_first=True)
 
         # Takes the attention layer and maps to a scalar prediction for each gene
         self.readout = nn.Sequential(
-            nn.LayerNorm(d_model),
-            nn.Linear(d_model, 1)
+            nn.LayerNorm(self.d_model),
+            nn.Linear(self.d_model, 1)
         )
 
         self._reset_parameters()
@@ -118,7 +124,8 @@ class MultiomicTransformer(nn.Module):
                 
     def attach_sparse_sources(
         self,
-        H, D,                           # SciPy CSR: H [TF x P], D [P x G]
+        tf_peak_matrix,                 # SciPy CSR: tf_peak_matrix [TF x peak binding potential]
+        peak_gene_matrix,               # SciPy CSR: peak_gene_matrix [peak x gene regulatory potential]
         peaks_by_window: Sequence,      # list/seq of np.ndarray peak indices per window
         col_of,                         # cell_id -> column index in RNA/ATAC matrices
         rna_arr, atac_arr,              # typically numpy / SciPy matrices
@@ -127,8 +134,8 @@ class MultiomicTransformer(nn.Module):
         """
         Stashes references (kept on CPU). Call once per process.
         """
-        self.H = H
-        self.D = D
+        self.tf_peak_matrix = tf_peak_matrix
+        self.peak_gene_matrix = peak_gene_matrix
         self.peaks_by_window = peaks_by_window
         self.col_of = col_of
         self.rna_arr = rna_arr
@@ -145,24 +152,29 @@ class MultiomicTransformer(nn.Module):
         """
         if key_padding_mask is None:
             return None
+        
         batch_size, num_windows = key_padding_mask.shape
         
         # Trim to multiple of the kernel stride size to avoid ragged pooling
-        windows_trimmed = (num_windows // self.kernel_stride_size) * self.kernel_stride_size
+        num_windows_trimmed = (num_windows // self.kernel_stride_size) * self.kernel_stride_size
         
-        # Reshape the windows into groups of size kernel stride size
-        mask = key_padding_mask[:, :windows_trimmed].float()  # [batch, windows_trimmed]
-        mask = mask.view(
+        # Group into [batch_size, num_pooled_groups, kernel_size]
+        grouped = key_padding_mask[:, :num_windows_trimmed].float()  # [batch, num_windows_trimmed]
+        grouped = grouped.view(
             batch_size, 
-            windows_trimmed // self.kernel_stride_size, 
+            num_windows_trimmed // self.kernel_stride_size, 
             self.kernel_stride_size
-            ).all(dim=-1)  # [batch, windows_trimmed // kernel size]
+            )
+        
+        # A pooled position is pad if ALL windows in that group are pad
+        pooled_mask = grouped.all(dim=-1)  # [batch, windows_trimmed // kernel size]
         
         # Handle tail (<pooling size): if exists, pad if all were pad
-        if self.kernel_stride_size < num_windows:
-            tail = key_padding_mask[:, self.kernel_stride_size:].all(dim=-1, keepdim=True)  # [batch,1]
-            mask = torch.cat([mask, tail], dim=1)
-        return mask.bool()
+        if num_windows_trimmed < num_windows:
+            tail = key_padding_mask[:, num_windows_trimmed:].all(dim=-1, keepdim=True)  # [batch,1]
+            pooled_mask = torch.cat([pooled_mask, tail], dim=1)
+            
+        return pooled_mask
 
     def build_tokens_streaming_for_cells(
         self,
@@ -171,118 +183,137 @@ class MultiomicTransformer(nn.Module):
         pad_to_max_in_batch: bool = False,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
+        Builds pooled window tokens for the given cells, streaming over windows without
+        materializing full [windows, d_model] intermediates.
+
         Returns:
-            tokens: [B, W', d_model] if pad_to_max_in_batch=False
-                    [B, Wmax, d_model] if pad_to_max_in_batch=True (padded with zeros)
-            key_padding_mask: None if not padded,
-                              else [B, Wmax] (True = PAD)
-        Preserves streaming behavior: never materializes [W, d_model].
+            tokens:
+                [batch_size, num_windows_pooled, d_model] if pad_to_max_in_batch=False
+                [batch_size, max_windows_pooled_in_batch, d_model] if True (right-padded with zeros)
+            key_padding_mask:
+                None if not padded;
+                otherwise [batch_size, max_windows_pooled_in_batch] with True = PAD (ignore), False = real token
         """
-        assert hasattr(self, "H") and hasattr(self, "D"), "Call attach_sparse_sources(...) first."
+        assert hasattr(self, "tf_peak_matrix") and hasattr(self, "peak_gene_matrix"), "Call attach_sparse_sources(...) first."
         device = self._module_device()
 
-        # pool kernel size (int)
-        ks = self.pool.kernel_size if isinstance(self.pool.kernel_size, int) else self.pool.kernel_size[0]
+        # Pool (reduce) windows in groups of this size
+        kernel_size: int = self.pool.kernel_size if isinstance(self.pool.kernel_size, int) else self.pool.kernel_size[0]
 
-        out_batches = []
-        seq_lengths = []
+        # Output feature size of the window projection (d_model)
+        d_model_out: int = self.proj_window.out_features
 
-        # For fallback zero token shape
-        if isinstance(self.proj_window, nn.Sequential):
-            d_model_out = self.proj_window[0].out_features
-        else:
-            d_model_out = self.proj_window.out_features
+        per_cell_token_sequences: list[torch.Tensor] = []
+        seq_lengths_per_cell: list[int] = []
 
-        for cell in cell_ids:
-            col = self.col_of[cell]
+        for cell_id in cell_ids:
+            # Get the column index for the cell in the RNA and ATAC data arrays
+            col_index = self.col_of[cell_id]
 
-            # Column slices (CPU)
-            e = self.rna_arr[:, col]   # [TF]
-            a = self.atac_arr[:, col]  # [P]
+            # Sparse column slices (CPU)
+            rna_col = self.rna_arr[:, col_index]    # [TF]
+            atac_col = self.atac_arr[:, col_index]  # [P]
 
-            # Scale sparse and keep CSR for slicing
-            B = self.H.multiply(e[:, None]).tocsr()  # [TF, P]
-            R = self.D.multiply(a[:, None]).tocsr()  # [P,  G]
+            # Multiply the TF-peak binding potential by the RNA expression for the TFs
+            tf_by_peak_scaled = self.tf_peak_matrix.multiply(rna_col[:, None]).tocsr()  # [TF, P]
+            
+            # Multiply the Peak-TG regulatory potential by the ATAC accessibility
+            peak_by_gene_scaled = self.peak_gene_matrix.multiply(atac_col[:, None]).tocsr()  # [P, G]
 
-            pooled_list = []        # will hold a few [1,1,d_model]; tiny
-            sum_tok = None          # [1, d_model] on device
-            cnt = 0
+            pooled_token_chunks: list[torch.Tensor] = []   # each chunk is [1, 1, d_model]
+            rolling_sum_token: Optional[torch.Tensor] = None  # [1, d_model] on device
+            windows_accumulated = 0
 
-            for p_idx in self.peaks_by_window:
-                # active peaks for this window in this cell
-                p_active = p_idx[a[p_idx] > 0]
-                if p_active.size == 0:
+            # Generate the TF-TG embeddings for each window
+            # This embeds the TF expression, TF-peak binding, peak-TG regulatory potential, and peak accessibility for each windwo
+            for window_peak_indices in self.peaks_by_window:
+                # Active peaks for this window in this cell
+                active_peak_indices = window_peak_indices[atac_col[window_peak_indices] > 0]
+                if active_peak_indices.size == 0:
                     continue
+                
+                # Matrix multiply the TF-peak binding with the peak-TG regulatory potential for windows with peaks
+                # (TF x |p|) @ (|p| x G) -> [TF, G], dense on CPU
+                tf_by_gene_cpu = (tf_by_peak_scaled[:, active_peak_indices] @ peak_by_gene_scaled[active_peak_indices, :]).toarray()
 
-                # (TF x |p|) @ (|p| x G) -> [TF, G], CPU dense
-                Mw = (B[:, p_active] @ R[p_active, :]).toarray()
+                # Move to GPU
+                tf_by_gene = torch.as_tensor(tf_by_gene_cpu, device=device, dtype=torch.float32)
 
-                # to GPU, stabilize per TF
-                M = torch.as_tensor(Mw, device=device, dtype=torch.float32)
-                # safety
-                if not torch.isfinite(M).all():
-                    M = torch.nan_to_num(M, 0.0)
+                # Remove infinite and nan values
+                if not torch.isfinite(tf_by_gene).all():
+                    tf_by_gene = torch.nan_to_num(tf_by_gene, nan=0.0, posinf=0.0, neginf=0.0)
 
-                # standardize per TF across genes
-                M = (M - M.mean(dim=1, keepdim=True)) / (M.std(dim=1, keepdim=True) + 1e-6)
-                M = torch.clamp(torch.nan_to_num(M, 0.0), -clamp_val, clamp_val)
+                # Standardize per-TF across genes, clamp outliers
+                tf_by_gene = (tf_by_gene - tf_by_gene.mean(dim=1, keepdim=True)) / (tf_by_gene.std(dim=1, keepdim=True) + 1e-6)
+                tf_by_gene = torch.clamp(torch.nan_to_num(tf_by_gene, nan=0.0), -clamp_val, clamp_val)
 
-                # projections on device (keep fp32 to avoid overflow)
+                # Project to token (stay fp32 to avoid overflow)
                 with torch.amp.autocast(device_type="cuda", enabled=False):
-                    # M.t(): [G, TF] -> proj_tf: Linear(TF -> tf_channels)
-                    Xtf  = self.proj_tf(M.t().unsqueeze(0))        # [1, G, 32]
-                    Xtg  = self.proj_tg(Xtf.transpose(1, 2))       # [1, 32, 64]
-                    feat = Xtg.reshape(1, -1)                      # [1, 2048]
-                    assert feat.size(-1) == self.proj_window.in_features, \
-                        f"feat={feat.size(-1)} vs proj_window.in_features={self.proj_window.in_features}"
-                    tok  = self.proj_window(feat)           # [1, 192]
+                    # Linear projections for TF and TG
+                    tf_proj  = self.proj_tf(tf_by_gene.T.unsqueeze(0))        # [1, G, 32]
+                    tg_proj  = self.proj_tg(tf_proj.transpose(1, 2))          # [1, 32, 64]
+                    
+                    # Flatten the TF x TG projections into a vector
+                    fused    = tg_proj.reshape(1, -1)                          # [1, tf_channels * tg_channels]
+                    assert fused.size(-1) == self.proj_window.in_features, \
+                        f"fused={fused.size(-1)} vs proj_window.in_features={self.proj_window.in_features}"
+                        
+                    # Project the linear TF-TG embedding down to the model dimension
+                    token    = self.proj_window(fused)                         # [1, d_model_out]
 
-                # rolling sum for avg pooling over windows
-                sum_tok = tok if sum_tok is None else (sum_tok + tok)
-                cnt += 1
+                # Rolling sum for manual average pooling across consecutive windows 
+                # (Mimics Avg1DPool to aggregate consecutive windows)
+                rolling_sum_token = token if rolling_sum_token is None else (rolling_sum_token + token)
+                windows_accumulated += 1
 
-                if cnt == ks:
-                    pooled = (sum_tok / float(ks)).unsqueeze(1)  # [1, 1, d_model]
-                    pooled_list.append(pooled)
-                    sum_tok = None
-                    cnt = 0
+                if windows_accumulated == kernel_size:
+                    pooled_token = (rolling_sum_token / float(kernel_size)).unsqueeze(1)  # [1, 1, d_model]
+                    pooled_token_chunks.append(pooled_token)
+                    rolling_sum_token = None
+                    windows_accumulated = 0
 
-                # free big intermediates promptly
-                del M, Xtf, Xtg, feat, tok
+                # Free large intermediates promptly
+                del tf_by_gene, tf_proj, tg_proj, fused, token
 
-            # tail (< ks)
-            if cnt > 0 and sum_tok is not None:
-                pooled = (sum_tok / float(cnt)).unsqueeze(1)     # [1, 1, d_model]
-                pooled_list.append(pooled)
-                sum_tok = None; cnt = 0
+            # Divide the rolling sum by the number of windows for the cell to get the average
+            if windows_accumulated > 0 and rolling_sum_token is not None:
+                pooled_token = (rolling_sum_token / float(windows_accumulated)).unsqueeze(1)  # [1, 1, d_model]
+                pooled_token_chunks.append(pooled_token)
+                rolling_sum_token = None
+                windows_accumulated = 0
 
-            if len(pooled_list) == 0:
-                toks = torch.zeros((1, 1, d_model_out), device=device, dtype=torch.float32)
+            # Concatenate pooled chunks for this cell
+            if len(pooled_token_chunks) == 0:
+                tokens_for_cell = torch.zeros((1, 1, d_model_out), device=device, dtype=torch.float32)
             else:
-                toks = torch.cat(pooled_list, dim=1)             # [1, W', d_model]
+                tokens_for_cell = torch.cat(pooled_token_chunks, dim=1)  # [1, num_windows_pooled, d_model]
 
-            out_batches.append(toks)
-            seq_lengths.append(toks.size(1))
+            per_cell_token_sequences.append(tokens_for_cell)
+            seq_lengths_per_cell.append(tokens_for_cell.size(1))
 
-            # free per-cell CSR on CPU
-            del B, R
+            # Free per-cell CSR on CPU
+            del tf_by_peak_scaled, peak_by_gene_scaled
 
-        # If no padding requested, all W' must match or this will raise (same as your current function)
+        # If no padding requested, require all pooled lengths to match and return directly
         if not pad_to_max_in_batch:
-            tokens = torch.cat(out_batches, dim=0)               # [B, W', d_model]
+            tokens = torch.cat(per_cell_token_sequences, dim=0)  # [batch_size, num_windows_pooled, d_model]
             return tokens, None
 
-        # Otherwise pad to the longest within this batch and build a key_padding_mask
-        Wmax = int(max(seq_lengths))
-        Bsz  = len(out_batches)
-        tokens = torch.zeros((Bsz, Wmax, d_model_out), device=device, dtype=torch.float32)
-        key_padding_mask = torch.ones((Bsz, Wmax), device=device, dtype=torch.bool)  # True=PAD
-        for i, t in enumerate(out_batches):
-            w = t.size(1)
-            tokens[i, :w, :] = t[0]
-            key_padding_mask[i, :w] = False
+        # Otherwise, right-pad to the longest pooled sequence in the batch and build a key_padding_mask
+        max_windows_pooled_in_batch: int = int(max(seq_lengths_per_cell))   # Find the max number of pooled windows
+        batch_size: int = len(per_cell_token_sequences)
+
+        # Create a mask (1 if the position in the window is a true token or 0 if its padding)
+        tokens = torch.zeros((batch_size, max_windows_pooled_in_batch, d_model_out), device=device, dtype=torch.float32)
+        key_padding_mask = torch.ones((batch_size, max_windows_pooled_in_batch), device=device, dtype=torch.bool)  # True=PAD
+
+        for row_index, cell_tokens in enumerate(per_cell_token_sequences):
+            num_windows_pooled = cell_tokens.size(1)
+            tokens[row_index, :num_windows_pooled, :] = cell_tokens[0]
+            key_padding_mask[row_index, :num_windows_pooled] = False  # mark real tokens
 
         return tokens, key_padding_mask
+
 
     def encode_windows(
         self, 
@@ -310,9 +341,9 @@ class MultiomicTransformer(nn.Module):
             x = x.transpose(1, 2)    # Transpose back to the original shape
             pooled_mask = self._pool_mask(key_padding_mask)
         else:
+            assert x.size(-1) == self.d_model, \
+                "already_pooled=True requires d_model features"
             pooled_mask = key_padding_mask
-        
-        
         
         # Add the positional encoding  
         x = self.posenc(x)                

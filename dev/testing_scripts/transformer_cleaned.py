@@ -435,7 +435,6 @@ def build_train_gene_stats(rna_data_shared_barcodes, train_cells, genes, device)
     
     return mu, sd, seen_genes_mask
 
-
 def main():
     multi_gpu = torch.cuda.device_count() > 1 and os.environ.get("WORLD_SIZE", "1") != "1"
     if multi_gpu:
@@ -501,7 +500,7 @@ def main():
     tg_channels = 64 
     batch_size = 1
     epochs = 20
-    kernel_and_stride_size = 32
+    kernel_and_stride_size = 8
     window_channels = tg_channels * tf_channels
 
     # Encoder Settings
@@ -575,9 +574,9 @@ def main():
     val_cells = all_cells[:n_val]
     train_cells = all_cells[n_val:]
 
-    target = model.module if multi_gpu else model
-    target.attach_sparse_sources(
-        H=homer_tf_peak_sparse, D=gene_distance_sparse,
+    inner = unwrap(model)
+    inner.attach_sparse_sources(
+        tf_peak_matrix=homer_tf_peak_sparse, peak_gene_matrix=gene_distance_sparse,
         peaks_by_window=peaks_by_window, col_of=col_of,
         rna_arr=rna_arr, atac_arr=atac_arr,
     )
@@ -626,26 +625,29 @@ def main():
                     already_pooled=True
                     )
 
-                # targets
                 y_list, m_list = [], []
                 for c in cell_batch:
                     y, m = get_true_tg_expr_vector_from_data(mesc_rna_data_shared[c], genes)
                     y_list.append(y); m_list.append(m)
 
-                y_true = torch.cat(y_list, dim=0).to(pred.device)     # fp32
-                mask_t = torch.cat(m_list, dim=0).to(pred.device)      # bool
+                y_true = torch.cat(y_list, dim=0).to(pred.device)
+                mask_t = torch.cat(m_list, dim=0).to(pred.device)
 
                 y_norm = ((y_true - mu) / sd)
                 y_norm = torch.clamp(y_norm, -8.0, 8.0)
-                y_norm = torch.nan_to_num(y_norm, 0.0).to(pred.dtype)  # *** critical: match pred dtype ***
 
                 mask_eff = mask_t & seen_genes_mask.unsqueeze(0) & torch.isfinite(y_norm)
-                pred     = torch.nan_to_num(pred, 0.0)
-
                 if not mask_eff.any():
                     continue
+                pred = torch.clamp(pred, -10, 10)
 
-                loss = F.huber_loss(pred[mask_eff], y_norm.to(pred.dtype)[mask_eff], delta=1.0)
+                loss = F.huber_loss(
+                    pred[mask_eff].float(),
+                    y_norm[mask_eff].float(),
+                    delta=1.0,
+                )
+                if not torch.isfinite(loss):
+                    raise RuntimeError("Non-finite loss detected")
 
 
             # ---- backward/step (bf16 -> no GradScaler) ----
@@ -694,15 +696,19 @@ def main():
 
                     y_norm = ((y_true - mu) / sd)
                     y_norm = torch.clamp(y_norm, -8.0, 8.0)
-                    y_norm = torch.nan_to_num(y_norm, 0.0).to(pred.dtype)
 
                     mask_eff = mask_t & seen_genes_mask.unsqueeze(0) & torch.isfinite(y_norm)
-                    pred     = torch.nan_to_num(pred, 0.0)
-
                     if not mask_eff.any():
                         continue
+                    pred = torch.clamp(pred, -10, 10)
 
-                    loss = F.huber_loss(pred[mask_eff], y_norm.to(pred.dtype)[mask_eff], delta=1.0)
+                    loss = F.huber_loss(
+                        pred[mask_eff].float(),
+                        y_norm[mask_eff].float(),
+                        delta=1.0,
+                    )
+                    if not torch.isfinite(loss):
+                        raise RuntimeError("Non-finite loss detected")
 
                 val_loss_sum += float(loss.item()) * len(cell_batch)
                 n_valtot     += len(cell_batch)
