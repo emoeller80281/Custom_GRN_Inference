@@ -49,6 +49,7 @@ torch.set_num_interop_threads(1)
 load_model = False
 window_size = 1000 # 1000
 num_cells = 500
+chrom_id = "chr1"
 
 atac_data_filename = "mESC_filtered_L2_E7.5_rep1_ATAC_processed.parquet"
 rna_data_filename = "mESC_filtered_L2_E7.5_rep1_RNA_processed.parquet"
@@ -232,6 +233,9 @@ def create_homer_peaks_file(genes_near_peaks):
     homer_peaks.to_csv(homer_peak_path, sep="\t", header=False, index=False)
 
 def load_homer_tf_to_peak_results():
+    assert os.path.exists(os.path.join(OUTPUT_DIR, "homer_tf_to_peak.parquet")), \
+        "ERROR: Homer TF to peak output parquet file required"
+        
     homer_results = pd.read_parquet(os.path.join(OUTPUT_DIR, "homer_tf_to_peak.parquet"), engine="pyarrow")
     homer_results = homer_results.reset_index(drop=True)
     homer_results["source_id"] = homer_results["source_id"].str.capitalize()
@@ -251,7 +255,7 @@ def find_shared_barcodes(atac_df, rna_df, num_cells):
     
     return shared_barcodes, atac_df_shared, rna_df_shared
 
-def get_unique_tfs_peaks_genes(homer_results, genes_near_peaks):
+def get_unique_tfs_peaks_genes(homer_results, genes_near_peaks):  
     tfs   = homer_results["source_id"].astype(str).str.capitalize().unique()
     
     peaks = np.unique(np.concatenate([
@@ -443,7 +447,6 @@ def main():
     
     setup_logging()
 
-    
     # ----- Input Data Setup -----
     if rank == 0:
         logging.info("Reading processed scATAC-seq dataset")
@@ -451,15 +454,27 @@ def main():
     mesc_rna_data = load_rna_data(rna_data_filename)
 
     gene_tss_df = load_or_create_gene_tss_df()
+    if rank == 0:
+        logging.info(f"Using {gene_tss_df['name'].nunique()} genes (TSS df)")
+    
+    # Restrict gene TSS dataframe to only use the selected chromosome
+    gene_tss_df = gene_tss_df[gene_tss_df["chrom"] == chrom_id]
+    
+    mesc_rna_data = mesc_rna_data[mesc_rna_data["gene_id"].isin(gene_tss_df["name"])]
+    if rank == 0:
+        logging.info(f"Using {mesc_rna_data['gene_id'].nunique()} genes (scRNA-seq data df)")
+    
     mm10_chr1_windows = create_or_load_genomic_windows(force_recalculate=False)
 
     genes_near_peaks = calculate_peak_to_tg_distance_score(mesc_atac_peak_loc_df, gene_tss_df)
+    
+    # Restrict the genes near peaks dataframe to only using TGs from genes on chr1
+    genes_near_peaks = genes_near_peaks[genes_near_peaks["gene_chr"] == chrom_id]
+    if rank == 0:
+        logging.info(f"Using {genes_near_peaks['target_id'].nunique()} genes (genes_near_peaks_df)")
 
     if not os.path.isfile(os.path.join(OUTPUT_DIR, "tmp/homer_peaks.txt")):
         create_homer_peaks_file(genes_near_peaks)
-
-    # assert os.path.isfile(os.path.join(OUTPUT_DIR, "homer_tf_to_peak.parquet")), \
-    #     "ERROR: Homer TF to peak output parquet file required"
         
     homer_results = load_homer_tf_to_peak_results()
 
@@ -715,7 +730,8 @@ def main():
             logging.info(f"No improvement ({pat}/{patience}) — val {val_loss_avg:.4f} ≥ best {best_val:.4f}")
         stop = pat >= patience
         
-        if rank == 0:
+        # Save a checkpoint every 5 epochs
+        if rank == 0 and epoch % == 0:
             save_regular(model, opt, sched, epoch, loss=train_loss_avg, best_val=best_val)
         
         if dist.is_available() and dist.is_initialized():

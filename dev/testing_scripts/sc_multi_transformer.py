@@ -266,7 +266,7 @@ class MultiomicTransformer(nn.Module):
         # AvgPool1d the windows
         x = x.transpose(1, 2)   # Transpose to get the windows as the last dim
         x = self.pool(x)        # AvgPool1d the windows (must be the last dimension)
-        x = x.tranpose(1, 2)    # Transpose back to the original shape
+        x = x.transpose(1, 2)    # Transpose back to the original shape
         
         # Add the positional encoding  
         x = self.posenc(x)                
