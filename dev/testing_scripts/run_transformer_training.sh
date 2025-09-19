@@ -1,7 +1,7 @@
 #!/bin/bash -l
 #SBATCH --job-name=transformer_training
-#SBATCH --output=LOGS/%x.log
-#SBATCH --error=LOGS/%x.err
+#SBATCH --output=LOGS/%x_%j.log
+#SBATCH --error=LOGS/%x_%j.err
 #SBATCH --time=12:00:00
 #SBATCH -p dense
 #SBATCH -N 1

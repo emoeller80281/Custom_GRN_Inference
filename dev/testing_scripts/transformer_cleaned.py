@@ -48,15 +48,45 @@ for var in ["OMP_NUM_THREADS","MKL_NUM_THREADS","OPENBLAS_NUM_THREADS","NUMEXPR_
 torch.set_num_threads(per)
 torch.set_num_interop_threads(1)
 
+#=================================== USER SETTINGS ===================================
 # ----- User Settings -----
 load_model = False
 window_size = 1000 # 1000
-num_cells = 500
+num_cells = 1000
 chrom_id = "chr19"
 force_recalculate = True
 
 atac_data_filename = "mESC_filtered_L2_E7.5_rep1_ATAC_processed.parquet"
 rna_data_filename = "mESC_filtered_L2_E7.5_rep1_RNA_processed.parquet"
+
+# ----- Model Configurations -----
+# Logging
+log_every_n_steps = 5
+
+# Model Size
+d_model = 256
+tf_channels = 64
+kernel_and_stride_size = 1
+
+# Encoder Settings
+encoder_nhead = 8
+encoder_dim_feedforward = 1024
+encoder_num_layers = 6
+dropout = 0.1
+
+# Train-test split
+validation_fraction = 0.15
+
+# Training configurations
+epochs = 20
+batch_size = 5
+effective_batch_size = 16
+warmup_steps = 100
+learning_rate = 3e-4
+patience = 5
+epochs_before_patience = 3
+
+#=====================================================================================
 
 PROJECT_DIR = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
 MM10_GENOME_DIR = os.path.join(PROJECT_DIR, "data/reference_genome/mm10")
@@ -498,27 +528,7 @@ def main():
         logging.info("\nBuilding Transformer Model")
     TF = len(tfs)               # number of TFs
 
-    # ----- Configurations -----
-    # Model Size
-    d_model = 256
-    tf_channels = 64
-    kernel_and_stride_size = 4
 
-    # Encoder Settings
-    encoder_nhead = 8
-    encoder_dim_feedforward = 1024
-    encoder_num_layers = 6
-    dropout = 0.1
-    
-    # Train-test split
-    validation_fraction = 0.15
-    
-    # Training configurations
-    epochs = 20
-    batch_size = 5
-    effective_batch_size = 16
-    warmup_steps = 100
-    learning_rate = 3e-4
     
     micro_batch_size     = batch_size
     accumulation_steps   = max(1, effective_batch_size // micro_batch_size)
@@ -588,7 +598,7 @@ def main():
         rna_arr=rna_arr, atac_arr=atac_arr,
     )
 
-    best_val, patience, pat = float("inf"), 10, 0
+    best_val, pat = float("inf"), 0
 
     best_val = float("inf")
     start_epoch = 1
@@ -644,7 +654,7 @@ def main():
         micro_step_count    = 0
 
         for batch_index, cell_batch in enumerate(iter_batches(train_cells_rank, micro_batch_size), start=1):
-            if rank == 0 and batch_index % 2 == 0:
+            if rank == 0 and batch_index % log_every_n_steps == 0:
                 total_train_batches = (len(train_cells_rank) + micro_batch_size - 1) // micro_batch_size
                 logging.info(f"       {batch_index}/{total_train_batches}")
 
@@ -675,15 +685,6 @@ def main():
                 y_norm = y_norm.clamp_(-8.0, 8.0)
 
                 valid_mask = mask_true & seen_genes_mask.unsqueeze(0) & torch.isfinite(y_norm)
-
-                if rank == 0 and batch_index % 85 == 0:
-                    print(
-                        f"[b{batch_index}] "
-                        f"mask_true.sum={mask_true.sum().item()}  "
-                        f"seen_genes.sum={seen_genes_mask.sum().item()}  "
-                        f"finite_y={torch.isfinite(y_norm).sum().item()}  "
-                        f"valid={valid_mask.sum().item()}"
-                    )
 
                 limit = 10.0
                 pred_for_loss = limit * torch.tanh(pred / limit)
@@ -738,7 +739,7 @@ def main():
                 logging.info("  - Running Validation:")
 
             for bi, cell_batch in enumerate(iter_batches(val_cells_rank, batch_size), start=1):
-                if rank == 0 and bi % 2 == 0:
+                if rank == 0 and bi % log_every_n_steps == 0:
                     total_val_batches = (len(val_cells_rank) + batch_size - 1) // batch_size
                     logging.info(f"       {bi}/{total_val_batches}")
 
@@ -808,7 +809,7 @@ def main():
         
         # Calculate early stopping (best val hasnt improved in several epochs)
         is_best = val_loss_avg < best_val - 1e-5
-        if epoch > 3:
+        if epoch > epochs_before_patience:
             if is_best:
                 best_val = val_loss_avg
                 pat = 0
@@ -850,7 +851,7 @@ def main():
                 
     logging.info("\nTRAINING COMPLETE, ENDING PROCESS")
     training_stats = pd.DataFrame(loss_by_epoch).set_index("epoch")
-    training_stats.to_csv(os.path.join(OUTPUT_DIR, f"training_stats/training_loss_window_{window_size // 1000}kb_{num_cells}_cells.csv"), header=True, index=True)
+    training_stats.to_csv(os.path.join(OUTPUT_DIR, f"training_stats/{chrom_id}_training_loss_window_{window_size // 1000}kb_{num_cells}_cells.csv"), header=True, index=True)
 
     if dist.is_available() and dist.is_initialized():
         dist.barrier()
