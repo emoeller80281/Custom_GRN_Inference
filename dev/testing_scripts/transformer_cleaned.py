@@ -52,7 +52,8 @@ torch.set_num_interop_threads(1)
 load_model = False
 window_size = 1000 # 1000
 num_cells = 500
-chrom_id = "chr1"
+chrom_id = "chr19"
+force_recalculate = True
 
 atac_data_filename = "mESC_filtered_L2_E7.5_rep1_ATAC_processed.parquet"
 rna_data_filename = "mESC_filtered_L2_E7.5_rep1_RNA_processed.parquet"
@@ -63,6 +64,7 @@ MM10_GENE_TSS_FILE = os.path.join(PROJECT_DIR, "data/genome_annotation/mm10/mm10
 GROUND_TRUTH_DIR = os.path.join(PROJECT_DIR, "ground_truth_files")
 SAMPLE_INPUT_DIR = os.path.join(PROJECT_DIR, "input/mESC/filtered_L2_E7.5_rep1")
 OUTPUT_DIR = os.path.join(PROJECT_DIR, "output/transformer_testing_output")
+DEBUG_FILE = os.path.join(PROJECT_DIR, "LOGS/transformer_training.debug")
 
 MM10_FASTA_FILE = os.path.join(MM10_GENOME_DIR, f"{chrom_id}.fa")
 MM10_CHROM_SIZES_FILE = os.path.join(MM10_GENOME_DIR, "chrom.sizes")
@@ -130,14 +132,14 @@ def save_regular(model, optimizer, scheduler, epoch: int, loss: float, best_val:
 def unwrap(m):
     return m.module if isinstance(m, torch.nn.parallel.DistributedDataParallel) else m
 
-def load_or_create_gene_tss_df():
+def load_or_create_gene_tss_df(chrom_id, force_recalculate=False):
     gene_tss_outfile = os.path.join(MM10_GENOME_DIR, "mm10_ch1_gene_tss.bed")
-    if not os.path.isfile(gene_tss_outfile):
+    if not os.path.isfile(gene_tss_outfile) or force_recalculate:
         mm10_gene_tss_bed = pybedtools.BedTool(MM10_GENE_TSS_FILE)
         
         gene_tss_df = (
             mm10_gene_tss_bed
-            .filter(lambda x: x.chrom == "chr1")
+            .filter(lambda x: x.chrom == chrom_id)
             .saveas(gene_tss_outfile)
             .to_dataframe()
             .sort_values(by="start", ascending=True)
@@ -147,19 +149,19 @@ def load_or_create_gene_tss_df():
         
     return gene_tss_df
 
-def load_atac_dataset(atac_data_filename):
+def load_atac_dataset(atac_data_filename, chrom_id):
     mesc_atac_data = pd.read_parquet(os.path.join(SAMPLE_INPUT_DIR, atac_data_filename)).set_index("peak_id")
     mesc_atac_peak_loc = mesc_atac_data.index
 
     # format the peaks to be in bed_format
     mesc_atac_peak_loc_df = utils.format_peaks(mesc_atac_peak_loc)
-    mesc_atac_peak_loc_df = mesc_atac_peak_loc_df[mesc_atac_peak_loc_df["chromosome"] == "chr1"]
+    mesc_atac_peak_loc_df = mesc_atac_peak_loc_df[mesc_atac_peak_loc_df["chromosome"] == chrom_id]
     mesc_atac_peak_loc_df = mesc_atac_peak_loc_df.rename(columns={"chromosome":"chrom"})
 
-    # TEMPORARY Restrict to Chr1 for testing
-    mesc_atac_data_chr1 = mesc_atac_data[mesc_atac_data.index.isin(mesc_atac_peak_loc_df.peak_id)]
+    # TEMPORARY Restrict to one chromosome for testing
+    mesc_atac_data = mesc_atac_data[mesc_atac_data.index.isin(mesc_atac_peak_loc_df.peak_id)]
     
-    return mesc_atac_data_chr1, mesc_atac_peak_loc_df
+    return mesc_atac_data, mesc_atac_peak_loc_df
 
 def load_rna_data(rna_data_filename):
     logging.info("Reading in the scRNA-seq dataset")
@@ -173,18 +175,18 @@ def create_or_load_genomic_windows(chrom_id, force_recalculate=False):
         
         logging.info("Creating genomic windows")
         mm10_genome_windows = pybedtools.bedtool.BedTool().window_maker(g=MM10_CHROM_SIZES_FILE, w=window_size)
-        mm10_chr1_windows = (
+        mm10_windows = (
             mm10_genome_windows
-            .filter(lambda x: x.chrom == chrom_id)  # TEMPORARY Restrict to Chr1 for testing
+            .filter(lambda x: x.chrom == chrom_id)  # TEMPORARY Restrict to one chromosome for testing
             .saveas(genome_window_file)
             .to_dataframe()
         )
     else:
         
         logging.info("Loading existing genomic windows")
-        mm10_chr1_windows = pybedtools.BedTool(genome_window_file).to_dataframe()
+        mm10_windows = pybedtools.BedTool(genome_window_file).to_dataframe()
         
-    return mm10_chr1_windows
+    return mm10_windows
 
 def calculate_peak_to_tg_distance_score(mesc_atac_peak_loc_df, gene_tss_df, force_recalculate=False):
     if not os.path.isfile(os.path.join(OUTPUT_DIR, "genes_near_peaks.parquet")) or force_recalculate:
@@ -201,6 +203,7 @@ def calculate_peak_to_tg_distance_score(mesc_atac_peak_loc_df, gene_tss_df, forc
             
         peak_bed = pybedtools.BedTool(os.path.join(OUTPUT_DIR, "peak_tmp.bed"))
         tss_bed = pybedtools.BedTool(os.path.join(OUTPUT_DIR, "tss_tmp.bed"))
+    
 
         genes_near_peaks = utils.find_genes_near_peaks(peak_bed, tss_bed)
 
@@ -303,12 +306,12 @@ def cast_peak_to_tg_distance_sparse(genes_near_peaks, peak_i, gene_i):
     
     return gene_distance_sparse
 
-def assign_peaks_to_windows(mesc_atac_peak_loc_df, peaks, peak_i, windows_df):
+def assign_peaks_to_windows(mesc_atac_peak_loc_df, peaks, peak_i, windows_df, chrom_id):
     logging.info("Assigning peaks to windows")
 
     # Make a Series with peak start/end by peak_id
     peak_coord_df = mesc_atac_peak_loc_df.loc[mesc_atac_peak_loc_df["peak_id"].isin(peaks), ["peak_id","chrom","start","end"]].copy()
-    peak_coord_df = peak_coord_df[peak_coord_df["chrom"] == "chr1"]  # keep chr1
+    peak_coord_df = peak_coord_df[peak_coord_df["chrom"] == chrom_id]
     coord_map = peak_coord_df.set_index("peak_id")[["start","end"]].to_dict(orient="index")
 
     w = int((windows_df["end"] - windows_df["start"]).mode().iloc[0])
@@ -452,10 +455,10 @@ def main():
     # ----- Input Data Setup -----
     if rank == 0:
         logging.info("Reading processed scATAC-seq dataset")
-    mesc_atac_data_chr1, mesc_atac_peak_loc_df = load_atac_dataset(atac_data_filename)
+    mesc_atac_data, mesc_atac_peak_loc_df = load_atac_dataset(atac_data_filename, chrom_id)
     mesc_rna_data = load_rna_data(rna_data_filename)
 
-    gene_tss_df = load_or_create_gene_tss_df()
+    gene_tss_df = load_or_create_gene_tss_df(chrom_id, force_recalculate=force_recalculate)
     if rank == 0:
         logging.info(f"Using {gene_tss_df['name'].nunique()} genes (TSS df)")
     
@@ -466,11 +469,11 @@ def main():
     if rank == 0:
         logging.info(f"Using {mesc_rna_data.index.nunique()} genes (scRNA-seq data df)")
     
-    mm10_chr1_windows = create_or_load_genomic_windows(chrom_id, force_recalculate=True)
+    mm10_windows = create_or_load_genomic_windows(chrom_id, force_recalculate=force_recalculate)
 
-    genes_near_peaks = calculate_peak_to_tg_distance_score(mesc_atac_peak_loc_df, gene_tss_df, force_recalculate=True)
+    genes_near_peaks = calculate_peak_to_tg_distance_score(mesc_atac_peak_loc_df, gene_tss_df, force_recalculate=force_recalculate)
     
-    # Restrict the genes near peaks dataframe to only using TGs from genes on chr1
+    # Restrict the genes near peaks dataframe to only using TGs from genes on one chromosome
     genes_near_peaks = genes_near_peaks[(genes_near_peaks["gene_chr"] == chrom_id) & (genes_near_peaks["peak_chr"] == chrom_id)]
     if rank == 0:
         logging.info(f"Using {genes_near_peaks['target_id'].nunique()} genes (genes_near_peaks_df)")
@@ -480,7 +483,7 @@ def main():
         
     homer_results = load_homer_tf_to_peak_results()
 
-    shared_barcodes, mesc_atac_data_chr1_shared, mesc_rna_data_shared = find_shared_barcodes(mesc_atac_data_chr1, mesc_rna_data, num_cells)
+    shared_barcodes, mesc_atac_data_shared, mesc_rna_data_shared = find_shared_barcodes(mesc_atac_data, mesc_rna_data, num_cells)
 
     tfs, peaks, genes = get_unique_tfs_peaks_genes(homer_results, genes_near_peaks)
     tf_i, peak_i, gene_i = create_tf_peak_gene_mapping_dicts(tfs, peaks, genes)
@@ -489,7 +492,7 @@ def main():
         logging.info("Preparing sparse components (TF×Peak and Peak×Gene)")
     homer_tf_peak_sparse = cast_homer_tf_to_peak_df_sparse(homer_results, tf_i, peak_i)
     gene_distance_sparse = cast_peak_to_tg_distance_sparse(genes_near_peaks, peak_i, gene_i)
-    peaks_by_window, window_ids = assign_peaks_to_windows(mesc_atac_peak_loc_df, peaks, peak_i, mm10_chr1_windows)
+    peaks_by_window, window_ids = assign_peaks_to_windows(mesc_atac_peak_loc_df, peaks, peak_i, mm10_windows, chrom_id)
 
     if rank == 0:
         logging.info("\nBuilding Transformer Model")
@@ -563,7 +566,7 @@ def main():
     gene_ids = torch.arange(len(genes), device=device)
 
     rna_TF  = mesc_rna_data_shared.reindex(index=tfs).fillna(0).astype("float32")          # rows: TFs, cols: cells
-    atac_P  = mesc_atac_data_chr1_shared.reindex(index=peaks).fillna(0).astype("float32")   # rows: peaks, cols: cells
+    atac_P  = mesc_atac_data_shared.reindex(index=peaks).fillna(0).astype("float32")   # rows: peaks, cols: cells
 
     assert set(rna_TF.columns) == set(atac_P.columns), "RNA/ATAC barcode sets differ"
     rna_arr  = rna_TF.values          # shape [TF, n_cells]

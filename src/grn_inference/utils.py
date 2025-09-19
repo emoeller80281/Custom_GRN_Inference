@@ -405,7 +405,7 @@ def find_genes_near_peaks(
         dtype=dtype_dict,
         low_memory=False  # ensures the entire file is read in one go
     ).rename(columns={"gene_id": "target_id"}).dropna()
-    
+        
     # Calculate the absolute distance in basepairs between the peak's end and gene's start.
     distances = np.abs(peak_tss_overlap_df["peak_end"].values - peak_tss_overlap_df["gene_start"].values)
     peak_tss_overlap_df["TSS_dist"] = distances
