@@ -23,6 +23,7 @@ import multiprocessing as mp
 import warnings
 import math
 from sc_multi_transformer import MultiomicTransformer
+from datetime import datetime
 
 # ------ PyTorch Configurations ------
 warnings.filterwarnings("ignore", message="No device id is provided via `init_process_group` or `barrier `")
@@ -51,7 +52,7 @@ torch.set_num_interop_threads(1)
 #=================================== USER SETTINGS ===================================
 # ----- User Settings -----
 load_model = False
-window_size = 1000 # 1000
+window_size = 800
 num_cells = 1000
 chrom_id = "chr19"
 force_recalculate = True
@@ -78,7 +79,7 @@ dropout = 0.1
 validation_fraction = 0.15
 
 # Training configurations
-epochs = 20
+epochs = 75
 batch_size = 5
 effective_batch_size = 16
 warmup_steps = 100
@@ -99,7 +100,11 @@ DEBUG_FILE = os.path.join(PROJECT_DIR, "LOGS/transformer_training.debug")
 MM10_FASTA_FILE = os.path.join(MM10_GENOME_DIR, f"{chrom_id}.fa")
 MM10_CHROM_SIZES_FILE = os.path.join(MM10_GENOME_DIR, "chrom.sizes")
 
-CHECKPOINT_DIR = os.path.join(OUTPUT_DIR, "checkpoints")
+time_now = datetime.now().strftime("%d%m%y%H%M%S")
+
+TRAINING_DIR=os.path.join(PROJECT_DIR, f"training_stats_{time_now}/")
+
+CHECKPOINT_DIR = os.path.join(OUTPUT_DIR, f"checkpoints_{time_now}")
 os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 os.makedirs(os.path.join(OUTPUT_DIR, "training_stats"), exist_ok=True)
 
@@ -557,6 +562,12 @@ def main():
         logging.info(f"  - Number of Heads = {encoder_nhead}")
         logging.info(f"  - Feedforward Layer Neurons = {encoder_dim_feedforward}")
 
+    if window_size > 1000:
+        training_stats_filename = f"{chrom_id}_training_loss_window_{window_size // 1000}kb_{kernel_and_stride_size}_{shared_barcodes}.csv"
+    else:
+        training_stats_filename = f"{chrom_id}_training_loss_window_{window_size}bp_kernel_{kernel_and_stride_size}_{shared_barcodes}_cells.csv"
+
+
     model = MultiomicTransformer(
         n_genes = len(genes),
         tf_in_dim=TF,
@@ -584,12 +595,11 @@ def main():
     col_of   = {c:i for i,c in enumerate(rna_TF.columns)}
 
     # Train/val split on barcodes you already computed
-    all_cells = shared_barcodes
     rng = np.random.default_rng(0)
-    rng.shuffle(all_cells)
-    n_val = max(1, int(len(all_cells)*validation_fraction))
-    val_cells = all_cells[:n_val]
-    train_cells = all_cells[n_val:]
+    rng.shuffle(shared_barcodes)
+    n_val = max(1, int(len(shared_barcodes)*validation_fraction))
+    val_cells = shared_barcodes[:n_val]
+    train_cells = shared_barcodes[n_val:]
 
     target = unwrap(model)
     target.attach_sparse_sources(
@@ -645,13 +655,10 @@ def main():
         if rank == 0:
             logging.info("  - Running Training ")
 
-        using_ddp = (dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1)
-
         opt.zero_grad(set_to_none=True)
 
         running_loss_sum    = 0.0   # sum of per-element loss across the epoch
         running_valid_count = 0     # number of supervised elements used in loss
-        micro_step_count    = 0
 
         for batch_index, cell_batch in enumerate(iter_batches(train_cells_rank, micro_batch_size), start=1):
             if rank == 0 and batch_index % log_every_n_steps == 0:
@@ -676,58 +683,43 @@ def main():
                 for cell_id in cell_batch:
                     y, m = get_true_tg_expr_vector_from_data(mesc_rna_data_shared[cell_id], genes)
                     y_list.append(y); m_list.append(m)
-
                 y_true    = torch.cat(y_list, dim=0).to(pred.device)
                 mask_true = torch.cat(m_list, dim=0).to(pred.device)
 
-                # normalize labels (avoid div-by-zero)
-                y_norm = (y_true - mu) / sd.clamp_min(1e-6)
-                y_norm = y_norm.clamp_(-8.0, 8.0)
-
+                # normalize labels (avoid div-by-zero), clamp for stability
+                y_norm = ((y_true - mu) / sd.clamp_min(1e-6)).clamp_(-8.0, 8.0)
                 valid_mask = mask_true & seen_genes_mask.unsqueeze(0) & torch.isfinite(y_norm)
 
+                # softly clamp predictions ONLY for the loss
                 limit = 10.0
                 pred_for_loss = limit * torch.tanh(pred / limit)
 
                 if valid_mask.any():
+                    # sum-reduction so we can average over *valid elements* at epoch end
                     batch_loss_sum = F.huber_loss(
                         pred_for_loss[valid_mask].float(),
                         y_norm[valid_mask].float(),
                         delta=1.0,
                         reduction="sum",
                     )
-                    loss = batch_loss_sum / accumulation_steps
+                    loss = batch_loss_sum
                     valid_elems = int(valid_mask.sum().item())
                 else:
-                    # keep schedule aligned across ranks
+                    # keep optimizer/scheduler step counts aligned across ranks
                     batch_loss_sum = torch.zeros((), device=pred.device, dtype=torch.float32)
-                    loss = batch_loss_sum / accumulation_steps
+                    loss = batch_loss_sum
                     valid_elems = 0
 
-            # ---- gradient accumulation / DDP sync gating ----
-            flush_this_step = ((micro_step_count + 1) % accumulation_steps == 0)
-            sync_cm = (model.no_sync if (using_ddp and not flush_this_step) else nullcontext)
-
-            with sync_cm():
-                loss.backward()
-
-            micro_step_count += 1
-
-            if flush_this_step:
-                torch.nn.utils.clip_grad_norm_(inner.parameters(), 1.0)
-                opt.step()
-                opt.zero_grad(set_to_none=True)
-                sched.step()
-
-            # accumulate epoch stats (undo accumulation scaling)
-            running_loss_sum    += float(batch_loss_sum.item())  # NOT the scaled 'loss'
-            running_valid_count += valid_elems
-            
-        # leftover flush if steps don’t divide evenly
-        if micro_step_count % accumulation_steps != 0:
+            # ---- single backward + step per batch ----
+            opt.zero_grad(set_to_none=True)
+            loss.backward()
             torch.nn.utils.clip_grad_norm_(inner.parameters(), 1.0)
             opt.step()
-            opt.zero_grad(set_to_none=True)
+            sched.step()
+
+            # ---- accumulate epoch stats (per-element averaging later) ----
+            running_loss_sum    += float(batch_loss_sum.item())  # NOT the scaled 'loss'
+            running_valid_count += valid_elems
 
         # ---- VALIDATION ----
         model.eval()
@@ -829,7 +821,7 @@ def main():
             if rank == 0:
                 logging.info(f"Early stopping at epoch {epoch} (no val improvement for {patience} epochs).")
                 training_stats = pd.DataFrame(loss_by_epoch).set_index("epoch")
-                training_stats.to_csv(os.path.join(OUTPUT_DIR, f"training_stats/training_loss_window_{window_size // 1000}kb_{num_cells}_cells.csv"), header=True, index=True)
+                training_stats.to_csv(os.path.join(OUTPUT_DIR, f"training_stats/{training_stats_filename}"), header=True, index=True)
 
                 break
 
@@ -851,7 +843,7 @@ def main():
                 
     logging.info("\nTRAINING COMPLETE, ENDING PROCESS")
     training_stats = pd.DataFrame(loss_by_epoch).set_index("epoch")
-    training_stats.to_csv(os.path.join(OUTPUT_DIR, f"training_stats/{chrom_id}_training_loss_window_{window_size // 1000}kb_{num_cells}_cells.csv"), header=True, index=True)
+    training_stats.to_csv(os.path.join(OUTPUT_DIR, f"training_stats/{training_stats_filename}"), header=True, index=True)
 
     if dist.is_available() and dist.is_initialized():
         dist.barrier()

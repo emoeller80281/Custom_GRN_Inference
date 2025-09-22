@@ -198,11 +198,11 @@ class MultiomicTransformer(nn.Module):
             col_index = self.col_of[cell_id]
 
             # Sparse column slices (CPU)
-            rna_col  = self.rna_arr[:, col_index]   # [TF]
-            atac_col = self.atac_arr[:, col_index]  # [P]
+            tf_expr  = self.rna_arr[:, col_index]   # [TF]
+            peak_acc = self.atac_arr[:, col_index]  # [P]
 
             # TF-peak binding scaled by TF expression (CSR)
-            tf_peak_binding = self.tf_peak_matrix.multiply(rna_col[:, None]).tocsr()  # [TF, P]
+            tf_peak_binding = self.tf_peak_matrix.multiply(tf_expr[:, None]).tocsr()  # [TF, P]
 
             pooled_token_chunks: List[torch.Tensor] = []   # each [1, 1, d_model]
             pooled_bias_chunks:  List[torch.Tensor] = []   # each [1, 1, G]
@@ -212,13 +212,13 @@ class MultiomicTransformer(nn.Module):
 
             for window_peak_indices in self.peaks_by_window:
                 # Cell-specific active peaks in this window (gate by accessibility)
-                active_peak_idx = window_peak_indices[atac_col[window_peak_indices] > 0]
+                active_peak_idx = window_peak_indices[peak_acc[window_peak_indices] > 0]
                 if active_peak_idx.size == 0:
                     continue
 
                 # --------- TF-only token for this window ---------
                 # Weighted sum of TF contributions across peaks in this window
-                w = atac_col[active_peak_idx]  # np array of weights [|p|]
+                w = peak_acc[active_peak_idx]  # np array of weights [|p|]
                 # (TF x |p|) @ (|p|) -> [TF]
                 tf_window = (tf_peak_binding[:, active_peak_idx] @ w)  # np array [TF]
 
