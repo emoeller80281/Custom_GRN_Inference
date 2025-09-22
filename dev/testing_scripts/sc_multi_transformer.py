@@ -19,27 +19,6 @@ class SinusoidalPositionalEncoding(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         S = x.size(1)
         return x + self.pe[:S].to(x.dtype).unsqueeze(0)
-    
-class CheckpointedEncoder(nn.Module):
-    """
-    Wrap a stack of encoder layers, checkpointing each layer during training.
-    Works with batch_first=True (input [B, S, D]).
-    """
-    def __init__(self, layers, norm=None, use_checkpoint=True, use_reentrant=False):
-        super().__init__()
-        self.layers = nn.ModuleList(layers)
-        self.norm = norm
-        self.use_checkpoint = use_checkpoint
-        self.use_reentrant = use_reentrant
-
-    def forward(self, x):
-        for layer in self.layers:
-            if self.use_checkpoint and self.training:
-                # pass the flag explicitly and avoid the lambda
-                x = checkpoint(layer, x, use_reentrant=self.use_reentrant)
-            else:
-                x = layer(x)
-        return self.norm(x) if self.norm is not None else x
 
 class MultiomicTransformer(nn.Module):
     def __init__(
@@ -60,7 +39,7 @@ class MultiomicTransformer(nn.Module):
         # Linear projections of TF, TG, and the windows, with dropout
         self.d_model = d_model
         self.tf_channels = 64
-        self.attn_bias_scale = 0.1
+        self.attn_bias_scale = nn.Parameter(torch.tensor(np.log(0.1), dtype=torch.float32))
         
         self.kernel_stride_size = kernel_stride_size
         
@@ -68,7 +47,9 @@ class MultiomicTransformer(nn.Module):
         self.window_from_tf = nn.Sequential(
             nn.Linear(tf_in_dim, self.tf_channels, bias=False),  # TF -> 32
             nn.GELU(),
-            nn.Linear(self.tf_channels, self.d_model, bias=False)  # 32 -> d_model
+            nn.Dropout(p=0.1),
+            nn.Linear(self.tf_channels, self.d_model, bias=True),
+            nn.LayerNorm(self.d_model)
         )
 
         # Pool windows to reduce the dimensionality, helps with computational efficiency
@@ -161,14 +142,15 @@ class MultiomicTransformer(nn.Module):
         
         # Group into [batch_size, num_pooled_groups, kernel_size]
         grouped = key_padding_mask[:, :num_windows_trimmed]  # keep bool
-        grouped = grouped.view(
+        grouped = grouped.contiguous().view(
             batch_size,
             num_windows_trimmed // self.kernel_stride_size,
             self.kernel_stride_size
         )
         pooled_mask = grouped.all(dim=-1)  # bool
         if num_windows_trimmed < num_windows:
-            tail = key_padding_mask[:, num_windows_trimmed:].all(dim=-1, keepdim=True)
+            tail = key_padding_mask[:, num_windows_trimmed:]
+            tail = tail.all(dim=-1, keepdim=True)
             pooled_mask = torch.cat([pooled_mask, tail], dim=1)
         return pooled_mask
 
@@ -338,7 +320,7 @@ class MultiomicTransformer(nn.Module):
         
         # Run the transformer encoder
         # Attend to all other windows to gain global context
-        encoded_windows = self.encoder(x) 
+        encoded_windows = self.encoder(x, mask=None, src_key_padding_mask=pooled_mask)
         
         return encoded_windows, pooled_mask
 
@@ -387,7 +369,8 @@ class MultiomicTransformer(nn.Module):
             )
             
             # Then scale the attention bias so that it influences but doesn't overwhelm the attention
-            permuted_bias = self.attn_bias_scale * permuted_bias
+            scale = self.attn_bias_scale.exp()
+            permuted_bias = scale * permuted_bias
 
             # Expand across heads and flatten head into batch for MHA: [batch_size * num_heads, num_genes, num_windows_pooled]
             expanded_attention_bias = (

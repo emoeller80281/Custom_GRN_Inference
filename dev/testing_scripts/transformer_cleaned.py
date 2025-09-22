@@ -518,6 +518,9 @@ def main():
         
     homer_results = load_homer_tf_to_peak_results()
 
+    top_50_expressed_genes = np.load(os.path.join(OUTPUT_DIR, "top_50_expressed_chr19_genes.npy"), allow_pickle=True)
+    genes_near_peaks = genes_near_peaks[genes_near_peaks["target_id"].isin(top_50_expressed_genes)]
+
     shared_barcodes, mesc_atac_data_shared, mesc_rna_data_shared = find_shared_barcodes(mesc_atac_data, mesc_rna_data, num_cells)
 
     tfs, peaks, genes = get_unique_tfs_peaks_genes(homer_results, genes_near_peaks)
