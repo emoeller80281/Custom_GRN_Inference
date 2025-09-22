@@ -24,16 +24,16 @@ echo "Adding the 'homer/bin' directory to PATH"
 export PATH="$BASE_DIR/data/homer/bin:$PATH"
 # export PERL5LIB="$BASE_DIR/data/homer/bin:$PERL5LIB"
 
-# echo "Running findMotifsGenome.pl"
-# mkdir -p "$OUTPUT_DIR/homer_results"
-# perl "$BASE_DIR/data/homer/bin/findMotifsGenome.pl" \
-#     "$OUTPUT_DIR/tmp/homer_peaks.txt" \
-#     "$SPECIES" "$OUTPUT_DIR/homer_results/" \
-#     -size 200 \
-#     -p $NUM_CPU \
-#     -nomotif
-#     # -redundant 0.5 \
-# echo "    Done!"
+echo "Running findMotifsGenome.pl"
+mkdir -p "$OUTPUT_DIR/homer_results"
+perl "$BASE_DIR/data/homer/bin/findMotifsGenome.pl" \
+    "$OUTPUT_DIR/tmp/homer_peaks.txt" \
+    "$SPECIES" "$OUTPUT_DIR/homer_results/" \
+    -size 200 \
+    -p $NUM_CPU \
+    -nomotif
+    # -redundant 0.5 \
+echo "    Done!"
 
 echo ""
 echo "----- Homer annotatePeaks.pl -----"

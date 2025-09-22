@@ -72,11 +72,18 @@ class MultiomicTransformer(nn.Module):
         )
         
         # Build an encoder with multiple layers
-        self.encoder = nn.TransformerEncoder(
+        self.win_encoder = nn.TransformerEncoder(
             enc_layer, 
             num_layers=n_layers, 
             enable_nested_tensor=False
             )
+        
+        # Learn an embedding per TF and scale it by expression to form tokens
+        self.tf_id_embed = nn.Embedding(tf_in_dim, d_model)        # [n_tfs, d_model]
+        tf_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, dim_feedforward=dff,
+                                              dropout=dropout, batch_first=True, norm_first=True)
+        self.tf_encoder = nn.TransformerEncoder(tf_layer, num_layers=max(1, n_layers//2), enable_nested_tensor=False)
+        self.tf_ln = nn.LayerNorm(d_model)
 
         # Cross-attention
         # Creates an embedding of potential TGs to the same dimension of the model
@@ -180,11 +187,10 @@ class MultiomicTransformer(nn.Module):
             col_index = self.col_of[cell_id]
 
             # Sparse column slices (CPU)
-            tf_expr  = self.rna_arr[:, col_index]   # [TF]
             peak_acc = self.atac_arr[:, col_index]  # [P]
 
             # TF-peak binding scaled by TF expression (CSR)
-            tf_peak_binding = self.tf_peak_matrix.multiply(tf_expr[:, None]).tocsr()  # [TF, P]
+            tf_peak_binding = self.tf_peak_matrix  # [TF, P]
 
             pooled_token_chunks: List[torch.Tensor] = []   # each [1, 1, d_model]
             pooled_bias_chunks:  List[torch.Tensor] = []   # each [1, 1, G]
@@ -199,10 +205,12 @@ class MultiomicTransformer(nn.Module):
                     continue
 
                 # --------- TF-only token for this window ---------
-                # Weighted sum of TF contributions across peaks in this window
-                w = peak_acc[active_peak_idx]  # np array of weights [|p|]
-                # (TF x |p|) @ (|p|) -> [TF]
-                tf_window = (tf_peak_binding[:, active_peak_idx] @ w)  # np array [TF]
+                # Weighted average of TF contributions across peaks in this window
+                weights = peak_acc[active_peak_idx].astype(np.float32)
+                wsum = float(weights.sum())
+                if wsum > 0:
+                    weights = weights / wsum
+                tf_window = (tf_peak_binding[:, active_peak_idx] @ weights)
 
                 tf_window_t = torch.as_tensor(tf_window, device=device, dtype=torch.float32)
                 # stabilize
@@ -288,6 +296,27 @@ class MultiomicTransformer(nn.Module):
 
         return tokens, key_padding_mask, bias_pads
 
+    def build_tf_tokens_for_cells(self, cell_ids: Sequence[int], clamp_val: float = 3.0) -> torch.Tensor:
+        """
+        Returns TF tokens from expression only: [B, n_tfs, d_model]
+        token(tf_k) = expr_k * TF_Embedding[k]
+        """
+        device = self._module_device()
+        tf_count = self.tf_id_embed.num_embeddings
+        tokens = []
+        for cell_id in cell_ids:
+            col = self.col_of[cell_id]
+            tf_expr = self.rna_arr[:, col].astype(np.float32)  # shape [n_tfs]
+            tf_expr_t = torch.as_tensor(tf_expr, device=device)
+            # normalize a bit to stabilize
+            tf_expr_t = (tf_expr_t - tf_expr_t.mean()) / (tf_expr_t.std() + 1e-6)
+            tf_expr_t = torch.clamp(torch.nan_to_num(tf_expr_t, nan=0.0), -clamp_val, clamp_val)  # [n_tfs]
+            # scale learned TF embeddings by expression => tokens [n_tfs, d_model]
+            tf_tok = tf_expr_t.unsqueeze(1) * self.tf_id_embed.weight  # broadcast
+            tokens.append(tf_tok.unsqueeze(0))  # [1, n_tfs, d_model]
+        return torch.cat(tokens, dim=0)  # [B, n_tfs, d_model]
+
+
     def encode_windows(
         self, 
         windows: torch.Tensor, 
@@ -320,104 +349,66 @@ class MultiomicTransformer(nn.Module):
         
         # Run the transformer encoder
         # Attend to all other windows to gain global context
-        encoded_windows = self.encoder(x, mask=None, src_key_padding_mask=pooled_mask)
+        encoded_windows = self.win_encoder(x, mask=None, src_key_padding_mask=pooled_mask)
         
         return encoded_windows, pooled_mask
 
-    def forward(
-        self,
-        windows: torch.Tensor,          # [B, S, Fw] window features (already pooled OR raw per-bin -> you pool before passing here)
-        gene_ids: torch.Tensor,          # [G] LongTensor (0..n_genes-1)
-        key_padding_mask: Optional[torch.Tensor] = None,  # [B, S] True for PAD
-        attn_bias: Optional[torch.Tensor] = None,         # [B, W', G]
-        already_pooled: bool = True
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Returns:
-            pred: [B, G] predictions per gene
-            Z:    [B, G, D] attended gene representations (for analysis)
-        """
-        # Encode window sequence
-        encoded_windows, pooled_mask = self.encode_windows(windows, key_padding_mask, already_pooled)  # [B, S, D]
+    def forward(self,
+                windows: torch.Tensor,                 # [B, W', d_model]
+                tf_tokens: torch.Tensor,               # [B, n_tfs, d_model]
+                gene_ids: torch.Tensor,                # [G]
+                key_padding_mask_win: Optional[torch.Tensor] = None,  # [B, W'] True=PAD
+                attn_bias_win: Optional[torch.Tensor] = None          # [B, W', G]
+                ):
+        B, Wp, D = windows.shape
+        G = gene_ids.numel()
+        H = self.cross_attn.num_heads
+        T = tf_tokens.size(1)
 
-        batch_size, num_windows_pooled, _ = encoded_windows.shape
-        num_genes = gene_ids.numel()
-        num_heads = self.cross_attn.num_heads
-        
-        # Build gene queries
-        gene_queries = (
-            self.gene_embed(gene_ids)               # Create an embeddings for the genes         
-            .unsqueeze(0)                           # Get the embeddings into the same size 
-            .expand(batch_size, num_genes, -1)
-            )  # [B, G, D]
-        
-        # Layer normalize the window embeddings from the encoder and the gene
-        # embeddings from the decoder to stabilize activations
-        gene_queries_layernorm = self.layer_norm_gene_queries(gene_queries)
-        encoded_windows_layernorm = self.layer_norm_encoder_keys_values(encoded_windows)
-        
-        # Build additive attention bias [batch_size, num_genes, num_windows_pooled]
-        expanded_attention_bias = None
-        if attn_bias is not None:
-            # attention_bias from builder is [batch_size, num_windows_pooled, num_genes]
-            # permute to [batch_size, num_genes, num_windows_pooled]
-            permuted_bias = attn_bias.permute(0, 2, 1).to(encoded_windows_layernorm.dtype)
-            
-            # Normalize the bias per (batch, gene) across windows 
-            permuted_bias = (permuted_bias - permuted_bias.mean(dim=2, keepdim=True)) / (
-                permuted_bias.std(dim=2, keepdim=True) + 1e-6
-            )
-            
-            # Then scale the attention bias so that it influences but doesn't overwhelm the attention
-            scale = self.attn_bias_scale.exp()
-            permuted_bias = scale * permuted_bias
+        # --- encode windows ---
+        win_enc = self.win_encoder(self.posenc(windows))                       # [B, W', D]
+        # --- encode TFs ---
+        tf_enc  = self.tf_encoder(self.tf_ln(tf_tokens))                       # [B, T, D]
 
-            # Expand across heads and flatten head into batch for MHA: [batch_size * num_heads, num_genes, num_windows_pooled]
-            expanded_attention_bias = (
-                permuted_bias
-                .unsqueeze(1)  # [batch_size, 1, num_genes, num_windows_pooled]
-                .expand(batch_size, num_heads, num_genes, num_windows_pooled)
-                .reshape(batch_size * num_heads, num_genes, num_windows_pooled)
-            )
+        # --- fuse as a single memory (keys/values) ---
+        mem = torch.cat([win_enc, tf_enc], dim=1)                              # [B, W'+T, D]
+        mem = self.layer_norm_encoder_keys_values(mem)
 
-        # Fold padding into the additive mask so we don't pass key_padding_mask separately
-        if pooled_mask is not None:
-            # pooled_mask: [batch_size, num_windows_pooled]  (True = PAD)
-            # expand to per-head, per-gene, per-window, then add a very negative number at PAD positions
-            if expanded_attention_bias is None:
-                # if no bias, start from zeros
-                expanded_attention_bias = torch.zeros(
-                    batch_size * num_heads, num_genes, num_windows_pooled,
-                    device=encoded_windows_layernorm.device,
-                    dtype=encoded_windows_layernorm.dtype,
-                )
+        # --- gene queries ---
+        q = self.gene_embed(gene_ids).unsqueeze(0).expand(B, G, -1)            # [B, G, D]
+        q = self.layer_norm_gene_queries(q)
 
-            # Add a very negative number for pad positions
-            very_negative = -1e4
+        # --- build additive attention bias for the fused memory ---
+        # start from window bias (if any): [B, W', G] -> [B, G, W']
+        fused_bias = None
+        if attn_bias_win is not None:
+            win_bias = attn_bias_win.permute(0, 2, 1).to(mem.dtype)            # [B, G, W']
+            # z-norm per (B,G)
+            win_bias = (win_bias - win_bias.mean(dim=2, keepdim=True)) / (win_bias.std(dim=2, keepdim=True) + 1e-6)
+            win_bias = self.attn_bias_scale * win_bias
+            # zeros for TF part
+            tf_bias = torch.zeros(B, G, T, device=mem.device, dtype=mem.dtype) # [B, G, T]
+            fused_bias = torch.cat([win_bias, tf_bias], dim=2)                  # [B, G, W'+T]
 
-            expanded_padding = (
-                pooled_mask
-                .to(torch.bool)                # ensure boolean
-                .unsqueeze(1)                  # [batch_size, 1, num_windows_pooled]
-                .unsqueeze(1)                  # [batch_size, 1, 1, num_windows_pooled]
-                .expand(batch_size, num_heads, num_genes, num_windows_pooled)
-                .reshape(batch_size * num_heads, num_genes, num_windows_pooled)
-            )
+        # --- fold padding into bias ---
+        if key_padding_mask_win is not None:
+            pad = key_padding_mask_win.to(torch.bool)                           # [B, W']
+            pad_fused = torch.cat([pad, torch.zeros(B, T, dtype=torch.bool, device=pad.device)], dim=1)  # [B, W'+T]
+            very_neg = -1e4
+            if fused_bias is None:
+                fused_bias = torch.zeros(B, G, Wp + T, device=mem.device, dtype=mem.dtype)
+            fused_bias = fused_bias.masked_fill(pad_fused.unsqueeze(1), very_neg)
 
-            expanded_attention_bias = expanded_attention_bias.masked_fill(expanded_padding, very_negative)
-            
-        # Run Cross-Attention
-        # Each gene queries the window embeddings to find most relevant
-        # windows for its expression
-        gene_embeddings, _ = self.cross_attn(
-            query=gene_queries_layernorm, 
-            key=encoded_windows_layernorm, 
-            value=encoded_windows_layernorm,
-            attn_mask=expanded_attention_bias
-            )  # [batch_size, num_genes, d_model]
-        
-        # Final prediction is one expression prediction per gene per batch
-        pred = self.readout(gene_embeddings).squeeze(-1)  # [B, G]
-        return pred, gene_embeddings
-    
+        # --- expand bias per head for torch MHA ---
+        attn_mask = None
+        if fused_bias is not None:
+            attn_mask = (fused_bias
+                        .unsqueeze(1)                           # [B, 1, G, W'+T]
+                        .expand(B, H, G, Wp + T)
+                        .reshape(B * H, G, Wp + T))             # [B*H, G, W'+T]
+
+        # --- cross-attention ---
+        gene_ctx, _ = self.cross_attn(query=q, key=mem, value=mem, attn_mask=attn_mask)  # [B, G, D]
+        pred = self.readout(gene_ctx).squeeze(-1)                                        # [B, G]
+        return pred, gene_ctx
 

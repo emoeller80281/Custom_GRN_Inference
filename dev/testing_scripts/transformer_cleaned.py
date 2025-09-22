@@ -24,6 +24,10 @@ import warnings
 import math
 from sc_multi_transformer import MultiomicTransformer
 from datetime import datetime
+from transformer_dataset import OnDiskWindowsDataset, WindowsWithTargets, make_collate
+from torch.utils.data.distributed import DistributedSampler
+from torch.utils.data import DataLoader, Subset
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 # ------ PyTorch Configurations ------
 warnings.filterwarnings("ignore", message="No device id is provided via `init_process_group` or `barrier `")
@@ -52,8 +56,8 @@ torch.set_num_interop_threads(1)
 #=================================== USER SETTINGS ===================================
 # ----- User Settings -----
 load_model = False
-window_size = 800
-num_cells = 1000
+window_size = 1000
+num_cells = 500
 chrom_id = "chr19"
 force_recalculate = True
 
@@ -65,14 +69,14 @@ rna_data_filename = "mESC_filtered_L2_E7.5_rep1_RNA_processed.parquet"
 log_every_n_steps = 5
 
 # Model Size
-d_model = 256
+d_model = 196
 tf_channels = 64
-kernel_and_stride_size = 1
+kernel_and_stride_size = 4
 
 # Encoder Settings
-encoder_nhead = 8
+encoder_nhead = 7
 encoder_dim_feedforward = 1024
-encoder_num_layers = 6
+encoder_num_layers = 3
 dropout = 0.1
 
 # Train-test split
@@ -536,8 +540,6 @@ def main():
         logging.info("\nBuilding Transformer Model")
     TF = len(tfs)               # number of TFs
 
-
-    
     micro_batch_size     = batch_size
     accumulation_steps   = max(1, effective_batch_size // micro_batch_size)
 
@@ -671,14 +673,15 @@ def main():
             tokens_b, key_mask, bias_b = inner.build_tokens_streaming_for_cells(
                 cell_batch, clamp_val=3.0, pad_to_max_in_batch=True
             )
+            
+            tf_tokens = inner.build_tf_tokens_for_cells(cell_batch)  # [B, n_tfs, d_model]
 
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=torch.cuda.is_available()):
                 pred, _ = inner.forward(
-                    windows=tokens_b,
+                    windows=tokens_b, tf_tokens=tf_tokens,
                     gene_ids=gene_ids,
-                    key_padding_mask=key_mask,
-                    attn_bias=bias_b,
-                    already_pooled=True,
+                    key_padding_mask_win=key_mask,
+                    attn_bias_win=bias_b
                 )
 
                 # targets
@@ -744,12 +747,12 @@ def main():
 
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=torch.cuda.is_available()):
                     pred, _ = inner.forward(
-                        windows=tokens_b, 
-                        gene_ids=gene_ids, 
-                        key_padding_mask=key_mask,
-                        attn_bias=bias_b,
-                        already_pooled=True
+                        windows=tokens_b, tf_tokens=tf_tokens,
+                        gene_ids=gene_ids,
+                        key_padding_mask_win=key_mask,
+                        attn_bias_win=bias_b
                     )
+
 
                     y_list, m_list = [], []
                     for c in cell_batch:

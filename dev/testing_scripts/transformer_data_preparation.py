@@ -363,6 +363,7 @@ def process_and_save_dataset(
     cells_dir = base / "cells"
     meta_dir  = base / "meta"
     _ensure_dir(cells_dir); _ensure_dir(meta_dir)
+    logging.info(f"Saving dataset to {base}")
 
     # ---- Save global objects ----
     save_sparse_npz(meta_dir / "homer_tf_peak_sparse.npz", homer_tf_peak_sparse)
@@ -418,37 +419,32 @@ def process_and_save_dataset(
 
 
 def main():
-    logging.info("Reading processed scATAC-seq dataset")
-    
-    
+    logging.info("Reading Input Data")
     mesc_atac_data, mesc_atac_peak_loc_df = load_atac_dataset(atac_data_filename, chrom_id)
     mesc_rna_data = load_rna_data(rna_data_filename)
-
     gene_tss_df = load_or_create_gene_tss_df(chrom_id, force_recalculate=force_recalculate)
-    logging.info(f"Using {gene_tss_df['name'].nunique()} genes (TSS df)")
     
-    # Restrict gene TSS dataframe to only use the selected chromosome
+    logging.info(f"Creating Windows for {chrom_id}")
     gene_tss_df = gene_tss_df[gene_tss_df["chrom"] == chrom_id]
-    
-    mesc_rna_data = mesc_rna_data[mesc_rna_data.index.isin(gene_tss_df["name"])]
-    logging.info(f"Using {mesc_rna_data.index.nunique()} genes (scRNA-seq data df)")
-    
+    mesc_rna_data = mesc_rna_data[mesc_rna_data.index.isin(gene_tss_df["name"])]    
     mm10_windows = create_or_load_genomic_windows(chrom_id, force_recalculate=force_recalculate)
 
-    genes_near_peaks = calculate_peak_to_tg_distance_score(mesc_atac_peak_loc_df, gene_tss_df, force_recalculate=force_recalculate)
-    
-    # Restrict the genes near peaks dataframe to only using TGs from genes on one chromosome
+    logging.info("Loading / Calculating peak-TG distance")
+    genes_near_peaks = calculate_peak_to_tg_distance_score(mesc_atac_peak_loc_df, gene_tss_df, force_recalculate=force_recalculate)    
     genes_near_peaks = genes_near_peaks[(genes_near_peaks["gene_chr"] == chrom_id) & (genes_near_peaks["peak_chr"] == chrom_id)]
-    logging.info(f"Using {genes_near_peaks['target_id'].nunique()} genes (genes_near_peaks_df)")
 
+    
     if not os.path.isfile(os.path.join(OUTPUT_DIR, "tmp/homer_peaks.txt")):
+        logging.info("Creating Homer peak file")    
         create_homer_peaks_file(genes_near_peaks)
-        
+    
+    logging.info("Loading Homer TF-peak results")
     homer_results = load_homer_tf_to_peak_results()
     
     top_50_expressed_genes = np.load(os.path.join(OUTPUT_DIR, "top_50_expressed_chr19_genes.npy"), allow_pickle=True)
     genes_near_peaks = genes_near_peaks[genes_near_peaks["target_id"].isin(top_50_expressed_genes)]
 
+    logging.info("Indexing TFs, Peaks, and Genes")
     tfs, peaks, genes = get_unique_tfs_peaks_genes(homer_results, genes_near_peaks)
     tf_i, peak_i, gene_i = create_tf_peak_gene_mapping_dicts(tfs, peaks, genes)
     
@@ -456,7 +452,9 @@ def main():
     homer_tf_peak_sparse = cast_homer_tf_to_peak_df_sparse(homer_results, tf_i, peak_i)
     gene_distance_sparse = cast_peak_to_tg_distance_sparse(genes_near_peaks, peak_i, gene_i)
     peaks_by_window, window_ids = assign_peaks_to_windows(mesc_atac_peak_loc_df, peaks, peak_i, mm10_windows, chrom_id)
-        
+    
+    
+    logging.info("Finding shared ATAC-seq and RNA-seq barcodes")
     shared_barcodes, mesc_atac_data_shared, mesc_rna_data_shared = find_shared_barcodes(mesc_atac_data, mesc_rna_data, num_cells)
 
     rna_tfs  = mesc_rna_data_shared.reindex(index=tfs).fillna(0).astype("float32")          # rows: TFs, cols: cells
@@ -467,6 +465,20 @@ def main():
     tf_expr_arr  = rna_tfs.values          # shape [TF, n_cells]
     peak_acc_arr = atac_peaks.values          # shape [P,  n_cells]
     cell_col_idx   = {c:i for i,c in enumerate(rna_tfs.columns)}
+    
+    M = homer_tf_peak_sparse   # CSR [n_tf, n_peak]
+    row_nnz = np.diff(M.indptr)                 # hits per TF
+    col_nnz = np.asarray(M.sum(axis=0)).ravel() # hits per peak (counts if binary; weight-sum if scores)
+    motif_tfs = set(tfs)  # from HOMER
+    rna_genes = set(mesc_rna_data_shared.index.astype(str))
+    miss_in_rna = [t for t in motif_tfs if t not in rna_genes]
+    
+    print("Motif TFs missing in RNA index:", len(miss_in_rna))
+    print("TFs:", M.shape[0], "Peaks:", M.shape[1])
+    print("TFs with zero hits:", (row_nnz==0).sum())
+    print("Peaks with zero hits:", (col_nnz==0).sum())
+    print("% peaks with ≥1 TF motif:", 100*(col_nnz>0).mean())
+    print("Median hits per peak:", np.median(col_nnz))
     
     process_and_save_dataset(
         OUTPUT_DIR=OUTPUT_DIR,
