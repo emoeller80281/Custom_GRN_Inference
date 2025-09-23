@@ -25,6 +25,7 @@ class OnDiskWindowsDataset(torch.utils.data.Dataset):
             "barcode": row.barcode,
             "tf_windows": d["tf_windows"],     # [W', TF] float32
             "gene_biases": d["gene_biases"],   # [W', G]  float32
+            "tf_expr": d["tf_expr"]
         }
 
 class WindowsWithTargets(Dataset):
@@ -65,12 +66,14 @@ class WindowsWithTargets(Dataset):
         col = self.b2col[b]
         target = self.rna_arr[:, col]  # [G] float32
         tmask  = self.mask_arr[:, col]     # [G], float32 (1.0 if observed else 0.0)
+        
         return {
             "barcode": b,
             "tf_windows": rec["tf_windows"],
             "gene_biases": rec["gene_biases"],
             "target": target,
             "target_mask": tmask,
+            "tf_expr": rec["tf_expr"], 
         }
 
 
@@ -94,6 +97,7 @@ def make_collate(pad_to_max=True):
         kpm       = torch.ones((B, Wmax),      dtype=torch.bool)     # True=PAD
         targets   = torch.zeros((B, G),        dtype=torch.float32)
         tmask_pad = torch.zeros((B, G),        dtype=torch.float32)  # 1.0=keep, 0.0=ignore
+        tf_expr   = torch.zeros((B, TF),       dtype=torch.float32)
 
         for i, b in enumerate(batch):
             w = b["tf_windows"].shape[0]
@@ -103,6 +107,7 @@ def make_collate(pad_to_max=True):
                 kpm[i, :w] = False
             targets[i]   = torch.from_numpy(b["target"])
             tmask_pad[i] = torch.from_numpy(b["target_mask"])
+            tf_expr[i]   = torch.from_numpy(b["tf_expr"])
 
-        return tf_pad, bias_pad, kpm, targets, tmask_pad
+        return tf_pad, bias_pad, kpm, targets, tmask_pad, tf_expr
     return _collate

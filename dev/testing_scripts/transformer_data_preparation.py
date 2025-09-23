@@ -17,12 +17,6 @@ from grn_inference import utils
 
 #=================================== USER SETTINGS ===================================
 # ----- User Settings -----
-load_model = False
-window_size = 800
-num_cells = 1000
-chrom_id = "chr19"
-force_recalculate = True
-
 atac_data_filename = "mESC_filtered_L2_E7.5_rep1_ATAC_processed.parquet"
 rna_data_filename = "mESC_filtered_L2_E7.5_rep1_RNA_processed.parquet"
 
@@ -34,7 +28,6 @@ SAMPLE_INPUT_DIR = os.path.join(PROJECT_DIR, "input/mESC/filtered_L2_E7.5_rep1")
 OUTPUT_DIR = os.path.join(PROJECT_DIR, "output/transformer_testing_output")
 DEBUG_FILE = os.path.join(PROJECT_DIR, "LOGS/transformer_training.debug")
 
-MM10_FASTA_FILE = os.path.join(MM10_GENOME_DIR, f"{chrom_id}.fa")
 MM10_CHROM_SIZES_FILE = os.path.join(MM10_GENOME_DIR, "chrom.sizes")
 
 time_now = datetime.now().strftime("%d%m%y%H%M%S")
@@ -102,7 +95,7 @@ def load_rna_data(rna_data_filename):
         os.path.join(SAMPLE_INPUT_DIR, rna_data_filename)).set_index("gene_id")
     return mesc_rna_data
 
-def create_or_load_genomic_windows(chrom_id, force_recalculate=False):
+def create_or_load_genomic_windows(chrom_id, window_size, force_recalculate=False):
     genome_window_file = os.path.join(MM10_GENOME_DIR, f"mm10_{chrom_id}_windows_{window_size // 1000}kb.bed")
     if not os.path.exists(genome_window_file) or force_recalculate:
         
@@ -395,6 +388,8 @@ def process_and_save_dataset(
     # ---- Per-cell features (parallel) ----
     def _one(barcode: str):
         out_path = cells_dir / f"{barcode}.npz"
+        col = cell_col_idx[barcode]
+        tf_vec = tf_expr_arr[:, col].astype(np.float32)
         res = build_cell_features(
             barcode, cell_col_idx, tf_expr_arr, peak_acc_arr,
             homer_tf_peak_sparse, gene_distance_sparse, peaks_by_window
@@ -402,11 +397,12 @@ def process_and_save_dataset(
         if res is None:
             save_npz(out_path, tf_windows=np.zeros((0, len(tfs)), np.float32),
                                gene_biases=np.zeros((0, len(genes)), np.float32),
+                               tf_expr=tf_vec,
                                wlen=np.array(0, dtype=np.int32),
                                barcode=np.array(barcode, dtype=object))
             return dict(barcode=barcode, path=str(out_path), wlen=0)
         tf_windows, gene_biases = res
-        save_npz(out_path, tf_windows=tf_windows, gene_biases=gene_biases,
+        save_npz(out_path, tf_windows=tf_windows, gene_biases=gene_biases,tf_expr=tf_vec,
                            wlen=np.array(tf_windows.shape[0], dtype=np.int32),
                            barcode=np.array(barcode, dtype=object))
         return dict(barcode=barcode, path=str(out_path), wlen=int(tf_windows.shape[0]))
@@ -417,8 +413,7 @@ def process_and_save_dataset(
     manifest.to_parquet(meta_dir / "manifest.parquet", index=False)
     logging.info(f"Saved {len(manifest)} cells to {cells_dir}")
 
-
-def main():
+def preprocess_training_data(window_size, num_cells, chrom_id, force_recalculate):
     logging.info("Reading Input Data")
     mesc_atac_data, mesc_atac_peak_loc_df = load_atac_dataset(atac_data_filename, chrom_id)
     mesc_rna_data = load_rna_data(rna_data_filename)
@@ -427,7 +422,7 @@ def main():
     logging.info(f"Creating Windows for {chrom_id}")
     gene_tss_df = gene_tss_df[gene_tss_df["chrom"] == chrom_id]
     mesc_rna_data = mesc_rna_data[mesc_rna_data.index.isin(gene_tss_df["name"])]    
-    mm10_windows = create_or_load_genomic_windows(chrom_id, force_recalculate=force_recalculate)
+    mm10_windows = create_or_load_genomic_windows(chrom_id, window_size, force_recalculate=force_recalculate)
 
     logging.info("Loading / Calculating peak-TG distance")
     genes_near_peaks = calculate_peak_to_tg_distance_score(mesc_atac_peak_loc_df, gene_tss_df, force_recalculate=force_recalculate)    
@@ -496,8 +491,3 @@ def main():
         cell_col_idx=cell_col_idx,
         n_jobs=8,
     )
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
-    
-    main()    

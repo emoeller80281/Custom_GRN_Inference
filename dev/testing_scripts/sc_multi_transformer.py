@@ -39,7 +39,7 @@ class MultiomicTransformer(nn.Module):
         # Linear projections of TF, TG, and the windows, with dropout
         self.d_model = d_model
         self.tf_channels = 64
-        self.attn_bias_scale = nn.Parameter(torch.tensor(np.log(0.1), dtype=torch.float32))
+        self.log_attn_bias_scale = nn.Parameter(torch.tensor(math.log(0.1), dtype=torch.float32))
         
         self.kernel_stride_size = kernel_stride_size
         
@@ -353,62 +353,69 @@ class MultiomicTransformer(nn.Module):
         
         return encoded_windows, pooled_mask
 
-    def forward(self,
-                windows: torch.Tensor,                 # [B, W', d_model]
-                tf_tokens: torch.Tensor,               # [B, n_tfs, d_model]
-                gene_ids: torch.Tensor,                # [G]
-                key_padding_mask_win: Optional[torch.Tensor] = None,  # [B, W'] True=PAD
-                attn_bias_win: Optional[torch.Tensor] = None          # [B, W', G]
-                ):
-        B, Wp, D = windows.shape
-        G = gene_ids.numel()
+    def forward(
+        self,
+        windows: torch.Tensor,                  # [B, W, d_model] if already pooled; else [B, W, TF]
+        gene_ids: torch.Tensor,                 # [G]
+        tf_tokens: Optional[torch.Tensor] = None,        # [B, T, d_model] (optional)
+        key_padding_mask_win: Optional[torch.Tensor] = None,   # [B, W] (True=PAD)
+        attn_bias_win: Optional[torch.Tensor] = None,           # [B, W, G]
+        already_pooled: bool = True,
+    ):
+        B = windows.size(0)
+        G = int(gene_ids.numel())
         H = self.cross_attn.num_heads
-        T = tf_tokens.size(1)
 
-        # --- encode windows ---
-        win_enc = self.win_encoder(self.posenc(windows))                       # [B, W', D]
-        # --- encode TFs ---
-        tf_enc  = self.tf_encoder(self.tf_ln(tf_tokens))                       # [B, T, D]
+        # 1) Encode windows (positional encoding + Transformer + proper PAD mask)
+        win_enc, pooled_mask = self.encode_windows(
+            windows, key_padding_mask=key_padding_mask_win, already_pooled=already_pooled
+        )                                           # [B, W', D], pooled_mask [B, W'] or None
+        Wp = win_enc.size(1)
 
-        # --- fuse as a single memory (keys/values) ---
-        mem = torch.cat([win_enc, tf_enc], dim=1)                              # [B, W'+T, D]
+        # 2) Encode TF tokens if provided
+        if tf_tokens is not None:
+            tf_enc = self.tf_encoder(self.tf_ln(tf_tokens))     # [B, T, D]
+            T = tf_enc.size(1)
+            mem = torch.cat([win_enc, tf_enc], dim=1)           # [B, W'+T, D]
+        else:
+            T = 0
+            mem = win_enc                                       # [B, W', D]
+
         mem = self.layer_norm_encoder_keys_values(mem)
 
-        # --- gene queries ---
-        q = self.gene_embed(gene_ids).unsqueeze(0).expand(B, G, -1)            # [B, G, D]
+        # 3) Gene queries
+        q = self.gene_embed(gene_ids).unsqueeze(0).expand(B, G, -1)  # [B, G, D]
         q = self.layer_norm_gene_queries(q)
 
-        # --- build additive attention bias for the fused memory ---
-        # start from window bias (if any): [B, W', G] -> [B, G, W']
+        # 4) Build additive attention bias over the fused memory (windows [+ TFs])
         fused_bias = None
         if attn_bias_win is not None:
-            win_bias = attn_bias_win.permute(0, 2, 1).to(mem.dtype)            # [B, G, W']
+            # [B, W, G] -> [B, G, W]
+            win_bias = attn_bias_win.permute(0, 2, 1).to(mem.dtype)
             # z-norm per (B,G)
             win_bias = (win_bias - win_bias.mean(dim=2, keepdim=True)) / (win_bias.std(dim=2, keepdim=True) + 1e-6)
-            win_bias = self.attn_bias_scale * win_bias
-            # zeros for TF part
-            tf_bias = torch.zeros(B, G, T, device=mem.device, dtype=mem.dtype) # [B, G, T]
-            fused_bias = torch.cat([win_bias, tf_bias], dim=2)                  # [B, G, W'+T]
+            scale = self.log_attn_bias_scale.exp()              # ensure positive scale
+            win_bias = scale * win_bias                         # larger => more attention
+            # pad mask for windows (if any) -> very negative
+            if pooled_mask is not None:
+                very_neg = -1e4
+                win_bias = win_bias.masked_fill(pooled_mask.unsqueeze(1), very_neg)
+            # append zeros for TF segment if present
+            if T > 0:
+                tf_bias = torch.zeros(B, G, T, device=mem.device, dtype=mem.dtype)
+                fused_bias = torch.cat([win_bias, tf_bias], dim=2)      # [B, G, W'+T]
+            else:
+                fused_bias = win_bias                                   # [B, G, W']
 
-        # --- fold padding into bias ---
-        if key_padding_mask_win is not None:
-            pad = key_padding_mask_win.to(torch.bool)                           # [B, W']
-            pad_fused = torch.cat([pad, torch.zeros(B, T, dtype=torch.bool, device=pad.device)], dim=1)  # [B, W'+T]
-            very_neg = -1e4
-            if fused_bias is None:
-                fused_bias = torch.zeros(B, G, Wp + T, device=mem.device, dtype=mem.dtype)
-            fused_bias = fused_bias.masked_fill(pad_fused.unsqueeze(1), very_neg)
-
-        # --- expand bias per head for torch MHA ---
+        # 5) Convert to MultiheadAttention attn_mask (additive, per-head)
         attn_mask = None
         if fused_bias is not None:
             attn_mask = (fused_bias
-                        .unsqueeze(1)                           # [B, 1, G, W'+T]
+                        .unsqueeze(1)                    # [B, 1, G, W'+T]
                         .expand(B, H, G, Wp + T)
-                        .reshape(B * H, G, Wp + T))             # [B*H, G, W'+T]
+                        .reshape(B * H, G, Wp + T))      # [B*H, G, W'+T]
 
-        # --- cross-attention ---
+        # 6) Cross-attention: genes query fused memory
         gene_ctx, _ = self.cross_attn(query=q, key=mem, value=mem, attn_mask=attn_mask)  # [B, G, D]
         pred = self.readout(gene_ctx).squeeze(-1)                                        # [B, G]
         return pred, gene_ctx
-
