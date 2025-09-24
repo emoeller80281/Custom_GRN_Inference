@@ -2,6 +2,7 @@ homer/
 input/*
 LOGS/
 output/*
+dev/testing_scripts/transformer_data/
 macrophage_output/
 reference_genome/
 reference_networks/

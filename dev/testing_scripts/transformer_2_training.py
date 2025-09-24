@@ -2,170 +2,150 @@ import os
 import torch
 import pandas as pd
 import logging
-import pybedtools
-
+import torch.nn.functional as F
+from torch.utils.data import Dataset, DataLoader, random_split
 from transformer_2 import MultiomicTransformer
+from transformer_2_dataset import MultiomicTransformerDataset
 
-logging.basicConfig(level=logging.INFO, format="%(message)s")
+import torch.multiprocessing as mp
+from torch.utils.data.distributed import DistributedSampler
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.distributed import init_process_group, destroy_process_group, get_rank, is_initialized, is_available
 
 PROJECT_DIR = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
-RAW_MESC_DATA_DIR = "/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/SINGLE_CELL_DATASETS/DS014_DOI496239_MOUSE_ESC_RAW_FILES"
-MESC_PEAK_MATRIX_FILE = "/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/SINGLE_CELL_DATASETS/DS014_DOI496239_MOUSE_ESCDAYS7AND8/scATAC_PeakMatrix.txt"
+DATA_DIR = os.path.join(PROJECT_DIR, "dev/testing_scripts/transformer_data")
 
-MM10_GENOME_DIR = os.path.join(PROJECT_DIR, "data/reference_genome/mm10")
-MM10_CHROM_SIZES_FILE = os.path.join(MM10_GENOME_DIR, "chrom.sizes")
-MM10_GENE_TSS_FILE = os.path.join(PROJECT_DIR, "data/genome_annotation/mm10/mm10_TSS.bed")
-GROUND_TRUTH_DIR = os.path.join(PROJECT_DIR, "ground_truth_files")
-SAMPLE_INPUT_DIR = os.path.join(PROJECT_DIR, "input/mESC/")
-OUTPUT_DIR = os.path.join(PROJECT_DIR, "output/transformer_testing_output")
+D_MODEL = 128
+NUM_HEADS = 8
+D_FF = 256
+DROPOUT = 0.1
 
-def load_homer_tf_to_peak_results():
-    assert os.path.exists(os.path.join(OUTPUT_DIR, "homer_tf_to_peak.parquet")), \
-        "ERROR: Homer TF to peak output parquet file required"
-        
-    homer_results = pd.read_parquet(os.path.join(OUTPUT_DIR, "homer_tf_to_peak.parquet"), engine="pyarrow")
-    homer_results = homer_results.reset_index(drop=True)
-    homer_results["source_id"] = homer_results["source_id"].str.capitalize()
-    
-    return homer_results
-
-def create_or_load_genomic_windows(chrom_id, window_size, force_recalculate=False):
-    genome_window_file = os.path.join(MM10_GENOME_DIR, f"mm10_{chrom_id}_windows_{window_size // 1000}kb.bed")
-    if not os.path.exists(genome_window_file) or force_recalculate:
-        
-        logging.info("\nCreating genomic windows")
-        mm10_genome_windows = pybedtools.bedtool.BedTool().window_maker(g=MM10_CHROM_SIZES_FILE, w=window_size)
-        mm10_windows = (
-            mm10_genome_windows
-            .filter(lambda x: x.chrom == chrom_id)  # TEMPORARY Restrict to one chromosome for testing
-            .saveas(genome_window_file)
-            .to_dataframe()
-        )
-    else:
-        
-        logging.info("\nLoading existing genomic windows")
-        mm10_windows = pybedtools.BedTool(genome_window_file).to_dataframe()
-        
-    return mm10_windows
-
-def make_peak_to_window_map(peaks_bed: pd.DataFrame, windows_bed: pd.DataFrame) -> dict[str, int]:
+def ddp_setup(rank, world_size):
     """
-    peaks_bed: df with ['chrom','start','end','peak_id']
-    windows_bed: df with ['chrom','start','end','win_idx']
-    """
-    bedtool_peaks = pybedtools.BedTool.from_dataframe(peaks_bed)
-    bedtool_windows = pybedtools.BedTool.from_dataframe(windows_bed)
-    
-    mapping = {}
-    for interval in bedtool_peaks.intersect(bedtool_windows, wa=True, wb=True):
-        peak_id = interval.name  # the peak_id column from peaks_bed
-        win_idx = int(interval.fields[-1])  # last column = win_idx
-        mapping[peak_id] = win_idx
-    return mapping
-
-def prepare_inputs(TG_pseudobulk: pd.DataFrame,
-                   RE_pseudobulk: pd.DataFrame,
-                   tf_list: list[str],
-                   window_map: dict[str, int]) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Convert pseudobulk matrices into model inputs.
-    
     Args:
-      TG_pseudobulk : genes x samples dataframe
-      RE_pseudobulk : peaks x samples dataframe
-      tf_list       : list of TF gene symbols to keep
-      window_map    : dict mapping peaks -> window index (0..num_windows-1)
-    
-    Returns:
-      tf_expr   : Tensor [B, num_tf]
-      atac_wins : Tensor [B, num_windows, 1]
+        rank: Unique identifier of each process
+        world_size: Total number of processes
     """
-    # 1. Extract TF expression
-    tf_expr = TG_pseudobulk.loc[TG_pseudobulk.index.intersection(tf_list)].T
-    tf_tensor = torch.tensor(tf_expr.values, dtype=torch.float32)   # [B, num_tf]
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = "12355"
+    torch.cuda.set_device(rank)
+    init_process_group(backend="nccl", rank=rank, world_size=world_size)
+    
+def setup_logging():
+    if is_available() and is_initialized():
+        rank = get_rank()
+    else:
+        rank = 0
 
-    # 2. Collapse peaks into windows
-    num_windows = max(window_map.values()) + 1
-    atac_wins = torch.zeros((RE_pseudobulk.shape[1], num_windows, 1), dtype=torch.float32)
+    # Clear existing handlers to avoid duplicate logs
+    for handler in logging.root.handlers[:]:
+        logging.root.removeHandler(handler)
 
-    peak_idx = [RE_pseudobulk.index.get_loc(p) for p in window_map if p in RE_pseudobulk.index]
-    win_idx = [window_map[p] for p in window_map if p in RE_pseudobulk.index]
-
-    peak_tensor = torch.tensor(RE_pseudobulk.iloc[peak_idx].values.T, dtype=torch.float32)  # [B, num_peaks]
-    win_idx_tensor = torch.tensor(win_idx, dtype=torch.long)
-
-    atac_wins.index_add_(1, win_idx_tensor, peak_tensor.unsqueeze(-1))
-    return tf_tensor, atac_wins
-
-sample_name = "E7.5_rep1"
-window_size = 25000
-chrom_id = "chr19"
-
-mm10_gene_tss_bed = pybedtools.BedTool(MM10_GENE_TSS_FILE)
-gene_tss_df = (
-    mm10_gene_tss_bed
-    .filter(lambda x: x.chrom == chrom_id)
-    .saveas(os.path.join(MM10_GENOME_DIR, "mm10_ch19_gene_tss.bed"))
-    .to_dataframe()
-    .sort_values(by="start", ascending=True)
+    level = logging.INFO if rank == 0 else logging.ERROR
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s | %(message)s",
+        handlers=[logging.StreamHandler()],
+        force=True
     )
+    
+class Trainer:
+    def __init__(
+        self,
+        model: torch.nn.Module,
+        train_data: DataLoader,
+        optimizer: torch.optim.Optimizer,
+        gpu_id: int,
+        save_every: int,
+    ) -> None:
+        self.gpu_id = gpu_id
+        self.model = model.to(gpu_id)
+        self.train_data = train_data
+        self.optimizer = optimizer
+        self.save_every = save_every
+        self.model = DDP(model, device_ids=[gpu_id])
 
+    def _run_batch(self, batch, targets):
+        atac_wins, tf_tensor = batch
+        self.optimizer.zero_grad()
+        output = self.model(atac_wins, tf_tensor)   # << your model signature
+        loss = F.mse_loss(output, targets)
+        loss.backward()
+        self.optimizer.step()
 
-tf_list = list(load_homer_tf_to_peak_results()["source_id"].unique())
-logging.info(f"\nHomer TFs: \t{tf_list[:5]}\n\tTotal {len(tf_list)} TFs")
+    def _run_epoch(self, epoch):
+        b_sz = self.train_data.batch_size
+        if self.gpu_id == 0:
+            logging.info(f"[GPU{self.gpu_id}] Epoch {epoch} | Batchsize: {b_sz} | Steps: {len(self.train_data)}")
+        self.train_data.sampler.set_epoch(epoch)
+        for atac_wins, tf_tensor, targets in self.train_data:
+            atac_wins, tf_tensor, targets = atac_wins.to(self.gpu_id), tf_tensor.to(self.gpu_id), targets.to(self.gpu_id)
+            self._run_batch((atac_wins, tf_tensor), targets)
 
-sample_data_dir = os.path.join(SAMPLE_INPUT_DIR, sample_name)
-TG_pseudobulk = pd.read_csv(os.path.join(sample_data_dir, "TG_pseudobulk.tsv"), sep="\t", index_col=0)
-RE_pseudobulk = pd.read_csv(os.path.join(sample_data_dir, "RE_pseudobulk.tsv"), sep="\t", index_col=0)
+    def _save_checkpoint(self, epoch):
+        ckp = self.model.module.state_dict()
+        PATH = "checkpoint.pt"
+        torch.save(ckp, PATH)
+        if self.gpu_id == 0:
+            logging.info(f"Epoch {epoch} | Training checkpoint saved at {PATH}")
 
-logging.info("\nTotal Pseudobulk Genes and Peaks")
-logging.info(f"\tTG_pseudobulk: {TG_pseudobulk.shape[0]:,} Genes x {TG_pseudobulk.shape[1]} metacells")
-logging.info(f"\tRE_pseudobulk: {RE_pseudobulk.shape[0]:,} Peaks x {RE_pseudobulk.shape[1]} metacells")
+    def train(self, max_epochs: int):
+        for epoch in range(max_epochs):
+            self._run_epoch(epoch)
+            if self.gpu_id == 0 and epoch % self.save_every == 0:
+                self._save_checkpoint(epoch)
 
-TG_chr_specific = TG_pseudobulk.loc[TG_pseudobulk.index.intersection(gene_tss_df['name'].unique())]
-RE_chr_specific = RE_pseudobulk[RE_pseudobulk.index.str.startswith(f"{chrom_id}:")]
+def load_train_objs():
+    dataset = MultiomicTransformerDataset(
+        data_dir=DATA_DIR,
+        chrom_id="chr19"
+    ) 
+    model = MultiomicTransformer(
+        D_MODEL, NUM_HEADS, D_FF, DROPOUT, 
+        dataset.num_tf, dataset.num_windows, dataset.num_tg
+        )
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    return dataset, model, optimizer
 
-logging.info(f"\nRestricted to {chrom_id} Genes and Peaks: ")
-logging.info(f"\tTG_chr_specific: {TG_chr_specific.shape[0]} Genes x {TG_chr_specific.shape[1]} metacells")
-logging.info(f"\tRE_chr_specific: {RE_chr_specific.shape[0]:,} Peaks x {RE_chr_specific.shape[1]} metacells")
+def prepare_dataloader(dataset: Dataset, batch_size: int, world_size: int, rank: int):
+    train_frac, val_frac, test_frac = 0.7, 0.15, 0.15
+    n_total = len(dataset)
+    n_train = int(n_total * train_frac)
+    n_val = int(n_total * val_frac)
+    n_test = n_total - n_train - n_val
 
-peaks_df = (
-    RE_chr_specific.index.to_series()
-    .str.split("[:-]", expand=True)
-    .rename(columns={0: "chrom", 1: "start", 2: "end"})
-)
-peaks_df["start"] = peaks_df["start"].astype(int)
-peaks_df["end"] = peaks_df["end"].astype(int)
-peaks_df["peak_id"] = RE_chr_specific.index
+    train_set, val_set, test_set = random_split(dataset, [n_train, n_val, n_test])
 
-# Create genome windows and add index
-mm10_windows = create_or_load_genomic_windows(chrom_id, window_size)
-mm10_windows = mm10_windows.reset_index(drop=True)
-mm10_windows["win_idx"] = mm10_windows.index
+    train_loader = DataLoader(train_set, batch_size=batch_size, sampler=DistributedSampler(train_set, num_replicas=world_size, rank=rank))
+    val_loader   = DataLoader(val_set, batch_size=batch_size, sampler=DistributedSampler(val_set, num_replicas=world_size, rank=rank))
+    test_loader  = DataLoader(test_set, batch_size=batch_size, sampler=DistributedSampler(test_set, num_replicas=world_size, rank=rank))
 
-# Build peak -> window mapping
-window_map = make_peak_to_window_map(peaks_df, mm10_windows)
-logging.info(f"Mapped {len(window_map)} peaks to windows")
+    return train_loader, val_loader, test_loader
+    
+def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_size: int):
+    ddp_setup(rank, world_size)
+    print(f"Hello from rank {rank}", flush=True)
+    setup_logging()
+    logging.info(f"DDP initialized for rank {rank}")
+    
+    if rank == 0:
+        logging.info("Loading Training Objectives")
+    dataset, model, optimizer = load_train_objs()
+    if rank == 0:
+        logging.info("Preparing DataLoader")
+    train_loader, val_loader, test_loader = prepare_dataloader(dataset, batch_size, world_size, rank)
+    if rank == 0:
+        logging.info("Initializing Trainer")
+    trainer = Trainer(model, train_loader, optimizer, rank, save_every)
+    if rank == 0:
+        logging.info("\n ----- Training -----")
+    trainer.train(total_epochs)
+    destroy_process_group()
 
-# Example setup
-d_model = 128
-num_heads = 8
-d_ff = 256
-dropout = 0.1
-num_tf = len(tf_list)
-num_windows = max(window_map.values()) + 1
-num_tg = TG_chr_specific.shape[0]   # or restrict to TGs only
-
-model = MultiomicTransformer(d_model, num_heads, d_ff, dropout, num_tf, num_windows, num_tg)
-
-# Prepare inputs
-logging.info("\nPreparing Info")
-tf_tensor, atac_wins = prepare_inputs(TG_chr_specific, RE_chr_specific, tf_list, window_map)
-
-# Forward pass
-logging.info("\n ----- Training -----")
-gene_logits = model(atac_wins, tf_tensor)   # [B, num_tg]
-
-
-logging.info(gene_logits)
-logging.info(gene_logits.shape)
+if __name__ == "__main__":
+    total_epochs = 20
+    save_every = 5
+    batch_size = 2
+    world_size = torch.cuda.device_count()
+    print(world_size, flush=True)
+    mp.spawn(main, args=(world_size, save_every, total_epochs, batch_size), nprocs=world_size)

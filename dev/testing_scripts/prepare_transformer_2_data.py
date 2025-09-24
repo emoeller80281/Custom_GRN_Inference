@@ -1,0 +1,126 @@
+import os
+import torch
+import pandas as pd
+import logging
+import pybedtools
+import json
+import pickle
+
+logging.basicConfig(level=logging.INFO, format="%(message)s")
+
+PROJECT_DIR = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
+RAW_MESC_DATA_DIR = "/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/SINGLE_CELL_DATASETS/DS014_DOI496239_MOUSE_ESC_RAW_FILES"
+MESC_PEAK_MATRIX_FILE = "/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/SINGLE_CELL_DATASETS/DS014_DOI496239_MOUSE_ESCDAYS7AND8/scATAC_PeakMatrix.txt"
+
+MM10_GENOME_DIR = os.path.join(PROJECT_DIR, "data/reference_genome/mm10")
+MM10_CHROM_SIZES_FILE = os.path.join(MM10_GENOME_DIR, "chrom.sizes")
+MM10_GENE_TSS_FILE = os.path.join(PROJECT_DIR, "data/genome_annotation/mm10/mm10_TSS.bed")
+GROUND_TRUTH_DIR = os.path.join(PROJECT_DIR, "ground_truth_files")
+SAMPLE_INPUT_DIR = os.path.join(PROJECT_DIR, "input/mESC/")
+OUTPUT_DIR = os.path.join(PROJECT_DIR, "output/transformer_testing_output")
+
+def load_homer_tf_to_peak_results():
+    assert os.path.exists(os.path.join(OUTPUT_DIR, "homer_tf_to_peak.parquet")), \
+        "ERROR: Homer TF to peak output parquet file required"
+        
+    homer_results = pd.read_parquet(os.path.join(OUTPUT_DIR, "homer_tf_to_peak.parquet"), engine="pyarrow")
+    homer_results = homer_results.reset_index(drop=True)
+    homer_results["source_id"] = homer_results["source_id"].str.capitalize()
+    
+    return homer_results
+
+def create_or_load_genomic_windows(chrom_id, window_size, force_recalculate=False):
+    genome_window_file = os.path.join(MM10_GENOME_DIR, f"mm10_{chrom_id}_windows_{window_size // 1000}kb.bed")
+    if not os.path.exists(genome_window_file) or force_recalculate:
+        
+        logging.info("\nCreating genomic windows")
+        mm10_genome_windows = pybedtools.bedtool.BedTool().window_maker(g=MM10_CHROM_SIZES_FILE, w=window_size)
+        mm10_windows = (
+            mm10_genome_windows
+            .filter(lambda x: x.chrom == chrom_id)  # TEMPORARY Restrict to one chromosome for testing
+            .saveas(genome_window_file)
+            .to_dataframe()
+        )
+    else:
+        
+        logging.info("\nLoading existing genomic windows")
+        mm10_windows = pybedtools.BedTool(genome_window_file).to_dataframe()
+        
+    return mm10_windows
+
+def make_peak_to_window_map(peaks_bed: pd.DataFrame, windows_bed: pd.DataFrame) -> dict[str, int]:
+    """
+    peaks_bed: df with ['chrom','start','end','peak_id']
+    windows_bed: df with ['chrom','start','end','win_idx']
+    """
+    bedtool_peaks = pybedtools.BedTool.from_dataframe(peaks_bed)
+    bedtool_windows = pybedtools.BedTool.from_dataframe(windows_bed)
+    
+    mapping = {}
+    for interval in bedtool_peaks.intersect(bedtool_windows, wa=True, wb=True):
+        peak_id = interval.name  # the peak_id column from peaks_bed
+        win_idx = int(interval.fields[-1])  # last column = win_idx
+        mapping[peak_id] = win_idx
+    return mapping
+
+sample_name = "E7.5_rep1"
+window_size = 25000
+chrom_id = "chr19"
+
+mm10_gene_tss_bed = pybedtools.BedTool(MM10_GENE_TSS_FILE)
+gene_tss_df = (
+    mm10_gene_tss_bed
+    .filter(lambda x: x.chrom == chrom_id)
+    .saveas(os.path.join(MM10_GENOME_DIR, "mm10_ch19_gene_tss.bed"))
+    .to_dataframe()
+    .sort_values(by="start", ascending=True)
+    )
+
+
+tf_list = list(load_homer_tf_to_peak_results()["source_id"].unique())
+logging.info(f"\nHomer TFs: \t{tf_list[:5]}\n\tTotal {len(tf_list)} TFs")
+
+sample_data_dir = os.path.join(SAMPLE_INPUT_DIR, sample_name)
+TG_pseudobulk = pd.read_csv(os.path.join(sample_data_dir, "TG_pseudobulk.tsv"), sep="\t", index_col=0)
+RE_pseudobulk = pd.read_csv(os.path.join(sample_data_dir, "RE_pseudobulk.tsv"), sep="\t", index_col=0)
+
+logging.info("\nTotal Pseudobulk Genes and Peaks")
+logging.info(f"\tTG_pseudobulk: {TG_pseudobulk.shape[0]:,} Genes x {TG_pseudobulk.shape[1]} metacells")
+logging.info(f"\tRE_pseudobulk: {RE_pseudobulk.shape[0]:,} Peaks x {RE_pseudobulk.shape[1]} metacells")
+
+TG_chr_specific = TG_pseudobulk.loc[TG_pseudobulk.index.intersection(gene_tss_df['name'].unique())]
+RE_chr_specific = RE_pseudobulk[RE_pseudobulk.index.str.startswith(f"{chrom_id}:")]
+
+logging.info(f"\nRestricted to {chrom_id} Genes and Peaks: ")
+logging.info(f"\tTG_chr_specific: {TG_chr_specific.shape[0]} Genes x {TG_chr_specific.shape[1]} metacells")
+logging.info(f"\tRE_chr_specific: {RE_chr_specific.shape[0]:,} Peaks x {RE_chr_specific.shape[1]} metacells")
+
+peaks_df = (
+    RE_chr_specific.index.to_series()
+    .str.split("[:-]", expand=True)
+    .rename(columns={0: "chrom", 1: "start", 2: "end"})
+)
+peaks_df["start"] = peaks_df["start"].astype(int)
+peaks_df["end"] = peaks_df["end"].astype(int)
+peaks_df["peak_id"] = RE_chr_specific.index
+
+# Create genome windows and add index
+mm10_windows = create_or_load_genomic_windows(chrom_id, window_size)
+mm10_windows = mm10_windows.reset_index(drop=True)
+mm10_windows["win_idx"] = mm10_windows.index
+
+# Build peak -> window mapping
+window_map = make_peak_to_window_map(peaks_df, mm10_windows)
+logging.info(f"Mapped {len(window_map)} peaks to windows")
+
+transformer_data_dir = os.path.join(PROJECT_DIR, "dev/testing_scripts/transformer_data")
+
+with open(os.path.join(transformer_data_dir, "window_map.json"), "w") as f:
+    json.dump(window_map, f, indent=4)
+
+with open(os.path.join(transformer_data_dir, "tf_list.pickle"), "wb") as fp:
+    pickle.dump(tf_list, fp)
+
+TG_chr_specific.to_csv(os.path.join(transformer_data_dir, f"TG_{chrom_id}_specific_pseudobulk.csv"))
+RE_chr_specific.to_csv(os.path.join(transformer_data_dir, f"RE_{chrom_id}_specific_pseudobulk.csv"))
+
