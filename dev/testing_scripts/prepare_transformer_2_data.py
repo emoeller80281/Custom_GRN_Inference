@@ -16,7 +16,7 @@ MM10_GENOME_DIR = os.path.join(PROJECT_DIR, "data/reference_genome/mm10")
 MM10_CHROM_SIZES_FILE = os.path.join(MM10_GENOME_DIR, "chrom.sizes")
 MM10_GENE_TSS_FILE = os.path.join(PROJECT_DIR, "data/genome_annotation/mm10/mm10_TSS.bed")
 GROUND_TRUTH_DIR = os.path.join(PROJECT_DIR, "ground_truth_files")
-SAMPLE_INPUT_DIR = os.path.join(PROJECT_DIR, "input/mESC/")
+SAMPLE_INPUT_DIR = os.path.join(PROJECT_DIR, "input/transformer_input/mESC/")
 OUTPUT_DIR = os.path.join(PROJECT_DIR, "output/transformer_testing_output")
 
 def load_homer_tf_to_peak_results():
@@ -63,7 +63,8 @@ def make_peak_to_window_map(peaks_bed: pd.DataFrame, windows_bed: pd.DataFrame) 
         mapping[peak_id] = win_idx
     return mapping
 
-sample_name = "E7.5_rep1"
+sample_name_list = ["E7.5_rep1", "E7.5_rep1", "E7.75_rep1", "E8.0_rep2", "E8.5_rep2",
+                    "E8.75_rep2", "E7.5_rep2", "E8.0_rep1", "E8.5_rep1", "E8.75_rep1"]
 window_size = 25000
 chrom_id = "chr19"
 
@@ -80,29 +81,45 @@ gene_tss_df = (
 tf_list = list(load_homer_tf_to_peak_results()["source_id"].unique())
 logging.info(f"\nHomer TFs: \t{tf_list[:5]}\n\tTotal {len(tf_list)} TFs")
 
-sample_data_dir = os.path.join(SAMPLE_INPUT_DIR, sample_name)
-TG_pseudobulk = pd.read_csv(os.path.join(sample_data_dir, "TG_pseudobulk.tsv"), sep="\t", index_col=0)
-RE_pseudobulk = pd.read_csv(os.path.join(sample_data_dir, "RE_pseudobulk.tsv"), sep="\t", index_col=0)
+TG_pseudobulk_samples = []
+RE_pseudobulk_samples = []
+peaks_df_samples = []
 
-logging.info("\nTotal Pseudobulk Genes and Peaks")
-logging.info(f"\tTG_pseudobulk: {TG_pseudobulk.shape[0]:,} Genes x {TG_pseudobulk.shape[1]} metacells")
-logging.info(f"\tRE_pseudobulk: {RE_pseudobulk.shape[0]:,} Peaks x {RE_pseudobulk.shape[1]} metacells")
+for sample_name in sample_name_list:
+    logging.info(f"\nLoading Pseudobulk data for {sample_name}")
+    sample_data_dir = os.path.join(SAMPLE_INPUT_DIR, sample_name)
+    if os.path.exists(sample_data_dir) and len(os.listdir(sample_data_dir)) == 7:
+        
+        TG_pseudobulk = pd.read_csv(os.path.join(sample_data_dir, "TG_pseudobulk.tsv"), sep="\t", index_col=0)
+        RE_pseudobulk = pd.read_csv(os.path.join(sample_data_dir, "RE_pseudobulk.tsv"), sep="\t", index_col=0)
 
-TG_chr_specific = TG_pseudobulk.loc[TG_pseudobulk.index.intersection(gene_tss_df['name'].unique())]
-RE_chr_specific = RE_pseudobulk[RE_pseudobulk.index.str.startswith(f"{chrom_id}:")]
+        logging.info("\n  - Total Pseudobulk Genes and Peaks")
+        logging.info(f"\tTG_pseudobulk: {TG_pseudobulk.shape[0]:,} Genes x {TG_pseudobulk.shape[1]} metacells")
+        logging.info(f"\tRE_pseudobulk: {RE_pseudobulk.shape[0]:,} Peaks x {RE_pseudobulk.shape[1]} metacells")
 
-logging.info(f"\nRestricted to {chrom_id} Genes and Peaks: ")
-logging.info(f"\tTG_chr_specific: {TG_chr_specific.shape[0]} Genes x {TG_chr_specific.shape[1]} metacells")
-logging.info(f"\tRE_chr_specific: {RE_chr_specific.shape[0]:,} Peaks x {RE_chr_specific.shape[1]} metacells")
+        TG_chr_specific = TG_pseudobulk.loc[TG_pseudobulk.index.intersection(gene_tss_df['name'].unique())]
+        RE_chr_specific = RE_pseudobulk[RE_pseudobulk.index.str.startswith(f"{chrom_id}:")]
 
-peaks_df = (
-    RE_chr_specific.index.to_series()
-    .str.split("[:-]", expand=True)
-    .rename(columns={0: "chrom", 1: "start", 2: "end"})
-)
-peaks_df["start"] = peaks_df["start"].astype(int)
-peaks_df["end"] = peaks_df["end"].astype(int)
-peaks_df["peak_id"] = RE_chr_specific.index
+        logging.info(f"\n  - Restricted to {chrom_id} Genes and Peaks: ")
+        logging.info(f"\tTG_chr_specific: {TG_chr_specific.shape[0]} Genes x {TG_chr_specific.shape[1]} metacells")
+        logging.info(f"\tRE_chr_specific: {RE_chr_specific.shape[0]:,} Peaks x {RE_chr_specific.shape[1]} metacells")
+
+        peaks_df = (
+            RE_chr_specific.index.to_series()
+            .str.split("[:-]", expand=True)
+            .rename(columns={0: "chrom", 1: "start", 2: "end"})
+        )
+        peaks_df["start"] = peaks_df["start"].astype(int)
+        peaks_df["end"] = peaks_df["end"].astype(int)
+        peaks_df["peak_id"] = RE_chr_specific.index
+        
+        TG_pseudobulk_samples.append(TG_chr_specific)
+        RE_pseudobulk_samples.append(RE_chr_specific)
+        peaks_df_samples.append(peaks_df)
+    
+total_TG_pseudobulk = pd.concat(TG_pseudobulk_samples)
+total_RE_pseudobulk = pd.concat(RE_pseudobulk_samples)
+total_peaks_df = pd.concat(peaks_df_samples)
 
 # Create genome windows and add index
 mm10_windows = create_or_load_genomic_windows(chrom_id, window_size)
@@ -110,7 +127,7 @@ mm10_windows = mm10_windows.reset_index(drop=True)
 mm10_windows["win_idx"] = mm10_windows.index
 
 # Build peak -> window mapping
-window_map = make_peak_to_window_map(peaks_df, mm10_windows)
+window_map = make_peak_to_window_map(total_peaks_df, mm10_windows)
 logging.info(f"Mapped {len(window_map)} peaks to windows")
 
 transformer_data_dir = os.path.join(PROJECT_DIR, "dev/testing_scripts/transformer_data")
@@ -121,6 +138,6 @@ with open(os.path.join(transformer_data_dir, "window_map.json"), "w") as f:
 with open(os.path.join(transformer_data_dir, "tf_list.pickle"), "wb") as fp:
     pickle.dump(tf_list, fp)
 
-TG_chr_specific.to_csv(os.path.join(transformer_data_dir, f"TG_{chrom_id}_specific_pseudobulk.csv"))
-RE_chr_specific.to_csv(os.path.join(transformer_data_dir, f"RE_{chrom_id}_specific_pseudobulk.csv"))
+total_TG_pseudobulk.to_csv(os.path.join(transformer_data_dir, f"TG_{chrom_id}_specific_pseudobulk_agg.csv"))
+total_RE_pseudobulk.to_csv(os.path.join(transformer_data_dir, f"RE_{chrom_id}_specific_pseudobulk_agg.csv"))
 

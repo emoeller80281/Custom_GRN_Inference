@@ -213,8 +213,8 @@ def pseudo_bulk(
 
         if use_single or len(cluster_idx) < neighbors_k:
             # Single pseudobulk
-            rna_sum = rna_data.X[cluster_idx, :].sum(axis=0)
-            atac_sum = atac_data.X[cluster_idx, :].sum(axis=0)
+            rna_sum = sp.csr_matrix(rna_data.X[cluster_idx, :].sum(axis=0))
+            atac_sum = sp.csr_matrix(atac_data.X[cluster_idx, :].sum(axis=0))
             pseudo_bulk_rna.append(rna_sum)
             pseudo_bulk_atac.append(atac_sum)
             bulk_names.append(f"cluster{cid}")
@@ -225,11 +225,14 @@ def pseudo_bulk(
                 neighbors = conn[s].indices
                 group = np.append(neighbors, s)
 
-                rna_sum = rna_data.X[group, :].sum(axis=0)
-                atac_sum = atac_data.X[group, :].sum(axis=0)
+                rna_sum = sp.csr_matrix(rna_data.X[group, :].sum(axis=0))
+                atac_sum = sp.csr_matrix(atac_data.X[group, :].sum(axis=0))
                 pseudo_bulk_rna.append(rna_sum)
                 pseudo_bulk_atac.append(atac_sum)
                 bulk_names.append(f"cluster{cid}_cell{s}")
+                
+    pseudo_bulk_rna = [m if m.ndim == 2 else m.reshape(1, -1) for m in pseudo_bulk_rna]
+    pseudo_bulk_atac = [m if m.ndim == 2 else m.reshape(1, -1) for m in pseudo_bulk_atac]   
 
     # --- Convert to DataFrames ---
     pseudo_bulk_rna = sp.vstack(pseudo_bulk_rna).T
@@ -252,10 +255,6 @@ def get_adata_from_peakmatrix(peak_matrix_file: str, label: pd.DataFrame, sample
     # Read header only
     all_cols = pd.read_csv(peak_matrix_file, sep="\t", nrows=10).columns
     
-    logging.info("First few ATAC barcodes:", all_cols[:10].tolist())
-    logging.info("Overlap count after normalization:", 
-        len(set(label["barcode_use"]) & set(all_cols)))
-
     # Identify barcodes shared between RNA and ATAC
     matching_barcodes = set(label["barcode_use"]) & set(all_cols)
 
@@ -324,8 +323,6 @@ def main():
             adata_RNA.obs_names = [(sample_name + "." + i).replace("-", ".") for i in adata_RNA.obs_names]
             logging.info(f"Found {len(adata_RNA.obs_names)} cell barcodes")
             
-            logging.info("First few RNA barcodes:", adata_RNA.obs_names[:10])
-
             label = pd.DataFrame({"barcode_use":adata_RNA.obs_names, "label":["mESC"] * len(adata_RNA.obs_names)})
 
             adata_ATAC = get_adata_from_peakmatrix(MESC_PEAK_MATRIX_FILE, label, sample_name)

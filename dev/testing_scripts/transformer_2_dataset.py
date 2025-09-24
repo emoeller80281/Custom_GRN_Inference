@@ -11,11 +11,11 @@ class MultiomicTransformerDataset(Dataset):
 
         # Load pseudobulk (genes x metacells, peaks x metacells)
         self.TG_pseudobulk = pd.read_csv(
-            os.path.join(data_dir, f"TG_{chrom_id}_specific_pseudobulk.csv"),
+            os.path.join(data_dir, f"TG_{chrom_id}_specific_pseudobulk_agg.csv"),
             index_col=0
         )
         self.RE_pseudobulk = pd.read_csv(
-            os.path.join(data_dir, f"RE_{chrom_id}_specific_pseudobulk.csv"),
+            os.path.join(data_dir, f"RE_{chrom_id}_specific_pseudobulk_agg.csv"),
             index_col=0
         )
 

@@ -2,6 +2,7 @@ import os
 import sys
 import torch
 import pandas as pd
+import numpy as np
 import logging
 from scipy.stats import pearsonr, spearmanr
 import torch.nn.functional as F
@@ -9,11 +10,13 @@ from torch.utils.data import Dataset, DataLoader, random_split
 from transformer_2 import MultiomicTransformer
 from transformer_2_dataset import MultiomicTransformerDataset
 
-import matplotlib.pyplot as plt
 import torch.multiprocessing as mp
 from torch.utils.data.distributed import DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group, get_rank, is_initialized, is_available
+
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 PROJECT_DIR = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
 DATA_DIR = os.path.join(PROJECT_DIR, "dev/testing_scripts/transformer_data")
@@ -153,8 +156,6 @@ class Trainer:
         if avg_val_loss < self.best_val_loss - self.min_delta:
             self.best_val_loss = avg_val_loss
             self.patience_counter = 0
-            if self.gpu_id == 0:
-                self._save_checkpoint(epoch)
         else:
             self.patience_counter += 1
             if self.patience_counter >= self.patience:
@@ -170,11 +171,12 @@ class Trainer:
 
     def train(self, max_epochs: int):
         for epoch in range(max_epochs):
-            keep_going = self._run_epoch(epoch)
-            if not keep_going:
-                if self.gpu_id == 0:
-                    logging.info(f"\nEarly stopping, validation loss has not changed in {self.patience} epochs")
-                break
+            train_loss = self._run_epoch(epoch)
+            if self.gpu_id == 0 and epoch % self.save_every == 0:
+                self._save_checkpoint(epoch)
+        if self.gpu_id == 0:
+            logging.info("Training loop exited normally.")
+            
 
 def load_train_objs():
     dataset = MultiomicTransformerDataset(
@@ -203,7 +205,6 @@ def prepare_dataloader(dataset: Dataset, batch_size: int, world_size: int, rank:
 
     return train_loader, val_loader, test_loader
 
-from scipy.stats import pearsonr
 
 def evaluate_and_plot(model, dataloader, gpu_id=0, outpath=None):
     model.eval()
@@ -230,6 +231,76 @@ def evaluate_and_plot(model, dataloader, gpu_id=0, outpath=None):
         plt.savefig(outpath, dpi=300)
     else:
         plt.show()
+        
+def per_gene_correlation(model, dataloader, gpu_id=0, gene_names=None):
+    """
+    Compute Pearson & Spearman correlation per gene across the test set.
+
+    Args:
+        model       : trained PyTorch model
+        dataloader  : DataLoader over test set
+        gpu_id      : device id
+        gene_names  : list of gene names for annotation (optional)
+
+    Returns:
+        DataFrame with [gene, pearson, spearman]
+    """
+    model.eval()
+    preds, tgts = [], []
+    with torch.no_grad():
+        for atac_wins, tf_tensor, targets in dataloader:
+            atac_wins, tf_tensor = atac_wins.to(gpu_id), tf_tensor.to(gpu_id)
+            output = model(atac_wins, tf_tensor)
+            preds.append(output.cpu().numpy())
+            tgts.append(targets.cpu().numpy())
+
+    preds = np.concatenate(preds, axis=0)   # [samples, num_genes]
+    tgts  = np.concatenate(tgts, axis=0)
+
+    results = []
+    for i in range(tgts.shape[1]):  # loop over genes
+        if np.std(tgts[:, i]) < 1e-8:   # avoid constant targets
+            pear, spear = np.nan, np.nan
+        else:
+            pear, _ = pearsonr(preds[:, i], tgts[:, i])
+            spear, _ = spearmanr(preds[:, i], tgts[:, i])
+        results.append((pear, spear))
+
+    df = pd.DataFrame(results, columns=["pearson", "spearman"])
+    if gene_names is not None:
+        df.insert(0, "gene", gene_names)
+    return df
+
+def plot_gene_correlation_distribution(corr_df, out_prefix):
+    """
+    Plot distributions of per-gene Pearson & Spearman correlations.
+    """
+    plt.figure(figsize=(6,4))
+    sns.histplot(corr_df['pearson'].dropna(), bins=30, kde=True, color="steelblue")
+    plt.xlabel("Pearson correlation")
+    plt.ylabel("Number of genes")
+    plt.title("Per-gene Pearson correlation")
+    plt.tight_layout()
+    plt.savefig(f"{out_prefix}_pearson_hist.png", dpi=300)
+    plt.close()
+
+    plt.figure(figsize=(6,4))
+    sns.histplot(corr_df['spearman'].dropna(), bins=30, kde=True, color="darkorange")
+    plt.xlabel("Spearman correlation")
+    plt.ylabel("Number of genes")
+    plt.title("Per-gene Spearman correlation")
+    plt.tight_layout()
+    plt.savefig(f"{out_prefix}_spearman_hist.png", dpi=300)
+    plt.close()
+
+    # Optional: violin for side-by-side view
+    plt.figure(figsize=(5,4))
+    sns.violinplot(data=corr_df[['pearson','spearman']], inner="quartile", palette="Set2")
+    plt.ylabel("Correlation")
+    plt.title("Distribution of per-gene correlations")
+    plt.tight_layout()
+    plt.savefig(f"{out_prefix}_violin.png", dpi=300)
+    plt.close()
 
 def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_size: int):
     ddp_setup(rank, world_size)
@@ -255,7 +326,29 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
             gpu_id=0,
             outpath=os.path.join(PROJECT_DIR, "dev/testing_scripts/tmp/transformer_training.png")
         )
+        
+    if rank == 0:
+        logging.info("Evaluating per-gene correlations on test set...")
+        corr_df = per_gene_correlation(
+            model, test_loader, gpu_id=rank,
+            gene_names=dataset.TG_pseudobulk.index.tolist()
+        )
+        out_prefix = os.path.join(PROJECT_DIR, "dev/testing_scripts/tmp/per_gene_correlations")
+        corr_df.to_csv(out_prefix + ".csv", index=False)
+        logging.info(f"Saved per-gene correlations to {out_prefix}.csv")
+
+        # Quick summary
+        logging.info(f"Median Pearson: {np.nanmedian(corr_df['pearson']):.3f}, "
+                    f"Top 5 genes: {corr_df.sort_values('pearson', ascending=False).head()['gene'].tolist()}")
+
+        # Plots
+        plot_gene_correlation_distribution(corr_df, out_prefix)
+        logging.info(f"Saved per-gene correlation plots to {out_prefix}_*.png")
     
+    if rank == 0:
+        logging.info("Main finished, destroying process group")
+
+        
     destroy_process_group()
     
 
