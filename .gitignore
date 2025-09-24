@@ -6,6 +6,7 @@ dev/testing_scripts/transformer_data/
 macrophage_output/
 reference_genome/
 reference_networks/
+checkpoint.pt
 dev/notebooks/sliding_window_calculation_method_testing_cache
 *.png
 *.csv

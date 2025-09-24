@@ -12,4 +12,6 @@ set -euo pipefail
 
 cd /gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER
 
-poetry run python dev/testing_scripts/linger_pseudobulk.py
+source activate my_env
+
+python dev/testing_scripts/linger_pseudobulk.py

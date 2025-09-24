@@ -170,10 +170,21 @@ def pseudo_bulk(
     sc.pp.scale(atac_data, max_value=10, zero_center=True)
     sc.tl.pca(atac_data, n_comps=15, svd_solver="arpack")
 
+    # --- After filtering to common barcodes ---
+    common_barcodes = rna_data.obs_names.intersection(atac_data.obs_names)
+
+    rna_data = rna_data[common_barcodes].copy()
+    atac_data = atac_data[common_barcodes].copy()
+
+    # Align ordering explicitly: enforce identical order
+    atac_data = atac_data[rna_data.obs_names].copy()
+
     # --- Joint embedding ---
-    combined_pca = np.concatenate((rna_data.obsm['X_pca'], atac_data.obsm['X_pca']), axis=1)
-    rna_data.obsm['X_combined'] = combined_pca
-    atac_data.obsm['X_combined'] = combined_pca
+    combined_pca = np.concatenate(
+        (rna_data.obsm["X_pca"], atac_data.obsm["X_pca"]), axis=1
+    )
+    rna_data.obsm["X_combined"] = combined_pca
+    atac_data.obsm["X_combined"] = combined_pca
 
     # --- Build joint neighbors + Leiden clusters ---
     joint = make_joint_adata(rna_data, atac_data)
@@ -292,7 +303,8 @@ SAMPLE_INPUT_DIR = os.path.join(PROJECT_DIR, "input/transformer_input/mESC")
 OUTPUT_DIR = os.path.join(PROJECT_DIR, "output/transformer_testing_output")
 
 def main():
-    sample_name_list = ["E7.5_rep1"]
+    sample_name_list = ["E7.5_rep1", "E7.5_rep1", "E7.75_rep1", "E8.0_rep2", "E8.5_rep2",
+                        "E8.75_rep2", "E7.5_rep2", "E8.0_rep1", "E8.5_rep1", "E8.75_rep1"]
     
     for sample_name in sample_name_list:
         
