@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
 import math
 
@@ -90,6 +91,20 @@ class CrossAttention(nn.Module):
         out = self.norm(query + self.dropout(attn_out))  # residual
         return out
     
+class AttentionPooling(nn.Module):
+    def __init__(self, d_model):
+        super().__init__()
+        self.d_model = d_model
+        
+        self.query = nn.Parameter(torch.randn(d_model))  # learnable query vector
+
+    def forward(self, x):
+        # x: [B, N, d_model]
+        scores = torch.matmul(x, self.query) / (self.d_model ** 0.5)  # [B, N]
+        weights = F.softmax(scores, dim=1).unsqueeze(-1)          # [B, N, 1]
+        pooled = torch.sum(weights * x, dim=1)                   # [B, d_model]
+        return pooled, weights
+    
 class MultiomicTransformer(nn.Module):
     def __init__(self, d_model, num_heads, d_ff, dropout, num_tf, num_windows, num_tg):
         super(MultiomicTransformer, self).__init__()
@@ -137,26 +152,33 @@ class MultiomicTransformer(nn.Module):
         self.cross_tf_to_atac = CrossAttention(d_model, num_heads, dropout)
         self.cross_atac_to_tf = CrossAttention(d_model, num_heads, dropout)
         
+        # Add attention pooling to summarize the most important windows and TFs
+        self.tf_pool = AttentionPooling(d_model)
+        self.atac_pool = AttentionPooling(d_model)
+        
         # Pass the output of the transformer through a dense network
         # with a Tanh activation function (from UNADON Yang and Ma 2023)
         self.out_dense = nn.Sequential(
-            nn.Linear(d_model, d_ff, bias=False),
+            nn.Linear(2*d_model, d_ff, bias=False),
             nn.Tanh(),
             nn.Dropout(self.dropout),
             nn.Linear(d_ff, d_model, bias=False),
             nn.LayerNorm(d_model)
         )
         
-        self.gene_pred_dense = nn.Linear((num_tf + num_windows) * d_model, num_tg)
+        self.gene_pred_dense = nn.Linear(d_model, num_tg)
     
     def forward(self, atac_windows, tf_expr):
         # Use a dense layer to embed the ATAC windows
         win_emb = self.atac_window_dense_layer(atac_windows)                        # [B, num_windows, d_model]
+        # print("win_emb after dense:", win_emb.shape) 
         
         # Use a dense layer to embed each TF separately
         # tf_expr: [B, num_tf]
         tf_expr = tf_expr.unsqueeze(-1)                                             # [B, num_tf, 1]
+        # print("tf_expr:", tf_expr.shape)   
         tf_emb = self.tf_dense_layer(tf_expr)                                       # [B, num_tf, d_model]
+        # print("tf_emb after dense:", tf_emb.shape)   
         
         # Add positional encodings to the windows based on the number of windows
         # atac_windows: [B, num_windows, num_features]
@@ -164,23 +186,43 @@ class MultiomicTransformer(nn.Module):
         pos_emb = self.posenc(positions, bsz=win_emb.size(0))                       # [seq_len, B, d_model]
         pos_emb = pos_emb.transpose(0, 1)                                           # [B, seq_len, d_model]
         win_emb = win_emb + pos_emb
+        # print("win_emb + pos_emb:", win_emb.shape) 
+        
         win_emb = self.encoder(win_emb)                                             # [B, num_windows, d_model]
+        # print("win_emb after encoder:", win_emb.shape)     
         
         # Run cross-attention both ways
         tf_cross = self.cross_tf_to_atac(tf_emb, win_emb)                           # [B, num_tf, d_model]
-        atac_cross = self.cross_atac_to_tf(win_emb, tf_emb)                         # [B, num_windows, d_model]
+        # print("tf_cross:", tf_cross.shape)     
         
+        atac_cross = self.cross_atac_to_tf(win_emb, tf_emb)                         # [B, num_windows, d_model]
+        # print("atac_cross:", atac_cross.shape)     
+        
+        # Attention pool the output from the bi-directional cross attention
+        tf_repr, tf_weights = self.tf_pool(tf_cross)                                # [B, d_model], [B, num_tf, 1]
+        # print("tf_repr:", tf_repr.shape) 
+        # print("tf_weights:", tf_weights.shape) 
+        atac_repr, atac_weights = self.atac_pool(atac_cross)                        # [B, d_model], [B, num_windows, 1]
+        # print("atac_repr:", atac_repr.shape) 
+        # print("atac_weights:", atac_weights.shape) 
+                
         # Concatenate the results from cross-attention
-        fused_cross = torch.cat([tf_cross, atac_cross], dim=1)                      # [B, num_tf+num_windows, d_model]
+        fused_repr = torch.cat([tf_repr, atac_repr], dim=-1)                        # [B, 2*d_model]
+        # print("fused_repr shape after concatenation:", fused_repr.shape)     
         
         # Final dense layer for the bi-directional cross-attention
-        fused_cross = self.out_dense(fused_cross)                                   
+        fused_repr = self.out_dense(fused_repr)
+        # print("fused_repr shape BEFORE flattening:", fused_repr.shape)                                   
 
         # Project and flatten                           
-        fused_cross = fused_cross.flatten(start_dim=1)                                      # [B, num_tf+num_windows * d_model]
+        fused_repr = fused_repr.flatten(start_dim=1)                                      # [B, 2*d_model]
+        # print("fused_repr shape AFTER flattening:", fused_repr.shape)     
+        
+        # print("fused_repr shape:", fused_repr.shape)
+        # print("expected in_features:", self.gene_pred_dense.in_features)
         
         # Final linear projection to the dimensionality of the target genes
-        gene_logits = self.gene_pred_dense(fused_cross)
+        gene_logits = self.gene_pred_dense(fused_repr)
         
         return gene_logits
         

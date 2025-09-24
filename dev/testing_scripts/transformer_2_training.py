@@ -33,7 +33,7 @@ def create_or_load_genomic_windows(chrom_id, window_size, force_recalculate=Fals
     genome_window_file = os.path.join(MM10_GENOME_DIR, f"mm10_{chrom_id}_windows_{window_size // 1000}kb.bed")
     if not os.path.exists(genome_window_file) or force_recalculate:
         
-        logging.info("Creating genomic windows")
+        logging.info("\nCreating genomic windows")
         mm10_genome_windows = pybedtools.bedtool.BedTool().window_maker(g=MM10_CHROM_SIZES_FILE, w=window_size)
         mm10_windows = (
             mm10_genome_windows
@@ -43,7 +43,7 @@ def create_or_load_genomic_windows(chrom_id, window_size, force_recalculate=Fals
         )
     else:
         
-        logging.info("Loading existing genomic windows")
+        logging.info("\nLoading existing genomic windows")
         mm10_windows = pybedtools.BedTool(genome_window_file).to_dataframe()
         
     return mm10_windows
@@ -99,37 +99,53 @@ def prepare_inputs(TG_pseudobulk: pd.DataFrame,
 
 sample_name = "E7.5_rep1"
 window_size = 25000
+chrom_id = "chr19"
+
+mm10_gene_tss_bed = pybedtools.BedTool(MM10_GENE_TSS_FILE)
+gene_tss_df = (
+    mm10_gene_tss_bed
+    .filter(lambda x: x.chrom == chrom_id)
+    .saveas(os.path.join(MM10_GENOME_DIR, "mm10_ch19_gene_tss.bed"))
+    .to_dataframe()
+    .sort_values(by="start", ascending=True)
+    )
+
 
 tf_list = list(load_homer_tf_to_peak_results()["source_id"].unique())
-logging.info(f"TF List: {tf_list[:5]}, total {len(tf_list)} TFs")
+logging.info(f"\nHomer TFs: \t{tf_list[:5]}\n\tTotal {len(tf_list)} TFs")
 
 sample_data_dir = os.path.join(SAMPLE_INPUT_DIR, sample_name)
 TG_pseudobulk = pd.read_csv(os.path.join(sample_data_dir, "TG_pseudobulk.tsv"), sep="\t", index_col=0)
 RE_pseudobulk = pd.read_csv(os.path.join(sample_data_dir, "RE_pseudobulk.tsv"), sep="\t", index_col=0)
 
+logging.info("\nTotal Pseudobulk Genes and Peaks")
+logging.info(f"\tTG_pseudobulk: {TG_pseudobulk.shape[0]:,} Genes x {TG_pseudobulk.shape[1]} metacells")
+logging.info(f"\tRE_pseudobulk: {RE_pseudobulk.shape[0]:,} Peaks x {RE_pseudobulk.shape[1]} metacells")
+
+TG_chr_specific = TG_pseudobulk.loc[TG_pseudobulk.index.intersection(gene_tss_df['name'].unique())]
+RE_chr_specific = RE_pseudobulk[RE_pseudobulk.index.str.startswith(f"{chrom_id}:")]
+
+logging.info(f"\nRestricted to {chrom_id} Genes and Peaks: ")
+logging.info(f"\tTG_chr_specific: {TG_chr_specific.shape[0]} Genes x {TG_chr_specific.shape[1]} metacells")
+logging.info(f"\tRE_chr_specific: {RE_chr_specific.shape[0]:,} Peaks x {RE_chr_specific.shape[1]} metacells")
+
 peaks_df = (
-    RE_pseudobulk.index.to_series()
+    RE_chr_specific.index.to_series()
     .str.split("[:-]", expand=True)
     .rename(columns={0: "chrom", 1: "start", 2: "end"})
 )
 peaks_df["start"] = peaks_df["start"].astype(int)
 peaks_df["end"] = peaks_df["end"].astype(int)
-peaks_df["peak_id"] = RE_pseudobulk.index
+peaks_df["peak_id"] = RE_chr_specific.index
 
 # Create genome windows and add index
-mm10_windows = create_or_load_genomic_windows("chr19", window_size)
+mm10_windows = create_or_load_genomic_windows(chrom_id, window_size)
 mm10_windows = mm10_windows.reset_index(drop=True)
 mm10_windows["win_idx"] = mm10_windows.index
 
 # Build peak -> window mapping
 window_map = make_peak_to_window_map(peaks_df, mm10_windows)
 logging.info(f"Mapped {len(window_map)} peaks to windows")
-
-logging.info("TG Pseudobulk")
-logging.info(f"\tTG_pseudobulk: {TG_pseudobulk.shape[0]:,} Genes x {TG_pseudobulk.shape[1]} metacells")
-
-logging.info("\nRE Pseudobulk")
-logging.info(f"\tRE_pseudobulk: {RE_pseudobulk.shape[0]:,} Peaks x {RE_pseudobulk.shape[1]} metacells")
 
 # Example setup
 d_model = 128
@@ -138,13 +154,13 @@ d_ff = 256
 dropout = 0.1
 num_tf = len(tf_list)
 num_windows = max(window_map.values()) + 1
-num_tg = TG_pseudobulk.shape[0]   # or restrict to TGs only
+num_tg = TG_chr_specific.shape[0]   # or restrict to TGs only
 
 model = MultiomicTransformer(d_model, num_heads, d_ff, dropout, num_tf, num_windows, num_tg)
 
 # Prepare inputs
 logging.info("\nPreparing Info")
-tf_tensor, atac_wins = prepare_inputs(TG_pseudobulk, RE_pseudobulk, tf_list, window_map)
+tf_tensor, atac_wins = prepare_inputs(TG_chr_specific, RE_chr_specific, tf_list, window_map)
 
 # Forward pass
 logging.info("\n ----- Training -----")
