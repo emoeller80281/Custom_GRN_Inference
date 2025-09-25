@@ -106,7 +106,7 @@ class AttentionPooling(nn.Module):
         return pooled, weights
     
 class MultiomicTransformer(nn.Module):
-    def __init__(self, d_model, num_heads, d_ff, dropout, num_tf, num_windows, num_tg):
+    def __init__(self, d_model, num_heads, num_layers, d_ff, dropout, num_tf, num_tg):
         super(MultiomicTransformer, self).__init__()
         
         self.d_model = d_model
@@ -145,7 +145,7 @@ class MultiomicTransformer(nn.Module):
                 batch_first=True,
                 norm_first=True
             ),
-            num_layers=2
+            num_layers=num_layers
         )
         
         # Cross Attention in both directions (TF Q -> ATAC KV & ATAC Q -> TF KV)
@@ -166,17 +166,23 @@ class MultiomicTransformer(nn.Module):
             nn.LayerNorm(d_model)
         )
         
+        # Adds TF->TG weights at the end to directly modify the final TG expression predictions
+        self.tf_tg_weights = nn.Parameter(torch.empty(num_tf, num_tg))
+        nn.init.xavier_uniform_(self.tf_tg_weights)
+                
         self.gene_pred_dense = nn.Linear(d_model, num_tg)
     
     def forward(self, atac_windows, tf_expr):
         # Use a dense layer to embed the ATAC windows
         win_emb = self.atac_window_dense_layer(atac_windows)                        # [B, num_windows, d_model]
         # print("win_emb after dense:", win_emb.shape) 
+        tf_raw = tf_expr
         
         # Use a dense layer to embed each TF separately
         # tf_expr: [B, num_tf]
         tf_expr = tf_expr.unsqueeze(-1)                                             # [B, num_tf, 1]
         # print("tf_expr:", tf_expr.shape)   
+        
         tf_emb = self.tf_dense_layer(tf_expr)                                       # [B, num_tf, d_model]
         # print("tf_emb after dense:", tf_emb.shape)   
         
@@ -220,9 +226,14 @@ class MultiomicTransformer(nn.Module):
         
         # print("fused_repr shape:", fused_repr.shape)
         # print("expected in_features:", self.gene_pred_dense.in_features)
+        # Adds a direct TF-TG connection
+        tf_expr_logits = tf_raw @ self.tf_tg_weights
         
         # Final linear projection to the dimensionality of the target genes
         gene_logits = self.gene_pred_dense(fused_repr)
+        
+        # Direct TF–TG contribution
+        gene_logits = gene_logits + tf_expr_logits
         
         return gene_logits
         

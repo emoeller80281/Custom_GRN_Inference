@@ -1,10 +1,15 @@
 import os
 import sys
+import csv
 import torch
+import joblib
 import pandas as pd
 import numpy as np
 import logging
+from datetime import datetime
 from scipy.stats import pearsonr, spearmanr
+from sklearn.preprocessing import StandardScaler
+import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, random_split
 from transformer_2 import MultiomicTransformer
@@ -13,17 +18,22 @@ from transformer_2_dataset import MultiomicTransformerDataset
 import torch.multiprocessing as mp
 from torch.utils.data.distributed import DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.distributed import init_process_group, destroy_process_group, get_rank, is_initialized, is_available
+import torch.distributed as dist
 
 import matplotlib.pyplot as plt
 import seaborn as sns
 
 PROJECT_DIR = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
 DATA_DIR = os.path.join(PROJECT_DIR, "dev/testing_scripts/transformer_data")
+OUTPUT_DIR = os.path.join(PROJECT_DIR, "output/transformer_testing_output")
 
-D_MODEL = 128
+TOTAL_EPOCHS=50
+BATCH_SIZE=32
+
+D_MODEL = 512
 NUM_HEADS = 8
-D_FF = 256
+NUM_LAYERS = 6
+D_FF = 1024
 DROPOUT = 0.1
 
 def ddp_setup(rank, world_size):
@@ -35,7 +45,7 @@ def ddp_setup(rank, world_size):
     local_rank = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(local_rank)
 
-    init_process_group(backend="nccl", init_method="env://",
+    dist.init_process_group(backend="nccl", init_method="env://",
                             rank=rank, world_size=world_size)
     
 def setup_logging(rank: int):
@@ -62,16 +72,18 @@ class Trainer:
         train_data: DataLoader,
         val_data: DataLoader,
         optimizer: torch.optim.Optimizer,
+        criterion: torch.nn.Module,
         gpu_id: int,
         save_every: int,
-        patience: int = 5,
-        min_delta: float = 1e-4,
+        patience: int = 10,
+        min_delta: float = 1e-3,
     ) -> None:
         self.gpu_id = gpu_id
         self.model = model.to(gpu_id)
         self.train_data = train_data
         self.val_data = val_data
         self.optimizer = optimizer
+        self.criterion = criterion
         self.save_every = save_every
         self.model = DDP(model, device_ids=[gpu_id])
         
@@ -89,16 +101,53 @@ class Trainer:
     def _run_batch(self, batch, targets):
         atac_wins, tf_tensor = batch
         self.optimizer.zero_grad()
-        output = self.model(atac_wins, tf_tensor)   # << your model signature
-        loss = F.mse_loss(output, targets)
+        
+        # Calculate predictions
+        preds = self.model(atac_wins, tf_tensor)
+        
+        # Calculate loss
+        loss = self.criterion(preds, targets)
+        
+        # Add a correlation-based loss
+        preds_flat = preds.view(-1)
+        targets_flat = targets.view(-1)
+
+        if torch.std(targets_flat) > 1e-8 and torch.std(preds_flat) > 1e-8:
+            vx = preds_flat - torch.mean(preds_flat)
+            vy = targets_flat - torch.mean(targets_flat)
+            corr_loss = -torch.sum(vx * vy) / (
+                torch.sqrt(torch.sum(vx ** 2)) * torch.sqrt(torch.sum(vy ** 2)) + 1e-8
+            )
+        else:
+            corr_loss = torch.tensor(0.0, device=preds.device)
+            
+        loss = loss + 0.1 * corr_loss
+        
+        # L1 penalty for sparsity on the TF->TG weights at the end of the model
+        if hasattr(self.model, "tf_tg_weights"):
+            l1_penalty = 1e-4 * torch.norm(self.model.tf_tg_weights, p=1)
+            loss = loss + l1_penalty
+        
+        # Safety check to prevent GPUs from hanging on infinite loss values
+        if not torch.isfinite(loss):
+            logging.error(f"Non-finite loss on rank {self.gpu_id}: {loss.item()}")
+            dist.destroy_process_group()
+            sys.exit(1)
+        
+        # Backprop
         loss.backward()
+            
+        # Gradient clipping
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+        
+        
         self.optimizer.step()
         return loss
         
     def _validate(self):
         self.model.eval()
-        total_val_loss = 0.0
-        all_preds, all_targets = [], []
+        total_loss, n_batches = 0.0, 0
+        preds_list, tgts_list = [], []
 
         with torch.no_grad():
             for atac_wins, tf_tensor, targets in self.val_data:
@@ -108,30 +157,50 @@ class Trainer:
                     targets.to(self.gpu_id),
                 )
                 output = self.model(atac_wins, tf_tensor)
-
                 loss = F.mse_loss(output, targets)
-                total_val_loss += loss.item()
+                total_loss += loss.item()
+                n_batches += 1
+                preds_list.append(output)
+                tgts_list.append(targets)
 
-                # store predictions & targets on CPU for correlation
-                all_preds.append(output.detach().cpu())
-                all_targets.append(targets.detach().cpu())
+        # Stack local tensors
+        preds = torch.cat(preds_list, dim=0)
+        tgts = torch.cat(tgts_list, dim=0)
 
-        self.model.train()
-        avg_val_loss = total_val_loss / len(self.val_data)
+        # All-gather across ranks
+        world_size = dist.get_world_size()
+        gathered_preds = [torch.zeros_like(preds) for _ in range(world_size)]
+        gathered_tgts  = [torch.zeros_like(tgts) for _ in range(world_size)]
+        dist.all_gather(gathered_preds, preds)
+        dist.all_gather(gathered_tgts, tgts)
 
-        # flatten tensors to 1D for correlation
-        preds = torch.cat(all_preds).numpy().ravel()
-        tgts = torch.cat(all_targets).numpy().ravel()
+        # Concatenate global arrays
+        preds = torch.cat(gathered_preds, dim=0).cpu().numpy()
+        tgts  = torch.cat(gathered_tgts, dim=0).cpu().numpy()
 
-        pearson_corr, _ = pearsonr(preds, tgts)
-        spearman_corr, _ = spearmanr(preds, tgts)
+        # Replace NaN/inf with safe values
+        preds = np.nan_to_num(preds, nan=0.0, posinf=1e6, neginf=-1e6)
+        tgts  = np.nan_to_num(tgts, nan=0.0, posinf=1e6, neginf=-1e6)
 
-        return avg_val_loss, pearson_corr, spearman_corr
+            # Correlations
+        if np.std(tgts) < 1e-8 or np.std(preds) < 1e-8:
+            pearson_corr, spearman_corr = 0.0, 0.0
+        else:
+            try:
+                pearson_corr, _ = pearsonr(preds.ravel(), tgts.ravel())
+                spearman_corr, _ = spearmanr(preds.ravel(), tgts.ravel())
+            except Exception as e:
+                logging.warning(f"Correlation failed: {e}")
+                pearson_corr, spearman_corr = 0.0, 0.0
 
+        avg_loss = total_loss / max(1, n_batches)
+        return avg_loss, pearson_corr, spearman_corr
+    
     def _run_epoch(self, epoch):
         b_sz = self.train_data.batch_size
         self.train_data.sampler.set_epoch(epoch)
         total_loss, n_batches = 0.0, 0
+
         for atac_wins, tf_tensor, targets in self.train_data:
             atac_wins, tf_tensor, targets = atac_wins.to(self.gpu_id), tf_tensor.to(self.gpu_id), targets.to(self.gpu_id)
             loss_val = self._run_batch((atac_wins, tf_tensor), targets)
@@ -140,9 +209,6 @@ class Trainer:
 
         avg_train_loss = total_loss / max(1, n_batches)
         avg_val_loss, pearson_corr, spearman_corr = self._validate()
-        
-        # Scheduler step
-        self.scheduler.step(avg_val_loss)
 
         if self.gpu_id == 0:
             logging.info(
@@ -151,16 +217,8 @@ class Trainer:
                 f"Pearson: {pearson_corr:.3f} | Spearman: {spearman_corr:.3f} | "
                 f"LR: {self.optimizer.param_groups[0]['lr']:.2e}"
             )
-            
-        # Early stopping check
-        if avg_val_loss < self.best_val_loss - self.min_delta:
-            self.best_val_loss = avg_val_loss
-            self.patience_counter = 0
-        else:
-            self.patience_counter += 1
-            if self.patience_counter >= self.patience:
-                return False
-        return True
+
+        return avg_train_loss, avg_val_loss, pearson_corr, spearman_corr
 
     def _save_checkpoint(self, epoch):
         ckp = self.model.module.state_dict()
@@ -169,13 +227,51 @@ class Trainer:
         if self.gpu_id == 0:
             logging.info(f"\tTraining checkpoint saved at {PATH}")
 
-    def train(self, max_epochs: int):
+    def train(self, max_epochs: int, log_path: str = "training_log.csv"):
+        best_val_loss = float("inf")
+        patience_counter = 0
+        history = []  # store per-epoch logs
+
         for epoch in range(max_epochs):
-            train_loss = self._run_epoch(epoch)
+            train_loss, val_loss, pearson_corr, spearman_corr = self._run_epoch(epoch)
+
             if self.gpu_id == 0 and epoch % self.save_every == 0:
                 self._save_checkpoint(epoch)
+
+            # Save stats to history
+            if self.gpu_id == 0:
+                lr = self.optimizer.param_groups[0]['lr']
+                history.append({
+                    "Epoch": epoch,
+                    "Train Loss": train_loss.detach().cpu().item() if torch.is_tensor(train_loss) else float(train_loss),
+                    "Val Loss": val_loss.detach().cpu().item() if torch.is_tensor(val_loss) else float(val_loss),
+                    "Pearson": float(pearson_corr),
+                    "Spearman": float(spearman_corr),
+                    "LR": float(lr),
+                })
+
+            # Early stopping
+            if val_loss < best_val_loss - self.min_delta:
+                best_val_loss = val_loss
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                if patience_counter >= self.patience:
+                    if self.gpu_id == 0:
+                        logging.info("Early stopping triggered.")
+                    break
+
+        # Save history to CSV (only rank 0 does this)
         if self.gpu_id == 0:
+            fieldnames = ["Epoch", "Train Loss", "Val Loss", "Pearson", "Spearman", "LR"]
+            with open(log_path, "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(history)
+            logging.info(f"Saved training log to {log_path}")
+
             logging.info("Training loop exited normally.")
+
             
 
 def load_train_objs():
@@ -184,8 +280,8 @@ def load_train_objs():
         chrom_id="chr19"
     ) 
     model = MultiomicTransformer(
-        D_MODEL, NUM_HEADS, D_FF, DROPOUT, 
-        dataset.num_tf, dataset.num_windows, dataset.num_tg
+        D_MODEL, NUM_HEADS, NUM_LAYERS, D_FF, DROPOUT, 
+        dataset.num_tf, dataset.num_tg
         )
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     return dataset, model, optimizer
@@ -199,40 +295,46 @@ def prepare_dataloader(dataset: Dataset, batch_size: int, world_size: int, rank:
 
     train_set, val_set, test_set = random_split(dataset, [n_train, n_val, n_test])
 
-    train_loader = DataLoader(train_set, batch_size=batch_size, sampler=DistributedSampler(train_set, num_replicas=world_size, rank=rank))
-    val_loader   = DataLoader(val_set, batch_size=batch_size, sampler=DistributedSampler(val_set, num_replicas=world_size, rank=rank))
-    test_loader  = DataLoader(test_set, batch_size=batch_size, sampler=DistributedSampler(test_set, num_replicas=world_size, rank=rank))
+    train_loader = DataLoader(train_set, batch_size=batch_size, sampler=DistributedSampler(train_set, num_replicas=world_size, rank=rank, drop_last=True))
+    val_loader   = DataLoader(val_set, batch_size=batch_size, sampler=DistributedSampler(val_set, num_replicas=world_size, rank=rank, drop_last=True))
+    test_loader  = DataLoader(test_set, batch_size=batch_size, sampler=DistributedSampler(test_set, num_replicas=world_size, rank=rank, drop_last=True))
 
     return train_loader, val_loader, test_loader
 
 
-def evaluate_and_plot(model, dataloader, gpu_id=0, outpath=None):
+def plot_per_gene_correlation_scatterplot(model, dataloader, scaler, gpu_id=0, outpath=None):
     model.eval()
     preds, tgts = [], []
     with torch.no_grad():
         for atac_wins, tf_tensor, targets in dataloader:
             atac_wins, tf_tensor = atac_wins.to(gpu_id), tf_tensor.to(gpu_id)
             output = model(atac_wins, tf_tensor)
-            preds.append(output.cpu())
-            tgts.append(targets.cpu())
-    preds = torch.cat(preds).numpy().ravel()
-    tgts = torch.cat(tgts).numpy().ravel()
+            preds.append(output.cpu().numpy())
+            tgts.append(targets.cpu().numpy())
 
-    corr, _ = pearsonr(preds, tgts)
+    preds = np.concatenate(preds, axis=0)
+    tgts  = np.concatenate(tgts, axis=0)
+
+    # inverse-transform
+    preds_rescaled = scaler.inverse_transform(preds)
+    tgts_rescaled  = scaler.inverse_transform(tgts)
+
+    corr, _ = pearsonr(preds_rescaled.ravel(), tgts_rescaled.ravel())
     logging.info(f"Test Pearson correlation: {corr:.3f}")
 
     plt.figure(figsize=(6,6))
-    plt.scatter(tgts, preds, alpha=0.5, s=5)
+    plt.scatter(tgts_rescaled, preds_rescaled, alpha=0.5, s=5)
     plt.xlabel("True values")
     plt.ylabel("Predicted values")
     plt.title(f"Predicted vs True (r={corr:.3f})")
-    plt.plot([tgts.min(), tgts.max()], [tgts.min(), tgts.max()], 'r--')
+    plt.plot([tgts_rescaled.min(), tgts_rescaled.max()],
+             [tgts_rescaled.min(), tgts_rescaled.max()], 'r--')
     if outpath:
         plt.savefig(outpath, dpi=300)
     else:
         plt.show()
         
-def per_gene_correlation(model, dataloader, gpu_id=0, gene_names=None):
+def per_gene_correlation(model, dataloader, scaler, gpu_id=0, gene_names=None):
     """
     Compute Pearson & Spearman correlation per gene across the test set.
 
@@ -256,14 +358,18 @@ def per_gene_correlation(model, dataloader, gpu_id=0, gene_names=None):
 
     preds = np.concatenate(preds, axis=0)   # [samples, num_genes]
     tgts  = np.concatenate(tgts, axis=0)
+    
+    # inverse-transform
+    preds_rescaled = scaler.inverse_transform(preds)
+    tgts_rescaled  = scaler.inverse_transform(tgts)
 
     results = []
-    for i in range(tgts.shape[1]):  # loop over genes
-        if np.std(tgts[:, i]) < 1e-8:   # avoid constant targets
+    for i in range(tgts_rescaled.shape[1]):  # loop over genes
+        if np.std(tgts_rescaled[:, i]) < 1e-8:   # avoid constant targets
             pear, spear = np.nan, np.nan
         else:
-            pear, _ = pearsonr(preds[:, i], tgts[:, i])
-            spear, _ = spearmanr(preds[:, i], tgts[:, i])
+            pear, _ = pearsonr(preds_rescaled[:, i], tgts_rescaled[:, i])
+            spear, _ = spearmanr(preds_rescaled[:, i], tgts_rescaled[:, i])
         results.append((pear, spear))
 
     df = pd.DataFrame(results, columns=["pearson", "spearman"])
@@ -306,34 +412,63 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
     ddp_setup(rank, world_size)
     setup_logging(rank)
     
+    time_now = datetime.now().strftime("%d%m%y%H%M%S")
+    training_output_dir = os.path.join(OUTPUT_DIR, f"model_training_{time_now}")
+    
+    os.makedirs(training_output_dir, exist_ok=True)
+    
     if rank == 0:
         logging.info("Loading Training Objectives")
     dataset, model, optimizer = load_train_objs()
+    
+    if rank == 0:
+        logging.info("===== MultiomicTransformerDataset Loaded =====")
+        logging.info(f"Genes:            {dataset.num_tg}")
+        logging.info(f"Windows (RE):     {dataset.num_windows}")
+        logging.info(f"TFs:              {dataset.num_tf}")
+        logging.info(f"Metacells:        {len(dataset.metacell_names)}")
+        logging.info("================================================")
+    
     if rank == 0:
         logging.info("Preparing DataLoader")
     train_loader, val_loader, test_loader = prepare_dataloader(dataset, batch_size, world_size, rank)
     if rank == 0:
         logging.info("Initializing Trainer")
-    trainer = Trainer(model, train_loader, val_loader, optimizer, rank, save_every)
+    criterion = nn.MSELoss()
+    trainer = Trainer(
+        model=model, 
+        train_data=train_loader, 
+        val_data=val_loader, 
+        optimizer=optimizer, 
+        criterion=criterion, 
+        gpu_id=rank, 
+        save_every=save_every
+        )
     if rank == 0:
         logging.info("\n ----- Training -----")
-    trainer.train(total_epochs)
+    trainer.train(
+        max_epochs=total_epochs, 
+        log_path=os.path.join(training_output_dir, "training_log.csv")
+        )
     
     if rank == 0:
-        evaluate_and_plot(
+        scaler = joblib.load(os.path.join(DATA_DIR, "tg_scaler.pkl"))
+        
+        out_prefix = os.path.join(training_output_dir, "per_gene_correlation")
+        
+        plot_per_gene_correlation_scatterplot(
             trainer.model.module, 
             test_loader, 
+            scaler,
             gpu_id=0,
-            outpath=os.path.join(PROJECT_DIR, "dev/testing_scripts/tmp/transformer_training.png")
+            outpath=os.path.join(training_output_dir, "per_gene_correlation_scatterplot.png")
         )
         
-    if rank == 0:
         logging.info("Evaluating per-gene correlations on test set...")
         corr_df = per_gene_correlation(
-            model, test_loader, gpu_id=rank,
+            model, test_loader, scaler, gpu_id=rank,
             gene_names=dataset.TG_pseudobulk.index.tolist()
         )
-        out_prefix = os.path.join(PROJECT_DIR, "dev/testing_scripts/tmp/per_gene_correlations")
         corr_df.to_csv(out_prefix + ".csv", index=False)
         logging.info(f"Saved per-gene correlations to {out_prefix}.csv")
 
@@ -348,14 +483,15 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
     if rank == 0:
         logging.info("Main finished, destroying process group")
 
-        
-    destroy_process_group()
+    if dist.is_initialized():
+        dist.barrier()
+        if rank == 0:
+            logging.info("Destroying process group")
+        dist.destroy_process_group()
     
-
-
 if __name__ == "__main__":
     main(rank=int(os.environ["LOCAL_RANK"]),
         world_size=int(os.environ["WORLD_SIZE"]),
         save_every=5,
-        total_epochs=20,
-        batch_size=2)
+        total_epochs=TOTAL_EPOCHS,
+        batch_size=BATCH_SIZE)

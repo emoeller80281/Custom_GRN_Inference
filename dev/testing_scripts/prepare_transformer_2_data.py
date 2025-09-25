@@ -64,7 +64,8 @@ def make_peak_to_window_map(peaks_bed: pd.DataFrame, windows_bed: pd.DataFrame) 
     return mapping
 
 sample_name_list = ["E7.5_rep1", "E7.5_rep1", "E7.75_rep1", "E8.0_rep2", "E8.5_rep2",
-                    "E8.75_rep2", "E7.5_rep2", "E8.0_rep1", "E8.5_rep1", "E8.75_rep1"]
+                    "E8.75_rep2", "E7.5_rep2", "E8.0_rep1", "E8.5_rep1"]
+holdout = ["E8.75_rep1"]
 window_size = 25000
 chrom_id = "chr19"
 
@@ -81,15 +82,15 @@ gene_tss_df = (
 tf_list = list(load_homer_tf_to_peak_results()["source_id"].unique())
 logging.info(f"\nHomer TFs: \t{tf_list[:5]}\n\tTotal {len(tf_list)} TFs")
 
+TG_pseudobulk_global = []
 TG_pseudobulk_samples = []
 RE_pseudobulk_samples = []
 peaks_df_samples = []
 
 for sample_name in sample_name_list:
-    logging.info(f"\nLoading Pseudobulk data for {sample_name}")
     sample_data_dir = os.path.join(SAMPLE_INPUT_DIR, sample_name)
-    if os.path.exists(sample_data_dir) and len(os.listdir(sample_data_dir)) == 7:
-        
+    if os.path.exists(sample_data_dir) and len(os.listdir(sample_data_dir)) == 7 and sample_name not in holdout:
+        logging.info(f"\nLoading Pseudobulk data for {sample_name}")
         TG_pseudobulk = pd.read_csv(os.path.join(sample_data_dir, "TG_pseudobulk.tsv"), sep="\t", index_col=0)
         RE_pseudobulk = pd.read_csv(os.path.join(sample_data_dir, "RE_pseudobulk.tsv"), sep="\t", index_col=0)
 
@@ -113,12 +114,14 @@ for sample_name in sample_name_list:
         peaks_df["end"] = peaks_df["end"].astype(int)
         peaks_df["peak_id"] = RE_chr_specific.index
         
+        TG_pseudobulk_global.append(TG_pseudobulk)
         TG_pseudobulk_samples.append(TG_chr_specific)
         RE_pseudobulk_samples.append(RE_chr_specific)
         peaks_df_samples.append(peaks_df)
     
-total_TG_pseudobulk = pd.concat(TG_pseudobulk_samples)
-total_RE_pseudobulk = pd.concat(RE_pseudobulk_samples)
+total_TG_pseudobulk_global = pd.concat(TG_pseudobulk_samples)
+total_TG_pseudobulk_chr = pd.concat(TG_pseudobulk_samples)
+total_RE_pseudobulk_chr = pd.concat(RE_pseudobulk_samples)
 total_peaks_df = pd.concat(peaks_df_samples)
 
 # Create genome windows and add index
@@ -138,6 +141,7 @@ with open(os.path.join(transformer_data_dir, "window_map.json"), "w") as f:
 with open(os.path.join(transformer_data_dir, "tf_list.pickle"), "wb") as fp:
     pickle.dump(tf_list, fp)
 
-total_TG_pseudobulk.to_csv(os.path.join(transformer_data_dir, f"TG_{chrom_id}_specific_pseudobulk_agg.csv"))
-total_RE_pseudobulk.to_csv(os.path.join(transformer_data_dir, f"RE_{chrom_id}_specific_pseudobulk_agg.csv"))
+total_TG_pseudobulk_global.to_csv(os.path.join(transformer_data_dir, f"TG_pseudobulk_global.csv"))
+total_TG_pseudobulk_chr.to_csv(os.path.join(transformer_data_dir, f"TG_{chrom_id}_specific_pseudobulk_agg.csv"))
+total_RE_pseudobulk_chr.to_csv(os.path.join(transformer_data_dir, f"RE_{chrom_id}_specific_pseudobulk_agg.csv"))
 
