@@ -11,6 +11,9 @@ import logging
 from anndata import AnnData
 import argparse
 
+import warnings
+warnings.filterwarnings("ignore", message="No device id is provided via `init_process_group`")
+
 from grn_inference import utils
 
 def load_rna_adata(sample_raw_data_dir: str) -> sc.AnnData:
@@ -63,85 +66,6 @@ def tfidf(atac_matrix: np.ndarray) -> np.ndarray:
     transformed_matrix: np.ndarray = tfidf_matrix.T
     return transformed_matrix
 
-def find_neighbors(rna_data: AnnData, atac_data: AnnData) -> tuple[AnnData, AnnData]:
-    """
-    Combines RNA and ATAC-seq data in a joint PCA space and identifies neighbors based on combined features.
-
-    Parameters:
-        rna_data (AnnData):
-            AnnData object containing RNA expression data.
-        atac_data (AnnData):
-            AnnData object containing ATAC-seq data.
-
-    Returns:
-        tuple (AnnData, AnnData):
-            Updated `rna_data` and `atac_data` objects with combined PCA representation.
-    """
-    neighbors_k: int = 20  # Number of neighbors to find
-    
-    ### RNA Data Preprocessing ###
-    # Normalize RNA expression data and log-transform
-    sc.pp.normalize_total(rna_data, target_sum=1e4)
-    sc.pp.log1p(rna_data)
-    
-    # Identify highly variable genes
-    sc.pp.highly_variable_genes(rna_data, min_mean=0.0125, max_mean=3, min_disp=0.5)
-    
-    # Save raw data and subset highly variable genes
-    rna_data.raw = rna_data
-    rna_data = rna_data[:, rna_data.var.highly_variable]
-    
-    # Scale the data and perform PCA for dimensionality reduction
-    sc.pp.scale(rna_data, max_value=10)
-    sc.tl.pca(rna_data, n_comps=15, svd_solver="arpack")
-    
-    # Store the PCA results for RNA
-    pca_rna: np.ndarray = rna_data.obsm['X_pca']
-    
-    ### ATAC Data Preprocessing ###
-    # Log-transform ATAC-seq data
-    sc.pp.log1p(atac_data)
-    
-    # Identify highly variable peaks
-    sc.pp.highly_variable_genes(atac_data, min_mean=0.0125, max_mean=3, min_disp=0.5)
-    
-    # Save raw ATAC data and subset highly variable peaks
-    atac_data.raw = atac_data
-    atac_data = atac_data[:, atac_data.var.highly_variable]
-    
-    # Scale the ATAC data and perform PCA
-    sc.pp.scale(atac_data, max_value=10, zero_center=True)
-    sc.tl.pca(atac_data, n_comps=15, svd_solver="arpack")
-    
-    # Store the PCA results for ATAC
-    pca_atac: np.ndarray = atac_data.obsm['X_pca']
-    
-    ### Combine RNA and ATAC PCA Results ###
-    combined_pca: np.ndarray = np.concatenate((pca_rna, pca_atac), axis=1)
-    
-    # Store the combined PCA representation in both AnnData objects
-    rna_data.obsm['pca'] = combined_pca
-    atac_data.obsm['pca'] = combined_pca
-
-    return rna_data, atac_data
-
-def make_joint_adata(rna_data: AnnData, atac_data: AnnData) -> AnnData:
-    """
-    Construct a joint AnnData with combined PCA embeddings from RNA and ATAC.
-    Keeps the shared cells and ensures consistent obs/var.
-    """
-    assert (rna_data.obs_names == atac_data.obs_names).all(), "Cell barcodes must be aligned"
-
-    # Use the precomputed PCAs
-    combined_pca = np.concatenate((rna_data.obsm['X_pca'], atac_data.obsm['X_pca']), axis=1)
-
-    # Create empty placeholder matrix (not used, but AnnData requires X)
-    X_placeholder = sp.csr_matrix((rna_data.n_obs, 0))  
-
-    joint = AnnData(X=X_placeholder, obs=rna_data.obs.copy())
-    joint.obsm['X_combined'] = combined_pca
-
-    return joint
 
 def pseudo_bulk(
     rna_data: AnnData,
@@ -161,14 +85,14 @@ def pseudo_bulk(
     sc.pp.highly_variable_genes(rna_data, min_mean=0.0125, max_mean=3, min_disp=0.5)
     rna_data = rna_data[:, rna_data.var.highly_variable]
     sc.pp.scale(rna_data, max_value=10)
-    sc.tl.pca(rna_data, n_comps=15, svd_solver="arpack")
+    sc.tl.pca(rna_data, n_comps=25, svd_solver="arpack")
 
     # --- Preprocess ATAC ---
     sc.pp.log1p(atac_data)
     sc.pp.highly_variable_genes(atac_data, min_mean=0.0125, max_mean=3, min_disp=0.5)
     atac_data = atac_data[:, atac_data.var.highly_variable]
     sc.pp.scale(atac_data, max_value=10, zero_center=True)
-    sc.tl.pca(atac_data, n_comps=15, svd_solver="arpack")
+    sc.tl.pca(atac_data, n_comps=25, svd_solver="arpack")
 
     # --- After filtering to common barcodes ---
     common_barcodes = rna_data.obs_names.intersection(atac_data.obs_names)
@@ -178,6 +102,8 @@ def pseudo_bulk(
 
     # Align ordering explicitly: enforce identical order
     atac_data = atac_data[rna_data.obs_names].copy()
+    
+    assert (rna_data.obs_names == atac_data.obs_names).all(), "Cell barcodes must be aligned"
 
     # --- Joint embedding ---
     combined_pca = np.concatenate(
@@ -187,7 +113,11 @@ def pseudo_bulk(
     atac_data.obsm["X_combined"] = combined_pca
 
     # --- Build joint neighbors + Leiden clusters ---
-    joint = make_joint_adata(rna_data, atac_data)
+    # Create empty placeholder matrix (not used, but AnnData requires X)
+    X_placeholder = sp.csr_matrix((rna_data.n_obs, 0))  
+
+    joint = AnnData(X=X_placeholder, obs=rna_data.obs.copy())
+    joint.obsm['X_combined'] = combined_pca
     sc.pp.neighbors(joint, n_neighbors=neighbors_k, use_rep="X_combined")
     sc.tl.leiden(joint, resolution=resolution, key_added="cluster")
 
@@ -414,7 +344,13 @@ def main():
             adata_RNAtemp = adata_RNA[adata_RNA.obs['sample'] == tempsample].copy()
             adata_ATACtemp = adata_ATAC[adata_ATAC.obs['sample'] == tempsample].copy()
 
-            TG_pseudobulk_temp, RE_pseudobulk_temp = pseudo_bulk(adata_RNAtemp, adata_ATACtemp, singlepseudobulk)
+            TG_pseudobulk_temp, RE_pseudobulk_temp = pseudo_bulk(
+                adata_RNAtemp, 
+                adata_ATACtemp, 
+                singlepseudobulk,
+                neighbors_k=20,
+                resolution=1.0
+                )
 
             TG_pseudobulk = pd.concat([TG_pseudobulk, TG_pseudobulk_temp], axis=1)
             RE_pseudobulk = pd.concat([RE_pseudobulk, RE_pseudobulk_temp], axis=1)

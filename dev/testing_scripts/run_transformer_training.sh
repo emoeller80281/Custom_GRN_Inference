@@ -5,7 +5,7 @@
 #SBATCH --time=12:00:00
 #SBATCH -p dense
 #SBATCH -N 1
-#SBATCH --gres=gpu:a100:2
+#SBATCH --gres=gpu:a100:4
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 8
 #SBATCH --mem=128G
@@ -35,7 +35,7 @@ export KMP_AFFINITY=granularity=fine,compact,1,0
 export TORCH_NCCL_DEBUG=INFO
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export TORCH_NCCL_BLOCKING_WAIT=1
-export TORCH_DISTRIBUTED_DEBUG=INFO
+export TORCH_DISTRIBUTED_DEBUG=DETAIL
 
 # Create logs & start GPU sampler
 mkdir -p LOGS
@@ -45,7 +45,7 @@ nvidia-smi --query-gpu=timestamp,index,name,utilization.gpu,memory.used,memory.t
   --format=csv -l 30 > LOGS/gpu_usage_transformer_training.log &
 
 # Launch: 4 ranks on this node, bind ranks to cores
-torchrun --standalone --nproc_per_node=2 ./dev/testing_scripts/transformer_2_training.py
+torchrun --standalone --nproc_per_node=4 ./dev/testing_scripts/transformer_2_training.py
 
 # Launch: 2 ranks on this node, bind ranks to cores
 # torchrun --standalone --nproc_per_node=4 ./dev/testing_scripts/transformer.py

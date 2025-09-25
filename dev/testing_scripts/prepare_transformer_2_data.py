@@ -5,6 +5,7 @@ import logging
 import pybedtools
 import json
 import pickle
+import random
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -50,23 +51,52 @@ def create_or_load_genomic_windows(chrom_id, window_size, force_recalculate=Fals
 
 def make_peak_to_window_map(peaks_bed: pd.DataFrame, windows_bed: pd.DataFrame) -> dict[str, int]:
     """
-    peaks_bed: df with ['chrom','start','end','peak_id']
-    windows_bed: df with ['chrom','start','end','win_idx']
+    Map each peak to the window it overlaps the most.
+    If a peak ties across multiple windows, assign randomly.
+    
+    Parameters
+    ----------
+    peaks_bed : DataFrame
+        Must have ['chrom','start','end','peak_id'] columns
+    windows_bed : DataFrame
+        Must have ['chrom','start','end','win_idx'] columns
+    
+    Returns
+    -------
+    mapping : dict[str, int]
+        peak_id -> window index
     """
     bedtool_peaks = pybedtools.BedTool.from_dataframe(peaks_bed)
     bedtool_windows = pybedtools.BedTool.from_dataframe(windows_bed)
-    
-    mapping = {}
+
+    overlaps = {}
     for interval in bedtool_peaks.intersect(bedtool_windows, wa=True, wb=True):
-        peak_id = interval.name  # the peak_id column from peaks_bed
-        win_idx = int(interval.fields[-1])  # last column = win_idx
-        mapping[peak_id] = win_idx
+        peak_id = interval.name
+        win_idx = int(interval.fields[-1])  # window index
+        peak_start, peak_end = int(interval.start), int(interval.end)
+        win_start, win_end = int(interval.fields[-3]), int(interval.fields[-2])
+
+        # Compute overlap length
+        overlap_len = min(peak_end, win_end) - max(peak_start, win_start)
+
+        # Track best overlap for each peak
+        if peak_id not in overlaps:
+            overlaps[peak_id] = []
+        overlaps[peak_id].append((overlap_len, win_idx))
+
+    # Resolve ties by max overlap, then random choice
+    mapping = {}
+    for peak_id, ov_list in overlaps.items():
+        max_overlap = max(ov_list, key=lambda x: x[0])[0]
+        candidates = [win_idx for ol, win_idx in ov_list if ol == max_overlap]
+        mapping[peak_id] = random.choice(candidates)  # pick randomly if tie
+
     return mapping
 
 sample_name_list = ["E7.5_rep1", "E7.5_rep1", "E7.75_rep1", "E8.0_rep2", "E8.5_rep2",
                     "E8.75_rep2", "E7.5_rep2", "E8.0_rep1", "E8.5_rep1"]
 holdout = ["E8.75_rep1"]
-window_size = 25000
+window_size = 10000
 chrom_id = "chr19"
 
 mm10_gene_tss_bed = pybedtools.BedTool(MM10_GENE_TSS_FILE)

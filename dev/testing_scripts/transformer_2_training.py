@@ -23,6 +23,9 @@ import torch.distributed as dist
 import matplotlib.pyplot as plt
 import seaborn as sns
 
+import warnings
+warnings.filterwarnings("ignore", message="No device id is provided via `init_process_group`")
+
 PROJECT_DIR = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
 DATA_DIR = os.path.join(PROJECT_DIR, "dev/testing_scripts/transformer_data")
 OUTPUT_DIR = os.path.join(PROJECT_DIR, "output/transformer_testing_output")
@@ -89,7 +92,7 @@ class Trainer:
         
         # Learning rate scheduler
         self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, mode="min", factor=0.5, patience=2
+            self.optimizer, mode="min", factor=0.5, patience=5
         )
         
         # Early stopping
@@ -104,11 +107,11 @@ class Trainer:
         
         # Calculate predictions
         preds = self.model(atac_wins, tf_tensor)
-        
+                
         # Calculate loss
         loss = self.criterion(preds, targets)
         
-        # Add a correlation-based loss
+        # Add a correlation-based loss to maximize Pearson correlation
         preds_flat = preds.view(-1)
         targets_flat = targets.view(-1)
 
@@ -130,16 +133,15 @@ class Trainer:
         
         # Safety check to prevent GPUs from hanging on infinite loss values
         if not torch.isfinite(loss):
-            logging.error(f"Non-finite loss on rank {self.gpu_id}: {loss.item()}")
-            dist.destroy_process_group()
-            sys.exit(1)
+            # replace with safe scalar, skip backprop
+            logging.warning(f"Rank {self.gpu_id}: skipping batch due to non-finite loss")
+            loss = torch.tensor(0.0, device=self.gpu_id, requires_grad=True)
         
         # Backprop
         loss.backward()
             
         # Gradient clipping
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-        
         
         self.optimizer.step()
         return loss
@@ -182,7 +184,7 @@ class Trainer:
         preds = np.nan_to_num(preds, nan=0.0, posinf=1e6, neginf=-1e6)
         tgts  = np.nan_to_num(tgts, nan=0.0, posinf=1e6, neginf=-1e6)
 
-            # Correlations
+        # Correlations
         if np.std(tgts) < 1e-8 or np.std(preds) < 1e-8:
             pearson_corr, spearman_corr = 0.0, 0.0
         else:
@@ -204,19 +206,13 @@ class Trainer:
         for atac_wins, tf_tensor, targets in self.train_data:
             atac_wins, tf_tensor, targets = atac_wins.to(self.gpu_id), tf_tensor.to(self.gpu_id), targets.to(self.gpu_id)
             loss_val = self._run_batch((atac_wins, tf_tensor), targets)
+            if loss_val is None:
+                continue
             total_loss += loss_val
             n_batches += 1
 
         avg_train_loss = total_loss / max(1, n_batches)
         avg_val_loss, pearson_corr, spearman_corr = self._validate()
-
-        if self.gpu_id == 0:
-            logging.info(
-                f"Epoch {epoch} | Train Loss: {avg_train_loss:.4f} | "
-                f"Val Loss: {avg_val_loss:.4f} | "
-                f"Pearson: {pearson_corr:.3f} | Spearman: {spearman_corr:.3f} | "
-                f"LR: {self.optimizer.param_groups[0]['lr']:.2e}"
-            )
 
         return avg_train_loss, avg_val_loss, pearson_corr, spearman_corr
 
@@ -235,11 +231,15 @@ class Trainer:
         for epoch in range(max_epochs):
             train_loss, val_loss, pearson_corr, spearman_corr = self._run_epoch(epoch)
 
-            if self.gpu_id == 0 and epoch % self.save_every == 0:
-                self._save_checkpoint(epoch)
-
             # Save stats to history
             if self.gpu_id == 0:
+                logging.info(
+                    f"Epoch {epoch} | Train Loss: {train_loss:.4f} | "
+                    f"Val Loss: {val_loss:.4f} | "
+                    f"Pearson: {pearson_corr:.3f} | Spearman: {spearman_corr:.3f} | "
+                    f"LR: {self.optimizer.param_groups[0]['lr']:.2e}"
+                )
+                
                 lr = self.optimizer.param_groups[0]['lr']
                 history.append({
                     "Epoch": epoch,
@@ -250,28 +250,50 @@ class Trainer:
                     "LR": float(lr),
                 })
 
-            # Early stopping
+            # Checkpoint + CSV log
+            if epoch % self.save_every == 0:
+                if self.gpu_id == 0:
+                    self._save_checkpoint(epoch)
+                    self._write_log_csv(history, log_path, epoch)
+                dist.barrier()
+                
+            stop_tensor = torch.tensor(0, device=self.gpu_id)
+
+            # Early stopping check
             if val_loss < best_val_loss - self.min_delta:
                 best_val_loss = val_loss
                 patience_counter = 0
             else:
                 patience_counter += 1
-                if patience_counter >= self.patience:
-                    if self.gpu_id == 0:
-                        logging.info("Early stopping triggered.")
-                    break
+                
+                if patience_counter >= self.patience and self.gpu_id == 0:
+                    logging.info("Early stopping triggered.")
+                    self._save_checkpoint(epoch)
+                    self._write_log_csv(history, log_path, epoch, final=True)
+                    stop_tensor.fill_(1)  # rank 0 sets the stop flag
 
-        # Save history to CSV (only rank 0 does this)
-        if self.gpu_id == 0:
-            fieldnames = ["Epoch", "Train Loss", "Val Loss", "Pearson", "Spearman", "LR"]
-            with open(log_path, "w", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
-                writer.writeheader()
-                writer.writerows(history)
-            logging.info(f"Saved training log to {log_path}")
+            # broadcast stop flag from rank 0 → all ranks
+            dist.broadcast(stop_tensor, src=0)
 
+            if stop_tensor.item() == 1:
+                break
+            else:
+                if self.gpu_id == 0:
+                    logging.info(f"    Loss did not improved {patience_counter}/{self.patience}")
+
+        # Final save if not early stopped
+        if self.gpu_id == 0 and patience_counter < self.patience:
+            self._write_log_csv(history, log_path, epoch, final=True)
             logging.info("Training loop exited normally.")
-
+    
+    def _write_log_csv(self, history, log_path, epoch, final=False):
+        fieldnames = ["Epoch", "Train Loss", "Val Loss", "Pearson", "Spearman", "LR"]
+        with open(log_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(history)
+        tag = "final" if final else "intermediate"
+        logging.info(f"    {tag.capitalize()} training log written at epoch {epoch}")
             
 
 def load_train_objs():
@@ -300,7 +322,6 @@ def prepare_dataloader(dataset: Dataset, batch_size: int, world_size: int, rank:
     test_loader  = DataLoader(test_set, batch_size=batch_size, sampler=DistributedSampler(test_set, num_replicas=world_size, rank=rank, drop_last=True))
 
     return train_loader, val_loader, test_loader
-
 
 def plot_per_gene_correlation_scatterplot(model, dataloader, scaler, gpu_id=0, outpath=None):
     model.eval()
@@ -408,11 +429,33 @@ def plot_gene_correlation_distribution(corr_df, out_prefix):
     plt.savefig(f"{out_prefix}_violin.png", dpi=300)
     plt.close()
 
+def write_run_parameters(dataset, out_dir):
+    run_params = {
+        "Genes": dataset.num_tg,
+        "Windows": dataset.num_windows,
+        "TFs": dataset.num_tf,
+        "Metacells": len(dataset.metacell_names),  # store count, not huge list
+        "Epochs": TOTAL_EPOCHS,
+        "Batch Size": BATCH_SIZE,
+        "d_model": D_MODEL,
+        "Attention Heads": NUM_HEADS,
+        "Model Layers": NUM_LAYERS,
+        "d_feedforward": D_FF,
+        "Dropout": DROPOUT,
+    }
+
+    path = os.path.join(out_dir, "run_parameters.csv")
+    with open(path, "w", newline="") as f:
+        writer = csv.writer(f)
+        for key, value in run_params.items():
+            writer.writerow([key, value])
+    logging.info(f"Run parameters written to {path}")
+
 def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_size: int):
     ddp_setup(rank, world_size)
     setup_logging(rank)
     
-    time_now = datetime.now().strftime("%d%m%y%H%M%S")
+    time_now = datetime.now().strftime("%d_%m_%H_%M_%S")
     training_output_dir = os.path.join(OUTPUT_DIR, f"model_training_{time_now}")
     
     os.makedirs(training_output_dir, exist_ok=True)
@@ -420,6 +463,7 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
     if rank == 0:
         logging.info("Loading Training Objectives")
     dataset, model, optimizer = load_train_objs()
+
     
     if rank == 0:
         logging.info("===== MultiomicTransformerDataset Loaded =====")
@@ -428,6 +472,7 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
         logging.info(f"TFs:              {dataset.num_tf}")
         logging.info(f"Metacells:        {len(dataset.metacell_names)}")
         logging.info("================================================")
+        write_run_parameters(dataset, training_output_dir)
     
     if rank == 0:
         logging.info("Preparing DataLoader")
@@ -480,8 +525,6 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
         plot_gene_correlation_distribution(corr_df, out_prefix)
         logging.info(f"Saved per-gene correlation plots to {out_prefix}_*.png")
     
-    if rank == 0:
-        logging.info("Main finished, destroying process group")
 
     if dist.is_initialized():
         dist.barrier()
