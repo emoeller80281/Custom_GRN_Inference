@@ -9,6 +9,8 @@ import random
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
+WINDOW_SIZE = 50000
+
 PROJECT_DIR = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
 RAW_MESC_DATA_DIR = "/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/SINGLE_CELL_DATASETS/DS014_DOI496239_MOUSE_ESC_RAW_FILES"
 MESC_PEAK_MATRIX_FILE = "/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/SINGLE_CELL_DATASETS/DS014_DOI496239_MOUSE_ESCDAYS7AND8/scATAC_PeakMatrix.txt"
@@ -30,12 +32,12 @@ def load_homer_tf_to_peak_results():
     
     return homer_results
 
-def create_or_load_genomic_windows(chrom_id, window_size, force_recalculate=False):
-    genome_window_file = os.path.join(MM10_GENOME_DIR, f"mm10_{chrom_id}_windows_{window_size // 1000}kb.bed")
+def create_or_load_genomic_windows(chrom_id, force_recalculate=False):
+    genome_window_file = os.path.join(MM10_GENOME_DIR, f"mm10_{chrom_id}_windows_{WINDOW_SIZE // 1000}kb.bed")
     if not os.path.exists(genome_window_file) or force_recalculate:
         
         logging.info("\nCreating genomic windows")
-        mm10_genome_windows = pybedtools.bedtool.BedTool().window_maker(g=MM10_CHROM_SIZES_FILE, w=window_size)
+        mm10_genome_windows = pybedtools.bedtool.BedTool().window_maker(g=MM10_CHROM_SIZES_FILE, w=WINDOW_SIZE)
         mm10_windows = (
             mm10_genome_windows
             .filter(lambda x: x.chrom == chrom_id)  # TEMPORARY Restrict to one chromosome for testing
@@ -96,7 +98,6 @@ def make_peak_to_window_map(peaks_bed: pd.DataFrame, windows_bed: pd.DataFrame) 
 sample_name_list = ["E7.5_rep1", "E7.5_rep1", "E7.75_rep1", "E8.0_rep2", "E8.5_rep2",
                     "E8.75_rep2", "E7.5_rep2", "E8.0_rep1", "E8.5_rep1"]
 holdout = ["E8.75_rep1"]
-window_size = 10000
 chrom_id = "chr19"
 
 mm10_gene_tss_bed = pybedtools.BedTool(MM10_GENE_TSS_FILE)
@@ -155,7 +156,7 @@ total_RE_pseudobulk_chr = pd.concat(RE_pseudobulk_samples)
 total_peaks_df = pd.concat(peaks_df_samples)
 
 # Create genome windows and add index
-mm10_windows = create_or_load_genomic_windows(chrom_id, window_size)
+mm10_windows = create_or_load_genomic_windows(chrom_id)
 mm10_windows = mm10_windows.reset_index(drop=True)
 mm10_windows["win_idx"] = mm10_windows.index
 

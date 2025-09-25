@@ -30,7 +30,7 @@ PROJECT_DIR = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.M
 DATA_DIR = os.path.join(PROJECT_DIR, "dev/testing_scripts/transformer_data")
 OUTPUT_DIR = os.path.join(PROJECT_DIR, "output/transformer_testing_output")
 
-TOTAL_EPOCHS=50
+TOTAL_EPOCHS=20
 BATCH_SIZE=32
 
 D_MODEL = 512
@@ -223,6 +223,9 @@ class Trainer:
         if self.gpu_id == 0:
             logging.info(f"\tTraining checkpoint saved at {PATH}")
 
+                        
+        
+
     def train(self, max_epochs: int, log_path: str = "training_log.csv"):
         best_val_loss = float("inf")
         patience_counter = 0
@@ -278,8 +281,8 @@ class Trainer:
             if stop_tensor.item() == 1:
                 break
             else:
-                if self.gpu_id == 0:
-                    logging.info(f"    Loss did not improved {patience_counter}/{self.patience}")
+                if self.gpu_id == 0 and patience_counter > 0:
+                    logging.info(f"    Loss did not improve {patience_counter}/{self.patience}")
 
         # Final save if not early stopped
         if self.gpu_id == 0 and patience_counter < self.patience:
@@ -495,6 +498,21 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
         max_epochs=total_epochs, 
         log_path=os.path.join(training_output_dir, "training_log.csv")
         )
+    
+    if dist.is_initialized():
+        dist.barrier()
+        if rank == 0:
+            logging.info("Training Complete! Synchronizing ranks")
+    
+    if rank == 0:
+        tf_tg_weights = trainer.model.module.tf_tg_weights.detach().cpu().numpy()
+        tf_names = dataset.tf_names  # assuming you have these
+        tg_names = dataset.TG_pseudobulk.index.tolist()
+
+        tf_tg_df = pd.DataFrame(tf_tg_weights, index=tf_names, columns=tg_names)
+        tf_tg_df.to_csv(os.path.join(training_output_dir, "tf_tg_weights.csv"))
+        logging.info("Saved TF→TG weights to CSV")
+
     
     if rank == 0:
         scaler = joblib.load(os.path.join(DATA_DIR, "tg_scaler.pkl"))

@@ -10,11 +10,14 @@ import scipy.sparse as sp
 import logging
 from anndata import AnnData
 import argparse
+import multiprocessing as mp
 
 import warnings
 warnings.filterwarnings("ignore", message="No device id is provided via `init_process_group`")
 
 from grn_inference import utils
+
+
 
 def load_rna_adata(sample_raw_data_dir: str) -> sc.AnnData:
     # Look for features file
@@ -31,41 +34,6 @@ def load_rna_adata(sample_raw_data_dir: str) -> sc.AnnData:
         prefix=prefix
     )
     return adata
-
-def tfidf(atac_matrix: np.ndarray) -> np.ndarray:
-    """
-    Performs a TF-IDF-like transformation on the ATAC-seq matrix to highlight important regulatory elements.
-
-    Parameters:
-        atac_matrix (np.ndarray):
-            A matrix of ATAC-seq data, where rows are regulatory elements (peaks) and columns are cells. 
-            Values represent the accessibility of the peaks in each cell.
-
-    Returns:
-        transformed_matrix (np.ndarray):
-            Transformed matrix where rows represent regulatory elements (peaks) and columns represent cells,
-            with values weighted by TF-IDF-like scores.
-    """
-
-    # Create a binary matrix indicating presence/absence of peaks
-    binary_matrix: np.ndarray = 1 * (atac_matrix > 0)
-    
-    # Calculate term frequency (TF) normalized by log of total accessibility per cell
-    term_freq: np.ndarray = binary_matrix / (np.ones((binary_matrix.shape[0], 1)) * np.log(1 + np.sum(binary_matrix, axis=0))[np.newaxis, :])
-    
-    # Calculate inverse document frequency (IDF) based on peak occurrence across cells
-    inverse_doc_freq: np.ndarray = np.log(1 + binary_matrix.shape[1] / (1 + np.sum(binary_matrix > 0, axis=1)))
-    
-    # Compute the TF-IDF-like matrix
-    tfidf_matrix: np.ndarray = term_freq * (inverse_doc_freq[:, np.newaxis] * np.ones((1, binary_matrix.shape[1])))
-    
-    # Replace any NaN values with 0 (due to division by zero)
-    tfidf_matrix[np.isnan(tfidf_matrix)] = 0
-    
-    # Return the transposed matrix (cells as rows, peaks as columns)
-    transformed_matrix: np.ndarray = tfidf_matrix.T
-    return transformed_matrix
-
 
 def pseudo_bulk(
     rna_data: AnnData,
@@ -221,6 +189,67 @@ def get_adata_from_peakmatrix(peak_matrix_file: str, label: pd.DataFrame, sample
 
     return adata_ATAC
 
+def process_sample(sample_name: str):
+    sample_data_dir = os.path.join(SAMPLE_INPUT_DIR, sample_name)
+    os.makedirs(sample_data_dir, exist_ok=True)
+
+    if os.path.exists(os.path.join(sample_data_dir, f"{sample_name}_RNA_qc.h5ad")) \
+       and os.path.exists(os.path.join(sample_data_dir, f"{sample_name}_ATAC_qc.h5ad")):
+        adata_RNA = sc.read_h5ad(os.path.join(sample_data_dir, f"{sample_name}_RNA_qc.h5ad"))
+        adata_ATAC = sc.read_h5ad(os.path.join(sample_data_dir, f"{sample_name}_ATAC_qc.h5ad"))
+    else:
+        # --- load raw data ---
+        sample_raw_data_dir = os.path.join(RAW_MESC_DATA_DIR, sample_name)
+        adata_RNA = load_rna_adata(sample_raw_data_dir)
+        adata_RNA.obs_names = [(sample_name + "." + i).replace("-", ".") for i in adata_RNA.obs_names]
+        logging.info(f"[{sample_name}] Found {len(adata_RNA.obs_names)} RNA barcodes")
+
+        label = pd.DataFrame({"barcode_use": adata_RNA.obs_names,
+                              "label": ["mESC"] * len(adata_RNA.obs_names)})
+
+        adata_ATAC = get_adata_from_peakmatrix(MESC_PEAK_MATRIX_FILE, label, sample_name)
+
+        # Synchronize barcodes
+        adata_RNA.obs['barcode'] = adata_RNA.obs_names
+        common_barcodes = adata_RNA.obs['barcode'].isin(adata_ATAC.obs['barcode'])
+        adata_RNA = adata_RNA[common_barcodes].copy()
+        adata_ATAC = adata_ATAC[adata_ATAC.obs['barcode'].isin(adata_RNA.obs['barcode'])].copy()
+
+        # QC
+        adata_RNA.var['mt'] = adata_RNA.var_names.str.startswith("MT-")
+        sc.pp.calculate_qc_metrics(adata_RNA, qc_vars=["mt"], inplace=True)
+        adata_RNA = adata_RNA[adata_RNA.obs.pct_counts_mt < 5].copy()
+        adata_RNA.var_names_make_unique()
+        adata_RNA.var['gene_ids'] = adata_RNA.var.index
+
+        adata_RNA.write_h5ad(os.path.join(sample_data_dir, f"{sample_name}_RNA_qc.h5ad"))
+        adata_ATAC.write_h5ad(os.path.join(sample_data_dir, f"{sample_name}_ATAC_qc.h5ad"))
+
+    # --- filtering ---
+    sc.pp.filter_cells(adata_RNA, min_genes=200)
+    sc.pp.filter_genes(adata_RNA, min_cells=3)
+    sc.pp.filter_cells(adata_ATAC, min_genes=200)
+    sc.pp.filter_genes(adata_ATAC, min_cells=3)
+    
+    singlepseudobulk = (adata_RNA.obs['sample'].unique().shape[0] * adata_RNA.obs['sample'].unique().shape[0] > 100)
+
+    # --- pseudo-bulk ---
+    TG_pseudobulk, RE_pseudobulk = pseudo_bulk(
+        adata_RNA, adata_ATAC, use_single=singlepseudobulk,
+        neighbors_k=20, resolution=1.0
+    )
+    TG_pseudobulk = TG_pseudobulk.fillna(0)
+    RE_pseudobulk = RE_pseudobulk.fillna(0)
+    RE_pseudobulk[RE_pseudobulk > 100] = 100
+
+    TG_pseudobulk.to_csv(os.path.join(sample_data_dir, "TG_pseudobulk.tsv"), sep="\t")
+    RE_pseudobulk.to_csv(os.path.join(sample_data_dir, "RE_pseudobulk.tsv"), sep="\t")
+    pd.DataFrame(adata_ATAC.var['gene_ids']).to_csv(os.path.join(sample_data_dir, "Peaks.txt"),
+                                                    header=None, index=None)
+
+    logging.info(f"[{sample_name}] Finished processing")
+    return sample_name
+
 PROJECT_DIR = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
 RAW_MESC_DATA_DIR = "/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/SINGLE_CELL_DATASETS/DS014_DOI496239_MOUSE_ESC_RAW_FILES"
 MESC_PEAK_MATRIX_FILE = "/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/SINGLE_CELL_DATASETS/DS014_DOI496239_MOUSE_ESCDAYS7AND8/scATAC_PeakMatrix.txt"
@@ -235,141 +264,12 @@ def main():
     sample_name_list = ["E7.5_rep1", "E7.5_rep1", "E7.75_rep1", "E8.0_rep2", "E8.5_rep2",
                         "E8.75_rep2", "E7.5_rep2", "E8.0_rep1", "E8.5_rep1", "E8.75_rep1"]
     
-    for sample_name in sample_name_list:
-        
-        sample_data_dir = os.path.join(SAMPLE_INPUT_DIR, sample_name)
-        if not os.path.exists(sample_data_dir):
-            os.makedirs(sample_data_dir)
-        
-        if os.path.exists(os.path.join(sample_data_dir, f"{sample_name}_RNA_qc.h5ad")) and os.path.exists(os.path.join(sample_data_dir, f"{sample_name}_ATAC_qc.h5ad")):
-            adata_RNA = sc.read_h5ad(os.path.join(sample_data_dir, f"{sample_name}_RNA_qc.h5ad"))
-            adata_ATAC = sc.read_h5ad(os.path.join(sample_data_dir, f"{sample_name}_ATAC_qc.h5ad"))
-        else:
-            # for sample_name in os.listdir(RAW_MESC_DATA_DIR):
-            sample_raw_data_dir = os.path.join(RAW_MESC_DATA_DIR, sample_name)
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
 
-            adata_RNA = load_rna_adata(sample_raw_data_dir)
-            
-            adata_RNA.obs_names = [(sample_name + "." + i).replace("-", ".") for i in adata_RNA.obs_names]
-            logging.info(f"Found {len(adata_RNA.obs_names)} cell barcodes")
-            
-            label = pd.DataFrame({"barcode_use":adata_RNA.obs_names, "label":["mESC"] * len(adata_RNA.obs_names)})
+    with mp.Pool(processes=4) as pool:  # adjust #processes to #CPUs available
+        results = pool.map(process_sample, sample_name_list)
 
-            adata_ATAC = get_adata_from_peakmatrix(MESC_PEAK_MATRIX_FILE, label, sample_name)
-
-            # Add barcode column
-            adata_RNA.obs['barcode'] = adata_RNA.obs_names
-            
-            logging.info("Example RNA barcodes:", adata_RNA.obs['barcode'][:5].tolist())
-            logging.info("Example ATAC barcodes:", adata_ATAC.obs['barcode'][:5].tolist())
-
-            common_barcodes = adata_RNA.obs['barcode'].isin(adata_ATAC.obs['barcode'])
-            adata_RNA = adata_RNA[common_barcodes].copy()
-            adata_ATAC = adata_ATAC[adata_ATAC.obs['barcode'].isin(adata_RNA.obs['barcode'])].copy()
-
-            adata_RNA.obs['sample'] = sample_name
-
-            # Add label column from your label DataFrame
-            label_lookup = label.set_index("barcode_use").loc[adata_RNA.obs['barcode']]
-            adata_RNA.obs['label'] = label_lookup['label'].values
-
-            # QC fields like in the reference get_adata
-            adata_RNA.var['mt'] = adata_RNA.var_names.str.startswith("MT-")
-            sc.pp.calculate_qc_metrics(adata_RNA, qc_vars=["mt"], inplace=True)
-            adata_RNA = adata_RNA[adata_RNA.obs.pct_counts_mt < 5].copy()
-
-            # Ensure gene IDs are unique
-            adata_RNA.var.index = adata_RNA.var_names
-            adata_RNA.var_names_make_unique()
-            adata_RNA.var['gene_ids'] = adata_RNA.var.index
-            
-            # --- Save aligned & QC-filtered AnnData objects ---
-            sample_data_dir = os.path.join(SAMPLE_INPUT_DIR, sample_name)
-            os.makedirs(sample_data_dir, exist_ok=True)
-
-            adata_RNA.write_h5ad(os.path.join(sample_data_dir, f"{sample_name}_RNA_qc.h5ad"))
-            adata_ATAC.write_h5ad(os.path.join(sample_data_dir, f"{sample_name}_ATAC_qc.h5ad"))
-
-            logging.info(f"Saved RNA and ATAC AnnData objects for {sample_name} to {sample_data_dir}")
-                    
-        logging.info(f'\tscRNAseq Dataset: {adata_RNA.shape[1]} genes, {adata_RNA.shape[0]} cells')
-        logging.info(f'\tscATACseq Dataset: {adata_ATAC.shape[1]} peaks, {adata_ATAC.shape[0]} cells')
-
-        # Remove low count cells and genes
-        logging.info('\nFiltering Data')
-        logging.info(f'\tFiltering out cells with less than 200 genes...')
-        sc.pp.filter_cells(adata_RNA, min_genes=200)
-        adata_RNA = adata_RNA.copy()
-        logging.info(f'\t\tShape of the RNA dataset = {adata_RNA.shape[1]} genes, {adata_RNA.shape[0]} cells')
-
-        logging.info(f'\tFiltering out genes expressed in fewer than 3 cells...')
-        sc.pp.filter_genes(adata_RNA, min_cells=3)
-        adata_RNA = adata_RNA.copy()
-        logging.info(f'\t\tShape of the RNA dataset = {adata_RNA.shape[1]} genes, {adata_RNA.shape[0]} cells')
-
-        logging.info(f'\tFiltering out cells with less than 200 ATAC-seq peaks...')
-        sc.pp.filter_cells(adata_ATAC, min_genes=200)
-        adata_ATAC = adata_ATAC.copy()
-        logging.info(f'\t\tShape of the ATAC dataset = {adata_ATAC.shape[1]} peaks, {adata_ATAC.shape[0]} cells')
-
-        logging.info(f'\tFiltering out peaks expressed in fewer than 3 cells...')
-        sc.pp.filter_genes(adata_ATAC, min_cells=3)
-        adata_ATAC = adata_ATAC.copy()
-        logging.info(f'\t\tShape of the ATAC dataset = {adata_ATAC.shape[1]} peaks, {adata_ATAC.shape[0]} cells')
-
-        logging.info('\nShape of the dataset after filtering')
-        logging.info(f'\tscRNAseq Dataset: {adata_RNA.shape[1]} genes, {adata_RNA.shape[0]} cells')
-        logging.info(f'\tscATACseq Dataset: {adata_ATAC.shape[1]} peaks, {adata_ATAC.shape[0]} cells')
-
-        common_barcodes = set(adata_RNA.obs['barcode']).intersection(set(adata_ATAC.obs['barcode']))
-        logging.info(f"\nNumber of common barcodes: {len(common_barcodes)}")
-
-        adata_RNA = adata_RNA[adata_RNA.obs['barcode'].isin(common_barcodes)].copy()
-        adata_ATAC = adata_ATAC[adata_ATAC.obs['barcode'].isin(common_barcodes)].copy()
-
-        logging.info('\nOnly keeping shared barcodes')
-        logging.info(f'\tscRNAseq Dataset: {adata_RNA.shape[1]} genes, {adata_RNA.shape[0]} cells')
-        logging.info(f'\tscATACseq Dataset: {adata_ATAC.shape[1]} peaks, {adata_ATAC.shape[0]} cells')
-
-        logging.info(f'\nGenerating pseudo-bulk / metacells')
-        samplelist = list(set(adata_ATAC.obs['sample'].values))
-        tempsample = samplelist[0]
-
-        TG_pseudobulk = pd.DataFrame([])
-        RE_pseudobulk = pd.DataFrame([])
-
-        singlepseudobulk = (adata_RNA.obs['sample'].unique().shape[0] * adata_RNA.obs['sample'].unique().shape[0] > 100)
-
-        for tempsample in samplelist:
-            adata_RNAtemp = adata_RNA[adata_RNA.obs['sample'] == tempsample].copy()
-            adata_ATACtemp = adata_ATAC[adata_ATAC.obs['sample'] == tempsample].copy()
-
-            TG_pseudobulk_temp, RE_pseudobulk_temp = pseudo_bulk(
-                adata_RNAtemp, 
-                adata_ATACtemp, 
-                singlepseudobulk,
-                neighbors_k=20,
-                resolution=1.0
-                )
-
-            TG_pseudobulk = pd.concat([TG_pseudobulk, TG_pseudobulk_temp], axis=1)
-            RE_pseudobulk = pd.concat([RE_pseudobulk, RE_pseudobulk_temp], axis=1)
-
-            RE_pseudobulk[RE_pseudobulk > 100] = 100
-
-        logging.info(f'Writing adata_ATAC.h5ad and adata_RNA.h5ad')
-        adata_ATAC.write_h5ad(os.path.join(sample_data_dir, f'{sample_name}_ATAC.h5ad'))
-        adata_RNA.write_h5ad(os.path.join(sample_data_dir, f'{sample_name}_RNA.h5ad'))
-
-        TG_pseudobulk = TG_pseudobulk.fillna(0)
-        RE_pseudobulk = RE_pseudobulk.fillna(0)
-
-        logging.info(f'Writing out peak gene ids')
-        pd.DataFrame(adata_ATAC.var['gene_ids']).to_csv(os.path.join(sample_data_dir, "Peaks.txt"), header=None, index=None)
-
-        logging.info(f'Writing out pseudobulk...')
-        TG_pseudobulk.to_csv(os.path.join(sample_data_dir, "TG_pseudobulk.tsv"), sep='\t', index=True)
-        RE_pseudobulk.to_csv(os.path.join(sample_data_dir, "RE_pseudobulk.tsv"), sep='\t', index=True)
+    logging.info(f"Completed samples: {results}")
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(message)s")
