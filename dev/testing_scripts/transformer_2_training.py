@@ -30,7 +30,7 @@ PROJECT_DIR = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.M
 DATA_DIR = os.path.join(PROJECT_DIR, "dev/testing_scripts/transformer_data")
 OUTPUT_DIR = os.path.join(PROJECT_DIR, "output/transformer_testing_output")
 
-TOTAL_EPOCHS=20
+TOTAL_EPOCHS=100
 BATCH_SIZE=32
 
 D_MODEL = 512
@@ -79,7 +79,7 @@ class Trainer:
         gpu_id: int,
         save_every: int,
         patience: int = 10,
-        min_delta: float = 1e-3,
+        min_delta: float = 5e-4,
     ) -> None:
         self.gpu_id = gpu_id
         self.model = model.to(gpu_id)
@@ -296,7 +296,7 @@ class Trainer:
             writer.writeheader()
             writer.writerows(history)
         tag = "final" if final else "intermediate"
-        logging.info(f"    {tag.capitalize()} training log written at epoch {epoch}")
+        # logging.info(f"    {tag.capitalize()} training log written at epoch {epoch}")
             
 
 def load_train_objs():
@@ -466,14 +466,20 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
     if rank == 0:
         logging.info("Loading Training Objectives")
     dataset, model, optimizer = load_train_objs()
-
     
     if rank == 0:
         logging.info("===== MultiomicTransformerDataset Loaded =====")
-        logging.info(f"Genes:            {dataset.num_tg}")
-        logging.info(f"Windows (RE):     {dataset.num_windows}")
-        logging.info(f"TFs:              {dataset.num_tf}")
-        logging.info(f"Metacells:        {len(dataset.metacell_names)}")
+        logging.info(f"Genes:               {dataset.num_tg}")
+        logging.info(f"Windows (RE):        {dataset.num_windows}")
+        logging.info(f"TFs:                 {dataset.num_tf}")
+        logging.info(f"Metacells:           {len(dataset.metacell_names)}")
+        logging.info(f"Epochs:              {TOTAL_EPOCHS}")
+        logging.info(f"Batch Size:          {BATCH_SIZE}")
+        logging.info(f"Model Dimension:     {D_MODEL}")
+        logging.info(f"Attention Heads:     {NUM_HEADS}")
+        logging.info(f"Attention Layers:    {NUM_LAYERS}")
+        logging.info(f"Feedforward Layers:  {D_FF}")
+        logging.info(f"Dropout:             {DROPOUT}")
         logging.info("================================================")
         write_run_parameters(dataset, training_output_dir)
     
