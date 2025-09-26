@@ -113,8 +113,8 @@ gene_tss_df = (
     )
 
 
-tf_list = list(load_homer_tf_to_peak_results()["source_id"].unique())
-logging.info(f"\nHomer TFs: \t{tf_list[:5]}\n\tTotal {len(tf_list)} TFs")
+tf_names = list(load_homer_tf_to_peak_results()["source_id"].unique())
+logging.info(f"\nHomer TFs: \t{tf_names[:5]}\n\tTotal {len(tf_names)} TFs")
 
 TG_pseudobulk_global = []
 TG_pseudobulk_samples = []
@@ -160,7 +160,7 @@ total_peaks_df = pd.concat(peaks_df_samples).groupby(level=0).first()
 
 # TF expression (genome-wide TFs)
 total_TG_pseudobulk_global = pd.concat(TG_pseudobulk_samples).groupby(level=0).sum()
-genome_wide_tf_expression = total_TG_pseudobulk_global.reindex(tf_list).fillna(0).values.astype("float32")
+genome_wide_tf_expression = total_TG_pseudobulk_global.reindex(tf_names).fillna(0).values.astype("float32")
 
 # Scale TG expression
 scaler = StandardScaler()
@@ -204,7 +204,16 @@ torch.save(atac_window_tensor_all, os.path.join(transformer_data_dir, f"atac_win
 # Save metadata
 with open(os.path.join(transformer_data_dir, "window_map.json"), "w") as f:
     json.dump(window_map, f, indent=4)
-with open(os.path.join(transformer_data_dir, "tf_list.pickle"), "wb") as fp:
-    pickle.dump(tf_list, fp)
+    
+tg_names = total_TG_pseudobulk_chr.index.tolist()
+with open(os.path.join(transformer_data_dir, f"tg_names_{chrom_id}.json"), "w") as f:
+    json.dump(tg_names, f)
+    
+metacell_names = total_TG_pseudobulk_global.columns.tolist()
+with open(os.path.join(transformer_data_dir, f"metacell_names.json"), "w") as f:
+    json.dump(metacell_names, f)
+    
+with open(os.path.join(transformer_data_dir, "tf_names.pickle"), "wb") as fp:
+    pickle.dump(tf_names, fp)
 
 logging.info("\nPreprocessing complete. Saved TF, TG, ATAC tensors to transformer_data_dir")

@@ -17,8 +17,6 @@ warnings.filterwarnings("ignore", message="No device id is provided via `init_pr
 
 from grn_inference import utils
 
-
-
 def load_rna_adata(sample_raw_data_dir: str) -> sc.AnnData:
     # Look for features file
     features = [f for f in os.listdir(sample_raw_data_dir) if f.endswith("features.tsv.gz")]
@@ -256,7 +254,6 @@ MESC_PEAK_MATRIX_FILE = "/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/RE
 
 MM10_GENOME_DIR = os.path.join(PROJECT_DIR, "data/reference_genome/mm10")
 MM10_GENE_TSS_FILE = os.path.join(PROJECT_DIR, "data/genome_annotation/mm10/mm10_TSS.bed")
-GROUND_TRUTH_DIR = os.path.join(PROJECT_DIR, "ground_truth_files")
 SAMPLE_INPUT_DIR = os.path.join(PROJECT_DIR, "input/transformer_input/mESC")
 OUTPUT_DIR = os.path.join(PROJECT_DIR, "output/transformer_testing_output")
 

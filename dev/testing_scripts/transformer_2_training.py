@@ -222,10 +222,7 @@ class Trainer:
         torch.save(ckp, PATH)
         if self.gpu_id == 0:
             logging.info(f"\tTraining checkpoint saved at {PATH}")
-
-                        
         
-
     def train(self, max_epochs: int, log_path: str = "training_log.csv"):
         best_val_loss = float("inf")
         patience_counter = 0
@@ -513,7 +510,7 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
     if rank == 0:
         tf_tg_weights = trainer.model.module.tf_tg_weights.detach().cpu().numpy()
         tf_names = dataset.tf_list
-        tg_names = dataset.TG_pseudobulk.index.tolist()
+        tg_names = dataset.tg_names
 
         tf_tg_df = pd.DataFrame(tf_tg_weights, index=dataset.tf_list, columns=tg_names)
         tf_tg_df.to_csv(os.path.join(training_output_dir, "tf_tg_weights.csv"))
@@ -536,7 +533,7 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
         logging.info("Evaluating per-gene correlations on test set...")
         corr_df = per_gene_correlation(
             model, test_loader, scaler, gpu_id=rank,
-            gene_names=dataset.TG_pseudobulk.index.tolist()
+            gene_names=dataset.tg_names
         )
         corr_df.to_csv(out_prefix + ".csv", index=False)
         logging.info(f"Saved per-gene correlations to {out_prefix}.csv")
