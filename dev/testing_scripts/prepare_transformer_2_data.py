@@ -6,6 +6,9 @@ import pybedtools
 import json
 import pickle
 import random
+import scipy.sparse as sp
+from sklearn.preprocessing import StandardScaler
+import joblib
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -150,12 +153,25 @@ for sample_name in sample_name_list:
         RE_pseudobulk_samples.append(RE_chr_specific)
         peaks_df_samples.append(peaks_df)
     
-total_TG_pseudobulk_global = pd.concat(TG_pseudobulk_samples)
-total_TG_pseudobulk_chr = pd.concat(TG_pseudobulk_samples)
-total_RE_pseudobulk_chr = pd.concat(RE_pseudobulk_samples)
-total_peaks_df = pd.concat(peaks_df_samples)
+# Aggregate across samples
+total_TG_pseudobulk_chr = pd.concat(TG_pseudobulk_samples).groupby(level=0).sum()
+total_RE_pseudobulk_chr = pd.concat(RE_pseudobulk_samples).groupby(level=0).sum()
+total_peaks_df = pd.concat(peaks_df_samples).groupby(level=0).first()
 
-# Create genome windows and add index
+# TF expression (genome-wide TFs)
+total_TG_pseudobulk_global = pd.concat(TG_pseudobulk_samples).groupby(level=0).sum()
+genome_wide_tf_expression = total_TG_pseudobulk_global.reindex(tf_list).fillna(0).values.astype("float32")
+
+# Scale TG expression
+scaler = StandardScaler()
+TG_scaled = scaler.fit_transform(total_TG_pseudobulk_chr.values.astype("float32"))
+
+# Save scaler for inverse-transform
+transformer_data_dir = os.path.join(PROJECT_DIR, "dev/testing_scripts/transformer_data")
+os.makedirs(transformer_data_dir, exist_ok=True)
+joblib.dump(scaler, os.path.join(transformer_data_dir, "tg_scaler.pkl"))
+
+# Create genome windows
 mm10_windows = create_or_load_genomic_windows(chrom_id)
 mm10_windows = mm10_windows.reset_index(drop=True)
 mm10_windows["win_idx"] = mm10_windows.index
@@ -164,15 +180,31 @@ mm10_windows["win_idx"] = mm10_windows.index
 window_map = make_peak_to_window_map(total_peaks_df, mm10_windows)
 logging.info(f"Mapped {len(window_map)} peaks to windows")
 
-transformer_data_dir = os.path.join(PROJECT_DIR, "dev/testing_scripts/transformer_data")
+# ----- Save Precomputed Tensors -----
+# TF tensor
+tf_tensor_all = torch.tensor(genome_wide_tf_expression, dtype=torch.float32)
+torch.save(tf_tensor_all, os.path.join(transformer_data_dir, "tf_tensor_all.pt"))
 
+# TG tensor (scaled)
+tg_tensor_all = torch.tensor(TG_scaled, dtype=torch.float32)
+torch.save(tg_tensor_all, os.path.join(transformer_data_dir, f"tg_tensor_all_{chrom_id}.pt"))
+
+# ATAC window tensor
+rows, cols, vals = [], [], []
+for peak, win_idx in window_map.items():
+    if peak in total_RE_pseudobulk_chr.index:
+        peak_idx = total_RE_pseudobulk_chr.index.get_loc(peak)
+        rows.append(win_idx)
+        cols.append(peak_idx)
+        vals.append(1.0)
+W = sp.csr_matrix((vals, (rows, cols)), shape=(mm10_windows.shape[0], total_RE_pseudobulk_chr.shape[0]))
+atac_window_tensor_all = torch.tensor(W @ total_RE_pseudobulk_chr.values, dtype=torch.float32)
+torch.save(atac_window_tensor_all, os.path.join(transformer_data_dir, f"atac_window_tensor_all_{chrom_id}.pt"))
+
+# Save metadata
 with open(os.path.join(transformer_data_dir, "window_map.json"), "w") as f:
     json.dump(window_map, f, indent=4)
-
 with open(os.path.join(transformer_data_dir, "tf_list.pickle"), "wb") as fp:
     pickle.dump(tf_list, fp)
 
-total_TG_pseudobulk_global.to_csv(os.path.join(transformer_data_dir, f"TG_pseudobulk_global.csv"))
-total_TG_pseudobulk_chr.to_csv(os.path.join(transformer_data_dir, f"TG_{chrom_id}_specific_pseudobulk_agg.csv"))
-total_RE_pseudobulk_chr.to_csv(os.path.join(transformer_data_dir, f"RE_{chrom_id}_specific_pseudobulk_agg.csv"))
-
+logging.info("\nPreprocessing complete. Saved TF, TG, ATAC tensors to transformer_data_dir")

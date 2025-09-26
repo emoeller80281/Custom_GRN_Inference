@@ -7,78 +7,61 @@ import torch
 from torch.utils.data import Dataset
 from sklearn.preprocessing import StandardScaler
 import pickle
+import scipy.sparse as sp
 import logging
 
 class MultiomicTransformerDataset(Dataset):
     def __init__(self, data_dir, chrom_id):
         self.data_dir = data_dir
+        self.chrom_id = chrom_id
 
-        # Load pseudobulk (genes x metacells, peaks x metacells)
-        self.TG_pseudobulk = pd.read_csv(
-            os.path.join(data_dir, f"TG_{chrom_id}_specific_pseudobulk_agg.csv"),
-            index_col=0
+        # ----- Paths to required files -----
+        tf_path   = os.path.join(data_dir, "tf_tensor_all.pt")
+        tg_path   = os.path.join(data_dir, f"tg_tensor_all_{chrom_id}.pt")
+        atac_path = os.path.join(data_dir, f"atac_window_tensor_all_{chrom_id}.pt")
+        scaler_path = os.path.join(data_dir, "tg_scaler.pkl")
+        window_map_path = os.path.join(data_dir, "window_map.json")
+        tf_list_path = os.path.join(data_dir, "tf_list.pickle")
+        
+        for f in [tf_path, tg_path, atac_path, scaler_path, window_map_path, tf_list_path]:
+            if not os.path.exists(f):
+                raise FileNotFoundError(f"Required precomputed file not found: {f}")
+
+        # Load tensors
+        self.tf_tensor_all = torch.load(tf_path)          # [num_tf, num_cells]
+        self.tg_tensor_all = torch.load(tg_path)          # [num_tg, num_cells]
+        self.atac_window_tensor_all = torch.load(atac_path)  # [num_windows, num_cells]
+
+        # Load scaler for inverse-transform
+        self.scaler = joblib.load(scaler_path)
+
+        # Load metadata
+        with open(window_map_path) as f:
+            self.window_map = json.load(f)
+        with open(tf_list_path, "rb") as fp:
+            self.tf_list = pickle.load(fp)
+
+        # Infer metadata from shapes
+        self.num_tf = self.tf_tensor_all.shape[0]
+        self.num_windows = self.atac_window_tensor_all.shape[0]
+        self.num_tg = self.tg_tensor_all.shape[0]
+        self.metacell_names = [f"cell_{i}" for i in range(self.tf_tensor_all.shape[1])]
+
+        logging.info(
+            f"Loaded dataset from {data_dir}\n"
+            f" - TFs: {self.num_tf}\n"
+            f" - TGs: {self.num_tg}\n"
+            f" - Windows: {self.num_windows}\n"
+            f" - Metacells: {len(self.metacell_names)}"
         )
-        self.TG_pseudobulk = self.TG_pseudobulk.groupby(self.TG_pseudobulk.index).sum()
-        
-        # Scale the target gene expression to a mean of 0 and stdev of 1
-        self.scaler = StandardScaler()
-        self.TG_scaled = self.scaler.fit_transform(self.TG_pseudobulk.values)
-        
-        # Replace TG expression with scaled values for training
-        self.TG_pseudobulk.iloc[:, :] = self.TG_scaled
-
-        self.RE_pseudobulk = pd.read_csv(
-            os.path.join(data_dir, f"RE_{chrom_id}_specific_pseudobulk_agg.csv"),
-            index_col=0
-        )
-        self.RE_pseudobulk = self.RE_pseudobulk.groupby(self.RE_pseudobulk.index).sum()
-
-        self.window_map = self.load_window_map()
-        self.tf_list = self.load_tf_list()
-        
-        # Get the global gene expression for finding TF expression
-        self.TG_pseudobulk_global = pd.read_csv(
-            os.path.join(data_dir, "TG_pseudobulk_global.csv"),
-            index_col=0
-        )
-        self.TG_pseudobulk_global = self.TG_pseudobulk_global[~self.TG_pseudobulk_global.index.duplicated(keep="first")]
-
-        # Save the fitted scaler so you can inverse-transform later
-        joblib.dump(self.scaler, os.path.join(self.data_dir, "tg_scaler.pkl"))
-
-        # Metadata
-        self.metacell_names = self.TG_pseudobulk.columns.tolist()
-        self.num_tf = len(set(self.tf_list))
-        self.num_windows = max(self.window_map.values()) + 1
-        self.num_tg = self.TG_pseudobulk.shape[0]   # number of genes
-        
 
     def __len__(self):
-        return len(self.metacell_names)
+        return self.tf_tensor_all.shape[1]  # number of metacells
 
     def __getitem__(self, idx):
-        col_name = self.metacell_names[idx]
-
-        # --- TF expression (genome-wide TFs) ---
-        tf_expr = self.TG_pseudobulk_global.reindex(
-            self.tf_list
-        )[col_name].fillna(0).values.astype("float32")
-        tf_tensor = torch.tensor(tf_expr)
-
-        # --- Collapse peaks into windows [num_windows, 1] ---
-        atac_wins = torch.zeros((self.num_windows, 1), dtype=torch.float32)
-        for peak, win_idx in self.window_map.items():
-            if peak in self.RE_pseudobulk.index:
-                val = self.RE_pseudobulk.loc[peak, col_name]
-                # If multiple rows (Series), reduce to scalar
-                if isinstance(val, pd.Series):
-                    val = val.sum()   # or mean(), depending on biology
-                atac_wins[win_idx, 0] += float(val)
-
-        # --- TG expression (chr-specific targets) ---
-        tg_expr = self.TG_pseudobulk[col_name].values.astype("float32")
-        tg_tensor = torch.tensor(tg_expr)
-
+        tf_tensor   = self.tf_tensor_all[:, idx]                            # [num_tf]
+        atac_wins   = self.atac_window_tensor_all[:, idx].unsqueeze(-1)     # [num_windows, 1]
+        tg_tensor   = self.tg_tensor_all[:, idx]                            # [num_tg]
         return atac_wins, tf_tensor, tg_tensor
 
     def load_window_map(self):

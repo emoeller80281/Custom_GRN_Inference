@@ -512,10 +512,10 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
     
     if rank == 0:
         tf_tg_weights = trainer.model.module.tf_tg_weights.detach().cpu().numpy()
-        tf_names = dataset.tf_names  # assuming you have these
+        tf_names = dataset.tf_list
         tg_names = dataset.TG_pseudobulk.index.tolist()
 
-        tf_tg_df = pd.DataFrame(tf_tg_weights, index=tf_names, columns=tg_names)
+        tf_tg_df = pd.DataFrame(tf_tg_weights, index=dataset.tf_list, columns=tg_names)
         tf_tg_df.to_csv(os.path.join(training_output_dir, "tf_tg_weights.csv"))
         logging.info("Saved TF→TG weights to CSV")
 
