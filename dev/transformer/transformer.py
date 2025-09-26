@@ -1,3 +1,4 @@
+from pkg_resources import non_empty_lines
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -21,13 +22,17 @@ class MultiHeadAttention(nn.Module):
         self.W_v = nn.Linear(d_model, d_model) # Value transformation
         self.W_o = nn.Linear(d_model, d_model) # Output transformation
         
-    def scaled_dot_product_attention(self, Q, K, V, mask=None):
+    def scaled_dot_product_attention(self, Q, K, V, mask=None, attn_bias=None):
         # Calculate attention scores
         attn_scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.d_k)
         
         # Apply mask if provided (useful for preventing attention to certain parts like padding)
         if mask is not None:
             attn_scores = attn_scores.masked_fill(mask == 0, -1e9)
+        
+        # Add the peak-gene distance to the attention scores if its passed
+        if attn_bias is not None:
+            attn_scores = attn_scores + attn_bias
         
         # Softmax is applied to obtain attention probabilities
         attn_probs = torch.softmax(attn_scores, dim=-1)
@@ -46,14 +51,14 @@ class MultiHeadAttention(nn.Module):
         batch_size, _, seq_length, d_k = x.size()
         return x.transpose(1, 2).contiguous().view(batch_size, seq_length, self.d_model)
         
-    def forward(self, Q, K, V, mask=None):
+    def forward(self, Q, K, V, mask=None, attn_bias=None):
         # Apply linear transformations and split heads
         Q = self.split_heads(self.W_q(Q))
         K = self.split_heads(self.W_k(K))
         V = self.split_heads(self.W_v(V))
         
         # Perform scaled dot-product attention
-        attn_output = self.scaled_dot_product_attention(Q, K, V, mask)
+        attn_output = self.scaled_dot_product_attention(Q, K, V, mask, attn_bias)
         
         # Combine heads and apply output transformation
         output = self.W_o(self.combine_heads(attn_output))
@@ -84,10 +89,10 @@ class CrossAttention(nn.Module):
         self.norm = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, query, key_value, mask=None):
+    def forward(self, query, key_value, mask=None, attn_bias=None):
         # query: [B, len_query, d_model]
         # key_value: [B, len_key_val, d_model]
-        attn_out = self.attn(query, key_value, key_value, mask)
+        attn_out = self.attn(query, key_value, key_value, mask, attn_bias=attn_bias)
         out = self.norm(query + self.dropout(attn_out))  # residual
         return out
     
@@ -106,13 +111,14 @@ class AttentionPooling(nn.Module):
         return pooled, weights
     
 class MultiomicTransformer(nn.Module):
-    def __init__(self, d_model, num_heads, num_layers, d_ff, dropout, num_tf, num_tg):
+    def __init__(self, d_model, num_heads, num_layers, d_ff, dropout, num_tf, num_tg, dist_bias=None):
         super(MultiomicTransformer, self).__init__()
         
         self.d_model = d_model
         self.dropout = dropout
         self.d_ff = d_ff
         self.num_heads = num_heads
+        self.dist_bias = dist_bias
         
         # Dense layer to pass the ATAC-seq windows into
         self.atac_window_dense_layer = nn.Sequential(
@@ -174,6 +180,7 @@ class MultiomicTransformer(nn.Module):
         self.gene_pred_dense = nn.Linear(d_model, num_tg)
     
     def forward(self, atac_windows, tf_expr):
+        
         # Use a dense layer to embed the ATAC windows
         win_emb = self.atac_window_dense_layer(atac_windows)                        # [B, num_windows, d_model]
         tf_raw = tf_expr
@@ -183,6 +190,13 @@ class MultiomicTransformer(nn.Module):
         tf_expr = tf_expr.unsqueeze(-1)                                             # [B, num_tf, 1]
         
         tf_emb = self.tf_dense_layer(tf_expr)                                       # [B, num_tf, d_model]
+        
+        if self.dist_bias is not None:
+            B = tf_emb.size(0)  # batch size
+            bias = self.dist_bias.unsqueeze(0).unsqueeze(0)  # [1, 1, num_tg, num_windows]
+            bias = bias.expand(B, self.num_heads, -1, -1)   # [B, num_heads, num_tg, num_windows]
+        else:
+            bias = None
         
         # Add positional encodings to the windows based on the number of windows
         # atac_windows: [B, num_windows, num_features]
@@ -194,7 +208,8 @@ class MultiomicTransformer(nn.Module):
         win_emb = self.encoder(win_emb)                                             # [B, num_windows, d_model]
         
         # Run cross-attention both ways
-        tf_cross = self.cross_tf_to_atac(tf_emb, win_emb)                           # [B, num_tf, d_model]
+        # distance bias added to TF Q -> ATAC KV cross-attention
+        tf_cross = self.cross_tf_to_atac(tf_emb, win_emb, attn_bias=bias)           # [B, num_tf, d_model]
         
         atac_cross = self.cross_atac_to_tf(win_emb, tf_emb)                         # [B, num_windows, d_model]
         

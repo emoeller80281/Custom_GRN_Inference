@@ -9,6 +9,8 @@ import random
 import scipy.sparse as sp
 from sklearn.preprocessing import StandardScaler
 import joblib
+import numpy as np
+from grn_inference import utils
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -98,6 +100,38 @@ def make_peak_to_window_map(peaks_bed: pd.DataFrame, windows_bed: pd.DataFrame) 
 
     return mapping
 
+def calculate_peak_to_tg_distance_score(mesc_atac_peak_loc_df, gene_tss_df, force_recalculate=False):
+    if not os.path.isfile(os.path.join(OUTPUT_DIR, "genes_near_peaks.parquet")) or force_recalculate:
+        if "peak_tmp.bed" not in os.listdir(OUTPUT_DIR) or "tss_tmp.bed" not in os.listdir(OUTPUT_DIR) or force_recalculate:
+        
+            logging.info("Calculating peak to TG distance score")
+            peak_bed = pybedtools.BedTool.from_dataframe(
+                mesc_atac_peak_loc_df[["chrom", "start", "end", "peak_id"]]
+                ).saveas(os.path.join(OUTPUT_DIR, "peak_tmp.bed"))
+
+            tss_bed = pybedtools.BedTool.from_dataframe(
+                gene_tss_df[["chrom", "start", "end", "name"]]
+                ).saveas(os.path.join(OUTPUT_DIR, "tss_tmp.bed"))
+            
+        peak_bed = pybedtools.BedTool(os.path.join(OUTPUT_DIR, "peak_tmp.bed"))
+        tss_bed = pybedtools.BedTool(os.path.join(OUTPUT_DIR, "tss_tmp.bed"))
+    
+
+        genes_near_peaks = utils.find_genes_near_peaks(peak_bed, tss_bed)
+
+        # Restrict to peaks within 1 Mb of a gene TSS
+        genes_near_peaks = genes_near_peaks[genes_near_peaks["TSS_dist"] <= 1e6]
+
+        # Scale the TSS distance score by the exponential scaling factor
+        genes_near_peaks = genes_near_peaks.copy()
+        genes_near_peaks["TSS_dist_score"] = np.exp(-genes_near_peaks["TSS_dist"] / 250000)
+
+        genes_near_peaks.to_parquet(os.path.join(OUTPUT_DIR, "genes_near_peaks.parquet"), compression="snappy", engine="pyarrow")
+    else:
+        genes_near_peaks = pd.read_parquet(os.path.join(OUTPUT_DIR, "genes_near_peaks.parquet"), engine="pyarrow")
+    
+    return genes_near_peaks
+
 sample_name_list = ["E7.5_rep1", "E7.5_rep1", "E7.75_rep1", "E8.0_rep2", "E8.5_rep2",
                     "E8.75_rep2", "E7.5_rep2", "E8.0_rep1", "E8.5_rep1"]
 holdout = ["E8.75_rep1"]
@@ -183,6 +217,19 @@ mm10_windows = create_or_load_genomic_windows(chrom_id)
 mm10_windows = mm10_windows.reset_index(drop=True)
 mm10_windows["win_idx"] = mm10_windows.index
 
+# --- Calculate Peak-to-TG Distance Scores ---
+genes_near_peaks = calculate_peak_to_tg_distance_score(
+    mesc_atac_peak_loc_df=total_peaks_df,  # peak locations DataFrame
+    gene_tss_df=gene_tss_df,
+    force_recalculate=False
+)
+
+# Save as metadata for downstream use
+dist_path = os.path.join(TRANSFORMER_DATA_DIR, f"genes_near_peaks_{chrom_id}.parquet")
+genes_near_peaks.to_parquet(dist_path, compression="snappy", engine="pyarrow")
+logging.info(f"Saved peak-to-TG distance scores to {dist_path}")
+
+
 # Build peak -> window mapping
 window_map = make_peak_to_window_map(total_peaks_df, mm10_windows)
 logging.info(f"Mapped {len(window_map)} peaks to windows")
@@ -215,6 +262,25 @@ with open(os.path.join(TRANSFORMER_DATA_DIR, "window_map.json"), "w") as f:
 tg_names = total_TG_pseudobulk_chr.index.tolist()
 with open(os.path.join(TRANSFORMER_DATA_DIR, f"tg_names_{chrom_id}.json"), "w") as f:
     json.dump(tg_names, f)
+    
+# Build [num_windows x num_tg] distance bias matrix
+num_windows = mm10_windows.shape[0]
+num_tg = len(tg_names)
+dist_bias = torch.zeros((num_windows, num_tg), dtype=torch.float32)
+
+tg_index_map = {tg: i for i, tg in enumerate(tg_names)}
+
+for _, row in genes_near_peaks.iterrows():
+    peak_id, tg, score = row["peak_id"], row["target_id"], row["TSS_dist_score"]
+    if peak_id in window_map and tg in tg_index_map:
+        win_idx = window_map[peak_id]
+        tg_idx = tg_index_map[tg]
+        # store max score if multiple peaks map to the same window–TG
+        dist_bias[win_idx, tg_idx] = max(dist_bias[win_idx, tg_idx], score)
+
+# Save to disk
+torch.save(dist_bias, os.path.join(TRANSFORMER_DATA_DIR, f"dist_bias_{chrom_id}.pt"))
+logging.info(f"Saved distance bias tensor with shape {dist_bias.shape}")
     
 metacell_names = total_TG_pseudobulk_global.columns.tolist()
 with open(os.path.join(TRANSFORMER_DATA_DIR, f"metacell_names.json"), "w") as f:

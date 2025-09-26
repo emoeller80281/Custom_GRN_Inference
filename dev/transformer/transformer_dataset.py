@@ -22,6 +22,7 @@ class MultiomicTransformerDataset(Dataset):
         tf_names_path = os.path.join(data_dir, "tf_names.pickle")
         tg_names_path = os.path.join(data_dir, f"tg_names_{chrom_id}.json")
         metacell_names_path = os.path.join(data_dir, f"metacell_names.json")
+        dist_bias_path = os.path.join(data_dir, f"dist_bias_{chrom_id}.pt")
         
         for f in [tf_path, tg_path, atac_path, scaler_path, window_map_path,
             tf_names_path, tf_names_path, metacell_names_path]:
@@ -32,6 +33,11 @@ class MultiomicTransformerDataset(Dataset):
         self.tf_tensor_all = torch.load(tf_path)          # [num_tf, num_cells]
         self.tg_tensor_all = torch.load(tg_path)          # [num_tg, num_cells]
         self.atac_window_tensor_all = torch.load(atac_path)  # [num_windows, num_cells]
+        
+        if os.path.exists(dist_bias_path):
+            self.dist_bias_tensor = torch.load(dist_bias_path)  # [num_windows, num_tg]
+        else:
+            self.dist_bias_tensor = None
 
         # Load scaler for inverse-transform
         self.scaler = joblib.load(scaler_path)
@@ -109,6 +115,10 @@ class MultiomicTransformerDataset(Dataset):
 
         # Slice tg_tensor_all
         self.tg_tensor_all = self.tg_tensor_all[keep_indices, :]
+        
+        # Slice distance bias tensor if present
+        if hasattr(self, "dist_bias_tensor") and self.dist_bias_tensor is not None:
+            self.dist_bias_tensor = self.dist_bias_tensor[:, keep_indices]
 
         # Update tg_names
         self.tg_names = [self.tg_names[i] for i in keep_indices]

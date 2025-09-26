@@ -41,6 +41,8 @@ DATA_DIR = os.path.join(PROJECT_DIR, "dev/transformer/transformer_data")
 OUTPUT_DIR = os.path.join(PROJECT_DIR, "output/transformer_testing_output")
 GROUND_TRUTH_FILE = os.path.join(PROJECT_DIR, "ground_truth_files/mESC_beeline_ChIP-seq.csv")
 
+CHROM_ID = "chr19"
+
 TOTAL_EPOCHS=25
 BATCH_SIZE=32
 
@@ -310,7 +312,7 @@ class Trainer:
 def load_train_objs(subset_genes=None):
     dataset = MultiomicTransformerDataset(
         data_dir=DATA_DIR,
-        chrom_id="chr19"
+        chrom_id=CHROM_ID
     ) 
     if subset_genes is not None:
         dataset.filter_genes(subset_genes)
@@ -358,84 +360,97 @@ def write_run_parameters(dataset, out_dir):
         json.dump(run_params, f, indent=4)  # indent=4 for readability
     logging.info(f"Run parameters written to {path}")
     
-def iterative_refinement(model, dataset, training_output_dir, min_corr, iter_id,  world_size, rank):
-    def build_gene_features(tf_tg_weights, dataset):
-        tg_expr = dataset.tg_tensor_all.numpy()
-        features = {
-            "tf_weight_sum": tf_tg_weights.sum(axis=0),
-            "tf_weight_max": tf_tg_weights.max(axis=0),
-            "tf_weight_mean": tf_tg_weights.mean(axis=0),
-            "tf_weight_std": tf_tg_weights.std(axis=0),
-            "tf_weight_nonzero": (tf_tg_weights != 0).sum(axis=0),
-            "tg_expr_mean": tg_expr.mean(axis=1),
-            "tg_expr_std": tg_expr.std(axis=1),
-            "tg_expr_cv": tg_expr.std(axis=1) / (tg_expr.mean(axis=1) + 1e-8),
-        }
-        return pd.DataFrame(features, index=dataset.tg_names)
-
-    # Compute correlations → labels
-    _, _, test_loader = prepare_dataloader(dataset, BATCH_SIZE,  world_size, rank)
+def iterative_refinement(model, dataset, training_output_dir, min_corr, iter_id):
+    _, _, test_loader = prepare_dataloader(dataset, BATCH_SIZE, world_size=1, rank=0)
     corr_df = per_gene_correlation(
         model, test_loader, dataset.scaler, gpu_id=0, gene_names=dataset.tg_names
     )
     
-    # Store average Pearson correlation
     avg_corr = corr_df["pearson"].mean()
     
-    labels = corr_df.set_index("gene").loc[dataset.tg_names, "label"].to_numpy()
-    gene_features = build_gene_features(model.tf_tg_weights.detach().cpu().numpy(), dataset)
-    
-    assert len(labels) == gene_features.shape[0], "Mismatch in labels and features"
-
-    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-    clf = RandomForestClassifier(n_estimators=200, random_state=42, class_weight="balanced")
-    probs = cross_val_predict(clf, gene_features.values, labels, cv=cv,
-                            method="predict_proba")[:, 1]
-    
-    if len(np.unique(labels)) < 2:
-        roc_score = 0.5
-    else:
-        roc_score = roc_auc_score(labels, probs)
-
-    # Train final model on full dataset for subset prediction
-    clf.fit(gene_features.values, labels)
-    probs_all = clf.predict_proba(gene_features.values)[:, 1]
-    
-    # Remove lowest 10% only if Pearson < threshold
     if avg_corr < min_corr:
-        cutoff = np.percentile(probs_all, 10)  # 10th percentile
-        predicted_subset = gene_features.index[probs_all > cutoff]
+        # Remove bottom 10% of genes by Pearson correlation
+        cutoff = np.percentile(corr_df["pearson"], 5)
+        predicted_subset = corr_df.loc[corr_df["pearson"] > cutoff, "gene"]
     else:
-        predicted_subset = gene_features.index
-        
+        predicted_subset = corr_df["gene"]
+
     subset_path = os.path.join(training_output_dir, f"learnable_genes_iter{iter_id}.csv")
-    predicted_subset.to_series().to_csv(subset_path, index=False)
+    predicted_subset.to_csv(subset_path, index=False)
 
-    return roc_score, avg_corr, subset_path
+    return avg_corr, subset_path
 
-def build_edge_features(tf_tg_weights, tf_names, tg_names, chip_edges):
+def compute_tf_tg_distance_features(tf_tg_weights, tf_names, tg_names, dist_df, window_map, atac_window_tensor):
+    """
+    For each TF–TG pair, compute a distance-weighted accessibility score.
+    """
+
+    # Map peak -> dist_score -> gene
+    tg_to_scores = {tg: {} for tg in tg_names}
+    for _, row in dist_df.iterrows():
+        peak_id = row["peak_id"]
+        tg = row["target_id"]
+        dist_score = row["TSS_dist_score"]
+        if tg in tg_to_scores:
+            tg_to_scores[tg][peak_id] = dist_score
+
+    features = []
+    for i, tf in enumerate(tf_names):
+        for j, tg in enumerate(tg_names):
+            weight = tf_tg_weights[i, j]
+
+            # collect peaks mapped to this TG
+            peak_scores = tg_to_scores.get(tg, {})
+            if not peak_scores:
+                dist_weighted_accessibility = 0.0
+            else:
+                # Get accessibility of peaks' windows
+                scores = []
+                for peak_id, dist_score in peak_scores.items():
+                    if peak_id in window_map:
+                        win_idx = window_map[peak_id]
+                        acc = atac_window_tensor[win_idx].mean().item()  # avg across metacells
+                        scores.append(acc * dist_score)
+                dist_weighted_accessibility = sum(scores) / (len(scores) + 1e-8)
+
+            features.append([weight, dist_weighted_accessibility])
+
+    return np.array(features)
+
+
+def build_edge_features(tf_tg_weights, tf_names, tg_names, chip_edges, dist_df, window_map, atac_window_tensor):
     features = []
     labels = []
     edge_list = []
 
+    # Precompute gene -> max distance score from peaks
+    # dist_df = dist_df.copy()
+    # dist_df["target_id"] = dist_df["target_id"].str.upper()
+    dist_features = compute_tf_tg_distance_features(tf_tg_weights, tf_names, tg_names, dist_df, window_map, atac_window_tensor)
+
+    idx = 0
     for i, tf in enumerate(tf_names):
         for j, tg in enumerate(tg_names):
             edge = (tf.upper(), tg.upper())
-            weight = tf_tg_weights[i, j]
-
-            features.append([weight])
+            features.append(dist_features[idx])  # [weight, dist-weighted accessibility]
             labels.append(1 if edge in chip_edges else 0)
-            edge_list.append((tf, tg))
+            edge_list.append(edge)
+            idx += 1
 
-    return np.array(features), np.array(labels), edge_list
-
+    features = np.array(features)
+    labels = np.array(labels)
+    return features, labels, edge_list
 
 def train_tf_tg_classifier(tf_tg_weights, dataset, ground_truth_file, out_path):
     chip_df = pd.read_csv(ground_truth_file)
     chip_edges = set((g1.upper(), g2.upper()) for g1, g2 in zip(chip_df["Gene1"], chip_df["Gene2"]))
     
-    X, y, edge_list = build_edge_features(tf_tg_weights, dataset.tf_names, dataset.tg_names, chip_edges)
-
+    dist_df = pd.read_parquet(os.path.join(DATA_DIR, f"genes_near_peaks_{CHROM_ID}.parquet"))
+    
+    X, y, edge_list = build_edge_features(
+        tf_tg_weights, dataset.tf_names, dataset.tg_names, chip_edges, dist_df, dataset.window_map, dataset.atac_window_tensor_all
+    )
+    
     stratify = y if len(np.unique(y)) > 1 else None
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.3, stratify=stratify, random_state=42
@@ -494,12 +509,14 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
         training_output_dir = os.path.join(OUTPUT_DIR, f"model_training_{time_now}")
         os.makedirs(training_output_dir, exist_ok=True)
         
+        i = 1
+        stop_flag = False
         subset_genes = None
-        N_ITERS = 3
-        MIN_CORR = 0.5
+        TRAINING_ITERATIONS = 20
+        MIN_CORR = 0.5 # Filter low confidence genes
         TRANSFORMER_CORR_THRESH = 0.75
         
-        for i in range(1, N_ITERS+1):
+        while i <= TRAINING_ITERATIONS and not stop_flag:
             # if rank == 0:
             #     logging.info("Loading Training Objectives")
             iter_dir = os.path.join(training_output_dir, f"iter{i}")
@@ -538,13 +555,11 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
                 out_file = os.path.join(training_output_dir, "tf_tg_classifier_predictions.csv")
                 clf, edge_df = train_tf_tg_classifier(tf_tg_weights, dataset, GROUND_TRUTH_FILE, out_file)
                 
-                roc_score, avg_corr, subset_path = iterative_refinement(
-                    model, dataset, iter_dir, MIN_CORR, i, world_size=1, rank=0
+                avg_corr, subset_path = iterative_refinement(
+                    model, dataset, iter_dir, MIN_CORR, i
                 )
-                logging.info(f"Iteration {i} | AUROC = {roc_score:.3f} | Avg Pearson = {avg_corr:.3f}")
+                logging.info(f"Iteration {i} | Avg Pearson = {avg_corr:.3f}")
                 
-                
-
                 if avg_corr >= TRANSFORMER_CORR_THRESH:
                     logging.info(f"Stopping refinement: Pearson correlation threshold of {avg_corr} reached.")
                     stop_flag = True
