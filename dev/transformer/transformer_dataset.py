@@ -82,3 +82,38 @@ class MultiomicTransformerDataset(Dataset):
     def inverse_transform(self, preds: np.ndarray) -> np.ndarray:
         """Inverse transform predictions back to original scale"""
         return self.scaler.inverse_transform(preds)
+    
+    def filter_genes(self, subset_genes):
+        """
+        Restrict the dataset to a subset of target genes.
+
+        Args:
+            subset_genes (list[str]): List of TG names to keep.
+        """
+        # Ensure subset is a set for fast lookup
+        subset_set = set(subset_genes)
+        if not subset_set:
+            raise ValueError("subset_genes must be a non-empty list of gene names.")
+
+        # Map current tg_names to indices
+        name_to_idx = {g: i for i, g in enumerate(self.tg_names)}
+
+        # Keep only those genes that exist in current dataset
+        keep_indices = [name_to_idx[g] for g in subset_genes if g in name_to_idx]
+        missing = [g for g in subset_genes if g not in name_to_idx]
+        if missing:
+            logging.warning(f"{len(missing)} genes not found in tg_names: {missing[:10]}...")
+
+        if not keep_indices:
+            raise ValueError("No matching genes found in dataset for given subset.")
+
+        # Slice tg_tensor_all
+        self.tg_tensor_all = self.tg_tensor_all[keep_indices, :]
+
+        # Update tg_names
+        self.tg_names = [self.tg_names[i] for i in keep_indices]
+
+        # Update metadata
+        self.num_tg = len(self.tg_names)
+
+        logging.info(f"Filtered TGs: kept {self.num_tg}/{len(name_to_idx)} genes")

@@ -1,7 +1,7 @@
 #!/bin/bash -l
 #SBATCH --job-name=linger_pseudobulk
-#SBATCH --output=LOGS/transformer_logs/%x_%j.log
-#SBATCH --error=LOGS/transformer_logs/%x_%j.err
+#SBATCH --output=LOGS/transformer_logs/pseudobulk/%x_%j.log
+#SBATCH --error=LOGS/transformer_logs/pseudobulk/%x_%j.err
 #SBATCH --time=12:00:00
 #SBATCH -p compute
 #SBATCH -N 1

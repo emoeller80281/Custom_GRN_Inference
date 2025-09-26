@@ -123,7 +123,16 @@ peaks_df_samples = []
 
 for sample_name in sample_name_list:
     sample_data_dir = os.path.join(SAMPLE_INPUT_DIR, sample_name)
-    if os.path.exists(sample_data_dir) and len(os.listdir(sample_data_dir)) == 7 and sample_name not in holdout:
+    if not os.path.exists(sample_data_dir):
+        logging.warning(f"Skipping {sample_name}: directory not found")
+        continue
+    if len(os.listdir(sample_data_dir)) != 5:
+        logging.warning(f"Skipping {sample_name}: expected 5 files, found {len(os.listdir(sample_data_dir))}")
+        continue
+    if sample_name in holdout:
+        logging.warning(f"Skipping {sample_name}: in holdout list")
+        continue
+    else:
         logging.info(f"\nLoading Pseudobulk data for {sample_name}")
         TG_pseudobulk = pd.read_csv(os.path.join(sample_data_dir, "TG_pseudobulk.tsv"), sep="\t", index_col=0)
         RE_pseudobulk = pd.read_csv(os.path.join(sample_data_dir, "RE_pseudobulk.tsv"), sep="\t", index_col=0)

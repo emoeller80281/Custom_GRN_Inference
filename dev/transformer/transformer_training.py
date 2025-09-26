@@ -3,11 +3,17 @@ import sys
 import csv
 import torch
 import joblib
+import json
 import pandas as pd
 import numpy as np
 import logging
+import pickle
 from datetime import datetime
-from scipy.stats import pearsonr, spearmanr
+from scipy.stats import pearsonr, spearmanr, skew, kurtosis
+from imblearn.over_sampling import SMOTE
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import cross_val_predict, StratifiedKFold, train_test_split
+from sklearn.metrics import roc_auc_score, classification_report
 from sklearn.preprocessing import StandardScaler
 import torch.nn as nn
 import torch.nn.functional as F
@@ -23,14 +29,19 @@ import torch.distributed as dist
 import matplotlib.pyplot as plt
 import seaborn as sns
 
+from eval import (
+    per_gene_correlation
+)
+
 import warnings
 warnings.filterwarnings("ignore", message="No device id is provided via `init_process_group`")
 
 PROJECT_DIR = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
 DATA_DIR = os.path.join(PROJECT_DIR, "dev/transformer/transformer_data")
 OUTPUT_DIR = os.path.join(PROJECT_DIR, "output/transformer_testing_output")
+GROUND_TRUTH_FILE = os.path.join(PROJECT_DIR, "ground_truth_files/mESC_beeline_ChIP-seq.csv")
 
-TOTAL_EPOCHS=10
+TOTAL_EPOCHS=25
 BATCH_SIZE=32
 
 D_MODEL = 512
@@ -234,7 +245,7 @@ class Trainer:
             # Save stats to history
             if self.gpu_id == 0:
                 logging.info(
-                    f"Epoch {epoch} | Train Loss: {train_loss:.4f} | "
+                    f"Epoch {epoch+1} | Train Loss: {train_loss:.4f} | "
                     f"Val Loss: {val_loss:.4f} | "
                     f"Pearson: {pearson_corr:.3f} | Spearman: {spearman_corr:.3f} | "
                     f"LR: {self.optimizer.param_groups[0]['lr']:.2e}"
@@ -296,11 +307,14 @@ class Trainer:
         # logging.info(f"    {tag.capitalize()} training log written at epoch {epoch}")
             
 
-def load_train_objs():
+def load_train_objs(subset_genes=None):
     dataset = MultiomicTransformerDataset(
         data_dir=DATA_DIR,
         chrom_id="chr19"
     ) 
+    if subset_genes is not None:
+        dataset.filter_genes(subset_genes)
+    
     model = MultiomicTransformer(
         D_MODEL, NUM_HEADS, NUM_LAYERS, D_FF, DROPOUT, 
         dataset.num_tf, dataset.num_tg
@@ -323,113 +337,6 @@ def prepare_dataloader(dataset: Dataset, batch_size: int, world_size: int, rank:
 
     return train_loader, val_loader, test_loader
 
-def plot_per_gene_correlation_scatterplot(model, dataloader, scaler, gpu_id=0, outpath=None):
-    model.eval()
-    preds, tgts = [], []
-    with torch.no_grad():
-        for atac_wins, tf_tensor, targets in dataloader:
-            atac_wins, tf_tensor = atac_wins.to(gpu_id), tf_tensor.to(gpu_id)
-            output = model(atac_wins, tf_tensor)
-            preds.append(output.cpu().numpy())
-            tgts.append(targets.cpu().numpy())
-
-    preds = np.concatenate(preds, axis=0)
-    tgts  = np.concatenate(tgts, axis=0)
-
-    # inverse-transform
-    preds_rescaled = scaler.inverse_transform(preds)
-    tgts_rescaled  = scaler.inverse_transform(tgts)
-
-    corr, _ = pearsonr(preds_rescaled.ravel(), tgts_rescaled.ravel())
-    logging.info(f"Test Pearson correlation: {corr:.3f}")
-
-    plt.figure(figsize=(6,6))
-    plt.scatter(tgts_rescaled, preds_rescaled, alpha=0.5, s=5)
-    plt.xlabel("True values")
-    plt.ylabel("Predicted values")
-    plt.title(f"Predicted vs True (r={corr:.3f})")
-    plt.plot([tgts_rescaled.min(), tgts_rescaled.max()],
-             [tgts_rescaled.min(), tgts_rescaled.max()], 'r--')
-    if outpath:
-        plt.savefig(outpath, dpi=300)
-    else:
-        plt.show()
-        
-def per_gene_correlation(model, dataloader, scaler, gpu_id=0, gene_names=None):
-    """
-    Compute Pearson & Spearman correlation per gene across the test set.
-
-    Args:
-        model       : trained PyTorch model
-        dataloader  : DataLoader over test set
-        gpu_id      : device id
-        gene_names  : list of gene names for annotation (optional)
-
-    Returns:
-        DataFrame with [gene, pearson, spearman]
-    """
-    model.eval()
-    preds, tgts = [], []
-    with torch.no_grad():
-        for atac_wins, tf_tensor, targets in dataloader:
-            atac_wins, tf_tensor = atac_wins.to(gpu_id), tf_tensor.to(gpu_id)
-            output = model(atac_wins, tf_tensor)
-            preds.append(output.cpu().numpy())
-            tgts.append(targets.cpu().numpy())
-
-    preds = np.concatenate(preds, axis=0)   # [samples, num_genes]
-    tgts  = np.concatenate(tgts, axis=0)
-    
-    # inverse-transform
-    preds_rescaled = scaler.inverse_transform(preds)
-    tgts_rescaled  = scaler.inverse_transform(tgts)
-
-    results = []
-    for i in range(tgts_rescaled.shape[1]):  # loop over genes
-        if np.std(tgts_rescaled[:, i]) < 1e-8:   # avoid constant targets
-            pear, spear = np.nan, np.nan
-        else:
-            pear, _ = pearsonr(preds_rescaled[:, i], tgts_rescaled[:, i])
-            spear, _ = spearmanr(preds_rescaled[:, i], tgts_rescaled[:, i])
-        results.append((pear, spear))
-
-    df = pd.DataFrame(results, columns=["pearson", "spearman"])
-    if gene_names is not None:
-        df.insert(0, "gene", gene_names)
-    df["label"] = (df["pearson"] > 0.2).astype(int)
-    
-    return df
-
-def plot_gene_correlation_distribution(corr_df, out_prefix):
-    """
-    Plot distributions of per-gene Pearson & Spearman correlations.
-    """
-    plt.figure(figsize=(6,4))
-    sns.histplot(corr_df['pearson'].dropna(), bins=30, kde=True, color="steelblue")
-    plt.xlabel("Pearson correlation")
-    plt.ylabel("Number of genes")
-    plt.title("Per-gene Pearson correlation")
-    plt.tight_layout()
-    plt.savefig(f"{out_prefix}_pearson_hist.png", dpi=300)
-    plt.close()
-
-    plt.figure(figsize=(6,4))
-    sns.histplot(corr_df['spearman'].dropna(), bins=30, kde=True, color="darkorange")
-    plt.xlabel("Spearman correlation")
-    plt.ylabel("Number of genes")
-    plt.title("Per-gene Spearman correlation")
-    plt.tight_layout()
-    plt.savefig(f"{out_prefix}_spearman_hist.png", dpi=300)
-    plt.close()
-
-    # Optional: violin for side-by-side view
-    plt.figure(figsize=(5,4))
-    sns.violinplot(data=corr_df[['pearson','spearman']], inner="quartile", palette="Set2")
-    plt.ylabel("Correlation")
-    plt.title("Distribution of per-gene correlations")
-    plt.tight_layout()
-    plt.savefig(f"{out_prefix}_violin.png", dpi=300)
-    plt.close()
 
 def write_run_parameters(dataset, out_dir):
     run_params = {
@@ -446,111 +353,253 @@ def write_run_parameters(dataset, out_dir):
         "Dropout": DROPOUT,
     }
 
-    path = os.path.join(out_dir, "run_parameters.csv")
-    with open(path, "w", newline="") as f:
-        writer = csv.writer(f)
-        for key, value in run_params.items():
-            writer.writerow([key, value])
+    path = os.path.join(out_dir, "run_parameters.json")
+    with open(path, "w") as f:
+        json.dump(run_params, f, indent=4)  # indent=4 for readability
     logging.info(f"Run parameters written to {path}")
+    
+def iterative_refinement(model, dataset, training_output_dir, min_corr, iter_id,  world_size, rank):
+    def build_gene_features(tf_tg_weights, dataset):
+        tg_expr = dataset.tg_tensor_all.numpy()
+        features = {
+            "tf_weight_sum": tf_tg_weights.sum(axis=0),
+            "tf_weight_max": tf_tg_weights.max(axis=0),
+            "tf_weight_mean": tf_tg_weights.mean(axis=0),
+            "tf_weight_std": tf_tg_weights.std(axis=0),
+            "tf_weight_nonzero": (tf_tg_weights != 0).sum(axis=0),
+            "tg_expr_mean": tg_expr.mean(axis=1),
+            "tg_expr_std": tg_expr.std(axis=1),
+            "tg_expr_cv": tg_expr.std(axis=1) / (tg_expr.mean(axis=1) + 1e-8),
+        }
+        return pd.DataFrame(features, index=dataset.tg_names)
+
+    # Compute correlations → labels
+    _, _, test_loader = prepare_dataloader(dataset, BATCH_SIZE,  world_size, rank)
+    corr_df = per_gene_correlation(
+        model, test_loader, dataset.scaler, gpu_id=0, gene_names=dataset.tg_names
+    )
+    
+    # Store average Pearson correlation
+    avg_corr = corr_df["pearson"].mean()
+    
+    labels = corr_df.set_index("gene").loc[dataset.tg_names, "label"].to_numpy()
+    gene_features = build_gene_features(model.tf_tg_weights.detach().cpu().numpy(), dataset)
+    
+    assert len(labels) == gene_features.shape[0], "Mismatch in labels and features"
+
+    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    clf = RandomForestClassifier(n_estimators=200, random_state=42, class_weight="balanced")
+    probs = cross_val_predict(clf, gene_features.values, labels, cv=cv,
+                            method="predict_proba")[:, 1]
+    
+    if len(np.unique(labels)) < 2:
+        roc_score = 0.5
+    else:
+        roc_score = roc_auc_score(labels, probs)
+
+    # Train final model on full dataset for subset prediction
+    clf.fit(gene_features.values, labels)
+    probs_all = clf.predict_proba(gene_features.values)[:, 1]
+    
+    # Remove lowest 10% only if Pearson < threshold
+    if avg_corr < min_corr:
+        cutoff = np.percentile(probs_all, 10)  # 10th percentile
+        predicted_subset = gene_features.index[probs_all > cutoff]
+    else:
+        predicted_subset = gene_features.index
+        
+    subset_path = os.path.join(training_output_dir, f"learnable_genes_iter{iter_id}.csv")
+    predicted_subset.to_series().to_csv(subset_path, index=False)
+
+    return roc_score, avg_corr, subset_path
+
+def build_edge_features(tf_tg_weights, tf_names, tg_names, chip_edges):
+    features = []
+    labels = []
+    edge_list = []
+
+    for i, tf in enumerate(tf_names):
+        for j, tg in enumerate(tg_names):
+            edge = (tf.upper(), tg.upper())
+            weight = tf_tg_weights[i, j]
+
+            features.append([weight])
+            labels.append(1 if edge in chip_edges else 0)
+            edge_list.append((tf, tg))
+
+    return np.array(features), np.array(labels), edge_list
+
+
+def train_tf_tg_classifier(tf_tg_weights, dataset, ground_truth_file, out_path):
+    chip_df = pd.read_csv(ground_truth_file)
+    chip_edges = set((g1.upper(), g2.upper()) for g1, g2 in zip(chip_df["Gene1"], chip_df["Gene2"]))
+    
+    X, y, edge_list = build_edge_features(tf_tg_weights, dataset.tf_names, dataset.tg_names, chip_edges)
+
+    stratify = y if len(np.unique(y)) > 1 else None
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.3, stratify=stratify, random_state=42
+    )
+
+    clf = RandomForestClassifier(n_estimators=200, random_state=42, class_weight="balanced")
+    clf.fit(X_train, y_train)
+
+    y_score = clf.predict_proba(X_test)[:, 1]
+    y_pred = clf.predict(X_test)
+
+    print("\tTF-TG classification report:")
+    print(classification_report(y_test, y_pred))
+    logging.info(f"TF-TG AUROC: {roc_auc_score(y_test, y_score):.4f}")
+
+    # --- Save all edges with predicted scores ---
+    all_probs = clf.predict_proba(X)[:, 1]
+    edge_df = pd.DataFrame({
+        "TF": [e[0] for e in edge_list],
+        "TG": [e[1] for e in edge_list],
+        "probability": all_probs,
+        "label": y
+    })
+    edge_df.to_csv(out_path, index=False)
+    logging.info(f"Saved edge predictions to {out_path}")
+
+    return clf, edge_df
+
+def dist_broadcast_list(obj, src=0):
+    """Broadcast a Python list or object from src rank to all ranks."""
+    if dist.get_rank() == src:
+        data = pickle.dumps(obj)
+        tensor = torch.ByteTensor(list(data)).to("cuda")
+        size = torch.tensor([tensor.size(0)], device="cuda")
+    else:
+        tensor = torch.ByteTensor().to("cuda")
+        size = torch.tensor([0], device="cuda")
+
+    # Broadcast size first
+    dist.broadcast(size, src=src)
+
+    # Resize and broadcast actual data
+    if dist.get_rank() != src:
+        tensor = torch.empty(size.item(), dtype=torch.uint8, device="cuda")
+    dist.broadcast(tensor, src=src)
+
+    data = bytes(tensor.tolist())
+    return pickle.loads(data)
 
 def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_size: int):
     ddp_setup(rank, world_size)
     setup_logging(rank)
     
-    time_now = datetime.now().strftime("%d_%m_%H_%M_%S")
-    training_output_dir = os.path.join(OUTPUT_DIR, f"model_training_{time_now}")
-    
-    os.makedirs(training_output_dir, exist_ok=True)
-    
-    if rank == 0:
-        logging.info("Loading Training Objectives")
-    dataset, model, optimizer = load_train_objs()
-    
-    if rank == 0:
-        logging.info("===== MultiomicTransformerDataset Loaded =====")
-        logging.info(f"Genes:               {dataset.num_tg}")
-        logging.info(f"Windows (RE):        {dataset.num_windows}")
-        logging.info(f"TFs:                 {dataset.num_tf}")
-        logging.info(f"Metacells:           {len(dataset.metacell_names)}")
-        logging.info(f"Epochs:              {TOTAL_EPOCHS}")
-        logging.info(f"Batch Size:          {BATCH_SIZE}")
-        logging.info(f"Model Dimension:     {D_MODEL}")
-        logging.info(f"Attention Heads:     {NUM_HEADS}")
-        logging.info(f"Attention Layers:    {NUM_LAYERS}")
-        logging.info(f"Feedforward Layers:  {D_FF}")
-        logging.info(f"Dropout:             {DROPOUT}")
-        logging.info("================================================")
-        write_run_parameters(dataset, training_output_dir)
-    
-    if rank == 0:
-        logging.info("Preparing DataLoader")
-    train_loader, val_loader, test_loader = prepare_dataloader(dataset, batch_size, world_size, rank)
-    if rank == 0:
-        logging.info("Initializing Trainer")
-    criterion = nn.MSELoss()
-    trainer = Trainer(
-        model=model, 
-        train_data=train_loader, 
-        val_data=val_loader, 
-        optimizer=optimizer, 
-        criterion=criterion, 
-        gpu_id=rank, 
-        save_every=save_every
-        )
-    if rank == 0:
-        logging.info("\n ----- Training -----")
-    trainer.train(
-        max_epochs=total_epochs, 
-        log_path=os.path.join(training_output_dir, "training_log.csv")
-        )
-    
-    if dist.is_initialized():
-        dist.barrier()
+    try:
+        time_now = datetime.now().strftime("%d_%m_%H_%M_%S")
+        training_output_dir = os.path.join(OUTPUT_DIR, f"model_training_{time_now}")
+        os.makedirs(training_output_dir, exist_ok=True)
+        
+        subset_genes = None
+        N_ITERS = 3
+        MIN_CORR = 0.5
+        TRANSFORMER_CORR_THRESH = 0.75
+        
+        for i in range(1, N_ITERS+1):
+            # if rank == 0:
+            #     logging.info("Loading Training Objectives")
+            iter_dir = os.path.join(training_output_dir, f"iter{i}")
+            os.makedirs(iter_dir, exist_ok=True)
+            
+            if rank == 0:
+                logging.info(f"\n ----- Training Iteration {i} -----")
+                
+            dataset, model, optimizer = load_train_objs(subset_genes=subset_genes)
+            
+            if rank == 0:
+                logging.info("\n===== MultiomicTransformerDataset Loaded =====")
+                logging.info(f"Genes:               {dataset.num_tg}")
+                logging.info(f"Windows (RE):        {dataset.num_windows}")
+                logging.info(f"TFs:                 {dataset.num_tf}")
+                logging.info(f"Metacells:           {len(dataset.metacell_names)}")
+                logging.info(f"Epochs:              {TOTAL_EPOCHS}")
+                logging.info(f"Batch Size:          {BATCH_SIZE}")
+                logging.info(f"Model Dimension:     {D_MODEL}")
+                logging.info(f"Attention Heads:     {NUM_HEADS}")
+                logging.info(f"Attention Layers:    {NUM_LAYERS}")
+                logging.info(f"Feedforward Layers:  {D_FF}")
+                logging.info(f"Dropout:             {DROPOUT}")
+                logging.info("================================================")
+                write_run_parameters(dataset, iter_dir)
+            
+            train_loader, val_loader, test_loader = prepare_dataloader(dataset, batch_size, world_size, rank)
+            criterion = nn.MSELoss()
+            trainer = Trainer(model, train_loader, val_loader, optimizer, criterion, gpu_id=rank, save_every=save_every)
+        
+
+            trainer.train(max_epochs=total_epochs, log_path=os.path.join(iter_dir, "training_log.csv"))
+
+            if rank == 0:
+                tf_tg_weights = trainer.model.module.tf_tg_weights.detach().cpu().numpy()
+                out_file = os.path.join(training_output_dir, "tf_tg_classifier_predictions.csv")
+                clf, edge_df = train_tf_tg_classifier(tf_tg_weights, dataset, GROUND_TRUTH_FILE, out_file)
+                
+                roc_score, avg_corr, subset_path = iterative_refinement(
+                    model, dataset, iter_dir, MIN_CORR, i, world_size=1, rank=0
+                )
+                logging.info(f"Iteration {i} | AUROC = {roc_score:.3f} | Avg Pearson = {avg_corr:.3f}")
+                
+                
+
+                if avg_corr >= TRANSFORMER_CORR_THRESH:
+                    logging.info(f"Stopping refinement: Pearson correlation threshold of {avg_corr} reached.")
+                    stop_flag = True
+                else:
+                    stop_flag = False
+                    subset_genes = pd.read_csv(subset_path, header=None)[0].tolist()
+            else:
+                stop_flag = False
+                subset_genes = None
+
+            # Broadcast stop flag
+            stop_tensor = torch.tensor(int(stop_flag), device="cuda")
+            dist.broadcast(stop_tensor, src=0)
+            if stop_tensor.item() == 1:
+                break
+
+            # Broadcast subset genes
+            subset_genes = dist_broadcast_list(subset_genes, src=0)
+        
+            if dist.is_initialized():
+                dist.barrier()
+                if rank == 0:
+                    logging.info(f"Training Complete for iteration {i}! Synchronizing ranks")
+            
+            if rank == 0:
+                # Save model checkpoint
+                torch.save(trainer.model.module.state_dict(),
+                        os.path.join(iter_dir, "trained_model.pt"))
+                # logging.info("Saved final trained model")
+                
+                # Save supporting objects
+                joblib.dump(dataset.scaler, os.path.join(iter_dir, "tg_scaler.pkl"))
+                pd.DataFrame(trainer.model.module.tf_tg_weights.detach().cpu().numpy(),
+                            index=dataset.tf_names,
+                            columns=dataset.tg_names
+                ).to_csv(os.path.join(iter_dir, "tf_tg_weights.csv"))
+                
+                tf_tg_weights = trainer.model.module.tf_tg_weights.detach().cpu().numpy()
+                tg_names = dataset.tg_names
+
+                tf_tg_df = pd.DataFrame(tf_tg_weights, index=dataset.tf_names, columns=tg_names)
+                tf_tg_df.to_csv(os.path.join(iter_dir, "tf_tg_weights.csv"))
+                # logging.info("Saved TF→TG weights to CSV")
+                
+                
+                
         if rank == 0:
-            logging.info("Training Complete! Synchronizing ranks")
+            logging.info("\nIterations complete")
     
-    if rank == 0:
-        tf_tg_weights = trainer.model.module.tf_tg_weights.detach().cpu().numpy()
-        tf_names = dataset.tf_names
-        tg_names = dataset.tg_names
-
-        tf_tg_df = pd.DataFrame(tf_tg_weights, index=dataset.tf_names, columns=tg_names)
-        tf_tg_df.to_csv(os.path.join(training_output_dir, "tf_tg_weights.csv"))
-        logging.info("Saved TF→TG weights to CSV")
-        scaler = dataset.scaler
-        
-        out_prefix = os.path.join(training_output_dir, "per_gene_correlation")
-        
-        plot_per_gene_correlation_scatterplot(
-            trainer.model.module, 
-            test_loader, 
-            scaler,
-            gpu_id=0,
-            outpath=os.path.join(training_output_dir, "per_gene_correlation_scatterplot.png")
-        )
-        
-        logging.info("Evaluating per-gene correlations on test set...")
-        corr_df = per_gene_correlation(
-            model, test_loader, scaler, gpu_id=rank,
-            gene_names=dataset.tg_names
-        )
-        corr_df.to_csv(out_prefix + ".csv", index=False)
-        logging.info(f"Saved per-gene correlations to {out_prefix}.csv")
-
-        # Quick summary
-        logging.info(f"Median Pearson: {np.nanmedian(corr_df['pearson']):.3f}, "
-                    f"Top 5 genes: {corr_df.sort_values('pearson', ascending=False).head()['gene'].tolist()}")
-
-        # Plots
-        plot_gene_correlation_distribution(corr_df, out_prefix)
-        logging.info(f"Saved per-gene correlation plots to {out_prefix}_*.png")
-    
-
-    if dist.is_initialized():
-        dist.barrier()
-        if rank == 0:
-            logging.info("Destroying process group")
-        dist.destroy_process_group()
+    finally:
+        if dist.is_initialized():
+            dist.barrier()
+            if rank == 0:
+                logging.info("\nDestroying process group")
+            dist.destroy_process_group()
     
 if __name__ == "__main__":
     main(rank=int(os.environ["LOCAL_RANK"]),

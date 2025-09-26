@@ -48,7 +48,6 @@ def pseudo_bulk(
     atac_data = atac_data[rna_data.obs_names].copy()
     
     assert (rna_data.obs_names == atac_data.obs_names).all(), "Cell barcodes must be aligned"
-    assert aggregate.isin(["mean", "sum"]), "Aggregate must be set to either 'mean' or 'sum'"
 
     # --- Joint embedding ---
     combined_pca = np.concatenate(
