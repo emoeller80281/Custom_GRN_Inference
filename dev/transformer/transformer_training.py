@@ -47,12 +47,12 @@ TOTAL_EPOCHS=500
 BATCH_SIZE=32
 TRAINING_ITERATIONS = 30
 PERCENT_DROP=0
-PATIENCE=25
+PATIENCE=15
 
-D_MODEL = 512
-NUM_HEADS = 8
-NUM_LAYERS = 6
-D_FF = 1024
+D_MODEL = 384
+NUM_HEADS = 6
+NUM_LAYERS = 3
+D_FF = 768
 DROPOUT = 0.1
 
 def ddp_setup(rank, world_size):
@@ -235,6 +235,8 @@ class Trainer:
 
         avg_train_loss = total_loss / max(1, n_batches)
         avg_val_loss, pearson_corr, spearman_corr = self._validate()
+        
+        self.scheduler.step(avg_val_loss)
 
         return avg_train_loss, avg_val_loss, pearson_corr, spearman_corr
 
@@ -473,19 +475,45 @@ def train_tf_tg_classifier(tf_tg_weights, dataset, ground_truth_file, out_path):
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.3, stratify=stratify, random_state=42
     )
+    
+    from sklearn.model_selection import RandomizedSearchCV, StratifiedKFold
+    from scipy.stats import randint
 
-    clf = RandomForestClassifier(n_estimators=200, random_state=42, class_weight="balanced")
-    clf.fit(X_train, y_train)
+    # Define distributions instead of full grids
+    param_dist = {
+        "n_estimators": randint(100, 1000),       # sample between 100 and 999 trees
+        "max_depth": [None] + list(range(10, 60, 10)),
+        "max_features": ["sqrt", "log2", None],
+        "min_samples_split": randint(2, 20)       # sample split thresholds
+    }
 
-    y_score = clf.predict_proba(X_test)[:, 1]
-    y_pred = clf.predict(X_test)
+    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+
+    random_search = RandomizedSearchCV(
+        estimator=RandomForestClassifier(class_weight="balanced", random_state=42),
+        param_distributions=param_dist,
+        n_iter=50,                # number of random combos to try
+        scoring="roc_auc",
+        cv=cv,
+        n_jobs=-1,
+        verbose=2,
+        random_state=42
+    )
+
+    random_search.fit(X_train, y_train)
+
+    print("Best params:", random_search.best_params_)
+    print("Best AUROC:", random_search.best_score_)
+
+    y_score = random_search.predict_proba(X_test)[:, 1]
+    y_pred = random_search.predict(X_test)
 
     print("\tTF-TG classification report:")
     print(classification_report(y_test, y_pred))
     logging.info(f"TF-TG AUROC: {roc_auc_score(y_test, y_score):.4f}")
 
     # --- Save all edges with predicted scores ---
-    all_probs = clf.predict_proba(X)[:, 1]
+    all_probs = random_search.predict_proba(X)[:, 1]
     edge_df = pd.DataFrame({
         "TF": [e[0] for e in edge_list],
         "TG": [e[1] for e in edge_list],
@@ -495,7 +523,7 @@ def train_tf_tg_classifier(tf_tg_weights, dataset, ground_truth_file, out_path):
     edge_df.to_csv(out_path, index=False)
     logging.info(f"Saved edge predictions to {out_path}")
 
-    return clf, edge_df
+    return random_search, edge_df
 
 def dist_broadcast_list(obj, src=0):
     """Broadcast a Python list or object from src rank to all ranks."""
