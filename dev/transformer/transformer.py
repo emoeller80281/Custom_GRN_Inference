@@ -1,4 +1,3 @@
-from pkg_resources import non_empty_lines
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -111,14 +110,18 @@ class AttentionPooling(nn.Module):
         return pooled, weights
     
 class MultiomicTransformer(nn.Module):
-    def __init__(self, d_model, num_heads, num_layers, d_ff, dropout, num_tf, num_tg, dist_bias=None):
+    def __init__(self, d_model, num_heads, num_layers, d_ff, dropout, num_tf, num_tg):
         super(MultiomicTransformer, self).__init__()
         
         self.d_model = d_model
         self.dropout = dropout
         self.d_ff = d_ff
         self.num_heads = num_heads
-        self.dist_bias = dist_bias
+        self.num_tg = num_tg
+        
+        # Create a TG embedding (doesn't use TG expression)
+        self.tg_emb = nn.Parameter(torch.empty(num_tg, d_model))
+        nn.init.xavier_uniform_(self.tg_emb)
         
         # Dense layer to pass the ATAC-seq windows into
         self.atac_window_dense_layer = nn.Sequential(
@@ -155,9 +158,10 @@ class MultiomicTransformer(nn.Module):
             enable_nested_tensor=False
         )
         
-        # Cross Attention in both directions (TF Q -> ATAC KV & ATAC Q -> TF KV)
+        # Cross Attention between TF->peak, peak->TF, and TG->peak
         self.cross_tf_to_atac = CrossAttention(d_model, num_heads, dropout)
         self.cross_atac_to_tf = CrossAttention(d_model, num_heads, dropout)
+        self.cross_tg_to_atac = CrossAttention(d_model, num_heads, dropout)
         
         # Add attention pooling to summarize the most important windows and TFs
         self.tf_pool = AttentionPooling(d_model)
@@ -177,67 +181,57 @@ class MultiomicTransformer(nn.Module):
         self.tf_tg_weights = nn.Parameter(torch.empty(num_tf, num_tg))
         nn.init.xavier_uniform_(self.tf_tg_weights)
                 
-        self.gene_pred_dense = nn.Linear(d_model, num_tg)
+        self.gene_pred_dense = nn.Linear(d_model, 1)
     
-    def forward(self, atac_windows, tf_expr):
-        
-        # Use a dense layer to embed the ATAC windows
-        win_emb = self.atac_window_dense_layer(atac_windows)                        # [B, num_windows, d_model]
-        tf_raw = tf_expr
-        
-        # Use a dense layer to embed each TF separately
-        # tf_expr: [B, num_tf]
-        tf_expr = tf_expr.unsqueeze(-1)                                             # [B, num_tf, 1]
-        
-        tf_emb = self.tf_dense_layer(tf_expr)                                       # [B, num_tf, d_model]
-        
-        if self.dist_bias is not None:
-            B = tf_emb.size(0)  # batch size
-            bias = self.dist_bias.unsqueeze(0).unsqueeze(0)  # [1, 1, num_tg, num_windows]
-            bias = bias.expand(B, self.num_heads, -1, -1)   # [B, num_heads, num_tg, num_windows]
+    def forward(self, atac_windows, tf_expr, bias=None):
+        # ----- Embed ATAC windows -----
+        win_emb = self.atac_window_dense_layer(atac_windows)      # [B, num_windows, d_model]
+
+        # ----- Embed TF expression -----
+        tf_raw = tf_expr                                          # [B, num_tf]
+        tf_emb = self.tf_dense_layer(tf_expr.unsqueeze(-1))       # [B, num_tf, d_model]
+
+        # ----- Positional encoding -----
+        positions = torch.arange(win_emb.size(1), device=win_emb.device).float()
+        pos_emb = self.posenc(positions, bsz=win_emb.size(0))     # [seq_len, B, d_model]
+        pos_emb = pos_emb.transpose(0, 1)                         # [B, seq_len, d_model]
+        win_emb = win_emb + pos_emb
+        win_emb = self.encoder(win_emb)                           # [B, num_windows, d_model]
+
+        # ----- Cross attention TF <-> ATAC -----
+        tf_cross   = self.cross_tf_to_atac(tf_emb, win_emb)       # [B, num_tf, d_model]
+        atac_cross = self.cross_atac_to_tf(win_emb, tf_emb)       # [B, num_windows, d_model]
+
+        # ----- TG queries ATAC (with distance bias) -----
+        B = atac_windows.size(0)
+        tg_emb = self.tg_emb.unsqueeze(0).expand(B, -1, -1)       # [B, num_tg, d_model]
+        if bias is not None:
+            # bias: [B, num_tg, num_windows] -> [B, 1, num_tg, num_windows]
+            bias = bias.unsqueeze(1)
+            # expand across heads -> [B, num_heads, num_tg, num_windows]
+            bias = bias.expand(-1, self.num_heads, -1, -1)         # [B, num_heads, num_tg, num_windows]
         else:
             bias = None
-        
-        # Add positional encodings to the windows based on the number of windows
-        # atac_windows: [B, num_windows, num_features]
-        positions = torch.arange(win_emb.size(1), device=win_emb.device).float()    
-        pos_emb = self.posenc(positions, bsz=win_emb.size(0))                       # [seq_len, B, d_model]
-        pos_emb = pos_emb.transpose(0, 1)                                           # [B, seq_len, d_model]
-        win_emb = win_emb + pos_emb
-        
-        win_emb = self.encoder(win_emb)                                             # [B, num_windows, d_model]
-        
-        # Run cross-attention both ways
-        # distance bias added to TF Q -> ATAC KV cross-attention
-        tf_cross = self.cross_tf_to_atac(tf_emb, win_emb, attn_bias=bias)           # [B, num_tf, d_model]
-        
-        atac_cross = self.cross_atac_to_tf(win_emb, tf_emb)                         # [B, num_windows, d_model]
-        
-        # Attention pool the output from the bi-directional cross attention
-        tf_repr, tf_weights = self.tf_pool(tf_cross)                                # [B, d_model], [B, num_tf, 1]
-        atac_repr, atac_weights = self.atac_pool(atac_cross)                        # [B, d_model], [B, num_windows, 1]
+        tg_cross = self.cross_tg_to_atac(tg_emb, win_emb, attn_bias=bias)  # [B, num_tg, d_model]
 
-        # Concatenate the results from cross-attention
-        fused_repr = torch.cat([tf_repr, atac_repr], dim=-1)                        # [B, 2*d_model]
-        
-        # Final dense layer for the bi-directional cross-attention
-        fused_repr = self.out_dense(fused_repr)                                     # [B, 2*d_model] -> [B, d_model]
+        # ----- Global context pooling -----
+        tf_repr, _   = self.tf_pool(tf_cross)                     # [B, d_model]
+        atac_repr, _ = self.atac_pool(atac_cross)                 # [B, d_model]
+        fused_repr   = self.out_dense(torch.cat([tf_repr, atac_repr], dim=-1))  # [B, d_model]
 
-        # Project and flatten                           
-        fused_repr = fused_repr.flatten(start_dim=1)                                # [B, d_model]
-        
-        # print("expected in_features:", self.gene_pred_dense.in_features)
-        # Adds a direct TF-TG connection
-        tf_expr_logits = tf_raw @ self.tf_tg_weights                                # [B, num_tf] x [num_tf, num_tg] -> [B, num_tg]
-        
-        # Final linear projection to the dimensionality of the target genes
-        gene_logits = self.gene_pred_dense(fused_repr)                              # [B, d_model] x [d_model, num_tg] -> [B, num_tg]
-        
-        # Direct TF–TG contribution
-        gene_logits = gene_logits + tf_expr_logits                                  # [B, num_tg] + [B, num_tg] -> [B, num_TG]
-        
+        # ----- Combine global + gene-specific -----
+        fused_repr = fused_repr.unsqueeze(1).expand(-1, self.num_tg, -1)   # [B, num_tg, d_model]
+        tg_repr    = tg_cross + fused_repr                                # [B, num_tg, d_model]
+
+        # ----- Predict TG expression -----
+        gene_logits = self.gene_pred_dense(tg_repr).view(B, self.num_tg)   # [B, num_tg]
+
+        # Direct TF->TG shortcut
+        tf_expr_logits = tf_raw @ self.tf_tg_weights              # [B, num_tg]
+        gene_logits = gene_logits + tf_expr_logits
+
         return gene_logits
-        
+            
         
         
         

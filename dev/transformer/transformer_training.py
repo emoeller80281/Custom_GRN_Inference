@@ -43,8 +43,11 @@ GROUND_TRUTH_FILE = os.path.join(PROJECT_DIR, "ground_truth_files/mESC_beeline_C
 
 CHROM_ID = "chr19"
 
-TOTAL_EPOCHS=25
+TOTAL_EPOCHS=500
 BATCH_SIZE=32
+TRAINING_ITERATIONS = 30
+PERCENT_DROP=0
+PATIENCE=25
 
 D_MODEL = 512
 NUM_HEADS = 8
@@ -92,7 +95,7 @@ class Trainer:
         gpu_id: int,
         save_every: int,
         patience: int = 10,
-        min_delta: float = 5e-4,
+        min_delta: float = 1e-3,
     ) -> None:
         self.gpu_id = gpu_id
         self.model = model.to(gpu_id)
@@ -114,7 +117,7 @@ class Trainer:
         self.min_delta = min_delta
         self.patience_counter = 0
 
-    def _run_batch(self, batch, targets):
+    def _run_batch(self, batch, targets, bias=None):
         atac_wins, tf_tensor = batch
         self.optimizer.zero_grad()
         
@@ -137,12 +140,12 @@ class Trainer:
         else:
             corr_loss = torch.tensor(0.0, device=preds.device)
             
-        loss = loss + 0.1 * corr_loss
+        loss = loss + 0.05 * corr_loss
         
-        # L1 penalty for sparsity on the TF->TG weights at the end of the model
-        if hasattr(self.model, "tf_tg_weights"):
-            l1_penalty = 1e-4 * torch.norm(self.model.tf_tg_weights, p=1)
-            loss = loss + l1_penalty
+        # # L1 penalty for sparsity on the TF->TG weights at the end of the model
+        # if hasattr(self.model, "tf_tg_weights"):
+        #     l1_penalty = 1e-4 * torch.norm(self.model.tf_tg_weights, p=1)
+        #     loss = loss + l1_penalty
         
         # Safety check to prevent GPUs from hanging on infinite loss values
         if not torch.isfinite(loss):
@@ -165,17 +168,18 @@ class Trainer:
         preds_list, tgts_list = [], []
 
         with torch.no_grad():
-            for atac_wins, tf_tensor, targets in self.val_data:
-                atac_wins, tf_tensor, targets = (
+            for atac_wins, tf_tensor, targets, bias in self.val_data:
+                atac_wins, tf_tensor, targets, bias = (
                     atac_wins.to(self.gpu_id),
                     tf_tensor.to(self.gpu_id),
                     targets.to(self.gpu_id),
+                    bias.to(self.gpu_id)
                 )
-                output = self.model(atac_wins, tf_tensor)
-                loss = F.mse_loss(output, targets)
+                preds = self.model(atac_wins, tf_tensor, bias=bias)
+                loss = F.mse_loss(preds, targets)
                 total_loss += loss.item()
                 n_batches += 1
-                preds_list.append(output)
+                preds_list.append(preds)
                 tgts_list.append(targets)
 
         # Stack local tensors
@@ -216,9 +220,14 @@ class Trainer:
         self.train_data.sampler.set_epoch(epoch)
         total_loss, n_batches = 0.0, 0
 
-        for atac_wins, tf_tensor, targets in self.train_data:
-            atac_wins, tf_tensor, targets = atac_wins.to(self.gpu_id), tf_tensor.to(self.gpu_id), targets.to(self.gpu_id)
-            loss_val = self._run_batch((atac_wins, tf_tensor), targets)
+        for atac_wins, tf_tensor, targets, bias in self.train_data:
+            atac_wins, tf_tensor, targets, bias = (
+                atac_wins.to(self.gpu_id),
+                tf_tensor.to(self.gpu_id),
+                targets.to(self.gpu_id),
+                bias.to(self.gpu_id),
+            )
+            loss_val = self._run_batch((atac_wins, tf_tensor), targets, bias=bias)
             if loss_val is None:
                 continue
             total_loss += loss_val
@@ -229,15 +238,15 @@ class Trainer:
 
         return avg_train_loss, avg_val_loss, pearson_corr, spearman_corr
 
-    def _save_checkpoint(self, epoch):
+    def _save_checkpoint(self, epoch, path):
         ckp = self.model.module.state_dict()
-        PATH = "checkpoint.pt"
-        torch.save(ckp, PATH)
+        torch.save(ckp, os.path.join(path, "checkpoint.pt"))
         if self.gpu_id == 0:
-            logging.info(f"\tTraining checkpoint saved at {PATH}")
+            logging.info(f"\tTraining checkpoint saved")
         
-    def train(self, max_epochs: int, log_path: str = "training_log.csv"):
+    def train(self, max_epochs: int, path: str):
         best_val_loss = float("inf")
+        best_pearson = float(0)
         patience_counter = 0
         history = []  # store per-epoch logs
 
@@ -266,23 +275,27 @@ class Trainer:
             # Checkpoint + CSV log
             if epoch % self.save_every == 0:
                 if self.gpu_id == 0:
-                    self._save_checkpoint(epoch)
-                    self._write_log_csv(history, log_path, epoch)
+                    self._save_checkpoint(epoch, path)
+                    self._write_log_csv(history, path, epoch)
                 dist.barrier()
                 
             stop_tensor = torch.tensor(0, device=self.gpu_id)
 
             # Early stopping check
-            if val_loss < best_val_loss - self.min_delta:
-                best_val_loss = val_loss
+            # Track best values
+            if val_loss < best_val_loss - self.min_delta or pearson_corr > best_pearson + self.min_delta:
+                # If either val_loss improved OR pearson improved, reset patience
+                best_val_loss = min(best_val_loss, val_loss)
+                best_pearson = max(best_pearson, pearson_corr)
                 patience_counter = 0
             else:
+                # No improvement in *both* metrics
                 patience_counter += 1
                 
                 if patience_counter >= self.patience and self.gpu_id == 0:
                     logging.info("Early stopping triggered.")
-                    self._save_checkpoint(epoch)
-                    self._write_log_csv(history, log_path, epoch, final=True)
+                    self._save_checkpoint(epoch, path)
+                    self._write_log_csv(history, path, epoch, final=True)
                     stop_tensor.fill_(1)  # rank 0 sets the stop flag
 
             # broadcast stop flag from rank 0 → all ranks
@@ -296,11 +309,12 @@ class Trainer:
 
         # Final save if not early stopped
         if self.gpu_id == 0 and patience_counter < self.patience:
-            self._write_log_csv(history, log_path, epoch, final=True)
+            self._write_log_csv(history, path, epoch, final=True)
             logging.info("Training loop exited normally.")
     
-    def _write_log_csv(self, history, log_path, epoch, final=False):
+    def _write_log_csv(self, history, path, epoch, final=False):
         fieldnames = ["Epoch", "Train Loss", "Val Loss", "Pearson", "Spearman", "LR"]
+        log_path = os.path.join(path, "training_log.csv")
         with open(log_path, "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
@@ -340,7 +354,7 @@ def prepare_dataloader(dataset: Dataset, batch_size: int, world_size: int, rank:
     return train_loader, val_loader, test_loader
 
 
-def write_run_parameters(dataset, out_dir):
+def write_run_parameters(dataset, out_dir, has_dist_bias):
     run_params = {
         "Genes": dataset.num_tg,
         "Windows": dataset.num_windows,
@@ -353,6 +367,7 @@ def write_run_parameters(dataset, out_dir):
         "Model Layers": NUM_LAYERS,
         "d_feedforward": D_FF,
         "Dropout": DROPOUT,
+        "Distance Bias":has_dist_bias
     }
 
     path = os.path.join(out_dir, "run_parameters.json")
@@ -360,7 +375,7 @@ def write_run_parameters(dataset, out_dir):
         json.dump(run_params, f, indent=4)  # indent=4 for readability
     logging.info(f"Run parameters written to {path}")
     
-def iterative_refinement(model, dataset, training_output_dir, min_corr, iter_id):
+def nclb_refinement(model, dataset, training_output_dir, min_corr, iter_id):
     _, _, test_loader = prepare_dataloader(dataset, BATCH_SIZE, world_size=1, rank=0)
     corr_df = per_gene_correlation(
         model, test_loader, dataset.scaler, gpu_id=0, gene_names=dataset.tg_names
@@ -370,7 +385,7 @@ def iterative_refinement(model, dataset, training_output_dir, min_corr, iter_id)
     
     if avg_corr < min_corr:
         # Remove bottom 10% of genes by Pearson correlation
-        cutoff = np.percentile(corr_df["pearson"], 5)
+        cutoff = np.percentile(corr_df["pearson"], PERCENT_DROP)
         predicted_subset = corr_df.loc[corr_df["pearson"] > cutoff, "gene"]
     else:
         predicted_subset = corr_df["gene"]
@@ -383,6 +398,9 @@ def iterative_refinement(model, dataset, training_output_dir, min_corr, iter_id)
 def compute_tf_tg_distance_features(tf_tg_weights, tf_names, tg_names, dist_df, window_map, atac_window_tensor):
     """
     For each TF–TG pair, compute a distance-weighted accessibility score.
+    
+    Calculates the average peak accessibility for each TF-peak-TG edge
+    to get a TF-TG distance score.
     """
 
     # Map peak -> dist_score -> gene
@@ -512,7 +530,7 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
         i = 1
         stop_flag = False
         subset_genes = None
-        TRAINING_ITERATIONS = 20
+
         MIN_CORR = 0.5 # Filter low confidence genes
         TRANSFORMER_CORR_THRESH = 0.75
         
@@ -527,6 +545,10 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
                 
             dataset, model, optimizer = load_train_objs(subset_genes=subset_genes)
             
+            has_dist_bias = "No"
+            if dataset.dist_bias_tensor is not None:
+                has_dist_bias = "Yes"
+            
             if rank == 0:
                 logging.info("\n===== MultiomicTransformerDataset Loaded =====")
                 logging.info(f"Genes:               {dataset.num_tg}")
@@ -534,28 +556,30 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
                 logging.info(f"TFs:                 {dataset.num_tf}")
                 logging.info(f"Metacells:           {len(dataset.metacell_names)}")
                 logging.info(f"Epochs:              {TOTAL_EPOCHS}")
+                logging.info(f"Iterations:          {TRAINING_ITERATIONS}")
                 logging.info(f"Batch Size:          {BATCH_SIZE}")
                 logging.info(f"Model Dimension:     {D_MODEL}")
                 logging.info(f"Attention Heads:     {NUM_HEADS}")
                 logging.info(f"Attention Layers:    {NUM_LAYERS}")
                 logging.info(f"Feedforward Layers:  {D_FF}")
                 logging.info(f"Dropout:             {DROPOUT}")
+                logging.info(f"Dist bias?:          {has_dist_bias}")
                 logging.info("================================================")
-                write_run_parameters(dataset, iter_dir)
+                write_run_parameters(dataset, iter_dir, has_dist_bias)
             
             train_loader, val_loader, test_loader = prepare_dataloader(dataset, batch_size, world_size, rank)
             criterion = nn.MSELoss()
             trainer = Trainer(model, train_loader, val_loader, optimizer, criterion, gpu_id=rank, save_every=save_every)
         
 
-            trainer.train(max_epochs=total_epochs, log_path=os.path.join(iter_dir, "training_log.csv"))
+            trainer.train(max_epochs=TOTAL_EPOCHS, path=iter_dir)
 
             if rank == 0:
                 tf_tg_weights = trainer.model.module.tf_tg_weights.detach().cpu().numpy()
                 out_file = os.path.join(training_output_dir, "tf_tg_classifier_predictions.csv")
                 clf, edge_df = train_tf_tg_classifier(tf_tg_weights, dataset, GROUND_TRUTH_FILE, out_file)
                 
-                avg_corr, subset_path = iterative_refinement(
+                avg_corr, subset_path = nclb_refinement(
                     model, dataset, iter_dir, MIN_CORR, i
                 )
                 logging.info(f"Iteration {i} | Avg Pearson = {avg_corr:.3f}")
@@ -604,6 +628,7 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
                 tf_tg_df.to_csv(os.path.join(iter_dir, "tf_tg_weights.csv"))
                 # logging.info("Saved TF→TG weights to CSV")
                 
+            i += 1
                 
                 
         if rank == 0:

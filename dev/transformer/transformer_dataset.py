@@ -35,7 +35,8 @@ class MultiomicTransformerDataset(Dataset):
         self.atac_window_tensor_all = torch.load(atac_path)  # [num_windows, num_cells]
         
         if os.path.exists(dist_bias_path):
-            self.dist_bias_tensor = torch.load(dist_bias_path)  # [num_windows, num_tg]
+            bias = torch.load(dist_bias_path)  # [num_windows, num_tg]
+            self.dist_bias_tensor = bias.T.contiguous()    # [num_tg, num_windows]
         else:
             self.dist_bias_tensor = None
 
@@ -75,8 +76,14 @@ class MultiomicTransformerDataset(Dataset):
         tf_tensor   = self.tf_tensor_all[:, idx]                            # [num_tf]
         atac_wins   = self.atac_window_tensor_all[:, idx].unsqueeze(-1)     # [num_windows, 1]
         tg_tensor   = self.tg_tensor_all[:, idx]                            # [num_tg]
-        return atac_wins, tf_tensor, tg_tensor
+        
+        if self.dist_bias_tensor is not None:
+            dist_bias = self.dist_bias_tensor                           # [num_tg, num_windows]
+        else:
+            dist_bias = torch.zeros((self.num_tg, self.num_windows))
 
+        return atac_wins, tf_tensor, tg_tensor, dist_bias
+        
     def load_window_map(self):
         with open(os.path.join(self.data_dir, "window_map.json")) as f:
             return json.load(f)
@@ -118,7 +125,7 @@ class MultiomicTransformerDataset(Dataset):
         
         # Slice distance bias tensor if present
         if hasattr(self, "dist_bias_tensor") and self.dist_bias_tensor is not None:
-            self.dist_bias_tensor = self.dist_bias_tensor[:, keep_indices]
+            self.dist_bias_tensor = self.dist_bias_tensor[keep_indices, :]
 
         # Update tg_names
         self.tg_names = [self.tg_names[i] for i in keep_indices]
