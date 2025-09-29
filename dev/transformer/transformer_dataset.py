@@ -66,7 +66,7 @@ class MultiomicTransformerDataset(Dataset):
             f" - TFs: {self.num_tf}\n"
             f" - TGs: {self.num_tg}\n"
             f" - Windows: {self.num_windows}\n"
-            f" - Metacells: {len(self.metacell_names)}"
+            f" - Metacells: {len(self.metacell_names)}\n"
             f" - Chromosome: {chrom_id}"
         )
 

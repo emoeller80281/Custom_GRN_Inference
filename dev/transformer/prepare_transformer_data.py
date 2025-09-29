@@ -15,6 +15,7 @@ from grn_inference import utils
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 WINDOW_SIZE = 25000
+SAMPLE_NAME = "DS011"
 CHROM_ID = "chr1"
 
 PROJECT_DIR = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
@@ -22,11 +23,12 @@ PROJECT_DIR = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.M
 MM10_GENOME_DIR = os.path.join(PROJECT_DIR, "data/reference_genome/mm10")
 MM10_CHROM_SIZES_FILE = os.path.join(MM10_GENOME_DIR, "chrom.sizes")
 MM10_GENE_TSS_FILE = os.path.join(PROJECT_DIR, "data/genome_annotation/mm10/mm10_TSS.bed")
-SAMPLE_INPUT_DIR = os.path.join(PROJECT_DIR, "input/transformer_input/mESC/")
-OUTPUT_DIR = os.path.join(PROJECT_DIR, "output/transformer_testing_output")
+SAMPLE_INPUT_DIR = os.path.join(PROJECT_DIR, "input/transformer_input/{SAMPLE_NAME}/")
+OUTPUT_DIR = os.path.join(PROJECT_DIR, "output/transformer_testing_output/{SAMPLE_NAME}")
 
-TRANSFORMER_DATA_DIR = os.path.join(PROJECT_DIR, f"dev/transformer/transformer_data/{CHROM_ID}")
+TRANSFORMER_DATA_DIR = os.path.join(PROJECT_DIR, f"dev/transformer/transformer_data/{SAMPLE_NAME}_{CHROM_ID}")
 os.makedirs(TRANSFORMER_DATA_DIR, exist_ok=True)
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 def load_homer_tf_to_peak_results():
     assert os.path.exists(os.path.join(OUTPUT_DIR, "homer_tf_to_peak.parquet")), \
@@ -146,8 +148,9 @@ gene_tss_df = (
     .sort_values(by="start", ascending=True)
     )
 
-
-tf_names = list(load_homer_tf_to_peak_results()["source_id"].unique())
+with open(os.path.join(PROJECT_DIR, f"dev/transformer/"), 'rb') as f:
+    tf_names = pickle.load(f)
+    
 logging.info(f"\nHomer TFs: \t{tf_names[:5]}\n\tTotal {len(tf_names)} TFs")
 
 TG_pseudobulk_global = []
