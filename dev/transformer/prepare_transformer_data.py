@@ -16,29 +16,19 @@ logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 WINDOW_SIZE = 25000
 SAMPLE_NAME = "DS011"
-CHROM_ID = "chr1"
+CHROM_ID = "chr19"
 
 PROJECT_DIR = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
 
 MM10_GENOME_DIR = os.path.join(PROJECT_DIR, "data/reference_genome/mm10")
 MM10_CHROM_SIZES_FILE = os.path.join(MM10_GENOME_DIR, "chrom.sizes")
 MM10_GENE_TSS_FILE = os.path.join(PROJECT_DIR, "data/genome_annotation/mm10/mm10_TSS.bed")
-SAMPLE_INPUT_DIR = os.path.join(PROJECT_DIR, "input/transformer_input/{SAMPLE_NAME}/")
-OUTPUT_DIR = os.path.join(PROJECT_DIR, "output/transformer_testing_output/{SAMPLE_NAME}")
+SAMPLE_INPUT_DIR = os.path.join(PROJECT_DIR, f"input/transformer_input/{SAMPLE_NAME}/")
+OUTPUT_DIR = os.path.join(PROJECT_DIR, f"output/transformer_testing_output/{SAMPLE_NAME}/{CHROM_ID}")
 
 TRANSFORMER_DATA_DIR = os.path.join(PROJECT_DIR, f"dev/transformer/transformer_data/{SAMPLE_NAME}_{CHROM_ID}")
 os.makedirs(TRANSFORMER_DATA_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-def load_homer_tf_to_peak_results():
-    assert os.path.exists(os.path.join(OUTPUT_DIR, "homer_tf_to_peak.parquet")), \
-        "ERROR: Homer TF to peak output parquet file required"
-        
-    homer_results = pd.read_parquet(os.path.join(OUTPUT_DIR, "homer_tf_to_peak.parquet"), engine="pyarrow")
-    homer_results = homer_results.reset_index(drop=True)
-    homer_results["source_id"] = homer_results["source_id"].str.capitalize()
-    
-    return homer_results
 
 def create_or_load_genomic_windows(force_recalculate=False):
     genome_window_file = os.path.join(MM10_GENOME_DIR, f"mm10_{CHROM_ID}_windows_{WINDOW_SIZE // 1000}kb.bed")
@@ -135,9 +125,11 @@ def calculate_peak_to_tg_distance_score(mesc_atac_peak_loc_df, gene_tss_df, forc
     
     return genes_near_peaks
 
-sample_name_list = ["E7.5_rep1", "E7.5_rep1", "E7.75_rep1", "E8.0_rep2", "E8.5_rep2",
-                    "E8.75_rep2", "E7.5_rep2", "E8.0_rep1", "E8.5_rep1"]
+# sample_name_list = ["E7.5_rep1", "E7.5_rep1", "E7.75_rep1", "E8.0_rep2", "E8.5_rep2",
+#                     "E8.75_rep2", "E7.5_rep2", "E8.0_rep1", "E8.5_rep1"]
 holdout = ["E8.75_rep1"]
+
+sample_name_list = ["DS011_sample1"]
 
 mm10_gene_tss_bed = pybedtools.BedTool(MM10_GENE_TSS_FILE)
 gene_tss_df = (
@@ -148,8 +140,8 @@ gene_tss_df = (
     .sort_values(by="start", ascending=True)
     )
 
-with open(os.path.join(PROJECT_DIR, f"dev/transformer/"), 'rb') as f:
-    tf_names = pickle.load(f)
+with open(os.path.join(PROJECT_DIR, f"dev/transformer/mesc_homer_tfs.pkl"), 'rb') as f:
+    tf_names: list = pickle.load(f)
     
 logging.info(f"\nHomer TFs: \t{tf_names[:5]}\n\tTotal {len(tf_names)} TFs")
 

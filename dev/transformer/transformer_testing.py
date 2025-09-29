@@ -20,11 +20,14 @@ from transformer_training import (
     
 )
 
-selected_date = "26_09_11_56_06"
+SAMPLE_NAME="DS011"
+CHROM_ID="chr19"
+
 PROJECT_DIR="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
-TRANSFORMER_DATA_DIR = os.path.join(PROJECT_DIR, "dev/transformer/transformer_data")
+TRANSFORMER_DATA_DIR = os.path.join(PROJECT_DIR, F"dev/transformer/transformer_data/{SAMPLE_NAME}_{CHROM_ID}")
 OUTPUT_DIR = os.path.join(PROJECT_DIR, f"output/transformer_testing_output")
 TEST_DIR=os.path.join(OUTPUT_DIR, f"best_model_0.82_corr")
+
 
 def build_gene_features(tf_tg_weights, dataset):
     """
@@ -97,11 +100,13 @@ DROPOUT = run_params["Dropout"]
 # Paths
 model_path = os.path.join(TEST_DIR, "checkpoint.pt")
 
-# Rebuild dataset + model
+# Load the dataset to evaluate
 dataset = MultiomicTransformerDataset(
     data_dir=TRANSFORMER_DATA_DIR, 
-    chrom_id="chr19"
+    chrom_id=CHROM_ID
 )
+
+# Load the trained model
 model = MultiomicTransformer(
     D_MODEL, NUM_HEADS, NUM_LAYERS, D_FF, DROPOUT,
     dataset.num_tf, dataset.num_tg
@@ -190,12 +195,12 @@ def evaluate_auc_and_topk(tf_importance_df, chip_edges, k_list=[100, 500, 1000])
                 positives.append((tf, tg))
                 
     all_tgs_in_chip = set(g2 for _, g2 in chip_edges)
-    overlap_with_chr19 = all_tgs_in_chip.intersection(set(tf_importance_df.columns))
+    overlap = all_tgs_in_chip.intersection(set(tf_importance_df.columns))
 
     print(f"Total TGs in RN111: {len(all_tgs_in_chip)}")
-    print(f"TGs on chr19 (dataset): {len(tf_importance_df.columns)}")
-    print(f"TGs overlap between RN111 and chr19 dataset: {len(overlap_with_chr19)}")
-    print("Example overlap TGs:", list(overlap_with_chr19)[:20])
+    print(f"TGs overlap on {CHROM_ID} (dataset): {len(tf_importance_df.columns)}")
+    print(f"TGs overlap between RN111 and {CHROM_ID} dataset: {len(overlap)}")
+    print("Example overlap TGs:", list(overlap)[:20])
 
     print(f"Found {len(positives)} positive TF–TG edges in evaluation set.")
     print("Example positives:", positives[:10])
@@ -228,8 +233,6 @@ def evaluate_auc_and_topk(tf_importance_df, chip_edges, k_list=[100, 500, 1000])
         results[f"Precision@{k}"] = precision_at_k
 
     return results
-
-
 
 tf_imp_dir = os.path.join(TEST_DIR, "tf_gradient_attributions")
 os.makedirs(tf_imp_dir, exist_ok=True)

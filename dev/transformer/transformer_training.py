@@ -37,6 +37,7 @@ import warnings
 warnings.filterwarnings("ignore", message="No device id is provided via `init_process_group`")
 
 CHROM_ID = "chr1"
+SAMPLE_NAME = "mESC"
 
 TOTAL_EPOCHS=500
 BATCH_SIZE=32
@@ -51,8 +52,8 @@ D_FF = 768
 DROPOUT = 0.1
 
 PROJECT_DIR = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
-DATA_DIR = os.path.join(PROJECT_DIR, f"dev/transformer/transformer_data/{CHROM_ID}")
-OUTPUT_DIR = os.path.join(PROJECT_DIR, "output/transformer_testing_output")
+DATA_DIR = os.path.join(PROJECT_DIR, f"dev/transformer/transformer_data/{SAMPLE_NAME}_{CHROM_ID}")
+OUTPUT_DIR = os.path.join(PROJECT_DIR, f"output/transformer_testing_output/{SAMPLE_NAME}/{CHROM_ID}")
 GROUND_TRUTH_FILE = os.path.join(PROJECT_DIR, "ground_truth_files/mESC_beeline_ChIP-seq.csv")
 
 def ddp_setup(rank, world_size):
@@ -273,41 +274,46 @@ class Trainer:
                     "Spearman": float(spearman_corr),
                     "LR": float(lr),
                 })
-
+                
             # Checkpoint + CSV log
             if epoch % self.save_every == 0:
                 if self.gpu_id == 0:
                     self._save_checkpoint(epoch, path)
                     self._write_log_csv(history, path, epoch)
                 dist.barrier()
-                
+
+            # Checkpoint + CSV log
             stop_tensor = torch.tensor(0, device=self.gpu_id)
 
-            # Early stopping check
-            # Track best values
-            if val_loss < best_val_loss - self.min_delta or pearson_corr > best_pearson + self.min_delta:
-                # If either val_loss improved OR pearson improved, reset patience
-                best_val_loss = min(best_val_loss, val_loss)
-                best_pearson = max(best_pearson, pearson_corr)
-                patience_counter = 0
-            else:
-                # No improvement in *both* metrics
-                patience_counter += 1
-                
-                if patience_counter >= self.patience and self.gpu_id == 0:
-                    logging.info("Early stopping triggered.")
-                    self._save_checkpoint(epoch, path)
-                    self._write_log_csv(history, path, epoch, final=True)
-                    stop_tensor.fill_(1)  # rank 0 sets the stop flag
+            # --- Early stopping check (only rank 0 sets flag) ---
+            if self.gpu_id == 0:
+                if val_loss < best_val_loss - self.min_delta or pearson_corr > best_pearson + self.min_delta:
+                    # If either val_loss improved OR pearson improved, reset patience
+                    best_val_loss = min(best_val_loss, val_loss)
+                    best_pearson = max(best_pearson, pearson_corr)
+                    patience_counter = 0
+                else:
+                    # No improvement
+                    patience_counter += 1
 
-            # broadcast stop flag from rank 0 → all ranks
+                    if patience_counter >= self.patience:
+                        logging.info("Early stopping triggered.")
+                        self._save_checkpoint(epoch, path)
+                        self._write_log_csv(history, path, epoch, final=True)
+                        stop_tensor.fill_(1)  # <-- mark stop
+
+                    else:
+                        logging.info(f"    Loss did not improve {patience_counter}/{self.patience}")
+
+            # --- Broadcast stop flag from rank 0 to all ranks ---
             dist.broadcast(stop_tensor, src=0)
 
+            # --- All ranks see the same value now ---
             if stop_tensor.item() == 1:
+                if self.gpu_id == 0:
+                    logging.info("All ranks stopping training.")
                 break
-            else:
-                if self.gpu_id == 0 and patience_counter > 0:
-                    logging.info(f"    Loss did not improve {patience_counter}/{self.patience}")
+
 
         # Final save if not early stopped
         if self.gpu_id == 0 and patience_counter < self.patience:
@@ -598,7 +604,7 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
             
             train_loader, val_loader, test_loader = prepare_dataloader(dataset, batch_size, world_size, rank)
             criterion = nn.MSELoss()
-            trainer = Trainer(model, train_loader, val_loader, optimizer, criterion, gpu_id=rank, save_every=save_every)
+            trainer = Trainer(model, train_loader, val_loader, optimizer, criterion, gpu_id=rank, save_every=save_every, patience=PATIENCE)
         
 
             trainer.train(max_epochs=TOTAL_EPOCHS, path=iter_dir)
