@@ -5,7 +5,7 @@
 #SBATCH --time=12:00:00
 #SBATCH -p compute
 #SBATCH -N 1
-#SBATCH -c 1
+#SBATCH -c 10
 #SBATCH --mem=160G
 
 set -euo pipefail

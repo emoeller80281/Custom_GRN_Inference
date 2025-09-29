@@ -15,6 +15,7 @@ from grn_inference import utils
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 WINDOW_SIZE = 25000
+CHROM_ID = "chr1"
 
 PROJECT_DIR = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
 
@@ -24,7 +25,7 @@ MM10_GENE_TSS_FILE = os.path.join(PROJECT_DIR, "data/genome_annotation/mm10/mm10
 SAMPLE_INPUT_DIR = os.path.join(PROJECT_DIR, "input/transformer_input/mESC/")
 OUTPUT_DIR = os.path.join(PROJECT_DIR, "output/transformer_testing_output")
 
-TRANSFORMER_DATA_DIR = os.path.join(PROJECT_DIR, "dev/transformer/transformer_data")
+TRANSFORMER_DATA_DIR = os.path.join(PROJECT_DIR, f"dev/transformer/transformer_data/{CHROM_ID}")
 os.makedirs(TRANSFORMER_DATA_DIR, exist_ok=True)
 
 def load_homer_tf_to_peak_results():
@@ -37,15 +38,15 @@ def load_homer_tf_to_peak_results():
     
     return homer_results
 
-def create_or_load_genomic_windows(chrom_id, force_recalculate=False):
-    genome_window_file = os.path.join(MM10_GENOME_DIR, f"mm10_{chrom_id}_windows_{WINDOW_SIZE // 1000}kb.bed")
+def create_or_load_genomic_windows(force_recalculate=False):
+    genome_window_file = os.path.join(MM10_GENOME_DIR, f"mm10_{CHROM_ID}_windows_{WINDOW_SIZE // 1000}kb.bed")
     if not os.path.exists(genome_window_file) or force_recalculate:
         
         logging.info("\nCreating genomic windows")
         mm10_genome_windows = pybedtools.bedtool.BedTool().window_maker(g=MM10_CHROM_SIZES_FILE, w=WINDOW_SIZE)
         mm10_windows = (
             mm10_genome_windows
-            .filter(lambda x: x.chrom == chrom_id)  # TEMPORARY Restrict to one chromosome for testing
+            .filter(lambda x: x.chrom == CHROM_ID)  # TEMPORARY Restrict to one chromosome for testing
             .saveas(genome_window_file)
             .to_dataframe()
         )
@@ -135,13 +136,12 @@ def calculate_peak_to_tg_distance_score(mesc_atac_peak_loc_df, gene_tss_df, forc
 sample_name_list = ["E7.5_rep1", "E7.5_rep1", "E7.75_rep1", "E8.0_rep2", "E8.5_rep2",
                     "E8.75_rep2", "E7.5_rep2", "E8.0_rep1", "E8.5_rep1"]
 holdout = ["E8.75_rep1"]
-chrom_id = "chr19"
 
 mm10_gene_tss_bed = pybedtools.BedTool(MM10_GENE_TSS_FILE)
 gene_tss_df = (
     mm10_gene_tss_bed
-    .filter(lambda x: x.chrom == chrom_id)
-    .saveas(os.path.join(MM10_GENOME_DIR, "mm10_ch19_gene_tss.bed"))
+    .filter(lambda x: x.chrom == CHROM_ID)
+    .saveas(os.path.join(MM10_GENOME_DIR, f"mm10_{CHROM_ID}_gene_tss.bed"))
     .to_dataframe()
     .sort_values(by="start", ascending=True)
     )
@@ -176,9 +176,9 @@ for sample_name in sample_name_list:
         logging.info(f"\tRE_pseudobulk: {RE_pseudobulk.shape[0]:,} Peaks x {RE_pseudobulk.shape[1]} metacells")
 
         TG_chr_specific = TG_pseudobulk.loc[TG_pseudobulk.index.intersection(gene_tss_df['name'].unique())]
-        RE_chr_specific = RE_pseudobulk[RE_pseudobulk.index.str.startswith(f"{chrom_id}:")]
+        RE_chr_specific = RE_pseudobulk[RE_pseudobulk.index.str.startswith(f"{CHROM_ID}:")]
 
-        logging.info(f"\n  - Restricted to {chrom_id} Genes and Peaks: ")
+        logging.info(f"\n  - Restricted to {CHROM_ID} Genes and Peaks: ")
         logging.info(f"\tTG_chr_specific: {TG_chr_specific.shape[0]} Genes x {TG_chr_specific.shape[1]} metacells")
         logging.info(f"\tRE_chr_specific: {RE_chr_specific.shape[0]:,} Peaks x {RE_chr_specific.shape[1]} metacells")
 
@@ -210,10 +210,10 @@ scaler = StandardScaler()
 TG_scaled = scaler.fit_transform(total_TG_pseudobulk_chr.values.astype("float32"))
 
 # Save scaler for inverse-transform
-joblib.dump(scaler, os.path.join(TRANSFORMER_DATA_DIR, f"tg_scaler_{chrom_id}.pkl"))
+joblib.dump(scaler, os.path.join(TRANSFORMER_DATA_DIR, f"tg_scaler_{CHROM_ID}.pkl"))
 
 # Create genome windows
-mm10_windows = create_or_load_genomic_windows(chrom_id)
+mm10_windows = create_or_load_genomic_windows()
 mm10_windows = mm10_windows.reset_index(drop=True)
 mm10_windows["win_idx"] = mm10_windows.index
 
@@ -225,7 +225,7 @@ genes_near_peaks = calculate_peak_to_tg_distance_score(
 )
 
 # Save as metadata for downstream use
-dist_path = os.path.join(TRANSFORMER_DATA_DIR, f"genes_near_peaks_{chrom_id}.parquet")
+dist_path = os.path.join(TRANSFORMER_DATA_DIR, f"genes_near_peaks_{CHROM_ID}.parquet")
 genes_near_peaks.to_parquet(dist_path, compression="snappy", engine="pyarrow")
 logging.info(f"Saved peak-to-TG distance scores to {dist_path}")
 
@@ -241,7 +241,7 @@ torch.save(tf_tensor_all, os.path.join(TRANSFORMER_DATA_DIR, "tf_tensor_all.pt")
 
 # TG tensor (scaled)
 tg_tensor_all = torch.tensor(TG_scaled, dtype=torch.float32)
-torch.save(tg_tensor_all, os.path.join(TRANSFORMER_DATA_DIR, f"tg_tensor_all_{chrom_id}.pt"))
+torch.save(tg_tensor_all, os.path.join(TRANSFORMER_DATA_DIR, f"tg_tensor_all_{CHROM_ID}.pt"))
 
 # ATAC window tensor
 rows, cols, vals = [], [], []
@@ -253,14 +253,14 @@ for peak, win_idx in window_map.items():
         vals.append(1.0)
 W = sp.csr_matrix((vals, (rows, cols)), shape=(mm10_windows.shape[0], total_RE_pseudobulk_chr.shape[0]))
 atac_window_tensor_all = torch.tensor(W @ total_RE_pseudobulk_chr.values, dtype=torch.float32)
-torch.save(atac_window_tensor_all, os.path.join(TRANSFORMER_DATA_DIR, f"atac_window_tensor_all_{chrom_id}.pt"))
+torch.save(atac_window_tensor_all, os.path.join(TRANSFORMER_DATA_DIR, f"atac_window_tensor_all_{CHROM_ID}.pt"))
 
 # Save metadata
-with open(os.path.join(TRANSFORMER_DATA_DIR, "window_map.json"), "w") as f:
+with open(os.path.join(TRANSFORMER_DATA_DIR, f"window_map_{CHROM_ID}.json"), "w") as f:
     json.dump(window_map, f, indent=4)
     
 tg_names = total_TG_pseudobulk_chr.index.tolist()
-with open(os.path.join(TRANSFORMER_DATA_DIR, f"tg_names_{chrom_id}.json"), "w") as f:
+with open(os.path.join(TRANSFORMER_DATA_DIR, f"tg_names_{CHROM_ID}.json"), "w") as f:
     json.dump(tg_names, f)
     
 # Build [num_windows x num_tg] distance bias matrix
@@ -279,7 +279,7 @@ for _, row in genes_near_peaks.iterrows():
         dist_bias[win_idx, tg_idx] = max(dist_bias[win_idx, tg_idx], score)
 
 # Save to disk
-torch.save(dist_bias, os.path.join(TRANSFORMER_DATA_DIR, f"dist_bias_{chrom_id}.pt"))
+torch.save(dist_bias, os.path.join(TRANSFORMER_DATA_DIR, f"dist_bias_{CHROM_ID}.pt"))
 logging.info(f"Saved distance bias tensor with shape {dist_bias.shape}")
     
 metacell_names = total_TG_pseudobulk_global.columns.tolist()

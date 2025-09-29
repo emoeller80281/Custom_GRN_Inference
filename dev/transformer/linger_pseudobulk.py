@@ -134,16 +134,17 @@ def pseudo_bulk(
 
 def get_adata_from_peakmatrix(peak_matrix_file: str, label: pd.DataFrame, sample_name: str) -> AnnData:
     # Read header only
-    all_cols = pd.read_csv(peak_matrix_file, sep="\t", nrows=10).columns
+    all_cols = pd.read_csv(peak_matrix_file, sep="\t", nrows=10).columns[1:]
+    logging.info(f"First ATAC Barcode: {all_cols[0]}")
     
-    # # Identify barcodes shared between RNA and ATAC
-    # matching_barcodes = set(label["barcode_use"]) & set(all_cols)
+    # Identify barcodes shared between RNA and ATAC
+    matching_barcodes = set(label["barcode_use"]) & set(all_cols)
 
-    # # Map from original index -> normalized barcode
-    # col_map = {i: bc for i, bc in enumerate(all_cols)}
+    # Map from original index -> normalized barcode
+    col_map = {i: bc for i, bc in enumerate(all_cols)}
 
-    # # Always keep the first column (peak IDs)
-    # keep_indices = [0] + [i for i, bc in col_map.items() if bc in matching_barcodes]
+    # Always keep the first column (peak IDs)
+    keep_indices = [0] + [i for i, bc in col_map.items() if bc in matching_barcodes]
 
     # Read only those columns
     peak_matrix = pd.read_csv(
@@ -154,8 +155,8 @@ def get_adata_from_peakmatrix(peak_matrix_file: str, label: pd.DataFrame, sample
     )
 
     # Replace column names with normalized barcodes
-    # new_cols = [col_map[i] for i in keep_indices[1:]]
-    # peak_matrix.columns = new_cols
+    new_cols = [col_map[i] for i in keep_indices[1:]]
+    peak_matrix.columns = new_cols
     new_cols = peak_matrix.columns
 
     # Construct AnnData
@@ -240,7 +241,9 @@ def process_sample(sample_name: str):
         sample_raw_data_dir = os.path.join(RAW_MESC_DATA_DIR, sample_name)
         adata_RNA = load_rna_adata(sample_raw_data_dir)
         adata_RNA.obs_names = [(sample_name + "." + i).replace("-", ".") for i in adata_RNA.obs_names]
+        # adata_RNA.obs_names = [i.replace("-", ".") for i in adata_RNA.obs_names]
         logging.info(f"[{sample_name}] Found {len(adata_RNA.obs_names)} RNA barcodes")
+        logging.info(f"First RNA barcode: {adata_RNA.obs_names[0]}")
 
         label = pd.DataFrame({"barcode_use": adata_RNA.obs_names,
                               "label": ["mESC"] * len(adata_RNA.obs_names)})
@@ -272,19 +275,19 @@ def process_sample(sample_name: str):
     return sample_name
 
 PROJECT_DIR = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
-# RAW_MESC_DATA_DIR = "/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/SINGLE_CELL_DATASETS/DS014_DOI496239_MOUSE_ESC_RAW_FILES"
-# MESC_PEAK_MATRIX_FILE = "/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/SINGLE_CELL_DATASETS/DS014_DOI496239_MOUSE_ESCDAYS7AND8/scATAC_PeakMatrix.txt"
-SAMPLE_INPUT_DIR = os.path.join(PROJECT_DIR, "input/transformer_input/mESC")
+RAW_MESC_DATA_DIR = "/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/SINGLE_CELL_DATASETS/DS014_DOI496239_MOUSE_ESC_RAW_FILES"
+MESC_PEAK_MATRIX_FILE = "/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/SINGLE_CELL_DATASETS/DS014_DOI496239_MOUSE_ESCDAYS7AND8/scATAC_PeakMatrix.txt"
+SAMPLE_INPUT_DIR = os.path.join(PROJECT_DIR, f"input/transformer_input/mESC")
 
-RAW_MESC_DATA_DIR="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/DS011_mESC/10X_raw_data/HIFLR_barcodes_features_matrix"
-MESC_PEAK_MATRIX_FILE="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/DS011_mESC/10X_raw_data/DS011_PMID35977485_MOUSE_ESC/scATAC_PeakMatrix.HIFLR.txt"
+# RAW_MESC_DATA_DIR="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/DS011_mESC/10X_raw_data/HIFLR_barcodes_features_matrix"
+# MESC_PEAK_MATRIX_FILE="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/DS011_mESC/10X_raw_data/DS011_PMID35977485_MOUSE_ESC/scATAC_PeakMatrix.HIFLR.txt"
 
 
 def main():
-    # sample_name_list = ["E7.5_rep1", "E7.5_rep1", "E7.75_rep1", "E8.0_rep2", "E8.5_rep2",
-    #                     "E8.75_rep2", "E7.5_rep2", "E8.0_rep1", "E8.5_rep1", "E8.75_rep1"]
+    sample_name_list = ["E7.5_rep1", "E7.5_rep1", "E7.75_rep1", "E8.0_rep2", "E8.5_rep2",
+                        "E8.75_rep2", "E7.5_rep2", "E8.0_rep1", "E8.5_rep1", "E8.75_rep1"]
     
-    sample_name_list = ["DS011"]
+    # sample_name_list = ["DS011"]
     
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 

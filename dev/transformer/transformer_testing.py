@@ -7,6 +7,7 @@ sys.path.append("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE
 from scipy.stats import skew, kurtosis
 from transformer import MultiomicTransformer
 from sklearn.preprocessing import minmax_scale
+from sklearn.metrics import roc_auc_score, average_precision_score
 from transformer_dataset import MultiomicTransformerDataset
 from eval import (
     per_gene_correlation,
@@ -109,29 +110,17 @@ device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 model.load_state_dict(torch.load(model_path, map_location=device))
 model = model.to(device)
 
-top_50_genes = np.load(os.path.join(OUTPUT_DIR, "top_50_expressed_chr19_genes.npy"), allow_pickle=True)
-
-def gradient_attribution_matrix(model, dataset, tg_names, num_batches=5, device="cuda:0"):
+def gradient_attribution_matrix(model, dataset, num_batches=5, device="cuda:0"):
     """
     Compute gradient attribution scores for all TF–TG pairs.
-
-    Args:
-        model       : trained MultiomicTransformer
-        dataset     : MultiomicTransformerDataset
-        tg_names    : list of TG names to evaluate
-        num_batches : number of batches to average over
-        device      : GPU/CPU
-
-    Returns:
-        pd.DataFrame [TFs x TGs] with column-wise min-max scaled attribution scores
+    Returns a TF x TG DataFrame with global min-max scaled scores.
     """
     model.eval()
     _, _, test_loader = prepare_dataloader(dataset, batch_size=32, world_size=1, rank=0)
-
-    tg_names = [i for i in tg_names if tg_names in dataset.tg_names]
     
     # Initialize importance accumulator per TG
-    importance_dict = {tg: torch.zeros(len(dataset.tf_names), device=device) for tg in tg_names}
+    importance_dict = {tg: torch.zeros(len(dataset.tf_names), device=device) 
+                       for tg in dataset.tg_names}
 
     for i, (atac_wins, tf_tensor, targets, bias) in enumerate(test_loader):
         if i >= num_batches:
@@ -143,7 +132,7 @@ def gradient_attribution_matrix(model, dataset, tg_names, num_batches=5, device=
 
         preds = model(atac_wins, tf_tensor, bias=bias)  # [batch, n_genes]
 
-        for tg in tg_names:
+        for tg in dataset.tg_names:
             tg_idx = dataset.tg_names.index(tg)
             tg_pred = preds[:, tg_idx].mean()
 
@@ -154,27 +143,117 @@ def gradient_attribution_matrix(model, dataset, tg_names, num_batches=5, device=
 
     # Convert to DataFrame
     tf_importance_df = pd.DataFrame(
-        {tg: (importance_dict[tg] / num_batches).detach().cpu().numpy() for tg in tg_names},
+        {tg: (importance_dict[tg] / num_batches).detach().cpu().numpy() 
+         for tg in dataset.tg_names},
         index=dataset.tf_names
     )
 
-    # Column-wise min-max normalization
-    tf_importance_df = tf_importance_df.apply(lambda col: minmax_scale(col), axis=0, result_type="broadcast")
+    # Global min-max normalization (not per column)
+    min_val, max_val = tf_importance_df.values.min(), tf_importance_df.values.max()
+    tf_importance_df = (tf_importance_df - min_val) / (max_val - min_val + 1e-8)
 
     return tf_importance_df
+
+def evaluate_auc_and_topk(tf_importance_df, chip_edges, k_list=[100, 500, 1000]):
+    """
+    Compute AUROC, PR-AUC, and top-k precision for TF–TG importance scores vs ground truth.
+    
+    Args:
+        tf_importance_df : pd.DataFrame [TFs x TGs] (importance scores, normalized 0–1)
+        chip_edges       : set of (TF, TG) ground truth edges (uppercase)
+        k_list           : list of top-k cutoffs to evaluate precision
+    
+    Returns:
+        dict with AUROC, PR-AUC, and precision@k values
+    """
+    # Restrict TFs and TGs to RN111
+    rn111_tfs = set(g1 for g1, _ in chip_edges)
+    rn111_tgs = set(g2 for _, g2 in chip_edges)
+    tf_importance_df = tf_importance_df.loc[
+        tf_importance_df.index.intersection(rn111_tfs),
+        tf_importance_df.columns.intersection(rn111_tgs)
+    ]
+
+    scores, labels, edges = [], [], []
+    for tg in tf_importance_df.columns:
+        for tf in tf_importance_df.index:
+            score = tf_importance_df.loc[tf, tg]
+            label = 1 if (tf.upper(), tg.upper()) in chip_edges else 0
+            scores.append(score)
+            labels.append(label)
+            edges.append((tf, tg))
+
+    positives = []
+    for tf in tf_importance_df.index:
+        for tg in tf_importance_df.columns:
+            if (tf.upper(), tg.upper()) in chip_edges:
+                positives.append((tf, tg))
+                
+    all_tgs_in_chip = set(g2 for _, g2 in chip_edges)
+    overlap_with_chr19 = all_tgs_in_chip.intersection(set(tf_importance_df.columns))
+
+    print(f"Total TGs in RN111: {len(all_tgs_in_chip)}")
+    print(f"TGs on chr19 (dataset): {len(tf_importance_df.columns)}")
+    print(f"TGs overlap between RN111 and chr19 dataset: {len(overlap_with_chr19)}")
+    print("Example overlap TGs:", list(overlap_with_chr19)[:20])
+
+    print(f"Found {len(positives)} positive TF–TG edges in evaluation set.")
+    print("Example positives:", positives[:10])
+    
+    print("Overlap TFs:", len(tf_importance_df.index.intersection(rn111_tfs)))
+    print("Overlap TGs:", len(tf_importance_df.columns.intersection(rn111_tgs)))
+
+    if len(set(labels)) < 2:
+        raise ValueError("Ground truth labels have only one class; AUROC/PR-AUC undefined.")
+
+    # --- AUROC and PR-AUC ---
+    auroc = roc_auc_score(labels, scores)
+    auprc = average_precision_score(labels, scores)
+
+    # --- Top-k precision ---
+    results = {"AUROC": auroc, "PR-AUC": auprc}
+    scored_edges = pd.DataFrame({"tf": [e[0] for e in edges],
+                                 "tg": [e[1] for e in edges],
+                                 "score": scores,
+                                 "label": labels})
+    scored_edges = scored_edges.sort_values("score", ascending=False).reset_index(drop=True)
+
+    total_pos = sum(labels)
+    total = len(labels)
+    print(f"Evaluated on {total} edges ({total_pos} positives, {total_pos/total:.3%})")
+
+    for k in k_list:
+        topk = scored_edges.head(k)
+        precision_at_k = topk["label"].sum() / len(topk)
+        results[f"Precision@{k}"] = precision_at_k
+
+    return results
+
+
 
 tf_imp_dir = os.path.join(TEST_DIR, "tf_gradient_attributions")
 os.makedirs(tf_imp_dir, exist_ok=True)
 
 # --- Run for your top-50 genes ---
-top_50_genes = np.load(os.path.join(OUTPUT_DIR, "top_50_expressed_chr19_genes.npy"), allow_pickle=True).tolist()
-tf_importance_df = gradient_attribution_matrix(model, dataset, tg_names=top_50_genes, num_batches=10, device=device)
+tf_importance_df = gradient_attribution_matrix(model, dataset, num_batches=10, device=device)
 
 # Save results
-tf_importance_df.to_csv(os.path.join(tf_imp_dir, "tf_importance_matrix.csv"))
+tf_importance_df.to_csv(os.path.join(tf_imp_dir, "tf_importance_matrix_exp.csv"))
 print(tf_importance_df.shape)
 print(tf_importance_df.head())
 
+ground_truth_file = os.path.join(PROJECT_DIR, "ground_truth_files/mESC_beeline_ChIP-seq.csv")
+chip_df = pd.read_csv(ground_truth_file)
+chip_edges = set((g1.capitalize(), g2.capitalize()) for g1, g2 in zip(chip_df["Gene1"], chip_df["Gene2"]))
+
+# --- Run evaluation ---
+results = evaluate_auc_and_topk(tf_importance_df, chip_edges, k_list=[100, 500, 1000, 5000])
+
+print(f"AUROC: {results['AUROC']:.4f}")
+print(f"PR-AUC: {results['PR-AUC']:.4f}")
+for k in [100, 500, 1000, 5000]:
+    if f"Precision@{k}" in results:
+        print(f"Precision@{k}: {results[f'Precision@{k}']:.3f}")
 
 # model.eval()
 

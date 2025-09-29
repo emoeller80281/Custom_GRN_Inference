@@ -18,7 +18,7 @@ class MultiomicTransformerDataset(Dataset):
         tg_path   = os.path.join(data_dir, f"tg_tensor_all_{chrom_id}.pt")
         atac_path = os.path.join(data_dir, f"atac_window_tensor_all_{chrom_id}.pt")
         scaler_path = os.path.join(data_dir, f"tg_scaler_{chrom_id}.pkl")
-        window_map_path = os.path.join(data_dir, "window_map.json")
+        window_map_path = os.path.join(data_dir, f"window_map_{chrom_id}.json")
         tf_names_path = os.path.join(data_dir, "tf_names.pickle")
         tg_names_path = os.path.join(data_dir, f"tg_names_{chrom_id}.json")
         metacell_names_path = os.path.join(data_dir, f"metacell_names.json")
@@ -67,6 +67,7 @@ class MultiomicTransformerDataset(Dataset):
             f" - TGs: {self.num_tg}\n"
             f" - Windows: {self.num_windows}\n"
             f" - Metacells: {len(self.metacell_names)}"
+            f" - Chromosome: {chrom_id}"
         )
 
     def __len__(self):

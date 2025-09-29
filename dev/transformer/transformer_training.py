@@ -36,12 +36,7 @@ from eval import (
 import warnings
 warnings.filterwarnings("ignore", message="No device id is provided via `init_process_group`")
 
-PROJECT_DIR = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
-DATA_DIR = os.path.join(PROJECT_DIR, "dev/transformer/transformer_data")
-OUTPUT_DIR = os.path.join(PROJECT_DIR, "output/transformer_testing_output")
-GROUND_TRUTH_FILE = os.path.join(PROJECT_DIR, "ground_truth_files/mESC_beeline_ChIP-seq.csv")
-
-CHROM_ID = "chr19"
+CHROM_ID = "chr1"
 
 TOTAL_EPOCHS=500
 BATCH_SIZE=32
@@ -54,6 +49,11 @@ NUM_HEADS = 6
 NUM_LAYERS = 3
 D_FF = 768
 DROPOUT = 0.1
+
+PROJECT_DIR = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
+DATA_DIR = os.path.join(PROJECT_DIR, f"dev/transformer/transformer_data/{CHROM_ID}")
+OUTPUT_DIR = os.path.join(PROJECT_DIR, "output/transformer_testing_output")
+GROUND_TRUTH_FILE = os.path.join(PROJECT_DIR, "ground_truth_files/mESC_beeline_ChIP-seq.csv")
 
 def ddp_setup(rank, world_size):
     """
@@ -579,6 +579,7 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
             
             if rank == 0:
                 logging.info("\n===== MultiomicTransformerDataset Loaded =====")
+                logging.info(f"Chromosome:          {CHROM_ID}")
                 logging.info(f"Genes:               {dataset.num_tg}")
                 logging.info(f"Windows (RE):        {dataset.num_windows}")
                 logging.info(f"TFs:                 {dataset.num_tf}")
