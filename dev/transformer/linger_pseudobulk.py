@@ -136,26 +136,27 @@ def get_adata_from_peakmatrix(peak_matrix_file: str, label: pd.DataFrame, sample
     # Read header only
     all_cols = pd.read_csv(peak_matrix_file, sep="\t", nrows=10).columns
     
-    # Identify barcodes shared between RNA and ATAC
-    matching_barcodes = set(label["barcode_use"]) & set(all_cols)
+    # # Identify barcodes shared between RNA and ATAC
+    # matching_barcodes = set(label["barcode_use"]) & set(all_cols)
 
-    # Map from original index -> normalized barcode
-    col_map = {i: bc for i, bc in enumerate(all_cols)}
+    # # Map from original index -> normalized barcode
+    # col_map = {i: bc for i, bc in enumerate(all_cols)}
 
-    # Always keep the first column (peak IDs)
-    keep_indices = [0] + [i for i, bc in col_map.items() if bc in matching_barcodes]
+    # # Always keep the first column (peak IDs)
+    # keep_indices = [0] + [i for i, bc in col_map.items() if bc in matching_barcodes]
 
     # Read only those columns
     peak_matrix = pd.read_csv(
         peak_matrix_file,
         sep="\t",
-        usecols=keep_indices,
+        # usecols=keep_indices,
         index_col=0
     )
 
     # Replace column names with normalized barcodes
-    new_cols = [col_map[i] for i in keep_indices[1:]]
-    peak_matrix.columns = new_cols
+    # new_cols = [col_map[i] for i in keep_indices[1:]]
+    # peak_matrix.columns = new_cols
+    new_cols = peak_matrix.columns
 
     # Construct AnnData
     X = sp.csr_matrix(peak_matrix.values)
@@ -177,11 +178,19 @@ def filter_and_qc(adata_RNA: AnnData, adata_ATAC: AnnData) -> Tuple[AnnData, Ann
     adata_RNA = adata_RNA.copy()
     adata_ATAC = adata_ATAC.copy()
     
+    logging.info(f"[START] RNA shape={adata_RNA.shape}, ATAC shape={adata_ATAC.shape}")
+
+    
     # Synchronize barcodes
     adata_RNA.obs['barcode'] = adata_RNA.obs_names
     common_barcodes = adata_RNA.obs['barcode'].isin(adata_ATAC.obs['barcode'])
+    n_before = (adata_RNA.n_obs, adata_ATAC.n_obs)
     adata_RNA = adata_RNA[common_barcodes].copy()
     adata_ATAC = adata_ATAC[adata_ATAC.obs['barcode'].isin(adata_RNA.obs['barcode'])].copy()
+    
+    logging.info(
+        f"[BARCODES] before sync RNA={n_before[0]}, ATAC={n_before[1]} → after sync RNA={adata_RNA.n_obs}, ATAC={adata_ATAC.n_obs}"
+    )
     
     # --- QC and filtering ---
     adata_RNA.var['mt'] = adata_RNA.var_names.str.startswith("MT-")

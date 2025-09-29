@@ -14,12 +14,17 @@ from sklearn.metrics import roc_curve, auc, precision_recall_curve, average_prec
 import matplotlib.pyplot as plt
 import os
 
-def plot_per_gene_correlation_scatterplot(model, dataloader, scaler, gpu_id=0, outpath=None):
+def plot_per_gene_correlation_scatterplot(model, dataloader, gpu_id=0, outpath=None):
     model.eval()
     preds, tgts = [], []
     with torch.no_grad():
-        for atac_wins, tf_tensor, targets in dataloader:
-            atac_wins, tf_tensor = atac_wins.to(gpu_id), tf_tensor.to(gpu_id)
+        for atac_wins, tf_tensor, targets, bias in dataloader:
+            atac_wins, tf_tensor, targets, bias = (
+                atac_wins.to(gpu_id),
+                tf_tensor.to(gpu_id),
+                targets.to(gpu_id),
+                bias.to(gpu_id)
+            )
             output = model(atac_wins, tf_tensor)
             preds.append(output.cpu().numpy())
             tgts.append(targets.cpu().numpy())
@@ -48,7 +53,7 @@ def plot_per_gene_correlation_scatterplot(model, dataloader, scaler, gpu_id=0, o
     else:
         plt.show()
         
-def per_gene_correlation(model, dataloader, scaler, gpu_id=0, gene_names=None):
+def per_gene_correlation(model, dataloader, gpu_id=0, gene_names=None):
     """
     Compute Pearson & Spearman correlation per gene across the test set.
 
