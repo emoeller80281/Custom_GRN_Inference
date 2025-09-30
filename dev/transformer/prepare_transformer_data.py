@@ -17,18 +17,18 @@ random.seed(1337)
 np.random.seed(1337)
 torch.manual_seed(1337)
 
-logging.basicConfig(level=logging.INFO, format="%(message)")
+logging.basicConfig(level=logging.INFO, format='%(message)s')
 
 WINDOW_SIZE = 25000
-SAMPLE_NAME = "mESC_holdout"
-CHROM_ID = "chr1"
+SAMPLE_NAME = "mESC"
+CHROM_ID = "chr19"
 
-# sample_name_list = ["E7.5_rep1", "E7.75_rep1", "E8.0_rep2", "E8.5_rep2",
-#                     "E8.75_rep2", "E7.5_rep2", "E8.0_rep1", "E8.5_rep1"]
-# holdout = ["E8.75_rep1"]
+sample_name_list = ["E7.5_rep1", "E7.75_rep1", "E8.0_rep2", "E8.5_rep2",
+                    "E8.75_rep2", "E7.5_rep2", "E8.0_rep1", "E8.5_rep1"]
+holdout = ["E8.75_rep1"]
 
-sample_name_list = ["E8.75_rep1"]
-holdout = []
+# sample_name_list = ["E8.75_rep1"]
+# holdout = []
 
 # sample_name_list = ["DS011_sample1"]
 

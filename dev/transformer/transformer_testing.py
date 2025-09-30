@@ -7,7 +7,7 @@ from pathlib import Path
 from sklearn.metrics import roc_auc_score, average_precision_score
 import logging
 
-logging.basicConfig(level=logging.INFO, format="%(message)")
+logging.basicConfig(level=logging.INFO, format='%(message)s')
 
 # ---------------------------------------------------------------------
 # Paths / config
