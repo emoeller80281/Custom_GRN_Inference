@@ -328,7 +328,7 @@ def load_train_objs(DATA_DIR, CHROM_ID,
     if subset_genes is not None:
         dataset.filter_genes(subset_genes)
 
-    # global vocab sizes (from common vocab, loaded into dataset.*_name2id)
+    # global vocab sizes (from common vocab)
     tf_vocab_size = len(dataset.tf_name2id)
     tg_vocab_size = len(dataset.tg_name2id)
 
@@ -575,7 +575,8 @@ def train_tf_tg_classifier(model, dataset, ground_truth_file, out_path,
     chip_edges = set((a.upper(), b.upper()) for a,b in zip(chip_df["Gene1"], chip_df["Gene2"]))
 
     # distance table
-    dist_df = pd.read_parquet(os.path.join(dataset.data_dir,
+    chrom_data_dir = os.path.join(dataset.data_dir, CHROM_ID)
+    dist_df = pd.read_parquet(os.path.join(chrom_data_dir, 
                                            f"genes_near_peaks_{dataset.chrom_id}.parquet"))
 
     # dataloader for mean attention (same one you already have)
