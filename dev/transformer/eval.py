@@ -14,44 +14,134 @@ from sklearn.metrics import roc_curve, auc, precision_recall_curve, average_prec
 import matplotlib.pyplot as plt
 import os
 
-def plot_per_gene_correlation_scatterplot(model, dataloader, gpu_id=0, outpath=None):
+def plot_per_gene_correlation_scatterplot(
+    model,
+    dataloader,
+    device="cuda:0",
+    *,
+    zscore_tf: bool = False,
+    inverse_scaler=None,           # e.g. dataset.scaler (StandardScaler) or None
+    title: str = "Predicted vs True",
+    max_points: int = 5000,
+    outpath: str = None
+):
+    """
+    Scatter plot of predicted vs. true TG expression.
+
+    Parameters
+    ----------
+    model : torch.nn.Module
+        Your MultiomicTransformer.
+    dataloader : torch.utils.data.DataLoader
+        Should yield (atac_wins, tf_tensor, tg_true, bias, tf_ids, tg_ids)
+        or (atac_wins, tf_tensor, tg_true, bias).
+    device : str or torch.device
+        Device for inference.
+    zscore_tf : bool
+        Whether to z-score TF inputs per cell (recommended for cross-dataset).
+    inverse_scaler : object or None
+        Optional scaler with .mean_ and .scale_ (e.g., StandardScaler). If provided,
+        both preds and truth will be inverse-transformed feature-wise.
+    title : str
+        Plot title.
+    max_points : int
+        Randomly subsample to this many rows for plotting (to keep the figure readable).
+    outpath : str or None
+        If given, save the figure to this path; else show().
+
+    Returns
+    -------
+    corr : float
+        Pearson correlation on all points (in the space actually plotted:
+        raw if inverse_scaler is given; otherwise the z-space).
+    """
     model.eval()
-    preds, tgts = [], []
+    preds_all, true_all = [], []
+
     with torch.no_grad():
-        for atac_wins, tf_tensor, targets, bias in dataloader:
-            atac_wins, tf_tensor, targets, bias = (
-                atac_wins.to(gpu_id),
-                tf_tensor.to(gpu_id),
-                targets.to(gpu_id),
-                bias.to(gpu_id)
-            )
-            output = model(atac_wins, tf_tensor)
-            preds.append(output.cpu().numpy())
-            tgts.append(targets.cpu().numpy())
+        for batch in dataloader:
+            # Support both 4-tuple and 6-tuple batches
+            if len(batch) == 6:
+                atac_wins, tf_tensor, tg_true, bias, tf_ids, tg_ids = batch
+            elif len(batch) == 4:
+                atac_wins, tf_tensor, tg_true, bias = batch
+                tf_ids = tg_ids = None
+            else:
+                raise ValueError(
+                    f"Unexpected batch size {len(batch)}. "
+                    "Expected 4 or 6 elements from the dataloader."
+                )
 
-    preds = np.concatenate(preds, axis=0)
-    tgts  = np.concatenate(tgts, axis=0)
+            atac_wins = atac_wins.to(device)
+            tf_tensor = tf_tensor.to(device)
+            tg_true   = tg_true.to(device)
+            bias      = bias.to(device)
+            if tf_ids is not None: tf_ids = tf_ids.to(device)
+            if tg_ids is not None: tg_ids = tg_ids.to(device)
 
-    # inverse-transform
-    # preds_rescaled = scaler.inverse_transform(preds)
-    # tgts_rescaled  = scaler.inverse_transform(tgts)
-    preds_rescaled = preds
-    tgts_rescaled  = tgts
+            # Per-cell TF z-score (recommended)
+            if zscore_tf:
+                mu = tf_tensor.mean(dim=1, keepdim=True)
+                sd = tf_tensor.std(dim=1, keepdim=True).clamp_min(1e-6)
+                tf_tensor = (tf_tensor - mu) / sd
 
-    corr, _ = pearsonr(preds_rescaled.ravel(), tgts_rescaled.ravel())
-    logging.info(f"Test Pearson correlation: {corr:.3f}")
+            # Forward
+            outputs = model(
+                atac_wins, tf_tensor,
+                tf_ids=tf_ids, tg_ids=tg_ids, bias=bias
+            )  # [B, G]
 
-    plt.figure(figsize=(6,6))
-    plt.scatter(tgts_rescaled, preds_rescaled, alpha=0.5, s=5)
-    plt.xlabel("True values")
-    plt.ylabel("Predicted values")
-    plt.title(f"Predicted vs True (r={corr:.3f})")
-    plt.plot([tgts_rescaled.min(), tgts_rescaled.max()],
-             [tgts_rescaled.min(), tgts_rescaled.max()], 'r--')
+            preds_all.append(outputs.cpu().numpy())
+            true_all.append(tg_true.cpu().numpy())
+
+    preds = np.vstack(preds_all)  # [N_cells, G]
+    tgts  = np.vstack(true_all)   # [N_cells, G]
+
+    # Optional inverse-transform to raw space (feature-wise)
+    if inverse_scaler is not None:
+        # Expecting sklearn StandardScaler-like object with mean_/scale_
+        if getattr(inverse_scaler, "scale_", None) is not None:
+            preds = preds * inverse_scaler.scale_
+            tgts  = tgts  * inverse_scaler.scale_
+        if getattr(inverse_scaler, "mean_", None) is not None:
+            preds = preds + inverse_scaler.mean_
+            tgts  = tgts  + inverse_scaler.mean_
+
+    # Pearson on all points
+    corr = float(pearsonr(preds.ravel(), tgts.ravel())[0])
+    logging.info(f"Pred vs True Pearson: {corr:.3f} "
+                 f"({ 'raw' if inverse_scaler is not None else 'z-space' })")
+
+    # Subsample rows for plotting (keeps gene ordering intact)
+    n_rows = preds.shape[0]
+    if max_points is not None and n_rows > max_points:
+        sel = np.random.default_rng(42).choice(n_rows, size=max_points, replace=False)
+        y_true = tgts[sel].ravel()
+        y_pred = preds[sel].ravel()
+    else:
+        y_true = tgts.ravel()
+        y_pred = preds.ravel()
+
+    # Plot
+    plt.figure(figsize=(6.5, 6.5))
+    plt.scatter(y_true, y_pred, alpha=0.25, s=10)
+    lims = [min(y_true.min(), y_pred.min()), max(y_true.max(), y_pred.max())]
+    plt.plot(lims, lims, "r--", linewidth=1)
+    plt.xlim(lims); plt.ylim(lims)
+    space_tag = "raw" if inverse_scaler is not None else "z-space"
+    plt.title(f"{title}\nPearson r = {corr:.2f} ({space_tag})")
+    plt.xlabel("True")
+    plt.ylabel("Predicted")
+    plt.tight_layout()
+
     if outpath:
-        plt.savefig(outpath, dpi=300)
+        plt.savefig(outpath, dpi=150)
+        plt.close()
     else:
         plt.show()
+
+    return corr
+
         
 def per_gene_correlation(model, dataloader, gpu_id=0, gene_names=None):
     """

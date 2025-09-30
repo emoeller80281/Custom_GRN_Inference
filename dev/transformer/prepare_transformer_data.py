@@ -17,7 +17,7 @@ random.seed(1337)
 np.random.seed(1337)
 torch.manual_seed(1337)
 
-logging.basicConfig(level=logging.INFO, format="%(message)s")
+logging.basicConfig(level=logging.INFO, format="%(message)")
 
 WINDOW_SIZE = 25000
 SAMPLE_NAME = "mESC_holdout"

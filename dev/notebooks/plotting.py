@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import math
 import numpy as np
-from typing import Union
+from typing import Union, Optional
 from tqdm import tqdm
 from sklearn.metrics import roc_curve, auc
 import matplotlib.patches as mpatches
@@ -340,104 +340,100 @@ def plot_true_false_scores_by_tf_boxplots(
     return fig
 
 def plot_true_false_distribution(
-    true_series: pd.Series, 
-    false_series: pd.Series, 
-    xlabel: str = "Score", 
-    ylabel: str = "", 
-    title: str = "", 
+    true_series: pd.Series,
+    false_series: pd.Series,
+    xlabel: str = "Score",
+    ylabel: str = "",
+    title: str = "",
     log: bool = False,
     balance: bool = False,
     density: bool = False,
-    ax: Union[plt.Axes, None] = None,
+    ax: Optional[plt.Axes] = None,
     use_default_legend: bool = False,
-    silence_legend: bool = False
-    ) -> plt.Figure:
-    
-    if balance and not density: # Don't balance if using the density plot, it normalizes
-        true_series, false_series = balance_dataset(true_series, false_series)
-    
+    silence_legend: bool = False,
+) -> plt.Figure:
+    # Optional balancing (make sure you’ve defined balance_dataset elsewhere)
+    if balance and not density:
+        true_series, false_series = balance_dataset(true_series, false_series)  # noqa: F821
     if balance and density:
-        print("INFO: Setting density=True balances the dataset, balance can be set to False")
-    
+        print("INFO: density=True normalizes counts; balance=True is unnecessary.")
+
     if not balance and not density:
-        if len(true_series) > 10*len(false_series) or len(false_series) > 10*len(true_series):
-            print("WARNING: Number of score are unbalanced, consider setting balance=True or density=True")
-    
-    combined = pd.concat([true_series, false_series]).dropna()
+        n_t, n_f = len(true_series), len(false_series)
+        if n_t > 10*n_f or n_f > 10*n_t:
+            print("WARNING: Class sizes are highly unbalanced. Consider balance=True or density=True.")
+
+    # Combine to compute common bins
+    combined = pd.concat([true_series, false_series]).astype(float).dropna()
     if combined.empty:
         fig, ax2 = plt.subplots(figsize=(5, 3))
         ax2.set_title(title or "No data")
         ax2.set_xlabel(xlabel)
         ax2.set_ylabel(ylabel or ("Density" if density else "Frequency"))
         return fig
-    
+
     min_score = combined.min()
     max_score = combined.max()
-    
-    if max_score < 1:
-        bin_width = max_score - min_score / 85
+
+    # Handle degenerate range (all values equal)
+    if np.isclose(max_score, min_score):
+        eps = 1e-6 if max_score == 0 else 1e-3 * abs(max_score)
+        bins = np.linspace(min_score - eps, max_score + eps, 20)
     else:
-        bin_width = max((max_score - min_score) / 85, 1e-3)
-    bins = np.arange(min_score, max_score + bin_width, bin_width).tolist()
-    
+        # Robust automatic binning (Freedman–Diaconis); falls back to 'auto' if needed
+        try:
+            bins = np.histogram_bin_edges(combined.values, bins="fd")
+        except Exception:
+            bins = np.histogram_bin_edges(combined.values, bins="auto")
+
+        # Ensure a reasonable number of bins
+        if len(bins) < 5:
+            # manual: ~85 bins as you intended, but with correct parentheses
+            width = max((max_score - min_score) / 85.0, 1e-3)
+            bins = np.arange(min_score, max_score + width, width)
+
+    # Axes setup
     if ax is None:
         fig, ax = plt.subplots(figsize=(6, 4))
         fontsize = 12
-
     elif isinstance(ax, plt.Axes):
         fig = ax.figure
         fontsize = 10
     else:
         raise ValueError("ax must be a matplotlib Axes or None")
-    
-    if silence_legend == True:
+
+    # Labels
+    if silence_legend:
         true_label = None
         false_label = None
+    elif use_default_legend:
+        true_label = "Edge in\nGround Truth"
+        false_label = "Edge not in\nGround Truth"
     else:
-        if use_default_legend:
-            true_label = "Edge in\nGround Truth"
-            false_label = "Edge not in\nGround Truth"
-        else:
-            if isinstance(true_series.name, str):
-                true_label = true_series.name
-            if isinstance(true_series.name, str):
-                false_label = false_series.name
-            else:
-                true_label = None
-                false_label = None
-    
-    ax.hist(
-        true_series,
-        bins=bins,
-        alpha=0.5,
-        color="#4195df",
-        label=true_label,
-        density=density,
-        log=log
-    )
-    ax.hist(
-        false_series,
-        bins=bins,
-        alpha=0.5,
-        color="#747474",
-        label=false_label,
-        density=density,
-        log=log
-    )
-    
-    if ylabel is not None and len(ylabel) == 0:
+        true_label = true_series.name if isinstance(true_series.name, str) else None
+        false_label = false_series.name if isinstance(false_series.name, str) else None
+
+    # Plot
+    ax.hist(true_series,  bins=bins, alpha=0.5, color="#4195df",
+            label=true_label, density=density, log=log, edgecolor="none")
+    ax.hist(false_series, bins=bins, alpha=0.5, color="#747474",
+            label=false_label, density=density, log=log, edgecolor="none")
+
+    # Axis text
+    if not ylabel:
         ylabel = "Density" if density else "Frequency"
-            
     ax.set_title(title, fontsize=fontsize)
     ax.set_xlabel(xlabel, fontsize=fontsize)
     ax.set_ylabel(ylabel, fontsize=fontsize)
     ax.tick_params(axis='x', labelsize=fontsize-1)
     ax.tick_params(axis='y', labelsize=fontsize-1)
-    ax.set_xlim((min_score, max_score))
-    # if use_default_legend:
-    fig.legend(bbox_to_anchor=(1.03, 0.5), loc='upper left', borderaxespad=0., fontsize=fontsize-2)
+    ax.set_xlim((bins[0], bins[-1]))
+
+    # Legend (only if labels exist and not silenced)
+    if not silence_legend and (true_label or false_label):
+        ax.legend(loc="upper right", fontsize=fontsize-2)
+
     fig.tight_layout()
-    
     return fig
     
 def plot_auroc(df: pd.DataFrame, score_col: str, title: str="", ax: Union[plt.Axes, None]=None):

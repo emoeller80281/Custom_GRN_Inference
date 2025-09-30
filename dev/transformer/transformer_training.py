@@ -36,7 +36,7 @@ from eval import (
 import warnings
 warnings.filterwarnings("ignore", message="No device id is provided via `init_process_group`")
 
-CHROM_ID = "chr1"
+CHROM_ID = "chr19"
 SAMPLE_NAME = "mESC"
 
 TOTAL_EPOCHS=500
@@ -329,7 +329,8 @@ def load_train_objs(DATA_DIR, CHROM_ID,
         dataset.filter_genes(subset_genes)
 
     # global vocab sizes (from common vocab)
-
+    tf_vocab_size=len(dataset.tf_name2id)
+    tg_vocab_size=len(dataset.tg_name2id)
 
     model = MultiomicTransformer(
         d_model=D_MODEL,

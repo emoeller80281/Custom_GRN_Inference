@@ -6,7 +6,8 @@ import torch
 from pathlib import Path
 from sklearn.metrics import roc_auc_score, average_precision_score
 import logging
-logging.basicConfig(level=logging.INFO, format=f"%(message)%", force=True)
+
+logging.basicConfig(level=logging.INFO, format="%(message)")
 
 # ---------------------------------------------------------------------
 # Paths / config
@@ -18,6 +19,7 @@ sys.path.append(DEV_DIR)
 from transformer import MultiomicTransformer
 from transformer_dataset import MultiomicTransformerDataset
 from transformer_training import prepare_dataloader
+import eval
 
 SAMPLE_NAME = "mESC"
 CHROM_ID    = "chr1"
@@ -208,10 +210,19 @@ def evaluate_chip_aucs(tf_importance_df, chip_csv, k_list=(100, 500, 1000, 5000)
 # Main
 # ---------------------------------------------------------------------
 if __name__ == "__main__":
-    logging.info(f"Device: {DEVICE}")
+    logging.info("\nLoading model and dataset")
     model, dataset, test_loader = load_model_and_data()
+    
+    logging.info(f"\nPlotting gene correlation scatterplot")
+    fig = eval.plot_per_gene_correlation_scatterplot(
+        model, 
+        test_loader, 
+        DEVICE, 
+        outpath=os.path.join(TEST_DIR, "eval_results_scatter.png")
+        )
 
     # --- TF×TG gradient attribution (fast, chunked) ---
+    logging.info("\nGenerating gradient attribution matrix")
     tf_importance_df = gradient_attribution_matrix(
         model, dataset, test_loader, tg_chunk=TG_CHUNK, device=DEVICE, normalize="global"
     )
@@ -220,6 +231,7 @@ if __name__ == "__main__":
     logging.info(f"Saved TF×TG importance matrix: {out_csv}  shape={tf_importance_df.shape}")
 
     # --- Evaluate vs CHIP edges ---
+    logging.info("\nEvaluating AUROC and AUPRC")
     results, scored_edges = evaluate_chip_aucs(tf_importance_df, GROUND_TRUTH_FILE, k_list=(100, 500, 1000, 5000))
     logging.info(f"AUROC = {results['AUROC']:.4f}  |  PR-AUC = {results['PR-AUC']:.4f}  "
           f"| positives={results['positives']} / {results['edges']} edges")
