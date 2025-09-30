@@ -329,8 +329,7 @@ def load_train_objs(DATA_DIR, CHROM_ID,
         dataset.filter_genes(subset_genes)
 
     # global vocab sizes (from common vocab)
-    tf_vocab_size = len(dataset.tf_name2id)
-    tg_vocab_size = len(dataset.tg_name2id)
+
 
     model = MultiomicTransformer(
         d_model=D_MODEL,
