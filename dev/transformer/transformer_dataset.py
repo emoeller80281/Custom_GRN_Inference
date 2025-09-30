@@ -5,133 +5,249 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 import pickle
-import scipy.sparse as sp
 import logging
 
 class MultiomicTransformerDataset(Dataset):
-    def __init__(self, data_dir, chrom_id):
+    """
+    Yields:
+      atac_wins: [W, 1]
+      tf_tensor: [T_eval]
+      tg_tensor: [G_eval]
+      dist_bias: [G_eval, W]   (same for every item; stacked in collate)
+      tf_ids   : [T_eval] (Long) - indices into COMMON TF vocab
+      tg_ids   : [G_eval] (Long) - indices into COMMON TG vocab
+    """
+    def __init__(self,
+                 data_dir: str,
+                 chrom_id: str,
+                 tf_vocab_path: str = None,   # e.g. ".../transformer_data/common/tf_vocab.json"
+                 tg_vocab_path: str = None,   # e.g. ".../transformer_data/common/tg_vocab.json"
+                 ):
         self.data_dir = data_dir
         self.chrom_id = chrom_id
-
-        # ----- Paths to required files -----
-        tf_path   = os.path.join(data_dir, "tf_tensor_all.pt")
-        tg_path   = os.path.join(data_dir, f"tg_tensor_all_{chrom_id}.pt")
-        atac_path = os.path.join(data_dir, f"atac_window_tensor_all_{chrom_id}.pt")
-        scaler_path = os.path.join(data_dir, f"tg_scaler_{chrom_id}.pkl")
-        window_map_path = os.path.join(data_dir, f"window_map_{chrom_id}.json")
-        tf_names_path = os.path.join(data_dir, "tf_names.pickle")
-        tg_names_path = os.path.join(data_dir, f"tg_names_{chrom_id}.json")
-        metacell_names_path = os.path.join(data_dir, f"metacell_names.json")
-        dist_bias_path = os.path.join(data_dir, f"dist_bias_{chrom_id}.pt")
         
-        for f in [tf_path, tg_path, atac_path, scaler_path, window_map_path,
-            tf_names_path, tf_names_path, metacell_names_path]:
+        chrom_dir = os.path.join(data_dir, chrom_id)
+        if not os.path.isdir(chrom_dir):
+            raise FileNotFoundError(f"Chromosome directory missing: {chrom_dir}")
+
+        # -------- per-dataset file paths --------
+        tf_path            = os.path.join(data_dir, "tf_tensor_all.pt")
+        tg_path            = os.path.join(chrom_dir, f"tg_tensor_all_{chrom_id}.pt")
+        atac_path          = os.path.join(chrom_dir, f"atac_window_tensor_all_{chrom_id}.pt")
+        scaler_path        = os.path.join(chrom_dir, f"tg_scaler_{chrom_id}.pkl")
+        window_map_path    = os.path.join(chrom_dir, f"window_map_{chrom_id}.json")
+        dist_bias_path     = os.path.join(chrom_dir, f"dist_bias_{chrom_id}.pt")
+        tf_ids_path        = os.path.join(data_dir, "tf_ids.pt")
+        tg_ids_path        = os.path.join(chrom_dir, f"tg_ids_{chrom_id}.pt")
+        tf_names_json      = os.path.join(data_dir, "tf_names.json")
+        tg_names_json      = os.path.join(chrom_dir, f"tg_names_{chrom_id}.json")
+        metacell_names_path= os.path.join(data_dir, "metacell_names.json")
+
+        # required tensors/metadata
+        required = [
+            tf_path, tg_path, atac_path, scaler_path,
+            window_map_path, metacell_names_path,
+            tf_names_json, tg_names_json,
+            tf_ids_path, tg_ids_path,
+        ]
+        for f in required:
             if not os.path.exists(f):
-                raise FileNotFoundError(f"Required precomputed file not found: {f}")
+                raise FileNotFoundError(f"Required file not found: {f}")
 
-        # Load tensors
-        self.tf_tensor_all = torch.load(tf_path)          # [num_tf, num_cells]
-        self.tg_tensor_all = torch.load(tg_path)          # [num_tg, num_cells]
-        self.atac_window_tensor_all = torch.load(atac_path)  # [num_windows, num_cells]
+        # -------- load tensors --------
+        # stored [rows, cells]
+        self.tf_tensor_all = torch.load(tf_path).float()            # [T_eval, C]
+        self.tg_tensor_all = torch.load(tg_path).float()            # [G_eval, C]
+        self.atac_window_tensor_all = torch.load(atac_path).float() # [W, C]
         
+        self._paths = {
+            "tf": tf_path, "tg": tg_path, "atac": atac_path,
+            "scaler": scaler_path, "window_map": window_map_path,
+            "dist_bias": dist_bias_path,
+            "tf_ids": tf_ids_path, "tg_ids": tg_ids_path,
+            "tf_names": tf_names_json, "tg_names": tg_names_json,
+            "metacells": metacell_names_path,
+            "tf_vocab": tf_vocab_path, "tg_vocab": tg_vocab_path,
+        }
+
+        # distance bias saved in prep as [W, G_eval] → transpose to [G_eval, W]
         if os.path.exists(dist_bias_path):
-            bias = torch.load(dist_bias_path)  # [num_windows, num_tg]
-            self.dist_bias_tensor = bias.T.contiguous()    # [num_tg, num_windows]
+            bias_WG = torch.load(dist_bias_path).float()
+            if bias_WG.shape[0] == self.atac_window_tensor_all.shape[0]:
+                self.dist_bias_tensor = bias_WG.T.contiguous()      # [G_eval, W]
+            elif bias_WG.shape[1] == self.atac_window_tensor_all.shape[0]:
+                self.dist_bias_tensor = bias_WG.contiguous()        # already [G_eval, W]
+            else:
+                raise ValueError(f"dist_bias_{chrom_id}.pt shape mismatch: {tuple(bias_WG.shape)}")
         else:
             self.dist_bias_tensor = None
 
-        # Load scaler for inverse-transform
-        self.scaler = joblib.load(scaler_path)
+        # -------- metadata --------
+        with open(window_map_path, "r") as f:
+            self.window_map = json.load(f)
+        with open(metacell_names_path, "r") as f:
+            self.metacell_names = json.load(f)
 
-        # Load metadata
-        with open(window_map_path, 'r') as f:
-            self.window_map = json.loads(f.read())
-            
-        with open(tg_names_path, 'r') as f:
-            self.tg_names = json.loads(f.read())
-        
-        with open(metacell_names_path, 'r') as f:
-            self.metacell_names = json.loads(f.read())
-            
-        with open(tf_names_path, "rb") as fp:
-            self.tf_names = pickle.load(fp)
+        # names (for logging/eval)
+        if os.path.exists(tf_names_json):
+            with open(tf_names_json, "r") as f:
+                self.tf_names = json.load(f)
+        else:
+            # last resort: make placeholders
+            self.tf_names = [f"TF_{i}" for i in range(self.tf_tensor_all.shape[0])]
+            logging.warning("TF names not found; using placeholders.")
 
-        # Infer metadata from shapes
-        self.num_tf = self.tf_tensor_all.shape[0]
+        with open(tg_names_json, "r") as f:
+            self.tg_names = json.load(f)
+
+        # counts
         self.num_windows = self.atac_window_tensor_all.shape[0]
-        self.num_tg = self.tg_tensor_all.shape[0]
+        self.num_cells   = self.tf_tensor_all.shape[1]
+
+        # -------- load common vocabs (for reference / debugging) --------
+        # not strictly required at runtime if tf_ids/tg_ids exist, but handy to validate
+        self.tf_vocab_path = tf_vocab_path
+        self.tg_vocab_path = tg_vocab_path
+        self.tf_name2id = None
+        self.tg_name2id = None
+
+        if self.tf_vocab_path and os.path.exists(self.tf_vocab_path):
+            with open(self.tf_vocab_path, "r") as f:
+                obj = json.load(f)
+            # handle both {"name_to_id":...} or flat dict
+            if "name_to_id" in obj:
+                self.tf_name2id = obj["name_to_id"]
+            else:
+                self.tf_name2id = obj
+
+        if self.tg_vocab_path and os.path.exists(self.tg_vocab_path):
+            with open(self.tg_vocab_path, "r") as f:
+                obj = json.load(f)
+            if "name_to_id" in obj:
+                self.tg_name2id = obj["name_to_id"]
+            else:
+                self.tg_name2id = obj
+
+        # -------- load per-dataset ids (preferred) or derive from names --------
+        if os.path.exists(tf_ids_path):
+            self.tf_ids = torch.load(tf_ids_path).long()  # [T_eval]
+        else:
+            # derive from names using tf_name2id (if provided)
+            if self.tf_name2id is None:
+                raise FileNotFoundError(
+                    f"tf_ids.pt not found and no tf_vocab_path provided to map names → ids."
+                )
+            missing = [n for n in self.tf_names if n not in self.tf_name2id]
+            if missing:
+                logging.warning(f"TF: {len(missing)} names missing in common vocab (e.g. {missing[:10]})")
+            self.tf_ids = torch.tensor([self.tf_name2id[n] for n in self.tf_names if n in self.tf_name2id],
+                                       dtype=torch.long)
+
+        if os.path.exists(tg_ids_path):
+            self.tg_ids = torch.load(tg_ids_path).long()  # [G_eval]
+        else:
+            if self.tg_name2id is None:
+                raise FileNotFoundError(
+                    f"tg_ids.pt not found and no tg_vocab_path provided to map names → ids."
+                )
+            missing = [n for n in self.tg_names if n not in self.tg_name2id]
+            if missing:
+                logging.warning(f"TG: {len(missing)} names missing in common vocab (e.g. {missing[:10]})")
+            self.tg_ids = torch.tensor([self.tg_name2id[n] for n in self.tg_names if n in self.tg_name2id],
+                                       dtype=torch.long)
+
+        # sanity: lengths must match row counts of tensors
+        if self.tf_tensor_all.shape[0] != self.tf_ids.numel():
+            logging.warning(
+                f"TF rows ({self.tf_tensor_all.shape[0]}) != tf_ids ({self.tf_ids.numel()}). "
+                "Make sure you saved tf_tensor_all AFTER dropping TFs not in vocab."
+            )
+        if self.tg_tensor_all.shape[0] != self.tg_ids.numel():
+            logging.warning(
+                f"TG rows ({self.tg_tensor_all.shape[0]}) != tg_ids ({self.tg_ids.numel()}). "
+                "Make sure you saved tg_tensor_all AFTER dropping TGs not in vocab."
+            )
+        if self.dist_bias_tensor is not None and self.dist_bias_tensor.shape[0] != self.tg_ids.numel():
+            logging.warning(
+                f"Bias G dimension ({self.dist_bias_tensor.shape[0]}) != tg_ids ({self.tg_ids.numel()})."
+            )
 
         logging.info(
-            f"Loaded dataset from {data_dir}\n"
-            f" - TFs: {self.num_tf}\n"
-            f" - TGs: {self.num_tg}\n"
+            f"Loaded dataset {data_dir} [{chrom_id}]\n"
+            f" - TFs: {self.tf_tensor_all.shape[0]} (ids: {self.tf_ids.numel()})\n"
+            f" - TGs: {self.tg_tensor_all.shape[0]} (ids: {self.tg_ids.numel()})\n"
             f" - Windows: {self.num_windows}\n"
-            f" - Metacells: {len(self.metacell_names)}\n"
-            f" - Chromosome: {chrom_id}"
+            f" - Metacells: {self.num_cells}"
         )
 
+        # scaler for inverse-transform
+        self.scaler = joblib.load(scaler_path)
+
+    # -------- Dataset API --------
     def __len__(self):
-        return self.tf_tensor_all.shape[1]  # number of metacells
+        return self.num_cells
 
     def __getitem__(self, idx):
-        tf_tensor   = self.tf_tensor_all[:, idx]                            # [num_tf]
-        atac_wins   = self.atac_window_tensor_all[:, idx].unsqueeze(-1)     # [num_windows, 1]
-        tg_tensor   = self.tg_tensor_all[:, idx]                            # [num_tg]
-        
+        # expressions for this metacell
+        tf_tensor = self.tf_tensor_all[:, idx]                      # [T_eval]
+        tg_tensor = self.tg_tensor_all[:, idx]                      # [G_eval]
+        atac_wins = self.atac_window_tensor_all[:, idx].unsqueeze(-1)  # [W,1]
+
+        # distance bias (shared across items)
         if self.dist_bias_tensor is not None:
-            dist_bias = self.dist_bias_tensor                           # [num_tg, num_windows]
+            dist_bias = self.dist_bias_tensor                       # [G_eval, W]
         else:
-            dist_bias = torch.zeros((self.num_tg, self.num_windows))
+            dist_bias = torch.zeros((self.tg_ids.numel(), self.num_windows), dtype=torch.float32)
 
-        return atac_wins, tf_tensor, tg_tensor, dist_bias
-        
-    def load_window_map(self):
-        with open(os.path.join(self.data_dir, "window_map.json")) as f:
-            return json.load(f)
+        return atac_wins, tf_tensor, tg_tensor, dist_bias, self.tf_ids, self.tg_ids
 
-    def load_tf_list(self):
-        with open(os.path.join(self.data_dir, "tf_list.pickle"), "rb") as fp:
-            return pickle.load(fp)
-
+    # -------- utilities --------
     def inverse_transform(self, preds: np.ndarray) -> np.ndarray:
-        """Inverse transform predictions back to original scale"""
         return self.scaler.inverse_transform(preds)
-    
+
     def filter_genes(self, subset_genes):
-        """
-        Restrict the dataset to a subset of target genes.
-
-        Args:
-            subset_genes (list[str]): List of TG names to keep.
-        """
-        # Ensure subset is a set for fast lookup
-        subset_set = set(subset_genes)
-        if not subset_set:
-            raise ValueError("subset_genes must be a non-empty list of gene names.")
-
-        # Map current tg_names to indices
+        subset = set(subset_genes)
+        if not subset:
+            raise ValueError("subset_genes must be non-empty.")
         name_to_idx = {g: i for i, g in enumerate(self.tg_names)}
-
-        # Keep only those genes that exist in current dataset
-        keep_indices = [name_to_idx[g] for g in subset_genes if g in name_to_idx]
-        missing = [g for g in subset_genes if g not in name_to_idx]
+        keep = [name_to_idx[g] for g in subset if g in name_to_idx]
+        missing = [g for g in subset if g not in name_to_idx]
         if missing:
-            logging.warning(f"{len(missing)} genes not found in tg_names: {missing[:10]}...")
+            logging.warning(f"{len(missing)} genes not present (e.g. {missing[:10]})")
+        if not keep:
+            raise ValueError("No matching genes found to keep.")
 
-        if not keep_indices:
-            raise ValueError("No matching genes found in dataset for given subset.")
+        self.tg_tensor_all = self.tg_tensor_all[keep, :]
+        if self.dist_bias_tensor is not None:
+            self.dist_bias_tensor = self.dist_bias_tensor[keep, :]
+        self.tg_names = [self.tg_names[i] for i in keep]
 
-        # Slice tg_tensor_all
-        self.tg_tensor_all = self.tg_tensor_all[keep_indices, :]
-        
-        # Slice distance bias tensor if present
-        if hasattr(self, "dist_bias_tensor") and self.dist_bias_tensor is not None:
-            self.dist_bias_tensor = self.dist_bias_tensor[keep_indices, :]
+        # re-map tg_ids if we have a vocab
+        if self.tg_name2id is not None:
+            self.tg_ids = torch.tensor([self.tg_name2id[n] for n in self.tg_names if n in self.tg_name2id],
+                                       dtype=torch.long)
+        else:
+            # keep previous ids length-aligned to tensor
+            self.tg_ids = self.tg_ids[:len(self.tg_names)]
 
-        # Update tg_names
-        self.tg_names = [self.tg_names[i] for i in keep_indices]
+        logging.info(f"Filtered TGs: kept {len(self.tg_names)}")
 
-        # Update metadata
-        self.num_tg = len(self.tg_names)
-
-        logging.info(f"Filtered TGs: kept {self.num_tg}/{len(name_to_idx)} genes")
+    @staticmethod
+    def collate_fn(batch):
+        """
+        Returns:
+          atac_wins: [B, W, 1]
+          tf_tensor: [B, T_eval]
+          tg_tensor: [B, G_eval]
+          bias:      [B, G_eval, W]
+          tf_ids:    [T_eval]
+          tg_ids:    [G_eval]
+        """
+        atac_list, tf_list, tg_list, bias_list, tf_ids_list, tg_ids_list = zip(*batch)
+        atac_wins = torch.stack(atac_list, dim=0)
+        tf_tensor = torch.stack(tf_list,  dim=0)
+        tg_tensor = torch.stack(tg_list,  dim=0)
+        bias      = torch.stack(bias_list, dim=0)  # same bias per item → identical copies
+        tf_ids    = tf_ids_list[0]
+        tg_ids    = tg_ids_list[0]
+        return atac_wins, tf_tensor, tg_tensor, bias, tf_ids, tg_ids

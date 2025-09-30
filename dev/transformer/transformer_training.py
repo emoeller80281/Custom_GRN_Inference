@@ -8,11 +8,11 @@ import pandas as pd
 import numpy as np
 import logging
 import pickle
+import math
 from datetime import datetime
-from scipy.stats import pearsonr, spearmanr, skew, kurtosis
-from imblearn.over_sampling import SMOTE
+from scipy.stats import pearsonr, spearmanr, randint
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import cross_val_predict, StratifiedKFold, train_test_split
+from sklearn.model_selection import StratifiedKFold, train_test_split, RandomizedSearchCV
 from sklearn.metrics import roc_auc_score, classification_report
 from sklearn.preprocessing import StandardScaler
 import torch.nn as nn
@@ -43,7 +43,7 @@ TOTAL_EPOCHS=500
 BATCH_SIZE=32
 TRAINING_ITERATIONS = 30
 PERCENT_DROP=0
-PATIENCE=15
+PATIENCE=20
 
 D_MODEL = 384
 NUM_HEADS = 6
@@ -52,7 +52,7 @@ D_FF = 768
 DROPOUT = 0.1
 
 PROJECT_DIR = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
-DATA_DIR = os.path.join(PROJECT_DIR, f"dev/transformer/transformer_data/{SAMPLE_NAME}_{CHROM_ID}")
+DATA_DIR = os.path.join(PROJECT_DIR, f"dev/transformer/transformer_data/{SAMPLE_NAME}")
 OUTPUT_DIR = os.path.join(PROJECT_DIR, f"output/transformer_testing_output/{SAMPLE_NAME}/{CHROM_ID}")
 GROUND_TRUTH_FILE = os.path.join(PROJECT_DIR, "ground_truth_files/mESC_beeline_ChIP-seq.csv")
 
@@ -109,7 +109,7 @@ class Trainer:
         
         # Learning rate scheduler
         self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, mode="min", factor=0.5, patience=5
+            self.optimizer, mode="min", factor=0.1, patience=7
         )
         
         # Early stopping
@@ -118,70 +118,57 @@ class Trainer:
         self.min_delta = min_delta
         self.patience_counter = 0
 
-    def _run_batch(self, batch, targets, bias=None):
-        atac_wins, tf_tensor = batch
-        self.optimizer.zero_grad()
-        
-        # Calculate predictions
-        preds = self.model(atac_wins, tf_tensor)
-                
-        # Calculate loss
-        loss = self.criterion(preds, targets)
-        
-        # Add a correlation-based loss to maximize Pearson correlation
-        preds_flat = preds.view(-1)
-        targets_flat = targets.view(-1)
+    def _run_batch(self, batch):
+        atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids = batch
+        atac_wins = atac_wins.to(self.gpu_id)
+        tf_tensor = tf_tensor.to(self.gpu_id)
+        targets   = targets.to(self.gpu_id)
+        bias      = bias.to(self.gpu_id)
+        tf_ids    = tf_ids.to(self.gpu_id)
+        tg_ids    = tg_ids.to(self.gpu_id)
 
+        self.optimizer.zero_grad()
+        preds = self.model(atac_wins, tf_tensor, tf_ids=tf_ids, tg_ids=tg_ids, bias=bias)
+
+        loss = self.criterion(preds, targets)
+
+        # correlation bonus (unchanged)
+        preds_flat, targets_flat = preds.reshape(-1), targets.reshape(-1)
         if torch.std(targets_flat) > 1e-8 and torch.std(preds_flat) > 1e-8:
             vx = preds_flat - torch.mean(preds_flat)
             vy = targets_flat - torch.mean(targets_flat)
-            corr_loss = -torch.sum(vx * vy) / (
-                torch.sqrt(torch.sum(vx ** 2)) * torch.sqrt(torch.sum(vy ** 2)) + 1e-8
-            )
+            corr_loss = -torch.sum(vx * vy) / (torch.sqrt(torch.sum(vx**2))*torch.sqrt(torch.sum(vy**2)) + 1e-8)
         else:
             corr_loss = torch.tensor(0.0, device=preds.device)
-            
         loss = loss + 0.05 * corr_loss
-        
-        # # L1 penalty for sparsity on the TF->TG weights at the end of the model
-        # if hasattr(self.model, "tf_tg_weights"):
-        #     l1_penalty = 1e-4 * torch.norm(self.model.tf_tg_weights, p=1)
-        #     loss = loss + l1_penalty
-        
-        # Safety check to prevent GPUs from hanging on infinite loss values
+
         if not torch.isfinite(loss):
-            # replace with safe scalar, skip backprop
             logging.warning(f"Rank {self.gpu_id}: skipping batch due to non-finite loss")
-            loss = torch.tensor(0.0, device=self.gpu_id, requires_grad=True)
-        
-        # Backprop
+            return None
+
         loss.backward()
-            
-        # Gradient clipping
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-        
         self.optimizer.step()
         return loss
-        
+
     def _validate(self):
         self.model.eval()
         total_loss, n_batches = 0.0, 0
         preds_list, tgts_list = [], []
-
         with torch.no_grad():
-            for atac_wins, tf_tensor, targets, bias in self.val_data:
-                atac_wins, tf_tensor, targets, bias = (
-                    atac_wins.to(self.gpu_id),
-                    tf_tensor.to(self.gpu_id),
-                    targets.to(self.gpu_id),
-                    bias.to(self.gpu_id)
-                )
-                preds = self.model(atac_wins, tf_tensor, bias=bias)
-                loss = F.mse_loss(preds, targets)
-                total_loss += loss.item()
-                n_batches += 1
-                preds_list.append(preds)
-                tgts_list.append(targets)
+            for atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids in self.val_data:
+                atac_wins = atac_wins.to(self.gpu_id)
+                tf_tensor = tf_tensor.to(self.gpu_id)
+                targets   = targets.to(self.gpu_id)
+                bias      = bias.to(self.gpu_id)
+                tf_ids    = tf_ids.to(self.gpu_id)
+                tg_ids    = tg_ids.to(self.gpu_id)
+
+                preds = self.model(atac_wins, tf_tensor, tf_ids=tf_ids, tg_ids=tg_ids, bias=bias)
+                loss  = F.mse_loss(preds, targets)
+                total_loss += loss.item(); n_batches += 1
+                preds_list.append(preds); tgts_list.append(targets)
+
 
         # Stack local tensors
         preds = torch.cat(preds_list, dim=0)
@@ -217,22 +204,14 @@ class Trainer:
         return avg_loss, pearson_corr, spearman_corr
     
     def _run_epoch(self, epoch):
-        b_sz = self.train_data.batch_size
-        self.train_data.sampler.set_epoch(epoch)
+        sampler = getattr(self.train_data, "sampler", None)
+        if isinstance(sampler, DistributedSampler):
+            sampler.set_epoch(epoch)
         total_loss, n_batches = 0.0, 0
-
-        for atac_wins, tf_tensor, targets, bias in self.train_data:
-            atac_wins, tf_tensor, targets, bias = (
-                atac_wins.to(self.gpu_id),
-                tf_tensor.to(self.gpu_id),
-                targets.to(self.gpu_id),
-                bias.to(self.gpu_id),
-            )
-            loss_val = self._run_batch((atac_wins, tf_tensor), targets, bias=bias)
-            if loss_val is None:
-                continue
-            total_loss += loss_val
-            n_batches += 1
+        for atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids in self.train_data:
+            loss_val = self._run_batch((atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids))
+            if loss_val is None: continue
+            total_loss += loss_val; n_batches += 1
 
         avg_train_loss = total_loss / max(1, n_batches)
         avg_val_loss, pearson_corr, spearman_corr = self._validate()
@@ -331,42 +310,97 @@ class Trainer:
         # logging.info(f"    {tag.capitalize()} training log written at epoch {epoch}")
             
 
-def load_train_objs(subset_genes=None):
+def load_train_objs(DATA_DIR, CHROM_ID,
+                    D_MODEL, NUM_HEADS, NUM_LAYERS, D_FF, DROPOUT,
+                    subset_genes=None, lr=1e-3):
+
+    COMMON_DIR = os.path.join(
+        os.path.dirname(DATA_DIR),  # .../transformer_data/
+        "common"
+    )
+
     dataset = MultiomicTransformerDataset(
         data_dir=DATA_DIR,
-        chrom_id=CHROM_ID
-    ) 
+        chrom_id=CHROM_ID,
+        tf_vocab_path=os.path.join(COMMON_DIR, "tf_vocab.json"),
+        tg_vocab_path=os.path.join(COMMON_DIR, "tg_vocab.json"),
+    )
     if subset_genes is not None:
         dataset.filter_genes(subset_genes)
-    
+
+    # global vocab sizes (from common vocab, loaded into dataset.*_name2id)
+    tf_vocab_size = len(dataset.tf_name2id)
+    tg_vocab_size = len(dataset.tg_name2id)
+
     model = MultiomicTransformer(
-        D_MODEL, NUM_HEADS, NUM_LAYERS, D_FF, DROPOUT, 
-        dataset.num_tf, dataset.num_tg
-        )
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+        d_model=D_MODEL,
+        num_heads=NUM_HEADS,
+        num_layers=NUM_LAYERS,
+        d_ff=D_FF,
+        dropout=DROPOUT,
+        tf_vocab_size=tf_vocab_size,
+        tg_vocab_size=tg_vocab_size,
+        use_shortcut=False
+    )
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     return dataset, model, optimizer
 
-def prepare_dataloader(dataset: Dataset, batch_size: int, world_size: int, rank: int):
-    train_frac, val_frac, test_frac = 0.7, 0.15, 0.15
+
+def prepare_dataloader(dataset, batch_size, world_size=1, rank=0,
+                       num_workers=4, pin_memory=True, seed=42, drop_last=True):
+    """
+    Build train/val/test loaders with the dataset's collate_fn.
+    Uses DistributedSampler only when world_size > 1.
+    """
+    # --- deterministic split
+    g = torch.Generator()
+    g.manual_seed(seed)
+
     n_total = len(dataset)
-    n_train = int(n_total * train_frac)
-    n_val = int(n_total * val_frac)
-    n_test = n_total - n_train - n_val
+    n_train = int(n_total * 0.70)
+    n_val   = int(n_total * 0.15)
+    n_test  = n_total - n_train - n_val
 
-    train_set, val_set, test_set = random_split(dataset, [n_train, n_val, n_test])
+    train_set, val_set, test_set = random_split(dataset, [n_train, n_val, n_test], generator=g)
 
-    train_loader = DataLoader(train_set, batch_size=batch_size, sampler=DistributedSampler(train_set, num_replicas=world_size, rank=rank, drop_last=True))
-    val_loader   = DataLoader(val_set, batch_size=batch_size, sampler=DistributedSampler(val_set, num_replicas=world_size, rank=rank, drop_last=True))
-    test_loader  = DataLoader(test_set, batch_size=batch_size, sampler=DistributedSampler(test_set, num_replicas=world_size, rank=rank, drop_last=True))
+    # --- samplers (DDP only)
+    if world_size > 1:
+        train_sampler = DistributedSampler(train_set, num_replicas=world_size, rank=rank, drop_last=drop_last)
+        val_sampler   = DistributedSampler(val_set,   num_replicas=world_size, rank=rank, drop_last=False)
+        test_sampler  = DistributedSampler(test_set,  num_replicas=world_size, rank=rank, drop_last=False)
+        shuffle = False
+    else:
+        train_sampler = val_sampler = test_sampler = None
+        shuffle = True  # only for single-GPU/CPU
+
+    # --- loaders (always use the dataset's collate_fn)
+    train_loader = DataLoader(
+        train_set, batch_size=batch_size, shuffle=shuffle,
+        sampler=train_sampler,
+        collate_fn=MultiomicTransformerDataset.collate_fn,
+        num_workers=num_workers, pin_memory=pin_memory, drop_last=drop_last
+    )
+    val_loader = DataLoader(
+        val_set, batch_size=batch_size, shuffle=False,
+        sampler=val_sampler,
+        collate_fn=MultiomicTransformerDataset.collate_fn,
+        num_workers=num_workers, pin_memory=pin_memory, drop_last=False
+    )
+    test_loader = DataLoader(
+        test_set, batch_size=batch_size, shuffle=False,
+        sampler=test_sampler,
+        collate_fn=MultiomicTransformerDataset.collate_fn,
+        num_workers=num_workers, pin_memory=pin_memory, drop_last=False
+    )
 
     return train_loader, val_loader, test_loader
 
 
 def write_run_parameters(dataset, out_dir, has_dist_bias):
     run_params = {
-        "Genes": dataset.num_tg,
+        "Genes": dataset.tg_tensor_all.shape[0],
         "Windows": dataset.num_windows,
-        "TFs": dataset.num_tf,
+        "TFs": dataset.tf_tensor_all.shape[0],
         "Metacells": len(dataset.metacell_names),  # store count, not huge list
         "Epochs": TOTAL_EPOCHS,
         "Batch Size": BATCH_SIZE,
@@ -403,123 +437,198 @@ def nclb_refinement(model, dataset, training_output_dir, min_corr, iter_id):
 
     return avg_corr, subset_path
 
-def compute_tf_tg_distance_features(tf_tg_weights, tf_names, tg_names, dist_df, window_map, atac_window_tensor):
-    """
-    For each TF–TG pair, compute a distance-weighted accessibility score.
-    
-    Calculates the average peak accessibility for each TF-peak-TG edge
-    to get a TF-TG distance score.
-    """
+# helpers_tf_tg.py
+import math, torch
 
-    # Map peak -> dist_score -> gene
-    tg_to_scores = {tg: {} for tg in tg_names}
-    for _, row in dist_df.iterrows():
-        peak_id = row["peak_id"]
+@torch.no_grad()
+def get_tf_tg_affinity(model, tf_ids: torch.LongTensor, tg_ids: torch.LongTensor, device="cuda"):
+    """Static TF↔TG similarity used by the shortcut: [T_eval, G_eval]."""
+    model.eval()
+    tf_ids, tg_ids = tf_ids.to(device), tg_ids.to(device)
+    tf_base = model.tf_emb_table(tf_ids)          # [T_eval, D]
+    tg_dec  = model.tg_decoder_table(tg_ids)      # [G_eval, D]
+    sim = (tg_dec @ tf_base.T) / math.sqrt(model.d_model)   # [G_eval, T_eval]
+    return sim.T.contiguous()                                   # [T_eval, G_eval]
+
+@torch.no_grad()
+def get_mean_attention(model, dataloader, device="cuda", weight_by_tf_expr=False):
+    """
+    Average TG→TF attention across the dataset. Optionally weight by TF expression per batch.
+    Returns:
+      mean_attn: [T_eval, G_eval]
+      tf_ids, tg_ids: LongTensors used (assumed constant across the dataset)
+    """
+    model.eval()
+    acc = None
+    n   = 0
+    tf_ids_ref = tg_ids_ref = None
+
+    for atac_wins, tf_tensor, _, bias, tf_ids, tg_ids in dataloader:
+        atac_wins, tf_tensor, bias = atac_wins.to(device), tf_tensor.to(device), bias.to(device)
+        tf_ids, tg_ids = tf_ids.to(device), tg_ids.to(device)
+
+        tf_base = model.tf_emb_table(tf_ids)           # [T_eval,D]
+        tg_dec  = model.tg_decoder_table(tg_ids)       # [G_eval,D]
+        sim = (tg_dec @ tf_base.T) / math.sqrt(model.d_model)   # [G_eval,T_eval]
+        attn = torch.softmax(sim, dim=-1).T                        # [T_eval,G_eval]
+
+        if weight_by_tf_expr:
+            # normalize per-batch TF expr to [0,1] and average over cells
+            tf_min = tf_tensor.min(dim=1, keepdim=True).values
+            tf_max = tf_tensor.max(dim=1, keepdim=True).values
+            tf_norm = (tf_tensor - tf_min) / (tf_max - tf_min + 1e-6)    # [B,T_eval]
+            # weight attention by mean TF activity across batch
+            w = tf_norm.mean(dim=0, keepdim=True).T                      # [T_eval,1]
+            attn = attn * w                                              # [T_eval,G_eval]
+
+        acc = attn if acc is None else acc + attn
+        n += 1
+        tf_ids_ref, tg_ids_ref = tf_ids.detach().cpu(), tg_ids.detach().cpu()
+
+    mean_attn = (acc / max(n,1)).detach().cpu()
+    return mean_attn, tf_ids_ref, tg_ids_ref
+
+
+
+from collections import defaultdict
+
+def compute_tf_tg_distance_features(sim_mat, attn_mat, tf_names, tg_names,
+                                    dist_df, window_map, atac_window_tensor):
+    """
+    Build [n_tf*n_tg, 2] features: [similarity/weight, distance-weighted accessibility]
+    sim_mat:   [n_tg, n_tf]   (TG x TF similarity or weights)
+    attn_mat:  [n_tg, n_tf]   (optional extra feature; if unused, ignore)
+    """
+    tg_set = set(tg_names)
+    peak_set = set(window_map.keys())
+
+    # Keep only rows that map to our TGs and peaks
+    df = dist_df[dist_df["target_id"].isin(tg_set) & dist_df["peak_id"].isin(peak_set)].copy()
+
+    # Map TG -> dict(peak_id -> dist_score)
+    tg_to_scores = defaultdict(dict)
+    for _, row in df.iterrows():
         tg = row["target_id"]
-        dist_score = row["TSS_dist_score"]
-        if tg in tg_to_scores:
-            tg_to_scores[tg][peak_id] = dist_score
+        peak_id = row["peak_id"]
+        tg_to_scores[tg][peak_id] = float(row["TSS_dist_score"])
+
+    # Precompute peak accessibility per window (mean across metacells)
+    # atac_window_tensor shape: [W, C]
+    atac_mean = atac_window_tensor.mean(dim=1).cpu().numpy()  # [W]
 
     features = []
-    for i, tf in enumerate(tf_names):
-        for j, tg in enumerate(tg_names):
-            weight = tf_tg_weights[i, j]
+    for j, tg in enumerate(tg_names):
+        peak_scores = tg_to_scores.get(tg, {})
+        # distance-weighted accessibility for this TG
+        if peak_scores:
+            acc_scores = []
+            for peak_id, dist_score in peak_scores.items():
+                win_idx = window_map[peak_id]          # safe because filtered to peak_set
+                acc = atac_mean[win_idx]
+                acc_scores.append(acc * dist_score)
+            dist_weighted_accessibility = float(sum(acc_scores) / (len(acc_scores) + 1e-8))
+        else:
+            dist_weighted_accessibility = 0.0
 
-            # collect peaks mapped to this TG
-            peak_scores = tg_to_scores.get(tg, {})
-            if not peak_scores:
-                dist_weighted_accessibility = 0.0
-            else:
-                # Get accessibility of peaks' windows
-                scores = []
-                for peak_id, dist_score in peak_scores.items():
-                    if peak_id in window_map:
-                        win_idx = window_map[peak_id]
-                        acc = atac_window_tensor[win_idx].mean().item()  # avg across metacells
-                        scores.append(acc * dist_score)
-                dist_weighted_accessibility = sum(scores) / (len(scores) + 1e-8)
-
+        for i, tf in enumerate(tf_names):
+            weight = float(sim_mat[j, i])  # or whichever score you want to use
             features.append([weight, dist_weighted_accessibility])
 
     return np.array(features)
 
 
-def build_edge_features(tf_tg_weights, tf_names, tg_names, chip_edges, dist_df, window_map, atac_window_tensor):
-    features = []
-    labels = []
-    edge_list = []
 
-    # Precompute gene -> max distance score from peaks
-    # dist_df = dist_df.copy()
-    # dist_df["target_id"] = dist_df["target_id"].str.upper()
-    dist_features = compute_tf_tg_distance_features(tf_tg_weights, tf_names, tg_names, dist_df, window_map, atac_window_tensor)
+def build_edge_features(model, dataset, chip_edges, dist_df, window_map):
+    tf_names = dataset.tf_names
+    tg_names = dataset.tg_names
 
-    idx = 0
+    # filter dist table to model’s TGs & mapped peaks
+    tg_set = set(tg_names)
+    peak_set = set(window_map.keys())
+    dist_df = dist_df[dist_df["target_id"].isin(tg_set) & dist_df["peak_id"].isin(peak_set)].copy()
+
+    # get similarity/attention matrices from the model
+    # e.g., sim_mat = model.export_tg_tf_similarity(tf_names, tg_names)  -> [G,T]
+    sim_mat = model.export_tg_tf_similarity(tf_names, tg_names)  # implement this
+    attn_mat = None  # or another optional matrix/feature
+
+    X = compute_tf_tg_distance_features(sim_mat, attn_mat, tf_names, tg_names, dist_df, dataset.window_map, dataset.atac_window_tensor_all)
+
+    # labels
+    edge_list, labels = [], []
     for i, tf in enumerate(tf_names):
         for j, tg in enumerate(tg_names):
             edge = (tf.upper(), tg.upper())
-            features.append(dist_features[idx])  # [weight, dist-weighted accessibility]
-            labels.append(1 if edge in chip_edges else 0)
             edge_list.append(edge)
-            idx += 1
+            labels.append(1 if edge in chip_edges else 0)
 
-    features = np.array(features)
-    labels = np.array(labels)
-    return features, labels, edge_list
+    y = np.asarray(labels, dtype=np.int64)
+    return X, y, edge_list
 
-def train_tf_tg_classifier(tf_tg_weights, dataset, ground_truth_file, out_path):
+
+
+
+def train_tf_tg_classifier(model, dataset, ground_truth_file, out_path,
+                                device="cuda", weight_attn_by_tf=False):
+    # ground truth
     chip_df = pd.read_csv(ground_truth_file)
-    chip_edges = set((g1.upper(), g2.upper()) for g1, g2 in zip(chip_df["Gene1"], chip_df["Gene2"]))
-    
-    dist_df = pd.read_parquet(os.path.join(DATA_DIR, f"genes_near_peaks_{CHROM_ID}.parquet"))
-    
+    chip_edges = set((a.upper(), b.upper()) for a,b in zip(chip_df["Gene1"], chip_df["Gene2"]))
+
+    # distance table
+    dist_df = pd.read_parquet(os.path.join(dataset.data_dir,
+                                           f"genes_near_peaks_{dataset.chrom_id}.parquet"))
+
+    # dataloader for mean attention (same one you already have)
+    _, _, test_loader = prepare_dataloader(dataset, batch_size=64, world_size=1, rank=0)
+
+    # signals
+    sim_mat = get_tf_tg_affinity(model, dataset.tf_ids, dataset.tg_ids, device=device).cpu().numpy()
+    mean_attn, _, _ = get_mean_attention(model, test_loader, device=device,
+                                         weight_by_tf_expr=weight_attn_by_tf)     # [T,G]
+    attn_mat = mean_attn.numpy()
+
+    # features/labels
     X, y, edge_list = build_edge_features(
-        tf_tg_weights, dataset.tf_names, dataset.tg_names, chip_edges, dist_df, dataset.window_map, dataset.atac_window_tensor_all
+        sim_mat, attn_mat,
+        dataset.tf_names, dataset.tg_names,
+        chip_edges, dist_df,
+        dataset.window_map, dataset.atac_window_tensor_all
     )
-    
-    stratify = y if len(np.unique(y)) > 1 else None
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.3, stratify=stratify, random_state=42
-    )
-    
-    from sklearn.model_selection import RandomizedSearchCV, StratifiedKFold
-    from scipy.stats import randint
 
-    # Define distributions instead of full grids
+    # optional normalization (helps RF a bit when scales differ a lot)
+    # from sklearn.preprocessing import StandardScaler
+    scaler = StandardScaler()
+    X = scaler.fit_transform(X)
+
+    # RF as before
+    X_tr, X_te, y_tr, y_te = train_test_split(
+        X, y, test_size=0.3, stratify=y if len(np.unique(y))>1 else None, random_state=42
+    )
+
     param_dist = {
-        "n_estimators": randint(100, 1000),       # sample between 100 and 999 trees
-        "max_depth": [None] + list(range(10, 60, 10)),
+        "n_estimators": randint(200, 1200),
+        "max_depth": [None] + list(range(10, 70, 10)),
         "max_features": ["sqrt", "log2", None],
-        "min_samples_split": randint(2, 20)       # sample split thresholds
+        "min_samples_split": randint(2, 20),
     }
-
     cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-
-    random_search = RandomizedSearchCV(
-        estimator=RandomForestClassifier(class_weight="balanced", random_state=42),
-        param_distributions=param_dist,
-        n_iter=50,                # number of random combos to try
-        scoring="roc_auc",
-        cv=cv,
-        n_jobs=-1,
-        verbose=2,
-        random_state=42
+    rs = RandomizedSearchCV(
+        RandomForestClassifier(class_weight="balanced", random_state=42),
+        param_distributions=param_dist, n_iter=50,
+        scoring="roc_auc", cv=cv, n_jobs=-1, verbose=2, random_state=42
     )
+    rs.fit(X_tr, y_tr)
 
-    random_search.fit(X_train, y_train)
+    print("Best params:", rs.best_params_)
+    print("Best AUROC (CV):", rs.best_score_)
+    y_score = rs.predict_proba(X_te)[:, 1]
+    y_pred  = rs.predict(X_te)
+    print("TF–TG classification report:")
+    print(classification_report(y_te, y_pred))
+    print("Test AUROC:", roc_auc_score(y_te, y_score))
 
-    print("Best params:", random_search.best_params_)
-    print("Best AUROC:", random_search.best_score_)
-
-    y_score = random_search.predict_proba(X_test)[:, 1]
-    y_pred = random_search.predict(X_test)
-
-    print("\tTF-TG classification report:")
-    print(classification_report(y_test, y_pred))
-    logging.info(f"TF-TG AUROC: {roc_auc_score(y_test, y_score):.4f}")
-
-    # --- Save all edges with predicted scores ---
-    all_probs = random_search.predict_proba(X)[:, 1]
+    # save edge scores
+    all_probs = rs.predict_proba(X)[:, 1]
     edge_df = pd.DataFrame({
         "TF": [e[0] for e in edge_list],
         "TG": [e[1] for e in edge_list],
@@ -527,30 +636,26 @@ def train_tf_tg_classifier(tf_tg_weights, dataset, ground_truth_file, out_path):
         "label": y
     })
     edge_df.to_csv(out_path, index=False)
-    logging.info(f"Saved edge predictions to {out_path}")
+    return rs, edge_df
 
-    return random_search, edge_df
+
 
 def dist_broadcast_list(obj, src=0):
-    """Broadcast a Python list or object from src rank to all ranks."""
+    device = f"cuda:{torch.cuda.current_device()}"
     if dist.get_rank() == src:
         data = pickle.dumps(obj)
-        tensor = torch.ByteTensor(list(data)).to("cuda")
-        size = torch.tensor([tensor.size(0)], device="cuda")
+        tensor = torch.as_tensor(list(data), dtype=torch.uint8, device=device)
+        size = torch.tensor([tensor.numel()], device=device)
     else:
-        tensor = torch.ByteTensor().to("cuda")
-        size = torch.tensor([0], device="cuda")
+        tensor = torch.tensor([], dtype=torch.uint8, device=device)
+        size   = torch.tensor([0], device=device)
 
-    # Broadcast size first
     dist.broadcast(size, src=src)
-
-    # Resize and broadcast actual data
     if dist.get_rank() != src:
-        tensor = torch.empty(size.item(), dtype=torch.uint8, device="cuda")
+        tensor = torch.empty(size.item(), dtype=torch.uint8, device=device)
     dist.broadcast(tensor, src=src)
+    return pickle.loads(bytes(tensor.tolist()))
 
-    data = bytes(tensor.tolist())
-    return pickle.loads(data)
 
 def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_size: int):
     ddp_setup(rank, world_size)
@@ -577,8 +682,18 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
             if rank == 0:
                 logging.info(f"\n ----- Training Iteration {i} -----")
                 
-            dataset, model, optimizer = load_train_objs(subset_genes=subset_genes)
+            dataset, model, optimizer = load_train_objs(
+                DATA_DIR, CHROM_ID,
+                D_MODEL, NUM_HEADS, NUM_LAYERS, D_FF, DROPOUT,
+                subset_genes=subset_genes, lr=1e-3
+            )
             
+            if rank == 0:
+                with open(os.path.join(iter_dir, "tf_vocab.json"), "w") as f:
+                    json.dump(dataset.tf_name2id, f)
+                with open(os.path.join(iter_dir, "tg_vocab.json"), "w") as f:
+                    json.dump(dataset.tg_name2id, f)
+
             has_dist_bias = "No"
             if dataset.dist_bias_tensor is not None:
                 has_dist_bias = "Yes"
@@ -586,9 +701,9 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
             if rank == 0:
                 logging.info("\n===== MultiomicTransformerDataset Loaded =====")
                 logging.info(f"Chromosome:          {CHROM_ID}")
-                logging.info(f"Genes:               {dataset.num_tg}")
+                logging.info(f"Genes:               {len(dataset.tg_ids)}")
                 logging.info(f"Windows (RE):        {dataset.num_windows}")
-                logging.info(f"TFs:                 {dataset.num_tf}")
+                logging.info(f"TFs:                 {len(dataset.tf_ids)}")
                 logging.info(f"Metacells:           {len(dataset.metacell_names)}")
                 logging.info(f"Epochs:              {TOTAL_EPOCHS}")
                 logging.info(f"Iterations:          {TRAINING_ITERATIONS}")
@@ -610,9 +725,15 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
             trainer.train(max_epochs=TOTAL_EPOCHS, path=iter_dir)
 
             if rank == 0:
-                tf_tg_weights = trainer.model.module.tf_tg_weights.detach().cpu().numpy()
                 out_file = os.path.join(training_output_dir, "tf_tg_classifier_predictions.csv")
-                clf, edge_df = train_tf_tg_classifier(tf_tg_weights, dataset, GROUND_TRUTH_FILE, out_file)
+                clf, edge_df = train_tf_tg_classifier(
+                    trainer.model.module, 
+                    dataset, 
+                    GROUND_TRUTH_FILE, 
+                    out_file,
+                    device=f"cuda:{rank}",
+                    weight_attn_by_tf=False
+                    )
                 
                 avg_corr, subset_path = nclb_refinement(
                     model, dataset, iter_dir, MIN_CORR, i
@@ -656,11 +777,12 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
                             columns=dataset.tg_names
                 ).to_csv(os.path.join(iter_dir, "tf_tg_weights.csv"))
                 
-                tf_tg_weights = trainer.model.module.tf_tg_weights.detach().cpu().numpy()
-                tg_names = dataset.tg_names
-
-                tf_tg_df = pd.DataFrame(tf_tg_weights, index=dataset.tf_names, columns=tg_names)
-                tf_tg_df.to_csv(os.path.join(iter_dir, "tf_tg_weights.csv"))
+                W = trainer.model.module.tf_tg_weights.detach().cpu().numpy()   # [tf_vocab, tg_vocab]
+                tf_idx = [dataset.tf_name2id[n] for n in dataset.tf_names]
+                tg_idx = [dataset.tg_name2id[n] for n in dataset.tg_names]
+                W_sub = W[np.ix_(tf_idx, tg_idx)]
+                pd.DataFrame(W_sub, index=dataset.tf_names, columns=dataset.tg_names)\
+                .to_csv(os.path.join(iter_dir, "tf_tg_weights.csv"))
                 # logging.info("Saved TF→TG weights to CSV")
                 
             i += 1

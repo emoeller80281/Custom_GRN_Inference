@@ -110,18 +110,20 @@ class AttentionPooling(nn.Module):
         return pooled, weights
     
 class MultiomicTransformer(nn.Module):
-    def __init__(self, d_model, num_heads, num_layers, d_ff, dropout, num_tf, num_tg):
-        super(MultiomicTransformer, self).__init__()
+    def __init__(self, d_model, num_heads, num_layers, d_ff, dropout,
+                 tf_vocab_size, tg_vocab_size, use_shortcut=True):
+        super().__init__()
         
         self.d_model = d_model
-        self.dropout = dropout
-        self.d_ff = d_ff
         self.num_heads = num_heads
-        self.num_tg = num_tg
-        
-        # Create a TG embedding (doesn't use TG expression)
-        self.tg_emb = nn.Parameter(torch.empty(num_tg, d_model))
-        nn.init.xavier_uniform_(self.tg_emb)
+        self.d_ff = d_ff
+        self.dropout = dropout
+        self.use_shortcut = use_shortcut
+
+        # Embedding tables (fixed vocab; you index subsets by ids at runtime)
+        self.tf_emb_table = nn.Embedding(tf_vocab_size, d_model)
+        self.tg_emb_table = nn.Embedding(tg_vocab_size, d_model)
+        self.tg_decoder_table = nn.Embedding(tg_vocab_size, d_model)
         
         # Dense layer to pass the ATAC-seq windows into
         self.atac_window_dense_layer = nn.Sequential(
@@ -134,22 +136,20 @@ class MultiomicTransformer(nn.Module):
         
         # Dense layer to pass the TF RNA-seq data into
         self.tf_dense_layer = nn.Sequential(
-            nn.Linear(1, self.d_ff, bias=False),        # Projects each TF independently
+            nn.Linear(1, d_ff, bias=False),        # Projects each TF independently
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(d_ff, d_model, bias=False),
             nn.LayerNorm(d_model)
         )
         
-        # Positional encoding of the windows
-        self.posenc = PositionalEmbedding(d_model)
-        
         # Encode ATAC Windows
+        self.posenc = PositionalEmbedding(d_model)
         self.encoder = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(
                 d_model=d_model,
                 nhead=num_heads,
-                dim_feedforward=self.d_ff,
+                dim_feedforward=d_ff,
                 dropout=dropout,
                 batch_first=True,
                 norm_first=True
@@ -178,59 +178,73 @@ class MultiomicTransformer(nn.Module):
         )
         
         # Adds TF->TG weights at the end to directly modify the final TG expression predictions
-        self.tf_tg_weights = nn.Parameter(torch.empty(num_tf, num_tg))
-        nn.init.xavier_uniform_(self.tf_tg_weights)
+        # Optional TF→TG shortcut that adapts to any TF/TG set
+        if use_shortcut:
+            self.shortcut_scale = nn.Parameter(torch.tensor(0.1))  # starts small
                 
         self.gene_pred_dense = nn.Linear(d_model, 1)
     
-    def forward(self, atac_windows, tf_expr, bias=None):
-        # ----- Embed ATAC windows -----
-        win_emb = self.atac_window_dense_layer(atac_windows)      # [B, num_windows, d_model]
+    def forward(self, atac_windows, tf_expr, tf_ids, tg_ids, bias=None):
+        """
+        atac_windows : [B, W, 1]
+        tf_expr      : [B, T_eval]       (values must correspond to tf_ids order)
+        tf_ids       : LongTensor [T_eval]
+        tg_ids       : LongTensor [G_eval]
+        bias         : [B, G_eval, W] or None   (distance bias)
+        returns      : [B, G_eval]
+        """
+        B, W, _ = atac_windows.shape
+        device = atac_windows.device
 
-        # ----- Embed TF expression -----
-        tf_raw = tf_expr                                          # [B, num_tf]
-        tf_emb = self.tf_dense_layer(tf_expr.unsqueeze(-1))       # [B, num_tf, d_model]
+        # ----- ATAC encoding -----
+        win_emb = self.atac_window_dense_layer(atac_windows)       # [B,W,D]
+        pos = torch.arange(W, device=device, dtype=torch.float32)
+        win_emb = win_emb + self.posenc(pos, bsz=B).transpose(0, 1)  # [B,W,D]
+        win_emb = self.encoder(win_emb)                               # [B,W,D]
 
-        # ----- Positional encoding -----
-        positions = torch.arange(win_emb.size(1), device=win_emb.device).float()
-        pos_emb = self.posenc(positions, bsz=win_emb.size(0))     # [seq_len, B, d_model]
-        pos_emb = pos_emb.transpose(0, 1)                         # [B, seq_len, d_model]
-        win_emb = win_emb + pos_emb
-        win_emb = self.encoder(win_emb)                           # [B, num_windows, d_model]
+        # ----- TF embeddings -----
+        tf_base = self.tf_emb_table(tf_ids)                        # [T_eval,D]
+        tf_emb = self.tf_dense_layer(tf_expr.unsqueeze(-1))        # [B,T_eval,D]
+        tf_emb = tf_emb + tf_base.unsqueeze(0)                     # inject identity
 
-        # ----- Cross attention TF <-> ATAC -----
-        tf_cross   = self.cross_tf_to_atac(tf_emb, win_emb)       # [B, num_tf, d_model]
-        atac_cross = self.cross_atac_to_tf(win_emb, tf_emb)       # [B, num_windows, d_model]
+        # cross TF <-> ATAC
+        tf_cross   = self.cross_tf_to_atac(tf_emb, win_emb)        # [B,T_eval,D]
+        atac_cross = self.cross_atac_to_tf(win_emb, tf_emb)        # [B,W,D]
 
-        # ----- TG queries ATAC (with distance bias) -----
-        B = atac_windows.size(0)
-        tg_emb = self.tg_emb.unsqueeze(0).expand(B, -1, -1)       # [B, num_tg, d_model]
+        # ----- TG queries ATAC -----
+        tg_base = self.tg_emb_table(tg_ids).unsqueeze(0).expand(B, -1, -1)  # [B,G_eval,D]
+
+        # prepare attention bias for heads
         if bias is not None:
-            # bias: [B, num_tg, num_windows] -> [B, 1, num_tg, num_windows]
-            bias = bias.unsqueeze(1)
-            # expand across heads -> [B, num_heads, num_tg, num_windows]
-            bias = bias.expand(-1, self.num_heads, -1, -1)         # [B, num_heads, num_tg, num_windows]
-        else:
-            bias = None
-        tg_cross = self.cross_tg_to_atac(tg_emb, win_emb, attn_bias=bias)  # [B, num_tg, d_model]
+            # bias: [B,G_eval,W] -> [B,1,G_eval,W] -> [B,H,G_eval,W]
+            bias = bias.unsqueeze(1).expand(B, self.num_heads, -1, -1)
 
-        # ----- Global context pooling -----
-        tf_repr, _   = self.tf_pool(tf_cross)                     # [B, d_model]
-        atac_repr, _ = self.atac_pool(atac_cross)                 # [B, d_model]
-        fused_repr   = self.out_dense(torch.cat([tf_repr, atac_repr], dim=-1))  # [B, d_model]
+        tg_cross = self.cross_tg_to_atac(tg_base, win_emb, attn_bias=bias)   # [B,G_eval,D]
 
-        # ----- Combine global + gene-specific -----
-        fused_repr = fused_repr.unsqueeze(1).expand(-1, self.num_tg, -1)   # [B, num_tg, d_model]
-        tg_repr    = tg_cross + fused_repr                                # [B, num_tg, d_model]
+        # ----- Fuse global context -----
+        tf_repr, _   = self.tf_pool(tf_cross)                    # [B,D]
+        atac_repr, _ = self.atac_pool(atac_cross)                # [B,D]
+        fused = self.out_dense(torch.cat([tf_repr, atac_repr], dim=-1))  # [B,D]
+        fused = fused.unsqueeze(1).expand(-1, tg_cross.size(1), -1)      # [B,G_eval,D]
+        tg_repr = tg_cross + fused                                        # [B,G_eval,D]
 
-        # ----- Predict TG expression -----
-        gene_logits = self.gene_pred_dense(tg_repr).view(B, self.num_tg)   # [B, num_tg]
+        # ----- TG-aware prediction head (dot product) -----
+        tg_dec = self.tg_decoder_table(tg_ids)                   # [G_eval,D]
+        logits = torch.einsum("bgd,gd->bg", tg_repr, tg_dec)     # [B,G_eval]
 
-        # Direct TF->TG shortcut
-        tf_expr_logits = tf_raw @ self.tf_tg_weights              # [B, num_tg]
-        gene_logits = gene_logits + tf_expr_logits
+        logits = logits + self.gene_pred_dense(tg_repr).squeeze(-1)
+        
+        # ----- Optional TF→TG shortcut without fixed matrix -----
+        if self.use_shortcut:
+            # similarity between TG decoder and TF base embeddings
+            # sim: [G_eval, T_eval]
+            sim = torch.matmul(tg_dec, tf_base.T) / math.sqrt(self.d_model)
+            attn = torch.softmax(sim, dim=-1)                    # TG→TF attention
+            # aggregate TF expression per TG
+            tf_scalar = torch.einsum("bt,gt->bg", tf_expr, attn) # [B,G_eval]
+            logits = logits + self.shortcut_scale * tf_scalar
 
-        return gene_logits
+        return logits
             
         
         
