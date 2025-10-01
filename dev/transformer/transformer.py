@@ -94,7 +94,65 @@ class CrossAttention(nn.Module):
         attn_out = self.attn(query, key_value, key_value, mask, attn_bias=attn_bias)
         out = self.norm(query + self.dropout(attn_out))  # residual
         return out
-    
+
+class TFtoTGShortcut(nn.Module):
+    def __init__(self, d_model, use_motif_mask=False, lambda_l1=1e-4, lambda_l2=0.0,
+                 topk=None, dropout_p=0.2):
+        super().__init__()
+        self.scale = nn.Parameter(torch.tensor(0.1))  # learnable scaling
+        self.use_motif_mask = use_motif_mask
+        self.lambda_l1 = lambda_l1
+        self.lambda_l2 = lambda_l2
+        self.topk = topk  # keep only top-k TFs per TG if not None
+        self.dropout_p = dropout_p
+
+    def forward(self, tg_dec, tf_base, tf_expr, motif_mask=None):
+        """
+        tg_dec     : [G_eval, D]   TG embeddings
+        tf_base    : [T_eval, D]   TF embeddings
+        tf_expr    : [B, T_eval]   TF expression values
+        motif_mask : [G_eval, T_eval] (0/1) prior: TF motif present in TG-linked peaks
+        """
+        # Compute similarity TG↔TF
+        sim = torch.matmul(tg_dec, tf_base.T) / math.sqrt(tf_base.size(1))  # [G,T]
+
+        # Apply motif mask if provided
+        if self.use_motif_mask and motif_mask is not None:
+            sim = sim.masked_fill(motif_mask == 0, float("-inf"))
+
+        # Softmax attention
+        attn = torch.softmax(sim, dim=-1)  # [G,T]
+        
+        # Protect against NaNs (all -inf rows after masking -> NaN after softmax)
+        attn = torch.nan_to_num(attn, nan=0.0)
+
+        # Optional sparsity: keep only top-k TFs per TG
+        if self.topk is not None:
+            topk_vals, topk_idx = torch.topk(attn, self.topk, dim=-1)
+            mask = torch.zeros_like(attn)
+            mask.scatter_(1, topk_idx, 1.0)
+            attn = attn * mask
+            attn = attn / (attn.sum(dim=-1, keepdim=True) + 1e-8)
+
+        # Weighted TF → TG contribution
+        tf_scalar = torch.einsum("bt,gt->bg", tf_expr, attn)
+
+        # Apply dropout (on shortcut contribution)
+        tf_scalar = F.dropout(tf_scalar, p=self.dropout_p, training=self.training)
+
+        # Save attention for regularization and interpretability
+        self.attn = attn
+
+        return self.scale * tf_scalar, attn  # return both logits contribution and edge weights
+
+    def regularization(self):
+        if not hasattr(self, "attn"):
+            return 0.0
+        l1 = self.lambda_l1 * self.attn.abs().sum()
+        l2 = self.lambda_l2 * (self.attn ** 2).sum()
+        return l1 + l2
+
+
 class AttentionPooling(nn.Module):
     def __init__(self, d_model):
         super().__init__()
@@ -111,7 +169,14 @@ class AttentionPooling(nn.Module):
     
 class MultiomicTransformer(nn.Module):
     def __init__(self, d_model, num_heads, num_layers, d_ff, dropout,
-                 tf_vocab_size, tg_vocab_size, use_shortcut=True):
+                 tf_vocab_size, tg_vocab_size, 
+                 use_shortcut=True, 
+                 use_motif_mask=False, 
+                 lambda_l1=1e-4, 
+                 lambda_l2=0.0,
+                 topk=None,
+                 shortcut_dropout=0.2
+                 ):
         super().__init__()
         
         self.d_model = d_model
@@ -180,11 +245,11 @@ class MultiomicTransformer(nn.Module):
         # Adds TF->TG weights at the end to directly modify the final TG expression predictions
         # Optional TF→TG shortcut that adapts to any TF/TG set
         if use_shortcut:
-            self.shortcut_scale = nn.Parameter(torch.tensor(0.1))  # starts small
+            self.shortcut_layer = TFtoTGShortcut(d_model, use_motif_mask, lambda_l1, lambda_l2, topk, shortcut_dropout)
                 
         self.gene_pred_dense = nn.Linear(d_model, 1)
     
-    def forward(self, atac_windows, tf_expr, tf_ids, tg_ids, bias=None):
+    def forward(self, atac_windows, tf_expr, tf_ids, tg_ids, bias=None, motif_mask=None):
         """
         atac_windows : [B, W, 1]
         tf_expr      : [B, T_eval]       (values must correspond to tf_ids order)
@@ -195,6 +260,10 @@ class MultiomicTransformer(nn.Module):
         """
         B, W, _ = atac_windows.shape
         device = atac_windows.device
+        
+        if motif_mask is not None:
+            assert motif_mask.shape == (tg_dec.size(0), tf_base.size(0)), \
+                f"Motif mask shape {motif_mask.shape} does not match (G_eval, T_eval)"
 
         # ----- ATAC encoding -----
         win_emb = self.atac_window_dense_layer(atac_windows)       # [B,W,D]
@@ -236,16 +305,13 @@ class MultiomicTransformer(nn.Module):
         
         # ----- Optional TF→TG shortcut without fixed matrix -----
         if self.use_shortcut:
-            # similarity between TG decoder and TF base embeddings
-            # sim: [G_eval, T_eval]
-            sim = torch.matmul(tg_dec, tf_base.T) / math.sqrt(self.d_model)
-            attn = torch.softmax(sim, dim=-1)                    # TG→TF attention
-            # aggregate TF expression per TG
-            tf_scalar = torch.einsum("bt,gt->bg", tf_expr, attn) # [B,G_eval]
-            logits = logits + self.shortcut_scale * tf_scalar
+            tf_scalar, attn = self.shortcut_layer(tg_dec, tf_base, tf_expr, motif_mask=motif_mask)
+            logits = logits + tf_scalar
+            self.last_attn = attn
 
-        return logits
+        return logits, attn
             
+
         
         
         

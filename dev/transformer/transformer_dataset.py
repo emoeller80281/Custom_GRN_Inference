@@ -42,13 +42,14 @@ class MultiomicTransformerDataset(Dataset):
         tf_names_json      = os.path.join(data_dir, "tf_names.json")
         tg_names_json      = os.path.join(chrom_dir, f"tg_names_{chrom_id}.json")
         metacell_names_path= os.path.join(data_dir, "metacell_names.json")
+        motif_mask_path    = os.path.join(chrom_dir, f"motif_mask_{chrom_id}.pt")
 
         # required tensors/metadata
         required = [
             tf_path, tg_path, atac_path, scaler_path,
             window_map_path, metacell_names_path,
             tf_names_json, tg_names_json,
-            tf_ids_path, tg_ids_path,
+            tf_ids_path, tg_ids_path
         ]
         for f in required:
             if not os.path.exists(f):
@@ -68,9 +69,10 @@ class MultiomicTransformerDataset(Dataset):
             "tf_names": tf_names_json, "tg_names": tg_names_json,
             "metacells": metacell_names_path,
             "tf_vocab": tf_vocab_path, "tg_vocab": tg_vocab_path,
+            "motif_mask": motif_mask_path
         }
 
-        # distance bias saved in prep as [W, G_eval] → transpose to [G_eval, W]
+        # ------ load distance bias -------
         if os.path.exists(dist_bias_path):
             bias_WG = torch.load(dist_bias_path).float()
             if bias_WG.shape[0] == self.atac_window_tensor_all.shape[0]:
@@ -81,6 +83,20 @@ class MultiomicTransformerDataset(Dataset):
                 raise ValueError(f"dist_bias_{chrom_id}.pt shape mismatch: {tuple(bias_WG.shape)}")
         else:
             self.dist_bias_tensor = None
+        
+        # -------- load motif mask (TG x TF) --------
+        if os.path.exists(motif_mask_path):
+            motif_mask_tensor = torch.load(motif_mask_path).float()
+            # sanity check: TG dimension must match tg_ids, TF dimension must match tf_ids
+            if motif_mask_tensor.shape[0] != self.tg_ids.numel() or motif_mask_tensor.shape[1] != self.tf_ids.numel():
+                logging.warning(
+                    f"Motif mask shape {tuple(motif_mask_tensor.shape)} "
+                    f"!= (TG {self.tg_ids.numel()}, TF {self.tf_ids.numel()})"
+                )
+            self.motif_mask_tensor = motif_mask_tensor
+        else:
+            logging.warning("Motif mask file not found — using zeros.")
+            self.motif_mask_tensor = torch.zeros((self.tg_ids.numel(), self.tf_ids.numel()), dtype=torch.float32)
 
         # -------- metadata --------
         with open(window_map_path, "r") as f:
@@ -198,8 +214,22 @@ class MultiomicTransformerDataset(Dataset):
             dist_bias = self.dist_bias_tensor                       # [G_eval, W]
         else:
             dist_bias = torch.zeros((self.tg_ids.numel(), self.num_windows), dtype=torch.float32)
+            
+        # motif mask (shared across items)
+        if self.motif_mask_tensor is not None:
+            motif_mask = self.motif_mask_tensor                       # [G_eval, T_eval]
+        else:
+            motif_mask = torch.zeros((self.tg_ids.numel(), self.tf_ids.numel()), dtype=torch.float32)
 
-        return atac_wins, tf_tensor, tg_tensor, dist_bias, self.tf_ids, self.tg_ids
+        return (
+            atac_wins,
+            tf_tensor,
+            tg_tensor,
+            dist_bias,
+            self.tf_ids,
+            self.tg_ids,
+            motif_mask,
+        )
 
     # -------- utilities --------
     def inverse_transform(self, preds: np.ndarray) -> np.ndarray:
@@ -242,12 +272,17 @@ class MultiomicTransformerDataset(Dataset):
           bias:      [B, G_eval, W]
           tf_ids:    [T_eval]
           tg_ids:    [G_eval]
+          motif_mask:[B, G_eval, T_eval]
         """
-        atac_list, tf_list, tg_list, bias_list, tf_ids_list, tg_ids_list = zip(*batch)
+        atac_list, tf_list, tg_list, bias_list, tf_ids_list, tg_ids_list, mask_list = zip(*batch)
+
         atac_wins = torch.stack(atac_list, dim=0)
         tf_tensor = torch.stack(tf_list,  dim=0)
         tg_tensor = torch.stack(tg_list,  dim=0)
-        bias      = torch.stack(bias_list, dim=0)  # same bias per item → identical copies
-        tf_ids    = tf_ids_list[0]
-        tg_ids    = tg_ids_list[0]
-        return atac_wins, tf_tensor, tg_tensor, bias, tf_ids, tg_ids
+        bias      = torch.stack(bias_list, dim=0)
+
+        tf_ids     = tf_ids_list[0]
+        tg_ids     = tg_ids_list[0]
+        motif_mask = mask_list[0]
+
+        return atac_wins, tf_tensor, tg_tensor, bias, tf_ids, tg_ids, motif_mask

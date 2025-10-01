@@ -19,7 +19,7 @@ torch.manual_seed(1337)
 
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 
-WINDOW_SIZE = 25000
+WINDOW_SIZE = 15000
 SAMPLE_NAME = "mESC"
 CHROM_ID = "chr19"
 
@@ -65,6 +65,7 @@ dist_bias_file = os.path.join(CHROM_SPECIFIC_DATA_DIR, f"dist_bias_{CHROM_ID}.pt
 tf_id_file = os.path.join(SAMPLE_DATA_DIR, "tf_ids.pt")
 tg_id_file = os.path.join(CHROM_SPECIFIC_DATA_DIR, f"tg_ids_{CHROM_ID}.pt")
 manifest_file = os.path.join(CHROM_SPECIFIC_DATA_DIR, "manifest.json")
+motif_mask_file = os.path.join(CHROM_SPECIFIC_DATA_DIR, f"motif_mask_{CHROM_ID}.pt")
 
 os.makedirs(SAMPLE_DATA_DIR, exist_ok=True)
 os.makedirs(CHROM_SPECIFIC_DATA_DIR, exist_ok=True)
@@ -168,6 +169,32 @@ def calculate_peak_to_tg_distance_score(output_dir, mesc_atac_peak_loc_df, gene_
         genes_near_peaks = pd.read_parquet(os.path.join(output_dir, "genes_near_peaks.parquet"), engine="pyarrow")
     
     return genes_near_peaks
+
+def build_motif_mask(tf_names, tg_names, motif_hits_df, genes_near_peaks):
+    """
+    tf_names        : list of TF names
+    tg_names        : list of TG names
+    motif_hits_df   : DataFrame with columns ['peak_id','tf_name']
+    genes_near_peaks: DataFrame with columns ['peak_id','target_id']
+    """
+    TF = len(tf_names)
+    TG = len(tg_names)
+
+    # Map TFs and TGs to indices
+    tf_index = {tf: i for i, tf in enumerate(tf_names)}
+    tg_index = {tg: i for i, tg in enumerate(tg_names)}
+
+    mask = np.zeros((TG, TF), dtype=np.float32)
+
+    # Join motifs with peaks→TG assignments
+    merged = motif_hits_df.merge(genes_near_peaks, on="peak_id")
+
+    for _, row in merged.iterrows():
+        tf, tg, score = row["TF"], row["target_id"], row["logodds"]
+        if tf in tf_index and tg in tg_index:
+            mask[tg_index[tg], tf_index[tf]] = max(mask[tg_index[tg], tf_index[tf]], score)
+
+    return mask
 
 def precompute_input_tensors(
     output_dir: str,
@@ -420,7 +447,10 @@ if __name__ == "__main__":
 
     # Scale TG expression
     scaler = StandardScaler()
-    TG_scaled = scaler.fit_transform(total_TG_pseudobulk_chr.values.astype("float32"))
+    TG_scaled = scaler.fit_transform(total_TG_pseudobulk_chr.T.astype("float32")).T
+
+    print(total_TG_pseudobulk_chr.shape)
+    print(scaler.mean_.shape, scaler.scale_.shape)
 
     # Create genome windows
     mm10_windows = create_or_load_genomic_windows(
@@ -438,6 +468,8 @@ if __name__ == "__main__":
         gene_tss_df=gene_tss_df,
         force_recalculate=False
     )
+    
+
 
     # Build peak -> window mapping
     window_map = make_peak_to_window_map(total_peaks_df, mm10_windows)
@@ -474,6 +506,22 @@ if __name__ == "__main__":
     tf_tensor_all, tf_names_kept, tf_ids = match_gene_to_vocab(tf_names, tf_vocab, tf_tensor_all, label="TF")
     tg_tensor_all, tg_names_kept, tg_ids = match_gene_to_vocab(tg_names, tg_vocab, tg_tensor_all, label="TG")
     
+    moods_hits = pd.read_csv(os.path.join(CHROM_SPECIFIC_DATA_DIR, "chr19_moods_sites.tsv"), sep="\t")
+    
+    # Drop rows with missing TFs just in case
+    moods_hits = moods_hits.dropna(subset=["TF"])
+    
+    # Strip ".pfm" suffix from TF names if present
+    moods_hits["TF"] = moods_hits["TF"].str.replace(r"\.pfm$", "", regex=True)
+
+    # Build motif mask using merged info
+    motif_mask = build_motif_mask(
+        tf_names=tf_names_kept,
+        tg_names=tg_names_kept,
+        motif_hits_df=moods_hits,
+        genes_near_peaks=genes_near_peaks
+    )
+    
     if not tf_ids: raise ValueError("No TFs matched the common vocab.")
     if not tg_ids: raise ValueError("No TGs matched the common vocab.")
         
@@ -485,6 +533,8 @@ if __name__ == "__main__":
         num_windows=num_windows,
         dtype=torch.float32,
     )
+    
+    
 
     # ----- Writing Output Files -----
     # Save the Window, TF, and TG expression tensors
@@ -514,6 +564,8 @@ if __name__ == "__main__":
     logging.info(f"Saved distance bias tensor with shape {tuple(dist_bias.shape)}")
 
     atomic_json_dump(metacell_names, metacell_name_file)
+    
+    torch.save(torch.from_numpy(motif_mask), motif_mask_file)
 
     # Manifest of general sample info and file paths
     manifest = {
@@ -537,6 +589,7 @@ if __name__ == "__main__":
             "genes_near_peaks": peak_to_tss_dist_path,
             "metacell_names": metacell_name_file,
             "tg_scaler": sample_scaler_file,
+            "motif_mask": motif_mask_file,
         }
     }
     with open(manifest_file, "w") as f:

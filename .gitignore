@@ -10,6 +10,10 @@ checkpoint.pt
 dev/notebooks/sliding_window_calculation_method_testing_cache
 *.png
 *.csv
+*.meme
+*.pwm
+*.pfm
+*.jaspar
 *.tsv
 *.motifs
 *.log

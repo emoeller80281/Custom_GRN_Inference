@@ -22,14 +22,14 @@ from transformer_training import prepare_dataloader
 import eval
 
 SAMPLE_NAME = "mESC"
-CHROM_ID    = "chr1"
+CHROM_ID    = "chr19"
 
 TRANSFORMER_DATA_DIR = os.path.join(DEV_DIR, f"transformer_data/{SAMPLE_NAME}")
 COMMON_DIR           = os.path.join(DEV_DIR, "transformer_data/common")
 OUTPUT_DIR           = os.path.join(PROJECT_DIR, "output/transformer_testing_output")
-TEST_DIR             = os.path.join(OUTPUT_DIR, "model_0.77_corr")  # where checkpoint lives
+TEST_DIR             = os.path.join(OUTPUT_DIR, "best_model_0.82_corr")  # where checkpoint lives
 
-GROUND_TRUTH_FILE = os.path.join(PROJECT_DIR, "ground_truth_files/mESC_beeline_ChIP-seq.csv")
+GROUND_TRUTH_FILE = os.path.join(PROJECT_DIR, "ground_truth_files/ORTI_rank1_ground_truth_TF_TG.csv")
 OUT_DIR = os.path.join(TEST_DIR, "tf_gradient_attributions")
 os.makedirs(OUT_DIR, exist_ok=True)
 
@@ -64,7 +64,7 @@ def load_model_and_data():
         tf_vocab_path=os.path.join(COMMON_DIR, "tf_vocab.json"),
         tg_vocab_path=os.path.join(COMMON_DIR, "tg_vocab.json"),
     )
-    _, _, test_loader = prepare_dataloader(dataset, batch_size=BATCH, world_size=1, rank=0)
+    train_loader, _, test_loader = prepare_dataloader(dataset, batch_size=BATCH, world_size=1, rank=0)
 
     # --- model ---
     # infer whether shortcut existed in checkpoint
@@ -81,7 +81,7 @@ def load_model_and_data():
     model.load_state_dict(sd, strict=True)
     model.eval()
 
-    return model, dataset, test_loader
+    return model, dataset, train_loader, test_loader
 
 @torch.no_grad()
 def _global_minmax_(arr):
@@ -211,12 +211,12 @@ def evaluate_chip_aucs(tf_importance_df, chip_csv, k_list=(100, 500, 1000, 5000)
 # ---------------------------------------------------------------------
 if __name__ == "__main__":
     logging.info("\nLoading model and dataset")
-    model, dataset, test_loader = load_model_and_data()
+    model, dataset, train_loader, test_loader = load_model_and_data()
     
     logging.info(f"\nPlotting gene correlation scatterplot")
     fig = eval.plot_per_gene_correlation_scatterplot(
         model, 
-        test_loader, 
+        train_loader, 
         DEVICE, 
         outpath=os.path.join(TEST_DIR, "eval_results_scatter.png")
         )
@@ -228,7 +228,7 @@ if __name__ == "__main__":
     )
     out_csv = os.path.join(OUT_DIR, "tf_importance_matrix.csv")
     tf_importance_df.to_csv(out_csv)
-    logging.info(f"Saved TF×TG importance matrix: {out_csv}  shape={tf_importance_df.shape}")
+    logging.info(f"\tSaved TF×TG importance matrix: {out_csv}  shape={tf_importance_df.shape}")
 
     # --- Evaluate vs CHIP edges ---
     logging.info("\nEvaluating AUROC and AUPRC")
