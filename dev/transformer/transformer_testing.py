@@ -1,5 +1,6 @@
 # transformer_testing.py
 import os, sys, json
+import joblib
 import numpy as np
 import pandas as pd
 import torch
@@ -23,14 +24,14 @@ import eval
 
 SAMPLE_NAME = "mESC"
 CHROM_ID    = "chr19"
-TRAINING_RUN_NAME = "model_training_01_10_15_15_36"
+TRAINING_RUN_NAME = "model_training_01_10_16_03_45"
 
 TRANSFORMER_DATA_DIR = os.path.join(DEV_DIR, f"transformer_data/{SAMPLE_NAME}")
 COMMON_DIR           = os.path.join(DEV_DIR, "transformer_data/common")
 OUTPUT_DIR           = os.path.join(PROJECT_DIR, "output/transformer_testing_output")
 TEST_DIR             = os.path.join(OUTPUT_DIR, f"{SAMPLE_NAME}/{CHROM_ID}/{TRAINING_RUN_NAME}")  # where checkpoint lives
 
-GROUND_TRUTH_FILE = os.path.join(PROJECT_DIR, "ground_truth_files/ORTI_rank1_ground_truth_TF_TG.csv")
+GROUND_TRUTH_FILE = os.path.join(PROJECT_DIR, "ground_truth_files/mESC_beeline_ChIP-seq.csv")
 OUT_DIR = os.path.join(TEST_DIR, "tf_gradient_attributions")
 os.makedirs(OUT_DIR, exist_ok=True)
 
@@ -94,25 +95,38 @@ def _global_minmax_(arr):
     mn, mx = arr.min(), arr.max()
     return (arr - mn) / (mx - mn + 1e-8)
 
+def has_shortcut(model):
+    return hasattr(model, "shortcut") and model.shortcut is not None
+
 @torch.no_grad()
-def shortcut_matrix(model, dataset, normalize="global"):
+def extract_shortcut_matrix(model, dataset, device="cuda:0", normalize="global"):
     """
-    Extracts the learned TF→TG shortcut matrix directly from the model.
-
-    Returns
-    -------
-    DataFrame [TF × TG] with importance scores.
+    Runs a dummy forward to pull out the TF→TG attention (shortcut) matrix.
+    Returns DataFrame [TF × TG].
     """
-    if not hasattr(model, "shortcut") or model.shortcut is None:
-        raise ValueError("Model does not have a shortcut connection enabled.")
-
-    # Typically the shortcut weight is [TG, TF]
-    W = model.shortcut.weight.detach().cpu().float()  # [TG, TF]
-
-    # Transpose to TF×TG
-    mat = W.T
-
-    # Normalize
+    model.eval()
+    
+    # Build dummy inputs
+    B = 1
+    W = 1
+    atac_windows = torch.zeros(B, W, 1, device=device)      # minimal fake ATAC
+    tf_expr = torch.zeros(B, len(dataset.tf_names), device=device)  # fake TF expression
+    tf_ids = torch.arange(len(dataset.tf_names), device=device)
+    tg_ids = torch.arange(len(dataset.tg_names), device=device)
+    
+    # Forward once
+    logits, attn = model(
+        atac_windows, tf_expr, tf_ids, tg_ids, 
+        bias=None, motif_mask=None
+    )
+    
+    # attn is [G, T], transpose to [T, G]
+    mat = attn.detach().cpu().T
+    
+    # Apply scale
+    mat = model.shortcut_layer.scale.item() * mat
+    
+    # Normalize if requested
     if normalize == "global":
         mn, mx = mat.min(), mat.max()
         mat = (mat - mn) / (mx - mn + 1e-8)
@@ -120,11 +134,13 @@ def shortcut_matrix(model, dataset, normalize="global"):
         mn = mat.min(dim=0, keepdim=True).values
         mx = mat.max(dim=0, keepdim=True).values
         mat = (mat - mn) / (mx - mn + 1e-8)
-
-    df = pd.DataFrame(mat.numpy(),
-                      index=dataset.tf_names,
-                      columns=dataset.tg_names)
-    return df
+    
+    import pandas as pd
+    return pd.DataFrame(
+        mat.numpy(),
+        index=dataset.tf_names,
+        columns=dataset.tg_names
+    )
 
 
 def gradient_attribution_matrix(model, dataset, loader, tg_chunk=TG_CHUNK, device=DEVICE,
@@ -237,6 +253,9 @@ if __name__ == "__main__":
     logging.info("\nLoading model and dataset")
     model, dataset, train_loader, test_loader = load_model_and_data()
     
+    scaler_path = os.path.join(TEST_DIR, "tg_scaler.pkl")
+    scaler = joblib.load(scaler_path)
+    
     logging.info(f"\nPlotting gene correlation scatterplot")
     fig = eval.plot_per_gene_correlation_scatterplot(
         model, 
@@ -245,9 +264,9 @@ if __name__ == "__main__":
         outpath=os.path.join(TEST_DIR, "eval_results_scatter.png")
         )
 
-    if getattr(model, "use_shortcut", False):
+    if has_shortcut(model):
         logging.info("\nExtracting shortcut TF×TG matrix (no gradients needed)")
-        tf_importance_df = shortcut_matrix(model, dataset, normalize="global")
+        tf_importance_df = extract_shortcut_matrix(model, dataset, normalize="global")
     else:
         logging.info("\nGenerating gradient attribution matrix")
         tf_importance_df = gradient_attribution_matrix(

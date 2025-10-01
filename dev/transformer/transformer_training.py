@@ -39,22 +39,21 @@ warnings.filterwarnings("ignore", message="No device id is provided via `init_pr
 CHROM_ID = "chr19"
 SAMPLE_NAME = "mESC"
 
-TOTAL_EPOCHS=500
-BATCH_SIZE=32
-PERCENT_DROP=0
-PATIENCE=20
+TOTAL_EPOCHS=200
+BATCH_SIZE=16
+PATIENCE=25
 
 D_MODEL = 384
-NUM_HEADS = 6
-NUM_LAYERS = 3
-D_FF = 768
-DROPOUT = 0.1
+NUM_HEADS = 8
+NUM_LAYERS = 4
+D_FF = 1536
+DROPOUT = 0.05
 
 # TF to TG shortcut parameters
-SHORTCUT_L1 = 0.0001
+SHORTCUT_L1 = 1e-5
 SHORTCUT_L2 = 0
 SHORTCUT_TOPK = None
-SHORTCUT_DROPOUT = 0.2
+SHORTCUT_DROPOUT = 0.1
 
 PROJECT_DIR = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
 DATA_DIR = os.path.join(PROJECT_DIR, f"dev/transformer/transformer_data/{SAMPLE_NAME}")
@@ -505,6 +504,11 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
                 json.dump(dataset.tf_name2id, f)
             with open(os.path.join(training_output_dir, "tg_vocab.json"), "w") as f:
                 json.dump(dataset.tg_name2id, f)
+                
+            if getattr(dataset, "scaler", None) is not None:
+                scaler_out = os.path.join(training_output_dir, "tg_scaler.pkl")
+                joblib.dump(dataset.scaler, scaler_out)
+                logging.info(f"Saved TG scaler to {scaler_out}")
 
         has_dist_bias = "No"
         if dataset.dist_bias_tensor is not None:
