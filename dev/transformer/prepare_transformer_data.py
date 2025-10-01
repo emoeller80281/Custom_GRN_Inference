@@ -13,13 +13,16 @@ import numpy as np
 from grn_inference import utils
 from typing import List, Dict, Tuple, Sequence, Iterable, Optional
 
+import sys
+from dev.transformer.build_motif_mask.moods_scan import run_moods_scan
+
 random.seed(1337)
 np.random.seed(1337)
 torch.manual_seed(1337)
 
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 
-WINDOW_SIZE = 15000
+WINDOW_SIZE = 25000
 SAMPLE_NAME = "mESC"
 CHROM_ID = "chr19"
 
@@ -44,6 +47,7 @@ COMMON_DATA = os.path.join(PROJECT_DIR, f"dev/transformer/transformer_data/commo
 
 SAMPLE_DATA_DIR = os.path.join(PROJECT_DIR, f"dev/transformer/transformer_data/{SAMPLE_NAME}")
 CHROM_SPECIFIC_DATA_DIR = os.path.join(SAMPLE_DATA_DIR, CHROM_ID)
+JASPAR_PFM_DIR=os.path.join(PROJECT_DIR, "data/motif_information/JASPAR/pfm_files")
 
 # TF and TG vocab files
 common_tf_vocab_file = os.path.join(COMMON_DATA, f"tf_vocab.json")
@@ -66,6 +70,7 @@ tf_id_file = os.path.join(SAMPLE_DATA_DIR, "tf_ids.pt")
 tg_id_file = os.path.join(CHROM_SPECIFIC_DATA_DIR, f"tg_ids_{CHROM_ID}.pt")
 manifest_file = os.path.join(CHROM_SPECIFIC_DATA_DIR, "manifest.json")
 motif_mask_file = os.path.join(CHROM_SPECIFIC_DATA_DIR, f"motif_mask_{CHROM_ID}.pt")
+moods_sites_file = os.path.join(CHROM_SPECIFIC_DATA_DIR, f"{CHROM_ID}_moods_sites.tsv")
 
 os.makedirs(SAMPLE_DATA_DIR, exist_ok=True)
 os.makedirs(CHROM_SPECIFIC_DATA_DIR, exist_ok=True)
@@ -174,7 +179,7 @@ def build_motif_mask(tf_names, tg_names, motif_hits_df, genes_near_peaks):
     """
     tf_names        : list of TF names
     tg_names        : list of TG names
-    motif_hits_df   : DataFrame with columns ['peak_id','tf_name']
+    motif_hits_df   : DataFrame with columns ['peak_id','TF','logodds']
     genes_near_peaks: DataFrame with columns ['peak_id','target_id']
     """
     TF = len(tf_names)
@@ -186,13 +191,18 @@ def build_motif_mask(tf_names, tg_names, motif_hits_df, genes_near_peaks):
 
     mask = np.zeros((TG, TF), dtype=np.float32)
 
-    # Join motifs with peaks→TG assignments
-    merged = motif_hits_df.merge(genes_near_peaks, on="peak_id")
+    # Map peak → list of TGs
+    peak_to_tgs = genes_near_peaks.groupby("peak_id")["target_id"].apply(list).to_dict()
 
-    for _, row in merged.iterrows():
-        tf, tg, score = row["TF"], row["target_id"], row["logodds"]
-        if tf in tf_index and tg in tg_index:
-            mask[tg_index[tg], tf_index[tf]] = max(mask[tg_index[tg], tf_index[tf]], score)
+    # Fill mask directly
+    for _, row in motif_hits_df.iterrows():
+        pid, tf, score = row["peak_id"], row["TF"], row["logodds"]
+        if tf not in tf_index or pid not in peak_to_tgs:
+            continue
+        for tg in peak_to_tgs[pid]:
+            j, i = tf_index[tf], tg_index.get(tg)
+            if i is not None:
+                mask[i, j] = max(mask[i, j], score)
 
     return mask
 
@@ -372,6 +382,12 @@ def _agg_first(dfs: list[pd.DataFrame]) -> pd.DataFrame:
         return dfs[0]
     return pd.concat(dfs).groupby(level=0).first()
 
+def standardize_name(name: str) -> str:
+    """Convert gene/motif name to capitalization style (e.g. 'Hoxa2')."""
+    if not isinstance(name, str):
+        return name
+    return name.capitalize()
+
 if __name__ == "__main__":
     # Create or load the gene TSS information for the chromosome
     gene_tss_df = make_chrom_gene_tss_df(
@@ -383,6 +399,8 @@ if __name__ == "__main__":
     # Load the global TF vocab
     with open(os.path.join(PROJECT_DIR, f"dev/transformer/mesc_homer_tfs.pkl"), 'rb') as f:
         tf_names: list = pickle.load(f)
+    
+    tf_names = [standardize_name(n) for n in tf_names]
         
     logging.info(f"\nLoaded {SAMPLE_NAME} TFs: {len(tf_names)} TFs")
 
@@ -466,16 +484,28 @@ if __name__ == "__main__":
         output_dir=OUTPUT_DIR,
         mesc_atac_peak_loc_df=total_peaks_df,  # peak locations DataFrame
         gene_tss_df=gene_tss_df,
-        force_recalculate=False
+        force_recalculate=True
     )
     
-
-
+    peaks_bed = os.path.join(OUTPUT_DIR, "peak_tmp.bed")
+    jaspar_pfm_paths = [os.path.join(JASPAR_PFM_DIR, f) for f in os.listdir(JASPAR_PFM_DIR) if f.endswith(".pfm")]
+    
+    run_moods_scan(
+        peaks_bed=peaks_bed, 
+        fasta_path=os.path.join(GENOME_DIR, f"{CHROM_ID}.fa"), 
+        motif_paths=jaspar_pfm_paths, 
+        out_tsv=moods_sites_file, 
+        threshold=6.0, 
+        bg="auto"
+    )
+    
     # Build peak -> window mapping
+    logging.info(f"\nCreating peak to window map")
     window_map = make_peak_to_window_map(total_peaks_df, mm10_windows)
-    logging.info(f"Mapped {len(window_map)} peaks to windows")
+    logging.info(f"\tMapped {len(window_map)} peaks to windows")
 
     # Save Precomputed Tensors 
+    logging.info(f"\nPrecomputing TF, TG, and ATAC tensors")
     tf_tensor_all, tg_tensor_all, atac_window_tensor_all = precompute_input_tensors(
         output_dir=SAMPLE_DATA_DIR,
         genome_wide_tf_expression=genome_wide_tf_expression,
@@ -484,12 +514,14 @@ if __name__ == "__main__":
         window_map=window_map,
         windows=mm10_windows,
     )
+    logging.info(f"\t- Done!")
 
     # ----- Load common TF and TG vocab -----
     # Create a common TG vocabulary for the chromosome using the gene TSS
+    logging.info(f"\nMatching TFs and TGs to global gene vocabulary")
     if not os.path.isfile(common_tg_vocab_file):
         all_tg = sorted(gene_tss_df["name"].unique().tolist())
-        tg_vocab = {name: i for i, name in enumerate(all_tg)}
+        tg_vocab = {standardize_name(name): i for i, name in enumerate(all_tg)}
         atomic_json_dump(tg_vocab, common_tg_vocab_file)
 
     # Create a common global TF vocabulary using the TF names from Homer
@@ -502,17 +534,35 @@ if __name__ == "__main__":
         
     with open(common_tg_vocab_file) as f:
         tg_vocab = json.load(f)
-
-    tf_tensor_all, tf_names_kept, tf_ids = match_gene_to_vocab(tf_names, tf_vocab, tf_tensor_all, label="TF")
-    tg_tensor_all, tg_names_kept, tg_ids = match_gene_to_vocab(tg_names, tg_vocab, tg_tensor_all, label="TG")
+            
+    tg_names = [standardize_name(n) for n in total_TG_pseudobulk_chr.index.tolist()]
     
-    moods_hits = pd.read_csv(os.path.join(CHROM_SPECIFIC_DATA_DIR, "chr19_moods_sites.tsv"), sep="\t")
+    tf_tensor_all, tf_names_kept, tf_ids = match_gene_to_vocab(
+        [standardize_name(tf) for tf in tf_names],
+        tf_vocab,
+        tf_tensor_all,
+        label="TF"
+    )
+
+    tg_tensor_all, tg_names_kept, tg_ids = match_gene_to_vocab(
+        [standardize_name(tg) for tg in tg_names],
+        tg_vocab,
+        tg_tensor_all,
+        label="TG"
+    )
+
+    logging.info(f"\tMatched {len(tf_names_kept)} TFs to global vocab")
+    logging.info(f"\tMatched {len(tg_names_kept)} TGs to global vocab")
+    logging.info(f"\t- Done!")
+    
+    logging.info(f"\nBuilding motif mask")
+    moods_hits = pd.read_csv(moods_sites_file, sep="\t")
     
     # Drop rows with missing TFs just in case
     moods_hits = moods_hits.dropna(subset=["TF"])
     
     # Strip ".pfm" suffix from TF names if present
-    moods_hits["TF"] = moods_hits["TF"].str.replace(r"\.pfm$", "", regex=True)
+    moods_hits["TF"] = moods_hits["TF"].str.replace(r"\.pfm$", "", regex=True).apply(standardize_name)
 
     # Build motif mask using merged info
     motif_mask = build_motif_mask(
@@ -521,11 +571,14 @@ if __name__ == "__main__":
         motif_hits_df=moods_hits,
         genes_near_peaks=genes_near_peaks
     )
+    logging.info(f"\t- Done!")
+
     
     if not tf_ids: raise ValueError("No TFs matched the common vocab.")
     if not tg_ids: raise ValueError("No TGs matched the common vocab.")
         
     # Build distance bias [num_windows x num_tg_kept] aligned to kept TGs
+    logging.info(f"\nBuilding distance bias")
     dist_bias = build_distance_bias(
         genes_near_peaks=genes_near_peaks,
         window_map=window_map,
@@ -533,10 +586,10 @@ if __name__ == "__main__":
         num_windows=num_windows,
         dtype=torch.float32,
     )
+    logging.info(f"\t- Done!")
     
-    
-
     # ----- Writing Output Files -----
+    logging.info(f"\nWriting output files")
     # Save the Window, TF, and TG expression tensors
     torch.save(atac_window_tensor_all, atac_tensor_path)
     torch.save(tg_tensor_all, tg_tensor_path)

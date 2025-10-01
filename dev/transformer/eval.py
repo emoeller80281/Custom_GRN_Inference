@@ -1,3 +1,4 @@
+from pyarrow import output_stream
 import torch
 import pandas as pd
 import numpy as np
@@ -61,21 +62,13 @@ def plot_per_gene_correlation_scatterplot(
     with torch.no_grad():
         for batch in dataloader:
             # Support both 4-tuple and 6-tuple batches
-            if len(batch) == 6:
-                atac_wins, tf_tensor, tg_true, bias, tf_ids, tg_ids = batch
-            elif len(batch) == 4:
-                atac_wins, tf_tensor, tg_true, bias = batch
-                tf_ids = tg_ids = None
-            else:
-                raise ValueError(
-                    f"Unexpected batch size {len(batch)}. "
-                    "Expected 4 or 6 elements from the dataloader."
-                )
+            atac_wins, tf_tensor, tg_true, bias, tf_ids, tg_ids, motif_mask = batch
 
             atac_wins = atac_wins.to(device)
             tf_tensor = tf_tensor.to(device)
             tg_true   = tg_true.to(device)
             bias      = bias.to(device)
+            motif_mask = motif_mask.to(device)
             if tf_ids is not None: tf_ids = tf_ids.to(device)
             if tg_ids is not None: tg_ids = tg_ids.to(device)
 
@@ -86,12 +79,15 @@ def plot_per_gene_correlation_scatterplot(
                 tf_tensor = (tf_tensor - mu) / sd
 
             # Forward
-            outputs = model(
-                atac_wins, tf_tensor,
-                tf_ids=tf_ids, tg_ids=tg_ids, bias=bias
-            )  # [B, G]
+            outputs = model(atac_wins, tf_tensor, tf_ids=tf_ids, tg_ids=tg_ids, 
+                            bias=bias, motif_mask=motif_mask)
 
-            preds_all.append(outputs.cpu().numpy())
+            if isinstance(outputs, tuple):
+                pred, _ = outputs
+            else:
+                pred = outputs
+
+            preds_all.append(pred.cpu().numpy())
             true_all.append(tg_true.cpu().numpy())
 
     preds = np.vstack(preds_all)  # [N_cells, G]
@@ -156,19 +152,30 @@ def per_gene_correlation(model, dataloader, gpu_id=0, gene_names=None):
     Returns:
         DataFrame with [gene, pearson, spearman]
     """
+
     model.eval()
     preds, tgts = [], []
     with torch.no_grad():
-        for atac_wins, tf_tensor, targets, bias in dataloader:
-            atac_wins, tf_tensor, targets, bias = (
-                atac_wins.to(gpu_id),
-                tf_tensor.to(gpu_id),
-                targets.to(gpu_id),
-                bias.to(gpu_id)
-            )
-            output = model(atac_wins, tf_tensor, bias=bias)
-            preds.append(output.cpu().numpy())
-            tgts.append(targets.cpu().numpy())
+        for atac_wins, tf_tensor, tg_true, bias, tf_ids, tg_ids, motif_mask in dataloader:
+            atac_wins = atac_wins.to(gpu_id)
+            tf_tensor = tf_tensor.to(gpu_id)
+            tg_true   = tg_true.to(gpu_id)
+            bias      = bias.to(gpu_id)
+            if tf_ids is not None:
+                tf_ids = tf_ids.to(gpu_id)
+            if tg_ids is not None:
+                tg_ids = tg_ids.to(gpu_id)
+
+            outputs = model(atac_wins, tf_tensor, tf_ids=tf_ids, tg_ids=tg_ids, 
+                            bias=bias, motif_mask=motif_mask)
+
+            if isinstance(outputs, tuple):
+                pred, _ = outputs
+            else:
+                pred = outputs
+
+            preds.append(pred.cpu().numpy())
+            tgts.append(tg_true.cpu().numpy())
 
     preds = np.concatenate(preds, axis=0)   # [samples, num_genes]
     tgts  = np.concatenate(tgts, axis=0)

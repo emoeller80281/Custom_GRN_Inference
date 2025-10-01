@@ -23,11 +23,12 @@ import eval
 
 SAMPLE_NAME = "mESC"
 CHROM_ID    = "chr19"
+TRAINING_RUN_NAME = "model_training_01_10_15_15_36"
 
 TRANSFORMER_DATA_DIR = os.path.join(DEV_DIR, f"transformer_data/{SAMPLE_NAME}")
 COMMON_DIR           = os.path.join(DEV_DIR, "transformer_data/common")
 OUTPUT_DIR           = os.path.join(PROJECT_DIR, "output/transformer_testing_output")
-TEST_DIR             = os.path.join(OUTPUT_DIR, "best_model_0.82_corr")  # where checkpoint lives
+TEST_DIR             = os.path.join(OUTPUT_DIR, f"{SAMPLE_NAME}/{CHROM_ID}/{TRAINING_RUN_NAME}")  # where checkpoint lives
 
 GROUND_TRUTH_FILE = os.path.join(PROJECT_DIR, "ground_truth_files/ORTI_rank1_ground_truth_TF_TG.csv")
 OUT_DIR = os.path.join(TEST_DIR, "tf_gradient_attributions")
@@ -69,14 +70,19 @@ def load_model_and_data():
     # --- model ---
     # infer whether shortcut existed in checkpoint
     sd = torch.load(model_pt, map_location=DEVICE)
-    use_shortcut = ("shortcut_scale" in sd)
+    use_shortcut = run_params.get("Shortcut L1", None) is not None
 
     model = MultiomicTransformer(
         d_model=d_model, num_heads=n_heads, num_layers=n_layers,
         d_ff=d_ff, dropout=dropout,
         tf_vocab_size=len(dataset.tf_name2id),
         tg_vocab_size=len(dataset.tg_name2id),
-        use_shortcut=use_shortcut
+        use_shortcut=use_shortcut,
+        use_motif_mask=run_params.get("Motif Mask", "No") == "Yes",
+        lambda_l1=run_params.get("Shortcut L1", 0.0),
+        lambda_l2=run_params.get("Shortcut L2", 0.0),
+        topk=run_params.get("Shortcut Top K", None),
+        shortcut_dropout=run_params.get("Shortcut Dropout", 0.0)
     ).to(DEVICE)
     model.load_state_dict(sd, strict=True)
     model.eval()
@@ -88,72 +94,90 @@ def _global_minmax_(arr):
     mn, mx = arr.min(), arr.max()
     return (arr - mn) / (mx - mn + 1e-8)
 
+@torch.no_grad()
+def shortcut_matrix(model, dataset, normalize="global"):
+    """
+    Extracts the learned TF→TG shortcut matrix directly from the model.
+
+    Returns
+    -------
+    DataFrame [TF × TG] with importance scores.
+    """
+    if not hasattr(model, "shortcut") or model.shortcut is None:
+        raise ValueError("Model does not have a shortcut connection enabled.")
+
+    # Typically the shortcut weight is [TG, TF]
+    W = model.shortcut.weight.detach().cpu().float()  # [TG, TF]
+
+    # Transpose to TF×TG
+    mat = W.T
+
+    # Normalize
+    if normalize == "global":
+        mn, mx = mat.min(), mat.max()
+        mat = (mat - mn) / (mx - mn + 1e-8)
+    elif normalize == "per_tg":
+        mn = mat.min(dim=0, keepdim=True).values
+        mx = mat.max(dim=0, keepdim=True).values
+        mat = (mat - mn) / (mx - mn + 1e-8)
+
+    df = pd.DataFrame(mat.numpy(),
+                      index=dataset.tf_names,
+                      columns=dataset.tg_names)
+    return df
+
+
 def gradient_attribution_matrix(model, dataset, loader, tg_chunk=TG_CHUNK, device=DEVICE,
                                 normalize="global"):
     """
     Returns TF×TG DataFrame of mean |∂TG_j / ∂TF_i| over cells.
-    We compute grads w.r.t. tf_tensor (inputs), not model params.
-    - Chunked over TGs for memory/speed.
-    - Per-cell TF z-scoring (like inference).
-    normalize: "global" | "per_tg" | None
     """
     TF = len(dataset.tf_names)
     TG = len(dataset.tg_names)
-
-    # Accumulate per-batch grads: TF×TG
     acc = torch.zeros(TF, TG, device=device)
 
-    for (atac_wins, tf_tensor, tg_true, bias, tf_ids, tg_ids) in loader:
-        atac_wins = atac_wins.to(device)
-        bias      = bias.to(device)
-        tf_ids    = tf_ids.to(device)
-        tg_ids    = tg_ids.to(device)
+    for (atac_wins, tf_tensor, tg_true, bias, tf_ids, tg_ids, motif_mask) in loader:
+        atac_wins  = atac_wins.to(device)
+        bias       = bias.to(device)
+        tf_ids     = tf_ids.to(device)
+        tg_ids     = tg_ids.to(device)
+        motif_mask = motif_mask.to(device)
 
         # inputs we want gradients for
         tf_tensor = tf_tensor.to(device).detach().clone().requires_grad_(True)
         tf_norm   = zscore_per_cell(tf_tensor)
 
-        # forward once (we'll reuse graph with retain_graph=True)
-        preds = model(atac_wins, tf_norm, tf_ids=tf_ids, tg_ids=tg_ids, bias=bias)  # [B, TG_eval]
+        # forward pass
+        out = model(atac_wins, tf_norm, tf_ids=tf_ids, tg_ids=tg_ids, bias=bias, motif_mask=motif_mask)
+        preds = out[0] if isinstance(out, tuple) else out  # [B, TG_eval]
+
         B, G_eval = preds.shape
         assert G_eval == TG, "TG dimension mismatch."
 
-        # Process TGs in chunks
         for j0 in range(0, TG, tg_chunk):
             j1 = min(j0 + tg_chunk, TG)
-            # Make a (B x chunk) mean -> scalar per TG, then sum scalars to call grad once per chunk
-            # We’ll loop inside the chunk to avoid building very large autograd graphs.
             for j in range(j0, j1):
-                # scalar output: mean over batch for TG j
                 out = preds[:, j].mean()
-                # gradient wrt tf_norm (inputs), not params
-                grad = torch.autograd.grad(
-                    outputs=out, inputs=tf_norm, retain_graph=True, create_graph=False, allow_unused=False
-                )[0]  # [B, TF]
-                # accumulate |grad| over batch
+                grad = torch.autograd.grad(out, tf_norm, retain_graph=True)[0]  # [B, TF]
                 acc[:, j] += grad.abs().sum(dim=0)
 
-        # free graph
         del preds
         tf_tensor.grad = None
 
-    # Average over batches (divide by total batches seen)
-    n_batches = len(loader)
-    acc = acc / max(1, n_batches)  # [TF, TG]
+    acc = acc / max(1, len(loader))  # average
 
-    # Normalize if requested
+    # normalization
     if normalize == "global":
         acc = _global_minmax_(acc)
     elif normalize == "per_tg":
-        # column-wise minmax
         mn = acc.min(dim=0, keepdim=True).values
         mx = acc.max(dim=0, keepdim=True).values
         acc = (acc - mn) / (mx - mn + 1e-8)
 
-    # DataFrame TF×TG
     df = pd.DataFrame(acc.detach().cpu().numpy(),
                       index=dataset.tf_names, columns=dataset.tg_names)
     return df
+
 
 def evaluate_chip_aucs(tf_importance_df, chip_csv, k_list=(100, 500, 1000, 5000)):
     """
@@ -202,7 +226,7 @@ def evaluate_chip_aucs(tf_importance_df, chip_csv, k_list=(100, 500, 1000, 5000)
         k = int(k)
         if k <= len(df_scored):
             prec_k = df_scored.head(k)["label"].mean()
-            results[f"Precision with {k} top edges"] = float(prec_k)
+            results[f"Precision@{k}"] = float(prec_k)
 
     return results, df_scored
 
@@ -221,11 +245,14 @@ if __name__ == "__main__":
         outpath=os.path.join(TEST_DIR, "eval_results_scatter.png")
         )
 
-    # --- TF×TG gradient attribution (fast, chunked) ---
-    logging.info("\nGenerating gradient attribution matrix")
-    tf_importance_df = gradient_attribution_matrix(
-        model, dataset, test_loader, tg_chunk=TG_CHUNK, device=DEVICE, normalize="global"
-    )
+    if getattr(model, "use_shortcut", False):
+        logging.info("\nExtracting shortcut TF×TG matrix (no gradients needed)")
+        tf_importance_df = shortcut_matrix(model, dataset, normalize="global")
+    else:
+        logging.info("\nGenerating gradient attribution matrix")
+        tf_importance_df = gradient_attribution_matrix(
+            model, dataset, test_loader, tg_chunk=TG_CHUNK, device=DEVICE, normalize="global"
+        )
     out_csv = os.path.join(OUT_DIR, "tf_importance_matrix.csv")
     tf_importance_df.to_csv(out_csv)
     logging.info(f"\tSaved TF×TG importance matrix: {out_csv}  shape={tf_importance_df.shape}")

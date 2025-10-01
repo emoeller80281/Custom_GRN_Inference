@@ -84,20 +84,6 @@ class MultiomicTransformerDataset(Dataset):
         else:
             self.dist_bias_tensor = None
         
-        # -------- load motif mask (TG x TF) --------
-        if os.path.exists(motif_mask_path):
-            motif_mask_tensor = torch.load(motif_mask_path).float()
-            # sanity check: TG dimension must match tg_ids, TF dimension must match tf_ids
-            if motif_mask_tensor.shape[0] != self.tg_ids.numel() or motif_mask_tensor.shape[1] != self.tf_ids.numel():
-                logging.warning(
-                    f"Motif mask shape {tuple(motif_mask_tensor.shape)} "
-                    f"!= (TG {self.tg_ids.numel()}, TF {self.tf_ids.numel()})"
-                )
-            self.motif_mask_tensor = motif_mask_tensor
-        else:
-            logging.warning("Motif mask file not found — using zeros.")
-            self.motif_mask_tensor = torch.zeros((self.tg_ids.numel(), self.tf_ids.numel()), dtype=torch.float32)
-
         # -------- metadata --------
         with open(window_map_path, "r") as f:
             self.window_map = json.load(f)
@@ -108,6 +94,7 @@ class MultiomicTransformerDataset(Dataset):
         if os.path.exists(tf_names_json):
             with open(tf_names_json, "r") as f:
                 self.tf_names = json.load(f)
+            self.tf_names = [self.standardize_name(i) for i in self.tf_names]
         else:
             # last resort: make placeholders
             self.tf_names = [f"TF_{i}" for i in range(self.tf_tensor_all.shape[0])]
@@ -115,6 +102,7 @@ class MultiomicTransformerDataset(Dataset):
 
         with open(tg_names_json, "r") as f:
             self.tg_names = json.load(f)
+        self.tg_names = [self.standardize_name(i) for i in self.tg_names]
 
         # counts
         self.num_windows = self.atac_window_tensor_all.shape[0]
@@ -132,17 +120,18 @@ class MultiomicTransformerDataset(Dataset):
                 obj = json.load(f)
             # handle both {"name_to_id":...} or flat dict
             if "name_to_id" in obj:
-                self.tf_name2id = obj["name_to_id"]
+                self.tf_name2id = {self.standardize_name(k): v for k, v in obj["name_to_id"].items()}
             else:
-                self.tf_name2id = obj
+                self.tf_name2id = {self.standardize_name(k): v for k, v in obj.items()}
 
         if self.tg_vocab_path and os.path.exists(self.tg_vocab_path):
             with open(self.tg_vocab_path, "r") as f:
                 obj = json.load(f)
             if "name_to_id" in obj:
-                self.tg_name2id = obj["name_to_id"]
+                self.tg_name2id = {self.standardize_name(k): v for k, v in obj["name_to_id"].items()}
             else:
-                self.tg_name2id = obj
+                self.tg_name2id = {self.standardize_name(k): v for k, v in obj.items()}
+
 
         # -------- load per-dataset ids (preferred) or derive from names --------
         if os.path.exists(tf_ids_path):
@@ -187,6 +176,21 @@ class MultiomicTransformerDataset(Dataset):
             logging.warning(
                 f"Bias G dimension ({self.dist_bias_tensor.shape[0]}) != tg_ids ({self.tg_ids.numel()})."
             )
+            
+        # -------- load motif mask (TG x TF) --------
+        if os.path.exists(motif_mask_path):
+            motif_mask_tensor = torch.load(motif_mask_path).float()
+            # sanity check: TG dimension must match tg_ids, TF dimension must match tf_ids
+            if motif_mask_tensor.shape[0] != self.tg_ids.numel() or motif_mask_tensor.shape[1] != self.tf_ids.numel():
+                logging.warning(
+                    f"Motif mask shape {tuple(motif_mask_tensor.shape)} "
+                    f"!= (TG {self.tg_ids.numel()}, TF {self.tf_ids.numel()})"
+                )
+            self.motif_mask_tensor = motif_mask_tensor
+        else:
+            logging.warning("Motif mask file not found — using zeros.")
+            self.motif_mask_tensor = torch.zeros((self.tg_ids.numel(), self.tf_ids.numel()), dtype=torch.float32)
+
 
         logging.info(
             f"Loaded dataset {data_dir} [{chrom_id}]\n"
@@ -286,3 +290,9 @@ class MultiomicTransformerDataset(Dataset):
         motif_mask = mask_list[0]
 
         return atac_wins, tf_tensor, tg_tensor, bias, tf_ids, tg_ids, motif_mask
+    
+    def standardize_name(self, name: str) -> str:
+        """Convert gene/motif name to capitalization style (e.g. 'Hoxa2')."""
+        if not isinstance(name, str):
+            return name
+        return name.capitalize()

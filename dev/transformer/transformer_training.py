@@ -133,8 +133,13 @@ class Trainer:
         motif_mask= motif_mask.to(self.gpu_id)
 
         self.optimizer.zero_grad()
-        preds = self.model(atac_wins, tf_tensor, tf_ids=tf_ids, tg_ids=tg_ids, 
+        preds_out = self.model(atac_wins, tf_tensor, tf_ids=tf_ids, tg_ids=tg_ids, 
                            bias=bias, motif_mask=motif_mask)
+        
+        if isinstance(preds_out, tuple):
+            preds, _ = preds_out
+        else:
+            preds = preds_out
 
         loss = self.criterion(preds, targets)
 
@@ -175,10 +180,16 @@ class Trainer:
                 tg_ids    = tg_ids.to(self.gpu_id)
                 motif_mask= motif_mask.to(self.gpu_id)
 
-                preds = self.model(
+                preds_out = self.model(
                     atac_wins, tf_tensor, tf_ids=tf_ids, tg_ids=tg_ids,
                     bias=bias, motif_mask=motif_mask
                 )
+                
+                if isinstance(preds_out, tuple):
+                    preds, _ = preds_out
+                else:
+                    preds = preds_out
+                
                 loss  = F.mse_loss(preds, targets)
                 total_loss += loss.item(); n_batches += 1
                 preds_list.append(preds); tgts_list.append(targets)

@@ -260,10 +260,6 @@ class MultiomicTransformer(nn.Module):
         """
         B, W, _ = atac_windows.shape
         device = atac_windows.device
-        
-        if motif_mask is not None:
-            assert motif_mask.shape == (tg_dec.size(0), tf_base.size(0)), \
-                f"Motif mask shape {motif_mask.shape} does not match (G_eval, T_eval)"
 
         # ----- ATAC encoding -----
         win_emb = self.atac_window_dense_layer(atac_windows)       # [B,W,D]
@@ -302,6 +298,10 @@ class MultiomicTransformer(nn.Module):
         logits = torch.einsum("bgd,gd->bg", tg_repr, tg_dec)     # [B,G_eval]
 
         logits = logits + self.gene_pred_dense(tg_repr).squeeze(-1)
+        
+        if motif_mask is not None:
+            assert motif_mask.shape == (tg_dec.size(0), tf_base.size(0)), \
+                f"Motif mask shape {motif_mask.shape} does not match (G_eval, T_eval)"
         
         # ----- Optional TF→TG shortcut without fixed matrix -----
         if self.use_shortcut:
