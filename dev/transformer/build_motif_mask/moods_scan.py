@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 from pyfaidx import Fasta
+from Bio import motifs
 import pybedtools
 import MOODS.scan
 import MOODS.tools
@@ -20,8 +21,6 @@ logging.basicConfig(
 DNA = "ACGT"
 IDX = {c:i for i,c in enumerate(DNA)}
 
-from Bio import motifs
-
 def load_pfms(pfm_paths):
     logging.info(f"Loading PFMs from {len(pfm_paths)} files")
     pfms, names = [], []
@@ -30,11 +29,17 @@ def load_pfms(pfm_paths):
             for m in motifs.parse(f, "jaspar"):
                 pfm = [[m.counts[nuc][i] for nuc in "ACGT"] for i in range(m.length)]
                 pfms.append(pfm)
-                names.append(m.name or os.path.basename(p))
+                
+                # prefer motif name, else file basename
+                raw_name = m.name or os.path.basename(p)
+                # strip .pfm suffix if present
+                if raw_name.lower().endswith(".pfm"):
+                    raw_name = raw_name[:-4]
+                # capitalize (first letter uppercase, rest lowercase)
+                clean_name = raw_name.capitalize()
+                names.append(clean_name)
     logging.info(f"Loaded {len(pfms)} motifs")
     return pfms, names
-
-import numpy as np
 
 def reverse_complement_pwm(pwm):
     """
@@ -45,22 +50,6 @@ def reverse_complement_pwm(pwm):
     pwm = np.array(pwm)
     rc = pwm[::-1, :][:, [3, 2, 1, 0]]
     return rc.tolist()
-
-def to_pwms(pfms, bg=None, pseudocount=0.8):
-    if bg is None:
-        bg = [0.25,0.25,0.25,0.25]
-    pwms = []
-    for pfm in pfms:
-        pwm = []
-        L = len(pfm[0])
-        for a in range(4):
-            row = []
-            for j in range(L):
-                p = (pfm[a][j] + pseudocount) / (sum(pfm[x][j] + pseudocount for x in range(4)))
-                row.append(math.log2(p / bg[a]))
-            pwm.append(row)
-        pwms.append(pwm)
-    return pwms
 
 def build_first_order_bg(fasta, peaks_bed, sample=200000):
     """ crude 1st-order background over A,C,G,T transitions in peak sequences """
@@ -136,14 +125,16 @@ def scan_one_sequence(seq, fwd_mats, rc_mats, thresholds, names, bg):
             results.append(best)
     return results
 
-def scan_pwms(pfms, names, seqs, threshold=6.0, bg=None, pseudocount=0.8, n_jobs=32):
+def scan_pwms(pfms, names, seqs, pval_threshold=1e-4, bg=None, pseudocount=0.8, n_jobs=4):
     logging.info(f"Scanning {len(pfms)} motifs across {len(seqs)} sequences with {n_jobs} workers")
 
-    thresholds = [threshold] * len(pfms)
     fwd_mats = build_score_matrices(pfms, bg, pseudocount)
     rc_pfms  = [reverse_complement_pwm(p) for p in pfms]
     rc_mats  = build_score_matrices(rc_pfms, bg, pseudocount)
-
+    
+    thresholds = [MOODS.tools.threshold_from_p(m, bg, pval_threshold) for m in fwd_mats]
+    logging.info(f"Using per-motif thresholds at p={pval_threshold}")
+        
     results_list = Parallel(n_jobs=n_jobs)(
         delayed(scan_one_sequence)(seq, fwd_mats, rc_mats, thresholds, names, bg)
         for seq in tqdm(seqs, desc="Scanning sequences", unit="seq")
@@ -154,9 +145,7 @@ def scan_pwms(pfms, names, seqs, threshold=6.0, bg=None, pseudocount=0.8, n_jobs
     logging.info("Finished scanning motifs")
     return results
 
-
-
-def run_moods_scan(peaks_bed, fasta_path, motif_paths, out_tsv, threshold=6.0, bg="auto"):
+def run_moods_scan(peaks_bed, fasta_path, motif_paths, out_tsv, n_cpus, pval_threshold=1e-4, bg="auto"):
     fasta = Fasta(fasta_path, as_raw=True, sequence_always_upper=True)
     if bg == "auto":
         pi = build_first_order_bg(fasta, peaks_bed)
@@ -165,7 +154,7 @@ def run_moods_scan(peaks_bed, fasta_path, motif_paths, out_tsv, threshold=6.0, b
     pfms, names = load_pfms(motif_paths)
 
     peak_ids, seqs = extract_peak_seqs(fasta, peaks_bed)
-    res = scan_pwms(pfms, names, seqs, threshold=threshold, bg=pi, pseudocount=0.8)
+    res = scan_pwms(pfms, names, seqs, pval_threshold=pval_threshold, bg=pi, pseudocount=0.8, n_jobs=n_cpus)
 
     rows = []
     for mi, tf in enumerate(names):
@@ -183,6 +172,6 @@ if __name__ == "__main__":
     ap.add_argument("--fasta", required=True)
     ap.add_argument("--motifs", nargs="+", required=True, help="one or more PFM files")
     ap.add_argument("--out", required=True)
-    ap.add_argument("--threshold", type=float, default=6.0)
+    ap.add_argument("--pval_threshold", type=float, default=6.0)
     args = ap.parse_args()
-    run_moods_scan(args.peaks, args.fasta, args.motifs, args.out, threshold=args.threshold)
+    run_moods_scan(args.peaks, args.fasta, args.motifs, args.out, pval_threshold=args.pval_threshold)

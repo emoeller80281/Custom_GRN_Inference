@@ -13,11 +13,12 @@ from datetime import datetime
 from scipy.stats import pearsonr, spearmanr, randint
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import StratifiedKFold, train_test_split, RandomizedSearchCV
-from sklearn.metrics import roc_auc_score, classification_report
+from sklearn.metrics import roc_auc_score, classification_report, average_precision_score
 from sklearn.preprocessing import StandardScaler
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, random_split
+from dev.transformer.prepare_transformer_data import DISTANCE_SCALE_FACTOR
 from transformer import MultiomicTransformer
 from transformer_dataset import MultiomicTransformerDataset
 
@@ -49,15 +50,18 @@ NUM_LAYERS = 4
 D_FF = 1536
 DROPOUT = 0.05
 
+ATTN_BIAS_SCALE = 2.0
+
 # TF to TG shortcut parameters
-SHORTCUT_L1 = 1e-5
+SHORTCUT_L1 = 5e-5
 SHORTCUT_L2 = 0
-SHORTCUT_TOPK = None
+SHORTCUT_TOPK = 5
 SHORTCUT_DROPOUT = 0.1
 
 PROJECT_DIR = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
 DATA_DIR = os.path.join(PROJECT_DIR, f"dev/transformer/transformer_data/{SAMPLE_NAME}")
 OUTPUT_DIR = os.path.join(PROJECT_DIR, f"output/transformer_testing_output/{SAMPLE_NAME}/{CHROM_ID}")
+CHIP_GROUND_TRUTH_FILE = os.path.join(PROJECT_DIR, "ground_truth_files/combined_ground_truth.csv")
 
 def ddp_setup(rank, world_size):
     """
@@ -120,6 +124,7 @@ class Trainer:
         self.patience = patience
         self.min_delta = min_delta
         self.patience_counter = 0
+        self.best_auroc = 0.0
 
     def _run_batch(self, batch):
         atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids, motif_mask = batch
@@ -227,24 +232,41 @@ class Trainer:
         avg_loss = total_loss / max(1, n_batches)
         return avg_loss, pearson_corr, spearman_corr
     
-    def _run_epoch(self, epoch):
+    def _run_epoch(self, epoch, chip_csv=None):
         sampler = getattr(self.train_data, "sampler", None)
         if isinstance(sampler, DistributedSampler):
             sampler.set_epoch(epoch)
         total_loss, n_batches = 0.0, 0
-        
+
         for atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids, motif_mask in self.train_data:
             loss_val = self._run_batch((atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids, motif_mask))
-
-            if loss_val is None: continue
-            total_loss += loss_val; n_batches += 1
+            if loss_val is None: 
+                continue
+            total_loss += loss_val
+            n_batches += 1
 
         avg_train_loss = total_loss / max(1, n_batches)
         avg_val_loss, pearson_corr, spearman_corr = self._validate()
-        
+
+        # update LR schedule
         self.scheduler.step(avg_val_loss)
 
-        return avg_train_loss, avg_val_loss, pearson_corr, spearman_corr
+        auroc, auprc = None, None
+        if chip_csv is not None and self.gpu_id == 0:  # only run on rank 0
+            if hasattr(self.model.module, "shortcut_layer") and hasattr(self.model.module.shortcut_layer, "attn"):
+                try:
+                    mean_attn = get_mean_tf_tg_attention(self.model.module, self.val_data, device=f"cuda:{self.gpu_id}")
+                    tf_imp_df = pd.DataFrame(
+                        mean_attn.numpy(),
+                        index=self.val_data.dataset.tg_names,
+                        columns=self.val_data.dataset.tf_names
+                    )
+                    auroc, auprc = evaluate_chip_aucs(tf_imp_df, chip_csv)
+                    logging.info(f"   CHIP AUROC={auroc:.3f}, AUPRC={auprc:.3f}")
+                except Exception as e:
+                    logging.warning(f"CHIP evaluation failed: {e}")
+
+        return avg_train_loss, avg_val_loss, pearson_corr, spearman_corr, auroc, auprc
 
     def _save_checkpoint(self, epoch, path):
         ckp = self.model.module.state_dict()
@@ -259,7 +281,8 @@ class Trainer:
         history = []  # store per-epoch logs
 
         for epoch in range(max_epochs):
-            train_loss, val_loss, pearson_corr, spearman_corr = self._run_epoch(epoch)
+            train_loss, val_loss, pearson_corr, spearman_corr, auroc, auprc = \
+                self._run_epoch(epoch, chip_csv=CHIP_GROUND_TRUTH_FILE)
 
             # Save stats to history
             if self.gpu_id == 0:
@@ -273,10 +296,12 @@ class Trainer:
                 lr = self.optimizer.param_groups[0]['lr']
                 history.append({
                     "Epoch": epoch,
-                    "Train Loss": train_loss.detach().cpu().item() if torch.is_tensor(train_loss) else float(train_loss),
-                    "Val Loss": val_loss.detach().cpu().item() if torch.is_tensor(val_loss) else float(val_loss),
+                    "Train Loss": float(train_loss),
+                    "Val Loss": float(val_loss),
                     "Pearson": float(pearson_corr),
                     "Spearman": float(spearman_corr),
+                    "AUROC": float(auroc) if auroc is not None else None,
+                    "AUPRC": float(auprc) if auprc is not None else None,
                     "LR": float(lr),
                 })
                 
@@ -292,7 +317,7 @@ class Trainer:
 
             # --- Early stopping check (only rank 0 sets flag) ---
             if self.gpu_id == 0:
-                if val_loss < best_val_loss - self.min_delta or pearson_corr > best_pearson + self.min_delta:
+                if auroc is not None and auroc > self.best_auroc + self.min_delta:
                     # If either val_loss improved OR pearson improved, reset patience
                     best_val_loss = min(best_val_loss, val_loss)
                     best_pearson = max(best_pearson, pearson_corr)
@@ -326,14 +351,12 @@ class Trainer:
             logging.info("Training loop exited normally.")
     
     def _write_log_csv(self, history, path, epoch, final=False):
-        fieldnames = ["Epoch", "Train Loss", "Val Loss", "Pearson", "Spearman", "LR"]
+        fieldnames = ["Epoch", "Train Loss", "Val Loss", "Pearson", "Spearman", "AUROC", "AUPRC", "LR"]
         log_path = os.path.join(path, "training_log.csv")
         with open(log_path, "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerows(history)
-        tag = "final" if final else "intermediate"
-        # logging.info(f"    {tag.capitalize()} training log written at epoch {epoch}")
             
 
 def load_train_objs(DATA_DIR, CHROM_ID,
@@ -364,6 +387,7 @@ def load_train_objs(DATA_DIR, CHROM_ID,
         dropout=DROPOUT,
         tf_vocab_size=tf_vocab_size,
         tg_vocab_size=tg_vocab_size,
+        bias_scale=ATTN_BIAS_SCALE,
         use_shortcut=True,
         use_motif_mask=True,
         lambda_l1=SHORTCUT_L1,
@@ -483,6 +507,34 @@ def get_mean_tf_tg_attention(model, dataloader, device="cuda"):
             attn_accum = attn_batch if attn_accum is None else attn_accum + attn_batch
             n += 1
     return attn_accum / max(n, 1)
+
+def evaluate_chip_aucs(tf_importance_df, chip_csv):
+    chip = pd.read_csv(chip_csv)
+    chip_edges = {(t.capitalize(), g.capitalize()) for t, g in zip(chip["TF"], chip["TG"])}
+
+    tf_imp = tf_importance_df.copy()
+    tf_imp.index   = [x.capitalize() for x in tf_imp.index]
+    tf_imp.columns = [x.capitalize() for x in tf_imp.columns]
+
+    rn111_tfs = {t for t, _ in chip_edges}
+    rn111_tgs = {g for _, g in chip_edges}
+    tf_imp = tf_imp.loc[tf_imp.index.intersection(rn111_tfs),
+                        tf_imp.columns.intersection(rn111_tgs)]
+    if tf_imp.empty:
+        raise ValueError("No overlap between TF/TG names and CHIP set.")
+
+    scores, labels = [], []
+    for tg in tf_imp.columns:
+        for tf, score in tf_imp[tg].items():
+            scores.append(float(score))
+            labels.append(1 if (tf, tg) in chip_edges else 0)
+
+    if len(set(labels)) < 2:
+        raise ValueError("Only one class present; AUROC/PR-AUC undefined.")
+
+    auroc = roc_auc_score(labels, scores)
+    auprc = average_precision_score(labels, scores)
+    return auroc, auprc
 
 
 def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_size: int):

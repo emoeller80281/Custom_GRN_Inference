@@ -7,6 +7,7 @@ import json
 import pickle
 import random
 import scipy.sparse as sp
+from torch import logsumexp
 from sklearn.preprocessing import StandardScaler
 import joblib
 import numpy as np
@@ -22,9 +23,21 @@ torch.manual_seed(1337)
 
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 
-WINDOW_SIZE = 25000
+# Reads the number of CPUs from the slurm job, else defaults to 1
+NUM_CPUS = int(os.getenv("NUM_CPUS", "1"))
+print(f"Using {NUM_CPUS} CPUs")
+
 SAMPLE_NAME = "mESC"
-CHROM_ID = "chr19"
+CHROM_ID = "chr1"
+
+# Window parameters
+WINDOW_SIZE = 5_000             # Aggregates peaks within WINDOW_SIZE bp genomic tiles
+DISTANCE_SCALE_FACTOR = 3_000   # Weights the peak-gene TSS distance score. Lower numbers = faster dropoff
+MAX_PEAK_DISTANCE = 10_000      # Masks out peaks further than this distance from the gene TSS
+DIST_BIAS_MODE = "max"
+
+# TF-peak binding calculation parameters
+MOODS_PVAL_THRESHOLD=1e-3
 
 sample_name_list = ["E7.5_rep1", "E7.75_rep1", "E8.0_rep2", "E8.5_rep2",
                     "E8.75_rep2", "E7.5_rep2", "E8.0_rep1", "E8.5_rep1"]
@@ -143,7 +156,14 @@ def make_peak_to_window_map(peaks_bed: pd.DataFrame, windows_bed: pd.DataFrame) 
 
     return mapping
 
-def calculate_peak_to_tg_distance_score(output_dir, mesc_atac_peak_loc_df, gene_tss_df, force_recalculate=False):
+def calculate_peak_to_tg_distance_score(
+    output_dir, 
+    mesc_atac_peak_loc_df, 
+    gene_tss_df, 
+    max_peak_distance=1e6, 
+    distance_factor_scale=25000, 
+    force_recalculate=False
+    ) -> pd.DataFrame:
     if not os.path.isfile(os.path.join(output_dir, "genes_near_peaks.parquet")) or force_recalculate:
         if "peak_tmp.bed" not in os.listdir(output_dir) or "tss_tmp.bed" not in os.listdir(output_dir) or force_recalculate:
         
@@ -159,15 +179,14 @@ def calculate_peak_to_tg_distance_score(output_dir, mesc_atac_peak_loc_df, gene_
         peak_bed = pybedtools.BedTool(os.path.join(output_dir, "peak_tmp.bed"))
         tss_bed = pybedtools.BedTool(os.path.join(output_dir, "tss_tmp.bed"))
     
-
         genes_near_peaks = utils.find_genes_near_peaks(peak_bed, tss_bed)
 
         # Restrict to peaks within 1 Mb of a gene TSS
-        genes_near_peaks = genes_near_peaks[genes_near_peaks["TSS_dist"] <= 1e6]
+        genes_near_peaks = genes_near_peaks[genes_near_peaks["TSS_dist"] <= max_peak_distance]
 
         # Scale the TSS distance score by the exponential scaling factor
         genes_near_peaks = genes_near_peaks.copy()
-        genes_near_peaks["TSS_dist_score"] = np.exp(-genes_near_peaks["TSS_dist"] / 250000)
+        genes_near_peaks["TSS_dist_score"] = np.exp(-genes_near_peaks["TSS_dist"] / distance_factor_scale)
 
         genes_near_peaks.to_parquet(os.path.join(output_dir, "genes_near_peaks.parquet"), compression="snappy", engine="pyarrow")
     else:
@@ -305,6 +324,7 @@ def build_distance_bias(
     num_windows: int,
     dtype: torch.dtype = torch.float32,
     device: Optional[torch.device] = None,
+    mode: str = "logsumexp",   # "max" | "sum" | "mean" | "logsumexp"
 ) -> torch.Tensor:
     """
     Build a [num_windows x num_tg_kept] distance-bias tensor aligned to the kept TGs.
@@ -319,10 +339,12 @@ def build_distance_bias(
         num_windows: total number of genomic windows.
         dtype: torch dtype for the output tensor (default: torch.float32).
         device: optional torch device for the output tensor.
+        mode: pooling strategy if multiple peaks map to the same (window, TG).
+              Options = {"max", "sum", "mean", "logsumexp"}
 
     Returns:
         dist_bias: torch.Tensor of shape [num_windows, len(tg_names_kept)],
-                   where each entry is the max TSS distance score for (window, TG).
+                   where each entry is an aggregated TSS distance score.
     """
     tg_names_kept = list(tg_names_kept)
     num_tg_kept = len(tg_names_kept)
@@ -330,23 +352,33 @@ def build_distance_bias(
     dist_bias = torch.zeros((num_windows, num_tg_kept), dtype=dtype, device=device)
     tg_index_map = {tg: i for i, tg in enumerate(tg_names_kept)}
 
-    # Iterate rows; update with max score per (win_idx, tg_idx)
+    from collections import defaultdict
+    scores_map = defaultdict(list)
+
+    # Collect all scores for each (window, TG)
     for _, row in genes_near_peaks.iterrows():
-        peak_id = row["peak_id"]
-        tg      = row["target_id"]
-        score   = float(row["TSS_dist_score"])
+        win_idx = window_map.get(row["peak_id"])
+        tg_idx  = tg_index_map.get(row["target_id"])
+        if win_idx is not None and tg_idx is not None:
+            scores_map[(win_idx, tg_idx)].append(float(row["TSS_dist_score"]))
 
-        win_idx = window_map.get(peak_id, None)
-        tg_idx  = tg_index_map.get(tg, None)
-        if win_idx is None or tg_idx is None:
-            continue
+    # Aggregate according to pooling mode
+    for (win_idx, tg_idx), scores in scores_map.items():
+        scores_tensor = torch.tensor(scores, dtype=dtype, device=device)
 
-        # keep the maximum score if multiple peaks map to the same (window, TG)
-        current = dist_bias[win_idx, tg_idx].item()
-        if score > current:
-            dist_bias[win_idx, tg_idx] = score
+        if mode == "max":
+            dist_bias[win_idx, tg_idx] = scores_tensor.max()
+        elif mode == "sum":
+            dist_bias[win_idx, tg_idx] = scores_tensor.sum()
+        elif mode == "mean":
+            dist_bias[win_idx, tg_idx] = scores_tensor.mean()
+        elif mode == "logsumexp":
+            dist_bias[win_idx, tg_idx] = torch.logsumexp(scores_tensor, dim=0)
+        else:
+            raise ValueError(f"Unknown pooling mode: {mode}")
 
     return dist_bias
+
 
 def atomic_json_dump(obj, path):
     """Safe JSON dump, avoids race conditions by making a tmp file first, then updating the name"""
@@ -484,6 +516,8 @@ if __name__ == "__main__":
         output_dir=OUTPUT_DIR,
         mesc_atac_peak_loc_df=total_peaks_df,  # peak locations DataFrame
         gene_tss_df=gene_tss_df,
+        max_peak_distance= MAX_PEAK_DISTANCE,
+        distance_factor_scale= DISTANCE_SCALE_FACTOR,
         force_recalculate=True
     )
     
@@ -495,7 +529,7 @@ if __name__ == "__main__":
         fasta_path=os.path.join(GENOME_DIR, f"{CHROM_ID}.fa"), 
         motif_paths=jaspar_pfm_paths, 
         out_tsv=moods_sites_file, 
-        threshold=6.0, 
+        pval_threshold=MOODS_PVAL_THRESHOLD, 
         bg="auto"
     )
     
@@ -585,6 +619,7 @@ if __name__ == "__main__":
         tg_names_kept=tg_names_kept,
         num_windows=num_windows,
         dtype=torch.float32,
+        mode=DIST_BIAS_MODE
     )
     logging.info(f"\t- Done!")
     
@@ -627,6 +662,8 @@ if __name__ == "__main__":
         "num_windows": int(num_windows),
         "num_tfs": int(len(tf_names_kept)),
         "num_tgs": int(len(tg_names_kept)),
+        "Distance tau": DISTANCE_SCALE_FACTOR,
+        "Max peak-TG distance": MAX_PEAK_DISTANCE,
         "paths": {
             "tf_tensor_all": tf_tensor_path,
             "tg_tensor_all": tg_tensor_path,

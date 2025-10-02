@@ -170,6 +170,7 @@ class AttentionPooling(nn.Module):
 class MultiomicTransformer(nn.Module):
     def __init__(self, d_model, num_heads, num_layers, d_ff, dropout,
                  tf_vocab_size, tg_vocab_size, 
+                 bias_scale=2.0,
                  use_shortcut=True, 
                  use_motif_mask=False, 
                  lambda_l1=1e-4, 
@@ -184,6 +185,7 @@ class MultiomicTransformer(nn.Module):
         self.d_ff = d_ff
         self.dropout = dropout
         self.use_shortcut = use_shortcut
+        self.bias_scale = bias_scale
 
         # Embedding tables (fixed vocab; you index subsets by ids at runtime)
         self.tf_emb_table = nn.Embedding(tf_vocab_size, d_model)
@@ -279,10 +281,11 @@ class MultiomicTransformer(nn.Module):
         # ----- TG queries ATAC -----
         tg_base = self.tg_emb_table(tg_ids).unsqueeze(0).expand(B, -1, -1)  # [B,G_eval,D]
 
-        # prepare attention bias for heads
+        # prepare attention bias for the TF-ATAC cross-attention head
         if bias is not None:
             # bias: [B,G_eval,W] -> [B,1,G_eval,W] -> [B,H,G_eval,W]
             bias = bias.unsqueeze(1).expand(B, self.num_heads, -1, -1)
+            bias = self.bias_scale * bias
 
         tg_cross = self.cross_tg_to_atac(tg_base, win_emb, attn_bias=bias)   # [B,G_eval,D]
 
