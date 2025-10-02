@@ -179,7 +179,7 @@ def calculate_peak_to_tg_distance_score(
         peak_bed = pybedtools.BedTool(os.path.join(output_dir, "peak_tmp.bed"))
         tss_bed = pybedtools.BedTool(os.path.join(output_dir, "tss_tmp.bed"))
     
-        genes_near_peaks = utils.find_genes_near_peaks(peak_bed, tss_bed)
+        genes_near_peaks = utils.find_genes_near_peaks(peak_bed, tss_bed, tss_distance_cutoff=max_peak_distance)
 
         # Restrict to peaks within 1 Mb of a gene TSS
         genes_near_peaks = genes_near_peaks[genes_near_peaks["TSS_dist"] <= max_peak_distance]
@@ -379,6 +379,31 @@ def build_distance_bias(
 
     return dist_bias
 
+def update_vocab(vocab_file, new_names, label="GENE"):
+    # Load existing vocab or create new
+    if os.path.isfile(vocab_file):
+        with open(vocab_file) as f:
+            vocab = json.load(f)
+    else:
+        vocab = {}
+
+    # Standardize new names
+    new_names = [standardize_name(n) for n in new_names]
+
+    # Add missing names with new indices
+    updated = False
+    for name in sorted(set(new_names)):
+        if name not in vocab:
+            vocab[name] = len(vocab)
+            updated = True
+            logging.info(f"Added new {label}: {name}")
+
+    # Save only if something changed
+    if updated:
+        atomic_json_dump(vocab, vocab_file)
+        logging.info(f"Updated {label} vocab with {len(vocab)} entries")
+
+    return vocab
 
 def atomic_json_dump(obj, path):
     """Safe JSON dump, avoids race conditions by making a tmp file first, then updating the name"""
@@ -499,9 +524,6 @@ if __name__ == "__main__":
     scaler = StandardScaler()
     TG_scaled = scaler.fit_transform(total_TG_pseudobulk_chr.T.astype("float32")).T
 
-    print(total_TG_pseudobulk_chr.shape)
-    print(scaler.mean_.shape, scaler.scale_.shape)
-
     # Create genome windows
     mm10_windows = create_or_load_genomic_windows(
         genome_dir=GENOME_DIR,
@@ -529,6 +551,7 @@ if __name__ == "__main__":
         fasta_path=os.path.join(GENOME_DIR, f"{CHROM_ID}.fa"), 
         motif_paths=jaspar_pfm_paths, 
         out_tsv=moods_sites_file, 
+        n_cpus=NUM_CPUS,
         pval_threshold=MOODS_PVAL_THRESHOLD, 
         bg="auto"
     )
@@ -553,21 +576,12 @@ if __name__ == "__main__":
     # ----- Load common TF and TG vocab -----
     # Create a common TG vocabulary for the chromosome using the gene TSS
     logging.info(f"\nMatching TFs and TGs to global gene vocabulary")
-    if not os.path.isfile(common_tg_vocab_file):
-        all_tg = sorted(gene_tss_df["name"].unique().tolist())
-        tg_vocab = {standardize_name(name): i for i, name in enumerate(all_tg)}
-        atomic_json_dump(tg_vocab, common_tg_vocab_file)
+    
+    # Update TG vocab with whatever TGs exist in gene_tss_df
+    tg_vocab = update_vocab(common_tg_vocab_file, gene_tss_df["name"].unique(), label="TG")
 
-    # Create a common global TF vocabulary using the TF names from Homer
-    if not os.path.isfile(common_tf_vocab_file):
-        tf_vocab = {name: i for i, name in enumerate(sorted(set(tf_names)))}
-        atomic_json_dump(tf_vocab, common_tf_vocab_file)
-
-    with open(common_tf_vocab_file) as f:
-        tf_vocab = json.load(f)
-        
-    with open(common_tg_vocab_file) as f:
-        tg_vocab = json.load(f)
+    # Update TF vocab with whatever TFs exist in tf_names
+    tf_vocab = update_vocab(common_tf_vocab_file, tf_names, label="TF")
             
     tg_names = [standardize_name(n) for n in total_TG_pseudobulk_chr.index.tolist()]
     

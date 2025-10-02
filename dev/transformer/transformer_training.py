@@ -37,7 +37,7 @@ from eval import (
 import warnings
 warnings.filterwarnings("ignore", message="No device id is provided via `init_process_group`")
 
-CHROM_ID = "chr19"
+CHROM_ID = "chr1"
 SAMPLE_NAME = "mESC"
 
 TOTAL_EPOCHS=200

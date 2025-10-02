@@ -190,23 +190,16 @@ class MultiomicTransformer(nn.Module):
         # Embedding tables (fixed vocab; you index subsets by ids at runtime)
         self.tf_emb_table = nn.Embedding(tf_vocab_size, d_model)
         self.tg_emb_table = nn.Embedding(tg_vocab_size, d_model)
-        self.tg_decoder_table = nn.Embedding(tg_vocab_size, d_model)
         
         # Dense layer to pass the ATAC-seq windows into
         self.atac_window_dense_layer = nn.Sequential(
-            nn.Linear(1, d_ff, bias=False), 
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(d_ff, d_model, bias=False),
+            nn.Linear(1, d_model, bias=False),
             nn.LayerNorm(d_model)
         )
         
         # Dense layer to pass the TF RNA-seq data into
         self.tf_dense_layer = nn.Sequential(
-            nn.Linear(1, d_ff, bias=False),        # Projects each TF independently
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(d_ff, d_model, bias=False),
+            nn.Linear(1, d_model, bias=False),
             nn.LayerNorm(d_model)
         )
         
@@ -235,12 +228,9 @@ class MultiomicTransformer(nn.Module):
         self.atac_pool = AttentionPooling(d_model)
         
         # Pass the output of the transformer through a dense network
-        # with a Tanh activation function (from UNADON Yang and Ma 2023)
         self.out_dense = nn.Sequential(
-            nn.Linear(2*d_model, d_ff, bias=False),
-            nn.Tanh(),
-            nn.Dropout(self.dropout),
-            nn.Linear(d_ff, d_model, bias=False),
+            nn.Linear(2*d_model, d_model, bias=False),
+            nn.ReLU(),
             nn.LayerNorm(d_model)
         )
         
@@ -248,9 +238,7 @@ class MultiomicTransformer(nn.Module):
         # Optional TF→TG shortcut that adapts to any TF/TG set
         if use_shortcut:
             self.shortcut_layer = TFtoTGShortcut(d_model, use_motif_mask, lambda_l1, lambda_l2, topk, shortcut_dropout)
-                
-        self.gene_pred_dense = nn.Linear(d_model, 1)
-    
+                    
     def forward(self, atac_windows, tf_expr, tf_ids, tg_ids, bias=None, motif_mask=None):
         """
         atac_windows : [B, W, 1]
@@ -265,8 +253,10 @@ class MultiomicTransformer(nn.Module):
 
         # ----- ATAC encoding -----
         win_emb = self.atac_window_dense_layer(atac_windows)       # [B,W,D]
-        pos = torch.arange(W, device=device, dtype=torch.float32)
-        win_emb = win_emb + self.posenc(pos, bsz=B).transpose(0, 1)  # [B,W,D]
+        
+        # Testing without positional encoding
+        # pos = torch.arange(W, device=device, dtype=torch.float32)
+        # win_emb = win_emb + self.posenc(pos, bsz=B).transpose(0, 1)  # [B,W,D]
         win_emb = self.encoder(win_emb)                               # [B,W,D]
 
         # ----- TF embeddings -----
@@ -297,16 +287,15 @@ class MultiomicTransformer(nn.Module):
         tg_repr = tg_cross + fused                                        # [B,G_eval,D]
 
         # ----- TG-aware prediction head (dot product) -----
-        tg_dec = self.tg_decoder_table(tg_ids)                   # [G_eval,D]
+        tg_dec = self.tg_emb_table(tg_ids)                   # [G_eval,D]
         logits = torch.einsum("bgd,gd->bg", tg_repr, tg_dec)     # [B,G_eval]
-
-        logits = logits + self.gene_pred_dense(tg_repr).squeeze(-1)
         
         if motif_mask is not None:
             assert motif_mask.shape == (tg_dec.size(0), tf_base.size(0)), \
                 f"Motif mask shape {motif_mask.shape} does not match (G_eval, T_eval)"
         
         # ----- Optional TF→TG shortcut without fixed matrix -----
+        attn = None
         if self.use_shortcut:
             tf_scalar, attn = self.shortcut_layer(tg_dec, tf_base, tf_expr, motif_mask=motif_mask)
             logits = logits + tf_scalar
