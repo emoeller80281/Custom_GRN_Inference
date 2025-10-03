@@ -34,13 +34,14 @@ def compute_fisher_diag(model, loader, device, n_batches=50, loss_fn="mse"):
     batches = 0
     for batch in loader:
         batches += 1
-        atac_wins, tf_tensor, tg_true, bias, tf_ids, tg_ids = batch
+        atac_wins, tf_tensor, tg_true, bias, tf_ids, tg_ids, motif_mask = batch
         atac_wins = atac_wins.to(device)
         tf_tensor = tf_tensor.to(device)
         tg_true   = tg_true.to(device)
         bias      = bias.to(device)
         tf_ids    = tf_ids.to(device)
         tg_ids    = tg_ids.to(device)
+        motif_mask = motif_mask.to(device)
 
         # match your inference-time normalization
         mu = tf_tensor.mean(dim=1, keepdim=True)
@@ -49,7 +50,7 @@ def compute_fisher_diag(model, loader, device, n_batches=50, loss_fn="mse"):
 
         model.zero_grad(set_to_none=True)
 
-        preds = model(atac_wins, tf_norm, tf_ids=tf_ids, tg_ids=tg_ids, bias=bias)
+        preds, _ = model(atac_wins, tf_norm, tf_ids=tf_ids, tg_ids=tg_ids, bias=bias)
 
         if loss_fn == "mse":
             loss = F.mse_loss(preds, tg_true)
@@ -118,4 +119,6 @@ def ewc_penalty(model, fisher_diag, ref_params, lambda_ewc=100.0, include=None, 
 
         loss_ewc = loss_ewc + 0.5 * lambda_ewc * (F_n * (p - theta_star)**2).sum()
 
-    return loss_ewc
+    return loss_ewc    
+    
+

@@ -184,12 +184,14 @@ class MultiomicTransformer(nn.Module):
         self.num_heads = num_heads
         self.d_ff = d_ff
         self.dropout = dropout
+        self.use_motif_mask = use_motif_mask
         self.use_shortcut = use_shortcut
         self.bias_scale = bias_scale
 
         # Embedding tables (fixed vocab; you index subsets by ids at runtime)
         self.tf_emb_table = nn.Embedding(tf_vocab_size, d_model)
         self.tg_emb_table = nn.Embedding(tg_vocab_size, d_model)
+        self.tg_decoder_table = nn.Embedding(tg_vocab_size, d_model)
         
         # Dense layer to pass the ATAC-seq windows into
         self.atac_window_dense_layer = nn.Sequential(
@@ -246,7 +248,7 @@ class MultiomicTransformer(nn.Module):
         
         # Adds TF->TG weights at the end to directly modify the final TG expression predictions
         # Optional TF→TG shortcut that adapts to any TF/TG set
-        if use_shortcut:
+        if self.use_shortcut:
             self.shortcut_layer = TFtoTGShortcut(d_model, use_motif_mask, lambda_l1, lambda_l2, topk, shortcut_dropout)
                     
     def forward(self, atac_windows, tf_expr, tf_ids, tg_ids, bias=None, motif_mask=None):
@@ -260,16 +262,9 @@ class MultiomicTransformer(nn.Module):
         """
         B, W, _ = atac_windows.shape
         device = atac_windows.device
-        
-        assert tf_ids.max() < self.tf_emb_table.num_embeddings, \
-            f"Bad TF id {tf_ids.max().item()} >= {self.tf_emb_table.num_embeddings}"
-        assert tg_ids.max() < self.tg_emb_table.num_embeddings, \
-            f"Bad TG id {tg_ids.max().item()} >= {self.tg_emb_table.num_embeddings}"
 
         # ----- ATAC encoding -----
         win_emb = self.atac_window_dense_layer(atac_windows)       # [B,W,D]
-        
-        # Testing without positional encoding
         pos = torch.arange(W, device=device, dtype=torch.float32)
         win_emb = win_emb + self.posenc(pos, bsz=B).transpose(0, 1)  # [B,W,D]
         win_emb = self.encoder(win_emb)                               # [B,W,D]
@@ -302,12 +297,12 @@ class MultiomicTransformer(nn.Module):
         tg_repr = tg_cross + fused                                        # [B,G_eval,D]
 
         # ----- TG-aware prediction head (dot product) -----
-        tg_dec = self.tg_emb_table(tg_ids)                   # [G_eval,D]
+        tg_dec = self.tg_decoder_table(tg_ids)                   # [G_eval,D]
         logits = torch.einsum("bgd,gd->bg", tg_repr, tg_dec)     # [B,G_eval]
         
-        logits = self.gene_pred_dense(tg_repr).view(B, tg_cross.size(1))
-        
-        if motif_mask is not None:
+        logits = logits + self.gene_pred_dense(tg_repr).squeeze(-1)
+                
+        if motif_mask is not None and self.use_motif_mask:
             assert motif_mask.shape == (tg_dec.size(0), tf_base.size(0)), \
                 f"Motif mask shape {motif_mask.shape} does not match (G_eval, T_eval)"
         

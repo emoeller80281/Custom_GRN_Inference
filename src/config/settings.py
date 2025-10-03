@@ -24,32 +24,37 @@ AGGREGATION_METHOD = "mean" # "sum" or "mean"
 VALIDATION_DATASETS = ["E8.75_rep1"]
 FORCE_RECALCULATE = False                # Recomputes genomic windows, peak-TG distance, and re-runs MOODS TF-peak scan
 WINDOW_SIZE = 25_000                    # Aggregates peaks within WINDOW_SIZE bp genomic tiles
-DISTANCE_SCALE_FACTOR = 25_000          # Weights the peak-gene TSS distance score. Lower numbers = faster dropoff
-MAX_PEAK_DISTANCE = 100_000_000         # Masks out peaks further than this distance from the gene TSS
+DISTANCE_SCALE_FACTOR = 250_000          # Weights the peak-gene TSS distance score. Lower numbers = faster dropoff
+MAX_PEAK_DISTANCE = 1_000_000         # Masks out peaks further than this distance from the gene TSS
 DIST_BIAS_MODE = "max"                  # Method for calcuting window -> gene TSS distance. Options: "max" | "sum" | "mean" | "logsumexp"
 MOODS_PVAL_THRESHOLD = 1e-3             # MOODS binding significance threshold for associating a TF to a peak
 
 # ----- MODEL TRAINING PARAMETERS -----
 TOTAL_EPOCHS=200
-BATCH_SIZE=8
-GRAD_ACCUM_STEPS=8
+BATCH_SIZE=32
 PATIENCE=15
-CORR_LOSS_WEIGHT=0.05
+CORR_LOSS_WEIGHT=0.5
 
-D_MODEL = 246
+D_MODEL = 384
 NUM_HEADS = 6
 NUM_LAYERS = 3
 D_FF = 768
 DROPOUT = 0.1
+INITIAL_LEARNING_RATE = 1e-3
 
 ATTN_BIAS_SCALE = 1.0
 
 # TF to TG shortcut parameters
+USE_SHORTCUT = True
+USE_MOTIF_MASK = False
 SHORTCUT_L1 = 0
 SHORTCUT_L2 = 0
 SHORTCUT_TOPK = None
 SHORTCUT_DROPOUT = 0
 
+# ----- FINE TUNING ON SINGLE-CELL DATA -----
+FINETUNE_LR = 1e-4       # smaller LR for refinement
+EWC_LAMBDA = 50.0
 
 # ----- PATH SETUP -----
 # Fixed Paths
@@ -72,4 +77,9 @@ OUTPUT_DIR = EXPERIMENT_DIR / DATASET_NAME / CHROM_ID
 SAMPLE_PROCESSED_DATA_DIR = PROCESSED_DATA / DATASET_NAME
 SAMPLE_DATA_CACHE_DIR = TRAINING_DATA_CACHE / DATASET_NAME
 SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR = SAMPLE_DATA_CACHE_DIR / CHROM_ID
+SAMPLE_CHROM_SINGLE_CELL_DATA_CACHE = SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / "single_cell"
+
+FINE_TUNING_DIR = OUTPUT_DIR / "model_training_010"
+
+
 

@@ -21,6 +21,7 @@ from torch.utils.data import DataLoader, random_split
 from torch.utils.data.distributed import DistributedSampler
 
 from config.settings import *
+from multiomic_transformer.data.linger_pseudobulk import pseudo_bulk
 from multiomic_transformer.datasets.dataset import MultiomicTransformerDataset
 from multiomic_transformer.models.model import MultiomicTransformer
 from multiomic_transformer.utils.files import unique_path
@@ -61,19 +62,9 @@ def setup_logging(rank: int):
     )
     
 class Trainer:
-    def __init__(
-        self,
-        model: torch.nn.Module,
-        train_data: DataLoader,
-        val_data: DataLoader,
-        loss_fn: nn.Module,
-        optimizer: torch.optim.Optimizer,
-        gpu_id: int,
-        save_every: int,
-        patience: int = 20,
-        min_delta: float = 1e-3,
-
-    ) -> None:
+    def __init__(self, model, train_data, val_data, loss_fn, optimizer,
+                 gpu_id, save_every, patience=20, min_delta=1e-3,
+                 ref_params=None, fisher_diag=None, lambda_ewc=0.0):
         self.gpu_id = gpu_id
         self.model = model.to(gpu_id)
         self.train_data = train_data
@@ -82,19 +73,22 @@ class Trainer:
         self.optimizer = optimizer
         self.save_every = save_every
         self.model = DDP(model, device_ids=[gpu_id])
-        
         self.scaler = GradScaler()
 
-        # Learning rate scheduler
         self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             self.optimizer, mode="min", factor=0.5, patience=10
         )
-        
-        # Early stopping
+
         self.best_val_loss = float("inf")
         self.patience = patience
         self.min_delta = min_delta
         self.patience_counter = 0
+
+        # --- EWC state ---
+        self.ref_params = ref_params
+        self.fisher_diag = fisher_diag
+        self.lambda_ewc = lambda_ewc
+
 
     def _run_batch(self, batch):
         atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids, motif_mask = batch
@@ -133,6 +127,16 @@ class Trainer:
             else:
                 corr_loss = torch.tensor(0.0, device=preds.device)
             loss = loss + CORR_LOSS_WEIGHT * corr_loss
+            
+            # Add EWC penalty if available
+            if self.ref_params is not None and self.fisher_diag is not None:
+                loss_ewc = ewc_utils.ewc_penalty(
+                    self.model.module,  # unwrap DDP
+                    self.fisher_diag,
+                    self.ref_params,
+                    lambda_ewc=self.lambda_ewc
+                )
+                loss = loss + loss_ewc
             
         self.scaler.scale(loss).backward()
         self.scaler.step(self.optimizer)
@@ -308,22 +312,32 @@ class Trainer:
             
 
 def load_train_objs():
-    # Load the dataset
-    dataset = MultiomicTransformerDataset(
+    # Load pseudobulk dataset
+    pseudobulk_dataset = MultiomicTransformerDataset(
         data_dir=SAMPLE_DATA_CACHE_DIR,
         chrom_id=CHROM_ID,
         tf_vocab_path=os.path.join(COMMON_DATA, "tf_vocab.json"),
         tg_vocab_path=os.path.join(COMMON_DATA, "tg_vocab.json"),
     )
     
-    assert dataset.tf_name2id is not None
-    assert dataset.tg_name2id is not None
+    # Load single-cell dataset for fine-tuning
+    single_cell_dataset = MultiomicTransformerDataset(
+        data_dir=SAMPLE_DATA_CACHE_DIR,  # same cache base
+        chrom_id=CHROM_ID,
+        tf_vocab_path=os.path.join(COMMON_DATA, "tf_vocab.json"),
+        tg_vocab_path=os.path.join(COMMON_DATA, "tg_vocab.json"),
+        fine_tuner=True,
+        sample_name="E7.5_rep1"
+    )
+    
+    assert single_cell_dataset.tf_name2id is not None
+    assert single_cell_dataset.tg_name2id is not None
 
-    # global vocab sizes (from common vocab)
-    tf_vocab_size=len(dataset.tf_name2id)
-    tg_vocab_size=len(dataset.tg_name2id)
+    # vocab sizes
+    tf_vocab_size = len(single_cell_dataset.tf_name2id)
+    tg_vocab_size = len(single_cell_dataset.tg_name2id)
 
-    # Initiallize the model
+    # Initialize model
     model = MultiomicTransformer(
         d_model=D_MODEL,
         num_heads=NUM_HEADS,
@@ -340,8 +354,20 @@ def load_train_objs():
         topk=SHORTCUT_TOPK,
         shortcut_dropout=SHORTCUT_DROPOUT
     )
-    optimizer = torch.optim.Adam(model.parameters(), lr=INITIAL_LEARNING_RATE)
-    return dataset, model, optimizer
+
+    # Load pretrained weights if available
+    pretrained_model = FINE_TUNING_DIR / "trained_model.pt"
+    if pretrained_model.exists():
+        logging.info(f"Loading pretrained weights from {pretrained_model}")
+        state_dict = torch.load(pretrained_model, map_location="cpu")
+        model.load_state_dict(state_dict, strict=False)
+
+    # Fine-tune optimizer
+    optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()),
+                                 lr=FINETUNE_LR)
+    return pseudobulk_dataset, single_cell_dataset, model, optimizer
+
+
 
 def prepare_dataloader(dataset, batch_size, world_size=1, rank=0,
                        num_workers=4, pin_memory=True, seed=42, drop_last=True):
@@ -447,114 +473,61 @@ def write_run_parameters(dataset, out_dir):
         json.dump(run_params, f, indent=4)  # indent=4 for readability
     logging.info(f"Run parameters written to {path}")
 
-@torch.no_grad()
-def get_mean_tf_tg_attention(model, dataloader, device="cuda"):
-    model.eval()
-    attn_accum = None
-    n = 0
-    for atac_wins, tf_tensor, _, bias, tf_ids, tg_ids, motif_mask in dataloader:
-        atac_wins, tf_tensor, bias = atac_wins.to(device), tf_tensor.to(device), bias.to(device)
-        tf_ids, tg_ids = tf_ids.to(device), tg_ids.to(device)
-        motif_mask = motif_mask.to(device)
-
-        # Forward pass
-        _ = model(atac_wins, tf_tensor, tf_ids=tf_ids, tg_ids=tg_ids,
-                  bias=bias, motif_mask=motif_mask)
-
-        # grab attn from shortcut layer each batch
-        if hasattr(model.shortcut_layer, "attn"):
-            attn_batch = model.shortcut_layer.attn.detach().cpu()
-            attn_accum = attn_batch if attn_accum is None else attn_accum + attn_batch
-            n += 1
-    return attn_accum / max(n, 1)
-
-def write_experiment_settings_and_objects(training_output_dir: Path, dataset: MultiomicTransformerDataset):
-    with open(os.path.join(training_output_dir, "tf_vocab.json"), "w") as f:
-        json.dump(dataset.tf_name2id, f)
-    with open(os.path.join(training_output_dir, "tg_vocab.json"), "w") as f:
-        json.dump(dataset.tg_name2id, f)
-        
-    if getattr(dataset, "scaler", None) is not None:
-        scaler_out = os.path.join(training_output_dir, "tg_scaler.pkl")
-        joblib.dump(dataset.scaler, scaler_out)
-        logging.info(f"Saved TG scaler to {scaler_out}")
-        
-    write_run_parameters(dataset, training_output_dir)
-
 def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_size: int):
-    
-    # Early check to make sure the model dimension can be split evenly among the number of heads
-    assert D_MODEL % NUM_HEADS == 0, f"{D_MODEL} not divisible by {NUM_HEADS}"
-    
     ddp_setup(rank, world_size)
     setup_logging(rank)
     
     try:
-        training_file_iter_format = "model_training_{:03d}"
-        training_output_dir = unique_path(OUTPUT_DIR, training_file_iter_format)
-        
-        logging.info(f"\n =========== EXPERIMENT {training_output_dir.name.upper()} ===========")
-                
-        os.makedirs(training_output_dir, exist_ok=True)
-            
-        dataset, model, optimizer = load_train_objs()
+        pseudobulk_dataset, single_cell_dataset, model, optimizer = load_train_objs()
+        device = f"cuda:{rank}"
+        model = model.to(device)
+
+        # --- Step 1: Compute Fisher matrix on pseudobulk data ---
+        pseudobulk_loader, _, _ = prepare_dataloader(
+            pseudobulk_dataset, batch_size, world_size, rank
+        )
+
+        fisher_bundle_path = FINE_TUNING_DIR / "ewc_bundle.pt"
+        if fisher_bundle_path.exists():
+            ref_params, fisher_diag = ewc_utils.load_ewc_bundle(fisher_bundle_path, device=device)
+            if rank == 0:
+                logging.info(f"Loaded existing Fisher/EWC bundle: {fisher_bundle_path}")
+        else:
+            if rank == 0:
+                logging.info("Computing Fisher matrix on pseudobulk dataset...")
+            fisher_diag = ewc_utils.compute_fisher_diag(model, pseudobulk_loader, device=device, n_batches=100)
+            ref_params = {n: p.detach().clone().to(device) for n, p in model.named_parameters()}
+            ewc_utils.save_ewc_bundle(fisher_bundle_path, model, fisher_diag)
+            if rank == 0:
+                logging.info(f"Saved Fisher/EWC bundle to {fisher_bundle_path}")
+
+        # --- Step 2: Prepare fine-tuning loaders ---
+        train_loader, val_loader, test_loader = prepare_dataloader(
+            single_cell_dataset, batch_size, world_size, rank
+        )
+
+        # --- Step 3: Fine-tune with EWC penalty ---
+        trainer = Trainer(
+            model, train_loader, val_loader, nn.MSELoss(), optimizer,
+            gpu_id=rank, save_every=save_every, patience=PATIENCE,
+            ref_params=ref_params, fisher_diag=fisher_diag, lambda_ewc=EWC_LAMBDA
+        )
 
         if rank == 0:
-            write_experiment_settings_and_objects(training_output_dir, dataset)
-            logging.info("Wrote experiment settings and objects to training output directory")
-            logging.info("Preparing dataloader")
+            logging.info("\n ----- TRAINING STARTED (Fine-tuning with EWC) -----")
 
-        train_loader, val_loader, test_loader = prepare_dataloader(dataset, batch_size, world_size, rank)
-        
-        if rank == 0:
-            logging.info("Creating Trainer")
-        
-        loss_fn = nn.MSELoss()    
-        
-        trainer = Trainer(model, train_loader, val_loader, loss_fn, optimizer, gpu_id=rank, save_every=save_every, patience=PATIENCE)
-        
-        if rank == 0:
-            logging.info("\n ----- TRAINING STARTED -----")
-        trainer.train(max_epochs=TOTAL_EPOCHS, path=training_output_dir)
-        
+        trainer.train(max_epochs=total_epochs, path=str(FINE_TUNING_DIR))
 
-        
         if rank == 0:
-            # Save model checkpoint
-            torch.save(trainer.model.module.state_dict(),
-                    os.path.join(training_output_dir, "trained_model.pt"))
-            logging.info("Saved final trained model")
-            
-            ewc_bundle_path = training_output_dir / "ewc_bundle.pth"
-            fisher = ewc_utils.compute_fisher_diag(model, train_loader, device="cuda:0", n_batches=100)
-            ewc_utils.save_ewc_bundle(ewc_bundle_path, model, fisher)
-            
-            # Save TF→TG attention weights from the shortcut
-            if hasattr(trainer.model.module, "shortcut_layer") and hasattr(trainer.model.module.shortcut_layer, "attn"):
-                mean_attn = get_mean_tf_tg_attention(trainer.model.module, test_loader, device=f"cuda:{rank}")
-                mean_attn_df = pd.DataFrame(
-                    mean_attn.numpy(),
-                    index=dataset.tg_names,
-                    columns=dataset.tf_names
-                )
-                mean_attn_df.to_csv(os.path.join(training_output_dir, "tf_tg_mean_attention.csv"))
-                logging.info(f"Saved TF→TG attention weights to 'tf_tg_mean_attention.csv'")
-                
-                plt.figure(figsize=(12,8))
-                sns.heatmap(mean_attn_df.iloc[:50, :50], cmap="viridis")
-                plt.title("TF→TG attention weights (subset)")
-                plt.tight_layout()
-                plt.savefig(os.path.join(training_output_dir, "tf_tg_attention_heatmap.png"))                
-                
-        if rank == 0:
-            logging.info("\nIterations complete")
-    
+            logging.info("\nFine-tuning complete")
+
     finally:
         if dist.is_initialized():
             dist.barrier()
             if rank == 0:
                 logging.info("\nDestroying process group")
             dist.destroy_process_group()
+
     
 if __name__ == "__main__":
     main(rank=int(os.environ["LOCAL_RANK"]),

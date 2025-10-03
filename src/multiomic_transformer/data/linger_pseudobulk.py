@@ -260,24 +260,40 @@ def process_sample(sample_name: str):
     singlepseudobulk = adata_RNA.n_obs < 100
 
     # --- pseudo-bulk ---
-    TG_pseudobulk, RE_pseudobulk = pseudo_bulk(
-        adata_RNA, adata_ATAC, use_single=singlepseudobulk,
-        neighbors_k=NEIGHBORS_K, resolution=LEIDEN_RESOLUTION
+    # TG_pseudobulk, RE_pseudobulk = pseudo_bulk(
+    #     adata_RNA, adata_ATAC, use_single=singlepseudobulk,
+    #     neighbors_k=NEIGHBORS_K, resolution=LEIDEN_RESOLUTION
+    # )
+    # TG_pseudobulk = TG_pseudobulk.fillna(0)
+    # RE_pseudobulk = RE_pseudobulk.fillna(0)
+    # RE_pseudobulk[RE_pseudobulk > 100] = 100
+    
+    TG_single = pd.DataFrame(
+        (adata_RNA.X.toarray() if sp.issparse(adata_RNA.X) else adata_RNA.X).T,
+        index=adata_RNA.var_names,    # rows = genes
+        columns=adata_RNA.obs_names,  # cols = cells
     )
-    TG_pseudobulk = TG_pseudobulk.fillna(0)
-    RE_pseudobulk = RE_pseudobulk.fillna(0)
-    RE_pseudobulk[RE_pseudobulk > 100] = 100
 
-    TG_pseudobulk.to_csv(os.path.join(sample_data_dir, "TG_pseudobulk.tsv"), sep="\t")
-    RE_pseudobulk.to_csv(os.path.join(sample_data_dir, "RE_pseudobulk.tsv"), sep="\t")
-    pd.DataFrame(adata_ATAC.var['gene_ids']).to_csv(os.path.join(sample_data_dir, "Peaks.txt"),
-                                                    header=None, index=None)
+    RE_single = pd.DataFrame(
+        (adata_ATAC.X.toarray() if sp.issparse(adata_ATAC.X) else adata_ATAC.X).T,
+        index=adata_ATAC.var_names,   # rows = peaks
+        columns=adata_ATAC.obs_names, # cols = cells
+    )
+
+    TG_single.to_csv(os.path.join(sample_data_dir, "TG_singlecell.tsv"), sep="\t")
+    RE_single.to_csv(os.path.join(sample_data_dir, "RE_singlecell.tsv"), sep="\t")
+
+    # TG_pseudobulk.to_csv(os.path.join(sample_data_dir, "TG_pseudobulk.tsv"), sep="\t")
+    # RE_pseudobulk.to_csv(os.path.join(sample_data_dir, "RE_pseudobulk.tsv"), sep="\t")
+    # pd.DataFrame(adata_ATAC.var['gene_ids']).to_csv(os.path.join(sample_data_dir, "Peaks.txt"),
+    #                                                 header=None, index=None)
 
     logging.info(f"[{sample_name}] Finished processing")
     return sample_name
 
 def main():
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+    logging.info("Starting Preprocessing and Pseudobulk")
 
     with mp.Pool(processes=len(SAMPLE_NAMES)) as pool:
         results = pool.map(process_sample, SAMPLE_NAMES)

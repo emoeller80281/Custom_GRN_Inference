@@ -104,6 +104,65 @@ def make_chrom_gene_tss_df(gene_tss_file, chrom_id, genome_dir):
         )
     return gene_tss_df
 
+def create_single_cell_tensors(
+    sample_names: list[str],
+    dataset_processed_data_dir: Path,
+    tg_vocab: dict[str, int],
+    tf_vocab: dict[str, int],
+):
+    outdir = SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / "single_cell"
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    for sample_name in sample_names:
+        sample_processed_data_dir = dataset_processed_data_dir / sample_name
+
+        tg_sc_file = sample_processed_data_dir / "TG_singlecell.tsv"
+        re_sc_file = sample_processed_data_dir / "RE_singlecell.tsv"
+
+        if not (tg_sc_file.exists() and re_sc_file.exists()):
+            logging.warning(f"Skipping {sample_name}: missing TG/RE single-cell files")
+            continue
+
+        TG_sc = pd.read_csv(tg_sc_file, sep="\t", index_col=0)
+        RE_sc = pd.read_csv(re_sc_file, sep="\t", index_col=0)
+
+        # --- TG tensor ---
+        tg_tensor_sc, tg_names_kept, tg_ids = align_to_vocab(
+            TG_sc.index.tolist(),
+            tg_vocab,
+            torch.tensor(TG_sc.values, dtype=torch.float32),
+            label="TG"
+        )
+        torch.save(tg_tensor_sc, outdir / f"{sample_name}_tg_tensor_singlecell_{CHROM_ID}.pt")
+        torch.save(torch.tensor(tg_ids, dtype=torch.long), outdir / f"{sample_name}_tg_ids_singlecell_{CHROM_ID}.pt")
+        atomic_json_dump(tg_names_kept, outdir / f"{sample_name}_tg_names_singlecell_{CHROM_ID}.json")
+
+        # --- ATAC tensor ---
+        atac_tensor_sc = torch.tensor(RE_sc.values, dtype=torch.float32)
+        torch.save(atac_tensor_sc, outdir / f"{sample_name}_atac_tensor_singlecell_{CHROM_ID}.pt")
+
+        # --- TF tensor (subset of TGs) ---
+        tf_tensor_sc = None
+        tf_rows = [g for g in TG_sc.index if g in tf_vocab]
+        if tf_rows:
+            TF_sc = TG_sc.loc[tf_rows]
+            tf_tensor_sc, tf_names_kept, tf_ids = align_to_vocab(
+                TF_sc.index.tolist(),
+                tf_vocab,
+                torch.tensor(TF_sc.values, dtype=torch.float32),
+                label="TF"
+            )
+            torch.save(tf_tensor_sc, outdir / f"{sample_name}_tf_tensor_singlecell_{CHROM_ID}.pt")
+            torch.save(torch.tensor(tf_ids, dtype=torch.long), outdir / f"{sample_name}_tf_ids_singlecell_{CHROM_ID}.pt")
+            atomic_json_dump(tf_names_kept, outdir / f"{sample_name}_tf_names_singlecell_{CHROM_ID}.json")
+
+        logging.info(
+            f"Saved single-cell tensors for {sample_name} | "
+            f"TGs={tg_tensor_sc.shape}, "
+            f"TFs={tf_tensor_sc.shape if tf_tensor_sc is not None else 'N/A'}, "
+            f"RE={atac_tensor_sc.shape}"
+        )
+
 
 def aggregate_pseudobulk_datasets(sample_names: list[str], dataset_processed_data_dir: Path, chrom_id: str):
     
@@ -120,9 +179,6 @@ def aggregate_pseudobulk_datasets(sample_names: list[str], dataset_processed_dat
         sample_processed_data_dir = dataset_processed_data_dir / sample_name
         if not os.path.exists(sample_processed_data_dir):
             logging.warning(f"Skipping {sample_name}: directory not found")
-            continue
-        if len(os.listdir(sample_processed_data_dir)) != 5:
-            logging.warning(f"Skipping {sample_name}: expected 5 files, found {len(os.listdir(sample_processed_data_dir))}")
             continue
         if sample_name in VALIDATION_DATASETS:
             logging.warning(f"Skipping {sample_name}: in VALIDATION_DATASETS list")
@@ -504,7 +560,7 @@ if __name__ == "__main__":
 
     # Scale TG expression
     scaler = StandardScaler()
-    TG_scaled = scaler.fit_transform(total_TG_pseudobulk_chr.T.astype("float32")).T
+    TG_scaled = scaler.fit_transform(total_TG_pseudobulk_chr.values.astype("float32"))
 
     # Create genome windows
     mm10_windows = create_or_load_genomic_windows(
@@ -620,6 +676,8 @@ if __name__ == "__main__":
         mode=DIST_BIAS_MODE
     )
     logging.info(f"\t- Done!")
+    
+    create_single_cell_tensors(SAMPLE_NAMES, SAMPLE_PROCESSED_DATA_DIR, tg_vocab, tf_vocab)
     
     # ----- Writing Output Files -----
     logging.info(f"\nWriting output files")
