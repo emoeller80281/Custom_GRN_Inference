@@ -32,6 +32,8 @@ dev/notebooks/sliding_window_calculation_method_testing_cache
 *.npz
 *.out
 *.parquet
+data/*
+experiments/*
 motif_pwms/*
 other_method_grns
 figures

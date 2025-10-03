@@ -157,7 +157,6 @@ def train_xgboost_dask(train_test_dir, feature_names, client=None):
 
     return booster
 
-
 def parameter_grid_search(
     X_tr: pd.DataFrame,
     y_tr: pd.Series,
@@ -336,8 +335,6 @@ def parameter_grid_search(
     logging.info(f"Saved flatness vs AUROC plot to {plot_out}")
     
     return best_model
-
-    
 
 def xgb_classifier_from_booster(booster: xgb.Booster, feature_names: Union[list, np.ndarray, pd.Index]) -> xgb.XGBClassifier:
     """Wrap a trained :class:`xgboost.Booster` in an ``XGBClassifier`` instance.
