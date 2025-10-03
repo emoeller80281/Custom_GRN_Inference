@@ -154,7 +154,7 @@ def create_single_cell_tensors(
 
         # --- TF tensor (subset of TGs) ---
         tf_tensor_sc = None
-        tf_rows = [g for g in TG_sc_chr.index if g in tf_vocab]
+        tf_rows = [g for g in TG_sc.index if g in tf_vocab]
         if tf_rows:
             TF_sc = TG_sc.loc[tf_rows]
             tf_tensor_sc, tf_names_kept, tf_ids = align_to_vocab(

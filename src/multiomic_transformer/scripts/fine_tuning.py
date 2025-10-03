@@ -327,7 +327,7 @@ def load_train_objs():
         tf_vocab_path=os.path.join(COMMON_DATA, "tf_vocab.json"),
         tg_vocab_path=os.path.join(COMMON_DATA, "tg_vocab.json"),
         fine_tuner=True,
-        sample_name="E7.5_rep1"
+        sample_name=FINE_TUNING_DATASET[0]
     )
     
     assert single_cell_dataset.tf_name2id is not None
