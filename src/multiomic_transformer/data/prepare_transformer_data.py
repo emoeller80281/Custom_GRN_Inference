@@ -18,6 +18,7 @@ from grn_inference import utils
 from multiomic_transformer.data.moods_scan import run_moods_scan
 from multiomic_transformer.utils.standardize import standardize_name
 from multiomic_transformer.utils.files import atomic_json_dump
+from multiomic_transformer.utils.peaks import find_genes_near_peaks
 
 random.seed(1337)
 np.random.seed(1337)
@@ -27,7 +28,7 @@ logging.basicConfig(level=logging.INFO, format='%(message)s')
 
 # Reads the number of CPUs from the slurm job, else defaults to 1
 NUM_CPUS: int = int(os.getenv("NUM_CPUS", "1"))
-print(f"Using {NUM_CPUS} CPUs")
+logging.info(f"Using {NUM_CPUS} CPUs")
 
 # TF and TG vocab files
 common_tf_vocab_file: Path =  COMMON_DATA / f"tf_vocab.json"
@@ -57,111 +58,54 @@ os.makedirs(COMMON_DATA, exist_ok=True)
 os.makedirs(SAMPLE_DATA_CACHE_DIR, exist_ok=True)
 os.makedirs(SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR, exist_ok=True)
 
-def create_or_load_genomic_windows(window_size, chrom_id, genome_window_file, chrom_sizes_file, force_recalculate=False):
-    if not os.path.exists(genome_window_file) or force_recalculate:
-        
-        logging.info("\nCreating genomic windows")
-        mm10_genome_windows = pybedtools.bedtool.BedTool().window_maker(g=chrom_sizes_file, w=window_size)
-        mm10_windows = (
-            mm10_genome_windows
-            .filter(lambda x: x.chrom == chrom_id)  # TEMPORARY Restrict to one chromosome for testing
-            .saveas(genome_window_file)
-            .to_dataframe()
+
+def build_global_tg_vocab(gene_tss_file, vocab_file):
+    """
+    Build or update a global TG vocab from all genes in the genome.
+    """
+    # Load existing vocab if present
+    if os.path.isfile(vocab_file):
+        with open(vocab_file) as f:
+            vocab = json.load(f)
+    else:
+        vocab = {}
+
+    # Load all gene names genome-wide
+    gene_tss_bed = pybedtools.BedTool(gene_tss_file)
+    gene_tss_df = (
+        gene_tss_bed
+        .to_dataframe()
+        .sort_values(by="start", ascending=True)
         )
-        logging.info(f"  - Created {mm10_windows.shape[0]} windows")
-    else:
-        
-        logging.info("\nLoading existing genomic windows")
-        mm10_windows = pybedtools.BedTool(genome_window_file).to_dataframe()
-        
-    mm10_windows = mm10_windows.reset_index(drop=True)
-    mm10_windows["win_idx"] = mm10_windows.index
-    
-    return mm10_windows
+    all_genes = [standardize_name(n) for n in gene_tss_df["name"].unique()]
 
-def make_peak_to_window_map(peaks_bed: pd.DataFrame, windows_bed: pd.DataFrame) -> dict[str, int]:
-    """
-    Map each peak to the window it overlaps the most.
-    If a peak ties across multiple windows, assign randomly.
-    
-    Parameters
-    ----------
-    peaks_bed : DataFrame
-        Must have ['chrom','start','end','peak_id'] columns
-    windows_bed : DataFrame
-        Must have ['chrom','start','end','win_idx'] columns
-    
-    Returns
-    -------
-    mapping : dict[str, int]
-        peak_id -> window index
-    """
-    bedtool_peaks = pybedtools.BedTool.from_dataframe(peaks_bed)
-    bedtool_windows = pybedtools.BedTool.from_dataframe(windows_bed)
+    updated = False
+    for name in sorted(set(all_genes)):
+        if name not in vocab:
+            vocab[name] = len(vocab)
+            updated = True
 
-    overlaps = {}
-    for interval in bedtool_peaks.intersect(bedtool_windows, wa=True, wb=True):
-        peak_id = interval.name
-        win_idx = int(interval.fields[-1])  # window index
-        peak_start, peak_end = int(interval.start), int(interval.end)
-        win_start, win_end = int(interval.fields[-3]), int(interval.fields[-2])
+    if updated:
+        atomic_json_dump(vocab, vocab_file)
+        logging.info(f"Updated TG vocab: {len(vocab)} genes")
 
-        # Compute overlap length
-        overlap_len = min(peak_end, win_end) - max(peak_start, win_start)
+    return vocab
 
-        # Track best overlap for each peak
-        if peak_id not in overlaps:
-            overlaps[peak_id] = []
-        overlaps[peak_id].append((overlap_len, win_idx))
 
-    # Resolve ties by max overlap, then random choice
-    mapping = {}
-    for peak_id, ov_list in overlaps.items():
-        max_overlap = max(ov_list, key=lambda x: x[0])[0]
-        candidates = [win_idx for ol, win_idx in ov_list if ol == max_overlap]
-        mapping[peak_id] = random.choice(candidates)  # pick randomly if tie
 
-    return mapping
+def make_chrom_gene_tss_df(gene_tss_file, chrom_id, genome_dir):
+    gene_tss_bed = pybedtools.BedTool(gene_tss_file)
+    gene_tss_df = (
+        gene_tss_bed
+        .filter(lambda x: x.chrom == chrom_id)
+        .saveas(os.path.join(genome_dir, f"{chrom_id}_gene_tss.bed"))
+        .to_dataframe()
+        .sort_values(by="start", ascending=True)
+        )
+    return gene_tss_df
 
-def calculate_peak_to_tg_distance_score(
-    output_dir, 
-    mesc_atac_peak_loc_df, 
-    gene_tss_df, 
-    max_peak_distance=1e6, 
-    distance_factor_scale=25000, 
-    force_recalculate=False
-    ) -> pd.DataFrame:
-    if not os.path.isfile(os.path.join(output_dir, "genes_near_peaks.parquet")) or force_recalculate:
-        if "peak_tmp.bed" not in os.listdir(output_dir) or "tss_tmp.bed" not in os.listdir(output_dir) or force_recalculate:
-        
-            logging.info("Calculating peak to TG distance score")
-            peak_bed = pybedtools.BedTool.from_dataframe(
-                mesc_atac_peak_loc_df[["chrom", "start", "end", "peak_id"]]
-                ).saveas(os.path.join(output_dir, "peak_tmp.bed"))
 
-            tss_bed = pybedtools.BedTool.from_dataframe(
-                gene_tss_df[["chrom", "start", "end", "name"]]
-                ).saveas(os.path.join(output_dir, "tss_tmp.bed"))
-            
-        peak_bed = pybedtools.BedTool(os.path.join(output_dir, "peak_tmp.bed"))
-        tss_bed = pybedtools.BedTool(os.path.join(output_dir, "tss_tmp.bed"))
-    
-        genes_near_peaks = utils.find_genes_near_peaks(peak_bed, tss_bed, tss_distance_cutoff=max_peak_distance)
-
-        # Restrict to peaks within 1 Mb of a gene TSS
-        genes_near_peaks = genes_near_peaks[genes_near_peaks["TSS_dist"] <= max_peak_distance]
-
-        # Scale the TSS distance score by the exponential scaling factor
-        genes_near_peaks = genes_near_peaks.copy()
-        genes_near_peaks["TSS_dist_score"] = np.exp(-genes_near_peaks["TSS_dist"] / distance_factor_scale)
-
-        genes_near_peaks.to_parquet(os.path.join(output_dir, "genes_near_peaks.parquet"), compression="snappy", engine="pyarrow")
-    else:
-        genes_near_peaks = pd.read_parquet(os.path.join(output_dir, "genes_near_peaks.parquet"), engine="pyarrow")
-    
-    return genes_near_peaks
-
-def aggregate_pseudobulk_datasets(sample_names: list[str], sample_processed_data_dir: Path, chrom_id: str):
+def aggregate_pseudobulk_datasets(sample_names: list[str], dataset_processed_data_dir: Path, chrom_id: str):
     
     # ----- Combine Pseudobulk Data into a Training Dataset -----
     TG_pseudobulk_global = []
@@ -169,7 +113,11 @@ def aggregate_pseudobulk_datasets(sample_names: list[str], sample_processed_data
     RE_pseudobulk_samples = []
     peaks_df_samples = []
 
+    logging.info("\nLoading processed pseudobulk datasets:")
+    logging.info(f"  - Sample names: {sample_names}")
+    logging.info(f"  - Looking for processed samples in {dataset_processed_data_dir}")
     for sample_name in sample_names:
+        sample_processed_data_dir = dataset_processed_data_dir / sample_name
         if not os.path.exists(sample_processed_data_dir):
             logging.warning(f"Skipping {sample_name}: directory not found")
             continue
@@ -231,7 +179,115 @@ def aggregate_pseudobulk_datasets(sample_names: list[str], sample_processed_data
         total_RE_pseudobulk_chr    = _agg_sum(RE_pseudobulk_samples)
         total_peaks_df             = _agg_first(peaks_df_samples)
         
-        return total_TG_pseudobulk_global, total_TG_pseudobulk_chr, total_RE_pseudobulk_chr, total_peaks_df
+    return total_TG_pseudobulk_global, total_TG_pseudobulk_chr, total_RE_pseudobulk_chr, total_peaks_df
+
+
+def create_or_load_genomic_windows(window_size, chrom_id, genome_window_file, chrom_sizes_file, force_recalculate=False):
+    if not os.path.exists(genome_window_file) or force_recalculate:
+        
+        logging.info("\nCreating genomic windows")
+        mm10_genome_windows = pybedtools.bedtool.BedTool().window_maker(g=chrom_sizes_file, w=window_size)
+        mm10_windows = (
+            mm10_genome_windows
+            .filter(lambda x: x.chrom == chrom_id)  # TEMPORARY Restrict to one chromosome for testing
+            .saveas(genome_window_file)
+            .to_dataframe()
+        )
+        logging.info(f"  - Created {mm10_windows.shape[0]} windows")
+    else:
+        
+        logging.info("\nLoading existing genomic windows")
+        mm10_windows = pybedtools.BedTool(genome_window_file).to_dataframe()
+        
+    mm10_windows = mm10_windows.reset_index(drop=True)
+    mm10_windows["win_idx"] = mm10_windows.index
+    
+    return mm10_windows
+
+
+def calculate_peak_to_tg_distance_score(
+    output_dir, 
+    mesc_atac_peak_loc_df, 
+    gene_tss_df, 
+    max_peak_distance=1e6, 
+    distance_factor_scale=25000, 
+    force_recalculate=False
+    ) -> pd.DataFrame:
+    if not os.path.isfile(os.path.join(output_dir, "genes_near_peaks.parquet")) or force_recalculate:
+        if "peak_tmp.bed" not in os.listdir(output_dir) or "tss_tmp.bed" not in os.listdir(output_dir) or force_recalculate:
+        
+            logging.info("Calculating peak to TG distance score")
+            peak_bed = pybedtools.BedTool.from_dataframe(
+                mesc_atac_peak_loc_df[["chrom", "start", "end", "peak_id"]]
+                ).saveas(os.path.join(output_dir, "peak_tmp.bed"))
+
+            tss_bed = pybedtools.BedTool.from_dataframe(
+                gene_tss_df[["chrom", "start", "end", "name"]]
+                ).saveas(os.path.join(output_dir, "tss_tmp.bed"))
+            
+        peak_bed = pybedtools.BedTool(os.path.join(output_dir, "peak_tmp.bed"))
+        tss_bed = pybedtools.BedTool(os.path.join(output_dir, "tss_tmp.bed"))
+    
+        genes_near_peaks = find_genes_near_peaks(peak_bed, tss_bed, tss_distance_cutoff=max_peak_distance)
+
+        # Restrict to peaks within 1 Mb of a gene TSS
+        genes_near_peaks = genes_near_peaks[genes_near_peaks["TSS_dist"] <= max_peak_distance]
+
+        # Scale the TSS distance score by the exponential scaling factor
+        genes_near_peaks = genes_near_peaks.copy()
+        genes_near_peaks["TSS_dist_score"] = np.exp(-genes_near_peaks["TSS_dist"] / distance_factor_scale)
+
+        genes_near_peaks.to_parquet(os.path.join(output_dir, "genes_near_peaks.parquet"), compression="snappy", engine="pyarrow")
+    else:
+        genes_near_peaks = pd.read_parquet(os.path.join(output_dir, "genes_near_peaks.parquet"), engine="pyarrow")
+    
+    return genes_near_peaks
+
+
+def make_peak_to_window_map(peaks_bed: pd.DataFrame, windows_bed: pd.DataFrame) -> dict[str, int]:
+    """
+    Map each peak to the window it overlaps the most.
+    If a peak ties across multiple windows, assign randomly.
+    
+    Parameters
+    ----------
+    peaks_bed : DataFrame
+        Must have ['chrom','start','end','peak_id'] columns
+    windows_bed : DataFrame
+        Must have ['chrom','start','end','win_idx'] columns
+    
+    Returns
+    -------
+    mapping : dict[str, int]
+        peak_id -> window index
+    """
+    bedtool_peaks = pybedtools.BedTool.from_dataframe(peaks_bed)
+    bedtool_windows = pybedtools.BedTool.from_dataframe(windows_bed)
+
+    overlaps = {}
+    for interval in bedtool_peaks.intersect(bedtool_windows, wa=True, wb=True):
+        peak_id = interval.name
+        win_idx = int(interval.fields[-1])  # window index
+        peak_start, peak_end = int(interval.start), int(interval.end)
+        win_start, win_end = int(interval.fields[-3]), int(interval.fields[-2])
+
+        # Compute overlap length
+        overlap_len = min(peak_end, win_end) - max(peak_start, win_start)
+
+        # Track best overlap for each peak
+        if peak_id not in overlaps:
+            overlaps[peak_id] = []
+        overlaps[peak_id].append((overlap_len, win_idx))
+
+    # Resolve ties by max overlap, then random choice
+    mapping = {}
+    for peak_id, ov_list in overlaps.items():
+        max_overlap = max(ov_list, key=lambda x: x[0])[0]
+        candidates = [win_idx for ol, win_idx in ov_list if ol == max_overlap]
+        mapping[peak_id] = random.choice(candidates)  # pick randomly if tie
+
+    return mapping
+
 
 def build_motif_mask(tf_names, tg_names, motif_hits_df, genes_near_peaks):
     """
@@ -269,6 +325,7 @@ def build_motif_mask(tf_names, tg_names, motif_hits_df, genes_near_peaks):
     ).toarray()
 
     return mask
+
 
 def precompute_input_tensors(
     output_dir: str,
@@ -325,6 +382,7 @@ def precompute_input_tensors(
 
     return tf_tensor_all, tg_tensor_all, atac_window_tensor_all
 
+
 def align_to_vocab(names, vocab, tensor_all, label="genes"):
     """
     Restrict to the subset of names that exist in the global vocab.
@@ -350,6 +408,7 @@ def align_to_vocab(names, vocab, tensor_all, label="genes"):
     aligned_tensor = torch.stack(aligned_rows, dim=0)  # [num_kept, num_cells]
 
     return aligned_tensor, kept_names, kept_ids
+
 
 def build_distance_bias(
     genes_near_peaks: pd.DataFrame,
@@ -413,78 +472,9 @@ def build_distance_bias(
 
     return dist_bias
 
-def build_global_tg_vocab(gene_tss_file, vocab_file):
-    """
-    Build or update a global TG vocab from all genes in the genome.
-    """
-    # Load existing vocab if present
-    if os.path.isfile(vocab_file):
-        with open(vocab_file) as f:
-            vocab = json.load(f)
-    else:
-        vocab = {}
-
-    # Load all gene names genome-wide
-    gene_tss_bed = pybedtools.BedTool(gene_tss_file)
-    gene_tss_df = (
-        gene_tss_bed
-        .to_dataframe()
-        .sort_values(by="start", ascending=True)
-        )
-    all_genes = [standardize_name(n) for n in gene_tss_df["name"].unique()]
-
-    updated = False
-    for name in sorted(set(all_genes)):
-        if name not in vocab:
-            vocab[name] = len(vocab)
-            updated = True
-
-    if updated:
-        atomic_json_dump(vocab, vocab_file)
-        logging.info(f"Updated TG vocab: {len(vocab)} genes")
-
-    return vocab
-
-def update_vocab(vocab_file, new_names, label="GENE"):
-    # Load existing vocab or create new
-    if os.path.isfile(vocab_file):
-        with open(vocab_file) as f:
-            vocab = json.load(f)
-    else:
-        vocab = {}
-
-    # Standardize new names
-    new_names = [standardize_name(n) for n in new_names]
-
-    # Add missing names with new indices
-    updated = False
-    for name in sorted(set(new_names)):
-        if name not in vocab:
-            vocab[name] = len(vocab)
-            updated = True
-            logging.info(f"Added new {label}: {name}")
-
-    # Save only if something changed
-    if updated:
-        atomic_json_dump(vocab, vocab_file)
-        logging.info(f"Updated {label} vocab with {len(vocab)} entries")
-
-    return vocab
-
-def make_chrom_gene_tss_df(gene_tss_file, chrom_id, genome_dir):
-    gene_tss_bed = pybedtools.BedTool(gene_tss_file)
-    gene_tss_df = (
-        gene_tss_bed
-        .filter(lambda x: x.chrom == chrom_id)
-        .saveas(os.path.join(genome_dir, f"{chrom_id}_gene_tss.bed"))
-        .to_dataframe()
-        .sort_values(by="start", ascending=True)
-        )
-    return gene_tss_df
-
 
 if __name__ == "__main__":
-    logging.info(f"Preparing data for {SAMPLE_NAME} {CHROM_ID}")
+    logging.info(f"Preparing data for {DATASET_NAME} {CHROM_ID}")
     
     tg_vocab = build_global_tg_vocab(GENE_TSS_FILE, common_tg_vocab_file)
     
@@ -501,7 +491,7 @@ if __name__ == "__main__":
     
     tf_names = [standardize_name(n) for n in tf_names]
         
-    logging.info(f"\nLoaded {SAMPLE_NAME} TFs: {len(tf_names)} TFs")
+    logging.info(f"\nLoaded {DATASET_NAME} TFs: {len(tf_names)} TFs")
 
     total_TG_pseudobulk_global, total_TG_pseudobulk_chr, total_RE_pseudobulk_chr, total_peaks_df = \
         aggregate_pseudobulk_datasets(SAMPLE_NAMES, SAMPLE_PROCESSED_DATA_DIR, CHROM_ID)
@@ -663,7 +653,7 @@ if __name__ == "__main__":
 
     # Manifest of general sample info and file paths
     manifest = {
-        "sample": SAMPLE_NAME,
+        "dataset_name": DATASET_NAME,
         "chrom": CHROM_ID,
         "num_windows": int(num_windows),
         "num_tfs": int(len(tf_names_kept)),
@@ -671,21 +661,21 @@ if __name__ == "__main__":
         "Distance tau": DISTANCE_SCALE_FACTOR,
         "Max peak-TG distance": MAX_PEAK_DISTANCE,
         "paths": {
-            "tf_tensor_all": tf_tensor_path,
-            "tg_tensor_all": tg_tensor_path,
-            "atac_window_tensor_all": atac_tensor_path,
-            "dist_bias": dist_bias_file,
-            "tf_ids": tf_id_file,
-            "tg_ids": tg_id_file,
-            "tf_names": sample_tf_name_file,                 # sample-level
-            "tg_names": sample_tg_name_file,                 # chrom-level
-            "common_tf_vocab": common_tf_vocab_file,
-            "common_tg_vocab": common_tg_vocab_file,
-            "window_map": sample_window_map_file,
-            "genes_near_peaks": peak_to_tss_dist_path,
-            "metacell_names": metacell_name_file,
-            "tg_scaler": sample_scaler_file,
-            "motif_mask": motif_mask_file,
+            "tf_tensor_all": str(tf_tensor_path),
+            "tg_tensor_all": str(tg_tensor_path),
+            "atac_window_tensor_all": str(atac_tensor_path),
+            "dist_bias": str(dist_bias_file),
+            "tf_ids": str(tf_id_file),
+            "tg_ids": str(tg_id_file),
+            "tf_names": str(sample_tf_name_file),
+            "tg_names": str(sample_tg_name_file),
+            "common_tf_vocab": str(common_tf_vocab_file),
+            "common_tg_vocab": str(common_tg_vocab_file),
+            "window_map": str(sample_window_map_file),
+            "genes_near_peaks": str(peak_to_tss_dist_path),
+            "metacell_names": str(metacell_name_file),
+            "tg_scaler": str(sample_scaler_file),
+            "motif_mask": str(motif_mask_file),
         }
     }
     with open(manifest_file, "w") as f:

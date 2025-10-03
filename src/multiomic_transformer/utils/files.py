@@ -29,9 +29,14 @@ def unique_path(directory: Path, name_pattern: str):
         if not path.exists():
             return path
         
-def atomic_json_dump(obj, path):
+def atomic_json_dump(obj, path: Path):
     """Safe JSON dump, avoids race conditions by making a tmp file first, then updating the name"""
-    tmp = path + ".tmp"
+    def convert(o):
+        if isinstance(o, Path):
+            return str(o)
+        raise TypeError(f"Object of type {o.__class__.__name__} is not JSON serializable")
+
+    tmp = path.with_suffix(path.suffix + ".tmp")
     with open(tmp, "w") as f:
-        json.dump(obj, f)
+        json.dump(obj, f, indent=2, default=convert)
     os.replace(tmp, path)

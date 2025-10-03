@@ -16,4 +16,4 @@ cd /gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER
 
 export NUM_CPUS=${SLURM_CPUS_PER_TASK:-1}
 
-python -m dev.transformer.prepare_transformer_data
+python src/multiomic_transformer/data/prepare_transformer_data.py

@@ -134,10 +134,10 @@ def pseudo_bulk(
 
     return pseudo_bulk_rna, pseudo_bulk_atac
 
-def get_adata_from_peakmatrix(peak_matrix_file: str, label: pd.DataFrame, sample_name: str) -> AnnData:
+def get_adata_from_peakmatrix(peak_matrix_file: Path, label: pd.DataFrame, sample_name: str) -> AnnData:
     # Read header only
     all_cols = pd.read_csv(peak_matrix_file, sep="\t", nrows=10).columns[1:]
-    logging.info(f"First ATAC Barcode: {all_cols[0]}")
+    logging.info(f"  - First ATAC Barcode: {all_cols[0]}")
     
     # Identify barcodes shared between RNA and ATAC
     matching_barcodes = set(label["barcode_use"]) & set(all_cols)
@@ -231,7 +231,7 @@ def filter_and_qc(adata_RNA: AnnData, adata_ATAC: AnnData) -> Tuple[AnnData, Ann
     return adata_RNA, adata_ATAC
     
 def process_sample(sample_name: str):
-    sample_data_dir = os.path.join(PROCESSED_DATA, sample_name)
+    sample_data_dir = os.path.join(SAMPLE_PROCESSED_DATA_DIR, sample_name)
     os.makedirs(sample_data_dir, exist_ok=True)
 
     if os.path.exists(os.path.join(sample_data_dir, f"{sample_name}_RNA_qc.h5ad")) \
@@ -245,7 +245,7 @@ def process_sample(sample_name: str):
         adata_RNA.obs_names = [(sample_name + "." + i).replace("-", ".") for i in adata_RNA.obs_names]
         # adata_RNA.obs_names = [i.replace("-", ".") for i in adata_RNA.obs_names]
         logging.info(f"[{sample_name}] Found {len(adata_RNA.obs_names)} RNA barcodes")
-        logging.info(f"First RNA barcode: {adata_RNA.obs_names[0]}")
+        logging.info(f"  - First RNA barcode: {adata_RNA.obs_names[0]}")
 
         label = pd.DataFrame({"barcode_use": adata_RNA.obs_names,
                               "label": ["mESC"] * len(adata_RNA.obs_names)})
@@ -277,13 +277,10 @@ def process_sample(sample_name: str):
     return sample_name
 
 def main():
-    sample_name_list = ["E7.5_rep1", "E7.5_rep1", "E7.75_rep1", "E8.0_rep2", "E8.5_rep2",
-                        "E8.75_rep2", "E7.5_rep2", "E8.0_rep1", "E8.5_rep1", "E8.75_rep1"]
-    
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
-    with mp.Pool(processes=len(sample_name_list)) as pool:
-        results = pool.map(process_sample, sample_name_list)
+    with mp.Pool(processes=len(SAMPLE_NAMES)) as pool:
+        results = pool.map(process_sample, SAMPLE_NAMES)
 
     logging.info(f"Completed samples: {results}")
 

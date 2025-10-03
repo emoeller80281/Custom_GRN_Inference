@@ -54,4 +54,4 @@ nvidia-smi -L
 nvidia-smi --query-gpu=timestamp,index,name,utilization.gpu,memory.used,memory.total \
   --format=csv -l 30 > LOGS/gpu_usage_transformer_training.log &
 
-torchrun --standalone --nproc_per_node=$SLURM_NTASKS_PER_NODE ./dev/transformer/transformer_training.py
+torchrun --standalone --nproc_per_node=$SLURM_NTASKS_PER_NODE src/multiomic_transformer/scripts/train.py

@@ -1,3 +1,4 @@
+from enum import unique
 import os
 import sys
 import csv
@@ -18,8 +19,10 @@ from sklearn.preprocessing import StandardScaler
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, random_split
-from transformer import MultiomicTransformer
-from transformer_dataset import MultiomicTransformerDataset
+from multiomic_transformer.models.model import MultiomicTransformer
+from multiomic_transformer.datasets.dataset import MultiomicTransformerDataset
+from multiomic_transformer.utils.files import unique_path
+from config.settings import *
 
 import torch.multiprocessing as mp
 from torch.utils.data.distributed import DistributedSampler
@@ -30,40 +33,8 @@ import torch.distributed as dist
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-from eval import (
-    per_gene_correlation
-)
-
 import warnings
 warnings.filterwarnings("ignore", message="No device id is provided via `init_process_group`")
-
-CHROM_ID = "chr19"
-SAMPLE_NAME = "mESC"
-
-TOTAL_EPOCHS=200
-BATCH_SIZE=8
-GRAD_ACCUM_STEPS=8
-PATIENCE=15
-CORR_LOSS_WEIGHT=0.05
-
-D_MODEL = 246
-NUM_HEADS = 6
-NUM_LAYERS = 3
-D_FF = 768
-DROPOUT = 0.1
-
-ATTN_BIAS_SCALE = 1.0
-
-# TF to TG shortcut parameters
-SHORTCUT_L1 = 0
-SHORTCUT_L2 = 0
-SHORTCUT_TOPK = None
-SHORTCUT_DROPOUT = 0
-
-PROJECT_DIR = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
-DATA_DIR = os.path.join(PROJECT_DIR, f"dev/transformer/transformer_data/{SAMPLE_NAME}")
-OUTPUT_DIR = os.path.join(PROJECT_DIR, f"output/transformer_testing_output/{SAMPLE_NAME}/{CHROM_ID}")
-CHIP_GROUND_TRUTH_FILE = os.path.join(PROJECT_DIR, "ground_truth_files/combined_ground_truth.csv")
 
 def ddp_setup(rank, world_size):
     """
@@ -216,7 +187,6 @@ class Trainer:
                 total_loss += loss.item(); n_batches += 1
                 preds_list.append(preds); tgts_list.append(targets)
 
-
         # Stack local tensors
         preds = torch.cat(preds_list, dim=0)
         tgts = torch.cat(tgts_list, dim=0)
@@ -250,7 +220,7 @@ class Trainer:
         avg_loss = total_loss / max(1, n_batches)
         return avg_loss, pearson_corr, spearman_corr
     
-    def _run_epoch(self, epoch, chip_edges=None):
+    def _run_epoch(self, epoch):
         sampler = getattr(self.train_data, "sampler", None)
         if isinstance(sampler, DistributedSampler):
             sampler.set_epoch(epoch)
@@ -360,17 +330,17 @@ class Trainer:
             writer.writerows(history)
             
 
-def load_train_objs(DATA_DIR, CHROM_ID,
+def load_train_objs(SAMPLE_DATA_CACHE_DIR, CHROM_ID,
                     D_MODEL, NUM_HEADS, NUM_LAYERS, D_FF, DROPOUT,
                     lr=1e-3):
 
     COMMON_DIR = os.path.join(
-        os.path.dirname(DATA_DIR),  # .../transformer_data/
+        os.path.dirname(SAMPLE_DATA_CACHE_DIR),  # .../transformer_data/
         "common"
     )
 
     dataset = MultiomicTransformerDataset(
-        data_dir=DATA_DIR,
+        data_dir=SAMPLE_DATA_CACHE_DIR,
         chrom_id=CHROM_ID,
         tf_vocab_path=os.path.join(COMMON_DIR, "tf_vocab.json"),
         tg_vocab_path=os.path.join(COMMON_DIR, "tg_vocab.json"),
@@ -524,19 +494,15 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
     setup_logging(rank)
     
     try:
-        time_now = datetime.now().strftime("%d_%m_%H_%M_%S")
-        training_output_dir = os.path.join(OUTPUT_DIR, f"model_training_{time_now}")
-        os.makedirs(training_output_dir, exist_ok=True)
+        training_file_iter_format = "model_training_{:03d}"
+        training_output_dir = unique_path(OUTPUT_DIR, training_file_iter_format)
         
-        if rank == 0:
-            chip = pd.read_csv(CHIP_GROUND_TRUTH_FILE)
-            chip_edges = {(t.capitalize(), g.capitalize()) for t, g in zip(chip["TF"], chip["TG"])}
-        else:
-            chip_edges = None
-        chip_edges = dist_broadcast_list(chip_edges, src=0)
+        logging.info(f"\n =========== EXPERIMENT {training_output_dir.name.upper()} ===========")
+                
+        os.makedirs(training_output_dir, exist_ok=True)
             
         dataset, model, optimizer = load_train_objs(
-            DATA_DIR, CHROM_ID,
+            SAMPLE_DATA_CACHE_DIR, CHROM_ID,
             D_MODEL, NUM_HEADS, NUM_LAYERS, D_FF, DROPOUT, lr=1e-3
         )
         
