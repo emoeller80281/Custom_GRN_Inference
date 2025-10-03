@@ -172,6 +172,7 @@ if __name__ == "__main__":
     ap.add_argument("--fasta", required=True)
     ap.add_argument("--motifs", nargs="+", required=True, help="one or more PFM files")
     ap.add_argument("--out", required=True)
+    ap.add_argument("--n_cpus", default=4)
     ap.add_argument("--pval_threshold", type=float, default=6.0)
     args = ap.parse_args()
-    run_moods_scan(args.peaks, args.fasta, args.motifs, args.out, pval_threshold=args.pval_threshold)
+    run_moods_scan(args.peaks, args.fasta, args.motifs, args.out, args.n_cpus, pval_threshold=args.pval_threshold)

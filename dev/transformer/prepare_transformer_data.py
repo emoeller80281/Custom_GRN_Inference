@@ -27,13 +27,15 @@ logging.basicConfig(level=logging.INFO, format='%(message)s')
 NUM_CPUS = int(os.getenv("NUM_CPUS", "1"))
 print(f"Using {NUM_CPUS} CPUs")
 
+FORCE_RECALCULATE = True
+
 SAMPLE_NAME = "mESC"
-CHROM_ID = "chr1"
+CHROM_ID = "chr19"
 
 # Window parameters
-WINDOW_SIZE = 5_000             # Aggregates peaks within WINDOW_SIZE bp genomic tiles
-DISTANCE_SCALE_FACTOR = 3_000   # Weights the peak-gene TSS distance score. Lower numbers = faster dropoff
-MAX_PEAK_DISTANCE = 10_000      # Masks out peaks further than this distance from the gene TSS
+WINDOW_SIZE = 25_000             # Aggregates peaks within WINDOW_SIZE bp genomic tiles
+DISTANCE_SCALE_FACTOR = 25_000   # Weights the peak-gene TSS distance score. Lower numbers = faster dropoff
+MAX_PEAK_DISTANCE = 100_000_000      # Masks out peaks further than this distance from the gene TSS
 DIST_BIAS_MODE = "max"
 
 # TF-peak binding calculation parameters
@@ -64,7 +66,7 @@ JASPAR_PFM_DIR=os.path.join(PROJECT_DIR, "data/motif_information/JASPAR/pfm_file
 
 # TF and TG vocab files
 common_tf_vocab_file = os.path.join(COMMON_DATA, f"tf_vocab.json")
-common_tg_vocab_file = os.path.join(COMMON_DATA, f"tg_vocab_{CHROM_ID}.json")
+common_tg_vocab_file = os.path.join(COMMON_DATA, f"tg_vocab.json")
 
 # TF, TG, and Window tensors
 atac_tensor_path = os.path.join(CHROM_SPECIFIC_DATA_DIR, f"atac_window_tensor_all_{CHROM_ID}.pt")
@@ -102,6 +104,7 @@ def create_or_load_genomic_windows(genome_dir, window_size, chrom_id, chrom_size
             .saveas(genome_window_file)
             .to_dataframe()
         )
+        logging.info(f"  - Created {mm10_windows.shape[0]} windows")
     else:
         
         logging.info("\nLoading existing genomic windows")
@@ -109,6 +112,8 @@ def create_or_load_genomic_windows(genome_dir, window_size, chrom_id, chrom_size
         
     mm10_windows = mm10_windows.reset_index(drop=True)
     mm10_windows["win_idx"] = mm10_windows.index
+    
+    
         
     return mm10_windows
 
@@ -196,34 +201,41 @@ def calculate_peak_to_tg_distance_score(
 
 def build_motif_mask(tf_names, tg_names, motif_hits_df, genes_near_peaks):
     """
-    tf_names        : list of TF names
-    tg_names        : list of TG names
-    motif_hits_df   : DataFrame with columns ['peak_id','TF','logodds']
-    genes_near_peaks: DataFrame with columns ['peak_id','target_id']
+    Build motif mask [TG x TF] with max logodds per (TG, TF).
     """
-    TF = len(tf_names)
-    TG = len(tg_names)
-
-    # Map TFs and TGs to indices
+    # map TFs and TGs to ids
     tf_index = {tf: i for i, tf in enumerate(tf_names)}
     tg_index = {tg: i for i, tg in enumerate(tg_names)}
 
-    mask = np.zeros((TG, TF), dtype=np.float32)
+    # restrict to known TFs
+    motif_hits_df = motif_hits_df[motif_hits_df["TF"].isin(tf_index)]
+    
+    # merge motif hits with target genes (peak_id → TG)
+    merged = motif_hits_df.merge(
+        genes_near_peaks[["peak_id", "target_id"]],
+        on="peak_id",
+        how="inner"
+    )
 
-    # Map peak → list of TGs
-    peak_to_tgs = genes_near_peaks.groupby("peak_id")["target_id"].apply(list).to_dict()
+    # drop TGs not in tg_index
+    merged = merged[merged["target_id"].isin(tg_index)]
 
-    # Fill mask directly
-    for _, row in motif_hits_df.iterrows():
-        pid, tf, score = row["peak_id"], row["TF"], row["logodds"]
-        if tf not in tf_index or pid not in peak_to_tgs:
-            continue
-        for tg in peak_to_tgs[pid]:
-            j, i = tf_index[tf], tg_index.get(tg)
-            if i is not None:
-                mask[i, j] = max(mask[i, j], score)
+    # map names → indices
+    merged["tf_idx"] = merged["TF"].map(tf_index)
+    merged["tg_idx"] = merged["target_id"].map(tg_index)
+
+    # groupby max(logodds) per (TG, TF)
+    agg = merged.groupby(["tg_idx", "tf_idx"])["logodds"].max().reset_index()
+
+    # construct sparse COO
+    mask = sp.coo_matrix(
+        (agg["logodds"], (agg["tg_idx"], agg["tf_idx"])),
+        shape=(len(tg_names), len(tf_names)),
+        dtype=np.float32
+    ).toarray()
 
     return mask
+
 
 def precompute_input_tensors(
     output_dir: str,
@@ -280,42 +292,33 @@ def precompute_input_tensors(
 
     return tf_tensor_all, tg_tensor_all, atac_window_tensor_all
 
-def match_gene_to_vocab(
-    names: Sequence[str],
-    vocab: Dict[str, int],
-    tensor_all,              # torch.Tensor or np.ndarray shaped [N, C]
-    label: str = "genes",
-) -> Tuple:
+def align_to_vocab(names, vocab, tensor_all, label="genes"):
     """
-    Align rows of `tensor_all` (N x C) to a common `vocab`.
-    Keeps only names present in `vocab`, preserving original order.
-
+    Restrict to the subset of names that exist in the global vocab.
     Returns:
-      tensor_kept : filtered tensor [N_keep, C]
-      names_kept  : list[str] kept, in row order
-      ids         : list[int] vocab ids aligned to names_kept
+      aligned_tensor : [num_kept, C] (chromosome-specific subset)
+      kept_names     : list[str] of kept names (order = aligned_tensor rows)
+      kept_ids       : list[int] global vocab indices for kept names
     """
-    assert len(names) == (tensor_all.shape[0]), \
-        f"{label}: len(names) != tensor rows ({len(names)} vs {tensor_all.shape[0]})"
+    kept_ids = []
+    kept_names = []
+    aligned_rows = []
 
-    ids, keep_idx, dropped = [], [], []
     for i, n in enumerate(names):
         vid = vocab.get(n)
         if vid is not None:
-            ids.append(vid)
-            keep_idx.append(i)
-        else:
-            dropped.append(n)
+            kept_ids.append(vid)
+            kept_names.append(n)
+            aligned_rows.append(tensor_all[i])
 
-    if dropped:
-        logging.warning(f"Dropping {len(dropped)} {label} not in common vocab (e.g. {dropped[:5]})")
-        tensor_kept = tensor_all[keep_idx, :]
-        names_kept  = [names[i] for i in keep_idx]
-    else:
-        tensor_kept = tensor_all
-        names_kept  = list(names)
+    if not kept_ids:
+        raise ValueError(f"No {label} matched the global vocab.")
 
-    return tensor_kept, names_kept, ids
+    aligned_tensor = torch.stack(aligned_rows, dim=0)  # [num_kept, num_cells]
+
+    return aligned_tensor, kept_names, kept_ids
+
+
 
 def build_distance_bias(
     genes_near_peaks: pd.DataFrame,
@@ -378,6 +381,38 @@ def build_distance_bias(
             raise ValueError(f"Unknown pooling mode: {mode}")
 
     return dist_bias
+
+def build_global_tg_vocab(gene_tss_file, vocab_file):
+    """
+    Build or update a global TG vocab from all genes in the genome.
+    """
+    # Load existing vocab if present
+    if os.path.isfile(vocab_file):
+        with open(vocab_file) as f:
+            vocab = json.load(f)
+    else:
+        vocab = {}
+
+    # Load all gene names genome-wide
+    gene_tss_bed = pybedtools.BedTool(gene_tss_file)
+    gene_tss_df = (
+        gene_tss_bed
+        .to_dataframe()
+        .sort_values(by="start", ascending=True)
+        )
+    all_genes = [standardize_name(n) for n in gene_tss_df["name"].unique()]
+
+    updated = False
+    for name in sorted(set(all_genes)):
+        if name not in vocab:
+            vocab[name] = len(vocab)
+            updated = True
+
+    if updated:
+        atomic_json_dump(vocab, vocab_file)
+        logging.info(f"Updated TG vocab: {len(vocab)} genes")
+
+    return vocab
 
 def update_vocab(vocab_file, new_names, label="GENE"):
     # Load existing vocab or create new
@@ -446,6 +481,10 @@ def standardize_name(name: str) -> str:
     return name.capitalize()
 
 if __name__ == "__main__":
+    logging.info(f"Preparing data for {SAMPLE_NAME} {CHROM_ID}")
+    
+    tg_vocab = build_global_tg_vocab(GENE_TSS_FILE, common_tg_vocab_file)
+    
     # Create or load the gene TSS information for the chromosome
     gene_tss_df = make_chrom_gene_tss_df(
         gene_tss_file=GENE_TSS_FILE,
@@ -529,7 +568,8 @@ if __name__ == "__main__":
         genome_dir=GENOME_DIR,
         window_size=WINDOW_SIZE,
         chrom_id=CHROM_ID,
-        chrom_sizes_file=CHROM_SIZES_FILE
+        chrom_sizes_file=CHROM_SIZES_FILE,
+        force_recalculate=FORCE_RECALCULATE
     )
     num_windows = mm10_windows.shape[0]
 
@@ -540,21 +580,22 @@ if __name__ == "__main__":
         gene_tss_df=gene_tss_df,
         max_peak_distance= MAX_PEAK_DISTANCE,
         distance_factor_scale= DISTANCE_SCALE_FACTOR,
-        force_recalculate=True
+        force_recalculate=FORCE_RECALCULATE
     )
     
     peaks_bed = os.path.join(OUTPUT_DIR, "peak_tmp.bed")
     jaspar_pfm_paths = [os.path.join(JASPAR_PFM_DIR, f) for f in os.listdir(JASPAR_PFM_DIR) if f.endswith(".pfm")]
     
-    run_moods_scan(
-        peaks_bed=peaks_bed, 
-        fasta_path=os.path.join(GENOME_DIR, f"{CHROM_ID}.fa"), 
-        motif_paths=jaspar_pfm_paths, 
-        out_tsv=moods_sites_file, 
-        n_cpus=NUM_CPUS,
-        pval_threshold=MOODS_PVAL_THRESHOLD, 
-        bg="auto"
-    )
+    if FORCE_RECALCULATE == True:
+        run_moods_scan(
+            peaks_bed=peaks_bed, 
+            fasta_path=os.path.join(GENOME_DIR, f"{CHROM_ID}.fa"), 
+            motif_paths=jaspar_pfm_paths, 
+            out_tsv=moods_sites_file, 
+            n_cpus=NUM_CPUS,
+            pval_threshold=MOODS_PVAL_THRESHOLD, 
+            bg="auto"
+        )
     
     # Build peak -> window mapping
     logging.info(f"\nCreating peak to window map")
@@ -577,27 +618,27 @@ if __name__ == "__main__":
     # Create a common TG vocabulary for the chromosome using the gene TSS
     logging.info(f"\nMatching TFs and TGs to global gene vocabulary")
     
-    # Update TG vocab with whatever TGs exist in gene_tss_df
-    tg_vocab = update_vocab(common_tg_vocab_file, gene_tss_df["name"].unique(), label="TG")
-
-    # Update TF vocab with whatever TFs exist in tf_names
-    tf_vocab = update_vocab(common_tf_vocab_file, tf_names, label="TF")
-            
     tg_names = [standardize_name(n) for n in total_TG_pseudobulk_chr.index.tolist()]
     
-    tf_tensor_all, tf_names_kept, tf_ids = match_gene_to_vocab(
-        [standardize_name(tf) for tf in tf_names],
-        tf_vocab,
-        tf_tensor_all,
-        label="TF"
-    )
+    if not os.path.exists(common_tf_vocab_file):
+        vocab = {n: i for i, n in enumerate(tf_names)}
+        with open(common_tf_vocab_file, "w") as f:
+            json.dump(vocab, f)
+        logging.info(f"Initialized TF vocab with {len(vocab)} entries")
+    else:
+        with open(common_tf_vocab_file) as f:
+            vocab = json.load(f)
 
-    tg_tensor_all, tg_names_kept, tg_ids = match_gene_to_vocab(
-        [standardize_name(tg) for tg in tg_names],
-        tg_vocab,
-        tg_tensor_all,
-        label="TG"
-    )
+    # Load global vocab
+    with open(common_tf_vocab_file) as f: tf_vocab = json.load(f)
+    with open(common_tg_vocab_file) as f: tg_vocab = json.load(f)
+
+    # Match TFs and TGs to global vocab
+    tf_tensor_all, tf_names_kept, tf_ids = align_to_vocab(tf_names, tf_vocab, tf_tensor_all, label="TF")
+    tg_tensor_all, tg_names_kept, tg_ids = align_to_vocab(tg_names, tg_vocab, tg_tensor_all, label="TG")
+    
+    torch.save(torch.tensor(tf_ids, dtype=torch.long), tf_id_file)
+    torch.save(torch.tensor(tg_ids, dtype=torch.long), tg_id_file)
 
     logging.info(f"\tMatched {len(tf_names_kept)} TFs to global vocab")
     logging.info(f"\tMatched {len(tg_names_kept)} TGs to global vocab")
@@ -658,8 +699,6 @@ if __name__ == "__main__":
     atomic_json_dump(tf_names_kept, sample_tf_name_file)
     atomic_json_dump(tg_names_kept, sample_tg_name_file)
 
-    torch.save(torch.tensor(tf_ids, dtype=torch.long), tf_id_file)
-    torch.save(torch.tensor(tg_ids, dtype=torch.long), tg_id_file)
 
     # Write the distance bias and metacell names for the sample
     torch.save(dist_bias, dist_bias_file)

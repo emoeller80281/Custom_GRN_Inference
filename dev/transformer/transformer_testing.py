@@ -24,7 +24,7 @@ import eval
 
 SAMPLE_NAME = "mESC"
 CHROM_ID    = "chr19"
-TRAINING_RUN_NAME = "model_training_01_10_16_03_45"
+TRAINING_RUN_NAME = "model_training_02_10_14_08_31"
 
 TRANSFORMER_DATA_DIR = os.path.join(DEV_DIR, f"transformer_data/{SAMPLE_NAME}")
 COMMON_DIR           = os.path.join(DEV_DIR, "transformer_data/common")
@@ -261,20 +261,24 @@ if __name__ == "__main__":
         model, 
         train_loader, 
         DEVICE, 
+        inverse_scaler=scaler,
         outpath=os.path.join(TEST_DIR, "eval_results_scatter.png")
         )
 
-    if has_shortcut(model):
-        logging.info("\nExtracting shortcut TF×TG matrix (no gradients needed)")
-        tf_importance_df = extract_shortcut_matrix(model, dataset, normalize="global")
-    else:
-        logging.info("\nGenerating gradient attribution matrix")
-        tf_importance_df = gradient_attribution_matrix(
-            model, dataset, test_loader, tg_chunk=TG_CHUNK, device=DEVICE, normalize="global"
-        )
-    out_csv = os.path.join(OUT_DIR, "tf_importance_matrix.csv")
-    tf_importance_df.to_csv(out_csv)
-    logging.info(f"\tSaved TF×TG importance matrix: {out_csv}  shape={tf_importance_df.shape}")
+    logging.info("\nExtracting shortcut TF×TG matrix (no gradients needed)")
+    tf_importance_df = extract_shortcut_matrix(model, dataset, normalize="global")
+
+    logging.info("\nGenerating gradient attribution matrix")
+    gradient_attrib_df = gradient_attribution_matrix(
+        model, dataset, test_loader, tg_chunk=TG_CHUNK, device=DEVICE, normalize="global"
+    )
+    grad_attrib_out_csv = os.path.join(OUT_DIR, "gradient_attribution.csv")
+    gradient_attrib_df.to_csv(grad_attrib_out_csv)
+    logging.info(f"\tSaved gradient attribution matrix: {grad_attrib_out_csv}  shape={gradient_attrib_df.shape}")
+    
+    importance_out_csv = os.path.join(OUT_DIR, "shortcut_matrix.csv")
+    tf_importance_df.to_csv(importance_out_csv)
+    logging.info(f"\tSaved shortcut matrix: {importance_out_csv}  shape={tf_importance_df.shape}")
 
     # --- Evaluate vs CHIP edges ---
     logging.info("\nEvaluating AUROC and AUPRC")

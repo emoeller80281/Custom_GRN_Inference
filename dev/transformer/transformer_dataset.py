@@ -160,6 +160,11 @@ class MultiomicTransformerDataset(Dataset):
                 logging.warning(f"TG: {len(missing)} names missing in common vocab (e.g. {missing[:10]})")
             self.tg_ids = torch.tensor([self.tg_name2id[n] for n in self.tg_names if n in self.tg_name2id],
                                        dtype=torch.long)
+            
+        if self.tf_ids.max().item() >= len(self.tf_name2id):
+            logging.error(f"Bad TF id {self.tf_ids.max().item()} >= vocab size {len(self.tf_name2id)}")
+        if self.tg_ids.max().item() >= len(self.tg_name2id):
+            logging.error(f"Bad TG id {self.tg_ids.max().item()} >= vocab size {len(self.tg_name2id)}")
 
         # sanity: lengths must match row counts of tensors
         if self.tf_tensor_all.shape[0] != self.tf_ids.numel():

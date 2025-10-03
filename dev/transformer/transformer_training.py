@@ -18,13 +18,13 @@ from sklearn.preprocessing import StandardScaler
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, random_split
-from dev.transformer.prepare_transformer_data import DISTANCE_SCALE_FACTOR
 from transformer import MultiomicTransformer
 from transformer_dataset import MultiomicTransformerDataset
 
 import torch.multiprocessing as mp
 from torch.utils.data.distributed import DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.amp import autocast, GradScaler
 import torch.distributed as dist
 
 import matplotlib.pyplot as plt
@@ -37,26 +37,28 @@ from eval import (
 import warnings
 warnings.filterwarnings("ignore", message="No device id is provided via `init_process_group`")
 
-CHROM_ID = "chr1"
+CHROM_ID = "chr19"
 SAMPLE_NAME = "mESC"
 
 TOTAL_EPOCHS=200
-BATCH_SIZE=16
-PATIENCE=25
+BATCH_SIZE=8
+GRAD_ACCUM_STEPS=8
+PATIENCE=15
+CORR_LOSS_WEIGHT=0.05
 
-D_MODEL = 384
-NUM_HEADS = 8
-NUM_LAYERS = 4
-D_FF = 1536
-DROPOUT = 0.05
+D_MODEL = 246
+NUM_HEADS = 6
+NUM_LAYERS = 3
+D_FF = 768
+DROPOUT = 0.1
 
-ATTN_BIAS_SCALE = 2.0
+ATTN_BIAS_SCALE = 1.0
 
 # TF to TG shortcut parameters
-SHORTCUT_L1 = 5e-5
+SHORTCUT_L1 = 0
 SHORTCUT_L2 = 0
-SHORTCUT_TOPK = 5
-SHORTCUT_DROPOUT = 0.1
+SHORTCUT_TOPK = None
+SHORTCUT_DROPOUT = 0
 
 PROJECT_DIR = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
 DATA_DIR = os.path.join(PROJECT_DIR, f"dev/transformer/transformer_data/{SAMPLE_NAME}")
@@ -71,6 +73,8 @@ def ddp_setup(rank, world_size):
     """
     local_rank = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(local_rank)
+    
+    torch.backends.cuda.enable_flash_sdp(True)
 
     dist.init_process_group(backend="nccl", init_method="env://",
                             rank=rank, world_size=world_size)
@@ -104,6 +108,7 @@ class Trainer:
         save_every: int,
         patience: int = 10,
         min_delta: float = 1e-3,
+        grad_accum_steps: int = 1
     ) -> None:
         self.gpu_id = gpu_id
         self.model = model.to(gpu_id)
@@ -113,7 +118,10 @@ class Trainer:
         self.criterion = criterion
         self.save_every = save_every
         self.model = DDP(model, device_ids=[gpu_id])
-        
+        self.scaler = GradScaler(device="cuda")
+        self.grad_accum_steps = grad_accum_steps
+        self.step_count = 0
+
         # Learning rate scheduler
         self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             self.optimizer, mode="min", factor=0.1, patience=7
@@ -124,51 +132,61 @@ class Trainer:
         self.patience = patience
         self.min_delta = min_delta
         self.patience_counter = 0
-        self.best_auroc = 0.0
 
     def _run_batch(self, batch):
         atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids, motif_mask = batch
-        atac_wins = atac_wins.to(self.gpu_id)
-        tf_tensor = tf_tensor.to(self.gpu_id)
-        targets   = targets.to(self.gpu_id)
-        bias      = bias.to(self.gpu_id)
-        tf_ids    = tf_ids.to(self.gpu_id)
-        tg_ids    = tg_ids.to(self.gpu_id)
-        motif_mask= motif_mask.to(self.gpu_id)
+        atac_wins, tf_tensor, targets, bias = (
+            atac_wins.to(self.gpu_id),
+            tf_tensor.to(self.gpu_id),
+            targets.to(self.gpu_id),
+            bias.to(self.gpu_id),
+        )
+        tf_ids, tg_ids, motif_mask = (
+            tf_ids.to(self.gpu_id),
+            tg_ids.to(self.gpu_id),
+            motif_mask.to(self.gpu_id),
+        )
 
-        self.optimizer.zero_grad()
-        preds_out = self.model(atac_wins, tf_tensor, tf_ids=tf_ids, tg_ids=tg_ids, 
-                           bias=bias, motif_mask=motif_mask)
-        
-        if isinstance(preds_out, tuple):
-            preds, _ = preds_out
-        else:
-            preds = preds_out
+        with autocast(device_type="cuda", dtype=torch.bfloat16):
+            preds_out = self.model(
+                atac_wins,
+                tf_tensor,
+                tf_ids=tf_ids,
+                tg_ids=tg_ids,
+                bias=bias,
+                motif_mask=motif_mask,
+            )
+            preds = preds_out[0] if isinstance(preds_out, tuple) else preds_out
 
-        loss = self.criterion(preds, targets)
+            # Base regression loss
+            loss = self.criterion(preds, targets)
 
-        # correlation bonus (unchanged)
-        preds_flat, targets_flat = preds.reshape(-1), targets.reshape(-1)
-        if torch.std(targets_flat) > 1e-8 and torch.std(preds_flat) > 1e-8:
-            vx = preds_flat - torch.mean(preds_flat)
-            vy = targets_flat - torch.mean(targets_flat)
-            corr_loss = -torch.sum(vx * vy) / (torch.sqrt(torch.sum(vx**2))*torch.sqrt(torch.sum(vy**2)) + 1e-8)
-        else:
-            corr_loss = torch.tensor(0.0, device=preds.device)
-        loss = loss + 0.05 * corr_loss
-        
-        # add shortcut regularization if enabled
-        if hasattr(self.model.module, "shortcut_layer"):
-            loss = loss + self.model.module.shortcut_layer.regularization()
+            # Correlation bonus
+            preds_flat, targets_flat = preds.reshape(-1), targets.reshape(-1)
+            if torch.std(targets_flat) > 1e-8 and torch.std(preds_flat) > 1e-8:
+                vx, vy = preds_flat - preds_flat.mean(), targets_flat - targets_flat.mean()
+                corr_loss = -torch.sum(vx * vy) / (
+                    torch.sqrt(torch.sum(vx**2)) * torch.sqrt(torch.sum(vy**2)) + 1e-8
+                )
+            else:
+                corr_loss = torch.tensor(0.0, device=preds.device)
+            loss = loss + CORR_LOSS_WEIGHT * corr_loss
 
-        if not torch.isfinite(loss):
-            logging.warning(f"Rank {self.gpu_id}: skipping batch due to non-finite loss")
-            return None
+        # Gradient accumulation
+        loss = loss / self.grad_accum_steps
+        self.scaler.scale(loss).backward()
+        self.step_count += 1
 
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-        self.optimizer.step()
-        return loss
+        if self.step_count % self.grad_accum_steps == 0:
+            self.scaler.unscale_(self.optimizer)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+            self.optimizer.zero_grad(set_to_none=True)
+
+        return loss.detach() * self.grad_accum_steps
+
+
 
     def _validate(self):
         self.model.eval()
@@ -232,7 +250,7 @@ class Trainer:
         avg_loss = total_loss / max(1, n_batches)
         return avg_loss, pearson_corr, spearman_corr
     
-    def _run_epoch(self, epoch, chip_csv=None):
+    def _run_epoch(self, epoch, chip_edges=None):
         sampler = getattr(self.train_data, "sampler", None)
         if isinstance(sampler, DistributedSampler):
             sampler.set_epoch(epoch)
@@ -251,22 +269,7 @@ class Trainer:
         # update LR schedule
         self.scheduler.step(avg_val_loss)
 
-        auroc, auprc = None, None
-        if chip_csv is not None and self.gpu_id == 0:  # only run on rank 0
-            if hasattr(self.model.module, "shortcut_layer") and hasattr(self.model.module.shortcut_layer, "attn"):
-                try:
-                    mean_attn = get_mean_tf_tg_attention(self.model.module, self.val_data, device=f"cuda:{self.gpu_id}")
-                    tf_imp_df = pd.DataFrame(
-                        mean_attn.numpy(),
-                        index=self.val_data.dataset.tg_names,
-                        columns=self.val_data.dataset.tf_names
-                    )
-                    auroc, auprc = evaluate_chip_aucs(tf_imp_df, chip_csv)
-                    logging.info(f"   CHIP AUROC={auroc:.3f}, AUPRC={auprc:.3f}")
-                except Exception as e:
-                    logging.warning(f"CHIP evaluation failed: {e}")
-
-        return avg_train_loss, avg_val_loss, pearson_corr, spearman_corr, auroc, auprc
+        return avg_train_loss, avg_val_loss, pearson_corr, spearman_corr
 
     def _save_checkpoint(self, epoch, path):
         ckp = self.model.module.state_dict()
@@ -281,18 +284,18 @@ class Trainer:
         history = []  # store per-epoch logs
 
         for epoch in range(max_epochs):
-            train_loss, val_loss, pearson_corr, spearman_corr, auroc, auprc = \
-                self._run_epoch(epoch, chip_csv=CHIP_GROUND_TRUTH_FILE)
+            train_loss, val_loss, pearson_corr, spearman_corr = self._run_epoch(epoch)
 
-            # Save stats to history
+
             if self.gpu_id == 0:
+
                 logging.info(
                     f"Epoch {epoch+1} | Train Loss: {train_loss:.4f} | "
                     f"Val Loss: {val_loss:.4f} | "
                     f"Pearson: {pearson_corr:.3f} | Spearman: {spearman_corr:.3f} | "
                     f"LR: {self.optimizer.param_groups[0]['lr']:.2e}"
                 )
-                
+
                 lr = self.optimizer.param_groups[0]['lr']
                 history.append({
                     "Epoch": epoch,
@@ -300,8 +303,6 @@ class Trainer:
                     "Val Loss": float(val_loss),
                     "Pearson": float(pearson_corr),
                     "Spearman": float(spearman_corr),
-                    "AUROC": float(auroc) if auroc is not None else None,
-                    "AUPRC": float(auprc) if auprc is not None else None,
                     "LR": float(lr),
                 })
                 
@@ -317,9 +318,9 @@ class Trainer:
 
             # --- Early stopping check (only rank 0 sets flag) ---
             if self.gpu_id == 0:
-                if auroc is not None and auroc > self.best_auroc + self.min_delta:
+                if (val_loss < best_val_loss - self.min_delta) or (pearson_corr > best_pearson + self.min_delta):
                     # If either val_loss improved OR pearson improved, reset patience
-                    best_val_loss = min(best_val_loss, val_loss)
+                    best_val_loss = val_loss
                     best_pearson = max(best_pearson, pearson_corr)
                     patience_counter = 0
                 else:
@@ -351,7 +352,7 @@ class Trainer:
             logging.info("Training loop exited normally.")
     
     def _write_log_csv(self, history, path, epoch, final=False):
-        fieldnames = ["Epoch", "Train Loss", "Val Loss", "Pearson", "Spearman", "AUROC", "AUPRC", "LR"]
+        fieldnames = ["Epoch", "Train Loss", "Val Loss", "Pearson", "Spearman", "LR"]
         log_path = os.path.join(path, "training_log.csv")
         with open(log_path, "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -388,8 +389,8 @@ def load_train_objs(DATA_DIR, CHROM_ID,
         tf_vocab_size=tf_vocab_size,
         tg_vocab_size=tg_vocab_size,
         bias_scale=ATTN_BIAS_SCALE,
-        use_shortcut=True,
-        use_motif_mask=True,
+        use_shortcut=False,
+        use_motif_mask=False,
         lambda_l1=SHORTCUT_L1,
         lambda_l2=SHORTCUT_L2,
         topk=SHORTCUT_TOPK,
@@ -456,6 +457,7 @@ def write_run_parameters(dataset, out_dir, has_dist_bias, has_motif_mask):
         "Metacells": len(dataset.metacell_names),  # store count, not huge list
         "Epochs": TOTAL_EPOCHS,
         "Batch Size": BATCH_SIZE,
+        "Grad accumulation steps": GRAD_ACCUM_STEPS,
         "d_model": D_MODEL,
         "Attention Heads": NUM_HEADS,
         "Model Layers": NUM_LAYERS,
@@ -501,43 +503,23 @@ def get_mean_tf_tg_attention(model, dataloader, device="cuda"):
         tf_ids, tg_ids = tf_ids.to(device), tg_ids.to(device)
         motif_mask = motif_mask.to(device)
 
-        _ = model(atac_wins, tf_tensor, tf_ids=tf_ids, tg_ids=tg_ids, bias=bias, motif_mask=motif_mask)
+        # Forward pass
+        _ = model(atac_wins, tf_tensor, tf_ids=tf_ids, tg_ids=tg_ids,
+                  bias=bias, motif_mask=motif_mask)
+
+        # grab attn from shortcut layer each batch
         if hasattr(model.shortcut_layer, "attn"):
-            attn_batch = model.shortcut_layer.attn.detach().cpu()  # [G,T]
+            attn_batch = model.shortcut_layer.attn.detach().cpu()
             attn_accum = attn_batch if attn_accum is None else attn_accum + attn_batch
             n += 1
     return attn_accum / max(n, 1)
 
-def evaluate_chip_aucs(tf_importance_df, chip_csv):
-    chip = pd.read_csv(chip_csv)
-    chip_edges = {(t.capitalize(), g.capitalize()) for t, g in zip(chip["TF"], chip["TG"])}
-
-    tf_imp = tf_importance_df.copy()
-    tf_imp.index   = [x.capitalize() for x in tf_imp.index]
-    tf_imp.columns = [x.capitalize() for x in tf_imp.columns]
-
-    rn111_tfs = {t for t, _ in chip_edges}
-    rn111_tgs = {g for _, g in chip_edges}
-    tf_imp = tf_imp.loc[tf_imp.index.intersection(rn111_tfs),
-                        tf_imp.columns.intersection(rn111_tgs)]
-    if tf_imp.empty:
-        raise ValueError("No overlap between TF/TG names and CHIP set.")
-
-    scores, labels = [], []
-    for tg in tf_imp.columns:
-        for tf, score in tf_imp[tg].items():
-            scores.append(float(score))
-            labels.append(1 if (tf, tg) in chip_edges else 0)
-
-    if len(set(labels)) < 2:
-        raise ValueError("Only one class present; AUROC/PR-AUC undefined.")
-
-    auroc = roc_auc_score(labels, scores)
-    auprc = average_precision_score(labels, scores)
-    return auroc, auprc
 
 
 def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_size: int):
+    
+    assert D_MODEL % NUM_HEADS == 0, f"{D_MODEL} not divisible by {NUM_HEADS}"
+    
     ddp_setup(rank, world_size)
     setup_logging(rank)
     
@@ -545,6 +527,13 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
         time_now = datetime.now().strftime("%d_%m_%H_%M_%S")
         training_output_dir = os.path.join(OUTPUT_DIR, f"model_training_{time_now}")
         os.makedirs(training_output_dir, exist_ok=True)
+        
+        if rank == 0:
+            chip = pd.read_csv(CHIP_GROUND_TRUTH_FILE)
+            chip_edges = {(t.capitalize(), g.capitalize()) for t, g in zip(chip["TF"], chip["TG"])}
+        else:
+            chip_edges = None
+        chip_edges = dist_broadcast_list(chip_edges, src=0)
             
         dataset, model, optimizer = load_train_objs(
             DATA_DIR, CHROM_ID,
@@ -579,6 +568,7 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
             logging.info(f"Metacells:           {len(dataset.metacell_names)}")
             logging.info(f"Epochs:              {TOTAL_EPOCHS}")
             logging.info(f"Batch Size:          {BATCH_SIZE}")
+            logging.info(f"Grad steps:          {GRAD_ACCUM_STEPS}")
             logging.info(f"Model Dimension:     {D_MODEL}")
             logging.info(f"Attention Heads:     {NUM_HEADS}")
             logging.info(f"Attention Layers:    {NUM_LAYERS}")
@@ -593,10 +583,17 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
             logging.info("================================================")
             write_run_parameters(dataset, training_output_dir, has_dist_bias, has_motif_mask)
         
+        if rank == 0:
+            logging.info("Preparing dataloader")
         train_loader, val_loader, test_loader = prepare_dataloader(dataset, batch_size, world_size, rank)
         criterion = nn.MSELoss()
-        trainer = Trainer(model, train_loader, val_loader, optimizer, criterion, gpu_id=rank, save_every=save_every, patience=PATIENCE)
-
+        
+        if rank == 0:
+            logging.info("Creating Trainer")
+        trainer = Trainer(model, train_loader, val_loader, optimizer, criterion, gpu_id=rank, save_every=save_every, patience=PATIENCE, grad_accum_steps=GRAD_ACCUM_STEPS)
+        
+        if rank == 0:
+            logging.info("\n ----- TRAINING STARTED -----")
         trainer.train(max_epochs=TOTAL_EPOCHS, path=training_output_dir)
         
         if rank == 0:

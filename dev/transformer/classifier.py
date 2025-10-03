@@ -1,152 +1,87 @@
-import os
-import pandas as pd
-import json
-import joblib
 import torch
+import pandas as pd
+
+@torch.no_grad()
+def extract_edge_features(model, dataloader, tf_names, tg_names, chip_edges=None, device="cuda"):
+    model.eval()
+    edge_features = []
+    
+    for batch in dataloader:
+        atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids, motif_mask = [
+            x.to(device) if torch.is_tensor(x) else x for x in batch
+        ]
+
+        # forward pass
+        preds_out = model(atac_wins, tf_tensor, tf_ids=tf_ids, tg_ids=tg_ids,
+                          bias=bias, motif_mask=motif_mask)
+        preds = preds_out[0] if isinstance(preds_out, tuple) else preds_out
+
+        # shortcut attention [G, T]
+        if hasattr(model.shortcut_layer, "attn"):
+            attn = model.shortcut_layer.attn.detach().cpu()
+
+            for tg_idx, tg in enumerate(tg_names):
+                for tf_idx, tf in enumerate(tf_names):
+                    feat = {
+                        "TF": tf,
+                        "TG": tg,
+                        "attn": float(attn[tg_idx, tf_idx]),
+                        "pred_mean": float(preds[:, tg_idx].mean().cpu()),
+                        "pred_std": float(preds[:, tg_idx].std().cpu()),
+                        "bias_mean": float(bias[:, tg_idx].mean().cpu()),
+                        "motif_mask": float(motif_mask[tg_idx, tf_idx].cpu()) if motif_mask is not None else 0.0,
+                    }
+                    edge_features.append(feat)
+    
+    df = pd.DataFrame(edge_features)
+
+    # Add binary labels if ground truth is provided
+    if chip_edges is not None:
+        chip_set = set(chip_edges)
+        df["label"] = [(tf, tg) in chip_set for tf, tg in zip(df["TF"], df["TG"])]
+        df["label"] = df["label"].astype(int)
+    
+    return df
+
+from xgboost import XGBClassifier
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import roc_auc_score
-from sklearn.ensemble import RandomForestClassifier
-from imblearn.over_sampling import SMOTE
+from sklearn.metrics import roc_auc_score, average_precision_score
 
-from transformer import MultiomicTransformer
-from transformer_dataset import MultiomicTransformerDataset
-from eval import (
-    per_gene_correlation
-)
-from transformer_training import (
-    prepare_dataloader
-)
+def train_edge_classifier(df):
+    features = ["attn", "pred_mean", "pred_std", "bias_mean", "motif_mask"]
+    X = df[features].values
+    y = df["label"].values
 
-def train_classifier(feature_matrix, labels):
-    
-    X = feature_matrix
-    y = labels
-    
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.3, stratify=y, random_state=42
+    X_train, X_val, y_train, y_val = train_test_split(
+        X, y, test_size=0.2, stratify=y, random_state=42
     )
-    
-    sm = SMOTE(random_state=42)
-    X_train_res, y_train_res = sm.fit_resample(X_train, y_train)
 
-    clf = RandomForestClassifier(
-        n_estimators=200, 
-        random_state=42,
-        class_weight="balanced"   # upweight minority class
+    clf = XGBClassifier(
+        n_estimators=500,
+        max_depth=6,
+        learning_rate=0.05,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        scale_pos_weight=(y_train == 0).sum() / (y_train == 1).sum()  # balance
     )
-    clf.fit(X_train_res, y_train_res)
+    clf.fit(X_train, y_train)
 
-    probs = clf.predict_proba(X_test)[:, 1]
-    
-    predicted_subset = gene_features.index[probs > 0.5]
-    
-    predicted_subset.to_series().to_csv(os.path.join(TEST_DIR, "learnable_genes_iter1.csv"))
+    y_pred = clf.predict_proba(X_val)[:, 1]
+    auroc = roc_auc_score(y_val, y_pred)
+    auprc = average_precision_score(y_val, y_pred)
 
-    roc_score = roc_auc_score(y_test, probs)
-    
-    return roc_score
+    print(f"Validation AUROC: {auroc:.3f}, AUPRC: {auprc:.3f}")
+    return clf
 
-def build_gene_features(tf_tg_weights, dataset):
-    """
-    Create extended per-gene feature set.
-    
-    Args:
-        tf_tg_weights : np.ndarray [num_tfs, num_genes]
-        dataset       : MultiomicTransformerDataset (with tg_tensor_all etc.)
-    
-    Returns:
-        DataFrame [num_genes x features]
-    """
-    tg_expr = dataset.tg_tensor_all.numpy()   # [genes x cells]
-    
-    # 1. TF->TG weight stats
-    tf_sum = tf_tg_weights.sum(axis=0)
-    tf_max = tf_tg_weights.max(axis=0)
-    tf_mean = tf_tg_weights.mean(axis=0)
-    tf_std = tf_tg_weights.std(axis=0)
-    tf_median = np.median(tf_tg_weights, axis=0)
-    tf_nonzero = (tf_tg_weights != 0).sum(axis=0)
-    tf_skew = skew(tf_tg_weights, axis=0, bias=False)
-    tf_kurt = kurtosis(tf_tg_weights, axis=0, bias=False)
-    
-    # 2. Expression stats
-    expr_mean = tg_expr.mean(axis=1)
-    expr_std = tg_expr.std(axis=1)
-    expr_cv = np.divide(expr_std, expr_mean + 1e-8)
-    
-    # Optionally: ATAC stats if dataset.atac_tensor_all exists
-    atac_mean = None
-    if hasattr(dataset, "atac_tensor_all"):
-        atac_arr = dataset.atac_tensor_all.numpy()
-        atac_mean = atac_arr.mean(axis=1)[:len(dataset.tg_names)]  # adapt indexing
-    
-    # Assemble into DataFrame
-    features = {
-        "tf_weight_sum": tf_sum,
-        "tf_weight_max": tf_max,
-        "tf_weight_mean": tf_mean,
-        "tf_weight_std": tf_std,
-        "tf_weight_median": tf_median,
-        "tf_weight_nonzero": tf_nonzero,
-        "tf_weight_skew": tf_skew,
-        "tf_weight_kurt": tf_kurt,
-        "tg_expr_mean": expr_mean,
-        "tg_expr_std": expr_std,
-        "tg_expr_cv": expr_cv,
-    }
-    if atac_mean is not None:
-        features["atac_mean"] = atac_mean
-    
-    return pd.DataFrame(features, index=dataset.tg_names)
+df = extract_edge_features(trainer.model.module, val_loader,
+                           tf_names=dataset.tf_names,
+                           tg_names=dataset.tg_names,
+                           chip_edges=chip_edges,
+                           device=f"cuda:{rank}")
 
-selected_date = "26_09_11_56_06"
-PROJECT_DIR="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
-TRANSFORMER_DATA_DIR = os.path.join(PROJECT_DIR, "dev/transformer/transformer_data")
+df.to_csv("edge_features.csv", index=False)
 
-TEST_DIR=os.path.join(PROJECT_DIR, f"output/transformer_testing_output/model_training_{selected_date}")
-
-with open(os.path.join(TEST_DIR, "run_parameters.json"), 'r') as f:
-    run_params = json.loads(f.read())
-
-TOTAL_EPOCHS=run_params["Epochs"]
-BATCH_SIZE=run_params["Batch Size"]
-
-D_MODEL = run_params["d_model"]
-NUM_HEADS = run_params["Attention Heads"]
-NUM_LAYERS = run_params["Model Layers"]
-D_FF = run_params["d_feedforward"]
-DROPOUT = run_params["Dropout"]
-
-# Paths
-model_path = os.path.join(TEST_DIR, "final_model.pt")
-scaler = joblib.load(os.path.join(TEST_DIR, "tg_scaler.pkl"))
-
-# Rebuild dataset + model
-dataset = MultiomicTransformerDataset(
-    data_dir=TRANSFORMER_DATA_DIR, 
-    chrom_id="chr19"
-)
-model = MultiomicTransformer(
-    D_MODEL, NUM_HEADS, NUM_LAYERS, D_FF, DROPOUT,
-    dataset.num_tf, dataset.num_tg
-)
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-model.load_state_dict(torch.load(model_path, map_location=device))
-model = model.to(device)
-model.eval()
-
-# Prepare DataLoader for test split
-_, _, test_loader = prepare_dataloader(dataset, BATCH_SIZE, world_size=1, rank=0)
-
-tf_tg_weights = pd.read_csv(os.path.join(TEST_DIR, "tf_tg_weights.csv"), index_col=0)
-
-gene_features = build_gene_features(tf_tg_weights, dataset)
-
-corr_df = per_gene_correlation(model, test_loader, scaler, gpu_id=0, gene_names=dataset.tg_names)
-
-# Align labels
-labels = corr_df.set_index("gene").loc[gene_features.index, "label"].to_numpy()
-
-# Train + evaluate classifier
-roc_score = train_classifier(gene_features.values, labels)
+clf = train_edge_classifier(df)
+import joblib
+joblib.dump(clf, "edge_classifier.pkl")
 
