@@ -110,9 +110,13 @@ def create_single_cell_tensors(
     dataset_processed_data_dir: Path,
     tg_vocab: dict[str, int],
     tf_vocab: dict[str, int],
+    chrom_id: str,
 ):
     outdir = SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / "single_cell"
     outdir.mkdir(parents=True, exist_ok=True)
+
+    # --- set chromosome-specific TG list ---
+    chrom_tg_names = set(gene_tss_df["name"].unique())
 
     for sample_name in sample_names:
         sample_processed_data_dir = dataset_processed_data_dir / sample_name
@@ -127,30 +131,30 @@ def create_single_cell_tensors(
         TG_sc = pd.read_csv(tg_sc_file, sep="\t", index_col=0)
         RE_sc = pd.read_csv(re_sc_file, sep="\t", index_col=0)
 
-        # --- TG tensor ---
-        chrom_tg_names = set(gene_tss_df['name'].unique())  # from make_chrom_gene_tss_df
+        # --- restrict TGs to chromosome + vocab ---
         tg_rows = [g for g in TG_sc.index if g in chrom_tg_names]
-
         TG_sc_chr = TG_sc.loc[tg_rows]
 
-        # Align to global vocab
         tg_tensor_sc, tg_names_kept, tg_ids = align_to_vocab(
             TG_sc_chr.index.tolist(),
             tg_vocab,
             torch.tensor(TG_sc_chr.values, dtype=torch.float32),
             label="TG"
         )
-        torch.save(tg_tensor_sc, outdir / f"{sample_name}_tg_tensor_singlecell_{CHROM_ID}.pt")
-        torch.save(torch.tensor(tg_ids, dtype=torch.long), outdir / f"{sample_name}_tg_ids_singlecell_{CHROM_ID}.pt")
-        atomic_json_dump(tg_names_kept, outdir / f"{sample_name}_tg_names_singlecell_{CHROM_ID}.json")
+        torch.save(tg_tensor_sc, outdir / f"{sample_name}_tg_tensor_singlecell_{chrom_id}.pt")
+        torch.save(torch.tensor(tg_ids, dtype=torch.long), outdir / f"{sample_name}_tg_ids_singlecell_{chrom_id}.pt")
+        atomic_json_dump(tg_names_kept, outdir / f"{sample_name}_tg_names_singlecell_{chrom_id}.json")
 
-        # --- ATAC tensor ---
-        atac_tensor_sc = torch.tensor(RE_sc.values, dtype=torch.float32)
-        torch.save(atac_tensor_sc, outdir / f"{sample_name}_atac_tensor_singlecell_{CHROM_ID}.pt")
+        # --- restrict ATAC peaks to chromosome ---
+        re_rows = [p for p in RE_sc.index if p.startswith(f"{chrom_id}:")]
+        RE_sc_chr = RE_sc.loc[re_rows]
+
+        atac_tensor_sc = torch.tensor(RE_sc_chr.values, dtype=torch.float32)
+        torch.save(atac_tensor_sc, outdir / f"{sample_name}_atac_tensor_singlecell_{chrom_id}.pt")
 
         # --- TF tensor (subset of TGs) ---
         tf_tensor_sc = None
-        tf_rows = [g for g in TG_sc.index if g in tf_vocab]
+        tf_rows = [g for g in TG_sc_chr.index if g in tf_vocab]
         if tf_rows:
             TF_sc = TG_sc.loc[tf_rows]
             tf_tensor_sc, tf_names_kept, tf_ids = align_to_vocab(
@@ -159,9 +163,12 @@ def create_single_cell_tensors(
                 torch.tensor(TF_sc.values, dtype=torch.float32),
                 label="TF"
             )
-            torch.save(tf_tensor_sc, outdir / f"{sample_name}_tf_tensor_singlecell_{CHROM_ID}.pt")
-            torch.save(torch.tensor(tf_ids, dtype=torch.long), outdir / f"{sample_name}_tf_ids_singlecell_{CHROM_ID}.pt")
-            atomic_json_dump(tf_names_kept, outdir / f"{sample_name}_tf_names_singlecell_{CHROM_ID}.json")
+            torch.save(tf_tensor_sc, outdir / f"{sample_name}_tf_tensor_singlecell_{chrom_id}.pt")
+            torch.save(torch.tensor(tf_ids, dtype=torch.long), outdir / f"{sample_name}_tf_ids_singlecell_{chrom_id}.pt")
+            atomic_json_dump(tf_names_kept, outdir / f"{sample_name}_tf_names_singlecell_{chrom_id}.json")
+        else:
+            logging.warning(f"No TFs from global vocab found in sample {sample_name}")
+            tf_tensor_sc, tf_ids = None, []
 
         logging.info(
             f"Saved single-cell tensors for {sample_name} | "
@@ -684,7 +691,7 @@ if __name__ == "__main__":
     )
     logging.info(f"\t- Done!")
     
-    create_single_cell_tensors(gene_tss_df, FINE_TUNING_DATASET, SAMPLE_PROCESSED_DATA_DIR, tg_vocab, tf_vocab)
+    create_single_cell_tensors(gene_tss_df, FINE_TUNING_DATASET, SAMPLE_PROCESSED_DATA_DIR, tg_vocab, tf_vocab, CHROM_ID)
     
     # ----- Writing Output Files -----
     logging.info(f"\nWriting output files")
