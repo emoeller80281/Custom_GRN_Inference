@@ -8,6 +8,7 @@ ORGANISM_CODE = "mm10"
 DATASET_NAME = "mESC"
 CHROM_ID = "chr19"
 SAMPLE_NAMES = ["E7.5_rep1", "E7.5_rep2", "E7.75_rep1", "E8.0_rep2", "E8.5_rep2", "E8.75_rep2", "E7.5_rep2", "E8.0_rep1", "E8.5_rep1"]
+FINE_TUNING_DATASET = ["E7.5_rep1"]
 
 # Paths to the raw scRNA-seq and scATAC-seq data
 RAW_SINGLE_CELL_DATA = Path("/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/SINGLE_CELL_DATASETS")

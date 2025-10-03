@@ -77,8 +77,7 @@ class MultiomicTransformerDataset(Dataset):
             self.num_cells   = self.tg_tensor_all.shape[1]
             self.num_windows = self.atac_window_tensor_all.shape[0]
             
-            # scaler for inverse-transform
-            self.scaler = joblib.load(scaler_path)
+            self.scaler = None
 
             # in fine-tune mode we skip pseudobulk dist_bias + motif_mask
             self.dist_bias_tensor = None
@@ -114,6 +113,12 @@ class MultiomicTransformerDataset(Dataset):
             for f in required:
                 if not f.exists():
                     raise FileNotFoundError(f"Required file not found: {f}")
+                
+            if os.path.exists(scaler_path):
+                self.scaler = joblib.load(scaler_path)
+            else:
+                logging.warning(f"Scaler not found at {scaler_path}, setting to None")
+                self.scaler = None
 
             # load tensors
             self.tf_tensor_all = torch.load(tf_path).float()

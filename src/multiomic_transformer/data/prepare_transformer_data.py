@@ -105,6 +105,7 @@ def make_chrom_gene_tss_df(gene_tss_file, chrom_id, genome_dir):
     return gene_tss_df
 
 def create_single_cell_tensors(
+    gene_tss_df: pd.DataFrame,
     sample_names: list[str],
     dataset_processed_data_dir: Path,
     tg_vocab: dict[str, int],
@@ -127,10 +128,16 @@ def create_single_cell_tensors(
         RE_sc = pd.read_csv(re_sc_file, sep="\t", index_col=0)
 
         # --- TG tensor ---
+        chrom_tg_names = set(gene_tss_df['name'].unique())  # from make_chrom_gene_tss_df
+        tg_rows = [g for g in TG_sc.index if g in chrom_tg_names]
+
+        TG_sc_chr = TG_sc.loc[tg_rows]
+
+        # Align to global vocab
         tg_tensor_sc, tg_names_kept, tg_ids = align_to_vocab(
-            TG_sc.index.tolist(),
+            TG_sc_chr.index.tolist(),
             tg_vocab,
-            torch.tensor(TG_sc.values, dtype=torch.float32),
+            torch.tensor(TG_sc_chr.values, dtype=torch.float32),
             label="TG"
         )
         torch.save(tg_tensor_sc, outdir / f"{sample_name}_tg_tensor_singlecell_{CHROM_ID}.pt")
@@ -677,7 +684,7 @@ if __name__ == "__main__":
     )
     logging.info(f"\t- Done!")
     
-    create_single_cell_tensors(SAMPLE_NAMES, SAMPLE_PROCESSED_DATA_DIR, tg_vocab, tf_vocab)
+    create_single_cell_tensors(gene_tss_df, FINE_TUNING_DATASET, SAMPLE_PROCESSED_DATA_DIR, tg_vocab, tf_vocab)
     
     # ----- Writing Output Files -----
     logging.info(f"\nWriting output files")
