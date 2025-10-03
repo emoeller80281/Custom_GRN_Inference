@@ -1,7 +1,7 @@
 #!/bin/bash -l
 #SBATCH --job-name=prepare_transformer_data
-#SBATCH --output=LOGS/transformer_logs/prepare_transformer_data/%x_%j.log
-#SBATCH --error=LOGS/transformer_logs/prepare_transformer_data/%x_%j.err
+#SBATCH --output=LOGS/transformer_logs/02_prepare_transformer_data/%x_%j.log
+#SBATCH --error=LOGS/transformer_logs/02_prepare_transformer_data/%x_%j.err
 #SBATCH --time=12:00:00
 #SBATCH -p compute
 #SBATCH -N 1

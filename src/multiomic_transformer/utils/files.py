@@ -1,3 +1,5 @@
+import os
+import json
 from pathlib import Path
 
 def unique_path(directory: Path, name_pattern: str):
@@ -27,3 +29,9 @@ def unique_path(directory: Path, name_pattern: str):
         if not path.exists():
             return path
         
+def atomic_json_dump(obj, path):
+    """Safe JSON dump, avoids race conditions by making a tmp file first, then updating the name"""
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(obj, f)
+    os.replace(tmp, path)

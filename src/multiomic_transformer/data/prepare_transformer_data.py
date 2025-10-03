@@ -1,21 +1,23 @@
-import os
-import torch
-import pandas as pd
-import logging
-import pybedtools
 import json
-import pickle
+import logging
+import os
 import random
-import scipy.sparse as sp
-from torch import logsumexp
-from sklearn.preprocessing import StandardScaler
+from pathlib import Path
+from typing import Dict, Iterable, Optional
+
 import joblib
 import numpy as np
-from grn_inference import utils
-from typing import List, Dict, Tuple, Sequence, Iterable, Optional
+import pandas as pd
+import pybedtools
+import scipy.sparse as sp
+import torch
+from sklearn.preprocessing import StandardScaler
 
-import sys
-from dev.transformer.build_motif_mask.moods_scan import run_moods_scan
+from config.settings import *
+from grn_inference import utils
+from multiomic_transformer.data.moods_scan import run_moods_scan
+from multiomic_transformer.utils.standardize import standardize_name
+from multiomic_transformer.utils.files import atomic_json_dump
 
 random.seed(1337)
 np.random.seed(1337)
@@ -24,76 +26,38 @@ torch.manual_seed(1337)
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 
 # Reads the number of CPUs from the slurm job, else defaults to 1
-NUM_CPUS = int(os.getenv("NUM_CPUS", "1"))
+NUM_CPUS: int = int(os.getenv("NUM_CPUS", "1"))
 print(f"Using {NUM_CPUS} CPUs")
 
-FORCE_RECALCULATE = True
-
-SAMPLE_NAME = "mESC"
-CHROM_ID = "chr19"
-
-# Window parameters
-WINDOW_SIZE = 25_000             # Aggregates peaks within WINDOW_SIZE bp genomic tiles
-DISTANCE_SCALE_FACTOR = 25_000   # Weights the peak-gene TSS distance score. Lower numbers = faster dropoff
-MAX_PEAK_DISTANCE = 100_000_000      # Masks out peaks further than this distance from the gene TSS
-DIST_BIAS_MODE = "max"
-
-# TF-peak binding calculation parameters
-MOODS_PVAL_THRESHOLD=1e-3
-
-sample_name_list = ["E7.5_rep1", "E7.75_rep1", "E8.0_rep2", "E8.5_rep2",
-                    "E8.75_rep2", "E7.5_rep2", "E8.0_rep1", "E8.5_rep1"]
-holdout = ["E8.75_rep1"]
-
-# sample_name_list = ["E8.75_rep1"]
-# holdout = []
-
-# sample_name_list = ["DS011_sample1"]
-
-PROJECT_DIR = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
-
-GENOME_DIR = os.path.join(PROJECT_DIR, "data/reference_genome/mm10")
-CHROM_SIZES_FILE = os.path.join(GENOME_DIR, "chrom.sizes")
-GENE_TSS_FILE = os.path.join(PROJECT_DIR, "data/genome_annotation/mm10/mm10_TSS.bed")
-SAMPLE_INPUT_DIR = os.path.join(PROJECT_DIR, f"input/transformer_input/{SAMPLE_NAME}/")
-OUTPUT_DIR = os.path.join(PROJECT_DIR, f"output/transformer_testing_output/{SAMPLE_NAME}/{CHROM_ID}")
-
-COMMON_DATA = os.path.join(PROJECT_DIR, f"dev/transformer/transformer_data/common")
-
-SAMPLE_DATA_DIR = os.path.join(PROJECT_DIR, f"dev/transformer/transformer_data/{SAMPLE_NAME}")
-CHROM_SPECIFIC_DATA_DIR = os.path.join(SAMPLE_DATA_DIR, CHROM_ID)
-JASPAR_PFM_DIR=os.path.join(PROJECT_DIR, "data/motif_information/JASPAR/pfm_files")
-
 # TF and TG vocab files
-common_tf_vocab_file = os.path.join(COMMON_DATA, f"tf_vocab.json")
-common_tg_vocab_file = os.path.join(COMMON_DATA, f"tg_vocab.json")
+common_tf_vocab_file: Path =  COMMON_DATA / f"tf_vocab.json"
+common_tg_vocab_file: Path =  COMMON_DATA / f"tg_vocab.json"
 
-# TF, TG, and Window tensors
-atac_tensor_path = os.path.join(CHROM_SPECIFIC_DATA_DIR, f"atac_window_tensor_all_{CHROM_ID}.pt")
-tg_tensor_path = os.path.join(CHROM_SPECIFIC_DATA_DIR, f"tg_tensor_all_{CHROM_ID}.pt")
-tf_tensor_path = os.path.join(SAMPLE_DATA_DIR, "tf_tensor_all.pt")
+# Sample-specific cache files
+tf_tensor_path: Path =        SAMPLE_DATA_CACHE_DIR / "tf_tensor_all.pt"
+metacell_name_file: Path =    SAMPLE_DATA_CACHE_DIR / "metacell_names.json"
+sample_tf_name_file: Path =   SAMPLE_DATA_CACHE_DIR / "tf_names.json"
+tf_id_file: Path =            SAMPLE_DATA_CACHE_DIR / "tf_ids.pt"
 
-# Sample-specific output files
-metacell_name_file = os.path.join(SAMPLE_DATA_DIR, "metacell_names.json")
-sample_tf_name_file = os.path.join(SAMPLE_DATA_DIR, "tf_names.json")
-sample_tg_name_file = os.path.join(CHROM_SPECIFIC_DATA_DIR, f"tg_names_{CHROM_ID}.json")
-sample_window_map_file = os.path.join(CHROM_SPECIFIC_DATA_DIR, f"window_map_{CHROM_ID}.json")
-sample_scaler_file = os.path.join(CHROM_SPECIFIC_DATA_DIR, f"tg_scaler_{CHROM_ID}.pkl")
-peak_to_tss_dist_path = os.path.join(CHROM_SPECIFIC_DATA_DIR, f"genes_near_peaks_{CHROM_ID}.parquet")
-dist_bias_file = os.path.join(CHROM_SPECIFIC_DATA_DIR, f"dist_bias_{CHROM_ID}.pt")
-tf_id_file = os.path.join(SAMPLE_DATA_DIR, "tf_ids.pt")
-tg_id_file = os.path.join(CHROM_SPECIFIC_DATA_DIR, f"tg_ids_{CHROM_ID}.pt")
-manifest_file = os.path.join(CHROM_SPECIFIC_DATA_DIR, "manifest.json")
-motif_mask_file = os.path.join(CHROM_SPECIFIC_DATA_DIR, f"motif_mask_{CHROM_ID}.pt")
-moods_sites_file = os.path.join(CHROM_SPECIFIC_DATA_DIR, f"{CHROM_ID}_moods_sites.tsv")
+# Chromosome-specific cache files
+atac_tensor_path: Path =      SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"atac_window_tensor_all_{CHROM_ID}.pt"
+tg_tensor_path: Path =        SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"tg_tensor_all_{CHROM_ID}.pt"
+sample_tg_name_file: Path =   SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"tg_names_{CHROM_ID}.json"
+genome_window_file: Path =    SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"{CHROM_ID}_windows_{WINDOW_SIZE // 1000}kb.bed"
+sample_window_map_file: Path= SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"window_map_{CHROM_ID}.json"
+sample_scaler_file: Path =    SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"tg_scaler_{CHROM_ID}.save"
+peak_to_tss_dist_path: Path = SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"genes_near_peaks_{CHROM_ID}.parquet"
+dist_bias_file: Path =        SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"dist_bias_{CHROM_ID}.pt"
+tg_id_file: Path =            SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"tg_ids_{CHROM_ID}.pt"
+manifest_file: Path =         SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"manifest_{CHROM_ID}.json"
+motif_mask_file: Path =       SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"motif_mask_{CHROM_ID}.pt"
+moods_sites_file: Path =      SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"moods_sites_{CHROM_ID}.tsv"
 
-os.makedirs(SAMPLE_DATA_DIR, exist_ok=True)
-os.makedirs(CHROM_SPECIFIC_DATA_DIR, exist_ok=True)
 os.makedirs(COMMON_DATA, exist_ok=True)
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+os.makedirs(SAMPLE_DATA_CACHE_DIR, exist_ok=True)
+os.makedirs(SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR, exist_ok=True)
 
-def create_or_load_genomic_windows(genome_dir, window_size, chrom_id, chrom_sizes_file, force_recalculate=False):
-    genome_window_file = os.path.join(genome_dir, f"{chrom_id}_windows_{window_size // 1000}kb.bed")
+def create_or_load_genomic_windows(window_size, chrom_id, genome_window_file, chrom_sizes_file, force_recalculate=False):
     if not os.path.exists(genome_window_file) or force_recalculate:
         
         logging.info("\nCreating genomic windows")
@@ -113,8 +77,6 @@ def create_or_load_genomic_windows(genome_dir, window_size, chrom_id, chrom_size
     mm10_windows = mm10_windows.reset_index(drop=True)
     mm10_windows["win_idx"] = mm10_windows.index
     
-    
-        
     return mm10_windows
 
 def make_peak_to_window_map(peaks_bed: pd.DataFrame, windows_bed: pd.DataFrame) -> dict[str, int]:
@@ -199,6 +161,78 @@ def calculate_peak_to_tg_distance_score(
     
     return genes_near_peaks
 
+def aggregate_pseudobulk_datasets(sample_names: list[str], sample_processed_data_dir: Path, chrom_id: str):
+    
+    # ----- Combine Pseudobulk Data into a Training Dataset -----
+    TG_pseudobulk_global = []
+    TG_pseudobulk_samples = []
+    RE_pseudobulk_samples = []
+    peaks_df_samples = []
+
+    for sample_name in sample_names:
+        if not os.path.exists(sample_processed_data_dir):
+            logging.warning(f"Skipping {sample_name}: directory not found")
+            continue
+        if len(os.listdir(sample_processed_data_dir)) != 5:
+            logging.warning(f"Skipping {sample_name}: expected 5 files, found {len(os.listdir(sample_processed_data_dir))}")
+            continue
+        if sample_name in VALIDATION_DATASETS:
+            logging.warning(f"Skipping {sample_name}: in VALIDATION_DATASETS list")
+            continue
+        else:
+            logging.info(f"\nLoading Pseudobulk data for {sample_name}")
+            TG_pseudobulk = pd.read_csv(os.path.join(sample_processed_data_dir, "TG_pseudobulk.tsv"), sep="\t", index_col=0)
+            RE_pseudobulk = pd.read_csv(os.path.join(sample_processed_data_dir, "RE_pseudobulk.tsv"), sep="\t", index_col=0)
+
+            logging.info("\n  - Total Pseudobulk Genes and Peaks")
+            logging.info(f"\tTG_pseudobulk: {TG_pseudobulk.shape[0]:,} Genes x {TG_pseudobulk.shape[1]} metacells")
+            logging.info(f"\tRE_pseudobulk: {RE_pseudobulk.shape[0]:,} Peaks x {RE_pseudobulk.shape[1]} metacells")
+
+            TG_chr_specific = TG_pseudobulk.loc[TG_pseudobulk.index.intersection(gene_tss_df['name'].unique())]
+            RE_chr_specific = RE_pseudobulk[RE_pseudobulk.index.str.startswith(f"{chrom_id}:")]
+
+            logging.info(f"\n  - Restricted to {chrom_id} Genes and Peaks: ")
+            logging.info(f"\tTG_chr_specific: {TG_chr_specific.shape[0]} Genes x {TG_chr_specific.shape[1]} metacells")
+            logging.info(f"\tRE_chr_specific: {RE_chr_specific.shape[0]:,} Peaks x {RE_chr_specific.shape[1]} metacells")
+
+            peaks_df = (
+                RE_chr_specific.index.to_series()
+                .str.split("[:-]", expand=True)
+                .rename(columns={0: "chrom", 1: "start", 2: "end"})
+            )
+            peaks_df["start"] = peaks_df["start"].astype(int)
+            peaks_df["end"] = peaks_df["end"].astype(int)
+            peaks_df["peak_id"] = RE_chr_specific.index
+            
+            TG_pseudobulk_global.append(TG_pseudobulk)
+            TG_pseudobulk_samples.append(TG_chr_specific)
+            RE_pseudobulk_samples.append(RE_chr_specific)
+            peaks_df_samples.append(peaks_df)
+            
+        def _agg_sum(dfs: list[pd.DataFrame]) -> pd.DataFrame:
+            """Sum rows across samples; rows are aligned by index."""
+            if len(dfs) == 0:
+                raise ValueError("No DataFrames provided to aggregate.")
+            if len(dfs) == 1:
+                return dfs[0]
+            return pd.concat(dfs).groupby(level=0).sum()
+
+        def _agg_first(dfs: list[pd.DataFrame]) -> pd.DataFrame:
+            """Keep first occurrence per index (for metadata like peak coords)."""
+            if len(dfs) == 0:
+                raise ValueError("No DataFrames provided to aggregate.")
+            if len(dfs) == 1:
+                return dfs[0]
+            return pd.concat(dfs).groupby(level=0).first()
+        
+        # Aggregate the pseudobulk for all samples
+        total_TG_pseudobulk_global = _agg_sum(TG_pseudobulk_global)
+        total_TG_pseudobulk_chr    = _agg_sum(TG_pseudobulk_samples)
+        total_RE_pseudobulk_chr    = _agg_sum(RE_pseudobulk_samples)
+        total_peaks_df             = _agg_first(peaks_df_samples)
+        
+        return total_TG_pseudobulk_global, total_TG_pseudobulk_chr, total_RE_pseudobulk_chr, total_peaks_df
+
 def build_motif_mask(tf_names, tg_names, motif_hits_df, genes_near_peaks):
     """
     Build motif mask [TG x TF] with max logodds per (TG, TF).
@@ -235,7 +269,6 @@ def build_motif_mask(tf_names, tg_names, motif_hits_df, genes_near_peaks):
     ).toarray()
 
     return mask
-
 
 def precompute_input_tensors(
     output_dir: str,
@@ -317,8 +350,6 @@ def align_to_vocab(names, vocab, tensor_all, label="genes"):
     aligned_tensor = torch.stack(aligned_rows, dim=0)  # [num_kept, num_cells]
 
     return aligned_tensor, kept_names, kept_ids
-
-
 
 def build_distance_bias(
     genes_near_peaks: pd.DataFrame,
@@ -440,13 +471,6 @@ def update_vocab(vocab_file, new_names, label="GENE"):
 
     return vocab
 
-def atomic_json_dump(obj, path):
-    """Safe JSON dump, avoids race conditions by making a tmp file first, then updating the name"""
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(obj, f)
-    os.replace(tmp, path)
-
 def make_chrom_gene_tss_df(gene_tss_file, chrom_id, genome_dir):
     gene_tss_bed = pybedtools.BedTool(gene_tss_file)
     gene_tss_df = (
@@ -458,27 +482,6 @@ def make_chrom_gene_tss_df(gene_tss_file, chrom_id, genome_dir):
         )
     return gene_tss_df
 
-def _agg_sum(dfs: list[pd.DataFrame]) -> pd.DataFrame:
-    """Sum rows across samples; rows are aligned by index."""
-    if len(dfs) == 0:
-        raise ValueError("No DataFrames provided to aggregate.")
-    if len(dfs) == 1:
-        return dfs[0]
-    return pd.concat(dfs).groupby(level=0).sum()
-
-def _agg_first(dfs: list[pd.DataFrame]) -> pd.DataFrame:
-    """Keep first occurrence per index (for metadata like peak coords)."""
-    if len(dfs) == 0:
-        raise ValueError("No DataFrames provided to aggregate.")
-    if len(dfs) == 1:
-        return dfs[0]
-    return pd.concat(dfs).groupby(level=0).first()
-
-def standardize_name(name: str) -> str:
-    """Convert gene/motif name to capitalization style (e.g. 'Hoxa2')."""
-    if not isinstance(name, str):
-        return name
-    return name.capitalize()
 
 if __name__ == "__main__":
     logging.info(f"Preparing data for {SAMPLE_NAME} {CHROM_ID}")
@@ -493,66 +496,16 @@ if __name__ == "__main__":
     )
 
     # Load the global TF vocab
-    with open(os.path.join(PROJECT_DIR, f"dev/transformer/mesc_homer_tfs.pkl"), 'rb') as f:
-        tf_names: list = pickle.load(f)
+    with open(common_tf_vocab_file, 'r') as f:
+        tf_names: list = json.load(f)
     
     tf_names = [standardize_name(n) for n in tf_names]
         
     logging.info(f"\nLoaded {SAMPLE_NAME} TFs: {len(tf_names)} TFs")
 
-    # ----- Combe Pseudobulk Data into a Training Dataset -----
-    TG_pseudobulk_global = []
-    TG_pseudobulk_samples = []
-    RE_pseudobulk_samples = []
-    peaks_df_samples = []
-
-    for sample_name in sample_name_list:
-        sample_data_dir = os.path.join(SAMPLE_INPUT_DIR, sample_name)
-        if not os.path.exists(sample_data_dir):
-            logging.warning(f"Skipping {sample_name}: directory not found")
-            continue
-        if len(os.listdir(sample_data_dir)) != 5:
-            logging.warning(f"Skipping {sample_name}: expected 5 files, found {len(os.listdir(sample_data_dir))}")
-            continue
-        if sample_name in holdout:
-            logging.warning(f"Skipping {sample_name}: in holdout list")
-            continue
-        else:
-            logging.info(f"\nLoading Pseudobulk data for {sample_name}")
-            TG_pseudobulk = pd.read_csv(os.path.join(sample_data_dir, "TG_pseudobulk.tsv"), sep="\t", index_col=0)
-            RE_pseudobulk = pd.read_csv(os.path.join(sample_data_dir, "RE_pseudobulk.tsv"), sep="\t", index_col=0)
-
-            logging.info("\n  - Total Pseudobulk Genes and Peaks")
-            logging.info(f"\tTG_pseudobulk: {TG_pseudobulk.shape[0]:,} Genes x {TG_pseudobulk.shape[1]} metacells")
-            logging.info(f"\tRE_pseudobulk: {RE_pseudobulk.shape[0]:,} Peaks x {RE_pseudobulk.shape[1]} metacells")
-
-            TG_chr_specific = TG_pseudobulk.loc[TG_pseudobulk.index.intersection(gene_tss_df['name'].unique())]
-            RE_chr_specific = RE_pseudobulk[RE_pseudobulk.index.str.startswith(f"{CHROM_ID}:")]
-
-            logging.info(f"\n  - Restricted to {CHROM_ID} Genes and Peaks: ")
-            logging.info(f"\tTG_chr_specific: {TG_chr_specific.shape[0]} Genes x {TG_chr_specific.shape[1]} metacells")
-            logging.info(f"\tRE_chr_specific: {RE_chr_specific.shape[0]:,} Peaks x {RE_chr_specific.shape[1]} metacells")
-
-            peaks_df = (
-                RE_chr_specific.index.to_series()
-                .str.split("[:-]", expand=True)
-                .rename(columns={0: "chrom", 1: "start", 2: "end"})
-            )
-            peaks_df["start"] = peaks_df["start"].astype(int)
-            peaks_df["end"] = peaks_df["end"].astype(int)
-            peaks_df["peak_id"] = RE_chr_specific.index
-            
-            TG_pseudobulk_global.append(TG_pseudobulk)
-            TG_pseudobulk_samples.append(TG_chr_specific)
-            RE_pseudobulk_samples.append(RE_chr_specific)
-            peaks_df_samples.append(peaks_df)
-        
-    # Aggregate the pseudobulk for all samples
-    total_TG_pseudobulk_global = _agg_sum(TG_pseudobulk_global)
-    total_TG_pseudobulk_chr    = _agg_sum(TG_pseudobulk_samples)
-    total_RE_pseudobulk_chr    = _agg_sum(RE_pseudobulk_samples)
-    total_peaks_df             = _agg_first(peaks_df_samples)
-
+    total_TG_pseudobulk_global, total_TG_pseudobulk_chr, total_RE_pseudobulk_chr, total_peaks_df = \
+        aggregate_pseudobulk_datasets(SAMPLE_NAMES, SAMPLE_PROCESSED_DATA_DIR, CHROM_ID)
+    
     tg_names = total_TG_pseudobulk_chr.index.tolist()
 
     # Genome-wide TF expression for all samples
@@ -565,17 +518,17 @@ if __name__ == "__main__":
 
     # Create genome windows
     mm10_windows = create_or_load_genomic_windows(
-        genome_dir=GENOME_DIR,
         window_size=WINDOW_SIZE,
         chrom_id=CHROM_ID,
         chrom_sizes_file=CHROM_SIZES_FILE,
+        genome_window_file=genome_window_file,
         force_recalculate=FORCE_RECALCULATE
     )
     num_windows = mm10_windows.shape[0]
 
     # --- Calculate Peak-to-TG Distance Scores ---
     genes_near_peaks = calculate_peak_to_tg_distance_score(
-        output_dir=OUTPUT_DIR,
+        output_dir=SAMPLE_DATA_CACHE_DIR,
         mesc_atac_peak_loc_df=total_peaks_df,  # peak locations DataFrame
         gene_tss_df=gene_tss_df,
         max_peak_distance= MAX_PEAK_DISTANCE,
@@ -583,7 +536,7 @@ if __name__ == "__main__":
         force_recalculate=FORCE_RECALCULATE
     )
     
-    peaks_bed = os.path.join(OUTPUT_DIR, "peak_tmp.bed")
+    peaks_bed = os.path.join(SAMPLE_DATA_CACHE_DIR, "peak_tmp.bed")
     jaspar_pfm_paths = [os.path.join(JASPAR_PFM_DIR, f) for f in os.listdir(JASPAR_PFM_DIR) if f.endswith(".pfm")]
     
     if FORCE_RECALCULATE == True:
@@ -605,7 +558,7 @@ if __name__ == "__main__":
     # Save Precomputed Tensors 
     logging.info(f"\nPrecomputing TF, TG, and ATAC tensors")
     tf_tensor_all, tg_tensor_all, atac_window_tensor_all = precompute_input_tensors(
-        output_dir=SAMPLE_DATA_DIR,
+        output_dir=SAMPLE_DATA_CACHE_DIR,
         genome_wide_tf_expression=genome_wide_tf_expression,
         TG_scaled=TG_scaled,
         total_RE_pseudobulk_chr=total_RE_pseudobulk_chr,

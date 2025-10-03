@@ -1,15 +1,16 @@
+import logging
+import multiprocessing as mp
+import os
+import warnings
+from pathlib import Path
+from typing import Tuple
+
 import numpy as np
 import pandas as pd
 import scanpy as sc
-import random
-import os
-import warnings
 import scipy.sparse as sp
-import logging
 from anndata import AnnData
-from typing import Tuple
-import multiprocessing as mp
-from pathlib import Path
+from config.settings import *
 
 def load_rna_adata(sample_raw_data_dir: str) -> sc.AnnData:
     # Look for features file
@@ -230,7 +231,7 @@ def filter_and_qc(adata_RNA: AnnData, adata_ATAC: AnnData) -> Tuple[AnnData, Ann
     return adata_RNA, adata_ATAC
     
 def process_sample(sample_name: str):
-    sample_data_dir = os.path.join(SAMPLE_INPUT_DIR, sample_name)
+    sample_data_dir = os.path.join(PROCESSED_DATA, sample_name)
     os.makedirs(sample_data_dir, exist_ok=True)
 
     if os.path.exists(os.path.join(sample_data_dir, f"{sample_name}_RNA_qc.h5ad")) \
@@ -239,7 +240,7 @@ def process_sample(sample_name: str):
         adata_ATAC = sc.read_h5ad(os.path.join(sample_data_dir, f"{sample_name}_ATAC_qc.h5ad"))
     else:
         # --- load raw data ---
-        sample_raw_data_dir = os.path.join(RAW_MESC_DATA_DIR, sample_name)
+        sample_raw_data_dir = os.path.join(RAW_10X_RNA_DATA_DIR, sample_name)
         adata_RNA = load_rna_adata(sample_raw_data_dir)
         adata_RNA.obs_names = [(sample_name + "." + i).replace("-", ".") for i in adata_RNA.obs_names]
         # adata_RNA.obs_names = [i.replace("-", ".") for i in adata_RNA.obs_names]
@@ -249,7 +250,7 @@ def process_sample(sample_name: str):
         label = pd.DataFrame({"barcode_use": adata_RNA.obs_names,
                               "label": ["mESC"] * len(adata_RNA.obs_names)})
 
-        adata_ATAC = get_adata_from_peakmatrix(MESC_PEAK_MATRIX_FILE, label, sample_name)
+        adata_ATAC = get_adata_from_peakmatrix(RAW_ATAC_PEAK_MATRIX_FILE, label, sample_name)
 
         adata_RNA, adata_ATAC = filter_and_qc(adata_RNA, adata_ATAC)
 
@@ -261,7 +262,7 @@ def process_sample(sample_name: str):
     # --- pseudo-bulk ---
     TG_pseudobulk, RE_pseudobulk = pseudo_bulk(
         adata_RNA, adata_ATAC, use_single=singlepseudobulk,
-        neighbors_k=20, resolution=1.0
+        neighbors_k=NEIGHBORS_K, resolution=LEIDEN_RESOLUTION
     )
     TG_pseudobulk = TG_pseudobulk.fillna(0)
     RE_pseudobulk = RE_pseudobulk.fillna(0)
@@ -275,22 +276,9 @@ def process_sample(sample_name: str):
     logging.info(f"[{sample_name}] Finished processing")
     return sample_name
 
-project_base = Path()
-
-PROJECT_DIR = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
-RAW_MESC_DATA_DIR = "/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/SINGLE_CELL_DATASETS/DS014_DOI496239_MOUSE_ESC_RAW_FILES"
-MESC_PEAK_MATRIX_FILE = "/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/SINGLE_CELL_DATASETS/DS014_DOI496239_MOUSE_ESCDAYS7AND8/scATAC_PeakMatrix.txt"
-SAMPLE_INPUT_DIR = os.path.join(PROJECT_DIR, f"input/transformer_input/mESC")
-
-# RAW_MESC_DATA_DIR="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/DS011_mESC/10X_raw_data/HIFLR_barcodes_features_matrix"
-# MESC_PEAK_MATRIX_FILE="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/input/DS011_mESC/10X_raw_data/DS011_PMID35977485_MOUSE_ESC/scATAC_PeakMatrix.HIFLR.txt"
-
-
 def main():
     sample_name_list = ["E7.5_rep1", "E7.5_rep1", "E7.75_rep1", "E8.0_rep2", "E8.5_rep2",
                         "E8.75_rep2", "E7.5_rep2", "E8.0_rep1", "E8.5_rep1", "E8.75_rep1"]
-    
-    # sample_name_list = ["DS011"]
     
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 

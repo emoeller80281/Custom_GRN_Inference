@@ -1,7 +1,7 @@
 #!/bin/bash -l
 #SBATCH --job-name=transformer_testing
-#SBATCH --output=LOGS/transformer_logs/testing/%x_%j.log
-#SBATCH --error=LOGS/transformer_logs/testing/%x_%j.err
+#SBATCH --output=LOGS/transformer_logs/04_testing/%x_%j.log
+#SBATCH --error=LOGS/transformer_logs/04_testing/%x_%j.err
 #SBATCH --time=12:00:00
 #SBATCH -p gpu
 #SBATCH -N 1
