@@ -132,6 +132,12 @@ class MultiomicTransformerDataset(Dataset):
             self.tg_ids = torch.load(tg_ids_path).long()
             with open(tf_names_json) as f: self.tf_names = [self.standardize_name(n) for n in json.load(f)]
             with open(tg_names_json) as f: self.tg_names = [self.standardize_name(n) for n in json.load(f)]
+            
+            # -------- metadata --------
+            with open(window_map_path, "r") as f:
+                self.window_map = json.load(f)
+            with open(metacell_names_path, "r") as f:
+                self.metacell_names = json.load(f)
 
             # distance bias
             if dist_bias_path.exists():

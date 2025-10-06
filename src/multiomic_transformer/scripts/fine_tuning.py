@@ -652,14 +652,32 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
 
         trainer.train(max_epochs=total_epochs, path=str(out_dir))
 
-        # --- Step 4: Recompute Fisher on all fine-tuned data ---
-        all_train_sets = torch.utils.data.ConcatDataset(single_cell_datasets)
-        train_loader, _, _ = prepare_dataloader(all_train_sets, batch_size, world_size, rank)
-        
-        new_fisher = ewc_utils.compute_fisher_diag(model, train_loader, device=device, n_batches=100)
+        # --- Step 4: recompute Fisher on each dataset separately and merge ---
         new_ref_params = {n: p.detach().clone().to(device) for n, p in model.named_parameters()}
+
+        # total pseudobulk size for weighting
         len_all = sum(len(ds) for ds in single_cell_datasets)
-        fisher_diag = ewc_utils.merge_fishers(fisher_diag, new_fisher, total_size, len_all)
+
+        # start from empty fisher
+        new_fisher_accum = None
+
+        for ds, name in zip(single_cell_datasets, FINE_TUNING_DATASET):
+            train_loader, _, _ = prepare_dataloader(ds, batch_size, world_size, rank)
+            fisher_ds = ewc_utils.compute_fisher_diag(model, train_loader, device=device, n_batches=100)
+
+            # merge fisher: weighted by dataset size
+            fisher_size = len(ds)
+            if new_fisher_accum is None:
+                new_fisher_accum = fisher_ds
+                fisher_size_accum = fisher_size
+            else:
+                new_fisher_accum = ewc_utils.merge_fishers(
+                    new_fisher_accum, fisher_ds, fisher_size_accum, fisher_size
+                )
+                fisher_size_accum += fisher_size
+
+        # update fisher and reference params
+        fisher_diag = ewc_utils.merge_fishers(fisher_diag, new_fisher_accum, total_size, len_all)
         ref_params = new_ref_params
 
         if rank == 0:

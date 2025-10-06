@@ -24,7 +24,7 @@ from config.settings import *
 from multiomic_transformer.datasets.dataset import MultiomicTransformerDataset
 from multiomic_transformer.models.model import MultiomicTransformer
 from multiomic_transformer.utils.files import unique_path
-from multiomic_transformer.utils import ewc_utils
+from multiomic_transformer.utils import ewc_utils, plotting
 
 warnings.filterwarnings("ignore", message="No device id is provided via `init_process_group`")
 
@@ -543,6 +543,32 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
                 plt.title("TF→TG attention weights (subset)")
                 plt.tight_layout()
                 plt.savefig(os.path.join(training_output_dir, "tf_tg_attention_heatmap.png"))                
+            
+            # Training figures
+            log_path = os.path.join(training_output_dir, "training_log.csv")
+            log_df = pd.read_csv(log_path, header=0, index_col=0)
+            
+            pearson_corr_plt = plotting.plot_pearson_corr_across_epochs(
+                df=log_df,
+                dataset_name=DATASET_NAME,
+                chrom_id=CHROM_ID
+            )
+            pearson_corr_plt.savefig(os.path.join(training_output_dir, "pearson_training.png"), dpi=300)
+            
+            train_val_loss_plt = plotting.plot_train_val_loss(
+                df=log_df,
+                dataset_name=DATASET_NAME,
+                chrom_id=CHROM_ID
+            )
+            train_val_loss_plt.savefig(os.path.join(training_output_dir, "train_val_loss.png"), dpi=300)
+            
+            per_gene_corr_scatter_plt = plotting.plot_per_gene_correlation_scatterplot(
+                model=model,
+                dataloader=test_loader,
+                mask_arg=USE_MOTIF_MASK,
+                gpu_id=0
+            )
+            per_gene_corr_scatter_plt.savefig(os.path.join(training_output_dir, "per_gene_corr_scatter.png"), dpi=300)
                 
         if rank == 0:
             logging.info("\nIterations complete")
