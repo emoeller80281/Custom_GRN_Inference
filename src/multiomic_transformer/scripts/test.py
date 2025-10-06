@@ -1,296 +1,161 @@
-# transformer_testing.py
-import os, sys, json
-import joblib
+#!/usr/bin/env python
+
+import os
+import csv
+import torch
+import json
+import logging
 import numpy as np
 import pandas as pd
-import torch
 from pathlib import Path
-from sklearn.metrics import roc_auc_score, average_precision_score
-import logging
+from torch.utils.data import DataLoader
+from scipy.stats import pearsonr, spearmanr
 
-logging.basicConfig(level=logging.INFO, format='%(message)s')
+from config.settings import *
+from multiomic_transformer.datasets.dataset import MultiomicTransformerDataset
+from multiomic_transformer.models.model import MultiomicTransformer
+from multiomic_transformer.utils import plotting
 
-# ---------------------------------------------------------------------
-# Paths / config
-# ---------------------------------------------------------------------
-PROJECT_DIR = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
-DEV_DIR     = os.path.join(PROJECT_DIR, "dev/transformer")
-sys.path.append(DEV_DIR)
+def load_model_from_run_params(run_dir, tf_vocab_size, tg_vocab_size, device="cpu"):
+    """
+    Load MultiomicTransformer with the exact parameters from run_parameters.json
+    """
+    params_path = os.path.join(run_dir, "run_parameters.json")
+    if not os.path.exists(params_path):
+        raise FileNotFoundError(f"Could not find {params_path}")
 
-from transformer import MultiomicTransformer
-from transformer_dataset import MultiomicTransformerDataset
-from transformer_training import prepare_dataloader
-import eval
-
-SAMPLE_NAME = "mESC"
-CHROM_ID    = "chr19"
-TRAINING_RUN_NAME = "model_training_02_10_14_08_31"
-
-TRANSFORMER_DATA_DIR = os.path.join(DEV_DIR, f"transformer_data/{SAMPLE_NAME}")
-COMMON_DIR           = os.path.join(DEV_DIR, "transformer_data/common")
-OUTPUT_DIR           = os.path.join(PROJECT_DIR, "output/transformer_testing_output")
-TEST_DIR             = os.path.join(OUTPUT_DIR, f"{SAMPLE_NAME}/{CHROM_ID}/{TRAINING_RUN_NAME}")  # where checkpoint lives
-
-GROUND_TRUTH_FILE = os.path.join(PROJECT_DIR, "ground_truth_files/mESC_beeline_ChIP-seq.csv")
-OUT_DIR = os.path.join(TEST_DIR, "tf_gradient_attributions")
-os.makedirs(OUT_DIR, exist_ok=True)
-
-DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-BATCH  = 32
-TG_CHUNK = 64  # how many TGs to do at once when computing grads
-
-# ---------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------
-def zscore_per_cell(x: torch.Tensor, eps=1e-6):
-    mu = x.mean(dim=1, keepdim=True)
-    sd = x.std(dim=1, keepdim=True).clamp_min(eps)
-    return (x - mu) / sd
-
-def load_model_and_data():
-    # --- run params ---
-    with open(os.path.join(TEST_DIR, "run_parameters.json")) as f:
+    with open(params_path, "r") as f:
         run_params = json.load(f)
 
-    d_model   = run_params["d_model"]
-    n_heads   = run_params["Attention Heads"]
-    n_layers  = run_params["Model Layers"]
-    d_ff      = run_params["d_feedforward"]
-    dropout   = run_params["Dropout"]
-    model_pt  = os.path.join(TEST_DIR, "checkpoint.pt")
-
-    # --- dataset ---
-    dataset = MultiomicTransformerDataset(
-        data_dir=TRANSFORMER_DATA_DIR,
-        chrom_id=CHROM_ID,
-        tf_vocab_path=os.path.join(COMMON_DIR, "tf_vocab.json"),
-        tg_vocab_path=os.path.join(COMMON_DIR, "tg_vocab.json"),
-    )
-    train_loader, _, test_loader = prepare_dataloader(dataset, batch_size=BATCH, world_size=1, rank=0)
-
-    # --- model ---
-    # infer whether shortcut existed in checkpoint
-    sd = torch.load(model_pt, map_location=DEVICE)
-    use_shortcut = run_params.get("Shortcut L1", None) is not None
-
     model = MultiomicTransformer(
-        d_model=d_model, num_heads=n_heads, num_layers=n_layers,
-        d_ff=d_ff, dropout=dropout,
-        tf_vocab_size=len(dataset.tf_name2id),
-        tg_vocab_size=len(dataset.tg_name2id),
-        use_shortcut=use_shortcut,
-        use_motif_mask=run_params.get("Motif Mask", "No") == "Yes",
-        lambda_l1=run_params.get("Shortcut L1", 0.0),
-        lambda_l2=run_params.get("Shortcut L2", 0.0),
-        topk=run_params.get("Shortcut Top K", None),
-        shortcut_dropout=run_params.get("Shortcut Dropout", 0.0)
-    ).to(DEVICE)
-    model.load_state_dict(sd, strict=True)
-    model.eval()
-
-    return model, dataset, train_loader, test_loader
-
-@torch.no_grad()
-def _global_minmax_(arr):
-    mn, mx = arr.min(), arr.max()
-    return (arr - mn) / (mx - mn + 1e-8)
-
-def has_shortcut(model):
-    return hasattr(model, "shortcut") and model.shortcut is not None
-
-@torch.no_grad()
-def extract_shortcut_matrix(model, dataset, device="cuda:0", normalize="global"):
-    """
-    Runs a dummy forward to pull out the TF→TG attention (shortcut) matrix.
-    Returns DataFrame [TF × TG].
-    """
-    model.eval()
-    
-    # Build dummy inputs
-    B = 1
-    W = 1
-    atac_windows = torch.zeros(B, W, 1, device=device)      # minimal fake ATAC
-    tf_expr = torch.zeros(B, len(dataset.tf_names), device=device)  # fake TF expression
-    tf_ids = torch.arange(len(dataset.tf_names), device=device)
-    tg_ids = torch.arange(len(dataset.tg_names), device=device)
-    
-    # Forward once
-    logits, attn = model(
-        atac_windows, tf_expr, tf_ids, tg_ids, 
-        bias=None, motif_mask=None
-    )
-    
-    # attn is [G, T], transpose to [T, G]
-    mat = attn.detach().cpu().T
-    
-    # Apply scale
-    mat = model.shortcut_layer.scale.item() * mat
-    
-    # Normalize if requested
-    if normalize == "global":
-        mn, mx = mat.min(), mat.max()
-        mat = (mat - mn) / (mx - mn + 1e-8)
-    elif normalize == "per_tg":
-        mn = mat.min(dim=0, keepdim=True).values
-        mx = mat.max(dim=0, keepdim=True).values
-        mat = (mat - mn) / (mx - mn + 1e-8)
-    
-    import pandas as pd
-    return pd.DataFrame(
-        mat.numpy(),
-        index=dataset.tf_names,
-        columns=dataset.tg_names
+        d_model=run_params.get("d_model", 384),
+        num_heads=run_params.get("num_heads", 6),
+        num_layers=run_params.get("num_layers", 3),
+        d_ff=run_params.get("d_feedforward", 768),  # note the key
+        dropout=run_params.get("dropout", 0.1),
+        tf_vocab_size=tf_vocab_size,
+        tg_vocab_size=tg_vocab_size,
+        bias_scale=run_params.get("attn_bias_scale", 1.0),
+        use_shortcut=run_params.get("use_shortcut", True),
+        use_motif_mask=run_params.get("use_motif_mask", False),
+        lambda_l1=run_params.get("shortcut_l1", 0.0),
+        lambda_l2=run_params.get("shortcut_l2", 0.0),
+        topk=run_params.get("shortcut_topk", None),
+        shortcut_dropout=run_params.get("shortcut_dropout", 0.0),
     )
 
+    model = model.to(device)
+    return model
 
-def gradient_attribution_matrix(model, dataset, loader, tg_chunk=TG_CHUNK, device=DEVICE,
-                                normalize="global"):
-    """
-    Returns TF×TG DataFrame of mean |∂TG_j / ∂TF_i| over cells.
-    """
-    TF = len(dataset.tf_names)
-    TG = len(dataset.tg_names)
-    acc = torch.zeros(TF, TG, device=device)
+def subset_scaler(original_scaler, kept_indices):
+    from sklearn.preprocessing import StandardScaler
+    new_scaler = StandardScaler()
+    new_scaler.mean_ = original_scaler.mean_[kept_indices]
+    new_scaler.scale_ = original_scaler.scale_[kept_indices]
+    new_scaler.var_ = original_scaler.var_[kept_indices]
+    new_scaler.n_features_in_ = len(kept_indices)
+    return new_scaler
 
-    for (atac_wins, tf_tensor, tg_true, bias, tf_ids, tg_ids, motif_mask) in loader:
-        atac_wins  = atac_wins.to(device)
-        bias       = bias.to(device)
-        tf_ids     = tf_ids.to(device)
-        tg_ids     = tg_ids.to(device)
-        motif_mask = motif_mask.to(device)
+def run_test(checkpoint_path, out_dir, batch_size=BATCH_SIZE, gpu_id=0):
+    device = f"cuda:{gpu_id}" if torch.cuda.is_available() else "cpu"
+    ckpt_dir = os.path.dirname(checkpoint_path)
 
-        # inputs we want gradients for
-        tf_tensor = tf_tensor.to(device).detach().clone().requires_grad_(True)
-        tf_norm   = zscore_per_cell(tf_tensor)
+    # ----- Load dataset -----
+    dataset = MultiomicTransformerDataset(
+        data_dir=SAMPLE_DATA_CACHE_DIR,
+        chrom_id=CHROM_ID,
+        tf_vocab_path=os.path.join(COMMON_DATA, "tf_vocab.json"),
+        tg_vocab_path=os.path.join(COMMON_DATA, "tg_vocab.json"),
+    )
 
-        # forward pass
-        out = model(atac_wins, tf_norm, tf_ids=tf_ids, tg_ids=tg_ids, bias=bias, motif_mask=motif_mask)
-        preds = out[0] if isinstance(out, tuple) else out  # [B, TG_eval]
+    tf_vocab_size = len(dataset.tf_name2id)
+    tg_vocab_size = len(dataset.tg_name2id)
 
-        B, G_eval = preds.shape
-        assert G_eval == TG, "TG dimension mismatch."
+    # ----- Load model -----
+    model = load_model_from_run_params(ckpt_dir, tf_vocab_size, tg_vocab_size, device)
+    state_dict = torch.load(checkpoint_path, map_location=device)
+    model.load_state_dict(state_dict, strict=True)
+    model.eval()
 
-        for j0 in range(0, TG, tg_chunk):
-            j1 = min(j0 + tg_chunk, TG)
-            for j in range(j0, j1):
-                out = preds[:, j].mean()
-                grad = torch.autograd.grad(out, tf_norm, retain_graph=True)[0]  # [B, TF]
-                acc[:, j] += grad.abs().sum(dim=0)
+    # ----- Dataloader -----
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=MultiomicTransformerDataset.collate_fn,
+    )
 
-        del preds
-        tf_tensor.grad = None
+    # ----- Evaluate -----
+    preds_list, tgts_list, tg_ids_list = [], [], []
+    total_loss, n_batches = 0.0, 0
 
-    acc = acc / max(1, len(loader))  # average
+    with torch.no_grad():
+        for batch in loader:
+            atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids, motif_mask = [
+                x.to(device) for x in batch
+            ]
+            mask_arg = motif_mask if USE_MOTIF_MASK else None
 
-    # normalization
-    if normalize == "global":
-        acc = _global_minmax_(acc)
-    elif normalize == "per_tg":
-        mn = acc.min(dim=0, keepdim=True).values
-        mx = acc.max(dim=0, keepdim=True).values
-        acc = (acc - mn) / (mx - mn + 1e-8)
+            preds, _ = model(atac_wins, tf_tensor,
+                             tf_ids=tf_ids, tg_ids=tg_ids,
+                             bias=bias, motif_mask=mask_arg)
 
-    df = pd.DataFrame(acc.detach().cpu().numpy(),
-                      index=dataset.tf_names, columns=dataset.tg_names)
-    return df
+            loss = torch.nn.functional.mse_loss(preds, targets)
+            total_loss += loss.item(); n_batches += 1
+
+            preds_list.append(preds.cpu().numpy())
+            tgts_list.append(targets.cpu().numpy())
+            tg_ids_list.append(tg_ids.cpu().numpy())
+
+    val_loss = total_loss / max(1, n_batches)
+
+    # Stack results
+    all_preds = np.concatenate(preds_list, axis=0)
+    all_tgts  = np.concatenate(tgts_list, axis=0)
+    all_tg_ids = np.concatenate(tg_ids_list, axis=0)
+
+    # scaler = subset_scaler(dataset.scaler, all_tg_ids)
+    # preds_rescaled = scaler.inverse_transform(all_preds)
+    # tgts_rescaled  = scaler.inverse_transform(all_tgts)
+    
+    preds_rescaled = all_preds
+    tgts_rescaled  = all_tgts
+
+    pearson_corr, _ = pearsonr(preds_rescaled.ravel(), tgts_rescaled.ravel())
+    spearman_corr, _ = spearmanr(preds_rescaled.ravel(), tgts_rescaled.ravel())
+
+    logging.info(
+        f"[Test] Val Loss: {val_loss:.4f} | "
+        f"Pearson: {pearson_corr:.3f} | Spearman: {spearman_corr:.3f}"
+    )
+
+    # ----- Save CSV -----
+    csv_path = os.path.join(out_dir, "test_results.csv")
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["Val Loss", "Pearson", "Spearman"])
+        writer.writerow([val_loss, pearson_corr, spearman_corr])
+
+    # ----- Plot scatter -----
+    scatter_fig = plotting.plot_per_gene_correlation_scatterplot(
+        model, loader, mask_arg=USE_MOTIF_MASK, gpu_id=gpu_id
+    )
+    scatter_fig.savefig(os.path.join(out_dir, "test_scatter.png"), dpi=300)
+
+    return val_loss, pearson_corr, spearman_corr
 
 
-def evaluate_chip_aucs(tf_importance_df, chip_csv, k_list=(100, 500, 1000, 5000)):
-    """
-    Evaluate AUROC / PR-AUC / Precision K against CHIP edges.
-    We uppercase both the CHIP and the DF indexing to align.
-    """
-    chip = pd.read_csv(chip_csv)
-    chip_edges = {(t.upper(), g.upper()) for t, g in zip(chip["Gene1"], chip["Gene2"])}
 
-    # Uppercase DF indexing for matching
-    tf_imp = tf_importance_df.copy()
-    tf_imp.index   = [x.upper() for x in tf_imp.index]
-    tf_imp.columns = [x.upper() for x in tf_imp.columns]
-
-    rn111_tfs = {t for t, _ in chip_edges}
-    rn111_tgs = {g for _, g in chip_edges}
-
-    tf_imp = tf_imp.loc[tf_imp.index.intersection(rn111_tfs),
-                        tf_imp.columns.intersection(rn111_tgs)]
-    if tf_imp.empty:
-        raise ValueError("No overlap between TF/TG names and CHIP set.")
-
-    scores, labels, edges = [], [], []
-    # Flatten
-    for tg in tf_imp.columns:
-        col = tf_imp[tg]
-        for tf, score in col.items():
-            scores.append(float(score))
-            labels.append(1 if (tf, tg) in chip_edges else 0)
-            edges.append((tf, tg))
-
-    if len(set(labels)) < 2:
-        raise ValueError("Only one class present after overlap; AUROC/PR-AUC undefined.")
-
-    auroc = roc_auc_score(labels, scores)
-    auprc = average_precision_score(labels, scores)
-
-    # Precision K
-    df_scored = pd.DataFrame(edges, columns=["tf", "tg"])
-    df_scored["score"] = scores
-    df_scored["label"] = labels
-    df_scored = df_scored.sort_values("score", ascending=False).reset_index(drop=True)
-
-    results = {"AUROC": auroc, "PR-AUC": auprc, "positives": int(sum(labels)), "edges": int(len(labels))}
-    for k in k_list:
-        k = int(k)
-        if k <= len(df_scored):
-            prec_k = df_scored.head(k)["label"].mean()
-            results[f"Precision@{k}"] = float(prec_k)
-
-    return results, df_scored
-
-# ---------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------
 if __name__ == "__main__":
-    logging.info("\nLoading model and dataset")
-    model, dataset, train_loader, test_loader = load_model_and_data()
-    
-    scaler_path = os.path.join(TEST_DIR, "tg_scaler.pkl")
-    scaler = joblib.load(scaler_path)
-    
-    logging.info(f"\nPlotting gene correlation scatterplot")
-    fig = eval.plot_per_gene_correlation_scatterplot(
-        model, 
-        train_loader, 
-        DEVICE, 
-        inverse_scaler=scaler,
-        outpath=os.path.join(TEST_DIR, "eval_results_scatter.png")
-        )
-
-    logging.info("\nExtracting shortcut TF×TG matrix (no gradients needed)")
-    tf_importance_df = extract_shortcut_matrix(model, dataset, normalize="global")
-
-    logging.info("\nGenerating gradient attribution matrix")
-    gradient_attrib_df = gradient_attribution_matrix(
-        model, dataset, test_loader, tg_chunk=TG_CHUNK, device=DEVICE, normalize="global"
+    # Setup logging
+    logging.basicConfig(
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        level=logging.INFO,
     )
-    grad_attrib_out_csv = os.path.join(OUT_DIR, "gradient_attribution.csv")
-    gradient_attrib_df.to_csv(grad_attrib_out_csv)
-    logging.info(f"\tSaved gradient attribution matrix: {grad_attrib_out_csv}  shape={gradient_attrib_df.shape}")
-    
-    importance_out_csv = os.path.join(OUT_DIR, "shortcut_matrix.csv")
-    tf_importance_df.to_csv(importance_out_csv)
-    logging.info(f"\tSaved shortcut matrix: {importance_out_csv}  shape={tf_importance_df.shape}")
 
-    # --- Evaluate vs CHIP edges ---
-    logging.info("\nEvaluating AUROC and AUPRC")
-    results, scored_edges = evaluate_chip_aucs(tf_importance_df, GROUND_TRUTH_FILE, k_list=(100, 500, 1000, 5000))
-    logging.info(f"AUROC = {results['AUROC']:.4f}  |  PR-AUC = {results['PR-AUC']:.4f}  "
-          f"| positives={results['positives']} / {results['edges']} edges")
-    for k in (100, 500, 1000, 5000):
-        key = f"Precision@{k}"
-        if key in results:
-            logging.info(f"{key}: {results[key]:.3f}")
+    # Output directory
+    test_out = OUTPUT_DIR / "model_training_014"
 
-    # Save scored edges for inspection
-    scored_edges_path = os.path.join(OUT_DIR, "scored_edges.tsv")
-    scored_edges.to_csv(scored_edges_path, sep="\t", index=False)
-    logging.info(f"Wrote ranked edges: {scored_edges_path}")
+    # Run test on final checkpoint
+    ckpt_path = test_out / "trained_model.pt"
+    run_test(ckpt_path, test_out, batch_size=BATCH_SIZE, gpu_id=0)

@@ -62,16 +62,14 @@ def plot_pearson_corr_across_epochs(df, dataset_name, chrom_id):
 
 def plot_train_val_loss(df, dataset_name, chrom_id):
     fig = plt.figure(figsize=(6, 5))
-    plt.plot(df.index, df["Train Loss"], linewidth=2, label="Validation Loss")
-    plt.plot(df.index, df["Val Loss"], linewidth=2, label="Training Loss")
+    plt.plot(df["Epoch"], df["Train MSE"], label="Train MSE", linewidth=2)
+    plt.plot(df["Epoch"], df["Val MSE"], label="Validation MSE", linewidth=2)
+    plt.plot(df["Epoch"], df["Train Total Loss"], label="Train Total Loss", linestyle="--", alpha=0.7)
 
-    plt.title(f"Training {dataset_name} {chrom_id} Training/Validation Loss", fontsize=14)
-    plt.ylim((0,1.5))
-    plt.yticks(fontsize=13)
-    plt.xticks(fontsize=13)
+    plt.title(f"Training {dataset_name} {chrom_id} Loss Curves", fontsize=14)
     plt.xlabel("Epoch", fontsize=13)
     plt.ylabel("Loss", fontsize=13)
-    plt.legend(fontsize=13)
+    plt.ylim([0, 1])
+    plt.legend(fontsize=12)
     plt.tight_layout()
-    
     return fig

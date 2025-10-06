@@ -87,7 +87,7 @@ class Trainer:
 
         # Learning rate scheduler
         self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, mode="min", factor=0.5, patience=10
+            self.optimizer, mode="min", factor=SCHEDULER_FACTOR, patience=SCHEDULER_PATIENCE
         )
         
         # Early stopping
@@ -111,19 +111,16 @@ class Trainer:
         )
         self.optimizer.zero_grad(set_to_none=True)
 
-        
         with autocast(device_type="cuda"):
-            # Run the forward pass to get the model output
-            
             mask_arg = motif_mask if USE_MOTIF_MASK else None
             preds, _ = self.model(
                 atac_wins, tf_tensor, tf_ids=tf_ids, tg_ids=tg_ids, bias=bias, motif_mask=mask_arg
             )
 
-            # Calculate loss
-            loss = self.loss_fn(preds, targets)
+            # Base MSE loss
+            mse_loss = self.loss_fn(preds, targets)
 
-            # Correlation bonus
+            # Correlation term
             preds_flat, targets_flat = preds.reshape(-1), targets.reshape(-1)
             if torch.std(targets_flat) > 1e-8 and torch.std(preds_flat) > 1e-8:
                 vx, vy = preds_flat - preds_flat.mean(), targets_flat - targets_flat.mean()
@@ -132,14 +129,14 @@ class Trainer:
                 )
             else:
                 corr_loss = torch.tensor(0.0, device=preds.device)
-            loss = loss + CORR_LOSS_WEIGHT * corr_loss
-            
-        self.scaler.scale(loss).backward()
+
+            total_loss = mse_loss + CORR_LOSS_WEIGHT * corr_loss
+
+        self.scaler.scale(total_loss).backward()
         self.scaler.step(self.optimizer)
         self.scaler.update()
 
-
-        return loss
+        return total_loss.detach(), mse_loss.detach()
 
     def _validate(self):
         self.model.eval()
@@ -202,22 +199,24 @@ class Trainer:
         sampler = getattr(self.train_data, "sampler", None)
         if isinstance(sampler, DistributedSampler):
             sampler.set_epoch(epoch)
-        total_loss, n_batches = 0.0, 0
 
-        for atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids, motif_mask in self.train_data:
-            loss_val = self._run_batch((atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids, motif_mask))
-            if loss_val is None: 
-                continue
-            total_loss += loss_val
+        total_loss, total_mse, n_batches = 0.0, 0.0, 0
+
+        for batch in self.train_data:
+            total_loss_val, mse_loss_val = self._run_batch(batch)
+            total_loss += float(total_loss_val)
+            total_mse += float(mse_loss_val)
             n_batches += 1
 
         avg_train_loss = total_loss / max(1, n_batches)
+        avg_train_mse = total_mse / max(1, n_batches)
+
         avg_val_loss, pearson_corr, spearman_corr = self._validate()
 
-        # update LR schedule
         self.scheduler.step(avg_val_loss)
 
-        return avg_train_loss, avg_val_loss, pearson_corr, spearman_corr
+        return avg_train_loss, avg_train_mse, avg_val_loss, pearson_corr, spearman_corr
+
 
     def _save_checkpoint(self, epoch, path):
         ckp = self.model.module.state_dict()
@@ -232,25 +231,26 @@ class Trainer:
         history = []  # store per-epoch logs
 
         for epoch in range(max_epochs):
-            train_loss, val_loss, pearson_corr, spearman_corr = self._run_epoch(epoch)
+            train_loss, train_mse, val_loss, pearson_corr, spearman_corr = self._run_epoch(epoch)
 
             if self.gpu_id == 0:
-
+                lr = self.optimizer.param_groups[0]['lr']
                 logging.info(
-                    f"Epoch {epoch+1} | Train Loss: {train_loss:.4f} | "
-                    f"Val Loss: {val_loss:.4f} | "
+                    f"Epoch {epoch+1} | Train Total Loss: {train_loss:.4f} | "
+                    f"Train MSE: {train_mse:.4f} | "
+                    f"Val MSE: {val_loss:.4f} | "
                     f"Pearson: {pearson_corr:.3f} | Spearman: {spearman_corr:.3f} | "
-                    f"LR: {self.optimizer.param_groups[0]['lr']:.2e}"
+                    f"LR: {lr:.2e}"
                 )
 
-                lr = self.optimizer.param_groups[0]['lr']
                 history.append({
-                    "Epoch": epoch,
-                    "Train Loss": train_loss.detach().item() if torch.is_tensor(train_loss) else float(train_loss),
-                    "Val Loss": val_loss.detach().item() if torch.is_tensor(val_loss) else float(val_loss),
-                    "Pearson": float(pearson_corr),
-                    "Spearman": float(spearman_corr),
-                    "LR": float(lr),
+                    "Epoch": epoch+1,
+                    "Train Total Loss": train_loss,
+                    "Train MSE": train_mse,
+                    "Val MSE": val_loss,
+                    "Pearson": pearson_corr,
+                    "Spearman": spearman_corr,
+                    "LR": lr,
                 })
                                 
             # Checkpoint + CSV log
@@ -299,7 +299,7 @@ class Trainer:
             logging.info("Training loop exited normally.")
     
     def _write_log_csv(self, history, path):
-        fieldnames = ["Epoch", "Train Loss", "Val Loss", "Pearson", "Spearman", "LR"]
+        fieldnames = ["Epoch", "Train Total Loss", "Train MSE", "Val MSE", "Pearson", "Spearman", "LR"]
         log_path = os.path.join(path, "training_log.csv")
         with open(log_path, "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -333,6 +333,7 @@ def load_train_objs():
         tf_vocab_size=tf_vocab_size,
         tg_vocab_size=tg_vocab_size,
         bias_scale=ATTN_BIAS_SCALE,
+        use_bias=USE_DISTANCE_BIAS,
         use_shortcut=USE_SHORTCUT,
         use_motif_mask=USE_MOTIF_MASK,
         lambda_l1=SHORTCUT_L1,
@@ -515,8 +516,6 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
             logging.info("\n ----- TRAINING STARTED -----")
         trainer.train(max_epochs=TOTAL_EPOCHS, path=training_output_dir)
         
-
-        
         if rank == 0:
             # Save model checkpoint
             torch.save(trainer.model.module.state_dict(),
@@ -546,7 +545,7 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
             
             # Training figures
             log_path = os.path.join(training_output_dir, "training_log.csv")
-            log_df = pd.read_csv(log_path, header=0, index_col=0)
+            log_df = pd.read_csv(log_path, header=0)
             
             pearson_corr_plt = plotting.plot_pearson_corr_across_epochs(
                 df=log_df,

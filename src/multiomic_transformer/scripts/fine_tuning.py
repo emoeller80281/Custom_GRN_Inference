@@ -164,26 +164,33 @@ class Trainer:
                     preds, _ = self.model(atac_wins, tf_tensor, tf_ids=tf_ids, tg_ids=tg_ids, bias=bias)
                     loss = F.mse_loss(preds, targets)
                     total_loss += loss.item(); n_batches += 1
-                    preds_list.append(preds.cpu()); tgts_list.append(targets.cpu())
+                    preds_list.append(preds.cpu())
+                    tgts_list.append(targets.cpu())
 
                 preds = torch.cat(preds_list).numpy()
                 tgts = torch.cat(tgts_list).numpy()
 
-                val_loss = total_loss / max(1, n_batches)
+                val_loss = float(total_loss / max(1, n_batches))
                 if np.std(tgts) < 1e-8 or np.std(preds) < 1e-8:
                     pearson_corr, spearman_corr = 0.0, 0.0
                 else:
                     pearson_corr, _ = pearsonr(preds.ravel(), tgts.ravel())
                     spearman_corr, _ = spearmanr(preds.ravel(), tgts.ravel())
 
-                per_dataset_metrics[name] = (val_loss, pearson_corr, spearman_corr)
+                # Convert to Python floats before saving
+                per_dataset_metrics[name] = (
+                    float(val_loss),
+                    float(pearson_corr),
+                    float(spearman_corr),
+                )
 
-        # compute global averages if needed
-        avg_vals = np.mean([m[0] for m in per_dataset_metrics.values()])
-        avg_pearson = np.mean([m[1] for m in per_dataset_metrics.values()])
-        avg_spearman = np.mean([m[2] for m in per_dataset_metrics.values()])
+        # compute global averages (also ensure float conversion)
+        avg_vals = float(np.mean([m[0] for m in per_dataset_metrics.values()]))
+        avg_pearson = float(np.mean([m[1] for m in per_dataset_metrics.values()]))
+        avg_spearman = float(np.mean([m[2] for m in per_dataset_metrics.values()]))
 
         return avg_vals, avg_pearson, avg_spearman, per_dataset_metrics
+
 
 
     def _evaluate_loader(self, loader):
@@ -256,6 +263,7 @@ class Trainer:
             loss_val = self._run_batch(batch)
             if loss_val is None:
                 continue
+            loss_val = float(loss_val)
             total_loss += loss_val
             n_batches += 1
 
@@ -438,6 +446,7 @@ def load_train_objs():
         tf_vocab_size=tf_vocab_size,
         tg_vocab_size=tg_vocab_size,
         bias_scale=ATTN_BIAS_SCALE,
+        use_bias=USE_DISTANCE_BIAS,
         use_shortcut=USE_SHORTCUT,
         use_motif_mask=USE_MOTIF_MASK,
         lambda_l1=SHORTCUT_L1,
@@ -661,7 +670,7 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
         # start from empty fisher
         new_fisher_accum = None
 
-        for ds, name in zip(single_cell_datasets, FINE_TUNING_DATASET):
+        for ds, name in zip(single_cell_datasets, FINE_TUNING_DATASETS):
             train_loader, _, _ = prepare_dataloader(ds, batch_size, world_size, rank)
             fisher_ds = ewc_utils.compute_fisher_diag(model, train_loader, device=device, n_batches=100)
 

@@ -45,4 +45,4 @@ nvidia-smi --query-gpu=timestamp,index,name,utilization.gpu,memory.used,memory.t
   --format=csv -l 30 > LOGS/gpu_usage_transformer_training.log &
 
 # Launch: 4 ranks on this node, bind ranks to cores
-torchrun --standalone --nproc_per_node=1 ./dev/transformer/transformer_testing.py
+torchrun --standalone --nproc_per_node=1 ./src/multiomic_transformer/scripts/test.py

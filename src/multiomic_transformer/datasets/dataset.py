@@ -191,11 +191,28 @@ class MultiomicTransformerDataset(Dataset):
         )
 
     # -------- utilities --------
-    def inverse_transform(self, preds: np.ndarray) -> np.ndarray:
-        if self.scaler is None:
-            logging.warning("No scaler available in fine-tune mode; returning raw predictions")
-            return preds
-        return self.scaler.inverse_transform(preds)
+    def subset_scaler(self, original_scaler, kept_indices):
+        from sklearn.preprocessing import StandardScaler
+        new_scaler = StandardScaler()
+        new_scaler.mean_ = original_scaler.mean_[kept_indices]
+        new_scaler.scale_ = original_scaler.scale_[kept_indices]
+        new_scaler.var_ = original_scaler.var_[kept_indices]
+        new_scaler.n_features_in_ = len(kept_indices)
+        return new_scaler
+    
+    def inverse_transform(self, preds, tg_ids=None) -> np.ndarray:
+        """
+        Inverse-transform predictions back to raw scale.
+        preds: [num_samples, num_genes]
+        tg_ids: tensor or array of target gene IDs (indices into vocab).
+        """
+        if tg_ids is None:
+            # assume same number of TGs as scaler
+            return self.scaler.inverse_transform(preds)
+
+        tg_ids = np.array(tg_ids, dtype=int)
+        sub_scaler = self.subset_scaler(self.scaler, tg_ids)
+        return sub_scaler.inverse_transform(preds)
 
     def filter_genes(self, subset_genes):
         subset = set(subset_genes)
