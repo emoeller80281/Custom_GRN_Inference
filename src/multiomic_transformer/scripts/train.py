@@ -393,13 +393,9 @@ def prepare_dataloader(dataset, batch_size, world_size=1, rank=0,
 
 
 def write_run_parameters(dataset, out_dir):
-    has_dist_bias = "No"
+    has_dist_bias = False
     if dataset.dist_bias_tensor is not None:
-        has_dist_bias = "Yes"
-    
-    has_motif_mask = "Yes"
-    if USE_MOTIF_MASK == False or USE_SHORTCUT == False:
-        has_motif_mask = "No"
+        has_dist_bias = True
 
     logging.info("\n===== MultiomicTransformerDataset Loaded =====")
     logging.info(f"Chromosome:          {CHROM_ID}")
@@ -414,8 +410,9 @@ def write_run_parameters(dataset, out_dir):
     logging.info(f"Attention Layers:    {NUM_LAYERS}")
     logging.info(f"Feedforward Layers:  {D_FF}")
     logging.info(f"Dropout:             {DROPOUT}")
-    logging.info(f"Dist bias?:          {has_dist_bias}")
-    logging.info(f"Motif Mask?:         {has_motif_mask}")
+    logging.info(f"TF-TG Shortcut?:     {str(USE_SHORTCUT)}")
+    logging.info(f"Dist bias?:          {str(has_dist_bias)}")
+    logging.info(f"Motif Mask?:         {str(USE_MOTIF_MASK)}")
     logging.info(f"Shortcut L1:         {SHORTCUT_L1}")
     logging.info(f"Shortcut L2:         {SHORTCUT_L2}")
     logging.info(f"Shortcut Dropout:    {SHORTCUT_DROPOUT}")
@@ -434,8 +431,9 @@ def write_run_parameters(dataset, out_dir):
         "Model Layers": NUM_LAYERS,
         "d_feedforward": D_FF,
         "Dropout": DROPOUT,
-        "Distance Bias":has_dist_bias,
-        "Motif Mask": has_motif_mask,
+        "tf_tg_shortcut": str(USE_SHORTCUT),
+        "Distance Bias":str(has_dist_bias),
+        "Motif Mask": str(USE_MOTIF_MASK),
         "Shortcut L1": SHORTCUT_L1,
         "Shortcut L2": SHORTCUT_L2,
         "Shortcut Dropout": SHORTCUT_DROPOUT,

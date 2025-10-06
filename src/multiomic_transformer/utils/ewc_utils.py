@@ -51,7 +51,7 @@ def compute_fisher_diag(model, loader, device, n_batches=50, loss_fn="mse"):
         model.zero_grad(set_to_none=True)
 
         preds, _ = model(atac_wins, tf_norm, tf_ids=tf_ids, tg_ids=tg_ids, bias=bias)
-
+        
         if loss_fn == "mse":
             loss = F.mse_loss(preds, tg_true)
         else:
@@ -121,4 +121,23 @@ def ewc_penalty(model, fisher_diag, ref_params, lambda_ewc=100.0, include=None, 
 
     return loss_ewc    
     
+def merge_fishers(old_fisher, new_fisher, old_size, new_size):
+    """
+    Merge two Fisher diagonals weighted by dataset sizes.
+
+    Args:
+        old_fisher (dict): parameter_name -> tensor of Fisher estimates (from previous data)
+        new_fisher (dict): parameter_name -> tensor of Fisher estimates (from new data)
+        old_size (int): number of samples used to compute old_fisher
+        new_size (int): number of samples used to compute new_fisher
+
+    Returns:
+        dict: merged Fisher diagonal
+    """
+    merged = {}
+    total = old_size + new_size
+    for n in old_fisher:
+        merged[n] = (old_fisher[n] * old_size + new_fisher[n] * new_size) / total
+    return merged
+
 

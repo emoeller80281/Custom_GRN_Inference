@@ -112,13 +112,14 @@ def create_single_cell_tensors(
     tf_vocab: dict[str, int],
     chrom_id: str,
 ):
-    outdir = SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / "single_cell"
-    outdir.mkdir(parents=True, exist_ok=True)
 
     # --- set chromosome-specific TG list ---
     chrom_tg_names = set(gene_tss_df["name"].unique())
 
     for sample_name in sample_names:
+        outdir = SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / "single_cell" / sample_name
+        outdir.mkdir(parents=True, exist_ok=True)
+        
         sample_processed_data_dir = dataset_processed_data_dir / sample_name
 
         tg_sc_file = sample_processed_data_dir / "TG_singlecell.tsv"
@@ -618,7 +619,7 @@ if __name__ == "__main__":
     # Save Precomputed Tensors 
     logging.info(f"\nPrecomputing TF, TG, and ATAC tensors")
     tf_tensor_all, tg_tensor_all, atac_window_tensor_all = precompute_input_tensors(
-        output_dir=SAMPLE_DATA_CACHE_DIR,
+        output_dir=str(SAMPLE_DATA_CACHE_DIR),
         genome_wide_tf_expression=genome_wide_tf_expression,
         TG_scaled=TG_scaled,
         total_RE_pseudobulk_chr=total_RE_pseudobulk_chr,
@@ -691,7 +692,14 @@ if __name__ == "__main__":
     )
     logging.info(f"\t- Done!")
     
-    create_single_cell_tensors(gene_tss_df, FINE_TUNING_DATASET, SAMPLE_PROCESSED_DATA_DIR, tg_vocab, tf_vocab, CHROM_ID)
+    create_single_cell_tensors(
+        gene_tss_df=gene_tss_df, 
+        sample_names=FINE_TUNING_DATASETS, 
+        dataset_processed_data_dir=SAMPLE_PROCESSED_DATA_DIR, 
+        tg_vocab=tg_vocab, 
+        tf_vocab=tf_vocab, 
+        chrom_id=CHROM_ID
+    )
     
     # ----- Writing Output Files -----
     logging.info(f"\nWriting output files")

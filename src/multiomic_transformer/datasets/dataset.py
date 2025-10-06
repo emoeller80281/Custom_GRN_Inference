@@ -47,7 +47,7 @@ class MultiomicTransformerDataset(Dataset):
             if sample_name is None:
                 raise ValueError("fine_tuner=True requires sample_name (e.g. 'E7.5_rep1')")
 
-            sc_dir = chrom_dir / "single_cell"
+            sc_dir = chrom_dir / "single_cell" / sample_name
 
             tf_tensor_file   = sc_dir / f"{sample_name}_tf_tensor_singlecell_{chrom_id}.pt"
             tg_tensor_file   = sc_dir / f"{sample_name}_tg_tensor_singlecell_{chrom_id}.pt"
