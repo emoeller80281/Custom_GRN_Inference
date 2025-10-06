@@ -147,7 +147,7 @@ class Trainer:
         self.scaler.step(self.optimizer)
         self.scaler.update()
 
-        return loss
+        return loss.detach().item()
 
     def _validate(self):
         self.model.eval()

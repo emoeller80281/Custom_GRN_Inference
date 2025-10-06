@@ -6,7 +6,7 @@ from sklearn.preprocessing import StandardScaler
 
 import matplotlib.pyplot as plt
 
-def plot_per_gene_correlation_scatterplot(model, dataloader, mask_arg, gpu_id=0):
+def plot_per_gene_correlation_scatterplot(model, dataloader, use_mask, gpu_id=0):
     model.eval()
     preds_list, tgts_list = [], []
     first_tg_ids = None
@@ -20,9 +20,10 @@ def plot_per_gene_correlation_scatterplot(model, dataloader, mask_arg, gpu_id=0)
             tg_ids    = tg_ids.to(gpu_id)
             motif_mask= motif_mask.to(gpu_id)
             
+            mask_arg = motif_mask if use_mask else None
             preds, _ = model(
-                    atac_wins, tf_tensor, tf_ids=tf_ids, tg_ids=tg_ids, bias=bias, motif_mask=mask_arg
-                )
+                atac_wins, tf_tensor, tf_ids=tf_ids, tg_ids=tg_ids, bias=bias, motif_mask=mask_arg
+            )
             preds_list.append(preds.cpu().numpy())
             tgts_list.append(targets.cpu().numpy())
             

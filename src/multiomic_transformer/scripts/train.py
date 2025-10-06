@@ -394,9 +394,6 @@ def prepare_dataloader(dataset, batch_size, world_size=1, rank=0,
 
 
 def write_run_parameters(dataset, out_dir):
-    has_dist_bias = False
-    if dataset.dist_bias_tensor is not None:
-        has_dist_bias = True
 
     logging.info("\n===== MultiomicTransformerDataset Loaded =====")
     logging.info(f"Chromosome:          {CHROM_ID}")
@@ -411,9 +408,9 @@ def write_run_parameters(dataset, out_dir):
     logging.info(f"Attention Layers:    {NUM_LAYERS}")
     logging.info(f"Feedforward Layers:  {D_FF}")
     logging.info(f"Dropout:             {DROPOUT}")
-    logging.info(f"TF-TG Shortcut?:     {str(USE_SHORTCUT)}")
-    logging.info(f"Dist bias?:          {str(has_dist_bias)}")
-    logging.info(f"Motif Mask?:         {str(USE_MOTIF_MASK)}")
+    logging.info(f"TF-TG Shortcut?:     {USE_SHORTCUT}")
+    logging.info(f"Dist bias?:          {USE_DISTANCE_BIAS}")
+    logging.info(f"Motif Mask?:         {USE_MOTIF_MASK}")
     logging.info(f"Shortcut L1:         {SHORTCUT_L1}")
     logging.info(f"Shortcut L2:         {SHORTCUT_L2}")
     logging.info(f"Shortcut Dropout:    {SHORTCUT_DROPOUT}")
@@ -428,13 +425,15 @@ def write_run_parameters(dataset, out_dir):
         "Epochs": TOTAL_EPOCHS,
         "Batch Size": BATCH_SIZE,
         "d_model": D_MODEL,
+        "corr_loss_weight": CORR_LOSS_WEIGHT,
         "Attention Heads": NUM_HEADS,
         "Model Layers": NUM_LAYERS,
         "d_feedforward": D_FF,
         "Dropout": DROPOUT,
-        "tf_tg_shortcut": str(USE_SHORTCUT),
-        "Distance Bias":str(has_dist_bias),
-        "Motif Mask": str(USE_MOTIF_MASK),
+        "tf_tg_shortcut": USE_SHORTCUT,
+        "Distance Bias":USE_DISTANCE_BIAS,
+        "Distance Bias Scale": ATTN_BIAS_SCALE,
+        "Motif Mask": USE_MOTIF_MASK,
         "Shortcut L1": SHORTCUT_L1,
         "Shortcut L2": SHORTCUT_L2,
         "Shortcut Dropout": SHORTCUT_DROPOUT,
@@ -564,7 +563,7 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
             per_gene_corr_scatter_plt = plotting.plot_per_gene_correlation_scatterplot(
                 model=model,
                 dataloader=test_loader,
-                mask_arg=USE_MOTIF_MASK,
+                use_mask=USE_MOTIF_MASK,
                 gpu_id=0
             )
             per_gene_corr_scatter_plt.savefig(os.path.join(training_output_dir, "per_gene_corr_scatter.png"), dpi=300)
