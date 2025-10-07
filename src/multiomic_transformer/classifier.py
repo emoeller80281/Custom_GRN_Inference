@@ -470,6 +470,15 @@ def run_test(checkpoint_path, out_dir, batch_size=BATCH_SIZE, gpu_id=0, chip_fil
         device=DEVICE
     )
     
+    shortcut_long = (
+        shortcut_matrix_df.stack()
+        .rename("shortcut_weight")
+        .reset_index()
+        .rename(columns={"level_0": "TF", "level_1": "TG"})
+    )
+    
+    edge_df = edge_df.merge(shortcut_long, on=["TF", "TG"], how="left")
+    
     edge_df.to_csv(edge_path, index=False)
     logging.info(f"  - Saved edge features: {edge_path}  shape={edge_df.shape}")
     # else:
@@ -487,7 +496,7 @@ def run_test(checkpoint_path, out_dir, batch_size=BATCH_SIZE, gpu_id=0, chip_fil
     
     # --- Predict all edge scores with trained classifier ---
     logging.info("Generating predictions for all edges")
-    features = ["attn", "pred_mean", "pred_std", "bias_mean", "motif_mask", "grad_attr"]
+    features = ["attn", "pred_mean", "pred_std", "bias_mean", "grad_attr", "motif_mask", "shortcut_weight"]
     X_all = edge_df[features].values
     edge_df["pred_score"] = clf.predict_proba(X_all)[:, 1]
     
