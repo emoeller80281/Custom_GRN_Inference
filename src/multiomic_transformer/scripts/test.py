@@ -162,7 +162,7 @@ def run_test(checkpoint_path, out_dir, batch_size=BATCH_SIZE, gpu_id=0, chip_fil
     ckpt_dir = os.path.dirname(checkpoint_path)
     dataset = MultiomicTransformerDataset(
         data_dir=SAMPLE_DATA_CACHE_DIR,
-        chrom_id=CHROM_ID,
+        chrom_id=TEST_CHROM,
         tf_vocab_path=os.path.join(COMMON_DATA, "tf_vocab.json"),
         tg_vocab_path=os.path.join(COMMON_DATA, "tg_vocab.json"),
     )
@@ -221,6 +221,7 @@ def run_test(checkpoint_path, out_dir, batch_size=BATCH_SIZE, gpu_id=0, chip_fil
 
 
 if __name__ == "__main__":
-    ckpt_path = OUTPUT_DIR / "model_training_014" / "trained_model.pt"
+    CHROM_ID = "chr19"
+    ckpt_path = OUTPUT_DIR / CHROM_ID / "model_training_014" / "trained_model.pt"
     run_test(ckpt_path, OUTPUT_DIR / "model_training_014/test_results", gpu_id=0,
              chip_file="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data/ground_truth_files/mESC_beeline_ChIP-seq.csv")

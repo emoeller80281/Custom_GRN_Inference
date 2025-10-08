@@ -36,13 +36,17 @@ def plot_per_gene_correlation_scatterplot(model, dataloader, use_mask, gpu_id=0)
     corr, _ = pearsonr(total_preds.ravel(), total_tgts.ravel())
     print(f"Test Pearson correlation: {corr:.3f}")
 
-    fig = plt.figure(figsize=(6,6))
-    plt.scatter(total_tgts, total_preds, alpha=0.5, s=5)
-    plt.xlabel("True values")
-    plt.ylabel("Predicted values")
-    plt.title(f"Predicted vs True (r={corr:.3f})")
+    fig = plt.figure(figsize=(6,5))
+    plt.scatter(total_tgts, total_preds, alpha=0.5, s=5, label=f"Predicted vs True (r={corr:.3f})")
+    plt.xlabel("True values", fontsize=17)
+    plt.ylabel("Predicted values", fontsize=17)
+    plt.title(f"Predicted vs True TG Expression", fontsize=17)
     plt.plot([total_tgts.min(), total_tgts.max()],
              [total_tgts.min(), total_tgts.max()], 'r--')
+    plt.xticks(fontsize=15)
+    plt.yticks(fontsize=15)
+    plt.legend(loc="upper left", markerscale=0, fontsize=15)
+    plt.tight_layout()
     
     return fig
 
@@ -50,13 +54,13 @@ def plot_pearson_corr_across_epochs(df, dataset_name, chrom_id):
     fig = plt.figure(figsize=(6, 5))
     plt.plot(df.index, df["Pearson"], linewidth=2, label="Pearson Correlation")
 
-    plt.title(f"Training {dataset_name} {chrom_id} Pearson Correlation", fontsize=14)
+    plt.title(f"Training {dataset_name} {chrom_id} Pearson Correlation", fontsize=17)
     plt.ylim((0,1))
-    plt.yticks(fontsize=13)
-    plt.xticks(fontsize=13)
-    plt.xlabel("Epoch", fontsize=13)
-    plt.ylabel("Pearson Correlation", fontsize=13)
-    plt.legend(fontsize=13)
+    plt.yticks(fontsize=15)
+    plt.xticks(fontsize=15)
+    plt.xlabel("Epoch", fontsize=17)
+    plt.ylabel("Pearson Correlation", fontsize=17)
+    plt.legend(fontsize=17)
     plt.tight_layout()
     
     return fig
@@ -67,10 +71,12 @@ def plot_train_val_loss(df, dataset_name, chrom_id):
     plt.plot(df["Epoch"], df["Val MSE"], label="Validation MSE", linewidth=2)
     plt.plot(df["Epoch"], df["Train Total Loss"], label="Train Total Loss", linestyle="--", alpha=0.7)
 
-    plt.title(f"Training {dataset_name} {chrom_id} Loss Curves", fontsize=14)
-    plt.xlabel("Epoch", fontsize=13)
-    plt.ylabel("Loss", fontsize=13)
+    plt.title(f"Training {dataset_name} {chrom_id} Loss Curves", fontsize=17)
+    plt.xlabel("Epoch", fontsize=17)
+    plt.ylabel("Loss", fontsize=17)
+    plt.xticks(fontsize=15)
+    plt.yticks(fontsize=15)
     plt.ylim([0, 1])
-    plt.legend(fontsize=12)
+    plt.legend(fontsize=15)
     plt.tight_layout()
     return fig

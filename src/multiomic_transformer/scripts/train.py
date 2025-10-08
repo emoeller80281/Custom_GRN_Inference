@@ -489,7 +489,7 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
     
     try:
         training_file_iter_format = "model_training_{:03d}"
-        training_output_dir = unique_path(OUTPUT_DIR, training_file_iter_format)
+        training_output_dir = unique_path(OUTPUT_DIR / CHROM_ID, training_file_iter_format)
         
         logging.info(f"\n =========== EXPERIMENT {training_output_dir.name.upper()} ===========")
                 
@@ -579,6 +579,7 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
             dist.destroy_process_group()
     
 if __name__ == "__main__":
+    
     main(rank=int(os.environ["LOCAL_RANK"]),
         world_size=int(os.environ["WORLD_SIZE"]),
         save_every=5,

@@ -135,7 +135,7 @@ class TFtoTGShortcut(nn.Module):
             attn = attn / (attn.sum(dim=-1, keepdim=True) + 1e-8)
 
         # Weighted TF → TG contribution
-        tf_scalar = torch.einsum("bt,gt->bg", tf_expr, attn)
+        tf_scalar = tf_expr @ attn.T
 
         # Apply dropout (on shortcut contribution)
         tf_scalar = F.dropout(tf_scalar, p=self.dropout_p, training=self.training)

@@ -297,7 +297,7 @@ def gradient_attribution_matrix(model, dataset, loader, tg_chunk=64, device=DEVI
 # Training classifier
 # ---------------------------------------------------------------------
 def train_edge_classifier(df):
-    features = ["attn", "pred_mean", "pred_std", "bias_mean", "grad_attr", "motif_mask"]
+    features = ["attn", "pred_mean", "pred_std", "bias_mean", "grad_attr", "motif_mask", "shortcut_weight"]
     X = df[features].values
     y = df["label"].values
 
@@ -377,21 +377,21 @@ def compute_or_load_validation(model, loader, device, out_dir, fname="val_metric
 # ---------------------------------------------------------------------
 # Main runner
 # ---------------------------------------------------------------------
-def run_test(checkpoint_path, out_dir, batch_size=BATCH_SIZE, gpu_id=0, chip_file=None):
+def run_test(checkpoint_path, out_dir, batch_size=BATCH_SIZE, chrom_id="chr1", experiment_id="model_training_001", gpu_id=0, chip_file=None):
     os.makedirs(out_dir, exist_ok=True)
-    logging.info(f"Starting run_test with:\n  - Checkpoint={checkpoint_path}\n  - Out_dir={out_dir}")
+    logging.info(f"\n ----- TRAINING CLASSIFIER FOR {chrom_id} {experiment_id} -----")
+    logging.info(f"- Checkpoint={checkpoint_path}\n  - Out_dir={out_dir}")
 
     # --- Dataset ---
     ckpt_dir = os.path.dirname(checkpoint_path)
-    ckpt_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC/chr19/model_training_014"
+    ckpt_dir = f"/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC/{chrom_id}/{experiment_id}"
     logging.info("\nLoading dataset")
     dataset = MultiomicTransformerDataset(
         data_dir=SAMPLE_DATA_CACHE_DIR,
-        chrom_id=CHROM_ID,
+        chrom_id=chrom_id,
         tf_vocab_path=os.path.join(COMMON_DATA, "tf_vocab.json"),
         tg_vocab_path=os.path.join(COMMON_DATA, "tg_vocab.json"),
-        fine_tuner=True,
-        sample_name=FINE_TUNING_DATASETS[0]
+        fine_tuner=False,
     )
     logging.info(f"  - Dataset loaded! TFs={len(dataset.tf_names)}, TGs={len(dataset.tg_names)}")
 
@@ -431,7 +431,7 @@ def run_test(checkpoint_path, out_dir, batch_size=BATCH_SIZE, gpu_id=0, chip_fil
     if not os.path.isfile(grad_attr_path):
         logging.info("\nExtracting gradient attribution matrix")
         gradient_attrib_df = gradient_attribution_matrix(
-            model, dataset, loader, tg_chunk=16, device=DEVICE, normalize="global"
+            model, dataset, loader, tg_chunk=64, device=DEVICE, normalize="global"
         )
         
         gradient_attrib_df.to_csv(grad_attr_path)
@@ -441,9 +441,9 @@ def run_test(checkpoint_path, out_dir, batch_size=BATCH_SIZE, gpu_id=0, chip_fil
         gradient_attrib_df = pd.read_csv(grad_attr_path)
 
     
-    # logging.info(f"\nPlotting per gene prediction vs observed correlation scatterplot")
-    # scatter_fig = plotting.plot_per_gene_correlation_scatterplot(model, loader, use_mask=False, gpu_id=gpu_id)
-    # scatter_fig.savefig(os.path.join(out_dir, "test_scatter.png"), dpi=300)
+    logging.info(f"\nPlotting per gene prediction vs observed correlation scatterplot")
+    scatter_fig = plotting.plot_per_gene_correlation_scatterplot(model, loader, use_mask=False, gpu_id=gpu_id)
+    scatter_fig.savefig(os.path.join(out_dir, "per_gene_corr_scatterplot.png"), dpi=300)
 
     # --- Edge features ---
     logging.info(f"\nLoading ground truth from {chip_file}")
@@ -477,6 +477,12 @@ def run_test(checkpoint_path, out_dir, batch_size=BATCH_SIZE, gpu_id=0, chip_fil
         .rename(columns={"level_0": "TF", "level_1": "TG"})
     )
     
+    edge_df["TF"] = edge_df["TF"].astype(str)
+    edge_df["TG"] = edge_df["TG"].astype(str)
+
+    shortcut_long["TF"] = shortcut_long["TF"].astype(str)
+    shortcut_long["TG"] = shortcut_long["TG"].astype(str)
+
     edge_df = edge_df.merge(shortcut_long, on=["TF", "TG"], how="left")
     
     edge_df.to_csv(edge_path, index=False)
@@ -506,15 +512,24 @@ def run_test(checkpoint_path, out_dir, batch_size=BATCH_SIZE, gpu_id=0, chip_fil
         .rename(columns={"TF": "Source", "TG": "Target", "pred_score": "score"})
     )
 
-    pred_path = os.path.join(out_dir, "inferred_grn.csv")
+    pred_path = os.path.join(out_dir, f"inferred_grn_{chrom_id}.csv")
     pred_df.to_csv(pred_path, index=False)
     logging.info(f"Saved predictions file: {pred_path}  shape={edge_df.shape}")
 
     logging.info("\nClassifier training completed successfully")
 
 if __name__ == "__main__":
-    ckpt_path = OUTPUT_DIR / "model_training_014" / "fine_tuning" / "checkpoint_epoch47.pt"
-    run_test(ckpt_path,
-             OUTPUT_DIR / "model_training_014/fine_tuning/test_results",
-             gpu_id=0,
-             chip_file=Path(ROOT_DIR) / "data/ground_truth_files/combined_ground_truth.csv")
+    selected_experiment = "model_training_001"
+    chrom_id_list = ["chr1"]
+    # chrom_id_list = ["chr1", "chr2", "chr3", "chr4", "chr13"]
+    
+    for chrom_id in chrom_id_list:
+        ckpt_path = OUTPUT_DIR / chrom_id / selected_experiment / "trained_model.pt"
+        out_dir = OUTPUT_DIR / chrom_id / selected_experiment / "test_results" 
+        
+        run_test(ckpt_path,
+                out_dir=out_dir,
+                chrom_id=chrom_id,
+                experiment_id=selected_experiment,
+                gpu_id=0,
+                chip_file=Path(ROOT_DIR) / "data/ground_truth_files/combined_ground_truth.csv")

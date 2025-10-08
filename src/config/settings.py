@@ -1,12 +1,18 @@
 from pathlib import Path
+import numpy as np
+import itertools
 
 ROOT_DIR = Path(__file__).resolve().parent.parent.parent
+
+chr_nums = [f"chr{i}" for i in range(1, 20)]
+chrom_list = chr_nums + ["chrX", "chrY"]
 
 # ----- SAMPLE INFORMATION -----
 # Sample information
 ORGANISM_CODE = "mm10"
 DATASET_NAME = "mESC"
-CHROM_ID = "chr19"
+CHROM_ID_LIST = chrom_list
+CHROM_ID = "chr6"
 SAMPLE_NAMES = ["E7.5_rep1", "E7.5_rep2", "E7.75_rep1", "E8.0_rep2", "E8.5_rep2", "E8.75_rep2", "E7.5_rep2", "E8.0_rep1", "E8.5_rep1"]
 FINE_TUNING_DATASETS = ["E7.5_rep1"]
 
@@ -26,7 +32,7 @@ AGGREGATION_METHOD = "mean" # "sum" or "mean"
 
 # Data Preprocessing and Caching
 VALIDATION_DATASETS = ["E8.75_rep1"]
-FORCE_RECALCULATE = False                # Recomputes genomic windows, peak-TG distance, and re-runs MOODS TF-peak scan
+FORCE_RECALCULATE = True                # Recomputes genomic windows, peak-TG distance, and re-runs MOODS TF-peak scan
 WINDOW_SIZE = 25_000                    # Aggregates peaks within WINDOW_SIZE bp genomic tiles
 DISTANCE_SCALE_FACTOR = 250_000          # Weights the peak-gene TSS distance score. Lower numbers = faster dropoff
 MAX_PEAK_DISTANCE = 1_000_000         # Masks out peaks further than this distance from the gene TSS
@@ -52,7 +58,7 @@ SCHEDULER_PATIENCE=10
 # TF to TG shortcut parameters
 USE_DISTANCE_BIAS = True
 USE_SHORTCUT = True
-USE_MOTIF_MASK = True
+USE_MOTIF_MASK = False
 SHORTCUT_L1 = 0
 SHORTCUT_L2 = 0
 SHORTCUT_TOPK = None
@@ -82,13 +88,11 @@ RAW_DATA = DATA_DIR / "raw"
 COMMON_DATA = TRAINING_DATA_CACHE / "common"
 
 EXPERIMENT_DIR = ROOT_DIR / "experiments"
-OUTPUT_DIR = EXPERIMENT_DIR / DATASET_NAME / CHROM_ID
+OUTPUT_DIR = EXPERIMENT_DIR / DATASET_NAME
 
 # Sample-specific paths
 SAMPLE_PROCESSED_DATA_DIR = PROCESSED_DATA / DATASET_NAME
 SAMPLE_DATA_CACHE_DIR = TRAINING_DATA_CACHE / DATASET_NAME
-SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR = SAMPLE_DATA_CACHE_DIR / CHROM_ID
-SAMPLE_CHROM_SINGLE_CELL_DATA_CACHE = SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / "single_cell"
 
 FINE_TUNING_DIR = OUTPUT_DIR / FINE_TUNING_TRAINED_MODEL
 
