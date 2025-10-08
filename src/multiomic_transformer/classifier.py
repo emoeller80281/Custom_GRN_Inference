@@ -520,8 +520,8 @@ def run_test(checkpoint_path, out_dir, batch_size=BATCH_SIZE, chrom_id="chr1", e
 
 if __name__ == "__main__":
     selected_experiment = "model_training_001"
-    chrom_id_list = ["chr1"]
-    # chrom_id_list = ["chr1", "chr2", "chr3", "chr4", "chr13"]
+    chrom_id_list = ["chr13"]
+    # chrom_id_list = ["chr1", "chr2", "chr3", "chr4", "chr5", "chr6", "chr13"]
     
     for chrom_id in chrom_id_list:
         ckpt_path = OUTPUT_DIR / chrom_id / selected_experiment / "trained_model.pt"

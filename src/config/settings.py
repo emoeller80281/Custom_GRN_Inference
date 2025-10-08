@@ -12,7 +12,7 @@ chrom_list = chr_nums + ["chrX", "chrY"]
 ORGANISM_CODE = "mm10"
 DATASET_NAME = "mESC"
 CHROM_ID_LIST = chrom_list
-CHROM_ID = "chr6"
+CHROM_ID = "chr8"
 SAMPLE_NAMES = ["E7.5_rep1", "E7.5_rep2", "E7.75_rep1", "E8.0_rep2", "E8.5_rep2", "E8.75_rep2", "E7.5_rep2", "E8.0_rep1", "E8.5_rep1"]
 FINE_TUNING_DATASETS = ["E7.5_rep1"]
 
