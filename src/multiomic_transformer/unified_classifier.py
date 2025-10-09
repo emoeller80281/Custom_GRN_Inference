@@ -5,6 +5,7 @@ import logging
 import os
 from pathlib import Path
 import pickle
+from unicodedata import numeric
 
 import numpy as np
 import pandas as pd
@@ -384,6 +385,28 @@ def train_edge_classifier(df):
     print(f"Mean AUROC={np.mean(aucs):.3f}±{np.std(aucs):.3f} | Mean AUPRC={np.mean(auprcs):.3f}±{np.std(auprcs):.3f}")
     return best_clf
 
+def aggregate_edge_features_across_chromosomes(chrom_list, experiment_id):
+    """
+    Collects edge feature CSVs from each chromosome and merges them into one DataFrame.
+    """
+    all_edges = []
+    for chrom_id in chrom_list:
+        edge_path = OUTPUT_DIR / chrom_id / experiment_id / "test_results" / "edge_features.csv"
+        if edge_path.exists():
+            df = pd.read_csv(edge_path)
+            df["chrom_id"] = chrom_id
+            all_edges.append(df)
+            logging.info(f"Loaded {edge_path}  shape={df.shape}")
+        else:
+            logging.warning(f"Missing {edge_path}, skipping")
+
+    if not all_edges:
+        raise FileNotFoundError("No per-chromosome edge feature files found.")
+    
+    combined = pd.concat(all_edges, ignore_index=True)
+    logging.info(f"Combined edge feature matrix: shape={combined.shape}")
+    return combined
+
 
 def compute_or_load_validation(model, loader, device, out_dir, fname="val_metrics.pkl"):
     """
@@ -437,205 +460,71 @@ def compute_or_load_validation(model, loader, device, out_dir, fname="val_metric
 
     return results
 
+def predict_with_unified_classifier(model, input_edge_features, output_path):
+    """
+    Load a trained classifier and apply it to new edge feature data.
+    """
+    import joblib
+    import pandas as pd
 
+    # Ensure required feature columns exist
+    required_features = ["attn", "pred_mean", "pred_std", "bias_mean", "grad_attr", "motif_mask", "shortcut_weight"]
+    missing = [f for f in required_features if f not in input_edge_features.columns]
+    if missing:
+        raise ValueError(f"Missing required feature columns: {missing}")
 
-# ---------------------------------------------------------------------
-# Main runner
-# ---------------------------------------------------------------------
-def run_test(checkpoint_path, out_dir, batch_size=BATCH_SIZE, chrom_id="chr1", experiment_id="model_training_001", gpu_id=0, chip_file=None, inferred_net_outdir=None):
-    if inferred_net_outdir == None:
-        inferred_net_outdir = out_dir
-    
-    os.makedirs(out_dir, exist_ok=True)
-    os.makedirs(inferred_net_outdir, exist_ok=True)
-    logging.info(f"\n ----- TRAINING CLASSIFIER FOR {chrom_id} {experiment_id} -----")
-    logging.info(f"- Checkpoint={checkpoint_path}\n  - Out_dir={out_dir}")
+    X = input_edge_features[required_features].fillna(0).clip(-5, 5).values
 
-    # --- Dataset ---
-    ckpt_dir = os.path.dirname(checkpoint_path)
-    ckpt_dir = f"/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC/{chrom_id}/{experiment_id}"
-    logging.info("\nLoading dataset")
-    dataset = MultiomicTransformerDataset(
-        data_dir=SAMPLE_DATA_CACHE_DIR,
-        chrom_id=chrom_id,
-        tf_vocab_path=os.path.join(COMMON_DATA, "tf_vocab.json"),
-        tg_vocab_path=os.path.join(COMMON_DATA, "tg_vocab.json"),
-        fine_tuner=False,
-    )
-    logging.info(f"  - Dataset loaded! TFs={len(dataset.tf_names)}, TGs={len(dataset.tg_names)}")
+    logging.info(f"Predicting probabilities for {len(X):,} edges")
+    preds = model.predict_proba(X)[:, 1]
 
-    
-    # --- Model ---
-    logging.info("\nLoading model from run parameters")
-    model, run_params = load_model_from_run_params(
-        ckpt_dir, len(dataset.tf_name2id), len(dataset.tg_name2id), DEVICE
-    )
-    state_dict = torch.load(checkpoint_path, map_location=DEVICE)
-    model.load_state_dict(state_dict, strict=True)
-    model.eval()
-    logging.info("  - Model loaded and set to eval mode")
+    result_df = input_edge_features[["TF", "TG"]].copy()
+    result_df["score"] = preds
 
-    # --- Dataloader ---
-    logging.info("\nCreating Dataloader")
-    loader = DataLoader(
-        dataset, batch_size=batch_size, shuffle=False,
-        collate_fn=MultiomicTransformerDataset.collate_fn
-    )
-    logging.info(f"  - batch_size={batch_size}\n  - total_batches={len(loader)}")
+    # Sort by score descending (strongest predicted interactions first)
+    result_df = result_df.sort_values("pred_score", ascending=False)
 
-    # --- Shortcut matrix ---
-    shortcut_path = os.path.join(out_dir, "shortcut_matrix.csv")
-    if not os.path.isfile(shortcut_path):
-        logging.info("\nExtracting shortcut matrix")
-        shortcut_matrix_df = extract_shortcut_matrix(model, dataset)
-        
-        shortcut_matrix_df.to_csv(shortcut_path)
-        logging.info(f"  - Saved shortcut matrix: {shortcut_path}  shape={shortcut_matrix_df.shape}")
-    else:
-        shortcut_matrix_df = pd.read_csv(shortcut_path)
+    result_df = result_df.rename(columns={"TF":"Source", "TG":"Target"})
+    result_df.to_csv(output_path, index=False)
+    logging.info(f"Saved predictions: {output_path} (shape={result_df.shape})")
 
-    # --- Gradient attribution matrix ---
-    
-    grad_attr_path = os.path.join(out_dir, "gradient_attribution.csv")
-    if not os.path.isfile(grad_attr_path):
-        logging.info("\nExtracting gradient attribution matrix")
-        gradient_attrib_df = gradient_attribution_matrix(
-            model, dataset, loader, tg_chunk=64, device=DEVICE, normalize="global"
-        )
-        
-        gradient_attrib_df.to_csv(grad_attr_path)
-        logging.info(f"  - Saved gradient attribution matrix: {grad_attr_path}  shape={gradient_attrib_df.shape}")
-    else:
-        logging.info("\nLoading gradient attribution DataFrame")
-        gradient_attrib_df = pd.read_csv(grad_attr_path)
+    return result_df
 
-    
-    # logging.info(f"\nPlotting per gene prediction vs observed correlation scatterplot")
-    # scatter_fig = plotting.plot_per_gene_correlation_scatterplot(model, loader, use_mask=False, gpu_id=gpu_id)
-    # scatter_fig.savefig(os.path.join(out_dir, "per_gene_corr_scatterplot.png"), dpi=300)
-
-    # --- Edge features ---
-    logging.info(f"\nLoading ground truth from {chip_file}")
-    chip = pd.read_csv(chip_file)
-    chip = chip.dropna()
-    chip_edges = {(t.upper(), g.upper()) for t, g in zip(chip.iloc[:,0], chip.iloc[:,1])}
-    logging.info(f"  - Loaded ground truth with {len(chip_edges):,} edges")
-
-    max_id = int(max(dataset.tg_ids))
-    tg_id_map = np.full(max_id + 1, -1, dtype=int)
-    for local_idx, raw_id in enumerate(dataset.tg_ids):
-        tg_id_map[raw_id] = local_idx
-
-    edge_path = os.path.join(out_dir, "edge_features.csv")
-    # if not os.path.isfile(edge_path):
-    logging.info("\nExtracting edge features")
-    edge_df = extract_edge_features(
-        model,
-        loader,
-        tf_names=dataset.tf_names,
-        tg_names=dataset.tg_names,
-        tg_id_map=tg_id_map,
-        chip_edges=chip_edges,
-        gradient_attrib_df=gradient_attrib_df,
-        device=DEVICE
-    )
-    
-    shortcut_long = (
-        shortcut_matrix_df.stack()
-        .rename("shortcut_weight")
-        .reset_index()
-        .rename(columns={"level_0": "TF", "level_1": "TG"})
-    )
-    
-    edge_df["TF"] = edge_df["TF"].astype(str)
-    edge_df["TG"] = edge_df["TG"].astype(str)
-    
-    edge_df[["attn", "grad_attr", "motif_mask"]] = edge_df.groupby("TF")[["attn", "grad_attr", "motif_mask"]].transform(
-        lambda x: (x - x.mean()) / (x.std() + 1e-8)
-    )
-    
-    edge_df[["attn","grad_attr"]] = edge_df.groupby("TF")[["attn","grad_attr"]].transform(rank_gauss)
-    
-    pos = edge_df[edge_df.label==1]
-    neg = edge_df[(edge_df.label==0) & (edge_df["motif_mask"]>0)]
-    neg = neg.sample(n=len(pos), random_state=42, replace=len(neg)<len(pos))
-    edge_df_bal = pd.concat([pos, neg], ignore_index=True)
-
-    shortcut_long["TF"] = shortcut_long["TF"].astype(str)
-    shortcut_long["TG"] = shortcut_long["TG"].astype(str)
-
-    edge_df_bal = edge_df_bal.merge(shortcut_long, on=["TF", "TG"], how="left")
-    
-    edge_df_bal.to_csv(edge_path, index=False)
-    logging.info(f"  - Saved edge features: {edge_path}  shape={edge_df_bal.shape}")
-    # else:
-    #     logging.info("\nLoading edge features")
-    #     edge_df = pd.read_csv(edge_path)
-
-    # # --- Train classifier ---
-    # logging.info("\nTraining XGBoost edge classifier")
-    # clf = train_edge_classifier(edge_df_bal)
-
-    # import joblib
-    # clf_path = os.path.join(out_dir, "edge_classifier.pkl")
-    # joblib.dump(clf, clf_path)
-    # logging.info(f"  - Saved trained edge classifier: {clf_path}")
-    
-    # # --- Predict all edge scores with trained classifier ---
-    # logging.info("Generating predictions for all edges")
-    # features = ["attn", "pred_mean", "pred_std", "bias_mean", "grad_attr", "motif_mask", "shortcut_weight"]
-    # X_all = edge_df[features].values
-    # edge_df["pred_score"] = clf.predict_proba(X_all)[:, 1]
-    
-    # # Pivot into Source–Target–Score format
-    # pred_df = (
-    #     edge_df[["TF", "TG", "pred_score"]]
-    #     .rename(columns={"TF": "Source", "TG": "Target", "pred_score": "score"})
-    # )
-
-    # pred_path = os.path.join(inferred_net_outdir, f"inferred_grn_{chrom_id}.csv")
-    # pred_df.to_csv(pred_path, index=False)
-    # logging.info(f"Saved predictions file: {pred_path}  shape={edge_df.shape}")
-    
-    # # Create and customize the plot
-    # ax = xgb.plot_importance(clf, importance_type='gain', max_num_features=10)
-
-    # # Label and style adjustments (optional)
-    # ax.set_title("XGBoost Feature Importance (Gain)", fontsize=14)
-    # ax.set_xlabel("Average Gain", fontsize=12)
-    # ax.set_ylabel("Feature", fontsize=12)
-
-    # # Save the figure to file
-    # plt.tight_layout()
-    # plt.savefig(os.path.join(out_dir, "xgboost_feature_importance.png"), dpi=300, bbox_inches="tight")
-    # plt.close()
-
-    # logging.info("\nClassifier training completed successfully")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run classifier testing for MultiomicTransformer per chromosome")
-    parser.add_argument("--chrom_id", type=str, required=True, help="Chromosome ID (e.g., chr1, chr2, chrX)")
+    parser = argparse.ArgumentParser(description="Train or predict with unified classifier across multiple chromosomes")
+    parser.add_argument("--chrom_list", nargs="+", help="List of chromosomes (e.g., chr1 chr2 chr3)")
     parser.add_argument("--experiment_id", type=str, required=True, help="Experiment name (e.g., model_training_001)")
+    parser.add_argument("--chip_file", type=str, help="Path to ground truth CSV (for training)")
     parser.add_argument("--gpu_id", type=int, default=0, help="GPU ID to use")
-    parser.add_argument("--chip_file", type=str, required=True, help="Path to ground truth CSV")
-    parser.add_argument("--inferred_network_outdir", type=str, required=True, help="Path to ground truth CSV")
+    parser.add_argument("--output_path", type=str, help="Where to save prediction CSV")
     args = parser.parse_args()
 
-    chrom_id = args.chrom_id
+    # --- Run unified training ---
+    chrom_list = args.chrom_list
     experiment_id = args.experiment_id
+    chip_file = Path(args.chip_file)
     gpu_id = args.gpu_id
-    chip_file = args.chip_file
-    inferred_net_outdir = args.inferred_network_outdir
 
-    ckpt_path = OUTPUT_DIR / chrom_id / experiment_id / "trained_model.pt"
-    out_dir = OUTPUT_DIR / chrom_id / experiment_id / "test_results"
+    combined_df = aggregate_edge_features_across_chromosomes(chrom_list, experiment_id)
+    combined_df = pd.get_dummies(combined_df, columns=["chrom_id"], drop_first=True)
+    
+    numeric_cols = ["attn", "pred_mean", "pred_std", "bias_mean", "grad_attr", "motif_mask", "shortcut_weight"]
+    combined_df[numeric_cols] = combined_df[numeric_cols].fillna(0).clip(-5, 5)
+    combined_df = combined_df.dropna(subset=["label"])
 
-    run_test(
-        checkpoint_path=ckpt_path,
-        out_dir=out_dir,
-        chrom_id=chrom_id,
-        experiment_id=experiment_id,
-        gpu_id=gpu_id,
-        chip_file=Path(chip_file),
-        inferred_net_outdir=inferred_net_outdir
-    )
+    logging.info("\nTraining unified XGBoost classifier across all chromosomes")
+    clf = train_edge_classifier(combined_df)
+    log_clf = train_logistic_baseline(combined_df)
+
+    out_dir = OUTPUT_DIR / "combined" / experiment_id / "classifier"
+    os.makedirs(out_dir, exist_ok=True)
+
+    combined_df.to_csv(out_dir / "edge_features.csv")
+    joblib.dump(clf, out_dir / "edge_classifier_unified.pkl")
+    joblib.dump(log_clf, out_dir / "logistic_baseline_unified.pkl")
+
+    logging.info(f"Saved unified classifiers in {out_dir}")
+    
+    predict_with_unified_classifier(clf, combined_df, args.output_path)
+    

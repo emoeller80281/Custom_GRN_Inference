@@ -12,7 +12,7 @@ chrom_list = chr_nums + ["chrX", "chrY"]
 ORGANISM_CODE = "mm10"
 DATASET_NAME = "mESC"
 CHROM_ID_LIST = chrom_list
-CHROM_ID = "chr8"
+CHROM_ID = "chr19"
 SAMPLE_NAMES = ["E7.5_rep1", "E7.5_rep2", "E7.75_rep1", "E8.0_rep2", "E8.5_rep2", "E8.75_rep2", "E7.5_rep2", "E8.0_rep1", "E8.5_rep1"]
 FINE_TUNING_DATASETS = ["E7.5_rep1"]
 
@@ -34,9 +34,9 @@ AGGREGATION_METHOD = "mean" # "sum" or "mean"
 VALIDATION_DATASETS = ["E8.75_rep1"]
 FORCE_RECALCULATE = True                # Recomputes genomic windows, peak-TG distance, and re-runs MOODS TF-peak scan
 WINDOW_SIZE = 25_000                    # Aggregates peaks within WINDOW_SIZE bp genomic tiles
-DISTANCE_SCALE_FACTOR = 250_000          # Weights the peak-gene TSS distance score. Lower numbers = faster dropoff
-MAX_PEAK_DISTANCE = 1_000_000         # Masks out peaks further than this distance from the gene TSS
-DIST_BIAS_MODE = "mean"                  # Method for calcuting window -> gene TSS distance. Options: "max" | "sum" | "mean" | "logsumexp"
+DISTANCE_SCALE_FACTOR = 250_000         # Weights the peak-gene TSS distance score. Lower numbers = faster dropoff
+MAX_PEAK_DISTANCE = 1_000_000           # Masks out peaks further than this distance from the gene TSS
+DIST_BIAS_MODE = "mean"                 # Method for calcuting window -> gene TSS distance. Options: "max" | "sum" | "mean" | "logsumexp"
 MOODS_PVAL_THRESHOLD = 1e-3             # MOODS binding significance threshold for associating a TF to a peak
 
 # ----- MODEL TRAINING PARAMETERS -----
@@ -95,6 +95,8 @@ SAMPLE_PROCESSED_DATA_DIR = PROCESSED_DATA / DATASET_NAME
 SAMPLE_DATA_CACHE_DIR = TRAINING_DATA_CACHE / DATASET_NAME
 
 FINE_TUNING_DIR = OUTPUT_DIR / FINE_TUNING_TRAINED_MODEL
+
+INFERRED_NETWORK_OUTPUT_DIR = ROOT_DIR / "output" / "transformer_testing_output" / "chrom_inferred_grn_orti_chipatlas_rn117_unique"
 
 
 

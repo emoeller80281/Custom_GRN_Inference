@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch_geometric.nn import GraphSAGE, GATConv, global_mean_pool
+from torch_geometric.data import Data
 import numpy as np
 import math
 
@@ -319,8 +321,48 @@ class MultiomicTransformer(nn.Module):
         
 
         return logits, attn
-            
+    
+class TFGNNClassifier(nn.Module):
+    def __init__(self, num_features, hidden_dim=128, num_layers=2, dropout=0.2, heads=4):
+        super().__init__()
+        self.convs = nn.ModuleList()
+        self.convs.append(GATConv(num_features, hidden_dim, heads=heads, dropout=dropout))
+        for _ in range(num_layers - 1):
+            self.convs.append(GATConv(hidden_dim * heads, hidden_dim, heads=1, dropout=dropout))
 
-        
-        
-        
+        # Add normalization between layers
+        self.norms = nn.ModuleList([
+            nn.LayerNorm(hidden_dim * heads if i == 0 else hidden_dim)
+            for i in range(num_layers)
+        ])
+
+        # Edge-level MLP with normalization + dropout
+        self.edge_mlp = nn.Sequential(
+            nn.Linear(2 * hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(),
+            nn.LayerNorm(hidden_dim // 2),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim // 2, 1)
+        )
+
+    def forward(self, x, edge_index, edge_attr=None, batch=None):
+        for conv, norm in zip(self.convs, self.norms):
+            x = conv(x, edge_index)
+            x = norm(x)
+            x = F.relu(x)
+            x = F.dropout(x, p=0.2, training=self.training)
+
+        # Edge embeddings: concatenate source + target node embeddings
+        src, dst = edge_index
+        edge_emb = torch.cat([x[src], x[dst]], dim=-1)
+
+        # Smooth logits via small Gaussian noise (training only)
+        out = self.edge_mlp(edge_emb)
+        if self.training:
+            out = out + 0.05 * torch.randn_like(out)
+
+        return out.squeeze(-1)

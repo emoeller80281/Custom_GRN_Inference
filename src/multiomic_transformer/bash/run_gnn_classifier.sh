@@ -1,12 +1,12 @@
 #!/bin/bash -l
-#SBATCH --job-name=transformer_training
+#SBATCH --job-name=gnn_classifier
 #SBATCH --output=LOGS/transformer_logs/03_training/%x_%j.log
 #SBATCH --error=LOGS/transformer_logs/03_training/%x_%j.err
 #SBATCH --time=12:00:00
 #SBATCH -p dense
 #SBATCH -N 1
-#SBATCH --gres=gpu:a100:4
-#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:a100:1
+#SBATCH --ntasks-per-node=1
 #SBATCH -c 8
 #SBATCH --mem=128G
 
@@ -52,4 +52,6 @@ nvidia-smi -L
 nvidia-smi --query-gpu=timestamp,index,name,utilization.gpu,memory.used,memory.total \
   --format=csv -l 30 > LOGS/gpu_usage_transformer_training.log &
 
-torchrun --standalone --nproc_per_node=$SLURM_NTASKS_PER_NODE src/multiomic_transformer/scripts/train.py
+torchrun --standalone --nproc_per_node=$SLURM_NTASKS_PER_NODE src/multiomic_transformer/scripts/train_classifier.py
+
+torchrun --standalone --nproc_per_node=$SLURM_NTASKS_PER_NODE src/multiomic_transformer/scripts/test_classifier.py
