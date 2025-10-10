@@ -143,6 +143,10 @@ def extract_edge_features(
 
         # --- forward pass ---
         with torch.no_grad():
+            # --- ensure tg_ids is a torch.LongTensor ---
+            if not torch.is_tensor(tg_ids):
+                tg_ids = torch.tensor(tg_ids, dtype=torch.long, device=device)
+            
             if tg_chunk is None:
                 out = model(atac_wins, tf_tensor,
                             tf_ids=tf_ids, tg_ids=tg_ids,
@@ -234,11 +238,11 @@ def extract_edge_features(
                      .merge(long_grad,  on=["TG", "TF"], how="left") \
                      .merge(df_tg,      on="TG",         how="left")
 
-    if chip_edges is not None:
-        chip_set = set((t.upper(), g.upper()) for t, g in chip_edges)
-        edges["label"] = [(tf.upper(), tg.upper()) in chip_set
-                          for tf, tg in zip(edges["TF"], edges["TG"])]
-        edges["label"] = edges["label"].astype(int)
+    # if chip_edges is not None:
+    #     chip_set = set((t.upper(), g.upper()) for t, g in chip_edges)
+    #     edges["label"] = [(tf.upper(), tg.upper()) in chip_set
+    #                       for tf, tg in zip(edges["TF"], edges["TG"])]
+    #     edges["label"] = edges["label"].astype(int)
 
     cols = ["TF", "TG", "attn", "pred_mean", "pred_std", "bias_mean", "grad_attr", "motif_mask"]
     if "label" in edges:
@@ -407,7 +411,7 @@ def build_edge_feature_table(
     dataset = MultiomicTransformerDataset(
         data_dir=Path(cache_dir),
         chrom_id=chrom_id,
-        tf_vocab_path=global_vocab_dir / "tf_vocab.json",
+        tf_vocab_path=os.path.join(global_vocab_dir, "tf_vocab.json"),
         tg_vocab_path=tg_vocab_path,
         fine_tuner=False,
     )
@@ -472,7 +476,6 @@ def build_edge_feature_table(
         dataset.tf_names,
         dataset.tg_names,
         tg_id_map,
-        chip_edges=chip_edges,
         gradient_attrib_df=grad_df,
         device=DEVICE,
     )

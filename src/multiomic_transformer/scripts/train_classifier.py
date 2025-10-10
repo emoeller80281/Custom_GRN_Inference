@@ -104,11 +104,64 @@ def build_tg_graph(edge_df, tf_embeddings, tg_embeddings, tf_name2id, tg_name2id
 # ============================================================
 #  Train TF–TG GNN
 # ============================================================
-def train_tg_gnn(edge_csv, global_features_csv, tf_embeddings, tg_embeddings, tf_name2id, tg_name2id, out_dir, device="cuda:0"):
+def train_tg_gnn(edge_csv, ground_truth_csv, global_features_csv, tf_embeddings, tg_embeddings, tf_name2id, tg_name2id, out_dir, device="cuda:0"):
     logging.info("Loading edge features and merging with global TF–TG features")
 
+    # --- Load edge and ground-truth data ---
     edge_df = pd.read_csv(edge_csv)
     global_df = pd.read_csv(global_features_csv)
+
+# --- Load and normalize external ground truth labels ---
+    ground_truth_df = pd.read_csv(ground_truth_csv)
+
+    # Automatically assume first two columns are TF and TG
+    tf_col, tg_col = ground_truth_df.columns[:2]
+    ground_truth_df = ground_truth_df.rename(columns={tf_col: "TF", tg_col: "TG"})
+
+    # If there's no label column, assume all edges in this file are positives (label=1)
+    if "label" not in ground_truth_df.columns:
+        logging.warning("No 'label' column found in ground_truth_csv — assuming all entries are positive edges.")
+        ground_truth_df["label"] = 1.0
+
+    # Clean text formatting
+    ground_truth_df["TF"] = ground_truth_df["TF"].astype(str).str.upper().str.strip()
+    ground_truth_df["TG"] = ground_truth_df["TG"].astype(str).str.upper().str.strip()
+
+    # Ensure label is numeric binary
+    ground_truth_df["label"] = (
+        pd.to_numeric(ground_truth_df["label"], errors="coerce")
+        .fillna(0)
+        .clip(0, 1)
+        .astype(float)
+    )
+
+    # Normalize edge_df names before merging
+    edge_df["TF"] = edge_df["TF"].astype(str).str.upper().str.strip()
+    edge_df["TG"] = edge_df["TG"].astype(str).str.upper().str.strip()
+
+    # Merge external labels into edge_df
+    edge_df = edge_df.drop(columns=["label"], errors="ignore").merge(
+        ground_truth_df[["TF", "TG", "label"]],
+        on=["TF", "TG"],
+        how="left",
+    )
+
+    # Replace missing labels with 0 (negative edges)
+    missing_labels = edge_df["label"].isna().sum()
+    if missing_labels > 0:
+        logging.warning(f"{missing_labels:,} edges had no ground-truth label — assigning 0.")
+        edge_df["label"] = edge_df["label"].fillna(0)
+
+    # Convert final label column to binary numeric
+    edge_df["label"] = (
+        pd.to_numeric(edge_df["label"], errors="coerce")
+        .fillna(0)
+        .clip(0, 1)
+        .astype(float)
+    )
+
+    logging.info(f"Ground-truth labels merged: {edge_df['label'].value_counts(dropna=False).to_dict()}")
+
 
     # Normalize name columns
     edge_df["TF"] = edge_df["TF"].str.upper()
@@ -299,7 +352,7 @@ def train_tg_gnn(edge_csv, global_features_csv, tf_embeddings, tg_embeddings, tf
             val_auc    = roc_auc_score(y_np[val_idx.cpu().numpy()], val_probs)
             model.train()
 
-        if epoch % 10 == 0:
+        if epoch % 25 == 0:
             train_probs = torch.sigmoid(logits[train_idx]).detach().cpu().numpy().ravel()
             train_auc   = roc_auc_score(y_np[train_idx.cpu().numpy()], train_probs)
             lr = optimizer.param_groups[0]['lr']
@@ -383,6 +436,7 @@ if __name__ == "__main__":
     OUT_DIR = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC/gnn_classifier/"
     EDGE_CSV = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC/combined/model_training_001/classifier/edge_features.csv"
     GLOBAL_FEATURES_CSV = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data/training_data_cache/mESC/tf_tg_features_all_chr.csv"
+    GROUND_TRUTH = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data/ground_truth_files/combined_ground_truth_no_rn111_or_rn112_edges.csv"
 
     os.makedirs(OUT_DIR, exist_ok=True)
 
@@ -421,6 +475,7 @@ if __name__ == "__main__":
     # Train model with global feature integration
     train_tg_gnn(
         edge_csv=EDGE_CSV,
+        ground_truth_csv=GROUND_TRUTH,
         global_features_csv=GLOBAL_FEATURES_CSV,
         tf_embeddings=total_tf_embeddings,
         tg_embeddings=total_tg_embeddings,
