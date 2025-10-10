@@ -97,6 +97,8 @@ def build_tg_graph(edge_df, tf_embeddings, tg_embeddings, tf_name2id, tg_name2id
         labels = pd.to_numeric(edge_df["label"], errors="coerce").fillna(0).clip(0, 1)
         y = torch.tensor(labels.values, dtype=torch.float32)
 
+    y = torch.cat([y, y.clone()], dim=0)
+    
     logging.info(f"Graph built successfully with {n_nodes:,} nodes and {edge_index.size(1):,} edges")
     return Data(x=x, edge_index=edge_index, edge_attr=edge_attr, y=y)
 
@@ -104,15 +106,15 @@ def build_tg_graph(edge_df, tf_embeddings, tg_embeddings, tf_name2id, tg_name2id
 # ============================================================
 #  Train TF–TG GNN
 # ============================================================
-def train_tg_gnn(edge_csv, ground_truth_csv, global_features_csv, tf_embeddings, tg_embeddings, tf_name2id, tg_name2id, out_dir, device="cuda:0"):
+def train_tg_gnn(edge_csv, ground_truth_csv, sep, global_features_csv, tf_embeddings, tg_embeddings, tf_name2id, tg_name2id, out_dir, device="cuda:0"):
     logging.info("Loading edge features and merging with global TF–TG features")
 
     # --- Load edge and ground-truth data ---
     edge_df = pd.read_csv(edge_csv)
     global_df = pd.read_csv(global_features_csv)
 
-# --- Load and normalize external ground truth labels ---
-    ground_truth_df = pd.read_csv(ground_truth_csv)
+    # --- Load and normalize external ground truth labels ---
+    ground_truth_df = pd.read_csv(ground_truth_csv, sep=sep)
 
     # Automatically assume first two columns are TF and TG
     tf_col, tg_col = ground_truth_df.columns[:2]
@@ -180,6 +182,24 @@ def train_tg_gnn(edge_csv, ground_truth_csv, global_features_csv, tf_embeddings,
         how="left",
     )
     
+    pos_df = merged_df[merged_df["label"] == 1.0]
+    neg_df = merged_df[merged_df["label"] == 0.0]
+
+    # Undersample negatives to match positives
+    pos_per_tf = pos_df["TF"].value_counts().to_dict()
+
+    neg_sampled_df = (
+        neg_df.groupby("TF", group_keys=False)
+            .apply(lambda g: g.sample(
+                n=min(len(g), pos_per_tf.get(g.name, 0)),
+                random_state=42))
+    )
+
+    balanced_df = pd.concat([pos_df, neg_sampled_df], axis=0).sample(frac=1.0, random_state=42).reset_index(drop=True)
+
+    logging.info(f"Balanced dataset: {len(pos_df)} positives, {len(neg_sampled_df)} negatives")
+    merged_df = balanced_df
+    
     # --- Clean label column ---
     if "label" not in merged_df.columns:
         logging.warning("No 'label' column found — defaulting to zeros.")
@@ -229,7 +249,10 @@ def train_tg_gnn(edge_csv, ground_truth_csv, global_features_csv, tf_embeddings,
     exclude_from_norm = ["motif_mask", "grad_attr"]
     scale_cols = [c for c in edge_attr_cols if c not in exclude_from_norm]
     for col in ["motif_density", "motif_mask", "log_mean_score"]:
-        merged_df[col] = -merged_df[col]   # invert raw signal
+        if merged_df[col].corr(merged_df["label"]) < 0:
+            merged_df[col] = -merged_df[col]
+            logging.info(f"Inverted {col} to match positive correlation with label.")
+
 
     scaler = StandardScaler()
     merged_df[scale_cols] = scaler.fit_transform(merged_df[scale_cols])
@@ -277,120 +300,140 @@ def train_tg_gnn(edge_csv, ground_truth_csv, global_features_csv, tf_embeddings,
 
     logging.info(f"Using {len(edge_attr_cols)} edge attributes: {edge_attr_cols}")
 
-    # Build graph
-    data = build_tg_graph(merged_df, tf_embeddings, tg_embeddings, tf_name2id, tg_name2id, edge_attr_cols).to(device)
-
-    # ----- Initialize model/opt/loss -----
-    # model = TFGNNClassifier(
-    #     num_features=384, edge_dim=11, hidden_dim=256, num_layers=4, dropout=0.3, use_logit_noise=False
-    # ).to(device)
-    model = EdgeMLPClassifier(edge_dim=11, hidden_dim=256, dropout=0.2).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-4)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="max", factor=0.5, patience=100)
-
-    # Balanced BCE loss
-    n_pos = float((data.y == 1).sum().item())
-    n_neg = float((data.y == 0).sum().item())
-    if n_pos == 0:
-        logging.warning("No positive edges found, using default BCE loss.")
-        loss_fn = nn.BCEWithLogitsLoss()
-    else:
-        pos_weight = torch.tensor([n_neg / max(n_pos, 1)], device=device)
-        loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-        logging.info(f"Using BCEWithLogitsLoss(pos_weight={pos_weight.item():.2f})")
-
-    logging.info(f"Training GNN on {data.num_edges:,} edges ({int(n_pos)} positives, {int(n_neg)} negatives)")
-    logging.info(f"Node feature dim = {data.x.shape[1]}")
-    logging.info(f"Edge feature dim = {data.edge_attr.shape[1]}")
-    logging.info(f"Graph: {data.num_nodes:,} nodes, {data.num_edges:,} edges")
-
-    # ----- Train/val split over edges (stratified) -----
-    y_np = data.y.cpu().numpy()
-    idx_all = np.arange(len(y_np))
-    train_idx, val_idx = train_test_split(
-        idx_all, test_size=0.2, stratify=y_np, random_state=42
+    train_df, val_df = train_test_split(
+        merged_df,
+        stratify=merged_df["label"],
+        test_size=0.2,
+        random_state=42
     )
-    train_idx = torch.tensor(train_idx, dtype=torch.long, device=device)
-    val_idx   = torch.tensor(val_idx,   dtype=torch.long, device=device)
 
+    logging.info(f"Train edges: {len(train_df):,} | Val edges: {len(val_df):,}")
+    
+    # Build graph
+    train_data = build_tg_graph(
+        train_df, tf_embeddings, tg_embeddings, tf_name2id, tg_name2id, edge_attr_cols
+    ).to(device)
+    
+    val_data = build_tg_graph(
+        val_df, tf_embeddings, tg_embeddings, tf_name2id, tg_name2id, edge_attr_cols
+    ).to(device)
+
+    logging.info(f"Train graph: {train_data.num_nodes:,} nodes, {train_data.num_edges:,} edges")
+    logging.info(f"Val graph:   {val_data.num_nodes:,} nodes, {val_data.num_edges:,} edges")
+    
+    # ----- Initialize model/opt/loss -----
+    model = TFGNNClassifier(
+        num_features=384,
+        edge_dim=11,
+        hidden_dim=256,
+        num_layers=4,
+        dropout=0.3,
+        use_logit_noise=False,
+    ).to(device)
+
+    loss_fn = nn.BCEWithLogitsLoss()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="max", factor=0.5, patience=10)
+
+    logging.info(f"Using BCEWithLogitsLoss()")
+    
+
+    n_pos = int((train_data.y == 1).sum().item())
+    n_neg = int((train_data.y == 0).sum().item())
+
+    logging.info(f"Training GNN on {train_data.num_edges:,} edges "
+                f"({n_pos} positives, {n_neg} negatives)")
+    logging.info(f"Node feature dim = {train_data.x.shape[1]}")
+    logging.info(f"Edge feature dim = {train_data.edge_attr.shape[1]}")
+    logging.info(f"Graph: {train_data.num_nodes:,} nodes, {train_data.num_edges:,} edges")
+
+    # ============================================================
+    # 4. Training loop
+    # ============================================================
     best_val_auc = -np.inf
+    best_state = None
     patience = 50
     epochs_since_improve = 0
-    best_state = None
-    
-    model.train()
+
     for epoch in range(2000):
+        model.train()
         optimizer.zero_grad()
 
-        # Randomly drop 10% of edges each epoch
-        edge_index_dropped, edge_mask = dropout_edge(
-            data.edge_index, p=0.1, training=model.training
-        )
-
-        # Subset edge_attr to match kept edges
-        edge_attr_dropped = data.edge_attr[edge_mask]
-
-        # Add small node feature noise
-        x_noisy = data.x + 0.01 * torch.randn_like(data.x)
-
-        # Forward pass using dropped edges and corresponding attributes
-        logits = model(x_noisy, edge_index_dropped, edge_attr_dropped)
-        
-        loss = loss_fn(logits[train_idx], data.y[train_idx])
+        # ---- Forward + backward ----
+        logits = model(train_data.x, train_data.edge_index, train_data.edge_attr)
+        loss = loss_fn(logits, train_data.y)
         loss.backward()
-
-        # gradient clipping keeps training stable when features are strong
         nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
-
         optimizer.step()
 
-        # --- metrics ---
+        # ---- Validation ----
+        model.eval()
         with torch.no_grad():
-            model.eval()
-            val_logits = logits[val_idx]  # reuse current forward pass
-            val_probs  = torch.sigmoid(val_logits).detach().cpu().numpy().ravel()
-            val_auc    = roc_auc_score(y_np[val_idx.cpu().numpy()], val_probs)
-            model.train()
+            val_logits = model(val_data.x, val_data.edge_index, val_data.edge_attr)
+            val_probs = torch.sigmoid(val_logits).detach().cpu().numpy().ravel()
+            val_labels = val_data.y.cpu().numpy().ravel()
+            val_auc = roc_auc_score(val_labels, val_probs)
 
-        if epoch % 25 == 0:
-            train_probs = torch.sigmoid(logits[train_idx]).detach().cpu().numpy().ravel()
-            train_auc   = roc_auc_score(y_np[train_idx.cpu().numpy()], train_probs)
-            lr = optimizer.param_groups[0]['lr']
-            logging.info(f"[Epoch {epoch:03d}] Loss={loss.item():.4f}  AUC(train)={train_auc:.3f}  AUC(val)={val_auc:.3f} LR: {lr:.2e}")
+            train_probs = torch.sigmoid(logits).detach().cpu().numpy().ravel()
+            train_labels = train_data.y.cpu().numpy().ravel()
+            train_auc = roc_auc_score(train_labels, train_probs)
 
-        # scheduler + early stopping on val AUROC
+        # ---- Logging ----
+        lr = optimizer.param_groups[0]["lr"]
+        if epoch % 25 == 0 or epoch == 0:
+            logging.info(
+                f"[Epoch {epoch:04d}] "
+                f"Loss={loss.item():.4f} | "
+                f"AUC(train)={train_auc:.3f} | AUC(val)={val_auc:.3f} | LR={lr:.2e}"
+            )
+
+        # ---- Scheduler + Early stopping ----
         scheduler.step(val_auc)
+
         if val_auc > best_val_auc + 1e-4:
             best_val_auc = val_auc
             best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
             epochs_since_improve = 0
-        # else:
-        #     epochs_since_improve += 1
-        #     if epochs_since_improve >= patience:
-        #         logging.info(f"Early stopping at epoch {epoch} (best val AUROC = {best_val_auc:.3f})")
-        #         break
+        else:
+            epochs_since_improve += 1
+            if epochs_since_improve >= patience:
+                logging.info(
+                    f"Early stopping at epoch {epoch} "
+                    f"(best val AUROC = {best_val_auc:.3f})"
+                )
+                break
 
-    # restore best weights
+    # ----- Restore best weights -----
     if best_state is not None:
         model.load_state_dict(best_state)
     model.eval()
+    logging.info(f"Training complete. Best validation AUROC = {best_val_auc:.3f}")
 
-    # ----- (Optional) learn a calibration on the validation split -----
+    # ============================================================
+    # 6. Save results and calibration (optional)
+    # ============================================================
     with torch.no_grad():
-        final_logits = model(data.x, data.edge_index, data.edge_attr).detach().cpu().numpy().ravel()
-    val_logits_np = final_logits[val_idx.cpu().numpy()]
-    val_y_np      = y_np[val_idx.cpu().numpy()]
+        val_logits = model(val_data.x, val_data.edge_index, val_data.edge_attr).cpu().numpy().ravel()
+    val_labels = val_data.y.cpu().numpy().ravel()
 
-    # Temperature scaling (single parameter) – simple and robust
-    # minimize NLL on val set to estimate T
+    # ============================================================
+    # 6. Temperature scaling (simple, single parameter)
+    # ============================================================
     import scipy.optimize as opt
+
+    model.eval()
+    with torch.no_grad():
+        train_logits = model(train_data.x, train_data.edge_index, train_data.edge_attr).cpu().numpy().ravel()
+        val_logits   = model(val_data.x,   val_data.edge_index,   val_data.edge_attr).cpu().numpy().ravel()
+
+    train_labels = train_data.y.cpu().numpy().ravel()
+    val_labels   = val_data.y.cpu().numpy().ravel()
 
     def nll_for_T(T):
         T = max(T, 1e-6)
-        p = 1.0 / (1.0 + np.exp(-(val_logits_np / T)))
-        # clipped for numerical safety
-        p = np.clip(p, 1e-6, 1-1e-6)
-        return -np.mean(val_y_np*np.log(p) + (1-val_y_np)*np.log(1-p))
+        p = 1 / (1 + np.exp(-(val_logits / T)))
+        p = np.clip(p, 1e-6, 1 - 1e-6)
+        return -np.mean(val_labels * np.log(p) + (1 - val_labels) * np.log(1 - p))
 
     res = opt.minimize_scalar(nll_for_T, bounds=(0.5, 5.0), method="bounded")
     T_opt = float(res.x) if res.success else 1.0
@@ -398,31 +441,14 @@ def train_tg_gnn(edge_csv, ground_truth_csv, global_features_csv, tf_embeddings,
         json.dump({"method": "temperature", "T": T_opt}, f)
     logging.info(f"Saved calibration.json with T={T_opt:.3f}")
 
-    # ----- Evaluate ROC using labeled edges only -----
-    probs_full = 1.0 / (1.0 + np.exp(-(final_logits / max(T_opt, 1e-6))))
 
-    # Restrict both predictions and labels to the labeled (train+val) subset
-    labeled_idx = np.concatenate([train_idx.cpu().numpy(), val_idx.cpu().numpy()])
-    labeled_idx = np.unique(labeled_idx)  # ensure no duplicates
-
-    for split_name, idx in [("Train", train_idx), ("Val", val_idx)]:
-        y_true = y_np[idx.cpu().numpy()]
-        y_pred = probs_full[idx.cpu().numpy()]
-        auc = roc_auc_score(y_true, y_pred)
-        fpr, tpr, _ = roc_curve(y_true, y_pred)
-        plt.plot(fpr, tpr, label=f"{split_name} (AUC={auc:.3f})")
-
-    plt.legend()
-    plt.xlabel("FPR"); plt.ylabel("TPR"); plt.title("Train vs Val ROC")
-    plt.tight_layout()
-    plt.savefig(os.path.join(out_dir, "gnn_roc_curve_train_val.png"))
-    plt.close()
-
-    # ----- Save artifacts -----
+    # ============================================================
+    # 8. Save artifacts
+    # ============================================================
     torch.save(model.state_dict(), os.path.join(out_dir, "tf_tg_gnn.pt"))
-    np.save(os.path.join(out_dir, "gnn_pred.npy"), probs_full)  # calibrated probabilities
+    np.save(os.path.join(out_dir, "train_probs.npy"), train_probs)
+    np.save(os.path.join(out_dir, "val_probs.npy"), val_probs)
     logging.info("GNN training completed and artifacts saved.")
-
 
 # ============================================================
 #  Main entry point
@@ -443,6 +469,11 @@ if __name__ == "__main__":
         required=True,
         help="Output directory"
     )
+    parser.add_argument(
+        "--sep",
+        required=True,
+        help="Ground truth separator"
+    )
     
     args = parser.parse_args()
     
@@ -452,7 +483,7 @@ if __name__ == "__main__":
     TF_VOCAB_JSON = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data/training_data_cache/common/tf_vocab.json"
     TG_VOCAB_JSON = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data/training_data_cache/common/tg_vocab.json"
     OUT_DIR = args.output_dir
-    EDGE_CSV = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC/combined/model_training_001/classifier/edge_features.csv"
+    EDGE_CSV = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC/combined/edge_features/edge_features.csv"
     GLOBAL_FEATURES_CSV = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data/training_data_cache/mESC/tf_tg_features_all_chr.csv"
     GROUND_TRUTH = args.ground_truth_file
 
@@ -494,6 +525,7 @@ if __name__ == "__main__":
     train_tg_gnn(
         edge_csv=EDGE_CSV,
         ground_truth_csv=GROUND_TRUTH,
+        sep=args.sep,
         global_features_csv=GLOBAL_FEATURES_CSV,
         tf_embeddings=total_tf_embeddings,
         tg_embeddings=total_tg_embeddings,

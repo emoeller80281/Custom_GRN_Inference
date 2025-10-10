@@ -385,13 +385,11 @@ class TFGNNClassifier(nn.Module):
 
         # ---- Edge-level classifier ----
         self.edge_mlp = nn.Sequential(
-            nn.Linear(2 * hidden_dim + edge_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
+            nn.Linear(3 * hidden_dim, hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU(),
-            nn.LayerNorm(hidden_dim // 2),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim // 2, 1),
         )
@@ -412,7 +410,7 @@ class TFGNNClassifier(nn.Module):
 
         # ---- Edge-level classification ----
         src, dst = edge_index
-        edge_emb = torch.cat([x[src], x[dst], edge_attr], dim=-1)
+        edge_emb = torch.cat([x[src], x[dst], edge_attr_enc], dim=-1)
         logits = self.edge_mlp(edge_emb)
         if self.training and self.use_logit_noise:
             logits = logits + 0.05 * torch.randn_like(logits)

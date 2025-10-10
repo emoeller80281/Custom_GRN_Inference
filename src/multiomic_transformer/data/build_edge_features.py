@@ -101,161 +101,130 @@ def gradient_attribution_matrix(model, dataset, loader, device=DEVICE, normalize
 def extract_edge_features(
     model, dataloader, tf_names, tg_names, tg_id_map,
     chip_edges=None, gradient_attrib_df=None,
-    device="cuda", tg_chunk=None
+    device="cuda", tg_chunk=64
 ):
     """
-    Vectorized edge feature extraction for the MultiomicTransformer.
-    Produces a long-format DataFrame with one row per (TF, TG).
+    Extract TF–TG edge-level features from a trained MultiomicTransformer.
 
-    tg_id_map : array mapping raw tg_ids (from dataloader) -> [0 … TG-1]
+    Returns
+    -------
+    DataFrame with columns:
+        ['TF', 'TG', 'attn', 'motif_mask', 'grad_attr',
+         'pred_mean', 'pred_std', 'bias_mean', 'label' (optional)]
     """
     model.eval()
     TF, TG = len(tf_names), len(tg_names)
+    all_records = []
 
-    # --- Accumulators on CPU (to avoid GPU OOM) ---
-    attn_acc   = torch.zeros(TG, TF, dtype=torch.float32)   # [TG, TF]
-    motif_acc  = torch.zeros(TG, TF, dtype=torch.float32)   # [TG, TF]
-    pred_mu    = torch.zeros(TG, dtype=torch.float32)       # [TG]
-    pred_sd    = torch.zeros(TG, dtype=torch.float32)       # [TG]
-    bias_mu    = torch.zeros(TG, dtype=torch.float32)       # [TG]
-    counts     = torch.zeros(TG, dtype=torch.float32)       # [TG]
+    tf_names_np = np.array(tf_names)
+    tg_names_np = np.array(tg_names)
 
     for batch in tqdm(dataloader, desc="Extracting edge features"):
         atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids, motif_mask = [
             x.to(device) if torch.is_tensor(x) else x for x in batch
         ]
 
-        # --- map raw tg_ids -> global indices ---
-        if isinstance(tg_ids, torch.Tensor):
-            tg_idx = tg_ids.cpu().numpy()
-        else:
-            tg_idx = np.array(tg_ids)
+        if not torch.is_tensor(tg_ids):
+            tg_ids = torch.as_tensor(tg_ids, dtype=torch.long, device=device)
 
-        tg_batch_global = torch.as_tensor(
-            tg_id_map[tg_idx], device="cpu"
-        )
+        tg_global = tg_id_map[tg_ids.cpu().numpy()]
+        tg_batch_names = np.array(tg_names)[tg_global]
+        B = len(tg_batch_names)
 
-        if tg_batch_global.max() >= TG or tg_batch_global.min() < 0:
-            raise ValueError(
-                f"tg_batch_global out of bounds! "
-                f"max={tg_batch_global.max().item()}, TG={TG}"
-            )
-
-        # --- forward pass ---
         with torch.no_grad():
-            # --- ensure tg_ids is a torch.LongTensor ---
-            if not torch.is_tensor(tg_ids):
-                tg_ids = torch.tensor(tg_ids, dtype=torch.long, device=device)
+            out = model(
+                atac_wins, tf_tensor,
+                tf_ids=tf_ids, tg_ids=tg_ids,
+                bias=bias, motif_mask=motif_mask
+            )
+            preds, attn = out if isinstance(out, tuple) else (out, None)
+
+        preds_cpu = preds.detach().cpu()
+        attn_cpu  = attn.detach().cpu() if attn is not None else None
+        bias_cpu  = bias.mean(dim=(0, 2)).detach().cpu()
+        motif_cpu = motif_mask.float().cpu() if motif_mask is not None else None
+
+        # --------------------------
+        # Ensure all arrays same len
+        # --------------------------
+        min_len = min(
+            preds_cpu.shape[0],
+            len(tg_batch_names),
+            bias_cpu.shape[0] if bias_cpu.ndim else len(bias_cpu)
+        )
+        tg_batch_names = tg_batch_names[:min_len]
+
+        # Compute statistics
+        if preds_cpu.dim() > 1:
+            pred_mean = preds_cpu.mean(dim=1).numpy()[:min_len]
+            pred_std  = preds_cpu.std(dim=1).numpy()[:min_len]
+        else:
+            pred_mean = preds_cpu.numpy()[:min_len]
+            pred_std  = np.zeros_like(pred_mean)
+
+        bias_mean = bias_cpu.numpy()[:min_len]
+
+        tg_stats = pd.DataFrame({
+            "TG": tg_batch_names,
+            "pred_mean": pred_mean,
+            "pred_std": pred_std,
+            "bias_mean": bias_mean,
+        })
+
+        # Long-form attention and motif tables
+        if attn_cpu is not None:
+            attn_cpu_np = attn_cpu.numpy()[:min_len]
+            attn_df = pd.DataFrame(attn_cpu_np, columns=tf_names_np, index=tg_batch_names)
+            attn_long = attn_df.stack().reset_index()
+            attn_long.columns = ["TG", "TF", "attn"]
+        else:
+            attn_long = pd.DataFrame(columns=["TG", "TF", "attn"])
+
+        if motif_cpu is not None:
+            motif_cpu_np = motif_cpu.numpy()[:min_len]
+            motif_df = pd.DataFrame(motif_cpu_np, columns=tf_names_np, index=tg_batch_names)
+            motif_long = motif_df.stack().reset_index()
+            motif_long.columns = ["TG", "TF", "motif_mask"]
+        else:
+            motif_long = pd.DataFrame(columns=["TG", "TF", "motif_mask"])
+
+        # Combine everything
+        edge_batch_df = (
+            attn_long
+            .merge(motif_long, on=["TG", "TF"], how="outer")
+            .merge(tg_stats, on="TG", how="left")
+        )
+        
+        if gradient_attrib_df is not None:
+            edge_batch_df = edge_batch_df.merge(
+                gradient_attrib_df.stack().rename("grad_attr").reset_index().rename(columns={"level_0": "TF", "level_1": "TG"}),
+                on=["TF", "TG"], how="left"
+            )
+            edge_batch_df["grad_attr"] = edge_batch_df["grad_attr"].fillna(0.0)
+        else:
+            edge_batch_df["grad_attr"] = 0.0
             
-            if tg_chunk is None:
-                out = model(atac_wins, tf_tensor,
-                            tf_ids=tf_ids, tg_ids=tg_ids,
-                            bias=bias, motif_mask=motif_mask)
-                preds, attn = out if isinstance(out, tuple) else (out, None)
+        all_records.append(edge_batch_df)
 
-                preds_cpu = preds.detach().cpu()
-                attn_cpu  = attn.detach().cpu() if attn is not None else None
-                bias_cpu  = bias.mean(dim=(0,2)).detach().cpu()
-
-                # accumulate
-                pred_mu[tg_batch_global] += preds_cpu.mean(dim=0)
-                pred_sd[tg_batch_global] += preds_cpu.std(dim=0)
-                bias_mu[tg_batch_global] += bias_cpu
-                counts[tg_batch_global]  += 1
-
-                if attn_cpu is not None:
-                    attn_acc[tg_batch_global] += attn_cpu
-                if motif_mask is not None:
-                    motif_acc[tg_batch_global] += motif_mask.float().cpu()
-
-            else:
-                # --- chunk over TGs to reduce memory ---
-                for j0 in range(0, tg_ids.shape[0], tg_chunk):
-                    j1 = min(j0 + tg_chunk, tg_ids.shape[0])
-                    tg_subset = tg_ids[j0:j1]
-                    tg_global_subset = tg_batch_global[j0:j1]
-
-                    out = model(atac_wins, tf_tensor,
-                                tf_ids=tf_ids, tg_ids=tg_subset,
-                                bias=bias, motif_mask=motif_mask)
-                    preds, attn = out if isinstance(out, tuple) else (out, None)
-
-                    preds_cpu = preds.detach().cpu()
-                    attn_cpu  = attn.detach().cpu() if attn is not None else None
-                    bias_cpu  = bias[:, j0:j1, :].mean(dim=(0,2)).detach().cpu()
-
-                    pred_mu[tg_global_subset] += preds_cpu.mean(dim=0)
-                    pred_sd[tg_global_subset] += preds_cpu.std(dim=0)
-                    bias_mu[tg_global_subset] += bias_cpu
-                    counts[tg_global_subset]  += 1
-
-                    if attn_cpu is not None:
-                        attn_acc[tg_global_subset] += attn_cpu
-                    if motif_mask is not None:
-                        motif_acc[tg_global_subset] += motif_mask[:, j0:j1].float().cpu()
-
-        # free GPU memory
-        del preds, attn, bias
+        del preds_cpu, attn_cpu, bias_cpu, motif_cpu
         torch.cuda.empty_cache()
 
-    # --- Average by counts ---
-    denom_TG   = counts.clamp_min(1)
-    denom_TG2D = denom_TG.view(-1, 1)
+    df = pd.concat(all_records, ignore_index=True)
+    del all_records
 
-    pred_mu    = (pred_mu / denom_TG)
-    pred_sd    = (pred_sd / denom_TG)
-    bias_mu    = (bias_mu / denom_TG)
-    attn_mean  = (attn_acc / denom_TG2D)
-    motif_mean = (motif_acc / denom_TG2D)
+    if chip_edges is not None:
+        chip_set = set((t.upper(), g.upper()) for t, g in chip_edges)
+        df["label"] = [(tf.upper(), tg.upper()) in chip_set for tf, tg in zip(df["TF"], df["TG"])]
+        df["label"] = df["label"].astype(int)
 
-    # --- gradient attribution (optional) ---
-    if gradient_attrib_df is not None:
-        gradient_attrib_df = gradient_attrib_df.reindex(index=tf_names, columns=tg_names, fill_value=0.0)
-        grad_attr = torch.tensor(gradient_attrib_df.values.T, dtype=torch.float32)
-    else:
-        grad_attr = torch.zeros_like(attn_mean)
+    return df
 
-    # --- build edge DataFrame ---
-    tg_index = pd.Index(tg_names, name="TG")
-    tf_index = pd.Index(tf_names, name="TF")
-
-    df_attn  = pd.DataFrame(attn_mean.numpy(),  index=tg_index, columns=tf_index)
-    df_motif = pd.DataFrame(motif_mean.numpy(), index=tg_index, columns=tf_index)
-    df_grad  = pd.DataFrame(grad_attr.numpy(),  index=tg_index, columns=tf_index)
-
-    long_attn  = df_attn.stack().rename("attn").reset_index()
-    long_motif = df_motif.stack().rename("motif_mask").reset_index()
-    long_grad  = df_grad.stack().rename("grad_attr").reset_index()
-
-    df_tg = pd.DataFrame({
-        "TG": tg_names,
-        "pred_mean": pred_mu.numpy(),
-        "pred_std":  pred_sd.numpy(),
-        "bias_mean": bias_mu.numpy(),
-    })
-
-    edges = long_attn.merge(long_motif, on=["TG", "TF"], how="left") \
-                     .merge(long_grad,  on=["TG", "TF"], how="left") \
-                     .merge(df_tg,      on="TG",         how="left")
-
-    # if chip_edges is not None:
-    #     chip_set = set((t.upper(), g.upper()) for t, g in chip_edges)
-    #     edges["label"] = [(tf.upper(), tg.upper()) in chip_set
-    #                       for tf, tg in zip(edges["TF"], edges["TG"])]
-    #     edges["label"] = edges["label"].astype(int)
-
-    cols = ["TF", "TG", "attn", "pred_mean", "pred_std", "bias_mean", "grad_attr", "motif_mask"]
-    if "label" in edges:
-        cols.append("label")
-    edges = edges[cols]
-
-    return edges
 
 # ---------------------------------------------------------------------
 # 1. Aggregate TF–TG motif/distance/expression features
 # ---------------------------------------------------------------------
 
-def build_global_tf_tg_features(cache_dir: str, n_jobs: int = -1) -> pd.DataFrame:
+def build_global_tf_tg_features(cache_dir: str, chrom_list: list[str], n_jobs: int = -1) -> pd.DataFrame:
     """
     Aggregate TF–TG motif/distance/expression features across all chromosomes.
     Uses vectorized correlation and multi-core parallelism.
@@ -273,7 +242,7 @@ def build_global_tf_tg_features(cache_dir: str, n_jobs: int = -1) -> pd.DataFram
         Aggregated TF–TG feature dataframe with motif, distance, and correlation features.
     """
 
-    chr_dirs = sorted([d for d in os.listdir(cache_dir) if d.startswith("chr")])
+    chr_dirs = sorted([d for d in os.listdir(cache_dir) if d.startswith("chr") and d in chrom_list])
     logging.info(f"Found {len(chr_dirs)} chromosomes under {cache_dir}")
 
     # --- Load shared TF tensor once ---
@@ -306,47 +275,68 @@ def build_global_tf_tg_features(cache_dir: str, n_jobs: int = -1) -> pd.DataFram
             logging.warning(f"Skipping {chr_dir}: missing required files.")
             return None
 
-        moods_df = pd.read_csv(moods_path, sep="\t").rename(columns={"TF": "TF_name"})
-        dist_df = pd.read_parquet(dist_path).rename(columns={"target_id": "TG_name"})
+        # --- load minimal columns from genes_near_peaks ---
+        dist_df = pd.read_parquet(dist_path, columns=["peak_id", "target_id", "TSS_dist", "TSS_dist_score"])
+        dist_df = dist_df.rename(columns={"target_id": "TG_name"})
+
+        # --- expression correlation (same as before) ---
         tg_tensor = torch.load(tg_tensor_path, map_location="cpu")
         with open(tg_names_path) as f:
             tg_names = json.load(f)
 
-        # --- Compute TF–TG correlations (vectorized) ---
         tg_expr = tg_tensor.numpy()
         tg_centered = tg_expr - tg_expr.mean(axis=1, keepdims=True)
         tg_std = tg_centered.std(axis=1, keepdims=True)
-
-        # --- Avoid zero division and NaNs ---
         tf_std_safe = np.clip(tf_std, 1e-8, None)
         tg_std_safe = np.clip(tg_std, 1e-8, None)
 
         corr_matrix = (tf_centered @ tg_centered.T) / (tf_std_safe * tg_std_safe.T * tf_expr.shape[1])
         corr_matrix = np.nan_to_num(corr_matrix, nan=0.0, posinf=0.0, neginf=0.0)
-
         corr_df = pd.DataFrame({
             "TF_name": np.repeat(tf_names, len(tg_names)),
             "TG_name": np.tile(tg_names, len(tf_names)),
             "TF_TG_expr_corr": corr_matrix.ravel(),
         })
 
-        # --- Aggregate motif/distance info ---
-        merged = moods_df.merge(dist_df, on="peak_id", how="inner")
-        agg = (
-            merged.groupby(["TF_name", "TG_name"])
-            .agg(
-                n_peaks_linking=("peak_id", "nunique"),
-                n_motifs_linking=("logodds", "count"),
-                mean_motif_score=("logodds", "mean"),
-                min_tss_dist=("TSS_dist", "min"),
-                mean_tss_score=("TSS_dist_score", "mean"),
-            )
-            .reset_index()
-        )
+        # --- chunked merge / aggregation ---
+        chunksize = 2_000_000   # adjust for your memory; ~1–2 M rows per chunk
+        agg_chunks = []
 
+        usecols = ["peak_id", "TF", "logodds"]  # minimal columns for merge
+        for moods_chunk in pd.read_csv(moods_path, sep="\t", usecols=usecols, chunksize=chunksize):
+            moods_chunk = moods_chunk.rename(columns={"TF": "TF_name"})
+            merged = moods_chunk.merge(dist_df, on="peak_id", how="inner")
+
+            # aggregate immediately to free memory
+            agg_part = (
+                merged.groupby(["TF_name", "TG_name"])
+                .agg(
+                    n_peaks_linking=("peak_id", "nunique"),
+                    n_motifs_linking=("logodds", "count"),
+                    mean_motif_score=("logodds", "mean"),
+                    min_tss_dist=("TSS_dist", "min"),
+                    mean_tss_score=("TSS_dist_score", "mean"),
+                )
+                .reset_index()
+            )
+            agg_chunks.append(agg_part)
+            del merged, moods_chunk, agg_part
+            torch.cuda.empty_cache()
+
+        if not agg_chunks:
+            logging.warning(f"No merged rows for {chr_dir}")
+            return None
+
+        # concatenate all chunk aggregates
+        agg = pd.concat(agg_chunks, ignore_index=True)
+        del agg_chunks
+
+        # add chromosome ID and merge correlations
         agg["chrom"] = chr_dir
         agg = agg.merge(corr_df, on=["TF_name", "TG_name"], how="left")
+
         return agg
+
 
     # -------------------------------
     # Run in parallel
@@ -507,7 +497,7 @@ if __name__ == "__main__":
     logging.info(f"Processing chromosomes: {chrom_list}")
 
     # Build the global TF–TG aggregated features once (shared across all chromosomes)
-    agg_df = build_global_tf_tg_features(args.cache_dir, int(args.num_cpu))
+    agg_df = build_global_tf_tg_features(args.cache_dir, chrom_list, int(args.num_cpu))
 
     all_chrom_results = []
 
