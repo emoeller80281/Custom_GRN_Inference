@@ -379,71 +379,47 @@ class EdgeMLPClassifier(nn.Module):
 
 
 class TFGNNClassifier(nn.Module):
-    def __init__(
-        self,
-        num_features,
-        edge_dim,
-        hidden_dim=128,
-        num_layers=3,
-        dropout=0.3,
-        use_logit_noise=True,
-    ):
+    def __init__(self, num_features, edge_dim, hidden_dim=128, num_layers=3, dropout=0.3):
         super().__init__()
-        self.dropout = dropout
-        self.use_logit_noise = use_logit_noise
-
-        # ---- Project node embeddings (e.g., 384 → 128) ----
         self.node_proj = nn.Linear(num_features, hidden_dim)
-
-        # ---- Edge encoder (11 → 128) ----
         self.edge_encoder = nn.Sequential(
             nn.Linear(edge_dim, hidden_dim),
-            nn.ReLU(),
+            nn.SiLU(),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
         )
-
-        # ---- Message-passing layers ----
-        self.convs = nn.ModuleList()
-        self.norms = nn.ModuleList()
-        for _ in range(num_layers):
-            edge_mlp = nn.Sequential(
-                nn.Linear(hidden_dim, hidden_dim),
-                nn.ReLU(),
-                nn.Linear(hidden_dim, hidden_dim),
+        self.convs = nn.ModuleList([
+            GINEConv(
+                nn=nn.Sequential(
+                    nn.Linear(hidden_dim, hidden_dim),
+                    nn.SiLU(),
+                    nn.Dropout(0.1),
+                    nn.Linear(hidden_dim, hidden_dim),
+                ),
+                train_eps=True,
+                edge_dim=hidden_dim,
             )
-            conv = GINEConv(nn=edge_mlp, train_eps=True, edge_dim=hidden_dim)
-            self.convs.append(conv)
-            self.norms.append(nn.LayerNorm(hidden_dim))
-
-        # ---- Edge-level classifier ----
+            for _ in range(num_layers)
+        ])
+        self.norms = nn.ModuleList([nn.LayerNorm(hidden_dim) for _ in range(num_layers)])
         self.edge_mlp = nn.Sequential(
             nn.Linear(3 * hidden_dim, hidden_dim),
-            nn.ReLU(),
+            nn.SiLU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.ReLU(),
+            nn.SiLU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim // 2, 1),
         )
 
-    def forward(self, x, edge_index, edge_attr=None, batch=None):
-        if edge_attr is None:
-            raise ValueError("edge_attr is required but was None")
-
-        # ---- Encode ----
-        x = self.node_proj(x)                          # [N, hidden_dim]
-        edge_attr_enc = self.edge_encoder(edge_attr)   # [E, hidden_dim]
-
-        # ---- Message passing ----
+    def forward(self, x, edge_index, edge_attr):
+        x = self.node_proj(x)
+        edge_attr_enc = self.edge_encoder(edge_attr)
         for conv, norm in zip(self.convs, self.norms):
-            h = conv(x, edge_index, edge_attr_enc)
-            h = norm(F.relu(h))
-            x = x + F.dropout(h, p=self.dropout, training=self.training)  # simple residual
-
-        # ---- Edge-level classification ----
+            h = conv(norm(x), edge_index, edge_attr_enc)
+            h = F.silu(h)
+            x = x + F.dropout(h, 0.3, training=self.training)
         src, dst = edge_index
         edge_emb = torch.cat([x[src], x[dst], edge_attr_enc], dim=-1)
-        logits = self.edge_mlp(edge_emb)
-        if self.training and self.use_logit_noise:
-            logits = logits + 0.05 * torch.randn_like(logits)
-        return logits.squeeze(-1)
+        return self.edge_mlp(edge_emb).squeeze(-1)

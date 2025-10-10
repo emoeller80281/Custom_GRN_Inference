@@ -373,31 +373,36 @@ def evaluate_tg_gnn(edge_csv, ground_truth_csv, sep, global_features_csv, tf_emb
         auprc = average_precision_score(y_true, scores_sub)
         logging.info(f"AUROC={auroc:.3f} | AUPRC={auprc:.3f}")
         
+        # ---------------------------------------------------------
+        # Optimize threshold (using validation F1-like curve)
+        # ---------------------------------------------------------
         thr, score = optimize_threshold(y_true, scores_sub, metric="auprc")
         print(f"[Threshold Optimization] Best threshold={thr:.4f} (val F1-like={score:.4f})")
 
-        # Apply the threshold to get binary predictions
-        pred_binary = (scores_sub >= thr).astype(int)
-
         # Compute post-threshold metrics
         from sklearn.metrics import precision_score, recall_score, f1_score
+        pred_binary = (scores_sub >= thr).astype(int)
         precision = precision_score(y_true, pred_binary)
         recall = recall_score(y_true, pred_binary)
         f1 = f1_score(y_true, pred_binary)
         print(f"Post-threshold metrics: Precision={precision:.3f}, Recall={recall:.3f}, F1={f1:.3f}")
-        
+
         # ---------------------------------------------------------
-        # Save high-confidence edges
+        # Save only high-confidence edges (score ≥ threshold)
         # ---------------------------------------------------------
         pred_df = export[["Source", "Target"]].copy()
-        pred_df["Score"] = pred_binary
+        pred_df["Score"] = scores_sub  # keep continuous scores
+
+        high_conf_df = pred_df[pred_df["Score"] >= thr].copy()
+        high_conf_df.sort_values("Score", ascending=False, inplace=True)
 
         out_csv = os.path.join(out_dir, "gnn_high_confidence_edges.csv")
-        pred_df_pos = pred_df[pred_df["predicted_edge"] == 1].copy()
+        high_conf_df.to_csv(out_csv, index=False)
 
-        pred_df_pos.to_csv(out_csv, index=False)
-        logging.info(f"Saved {len(pred_df_pos):,} high-confidence edges to {out_csv}")
-
+        logging.info(
+            f"Saved {len(high_conf_df):,} high-confidence edges "
+            f"(Score ≥ {thr:.4f}) to {out_csv}"
+        )
 
         # ROC curve
         fpr, tpr, _ = roc_curve(y_true, scores_sub)

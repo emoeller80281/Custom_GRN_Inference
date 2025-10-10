@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader
 from joblib import Parallel, delayed
 import torch.backends.cuda as cuda_backends
 import contextlib
-from torch.cuda.amp import autocast
+from torch.amp import autocast
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
