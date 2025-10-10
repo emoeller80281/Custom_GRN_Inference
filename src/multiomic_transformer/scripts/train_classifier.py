@@ -577,12 +577,6 @@ if __name__ == "__main__":
     total_tf_embeddings = torch.mean(torch.stack(tf_all), dim=0)
     total_tg_embeddings = torch.mean(torch.stack(tg_all), dim=0)
 
-    torch.save(
-        {"tf_embeddings": total_tf_embeddings, "tg_embeddings": total_tg_embeddings},
-        os.path.join(OUT_DIR, "combined_embeddings.pt"),
-    )
-    logging.info("Saved combined embeddings to combined_embeddings.pt")
-    
     # ============================================================
     # Unsupervised pretraining (optional but recommended)
     # ============================================================
@@ -601,6 +595,12 @@ if __name__ == "__main__":
     unsup_embeds = unsup_embeds.to(total_tf_embeddings.device)
     total_tf_embeddings = torch.cat([total_tf_embeddings, unsup_embeds[:len(tf_name2id)]], dim=1)
     total_tg_embeddings = torch.cat([total_tg_embeddings, unsup_embeds[len(tf_name2id):]], dim=1)
+    
+    torch.save(
+        {"tf_embeddings": total_tf_embeddings, "tg_embeddings": total_tg_embeddings},
+        os.path.join(OUT_DIR, "combined_embeddings.pt"),
+    )
+    logging.info("Saved combined embeddings to combined_embeddings.pt")
 
     # Train model with global feature integration
     train_tg_gnn(

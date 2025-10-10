@@ -42,7 +42,7 @@ python ./src/multiomic_transformer/data/build_edge_features.py \
   --model_ckpt /gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC/chr1/model_training_001/trained_model.pt \
   --chip_file "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data/ground_truth_files/combined_ground_truth_no_rn111_or_rn112_edges.csv" \
   --out_csv /gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC/combined/model_training_001/classifier/edge_features.csv \
-  --chrom_list "chr13" \
+  --chrom_list "chr1,chr2,chr3,chr4,chr5,chr6,chr7,chr8,chr13" \
   --num_cpu 16
 
   echo "Finished successfully!"

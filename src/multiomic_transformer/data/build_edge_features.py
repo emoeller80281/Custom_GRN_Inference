@@ -9,6 +9,9 @@ from multiomic_transformer.datasets.dataset import MultiomicTransformerDataset
 from multiomic_transformer.models.model import MultiomicTransformer
 from torch.utils.data import DataLoader
 from joblib import Parallel, delayed
+import torch.backends.cuda as cuda_backends
+import contextlib
+from torch.cuda.amp import autocast
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -61,7 +64,7 @@ def gradient_attribution_matrix(model, dataset, loader, device=DEVICE,
     TF, TG = len(dataset.tf_names), len(dataset.tg_names)
     acc = torch.zeros(TF, TG, dtype=torch.float32, device="cpu")
 
-    scaler_ctx = torch.autocast(device_type="cuda", dtype=torch.float16) if (amp and device.type=="cuda") else contextlib.nullcontext()
+    scaler_ctx = autocast(device_type="cuda", dtype=torch.float16) if (amp and device.type=="cuda") else contextlib.nullcontext()
 
     for batch in tqdm(loader, desc="Fast gradient attribution"):
         atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids, motif_mask = [
@@ -111,123 +114,155 @@ def gradient_attribution_matrix(model, dataset, loader, device=DEVICE,
 def extract_edge_features(
     model, dataloader, tf_names, tg_names, tg_id_map,
     chip_edges=None, gradient_attrib_df=None,
-    device="cuda", tg_chunk=64
+    device="cuda", tg_chunk=None
 ):
     """
-    Extract TF–TG edge-level features from a trained MultiomicTransformer.
+    Vectorized edge feature extraction for the MultiomicTransformer.
+    Produces a long-format DataFrame with one row per (TF, TG).
 
-    Returns
-    -------
-    DataFrame with columns:
-        ['TF', 'TG', 'attn', 'motif_mask', 'grad_attr',
-         'pred_mean', 'pred_std', 'bias_mean', 'label' (optional)]
+    tg_id_map : array mapping raw tg_ids (from dataloader) -> [0 … TG-1]
     """
     model.eval()
     TF, TG = len(tf_names), len(tg_names)
-    all_records = []
 
-    tf_names_np = np.array(tf_names)
-    tg_names_np = np.array(tg_names)
+    # --- Accumulators on CPU (to avoid GPU OOM) ---
+    attn_acc   = torch.zeros(TG, TF, dtype=torch.float32)   # [TG, TF]
+    motif_acc  = torch.zeros(TG, TF, dtype=torch.float32)   # [TG, TF]
+    pred_mu    = torch.zeros(TG, dtype=torch.float32)       # [TG]
+    pred_sd    = torch.zeros(TG, dtype=torch.float32)       # [TG]
+    bias_mu    = torch.zeros(TG, dtype=torch.float32)       # [TG]
+    counts     = torch.zeros(TG, dtype=torch.float32)       # [TG]
 
     for batch in tqdm(dataloader, desc="Extracting edge features"):
         atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids, motif_mask = [
             x.to(device) if torch.is_tensor(x) else x for x in batch
         ]
 
-        if not torch.is_tensor(tg_ids):
-            tg_ids = torch.as_tensor(tg_ids, dtype=torch.long, device=device)
-
-        tg_global = tg_id_map[tg_ids.cpu().numpy()]
-        tg_batch_names = np.array(tg_names)[tg_global]
-        B = len(tg_batch_names)
-
-        with torch.no_grad():
-            out = model(
-                atac_wins, tf_tensor,
-                tf_ids=tf_ids, tg_ids=tg_ids,
-                bias=bias, motif_mask=motif_mask
-            )
-            preds, attn = out if isinstance(out, tuple) else (out, None)
-
-        preds_cpu = preds.detach().cpu()
-        attn_cpu  = attn.detach().cpu() if attn is not None else None
-        bias_cpu  = bias.mean(dim=(0, 2)).detach().cpu()
-        motif_cpu = motif_mask.float().cpu() if motif_mask is not None else None
-
-        # --------------------------
-        # Ensure all arrays same len
-        # --------------------------
-        min_len = min(
-            preds_cpu.shape[0],
-            len(tg_batch_names),
-            bias_cpu.shape[0] if bias_cpu.ndim else len(bias_cpu)
-        )
-        tg_batch_names = tg_batch_names[:min_len]
-
-        # Compute statistics
-        if preds_cpu.dim() > 1:
-            pred_mean = preds_cpu.mean(dim=1).numpy()[:min_len]
-            pred_std  = preds_cpu.std(dim=1).numpy()[:min_len]
+        # --- ensure tg_ids exist on both CPU (for lookup) and GPU (for model) ---
+        if isinstance(tg_ids, list):
+            tg_ids_cpu = torch.tensor(tg_ids, dtype=torch.long)
+        elif isinstance(tg_ids, torch.Tensor):
+            tg_ids_cpu = tg_ids.detach().cpu().long()
         else:
-            pred_mean = preds_cpu.numpy()[:min_len]
-            pred_std  = np.zeros_like(pred_mean)
+            raise TypeError(f"Unexpected tg_ids type: {type(tg_ids)}")
 
-        bias_mean = bias_cpu.numpy()[:min_len]
+        # Build CPU index map
+        tg_batch_global = torch.as_tensor(tg_id_map[tg_ids_cpu.numpy()], device="cpu")
 
-        tg_stats = pd.DataFrame({
-            "TG": tg_batch_names,
-            "pred_mean": pred_mean,
-            "pred_std": pred_std,
-            "bias_mean": bias_mean,
-        })
-
-        # Long-form attention and motif tables
-        if attn_cpu is not None:
-            attn_cpu_np = attn_cpu.numpy()[:min_len]
-            attn_df = pd.DataFrame(attn_cpu_np, columns=tf_names_np, index=tg_batch_names)
-            attn_long = attn_df.stack().reset_index()
-            attn_long.columns = ["TG", "TF", "attn"]
-        else:
-            attn_long = pd.DataFrame(columns=["TG", "TF", "attn"])
-
-        if motif_cpu is not None:
-            motif_cpu_np = motif_cpu.numpy()[:min_len]
-            motif_df = pd.DataFrame(motif_cpu_np, columns=tf_names_np, index=tg_batch_names)
-            motif_long = motif_df.stack().reset_index()
-            motif_long.columns = ["TG", "TF", "motif_mask"]
-        else:
-            motif_long = pd.DataFrame(columns=["TG", "TF", "motif_mask"])
-
-        # Combine everything
-        edge_batch_df = (
-            attn_long
-            .merge(motif_long, on=["TG", "TF"], how="outer")
-            .merge(tg_stats, on="TG", how="left")
-        )
+        # Keep GPU version for the model
+        tg_ids = tg_ids_cpu.to(device)
         
-        if gradient_attrib_df is not None:
-            edge_batch_df = edge_batch_df.merge(
-                gradient_attrib_df.stack().rename("grad_attr").reset_index().rename(columns={"level_0": "TF", "level_1": "TG"}),
-                on=["TF", "TG"], how="left"
+        if tg_batch_global.max() >= TG or tg_batch_global.min() < 0:
+            raise ValueError(
+                f"tg_batch_global out of bounds! "
+                f"max={tg_batch_global.max().item()}, TG={TG}"
             )
-            edge_batch_df["grad_attr"] = edge_batch_df["grad_attr"].fillna(0.0)
-        else:
-            edge_batch_df["grad_attr"] = 0.0
-            
-        all_records.append(edge_batch_df)
 
-        del preds_cpu, attn_cpu, bias_cpu, motif_cpu
+        # --- forward pass ---
+        with torch.no_grad():
+            if tg_chunk is None:
+                out = model(atac_wins, tf_tensor,
+                            tf_ids=tf_ids, tg_ids=tg_ids,
+                            bias=bias, motif_mask=motif_mask)
+                preds, attn = out if isinstance(out, tuple) else (out, None)
+
+                preds_cpu = preds.detach().cpu()
+                attn_cpu  = attn.detach().cpu() if attn is not None else None
+                bias_cpu  = bias.mean(dim=(0,2)).detach().cpu()
+
+                # accumulate
+                pred_mu[tg_batch_global] += preds_cpu.mean(dim=0)
+                pred_sd[tg_batch_global] += preds_cpu.std(dim=0)
+                bias_mu[tg_batch_global] += bias_cpu
+                counts[tg_batch_global]  += 1
+
+                if attn_cpu is not None:
+                    attn_acc[tg_batch_global] += attn_cpu
+                if motif_mask is not None:
+                    motif_acc[tg_batch_global] += motif_mask.float().cpu()
+
+            else:
+                # --- chunk over TGs to reduce memory ---
+                for j0 in range(0, tg_ids.shape[0], tg_chunk):
+                    j1 = min(j0 + tg_chunk, tg_ids.shape[0])
+                    tg_subset = tg_ids[j0:j1]
+                    tg_global_subset = tg_batch_global[j0:j1]
+
+                    out = model(atac_wins, tf_tensor,
+                                tf_ids=tf_ids, tg_ids=tg_subset,
+                                bias=bias, motif_mask=motif_mask)
+                    preds, attn = out if isinstance(out, tuple) else (out, None)
+
+                    preds_cpu = preds.detach().cpu()
+                    attn_cpu  = attn.detach().cpu() if attn is not None else None
+                    bias_cpu  = bias[:, j0:j1, :].mean(dim=(0,2)).detach().cpu()
+
+                    pred_mu[tg_global_subset] += preds_cpu.mean(dim=0)
+                    pred_sd[tg_global_subset] += preds_cpu.std(dim=0)
+                    bias_mu[tg_global_subset] += bias_cpu
+                    counts[tg_global_subset]  += 1
+
+                    if attn_cpu is not None:
+                        attn_acc[tg_global_subset] += attn_cpu
+                    if motif_mask is not None:
+                        motif_acc[tg_global_subset] += motif_mask[:, j0:j1].float().cpu()
+
+        # free GPU memory
+        del preds, attn, bias
         torch.cuda.empty_cache()
 
-    df = pd.concat(all_records, ignore_index=True)
-    del all_records
+    # --- Average by counts ---
+    denom_TG   = counts.clamp_min(1)
+    denom_TG2D = denom_TG.view(-1, 1)
+
+    pred_mu    = (pred_mu / denom_TG)
+    pred_sd    = (pred_sd / denom_TG)
+    bias_mu    = (bias_mu / denom_TG)
+    attn_mean  = (attn_acc / denom_TG2D)
+    motif_mean = (motif_acc / denom_TG2D)
+
+    # --- gradient attribution (optional) ---
+    if gradient_attrib_df is not None:
+        gradient_attrib_df = gradient_attrib_df.reindex(index=tf_names, columns=tg_names, fill_value=0.0)
+        grad_attr = torch.tensor(gradient_attrib_df.values.T, dtype=torch.float32)
+    else:
+        grad_attr = torch.zeros_like(attn_mean)
+
+    # --- build edge DataFrame ---
+    tg_index = pd.Index(tg_names, name="TG")
+    tf_index = pd.Index(tf_names, name="TF")
+
+    df_attn  = pd.DataFrame(attn_mean.numpy(),  index=tg_index, columns=tf_index)
+    df_motif = pd.DataFrame(motif_mean.numpy(), index=tg_index, columns=tf_index)
+    df_grad  = pd.DataFrame(grad_attr.numpy(),  index=tg_index, columns=tf_index)
+
+    long_attn  = df_attn.stack().rename("attn").reset_index()
+    long_motif = df_motif.stack().rename("motif_mask").reset_index()
+    long_grad  = df_grad.stack().rename("grad_attr").reset_index()
+
+    df_tg = pd.DataFrame({
+        "TG": tg_names,
+        "pred_mean": pred_mu.numpy(),
+        "pred_std":  pred_sd.numpy(),
+        "bias_mean": bias_mu.numpy(),
+    })
+
+    edges = long_attn.merge(long_motif, on=["TG", "TF"], how="left") \
+                     .merge(long_grad,  on=["TG", "TF"], how="left") \
+                     .merge(df_tg,      on="TG",         how="left")
 
     if chip_edges is not None:
         chip_set = set((t.upper(), g.upper()) for t, g in chip_edges)
-        df["label"] = [(tf.upper(), tg.upper()) in chip_set for tf, tg in zip(df["TF"], df["TG"])]
-        df["label"] = df["label"].astype(int)
+        edges["label"] = [(tf.upper(), tg.upper()) in chip_set
+                          for tf, tg in zip(edges["TF"], edges["TG"])]
+        edges["label"] = edges["label"].astype(int)
 
-    return df
+    cols = ["TF", "TG", "attn", "pred_mean", "pred_std", "bias_mean", "grad_attr", "motif_mask"]
+    if "label" in edges:
+        cols.append("label")
+    edges = edges[cols]
+
+    return edges
 
 
 # ---------------------------------------------------------------------

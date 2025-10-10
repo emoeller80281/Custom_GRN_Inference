@@ -6,7 +6,7 @@ import pandas as pd
 import numpy as np
 import logging
 import matplotlib.pyplot as plt
-from sklearn.metrics import roc_auc_score, average_precision_score, roc_curve
+from sklearn.metrics import roc_auc_score, average_precision_score, roc_curve, precision_recall_curve, f1_score
 from torch_geometric.data import Data
 from multiomic_transformer.models.model import TFGNNClassifier, EdgeMLPClassifier
 from sklearn.preprocessing import StandardScaler
@@ -64,6 +64,48 @@ def build_tg_graph(edge_df, tf_embeddings, tg_embeddings, tf_name2id, tg_name2id
     logging.info(f"Graph built successfully with {n_nodes:,} nodes and {edge_index.size(1):,} edges")
     return Data(x=x, edge_index=edge_index, edge_attr=edge_attr, y=y)
 
+def optimize_threshold(y_true, y_pred, metric="auprc"):
+    """
+    Find the optimal classification threshold based on validation performance.
+
+    Parameters
+    ----------
+    y_true : array-like
+        Ground-truth binary labels (0/1).
+    y_pred : array-like
+        Predicted probabilities or scores.
+    metric : str, optional
+        Metric to optimize; "auprc" (default) or "f1".
+
+    Returns
+    -------
+    best_thr : float
+        The threshold that maximizes the chosen metric.
+    best_score : float
+        The best metric value achieved.
+    """
+
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+
+    if metric.lower() == "auprc":
+        # Use precision–recall curve
+        precision, recall, thresholds = precision_recall_curve(y_true, y_pred)
+        prc = 2 * (precision * recall) / (precision + recall + 1e-8)  # F1-like tradeoff
+        best_idx = np.nanargmax(prc)
+        best_thr = thresholds[best_idx]
+        best_score = prc[best_idx]
+    elif metric.lower() == "f1":
+        from sklearn.metrics import f1_score
+        thresholds = np.linspace(0.0, 1.0, 201)
+        f1s = [f1_score(y_true, (y_pred >= t).astype(int)) for t in thresholds]
+        best_idx = int(np.argmax(f1s))
+        best_thr = thresholds[best_idx]
+        best_score = f1s[best_idx]
+    else:
+        raise ValueError("metric must be 'auprc' or 'f1'")
+
+    return float(best_thr), float(best_score)
 
 # ============================================================
 #  Evaluate Trained GNN
@@ -209,13 +251,28 @@ def evaluate_tg_gnn(edge_csv, ground_truth_csv, sep, global_features_csv, tf_emb
     clf.fit(X_train, y_train)
     print("Baseline AUROC:", roc_auc_score(y_test, clf.predict_proba(X_test)[:,1]))
     
-    # Load model
+    # --- Auto-detect embedding dimension and edge feature size ---
+    d_model = tf_embeddings.shape[1]
+    edge_dim = data.edge_attr.shape[1]
+
+    logging.info(f"Inferred embedding dimension from embeddings: {d_model}")
+    logging.info(f"Edge feature dimension: {edge_dim}")
+
+    # --- Build model accordingly ---
     model = TFGNNClassifier(
-        num_features=384, edge_dim=11, hidden_dim=256, num_layers=4, dropout=0.3, use_logit_noise=False
+        num_features=d_model,
+        edge_dim=edge_dim,
+        hidden_dim=256,
+        num_layers=4,
+        dropout=0.3,
+        use_logit_noise=False,
     ).to(device)
-    # model = EdgeMLPClassifier(edge_dim=11, hidden_dim=256, dropout=0.2).to(device)
+
+    # --- Load checkpoint safely ---
     state = torch.load(gnn_ckpt, map_location=device)
-    model.load_state_dict(state)
+    missing, unexpected = model.load_state_dict(state, strict=False)
+    if missing or unexpected:
+        logging.warning(f"⚠️ Missing keys: {missing} | Unexpected keys: {unexpected}")
     model.eval()
     logging.info(f"Loaded trained GNN checkpoint: {gnn_ckpt}")
 
@@ -291,7 +348,7 @@ def evaluate_tg_gnn(edge_csv, ground_truth_csv, sep, global_features_csv, tf_emb
     out_df["Score"] = scores_sub
 
     # Save prediction table
-    export = out_df[["TF", "TG", "Logit", "Prob_raw", "Score"]].rename(columns={"TF": "Source", "TG": "Target"})
+    export = out_df[["TF", "TG", "Score"]].rename(columns={"TF": "Source", "TG": "Target"})
 
     inferred_grn_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC/gnn_predictions"
     os.makedirs(inferred_grn_dir, exist_ok=True)
@@ -315,6 +372,32 @@ def evaluate_tg_gnn(edge_csv, ground_truth_csv, sep, global_features_csv, tf_emb
         auroc = roc_auc_score(y_true, scores_sub)
         auprc = average_precision_score(y_true, scores_sub)
         logging.info(f"AUROC={auroc:.3f} | AUPRC={auprc:.3f}")
+        
+        thr, score = optimize_threshold(y_true, scores_sub, metric="auprc")
+        print(f"[Threshold Optimization] Best threshold={thr:.4f} (val F1-like={score:.4f})")
+
+        # Apply the threshold to get binary predictions
+        pred_binary = (scores_sub >= thr).astype(int)
+
+        # Compute post-threshold metrics
+        from sklearn.metrics import precision_score, recall_score, f1_score
+        precision = precision_score(y_true, pred_binary)
+        recall = recall_score(y_true, pred_binary)
+        f1 = f1_score(y_true, pred_binary)
+        print(f"Post-threshold metrics: Precision={precision:.3f}, Recall={recall:.3f}, F1={f1:.3f}")
+        
+        # ---------------------------------------------------------
+        # Save high-confidence edges
+        # ---------------------------------------------------------
+        pred_df = export[["Source", "Target"]].copy()
+        pred_df["Score"] = pred_binary
+
+        out_csv = os.path.join(out_dir, "gnn_high_confidence_edges.csv")
+        pred_df_pos = pred_df[pred_df["predicted_edge"] == 1].copy()
+
+        pred_df_pos.to_csv(out_csv, index=False)
+        logging.info(f"Saved {len(pred_df_pos):,} high-confidence edges to {out_csv}")
+
 
         # ROC curve
         fpr, tpr, _ = roc_curve(y_true, scores_sub)
