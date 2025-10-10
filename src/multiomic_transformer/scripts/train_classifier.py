@@ -428,15 +428,33 @@ def train_tg_gnn(edge_csv, ground_truth_csv, global_features_csv, tf_embeddings,
 #  Main entry point
 # ============================================================
 if __name__ == "__main__":
+    import argparse
+    
+    parser = argparse.ArgumentParser()
+    
+    parser.add_argument(
+        "--ground_truth_file",
+        required=True,
+        help="Path to a ground truth file where the first column has TF names and the second column has TG names."
+    )
+    
+    parser.add_argument(
+        "--output_dir",
+        required=True,
+        help="Output directory"
+    )
+    
+    args = parser.parse_args()
+    
     model_training_num = "model_training_001"
     chrom_id_list = ["chr1", "chr2", "chr3", "chr4", "chr5", "chr6", "chr7"]
 
     TF_VOCAB_JSON = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data/training_data_cache/common/tf_vocab.json"
     TG_VOCAB_JSON = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data/training_data_cache/common/tg_vocab.json"
-    OUT_DIR = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC/gnn_classifier/"
+    OUT_DIR = args.output_dir
     EDGE_CSV = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC/combined/model_training_001/classifier/edge_features.csv"
     GLOBAL_FEATURES_CSV = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data/training_data_cache/mESC/tf_tg_features_all_chr.csv"
-    GROUND_TRUTH = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data/ground_truth_files/combined_ground_truth_no_rn111_or_rn112_edges.csv"
+    GROUND_TRUTH = args.ground_truth_file
 
     os.makedirs(OUT_DIR, exist_ok=True)
 

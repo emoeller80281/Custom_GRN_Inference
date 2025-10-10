@@ -45,13 +45,11 @@ echo "WORLD_SIZE      = " $WORLD_SIZE
 echo "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX "
 echo ""
 
-# Create logs & start GPU sampler
-mkdir -p LOGS
-trap 'pkill -P $$ || true' EXIT
-nvidia-smi -L
-nvidia-smi --query-gpu=timestamp,index,name,utilization.gpu,memory.used,memory.total \
-  --format=csv -l 30 > LOGS/gpu_usage_transformer_training.log &
+torchrun --standalone --nproc_per_node=$SLURM_NTASKS_PER_NODE src/multiomic_transformer/scripts/train_classifier.py \
+    --ground_truth_file "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data/ground_truth_files/combined_ground_truth_no_rn111_or_rn112_edges.csv" \
+    --output_dir "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC/train_chip_gnn_classifier/"
 
-torchrun --standalone --nproc_per_node=$SLURM_NTASKS_PER_NODE src/multiomic_transformer/scripts/train_classifier.py
+torchrun --standalone --nproc_per_node=$SLURM_NTASKS_PER_NODE src/multiomic_transformer/scripts/train_classifier.py \
+    --ground_truth_file "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.GRN_BENCHMARKING.MOELLER/testing_bear_grn/GROUND.TRUTHS/filtered_RN111_and_RN112_mESC_E7.5_rep1.tsv" \
+    --output_dir "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC/test_chip_gnn_classifier/"
 
-torchrun --standalone --nproc_per_node=$SLURM_NTASKS_PER_NODE src/multiomic_transformer/scripts/test_classifier.py
