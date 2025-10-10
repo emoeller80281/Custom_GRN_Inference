@@ -2,10 +2,10 @@
 #SBATCH --job-name=build_edge_features
 #SBATCH --output=LOGS/transformer_logs/04_testing/%x_%A.log
 #SBATCH --error=LOGS/transformer_logs/04_testing/%x_%A.err
-#SBATCH --time=12:00:00
+#SBATCH --time=16:00:00
 #SBATCH -p gpu
 #SBATCH -N 1
-#SBATCH --gres=gpu:p100:1
+#SBATCH --gres=gpu:a100:1
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 21
 #SBATCH --mem=64G

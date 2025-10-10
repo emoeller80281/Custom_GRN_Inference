@@ -387,10 +387,9 @@ def train_tg_gnn(edge_csv, ground_truth_csv, sep, global_features_csv, tf_embedd
     model = TFGNNClassifier(
         num_features=node_feature_dim,
         edge_dim=edge_feature_dim,
-        hidden_dim=256,
-        num_layers=4,
+        hidden_dim=512,
+        num_layers=8,
         dropout=0.3,
-        use_logit_noise=False,
     ).to(device)
 
     loss_fn = nn.BCEWithLogitsLoss()
@@ -414,7 +413,7 @@ def train_tg_gnn(edge_csv, ground_truth_csv, sep, global_features_csv, tf_embedd
     # ============================================================
     best_val_auc = -np.inf
     best_state = None
-    patience = 50
+    patience = 100
     epochs_since_improve = 0
 
     for epoch in range(2000):
@@ -456,14 +455,14 @@ def train_tg_gnn(edge_csv, ground_truth_csv, sep, global_features_csv, tf_embedd
             best_val_auc = val_auc
             best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
             epochs_since_improve = 0
-        else:
-            epochs_since_improve += 1
-            if epochs_since_improve >= patience:
-                logging.info(
-                    f"Early stopping at epoch {epoch} "
-                    f"(best val AUROC = {best_val_auc:.3f})"
-                )
-                break
+        # else:
+        #     epochs_since_improve += 1
+        #     if epochs_since_improve >= patience:
+        #         logging.info(
+        #             f"Early stopping at epoch {epoch} "
+        #             f"(best val AUROC = {best_val_auc:.3f})"
+        #         )
+        #         break
 
     # ----- Restore best weights -----
     if best_state is not None:

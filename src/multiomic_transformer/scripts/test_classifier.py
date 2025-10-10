@@ -262,10 +262,9 @@ def evaluate_tg_gnn(edge_csv, ground_truth_csv, sep, global_features_csv, tf_emb
     model = TFGNNClassifier(
         num_features=d_model,
         edge_dim=edge_dim,
-        hidden_dim=256,
-        num_layers=4,
+        hidden_dim=512,
+        num_layers=8,
         dropout=0.3,
-        use_logit_noise=False,
     ).to(device)
 
     # --- Load checkpoint safely ---
