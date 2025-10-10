@@ -121,7 +121,7 @@ def build_tf_tg_features_from_cache(training_data_cache, out_csv):
     all_features_df["neg_log_tss"] = -np.log1p(all_features_df["min_tss_dist"])
 
     all_features_df.to_csv(out_csv, index=False)
-    print(f"✅ Saved global TF–TG feature table: {out_csv}  shape={all_features_df.shape}")
+    print(f"Saved global TF–TG feature table: {out_csv}  shape={all_features_df.shape}")
 
     return all_features_df
 

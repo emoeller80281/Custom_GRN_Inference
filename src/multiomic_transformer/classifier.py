@@ -568,49 +568,7 @@ def run_test(checkpoint_path, out_dir, batch_size=BATCH_SIZE, chrom_id="chr1", e
     
     edge_df_bal.to_csv(edge_path, index=False)
     logging.info(f"  - Saved edge features: {edge_path}  shape={edge_df_bal.shape}")
-    # else:
-    #     logging.info("\nLoading edge features")
-    #     edge_df = pd.read_csv(edge_path)
 
-    # # --- Train classifier ---
-    # logging.info("\nTraining XGBoost edge classifier")
-    # clf = train_edge_classifier(edge_df_bal)
-
-    # import joblib
-    # clf_path = os.path.join(out_dir, "edge_classifier.pkl")
-    # joblib.dump(clf, clf_path)
-    # logging.info(f"  - Saved trained edge classifier: {clf_path}")
-    
-    # # --- Predict all edge scores with trained classifier ---
-    # logging.info("Generating predictions for all edges")
-    # features = ["attn", "pred_mean", "pred_std", "bias_mean", "grad_attr", "motif_mask", "shortcut_weight"]
-    # X_all = edge_df[features].values
-    # edge_df["pred_score"] = clf.predict_proba(X_all)[:, 1]
-    
-    # # Pivot into Source–Target–Score format
-    # pred_df = (
-    #     edge_df[["TF", "TG", "pred_score"]]
-    #     .rename(columns={"TF": "Source", "TG": "Target", "pred_score": "score"})
-    # )
-
-    # pred_path = os.path.join(inferred_net_outdir, f"inferred_grn_{chrom_id}.csv")
-    # pred_df.to_csv(pred_path, index=False)
-    # logging.info(f"Saved predictions file: {pred_path}  shape={edge_df.shape}")
-    
-    # # Create and customize the plot
-    # ax = xgb.plot_importance(clf, importance_type='gain', max_num_features=10)
-
-    # # Label and style adjustments (optional)
-    # ax.set_title("XGBoost Feature Importance (Gain)", fontsize=14)
-    # ax.set_xlabel("Average Gain", fontsize=12)
-    # ax.set_ylabel("Feature", fontsize=12)
-
-    # # Save the figure to file
-    # plt.tight_layout()
-    # plt.savefig(os.path.join(out_dir, "xgboost_feature_importance.png"), dpi=300, bbox_inches="tight")
-    # plt.close()
-
-    # logging.info("\nClassifier training completed successfully")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run classifier testing for MultiomicTransformer per chromosome")

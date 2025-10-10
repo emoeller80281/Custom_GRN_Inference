@@ -25,11 +25,11 @@ class MultiomicTransformerDataset(Dataset):
                  tg_vocab_path: str = Path,
                  fine_tuner: bool = False,
                  sample_name: str = None):
-        self.data_dir = data_dir
+        self.data_dir = Path(data_dir)
         self.chrom_id = chrom_id
         self.sample_name = sample_name
 
-        chrom_dir = Path(data_dir) / chrom_id
+        chrom_dir = self.data_dir / chrom_id
         if not chrom_dir.is_dir():
             raise FileNotFoundError(f"Chromosome directory missing: {chrom_dir}")
 
@@ -91,17 +91,17 @@ class MultiomicTransformerDataset(Dataset):
 
         # --- Pseudobulk mode ---
         else:
-            tf_path   = data_dir / "tf_tensor_all.pt"
+            tf_path   = self.data_dir / "tf_tensor_all.pt"
             tg_path   = chrom_dir / f"tg_tensor_all_{chrom_id}.pt"
             atac_path = chrom_dir / f"atac_window_tensor_all_{chrom_id}.pt"
             scaler_path = chrom_dir / f"tg_scaler_{chrom_id}.save"
             window_map_path = chrom_dir / f"window_map_{chrom_id}.json"
             dist_bias_path  = chrom_dir / f"dist_bias_{chrom_id}.pt"
-            tf_ids_path     = data_dir / "tf_ids.pt"
+            tf_ids_path     = self.data_dir / "tf_ids.pt"
             tg_ids_path     = chrom_dir / f"tg_ids_{chrom_id}.pt"
-            tf_names_json   = data_dir / "tf_names.json"
+            tf_names_json   = self.data_dir / "tf_names.json"
             tg_names_json   = chrom_dir / f"tg_names_{chrom_id}.json"
-            metacell_names_path = data_dir / "metacell_names.json"
+            metacell_names_path = self.data_dir / "metacell_names.json"
             motif_mask_path = chrom_dir / f"motif_mask_{chrom_id}.pt"
 
             required = [
