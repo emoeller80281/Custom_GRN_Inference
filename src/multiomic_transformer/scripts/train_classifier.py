@@ -13,7 +13,9 @@ from torch import nn
 from torch_geometric.data import Data
 from torch_geometric.utils import dropout_edge
 import seaborn as sns
-from multiomic_transformer.models.model import MultiomicTransformer, TFGNNClassifier, EdgeMLPClassifier
+from multiomic_transformer.models.model import (
+    MultiomicTransformer, TFGNNClassifier, EdgeMLPClassifier, GCNEncoder, GraphAutoEncoder
+)
 from sklearn.preprocessing import StandardScaler
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -101,6 +103,63 @@ def build_tg_graph(edge_df, tf_embeddings, tg_embeddings, tf_name2id, tg_name2id
     
     logging.info(f"Graph built successfully with {n_nodes:,} nodes and {edge_index.size(1):,} edges")
     return Data(x=x, edge_index=edge_index, edge_attr=edge_attr, y=y)
+
+def unsupervised_pretrain_graph_autoencoder(edge_csv, tf_embeddings, tg_embeddings, tf_name2id, tg_name2id, out_dir, device="cuda:0"):
+    """
+    Unsupervised pretraining using a Graph Autoencoder (GAE).
+    Learns structure-aware embeddings of TFs and TGs without using labels.
+    """
+    logging.info("Starting unsupervised GAE pretraining...")
+
+    # --- Load all available TF–TG edges (use all edges, no labels) ---
+    edge_df = pd.read_csv(edge_csv)
+    edge_df["TF"] = edge_df["TF"].astype(str).str.upper()
+    edge_df["TG"] = edge_df["TG"].astype(str).str.upper()
+
+    # --- Select feature columns (whatever you have globally available) ---
+    edge_attr_cols = [
+        c for c in [
+            "attn", "bias_mean", "pred_mean", "TF_TG_expr_corr",
+            "TF_mean_expr", "TG_mean_expr", "motif_density",
+            "neg_log_tss", "log_mean_score", "motif_mask"
+        ] if c in edge_df.columns
+    ]
+
+    # --- Build PyG graph ---
+    data = build_tg_graph(
+        edge_df, tf_embeddings, tg_embeddings, tf_name2id, tg_name2id, edge_attr_cols
+    ).to(device)
+
+    in_channels = data.x.shape[1]
+    hidden_dim = 128
+    embed_dim = 256
+
+    encoder = GCNEncoder(in_channels=in_channels, hidden_channels=hidden_dim, out_channels=embed_dim).to(device)
+    model = GraphAutoEncoder(encoder).to(device)
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    num_epochs = 100
+    best_loss = float("inf")
+
+    for epoch in range(1, num_epochs + 1):
+        model.train()
+        optimizer.zero_grad()
+        z = model(data.x, data.edge_index)
+        loss = model.recon_loss(z, data.edge_index)
+        loss.backward()
+        optimizer.step()
+
+        if epoch % 10 == 0:
+            logging.info(f"[GAE pretrain] Epoch {epoch:03d} | Loss: {loss.item():.4f}")
+        if loss.item() < best_loss:
+            best_loss = loss.item()
+            best_state = z.detach().cpu()
+
+    # --- Save learned embeddings ---
+    torch.save(best_state, os.path.join(out_dir, "unsupervised_embeddings.pt"))
+    logging.info(f"Saved unsupervised GAE embeddings to unsupervised_embeddings.pt (Loss={best_loss:.4f})")
+
+    return best_state
 
 
 # ============================================================
@@ -322,9 +381,12 @@ def train_tg_gnn(edge_csv, ground_truth_csv, sep, global_features_csv, tf_embedd
     logging.info(f"Val graph:   {val_data.num_nodes:,} nodes, {val_data.num_edges:,} edges")
     
     # ----- Initialize model/opt/loss -----
+    node_feature_dim = train_data.x.shape[1]
+    edge_feature_dim = train_data.edge_attr.shape[1]
+
     model = TFGNNClassifier(
-        num_features=384,
-        edge_dim=11,
+        num_features=node_feature_dim,
+        edge_dim=edge_feature_dim,
         hidden_dim=256,
         num_layers=4,
         dropout=0.3,
@@ -520,6 +582,25 @@ if __name__ == "__main__":
         os.path.join(OUT_DIR, "combined_embeddings.pt"),
     )
     logging.info("Saved combined embeddings to combined_embeddings.pt")
+    
+    # ============================================================
+    # Unsupervised pretraining (optional but recommended)
+    # ============================================================
+    unsup_embeds = unsupervised_pretrain_graph_autoencoder(
+        edge_csv=EDGE_CSV,
+        tf_embeddings=total_tf_embeddings,
+        tg_embeddings=total_tg_embeddings,
+        tf_name2id=tf_name2id,
+        tg_name2id=tg_name2id,
+        out_dir=OUT_DIR,
+        device="cuda:0"
+    )
+
+    # Integrate learned unsupervised embeddings with existing ones
+    # e.g. concatenate or average:
+    unsup_embeds = unsup_embeds.to(total_tf_embeddings.device)
+    total_tf_embeddings = torch.cat([total_tf_embeddings, unsup_embeds[:len(tf_name2id)]], dim=1)
+    total_tg_embeddings = torch.cat([total_tg_embeddings, unsup_embeds[len(tf_name2id):]], dim=1)
 
     # Train model with global feature integration
     train_tg_gnn(

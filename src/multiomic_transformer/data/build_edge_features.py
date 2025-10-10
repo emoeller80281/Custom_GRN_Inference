@@ -12,6 +12,8 @@ from joblib import Parallel, delayed
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+cuda_backends.matmul.allow_tf32 = True
+torch.set_float32_matmul_precision("high")
 
 # ---------------------------------------------------------------------
 # Model loading
@@ -51,46 +53,54 @@ def zscore_per_cell(x: torch.Tensor, eps=1e-6):
     return (x - mu) / sd
 
 
-def gradient_attribution_matrix(model, dataset, loader, device=DEVICE, normalize="global"):
+def gradient_attribution_matrix(model, dataset, loader, device=DEVICE,
+                                normalize="global", tg_chunk=128, amp=True):
     """
-    Compute gradient attribution per TF–TG pair efficiently by vectorizing
-    across TGs within a single backward pass.
+    Compute gradient attribution per TF–TG pair using TG chunking to reduce memory.
     """
     TF, TG = len(dataset.tf_names), len(dataset.tg_names)
     acc = torch.zeros(TF, TG, dtype=torch.float32, device="cpu")
+
+    scaler_ctx = torch.autocast(device_type="cuda", dtype=torch.float16) if (amp and device.type=="cuda") else contextlib.nullcontext()
 
     for batch in tqdm(loader, desc="Fast gradient attribution"):
         atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids, motif_mask = [
             x.to(device) if torch.is_tensor(x) else x for x in batch
         ]
-
-        # enable gradient on TFs
         tf_tensor = tf_tensor.detach().clone().requires_grad_(True)
-        tf_norm = zscore_per_cell(tf_tensor)
+        tf_norm   = zscore_per_cell(tf_tensor)
 
-        # Forward full TG slice (all TGs at once)
-        preds = model(
-            atac_wins,
-            tf_norm,
-            tf_ids=tf_ids,
-            tg_ids=torch.arange(TG, device=device),
-            bias=bias,
-            motif_mask=motif_mask,
-        )
-        preds = preds[0] if isinstance(preds, tuple) else preds  # [B, TG]
+        # Iterate TGs in chunks
+        for start in range(0, TG, tg_chunk):
+            end = min(start + tg_chunk, TG)
+            tg_slice = torch.arange(start, end, device=device)
 
-        # ---- Compute mean output per TG ----
-        # shape: [TG]; scalar loss aggregates all TGs equally
-        mean_per_tg = preds.mean(dim=0)  # [TG]
-        total = mean_per_tg.sum()
+            with scaler_ctx:
+                preds = model(
+                    atac_wins, tf_norm,
+                    tf_ids=tf_ids,
+                    tg_ids=tg_slice,
+                    bias=bias,
+                    motif_mask=motif_mask,
+                )
+                preds = preds[0] if isinstance(preds, tuple) else preds  # [B, tg_chunk]
 
-        # ---- One backward pass (for all TGs) ----
-        grads = torch.autograd.grad(total, tf_norm, retain_graph=False, create_graph=False)[0]  # [B, TF]
+                mean_per_tg = preds.mean(dim=0)      # [tg_chunk]
+                total = mean_per_tg.sum()            # scalar
 
-        # collapse batch → TF
-        grad_vec = grads.abs().sum(dim=0).cpu()  # [TF]
-        acc += grad_vec.unsqueeze(1).expand(-1, TG) / len(loader)
+            # Backprop ONLY wrt tf_norm; no graph retention across chunks
+            grads = torch.autograd.grad(total, tf_norm, retain_graph=False, create_graph=False)[0]  # [B, TF]
+            grad_vec = grads.abs().sum(dim=0).cpu()  # [TF]
 
+            # Write into the slice
+            acc[:, start:end] += grad_vec.unsqueeze(1).expand(-1, end-start) / len(loader)
+
+            # Free graph before next chunk
+            del preds, mean_per_tg, total, grads, grad_vec
+            torch.cuda.empty_cache()
+
+        # cleanup per batch
+        del atac_wins, tf_tensor, tf_norm, targets, bias, tf_ids, tg_ids, motif_mask
         torch.cuda.empty_cache()
 
     if normalize == "global":
@@ -507,7 +517,7 @@ if __name__ == "__main__":
 
         # 2. Extract model-based features for this chromosome
         edge_df = build_edge_feature_table(
-            args.model_ckpt, args.cache_dir, args.chip_file, args.out_csv, chrom_id=chrom_id
+            args.model_ckpt, args.cache_dir, args.chip_file, args.out_csv, chrom_id=chrom_id, batch_size=8
         )
 
         # 3. Merge aggregated & deep features (by TF/TG)

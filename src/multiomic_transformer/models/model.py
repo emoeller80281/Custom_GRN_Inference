@@ -1,10 +1,42 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.nn import GraphSAGE, GATConv, global_mean_pool, GATv2Conv, GINEConv
+from torch_geometric.nn import GCNConv, GATConv, GINEConv
 from torch_geometric.data import Data
+from torch_geometric.utils import negative_sampling
 import numpy as np
 import math
+
+
+class GCNEncoder(torch.nn.Module):
+    def __init__(self, in_channels, hidden_channels, out_channels):
+        super().__init__()
+        self.conv1 = GCNConv(in_channels, hidden_channels)
+        self.conv2 = GCNConv(hidden_channels, out_channels)
+
+    def forward(self, x, edge_index):
+        x = F.relu(self.conv1(x, edge_index))
+        z = self.conv2(x, edge_index)
+        return z
+
+
+class GraphAutoEncoder(torch.nn.Module):
+    def __init__(self, encoder):
+        super().__init__()
+        self.encoder = encoder
+
+    def forward(self, x, edge_index):
+        z = self.encoder(x, edge_index)
+        return z
+
+    def recon_loss(self, z, edge_index):
+        # positive edges
+        pos_loss = -torch.log(torch.sigmoid((z[edge_index[0]] * z[edge_index[1]]).sum(dim=-1)) + 1e-15).mean()
+        # negative edges
+        neg_edge_index = negative_sampling(edge_index, num_nodes=z.size(0))
+        neg_loss = -torch.log(1 - torch.sigmoid((z[neg_edge_index[0]] * z[neg_edge_index[1]]).sum(dim=-1)) + 1e-15).mean()
+        return pos_loss + neg_loss
+
 
 class MultiHeadAttention(nn.Module):
     def __init__(self, d_model, num_heads):
