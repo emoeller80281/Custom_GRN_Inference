@@ -9,7 +9,7 @@ import itertools
 # from rule_inference import *
 import logging
 import os
-from alive_progress import alive_bar
+from tqdm import tqdm
 import sys
 import logging
 from config.settings import *
@@ -544,27 +544,23 @@ class Pathways:
             except Exception as e:
                 logging.debug(f"could not read code: {code} ({e})")
 
-        with alive_bar(len(pathway_list)) as bar:
-            for pathway in pathway_list:
-                # pathway may look like 'path:mmu04110' or 'mmu04110' or 'ko04110' — normalize to numeric id
-                raw = pathway.replace("path:", "")
-                num = re.sub(r"[a-zA-Z]+", "", raw)   # retain digits only
-                if not num:
-                    logging.debug(f"Skipping malformed pathway id: {pathway}")
-                    bar()
-                    continue
+        for pathway in tqdm(pathway_list):
+            # pathway may look like 'path:mmu04110' or 'mmu04110' or 'ko04110' — normalize to numeric id
+            raw = pathway.replace("path:", "")
+            num = re.sub(r"[a-zA-Z]+", "", raw)   # retain digits only
+            if not num:
+                logging.debug(f"Skipping malformed pathway id: {pathway}")
+                continue
 
-                ko_code  = f"ko{num}"
-                org_code = f"{organism}{num}"
+            ko_code  = f"ko{num}"
+            org_code = f"{organism}{num}"
 
-                ko_path  = os.path.join(base_dir, f"{ko_code}.xml")
-                org_path = os.path.join(base_dir, f"{org_code}.xml")
+            ko_path  = os.path.join(base_dir, f"{ko_code}.xml")
+            org_path = os.path.join(base_dir, f"{org_code}.xml")
 
-                logging.debug(f'\t\t\tFetching {ko_code} and {org_code}')
-                _fetch_kgml(ko_code, ko_path)
-                _fetch_kgml(org_code, org_path)
-
-                bar()
+            logging.debug(f'\t\t\tFetching {ko_code} and {org_code}')
+            _fetch_kgml(ko_code, ko_path)
+            _fetch_kgml(org_code, org_path)
 
     def parse_kegg_pathway(self, graph, minimumOverlap, pathway_code, pathway_num, num_pathways):
         """
@@ -614,7 +610,7 @@ class Pathways:
         pathway_nodes = set(graph.nodes())
         overlap = len(pathway_nodes.intersection(self.gene_list))
 
-        if overlap > minimumOverlap and len(graph.edges()) > 0:
+        if overlap >= minimumOverlap and len(graph.edges()) > 0:
             logging.info(f'\t\t\tPathway ({pathway_num}/{num_pathways}): {pathway_code} '
                         f'Overlap: {overlap} Edges: {len(graph.edges())}')
 
@@ -710,13 +706,11 @@ class Pathways:
             num_pathways = len(xml_file_path)
             logging.info(f'\t\tNo KEGG pathways specified, searching all overlapping pathways')
             logging.info(f'\t\tFinding pathways with at least {minimumOverlap} genes that overlap with the dataset')
-            with alive_bar(num_pathways) as bar:
-                for pathway_num, xml_file in enumerate(xml_file_path):
-                    
-                    pathway_name = xml_file.split('.')[0]
-                    if f"{pathway_name}.graphml" not in os.listdir(self.output_path):
-                        parse_xml_files(xml_file, pathway_name)   # pass both args
-                    bar()
+            for pathway_num, xml_file in tqdm(enumerate(xml_file_path)):
+                
+                pathway_name = xml_file.split('.')[0]
+                if f"{pathway_name}.graphml" not in os.listdir(self.output_path):
+                    parse_xml_files(xml_file, pathway_name)   # pass both args
 
         # If there are pathways specified by the user, load those in
         else:
@@ -725,16 +719,14 @@ class Pathways:
             minimumOverlap = 1  # Minimum number of genes that need to be in both the dataset and pathway for the pathway to be considered
             logging.info(f'\t\tFinding pathways with at least {minimumOverlap} genes that overlap with the dataset')
 
-            with alive_bar(num_pathways) as bar:
-                for pathway_num, pathway in enumerate(pathway_list):
-                    for xml_pathway_name in xml_file_path:
-                        if organism + pathway + '.xml' == xml_pathway_name:
-                            parse_xml_files(xml_pathway_name, pathway)
+            for pathway_num, pathway in tqdm(enumerate(pathway_list)):
+                for xml_pathway_name in xml_file_path:
+                    if organism + pathway + '.xml' == xml_pathway_name:
+                        parse_xml_files(xml_pathway_name, pathway)
 
-                        elif 'ko' + pathway + '.xml'== xml_pathway_name:
-                            parse_xml_files(xml_pathway_name, pathway)
+                    elif 'ko' + pathway + '.xml'== xml_pathway_name:
+                        parse_xml_files(xml_pathway_name, pathway)
                         
-                    bar()
 
         if len(self.pathway_dict.keys()) == 0:
             raise Exception(f'WARNING: No pathways passed the minimum overlap of {minimumOverlap}')
@@ -847,40 +839,100 @@ class Pathways:
                         f"and {G_global.number_of_edges()} edges → {out_path}")
 
         return G_global
-        
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    
-    base_dir = ROOT_DIR
-    kegg_dir = DATA_DIR / "kegg_pathways"
-    data_dir = SAMPLE_PROCESSED_DATA_DIR
-    
-    os.makedirs(kegg_dir, exist_ok=True)
-    
-    # 0. Instantiate
-    logging.info("Creating Pathways object")
+
+def build_kegg_pkn(
+    dataset_name: str,
+    output_path,                    # same base dir you already use for KGML cache (e.g., DATA_DIR / "kegg_pathways")
+    data_file: str,                 # not used for the PKN itself, but Pathways expects it
+    gene_name_file,                 # same here (Pathways init), harmless defaults if you have them
+    organism: str = "mmu",          # KEGG org code (e.g., 'mmu', 'hsa'); 'mm10' gets normalized in your code if you added that
+    kegg_pathway_list: list = None, # None/[] -> all pathways
+    minimumOverlap: int = 0,        # keep any parsed pathway with ≥ this many overlapping genes
+    normalize_case: str = "upper",  # "upper" | "lower" | None
+    out_csv: str | None = None,
+    out_graphml: str | None = None, # writes the merged network
+    write_per_pathway_graphml: bool = False
+) -> pd.DataFrame:
+    """
+    Build the FULL KEGG PKN by parsing all KGML pathways into a global directed graph,
+    then flattening to an edge list with sign and provenance.
+
+    Output columns:
+      source_id, target_id, kegg_signal (-1/0/+1), kegg_n_pathways, kegg_pathways
+    """
+    # 1) Build (or reuse cached) KEGG global network
     pw = Pathways(
-        dataset_name      = DATASET_NAME,
-        cv_threshold      = None,
-        output_path       = kegg_dir,
-        data_file         = "expression_matrix.csv",
-        gene_name_file    = COMMON_DATA / "total_genes.csv",
-        write_graphml     = True,         # per‑pathway files optional
-        organism          = "mmu"
-    )
-
-    # 1. Discover *all* organism pathways
-    logging.info("Finding all KEGG pathways")
-    pathway_dict = pw.find_kegg_pathways(
-        kegg_pathway_list = [],            # empty means grab every pathway XML you have/can fetch
-        write_graphml     = True,         # skip per‑pathway output if you like
-        minimumOverlap    = 1              # keep anything with ≥1 gene from your dataset
-    )
-
-    # 2. Merge into one global network
-    logging.info("Building global network")
-    global_net = pw.build_global_network(
-        pathway_dict,
+        dataset_name=dataset_name,
+        cv_threshold=None,
+        output_path=output_path,
+        data_file=data_file,
+        gene_name_file=gene_name_file,
         write_graphml=True,
-        filename="all_kegg_pathways.graphml"
+        organism=organism
     )
+    if kegg_pathway_list is None:
+        kegg_pathway_list = []
+
+    logging.info("Discovering KEGG pathways…")
+    pdict = pw.find_kegg_pathways(
+        kegg_pathway_list=kegg_pathway_list,
+        write_graphml=write_per_pathway_graphml,
+        minimumOverlap=minimumOverlap
+    )
+
+    logging.info("Composing global KEGG network…")
+    G = pw.build_global_network(pdict, write_graphml=bool(out_graphml), filename="all_kegg_pathways.graphml")
+
+    # 2) Flatten graph to PKN
+    rows = []
+    sign_map = {"a": 1, "i": -1}
+
+    for u, v, d in G.edges(data=True):
+        signal = d.get("signal")  # 'a' (activation) / 'i' (inhibition) / None
+        sign = sign_map.get(signal, 0)
+
+        paths = d.get("pathways", "")
+        if isinstance(paths, set):
+            paths = ",".join(sorted(paths))
+        n_paths = 0 if not paths else len([p for p in paths.split(",") if p])
+
+        rows.append({
+            "source_id": u,
+            "target_id": v,
+            "kegg_signal": sign,
+            "kegg_n_pathways": n_paths,
+            "kegg_pathways": paths
+        })
+
+    pkn = pd.DataFrame(rows).drop_duplicates()
+
+    def _canon(s: pd.Series) -> pd.Series:
+        s = s.astype(str)
+        if normalize_case == "upper":
+            return s.str.upper()
+        if normalize_case == "lower":
+            return s.str.lower()
+        return s
+
+    if not pkn.empty:
+        pkn["source_id"] = _canon(pkn["source_id"])
+        pkn["target_id"] = _canon(pkn["target_id"])
+
+    # 3) Optional outputs
+    if out_csv:
+        os.makedirs(os.path.dirname(os.path.abspath(out_csv)), exist_ok=True)
+        pkn.to_csv(out_csv, index=False)
+        logging.info(f"Wrote KEGG PKN CSV → {out_csv}")
+
+    if out_graphml:
+        # we already wrote a merged GraphML of the *full* graph in pw.build_global_network if requested;
+        # but if you want a thin edge-attr-only version, we can also write it here:
+        H = nx.from_pandas_edgelist(
+            pkn, source="source_id", target="target_id",
+            edge_attr=["kegg_signal", "kegg_n_pathways", "kegg_pathways"],
+            create_using=nx.DiGraph()
+        )
+        nx.write_graphml(H, out_graphml)
+        logging.info(f"Wrote KEGG PKN GraphML → {out_graphml}")
+
+    return pkn

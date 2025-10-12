@@ -84,6 +84,7 @@ JASPAR_PFM_DIR = DATA_DIR / "databases" / "motif_information" / "JASPAR" / "pfm_
 PROCESSED_DATA = DATA_DIR / "processed"
 TRAINING_DATA_CACHE = DATA_DIR / "training_data_cache"
 RAW_DATA = DATA_DIR / "raw"
+PKN_DIR = DATA_DIR / "prior_knowledge_network_data"
 
 COMMON_DATA = TRAINING_DATA_CACHE / "common"
 
