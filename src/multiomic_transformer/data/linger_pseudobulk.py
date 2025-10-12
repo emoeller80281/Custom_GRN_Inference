@@ -254,6 +254,29 @@ def process_sample(sample_name: str):
 
         adata_RNA, adata_ATAC = filter_and_qc(adata_RNA, adata_ATAC)
 
+        gene_names_file = COMMON_DATA / "total_genes.csv"
+
+        existing_genes = set()
+        if gene_names_file.exists():
+            try:
+                df_existing = pd.read_csv(gene_names_file)
+                if "gene" in df_existing.columns:
+                    existing_genes.update(df_existing["gene"].astype(str).str.strip().tolist())
+                else:
+                    # Fallback to reading raw lines
+                    with gene_names_file.open("r") as f:
+                        existing_genes.update(line.strip() for line in f if line.strip())
+            except Exception:
+                # Fallback to raw lines if CSV read fails
+                with gene_names_file.open("r") as f:
+                    existing_genes.update(line.strip() for line in f if line.strip())
+
+        new_genes = set(map(str, adata_RNA.var_names.astype(str)))
+        updated_genes = sorted(existing_genes.union(new_genes))
+
+        pd.DataFrame({"gene": updated_genes}).to_csv(gene_names_file, index=False)
+        logging.info(f"Saved {len(updated_genes)} unique genes to {gene_names_file}")
+
         adata_RNA.write_h5ad(os.path.join(sample_data_dir, f"{sample_name}_RNA_qc.h5ad"))
         adata_ATAC.write_h5ad(os.path.join(sample_data_dir, f"{sample_name}_ATAC_qc.h5ad"))
     
@@ -289,7 +312,6 @@ def process_sample(sample_name: str):
     RE_pseudobulk.to_csv(os.path.join(sample_data_dir, "RE_pseudobulk.tsv"), sep="\t")
     pd.DataFrame(adata_ATAC.var['gene_ids']).to_csv(os.path.join(sample_data_dir, "Peaks.txt"),
                                                     header=None, index=None)
-
 
     logging.info(f"[{sample_name}] Finished processing")
     return sample_name
