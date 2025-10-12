@@ -143,8 +143,8 @@ class Pathways:
 
                 # Choose which dictionary to use based on whether the entries are hsa or kegg elements
                 # Entries with hsa correspond to genes, entries with ko correspond to orthologs
-                if entry_split[0] == "hsa" or entry_split[0] == "ko":
-                    if entry_split[0] == "hsa":
+                if entry_split[0] == self.organism or entry_split[0] == "ko":
+                    if entry_split[0] == self.organism:
                         useDict = hsaDict
                     elif entry_split[0] == "ko":
                         useDict = KEGGdict
@@ -182,7 +182,7 @@ class Pathways:
             # If there is only one name
             else:
                 # If the name is hsa
-                if entry_split[0] == "hsa":
+                if entry_split[0] == self.organism:
                     entry_name = entry_split[1] # Get the entry number
                     entry_type = entry["type"] # Get the entry type
                     entry_name = ( # Get the gene name from the entry number if its in the hsa gene name dict
@@ -327,8 +327,8 @@ class Pathways:
 
                             # Choose which dictionary to use based on whether the entries are hsa or kegg elements
                             # Entries with hsa correspond to genes, entries with ko correspond to orthologs
-                            if entry_split[0] == "hsa" or entry_split[0] == "ko":
-                                if entry_split[0] == "hsa":
+                            if entry_split[0] == self.organism or entry_split[0] == "ko":
+                                if entry_split[0] == self.organism:
                                     useDict = hsaDict
                                 elif entry_split[0] == "ko":
                                     useDict = KEGGdict
@@ -366,7 +366,7 @@ class Pathways:
                         # If there is only one name
                         else:
                             # If the name is hsa
-                            if entry_split[0] == "hsa":
+                            if entry_split[0] == self.organism:
                                 entry_name = entry_split[1] # Get the entry number
                                 entry_type = entry["type"] # Get the entry type
                                 entry_name = ( # Get the gene name from the entry number if its in the hsa gene name dict
@@ -527,49 +527,45 @@ class Pathways:
                 raise RuntimeError(f"Failed to fetch KEGG pathway list for {organism}: {e}")
         
         logging.info(f'\t\tDownloading pathway files, this may take a while...')
+        base_dir = f'{self.file_paths["pathway_xml_files"]}/{organism}'
+        os.makedirs(base_dir, exist_ok=True)
+
+        def _fetch_kgml(code: str, out_path: str) -> None:
+            """Fetch KEGG KGML for `code` (e.g., 'ko00010', 'mmu00010') to `out_path` if missing."""
+            if os.path.exists(out_path):
+                return
+            try:
+                resp = requests.get(f"http://rest.kegg.jp/get/{code}/kgml", stream=True, timeout=30)
+                resp.raise_for_status()
+                with open(out_path, "w") as f:
+                    for chunk in resp.iter_lines():
+                        if chunk:
+                            f.write(chunk.decode("utf-8"))
+            except Exception as e:
+                logging.debug(f"could not read code: {code} ({e})")
+
         with alive_bar(len(pathway_list)) as bar:
             for pathway in pathway_list:
-                pathway = pathway.replace("path:", "")
-                code = str(pathway)
-                code = re.sub(
-                    "[a-zA-Z]+", "", code
-                )  # eliminate org letters - retain only numbers from KEGG pathway codes
-                origCode = code
+                # pathway may look like 'path:mmu04110' or 'mmu04110' or 'ko04110' — normalize to numeric id
+                raw = pathway.replace("path:", "")
+                num = re.sub(r"[a-zA-Z]+", "", raw)   # retain digits only
+                if not num:
+                    logging.debug(f"Skipping malformed pathway id: {pathway}")
+                    bar()
+                    continue
 
-                code = str("ko" + code)  # add ko
-                os.makedirs(f'{self.file_paths["pathway_xml_files"]}/{organism}/', exist_ok=True)
+                ko_code  = f"ko{num}"
+                org_code = f"{organism}{num}"
 
-                # If the pathway is not in the list of xml files, find it and create it
-                if f'{code}.xml' not in os.listdir(f'{self.file_paths["pathway_xml_files"]}/{organism}/'):
-                    logging.debug(f'\t\t\tFinding xml file for pathway ko{origCode} and {organism}{origCode}')
+                ko_path  = os.path.join(base_dir, f"{ko_code}.xml")
+                org_path = os.path.join(base_dir, f"{org_code}.xml")
 
-                    # Write out the ko pathway xml files
-                    try:
-                        with open(f'{self.file_paths["pathway_xml_files"]}/{organism}/{code}.xml', 'w') as pathway_file:
-                            url = requests.get(
-                                "http://rest.kegg.jp/get/" + code + "/kgml", stream=True
-                            )
-                            [pathway_file.write(line.decode("utf-8")) for line in url.iter_lines()]
+                logging.debug(f'\t\t\tFetching {ko_code} and {org_code}')
+                _fetch_kgml(ko_code, ko_path)
+                _fetch_kgml(org_code, org_path)
 
-                    except:
-                        logging.debug("could not read code: " + code)
-                        continue
-                    
-                    # Write out the organism pathway xml files
-                    code = str(organism + origCode)  # set up with org letters
-
-                    try:
-                        with open(f'{self.file_paths["pathway_xml_files"]}/{organism}/{code}.xml', 'w') as pathway_file:
-                            url = requests.get(
-                                "http://rest.kegg.jp/get/" + code + "/kgml", stream=True
-                            )
-                            [pathway_file.write(line.decode("utf-8")) for line in url.iter_lines()]
-
-                    except:
-                        logging.debug("could not read code: " + code)
-                        continue
                 bar()
-    
+
     def parse_kegg_pathway(self, graph, minimumOverlap, pathway_code, pathway_num, num_pathways):
         """
         Format and optionally write the KEGG pathway graph if it has sufficient overlap with gene list.
@@ -623,8 +619,8 @@ class Pathways:
                         f'Overlap: {overlap} Edges: {len(graph.edges())}')
 
             # Optional metadata
-            if pathway_code.startswith("hsa"):
-                graph.graph["source"] = "hsa"
+            if pathway_code.startswith(self.organism):
+                graph.graph["source"] = self.organism
             elif pathway_code.startswith("ko"):
                 graph.graph["source"] = "ko"
 
@@ -637,13 +633,15 @@ class Pathways:
             logging.debug(f'\t\t\tPathway ({pathway_num}/{num_pathways}): {pathway_code} '
                         f'not enough overlapping genes (min = {minimumOverlap}, found {overlap})')
 
-    def find_kegg_pathways(self, kegg_pathway_list: list, write_graphml: bool, organism: str, minimumOverlap: int):
+    def find_kegg_pathways(self, kegg_pathway_list: list, write_graphml: bool, minimumOverlap: int):
         """
         write_graphml = whether or not to write out a graphml (usually true)
         organism = organism code from kegg. Eg human = 'hsa', mouse = 'mus'
 
         Finds the KEGG pathways from the pathway dictionaries
         """
+        organism = self.organism
+
         logging.info("\t\tFinding KEGG pathways...")
         kegg_dict = self.parse_kegg_dict()  # parse the dictionary of ko codes
         logging.info("\t\t\tLoaded KEGG code dictionary")
@@ -739,9 +737,7 @@ class Pathways:
                     bar()
 
         if len(self.pathway_dict.keys()) == 0:
-            msg = f'WARNING: No pathways passed the minimum overlap of {minimumOverlap}'
-            assert Exception(msg)
-
+            raise Exception(f'WARNING: No pathways passed the minimum overlap of {minimumOverlap}')
         
         return self.pathway_dict
 
@@ -794,25 +790,15 @@ class Pathways:
                 filtered_overlap = len(set(G.nodes()).intersection(pathway_genes))
 
                 if write_graphml and filtered_overlap > minOverlap:
-                    # Start the output file path with the otuput path
-                    output_file_name = self.output_path
-                    
-                    # Add the organism to the pathway file if its not already there
-                    if organism not in pathway:
-                        output_file_name = output_file_name + organism
-                    
-                    # Add the pathway name to the output name
-                    output_file_name = output_file_name + pathway
-                    
-                    # Only adds if not using _processed.graphml
-                    if "_processed.graphml" not in output_file_name:
-                        output_file_name = output_file_name + "_processed.graphml"
+                    base = self.output_path
+                    fname = pathway
+                    if not fname.startswith(organism):
+                        fname = f"{organism}{fname}"
+                    if not fname.endswith("_processed.graphml"):
+                        fname = f"{fname}_processed.graphml"
+                    out_path = os.path.join(base, fname)
+                    nx.write_graphml(G, out_path, infer_numeric_types=True)
 
-                    nx.write_graphml(
-                        G, output_file_name, infer_numeric_types=True
-                    )
-                
-                
             else:
                 msg = f'Overlap {overlap} is below the minimum {minOverlap}'
                 raise Exception(msg)
@@ -880,7 +866,7 @@ if __name__ == "__main__":
         data_file         = "expression_matrix.csv",
         gene_name_file    = COMMON_DATA / "total_genes.csv",
         write_graphml     = True,         # per‑pathway files optional
-        organism          = "mm10"          # human
+        organism          = "mmu"
     )
 
     # 1. Discover *all* organism pathways
@@ -888,7 +874,6 @@ if __name__ == "__main__":
     pathway_dict = pw.find_kegg_pathways(
         kegg_pathway_list = [],            # empty means grab every pathway XML you have/can fetch
         write_graphml     = True,         # skip per‑pathway output if you like
-        organism          = "mm10",
         minimumOverlap    = 1              # keep anything with ≥1 gene from your dataset
     )
 
@@ -897,5 +882,5 @@ if __name__ == "__main__":
     global_net = pw.build_global_network(
         pathway_dict,
         write_graphml=True,
-        filename=os.path.join(kegg_dir, "all_kegg_pathways.graphml")
+        filename="all_kegg_pathways.graphml"
     )
