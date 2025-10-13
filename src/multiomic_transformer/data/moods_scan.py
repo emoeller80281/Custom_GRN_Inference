@@ -144,22 +144,84 @@ def scan_pwms(pfms, names, seqs, pval_threshold=1e-4, bg=None, pseudocount=0.8, 
     logging.info("Finished scanning motifs")
     return results
 
-def run_moods_scan(peaks_bed, fasta_path, motif_paths, out_tsv, n_cpus, pval_threshold=1e-4, bg="auto"):
+import pandas as pd
+import logging
+from pyfaidx import Fasta
+from tqdm import tqdm
+
+def run_moods_scan_batched(
+    peaks_bed,
+    fasta_path,
+    motif_paths,
+    out_tsv,
+    n_cpus,
+    pval_threshold=1e-4,
+    bg="auto",
+    batch_size=5000,
+):
+    """
+    Memory-efficient MOODS scanning by chunking peaks.
+
+    Parameters
+    ----------
+    peaks_bed : pd.DataFrame or BedTool
+        Peaks with columns ["chrom","start","end","peak_id"]
+    fasta_path : str
+        Path to genome FASTA
+    motif_paths : list[str]
+        List of PFM files
+    out_tsv : str
+        Output TSV path (appended per batch)
+    n_cpus : int
+        Number of threads for scanning
+    pval_threshold : float
+        MOODS P-value threshold
+    bg : "auto" or list[float]
+        Background probabilities
+    batch_size : int
+        Number of peaks to process per batch
+    """
     fasta = Fasta(fasta_path, as_raw=True, sequence_always_upper=True)
     if bg == "auto":
         pi = build_first_order_bg(fasta, peaks_bed)
     else:
-        pi = bg  # list of 4
+        pi = bg
+
     pfms, names = load_pfms(motif_paths)
+    logging.info(f"Loaded {len(pfms)} PFMs from {len(motif_paths)} motif files")
+
+    # Prepare output header
+    with open(out_tsv, "w") as out:
+        out.write("peak_id\tTF\tpos\tlogodds\tstrand\n")
 
     peak_ids, seqs = extract_peak_seqs(fasta, peaks_bed)
-    res = scan_pwms(pfms, names, seqs, pval_threshold=pval_threshold, bg=pi, pseudocount=0.8, n_jobs=n_cpus)
 
-    rows = []
-    for mi, tf in enumerate(names):
-        for si, pid in enumerate(peak_ids):
-            pos, score, strand = res[tf][si]
-            rows.append((pid, tf, pos, score, strand))
-    df = pd.DataFrame(rows, columns=["peak_id","TF","pos","logodds","strand"])
-    df.to_csv(out_tsv, sep="\t", index=False)
-    logging.info(f"Wrote results: {out_tsv} ({df.shape[0]:,} rows)")
+    # Chunk peaks
+    n_total = len(peak_ids)
+    for i in tqdm(range(0, n_total, batch_size), desc="Scanning peaks in batches"):
+        batch_ids = peak_ids[i:i+batch_size]
+        batch_seqs = seqs[i:i+batch_size]
+
+        res = scan_pwms(
+            pfms,
+            names,
+            batch_seqs,
+            pval_threshold=pval_threshold,
+            bg=pi,
+            pseudocount=0.8,
+            n_jobs=n_cpus,
+        )
+
+        # Flatten batch results directly to disk
+        rows = []
+        for mi, tf in enumerate(names):
+            for si, pid in enumerate(batch_ids):
+                pos, score, strand = res[tf][si]
+                rows.append((pid, tf, pos, score, strand))
+
+        df = pd.DataFrame(rows, columns=["peak_id","TF","pos","logodds","strand"])
+        df.to_csv(out_tsv, sep="\t", header=False, index=False, mode="a")
+
+        del res, rows, df  # free memory explicitly
+
+    logging.info(f"Wrote all results to {out_tsv}")

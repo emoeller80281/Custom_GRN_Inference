@@ -1,5 +1,7 @@
 import os
+import re
 import json
+import glob
 import pandas as pd
 import scanpy as sc
 import logging
@@ -12,7 +14,7 @@ from anndata import AnnData
 from tqdm import tqdm
 import pybedtools
 
-from multiomic_transformer.data.moods_scan import run_moods_scan
+from multiomic_transformer.data.moods_scan import run_moods_scan_batched
 from multiomic_transformer.utils.standardize import standardize_name
 from multiomic_transformer.utils.files import atomic_json_dump
 from multiomic_transformer.utils.peaks import find_genes_near_peaks
@@ -83,35 +85,38 @@ def create_tf_tg_combination_files(genes):
     tfs = overlap_tf["Gene Symbol"].to_list()
     tgs = [gene for gene in genes if gene not in tfs]
 
-    print(f"Number of TFs: {len(tfs)}")
-    print(f"Number of TGs: {len(tgs)}")
+    print(f"Number of TFs: {len(tfs):,}")
+    print(f"Number of TGs: {len(tgs):,}")
 
     mux = pd.MultiIndex.from_product([tfs, tgs], names=["TF", "TG"])
     tf_tg_df = mux.to_frame(index=False)
     
     print(f"TF-TG combinations: {len(tf_tg_df):,}")
 
-    print(tf_tg_df.head())
-
     tf_tg_outdir = DATA_DIR / "tf_tg_combos"
     os.makedirs(tf_tg_outdir, exist_ok=True)
-
-    print("Writing TF list to 'tg_list.csv'")
-    with open(tf_tg_outdir / "tg_list.csv", 'w') as tg_list_file:
-        tg_list_file.write("TG\n")
-        for i in tgs:
-            tg_list_file.write(f"{i}\n")
     
-    print("Writing TF list to 'tf_list.csv'")
-    with open(tf_tg_outdir / "tf_list.csv", "w") as tf_list_file:
-        tf_list_file.write("TF\n")
-        for i in tfs:
-            tf_list_file.write(f"{i}\n")
+    if not os.path.isfile(tf_tg_outdir / "tg_list.csv"):
+        print("Writing TF list to 'tg_list.csv'")
+        with open(tf_tg_outdir / "tg_list.csv", 'w') as tg_list_file:
+            tg_list_file.write("TG\n")
+            for i in tgs:
+                tg_list_file.write(f"{i}\n")
     
-    print("Writing combinations to 'tf_tg_combos.csv'")
-    tf_tg_df.to_csv(tf_tg_outdir / "tf_tg_combos.csv", header=True, index=False)
+    if not os.path.isfile(tf_tg_outdir / "tf_list.csv"):
+        print("Writing TF list to 'tf_list.csv'")
+        with open(tf_tg_outdir / "tf_list.csv", "w") as tf_list_file:
+            tf_list_file.write("TF\n")
+            for i in tfs:
+                tf_list_file.write(f"{i}\n")
+    
+    if not os.path.isfile(tf_tg_outdir / "tf_tg_combos.csv"):
+        print("Writing combinations to 'tf_tg_combos.csv'")
+        tf_tg_df.to_csv(tf_tg_outdir / "tf_tg_combos.csv", header=True, index=False)
         
     print("Done!")
+
+    return tfs, tgs, tf_tg_df
 
 def make_chrom_gene_tss_df(gene_tss_file, genome_dir):
     gene_tss_bed = pybedtools.BedTool(gene_tss_file)
@@ -154,6 +159,20 @@ def build_global_tg_vocab(gene_tss_file, vocab_file):
         logging.info(f"Updated TG vocab: {len(vocab)} genes")
 
     return vocab
+
+def build_peak_locs_from_index(peak_index) -> pd.DataFrame:
+    rows = []
+    for pid in map(str, peak_index):
+        m = re.match(r"^(chr)?(\w+)[_:](\d+)[-_:](\d+)$", pid)
+        if not m:
+            raise ValueError(f"Cannot parse peak id: {pid!r}; expected formats like 'chr1:100-200'")
+        _, chrom_core, start, end = m.groups()
+        chrom = f"chr{chrom_core}" if not chrom_core.startswith("chr") else chrom_core
+        start, end = int(start), int(end)
+        if start > end:
+            start, end = end, start
+        rows.append((chrom, start, end, pid))
+    return pd.DataFrame(rows, columns=["chrom", "start", "end", "peak_id"])
 
 def calculate_peak_to_tg_distance_score(
     peak_bed_file,
@@ -214,7 +233,7 @@ if __name__ == "__main__":
     print(genes[:5])
     print(peaks[:5])
 
-    # create_tf_tg_combination_files(genes)
+    tfs, tgs, tf_tg_df = create_tf_tg_combination_files(genes)
 
     adata_rna = AnnData(rna_df.T)
     adata_atac = AnnData(atac_df.T)
@@ -229,9 +248,57 @@ if __name__ == "__main__":
         gene_tss_file=GENE_TSS_FILE,
         genome_dir=GENOME_DIR
     )
-    print(gene_tss_df.head())
 
-    
+    processed_rna_df = pd.DataFrame(
+        adata_rna_filtered.X,
+        index=adata_rna_filtered.obs_names,
+        columns=adata_rna_filtered.var_names,
+    ).T
+    processed_atac_df = pd.DataFrame(
+        adata_atac_filtered.X,
+        index=adata_atac_filtered.obs_names,
+        columns=adata_atac_filtered.var_names,
+    ).T
+
+    print("Processed RNA df")
+    print(processed_rna_df.head())
+
+    print("\nProcessed ATAC df")
+    print(processed_atac_df.head())
+
+    # Build peak locations from original ATAC peak names
+    peak_locs_df = build_peak_locs_from_index(atac_df.index)
+
+    peak_bed_file = DATA_DIR / "processed" / "peaks.bed"
+    peak_to_gene_dist_df = calculate_peak_to_tg_distance_score(
+        peak_bed_file=peak_bed_file,
+        tss_bed_file= DATA_DIR / "genome_data" / "genome_annotation" / "mm10" / "gene_tss.bed",
+        peak_gene_dist_file= DATA_DIR / "processed" / "peak_to_gene_dist.parquet",
+        mesc_atac_peak_loc_df=peak_locs_df,
+        gene_tss_df= gene_tss_df,
+    )
+    print("Peak to Gene Distance DataFrame")
+    print(peak_to_gene_dist_df.head())
+
+    print("\nTF-TG Combinations")
+    print(tf_tg_df.head())
+
+    print("Running MOODS TF-peak binding calculation")
+    jaspar_pfm_paths = DATA_DIR / "motif_information" / "mm10" / "JASPAR" / "pfm_files"
+    motif_paths = list(jaspar_pfm_paths.glob("*.pfm"))
+    moods_sites_file = DATA_DIR / "processed" / "moods_sites.tsv"
+    if not os.path.isfile(moods_sites_file):
+        run_moods_scan_batched(
+            peaks_bed=peak_bed_file, 
+            fasta_path=os.path.join(GENOME_DIR, f"mm10.fa.gz"), 
+            motif_paths=motif_paths, 
+            out_tsv=moods_sites_file, 
+            n_cpus=4,
+            pval_threshold=MOODS_PVAL_THRESHOLD, 
+            bg="auto"
+        )
+
+
 
 
     

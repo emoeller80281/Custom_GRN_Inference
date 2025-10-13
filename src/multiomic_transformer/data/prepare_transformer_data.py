@@ -600,12 +600,12 @@ def main(chrom_id: str):
     )
     
     
-    jaspar_pfm_paths = [os.path.join(JASPAR_PFM_DIR, f) for f in os.listdir(JASPAR_PFM_DIR) if f.endswith(".pfm")]
     
+    jaspar_pfm_paths = [os.path.join(JASPAR_PFM_DIR, f) for f in os.listdir(JASPAR_PFM_DIR) if f.endswith(".pfm")]
     if FORCE_RECALCULATE == True or not os.path.isfile(moods_sites_file):
         run_moods_scan(
             peaks_bed=peak_bed_file, 
-            fasta_path=os.path.join(GENOME_DIR, f"{chrom_id}.fa"), 
+            fasta_path=os.path.join(GENOME_DIR, "mm10.fa.gz"), 
             motif_paths=jaspar_pfm_paths, 
             out_tsv=moods_sites_file, 
             n_cpus=NUM_CPUS,
