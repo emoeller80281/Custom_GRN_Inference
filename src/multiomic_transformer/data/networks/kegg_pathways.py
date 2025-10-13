@@ -22,7 +22,6 @@ class Pathways:
     """
     def __init__(self, dataset_name, cv_threshold, output_path, data_file, gene_name_file, write_graphml, organism):
         self.cv_threshold = cv_threshold # The cutoff value threshold for binarizing 
-        self.data_file = data_file
         self.gene_list = self._find_genes(gene_name_file)
         self.pathway_graphs = {}
         self.dataset_name = dataset_name
@@ -42,35 +41,6 @@ class Pathways:
         while b:
             yield b
             b = reader(1024 * 1024)
-    
-    def _find_genes(self, gene_name_file):
-        """
-        Finds the names of the genes in the datafile
-        """
-        
-        gene_names_df = pd.read_csv(gene_name_file, header=None, index_col=0)
-        gene_list = gene_names_df.index.to_list()
-        
-        return gene_list
-    
-    def filter_data(self):
-        """
-        Filters out genes with low variability. The threshold is low by default (0.001) to allow for most genes
-        to be kept in. Increasing this value will lead to only including highly variable genes
-        """
-        logging.info(f'\tFiltering data based on cv threshold of {self.cv_threshold}')
-        self.cv_genes = []
-        with open(self.data_file, "r") as file:
-            next(file)
-            for line in file:
-                column = line.split(',')
-                gene_name = column[0]
-                row_data = [float(cell_value) for cell_value in column[1:]]
-                
-                # Calculate the cutoff value 
-                if np.std(row_data) / np.mean(row_data) >= self.cv_threshold:
-                    if gene_name in self.gene_list:
-                        self.cv_genes.append(gene_name)
 
     def parse_kegg_dict(self):
         """
@@ -516,15 +486,13 @@ class Pathways:
     
         k = silent_kegg_initialization()  # read KEGG from bioservices
         k.organism = organism
-        if not pathway_list:
-            logging.info(f"No pathway list provided — downloading all KEGG pathways for {organism}...")
-            try:
-                response = requests.get(f"http://rest.kegg.jp/list/pathway/{organism}")
-                response.raise_for_status()
-                # KEGG returns lines like: "path:hsa00010\tGlycolysis / Gluconeogenesis"
-                pathway_list = [line.split("\t")[0].replace("path:", "") for line in response.text.strip().split("\n")]
-            except Exception as e:
-                raise RuntimeError(f"Failed to fetch KEGG pathway list for {organism}: {e}")
+        try:
+            response = requests.get(f"http://rest.kegg.jp/list/pathway/{organism}")
+            response.raise_for_status()
+            # KEGG returns lines like: "path:hsa00010\tGlycolysis / Gluconeogenesis"
+            pathway_list = [line.split("\t")[0].replace("path:", "") for line in response.text.strip().split("\n")]
+        except Exception as e:
+            raise RuntimeError(f"Failed to fetch KEGG pathway list for {organism}: {e}")
         
         logging.info(f'\t\tDownloading pathway files, this may take a while...')
         base_dir = f'{self.file_paths["pathway_xml_files"]}/{organism}'
@@ -562,16 +530,14 @@ class Pathways:
             _fetch_kgml(ko_code, ko_path)
             _fetch_kgml(org_code, org_path)
 
-    def parse_kegg_pathway(self, graph, minimumOverlap, pathway_code, pathway_num, num_pathways):
+    def parse_kegg_pathway(self, graph, pathway_code, pathway_num, num_pathways):
         """
-        Format and optionally write the KEGG pathway graph if it has sufficient overlap with gene list.
+        Format and optionally write the KEGG pathway graph
 
         Parameters
         ----------
         graph : networkx.DiGraph
             The parsed pathway graph.
-        minimumOverlap : int
-            Minimum number of overlapping genes required to keep the pathway.
         pathway_code : str
             Full KEGG code like 'ko00010' or 'hsa00010'.
         pathway_num : int
@@ -606,30 +572,21 @@ class Pathways:
             if u == v:
                 graph.remove_edge(u, v)
 
-        # Filter based on gene overlap
-        pathway_nodes = set(graph.nodes())
-        overlap = len(pathway_nodes.intersection(self.gene_list))
+        logging.info(f'\t\t\tPathway ({pathway_num}/{num_pathways}): {pathway_code} Edges: {len(graph.edges())}')
 
-        if overlap >= minimumOverlap and len(graph.edges()) > 0:
-            logging.info(f'\t\t\tPathway ({pathway_num}/{num_pathways}): {pathway_code} '
-                        f'Overlap: {overlap} Edges: {len(graph.edges())}')
+        # Optional metadata
+        if pathway_code.startswith(self.organism):
+            graph.graph["source"] = self.organism
+        elif pathway_code.startswith("ko"):
+            graph.graph["source"] = "ko"
 
-            # Optional metadata
-            if pathway_code.startswith(self.organism):
-                graph.graph["source"] = self.organism
-            elif pathway_code.startswith("ko"):
-                graph.graph["source"] = "ko"
+        # Save graph
+        out_file = os.path.join(self.output_path, f"{pathway_code}.graphml")
+        nx.write_graphml(graph, out_file)
+        self.pathway_dict[pathway_code] = graph
 
-            # Save graph
-            out_file = os.path.join(self.output_path, f"{pathway_code}.graphml")
-            nx.write_graphml(graph, out_file)
-            self.pathway_dict[pathway_code] = graph
 
-        else:
-            logging.debug(f'\t\t\tPathway ({pathway_num}/{num_pathways}): {pathway_code} '
-                        f'not enough overlapping genes (min = {minimumOverlap}, found {overlap})')
-
-    def find_kegg_pathways(self, kegg_pathway_list: list, write_graphml: bool, minimumOverlap: int):
+    def find_kegg_pathways(self, kegg_pathway_list: list, write_graphml: bool):
         """
         write_graphml = whether or not to write out a graphml (usually true)
         organism = organism code from kegg. Eg human = 'hsa', mouse = 'mus'
@@ -696,44 +653,24 @@ class Pathways:
                 # Read the kegg xml file
                 graph = self.read_kegg(text, nx.DiGraph(), kegg_dict, orgDict)
 
-                # Parse the kegg pathway and determine if there is sufficient overlap for processing with scBONITA
+                # Parse the kegg pathway
                 pathway_code = xml_file.replace(".xml", "")
-                self.parse_kegg_pathway(graph, minimumOverlap, pathway_code, pathway_num, num_pathways)
+                self.parse_kegg_pathway(graph, pathway_code, pathway_num, num_pathways)
 
-        # If there aren't any kegg pathways specified, look for all overlapping pathways
-        if len(kegg_pathway_list) == 0:
-            # Read in the pre-downloaded xml files and read them into a DiGraph object
-            num_pathways = len(xml_file_path)
-            logging.info(f'\t\tNo KEGG pathways specified, searching all overlapping pathways')
-            logging.info(f'\t\tFinding pathways with at least {minimumOverlap} genes that overlap with the dataset')
-            for pathway_num, xml_file in tqdm(enumerate(xml_file_path)):
-                
-                pathway_name = xml_file.split('.')[0]
-                if f"{pathway_name}.graphml" not in os.listdir(self.output_path):
-                    parse_xml_files(xml_file, pathway_name)   # pass both args
+        pathway_list = list(kegg_pathway_list)
+        num_pathways = len(pathway_list)
 
-        # If there are pathways specified by the user, load those in
-        else:
-            pathway_list = list(kegg_pathway_list)
-            num_pathways = len(pathway_list)
-            minimumOverlap = 1  # Minimum number of genes that need to be in both the dataset and pathway for the pathway to be considered
-            logging.info(f'\t\tFinding pathways with at least {minimumOverlap} genes that overlap with the dataset')
+        for pathway_num, pathway in tqdm(enumerate(pathway_list)):
+            for xml_pathway_name in xml_file_path:
+                if organism + pathway + '.xml' == xml_pathway_name:
+                    parse_xml_files(xml_pathway_name, pathway)
 
-            for pathway_num, pathway in tqdm(enumerate(pathway_list)):
-                for xml_pathway_name in xml_file_path:
-                    if organism + pathway + '.xml' == xml_pathway_name:
-                        parse_xml_files(xml_pathway_name, pathway)
+                elif 'ko' + pathway + '.xml'== xml_pathway_name:
+                    parse_xml_files(xml_pathway_name, pathway)
 
-                    elif 'ko' + pathway + '.xml'== xml_pathway_name:
-                        parse_xml_files(xml_pathway_name, pathway)
-                        
-
-        if len(self.pathway_dict.keys()) == 0:
-            raise Exception(f'WARNING: No pathways passed the minimum overlap of {minimumOverlap}')
-        
         return self.pathway_dict
 
-    def add_pathways(self, pathway_list, minOverlap, write_graphml=True, removeSelfEdges=False, organism='hsa'):
+    def add_pathways(self, pathway_list, write_graphml=True, removeSelfEdges=False, organism='hsa'):
         """
         Add a list of pathways in graphml format to the rule_inference object
 
@@ -759,41 +696,35 @@ class Pathways:
             # Compute the number of nodes that overlap with the pathway genes
             overlap = len(nodes.intersection(pathway_genes))
 
-            # Check to see if there are enough genes in the dataset that overlap with the genes in the pathway
-            if overlap >= minOverlap:
+            logging.info(f'\t\tPathway: {pathway} Overlap: {overlap} Edges: {len(G.edges())}')
+            nodes = list(G.nodes())
 
-                logging.info(f'\t\tPathway: {pathway} Overlap: {overlap} Edges: {len(G.edges())}')
-                nodes = list(G.nodes())
-
-                if removeSelfEdges:
-                    G.remove_edges_from(nx.selfloop_edges(G))  # remove self loops
-                # remove genes not in dataset
-                for pg in list(G.nodes()):
-                    if pg not in pathway_genes:
-                        G.remove_node(pg)
+            if removeSelfEdges:
+                G.remove_edges_from(nx.selfloop_edges(G))  # remove self loops
+            # remove genes not in dataset
+            for pg in list(G.nodes()):
+                if pg not in pathway_genes:
+                    G.remove_node(pg)
 
 
-                # graph post-processing
-                # remove singletons/isolates
-                G.remove_nodes_from(list(nx.isolates(G)))
+            # graph post-processing
+            # remove singletons/isolates
+            G.remove_nodes_from(list(nx.isolates(G)))
 
-                self.pathway_graphs[pathway] = G
-                logging.info(f'\t\t\tEdges after processing: {len(G.edges())} Overlap: {len(set(G.nodes()).intersection(pathway_genes))}')
-                filtered_overlap = len(set(G.nodes()).intersection(pathway_genes))
+            self.pathway_graphs[pathway] = G
+            logging.info(f'\t\t\tEdges after processing: {len(G.edges())} Overlap: {len(set(G.nodes()).intersection(pathway_genes))}')
+            filtered_overlap = len(set(G.nodes()).intersection(pathway_genes))
 
-                if write_graphml and filtered_overlap > minOverlap:
-                    base = self.output_path
-                    fname = pathway
-                    if not fname.startswith(organism):
-                        fname = f"{organism}{fname}"
-                    if not fname.endswith("_processed.graphml"):
-                        fname = f"{fname}_processed.graphml"
-                    out_path = os.path.join(base, fname)
-                    nx.write_graphml(G, out_path, infer_numeric_types=True)
+            if write_graphml:
+                base = self.output_path
+                fname = pathway
+                if not fname.startswith(organism):
+                    fname = f"{organism}{fname}"
+                if not fname.endswith("_processed.graphml"):
+                    fname = f"{fname}_processed.graphml"
+                out_path = os.path.join(base, fname)
+                nx.write_graphml(G, out_path, infer_numeric_types=True)
 
-            else:
-                msg = f'Overlap {overlap} is below the minimum {minOverlap}'
-                raise Exception(msg)
 
         # Create the "_processed.graphml" files
 
@@ -843,11 +774,8 @@ class Pathways:
 def build_kegg_pkn(
     dataset_name: str,
     output_path,                    # same base dir you already use for KGML cache (e.g., DATA_DIR / "kegg_pathways")
-    data_file: str,                 # not used for the PKN itself, but Pathways expects it
     gene_name_file,                 # same here (Pathways init), harmless defaults if you have them
     organism: str = "mmu",          # KEGG org code (e.g., 'mmu', 'hsa'); 'mm10' gets normalized in your code if you added that
-    kegg_pathway_list: list = None, # None/[] -> all pathways
-    minimumOverlap: int = 0,        # keep any parsed pathway with ≥ this many overlapping genes
     normalize_case: str = "upper",  # "upper" | "lower" | None
     out_csv: str | None = None,
     out_graphml: str | None = None, # writes the merged network
@@ -865,19 +793,16 @@ def build_kegg_pkn(
         dataset_name=dataset_name,
         cv_threshold=None,
         output_path=output_path,
-        data_file=data_file,
         gene_name_file=gene_name_file,
         write_graphml=True,
         organism=organism
     )
-    if kegg_pathway_list is None:
-        kegg_pathway_list = []
+    kegg_pathway_list = []
 
     logging.info("Discovering KEGG pathways…")
     pdict = pw.find_kegg_pathways(
         kegg_pathway_list=kegg_pathway_list,
-        write_graphml=write_per_pathway_graphml,
-        minimumOverlap=minimumOverlap
+        write_graphml=write_per_pathway_graphml
     )
 
     logging.info("Composing global KEGG network…")

@@ -38,11 +38,8 @@ if __name__ == "__main__":
 
     print("Building KEGG prior knowledge network")
     kegg_pkn = kegg_pathways.build_kegg_pkn(
-        dataset_name="ds",
+        dataset_name=DATASET_NAME,
         output_path=str(KEGG_DIR),
-        data_file="expression_matrix.csv",
-        gene_name_file="total_genes.csv",
         organism="mmu",
-        minimumOverlap=0,
         out_csv=str(KEGG_DIR / "kegg_mouse_pkn.csv")
     )
