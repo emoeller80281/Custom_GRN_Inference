@@ -73,16 +73,35 @@ def build_first_order_bg(fasta, peaks_bed, sample=200000):
     return pi.tolist()
 
 def extract_peak_seqs(fasta, peaks_bed):
-    logging.info(f"Extracting sequences from {peaks_bed}")
-    bt = pybedtools.BedTool(peaks_bed)
-    seqs = []
-    ids  = []
-    for k, iv in enumerate(bt):
-        pid = iv.name if iv.name not in (None, "", ".") else f"{iv.chrom}:{iv.start}-{iv.end}"
-        ids.append(pid)
-        seqs.append(fasta[iv.chrom][iv.start:iv.end].upper())
-    logging.info(f"Extracted {len(seqs)} peak sequences")
-    return ids, seqs
+    peak_ids, seqs = [], []
+    chr_lens = {chrom: len(fasta[chrom]) for chrom in fasta.keys()}
+
+    for iv in peaks_bed.itertuples(index=False):
+        chrom = iv.chrom
+        if chrom not in chr_lens:
+            continue
+
+        start = max(int(iv.start), 0)
+        end = int(iv.end)
+        chr_len = chr_lens[chrom]
+        if start >= chr_len:
+            continue
+        if end > chr_len:
+            end = chr_len
+
+        try:
+            seq = fasta[chrom][start:end].upper()
+        except Exception as e:
+            # Skip any problematic sequences safely
+            print(f"Skipping {iv}: {e}")
+            continue
+
+        peak_ids.append(iv.peak_id)
+        seqs.append(seq)
+
+    print(f"Extracted {len(seqs)} / {len(peaks_bed)} sequences")
+    return peak_ids, seqs
+
 
 def build_score_matrices(pfms, bg, pseudocount=0.001):
     """

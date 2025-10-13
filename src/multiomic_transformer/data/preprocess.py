@@ -287,16 +287,19 @@ if __name__ == "__main__":
     jaspar_pfm_paths = DATA_DIR / "motif_information" / "mm10" / "JASPAR" / "pfm_files"
     motif_paths = list(jaspar_pfm_paths.glob("*.pfm"))
     moods_sites_file = DATA_DIR / "processed" / "moods_sites.tsv"
-    if not os.path.isfile(moods_sites_file):
-        run_moods_scan_batched(
-            peaks_bed=peak_bed_file, 
-            fasta_path=os.path.join(GENOME_DIR, f"mm10.fa.gz"), 
-            motif_paths=motif_paths, 
-            out_tsv=moods_sites_file, 
-            n_cpus=4,
-            pval_threshold=MOODS_PVAL_THRESHOLD, 
-            bg="auto"
-        )
+    
+    peaks_bed_path = Path(peak_bed_file)
+    peaks_df = pybedtools.BedTool(peaks_bed_path)
+    
+    run_moods_scan_batched(
+        peaks_bed=peaks_df, 
+        fasta_path=os.path.join(GENOME_DIR, f"mm10.fa.gz"), 
+        motif_paths=motif_paths, 
+        out_tsv=moods_sites_file, 
+        n_cpus=4,
+        pval_threshold=MOODS_PVAL_THRESHOLD, 
+        bg="auto"
+    )
 
 
 
