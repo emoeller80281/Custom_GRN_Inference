@@ -1,4 +1,5 @@
 import torch
+import torch.nn as nn
 import pandas as pd
 from torch_geometric.data import Data
 from sklearn.preprocessing import LabelEncoder
@@ -102,7 +103,7 @@ model = GRN_GAT_Bidirectional(
 
 # ----- Training loop -----
 criterion = nn.BCEWithLogitsLoss()
-optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-4)
 
 for epoch in range(1, 101):
     model.train()

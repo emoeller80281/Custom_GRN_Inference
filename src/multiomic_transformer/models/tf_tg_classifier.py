@@ -4,7 +4,6 @@ import torch.nn.functional as F
 from torch_geometric.nn import GATConv
 from torch_geometric.utils import dropout_edge
 
-
 class GRN_GAT_Bidirectional(nn.Module):
     """
     Bidirectional Graph Attention Network for GRN inference
@@ -53,7 +52,8 @@ class GRN_GAT_Bidirectional(nn.Module):
 
         # Edge dropout for regularization
         if self.training and self.edge_dropout_p > 0:
-            edge_index, edge_attr = dropout_edge(edge_index, edge_attr, p=self.edge_dropout_p)
+            edge_index, edge_mask = dropout_edge(edge_index, p=self.edge_dropout_p)
+            edge_attr = edge_attr[edge_mask]
 
         # Make edges bidirectional
         rev_edge_index = edge_index.flip(0)

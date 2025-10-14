@@ -49,7 +49,7 @@ def filter_and_qc(adata_RNA: AnnData, adata_ATAC: AnnData) -> Tuple[AnnData, Ann
         f"[BARCODES] before sync RNA={n_before[0]}, ATAC={n_before[1]} → after sync RNA={adata_RNA.n_obs}, ATAC={adata_ATAC.n_obs}"
     )
     
-    # --- QC and filtering ---
+    # QC and filtering
     
     adata_RNA.var['mt'] = adata_RNA.var_names.str.startswith("MT-")
     sc.pp.calculate_qc_metrics(adata_RNA, qc_vars=["mt"], inplace=True)
@@ -62,7 +62,7 @@ def filter_and_qc(adata_RNA: AnnData, adata_ATAC: AnnData) -> Tuple[AnnData, Ann
     sc.pp.filter_cells(adata_ATAC, min_genes=200)
     sc.pp.filter_genes(adata_ATAC, min_cells=3)
     
-    # --- Preprocess RNA ---
+    # Preprocess RNA
     sc.pp.normalize_total(adata_RNA, target_sum=1e4)
     sc.pp.log1p(adata_RNA)
     sc.pp.highly_variable_genes(adata_RNA, min_mean=0.0125, max_mean=3, min_disp=0.5)
@@ -70,14 +70,14 @@ def filter_and_qc(adata_RNA: AnnData, adata_ATAC: AnnData) -> Tuple[AnnData, Ann
     sc.pp.scale(adata_RNA, max_value=10)
     sc.tl.pca(adata_RNA, n_comps=25, svd_solver="arpack")
 
-    # --- Preprocess ATAC ---
+    # Preprocess ATAC
     sc.pp.log1p(adata_ATAC)
     sc.pp.highly_variable_genes(adata_ATAC, min_mean=0.0125, max_mean=3, min_disp=0.5)
     adata_ATAC = adata_ATAC[:, adata_ATAC.var.highly_variable]
     sc.pp.scale(adata_ATAC, max_value=10, zero_center=True)
     sc.tl.pca(adata_ATAC, n_comps=25, svd_solver="arpack")
     
-    # --- After filtering to common barcodes ---
+    # After filtering to common barcodes
     common_barcodes = adata_RNA.obs_names.intersection(adata_ATAC.obs_names)
     
     adata_RNA = adata_RNA[common_barcodes].copy()
@@ -230,10 +230,10 @@ def calculate_tf_tg_regulatory_potential(moods_sites_file, tf_tg_reg_pot_file):
     # Strip ".pfm" suffix from TF names if present
     moods_hits["TF"] = moods_hits["TF"].str.replace(r"\.pfm$", "", regex=True).apply(standardize_name)
     
-    # --- Compute per-TF binding probability across peaks ---
+    # Compute per-TF binding probability across peaks
     moods_hits["logodds_tf_softmax"] = moods_hits.groupby("peak_id")["logodds"].transform(softmax)
 
-    # --- Merge with peak-to-gene distance scores ---
+    # Merge with peak-to-gene distance scores
     merged = pd.merge(
         moods_hits[["peak_id", "TF", "logodds_tf_softmax"]],
         peak_to_gene_dist_df[["peak_id", "target_id", "TSS_dist_score"]],
@@ -241,10 +241,10 @@ def calculate_tf_tg_regulatory_potential(moods_sites_file, tf_tg_reg_pot_file):
         how="inner"
     )
 
-    # --- Compute TF–TG contribution per peak ---
+    # Compute TF–TG contribution per peak
     merged["tf_tg_contrib"] = merged["logodds_tf_softmax"] * merged["TSS_dist_score"]
 
-    # --- Compute motif density ---
+    # Compute motif density
     # motif_density = number of unique TF motifs per TF–TG (or per TF–TG–peak normalized)
     motif_density_df = (
         merged.groupby(["TF", "target_id"], as_index=False)
@@ -254,21 +254,24 @@ def calculate_tf_tg_regulatory_potential(moods_sites_file, tf_tg_reg_pot_file):
         .rename(columns={"peak_id": "motif_density"})
     )
 
-    # --- Aggregate regulatory potential over peaks ---
+    # Log1p normalize the motif density
+    tf_tg_reg_pot["motif_density"] = np.log1p(tf_tg_reg_pot["motif_density"])
+
+    # Aggregate regulatory potential over peaks
     tf_tg_reg_pot = (
         merged.groupby(["TF", "target_id"], as_index=False)
         .agg({"tf_tg_contrib": "sum"})
         .rename(columns={"target_id": "TG", "tf_tg_contrib": "reg_potential"})
     )
 
-    # --- Merge motif density back in ---
+    # Merge motif density back in
     tf_tg_reg_pot = tf_tg_reg_pot.merge(
         motif_density_df.rename(columns={"target_id": "TG"}),
         on=["TF", "TG"],
         how="left"
     )
 
-    # --- Save ---
+    # Save
     tf_tg_reg_pot.to_parquet(tf_tg_reg_pot_file, engine="pyarrow", compression="snappy")
     logging.info(f"Saved TF–TG regulatory potential with motif density: {tf_tg_reg_pot.shape}")
 
@@ -388,6 +391,7 @@ if __name__ == "__main__":
     # Calculate the mean ATAC accessibility per peak
     mean_norm_atac_acc = norm_atac_df.mean(axis=1)
 
+    # NOTE: Instead of mean, should I pass each cell's expression or pseudobulk?
     # Calculate the mean TF and TG expression
     mean_norm_tg_expr = (
         norm_tg_df
