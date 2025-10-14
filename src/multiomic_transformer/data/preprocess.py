@@ -23,6 +23,7 @@ from multiomic_transformer.data.moods_scan import run_moods_scan_batched
 from multiomic_transformer.utils.standardize import standardize_name
 from multiomic_transformer.utils.files import atomic_json_dump
 from multiomic_transformer.utils.peaks import find_genes_near_peaks
+from multiomic_transformer.utils.downloads import *
 from config.settings import *
 
 from grn_inference.utils import read_ground_truth
@@ -336,9 +337,17 @@ if __name__ == "__main__":
     peak_locs_df = build_peak_locs_from_index(processed_atac_df.index)
 
     peak_bed_file = DATA_DIR / "processed" / "peaks.bed"
+    gene_tss_file = DATA_DIR / "genome_data" / "genome_annotation" / "mm10" / "gene_tss.bed"
+    
+    if not os.path.isfile(gene_tss_file):
+        download_gene_tss_file(
+            save_dir=gene_tss_file,
+            gene_dataset_name="mmusculus_gene_ensembl",
+        )
+
     peak_to_gene_dist_df = calculate_peak_to_tg_distance_score(
         peak_bed_file=peak_bed_file,
-        tss_bed_file= DATA_DIR / "genome_data" / "genome_annotation" / "mm10" / "gene_tss.bed",
+        tss_bed_file= gene_tss_file,
         peak_gene_dist_file= DATA_DIR / "processed" / "peak_to_gene_dist.parquet",
         mesc_atac_peak_loc_df=peak_locs_df,
         gene_tss_df= gene_tss_df,
@@ -351,8 +360,24 @@ if __name__ == "__main__":
 
     # Calculate TF-peak binding score
     moods_sites_file = DATA_DIR / "processed" / "moods_sites.parquet"
+    genome_fasta_file = GENOME_DIR / "mm10.fa.gz"
+
     if not os.path.isfile(moods_sites_file):
         jaspar_pfm_dir = DATA_DIR / "motif_information" / "mm10" / "JASPAR" / "pfm_files"
+
+        if not os.path.isdir(jaspar_pfm_dir):
+            download_jaspar_pfms(
+                jaspar_pfm_dir,
+                tax_id="10090",
+                max_workers=3
+                )
+            
+        if not os.path.isfile(genome_fasta_file):
+            download_genome_fasta(
+                organism_code="mm10",
+                save_location=genome_fasta_file
+            )
+
         jaspar_pfm_paths = [os.path.join(jaspar_pfm_dir, f) for f in os.listdir(jaspar_pfm_dir) if f.endswith(".pfm")]
         
         peaks_bed_path = Path(peak_bed_file)
@@ -362,7 +387,7 @@ if __name__ == "__main__":
         print("Running MOODS TF-peak binding calculation")
         # run_moods_scan_batched(
         #     peaks_bed=peak_bed_file, 
-        #     fasta_path=os.path.join(GENOME_DIR, "mm10.fa.gz"), 
+        #     fasta_path=genome_fasta_file, 
         #     motif_paths=subset_jaspar_motifs, 
         #     out_file=moods_sites_file, 
         #     n_cpus=3,
