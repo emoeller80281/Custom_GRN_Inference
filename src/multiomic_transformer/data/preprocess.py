@@ -25,6 +25,8 @@ from multiomic_transformer.utils.files import atomic_json_dump
 from multiomic_transformer.utils.peaks import find_genes_near_peaks
 from config.settings import *
 
+from grn_inference.utils import read_ground_truth
+
 
 def filter_and_qc(adata_RNA: AnnData, adata_ATAC: AnnData) -> Tuple[AnnData, AnnData]:
     
@@ -219,6 +221,58 @@ def calculate_peak_to_tg_distance_score(
     
     return genes_near_peaks
 
+def calculate_tf_tg_regulatory_potential(moods_sites_file, tf_tg_reg_pot_file):
+    logging.info(f"\nLoading MOODS TF-peak binding")
+    moods_hits = pd.read_parquet(moods_sites_file, engine="pyarrow")
+    
+    # Drop rows with missing TFs just in case
+    moods_hits = moods_hits.dropna(subset=["TF", "peak_id", "logodds"])
+    # Strip ".pfm" suffix from TF names if present
+    moods_hits["TF"] = moods_hits["TF"].str.replace(r"\.pfm$", "", regex=True).apply(standardize_name)
+    
+    # --- Compute per-TF binding probability across peaks ---
+    moods_hits["logodds_tf_softmax"] = moods_hits.groupby("peak_id")["logodds"].transform(softmax)
+
+    # --- Merge with peak-to-gene distance scores ---
+    merged = pd.merge(
+        moods_hits[["peak_id", "TF", "logodds_tf_softmax"]],
+        peak_to_gene_dist_df[["peak_id", "target_id", "TSS_dist_score"]],
+        on="peak_id",
+        how="inner"
+    )
+
+    # --- Compute TF–TG contribution per peak ---
+    merged["tf_tg_contrib"] = merged["logodds_tf_softmax"] * merged["TSS_dist_score"]
+
+    # --- Compute motif density ---
+    # motif_density = number of unique TF motifs per TF–TG (or per TF–TG–peak normalized)
+    motif_density_df = (
+        merged.groupby(["TF", "target_id"], as_index=False)
+        .agg({
+            "peak_id": "nunique",                 # how many peaks with that TF
+        })
+        .rename(columns={"peak_id": "motif_density"})
+    )
+
+    # --- Aggregate regulatory potential over peaks ---
+    tf_tg_reg_pot = (
+        merged.groupby(["TF", "target_id"], as_index=False)
+        .agg({"tf_tg_contrib": "sum"})
+        .rename(columns={"target_id": "TG", "tf_tg_contrib": "reg_potential"})
+    )
+
+    # --- Merge motif density back in ---
+    tf_tg_reg_pot = tf_tg_reg_pot.merge(
+        motif_density_df.rename(columns={"target_id": "TG"}),
+        on=["TF", "TG"],
+        how="left"
+    )
+
+    # --- Save ---
+    tf_tg_reg_pot.to_parquet(tf_tg_reg_pot_file, engine="pyarrow", compression="snappy")
+    logging.info(f"Saved TF–TG regulatory potential with motif density: {tf_tg_reg_pot.shape}")
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -248,7 +302,7 @@ if __name__ == "__main__":
     adata_atac = AnnData(atac_df.T)
     
     adata_rna_filtered, adata_atac_filtered = filter_and_qc(adata_rna, adata_atac)
-    print(adata_rna_filtered.shape)
+    # print(adata_rna_filtered.shape)
 
     if not os.path.isdir(GENOME_DIR):
         os.makedirs(GENOME_DIR)
@@ -269,11 +323,11 @@ if __name__ == "__main__":
         columns=adata_atac_filtered.var_names,
     ).T
 
-    print("Processed RNA df")
-    print(processed_rna_df.head())
+    # print("Processed RNA df")
+    # print(processed_rna_df.head())
 
-    print("\nProcessed ATAC df")
-    print(processed_atac_df.head())
+    # print("\nProcessed ATAC df")
+    # print(processed_atac_df.head())
 
     # Build peak locations from original ATAC peak names
     peak_locs_df = build_peak_locs_from_index(processed_atac_df.index)
@@ -292,17 +346,16 @@ if __name__ == "__main__":
     print("\nTF-TG Combinations")
     print(tf_tg_df.head())
 
-    
-    jaspar_pfm_dir = DATA_DIR / "motif_information" / "mm10" / "JASPAR" / "pfm_files"
-    jaspar_pfm_paths = [os.path.join(jaspar_pfm_dir, f) for f in os.listdir(jaspar_pfm_dir) if f.endswith(".pfm")]
+    # Calculate TF-peak binding score
     moods_sites_file = DATA_DIR / "processed" / "moods_sites.parquet"
-    
-    peaks_bed_path = Path(peak_bed_file)
-    peaks_df = pybedtools.BedTool(peaks_bed_path)
-
-    subset_jaspar_motifs = jaspar_pfm_paths[:50]
-    
     if not os.path.isfile(moods_sites_file):
+        jaspar_pfm_dir = DATA_DIR / "motif_information" / "mm10" / "JASPAR" / "pfm_files"
+        jaspar_pfm_paths = [os.path.join(jaspar_pfm_dir, f) for f in os.listdir(jaspar_pfm_dir) if f.endswith(".pfm")]
+        
+        peaks_bed_path = Path(peak_bed_file)
+        peaks_df = pybedtools.BedTool(peaks_bed_path)
+
+        subset_jaspar_motifs = jaspar_pfm_paths[:50]
         print("Running MOODS TF-peak binding calculation")
         # run_moods_scan_batched(
         #     peaks_bed=peak_bed_file, 
@@ -315,30 +368,133 @@ if __name__ == "__main__":
         #     batch_size=500
         # )
 
-    logging.info(f"\nLoading MOODS TF-peak binding")
-    moods_hits = pd.read_parquet(moods_sites_file, engine="pyarrow")
+
+    # Get the 0-1 MinMax normalized ATAC accessibility
+    def minmax_scale_across_cells(df):
+        norm_df = df.copy()
+        scaler = MinMaxScaler()
+        x = norm_df.values
+        norm_df.loc[:, :] = scaler.fit_transform(x)
+
+        return norm_df
     
-    # Drop rows with missing TFs just in case
-    moods_hits = moods_hits.dropna()
+    tf_df = processed_rna_df[processed_rna_df.index.isin(tfs)]
+    tg_df = processed_rna_df[processed_rna_df.index.isin(tgs)]
+
+    norm_atac_df = minmax_scale_across_cells(processed_atac_df)
+    norm_tf_df = minmax_scale_across_cells(tf_df)
+    norm_tg_df = minmax_scale_across_cells(tg_df)
+
+    # Calculate the mean ATAC accessibility per peak
+    mean_norm_atac_acc = norm_atac_df.mean(axis=1)
+
+    # Calculate the mean TF and TG expression
+    mean_norm_tg_expr = (
+        norm_tg_df
+        .mean(axis=1)
+        .reset_index()
+        .rename(columns={"Symbol": "TG", 0: "mean_tg_expr"})
+    )
+
+    mean_norm_tf_expr = (
+        norm_tf_df
+        .mean(axis=1)
+        .reset_index()
+        .rename(columns={"Symbol": "TF", 0: "mean_tf_expr"})
+    )
+    print("mean_norm_tf_expr")
+    print(mean_norm_tf_expr)
+
+    print("\nmean_norm_tg_expr")
+    print(mean_norm_tg_expr)
+
+    tf_tg_reg_pot_file = DATA_DIR / "processed" / "tf_tg_regulatory_potential.parquet"
+    # if not os.path.isfile(tf_tg_reg_pot_file):
+    calculate_tf_tg_regulatory_potential(moods_sites_file, tf_tg_reg_pot_file)
     
-    # Strip ".pfm" suffix from TF names if present
-    moods_hits["TF"] = moods_hits["TF"].str.replace(r"\.pfm$", "", regex=True).apply(standardize_name)
+    print("Loading TF-TG regulatory potential scores")
+    tf_tg_reg_pot = pd.read_parquet(tf_tg_reg_pot_file, engine="pyarrow")
+    print(tf_tg_reg_pot.head())
 
-    print(moods_hits.head())
+    print("Loading ChIP-seq Ground Truth for Labeling Edges")
+    ground_truth_file = DATA_DIR / "ground_truth" / "RN111.tsv"
+    ground_truth_df = read_ground_truth(ground_truth_file)
+    ground_truth_df = ground_truth_df[["source_id", "target_id"]].rename(columns={
+        "source_id":"TF",
+        "target_id":"TG"
+    })
+    ground_truth_df["TF"] = ground_truth_df["TF"].str.capitalize()
+    ground_truth_df["TG"] = ground_truth_df["TG"].str.capitalize()
 
-    moods_hits = moods_hits.dropna()
+    print("Merging TF-TG attributes with all combinations")
+    print("  - Merging TF-TG Regulatory Potential")
+    tf_tg_df = pd.merge(
+        tf_tg_df,
+        tf_tg_reg_pot,
+        how="left",
+        on=["TF", "TG"]
+    ).fillna(0)
 
-    # Calculate Softmax TF-peak binding across all TFs independently
-    # The most likely TF to bind will have a higher score between 0-1
-    moods_hits["logodds__tf_softmax"] = moods_hits.groupby("TF")["logodds"].transform(softmax)
-    print(moods_hits.head())
+    print("  - Merging mean min-max normalized TF expression")
+    tf_tg_df = pd.merge(
+        tf_tg_df,
+        mean_norm_tf_expr,
+        how="left",
+        on=["TF"]
+    ).dropna(subset="mean_tf_expr")
 
-    norm_atac_df = processed_atac_df.copy()
-    scaler = MinMaxScaler()
-    x = norm_atac_df.values
-    norm_atac_df.loc[:, :] = scaler.fit_transform(x)
+    print("  - Merging mean min-max normalized TG expression")
+    tf_tg_df = pd.merge(
+        tf_tg_df,
+        mean_norm_tg_expr,
+        how="left",
+        on=["TG"]
+    ).dropna(subset="mean_tg_expr")
 
-    mean_norm_atac = norm_atac_df.mean(axis=1)
-    print(mean_norm_atac.head())
+    # Create a set of ground-truth pairs
+    gt_pairs = set(zip(ground_truth_df["TF"], ground_truth_df["TG"]))
 
+    # Assign label = 1 if (TF, TG) pair exists in ground truth
+    tf_tg_df["label"] = [
+        1 if (tf, tg) in gt_pairs else 0
+        for tf, tg in zip(tf_tg_df["TF"], tf_tg_df["TG"])
+    ]
 
+    true_df = tf_tg_df[tf_tg_df["label"] == 1]
+    false_df = tf_tg_df[tf_tg_df["label"] == 0]
+
+    # For each TF, randomly choose one false TG for each true TG
+    balanced_rows = []
+    rng = np.random.default_rng(42)
+    upscale_percent = 1.5
+
+    for tf, group in true_df.groupby("TF"):
+        true_tgs = group["TG"].tolist()
+
+        # candidate false TGs for same TF
+        false_candidates = false_df[false_df["TF"] == tf]
+        if false_candidates.empty:
+            continue  # skip if no negatives for this TF
+
+        # sample one negative TG per true TG (with replacement)
+        sampled_false = false_candidates.sample(
+            n=len(true_tgs), replace=True, random_state=rng.integers(1e9)
+        )
+
+        # randomly resample with replacement to get a % increase in True / False edges per TF
+        true_upscaled = group.sample(frac=upscale_percent, replace=True)
+        false_upscaled = sampled_false.sample(frac=upscale_percent, replace=True)
+
+        balanced_rows.append(pd.concat([true_upscaled, false_upscaled], ignore_index=True))
+
+    # Combine all TF groups
+    tf_tg_balanced = pd.concat(balanced_rows, ignore_index=True)
+    tf_tg_balanced = tf_tg_balanced.sample(frac=1, random_state=42).reset_index(drop=True)
+
+    print(tf_tg_balanced["label"].value_counts())
+
+    print(tf_tg_balanced.head())
+
+    tf_tg_feature_file = DATA_DIR / "processed" / "tf_tg_data.parquet"
+    tf_tg_balanced.to_parquet(tf_tg_feature_file, engine="pyarrow", compression="snappy")
+    print(f"\n Wrote TF-TG features to {tf_tg_feature_file}")
