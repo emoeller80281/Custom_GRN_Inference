@@ -9,10 +9,15 @@ from pathlib import Path
 import warnings
 import numpy as np
 import scipy.sparse as sp
+from scipy.special import softmax
+from sklearn.preprocessing import MinMaxScaler
 from typing import Tuple
 from anndata import AnnData
 from tqdm import tqdm
 import pybedtools
+
+import sys
+sys.path.append("/home/emoeller/github/grn_inference/src")
 
 from multiomic_transformer.data.moods_scan import run_moods_scan_batched
 from multiomic_transformer.utils.standardize import standardize_name
@@ -223,6 +228,10 @@ if __name__ == "__main__":
     rna_df = pd.read_csv(rna_file, delimiter="\t", header=0, index_col=0)
     atac_df = pd.read_csv(atac_file, delimiter="\t", header=0, index_col=0)
 
+    print(f"Number of peaks: {atac_df.shape[0]}")
+
+    atac_df = atac_df.iloc[:1500, :]
+
     # Temporarily rename columns, the barcodes in my test don't line up
     rna_df.columns = [f"cell_{i}" for i in range(1, rna_df.shape[1] + 1)]
     atac_df.columns = [f"cell_{i}" for i in range(1, atac_df.shape[1] + 1)]
@@ -267,7 +276,7 @@ if __name__ == "__main__":
     print(processed_atac_df.head())
 
     # Build peak locations from original ATAC peak names
-    peak_locs_df = build_peak_locs_from_index(atac_df.index)
+    peak_locs_df = build_peak_locs_from_index(processed_atac_df.index)
 
     peak_bed_file = DATA_DIR / "processed" / "peaks.bed"
     peak_to_gene_dist_df = calculate_peak_to_tg_distance_score(
@@ -283,25 +292,53 @@ if __name__ == "__main__":
     print("\nTF-TG Combinations")
     print(tf_tg_df.head())
 
-    print("Running MOODS TF-peak binding calculation")
-    jaspar_pfm_paths = DATA_DIR / "motif_information" / "mm10" / "JASPAR" / "pfm_files"
-    motif_paths = list(jaspar_pfm_paths.glob("*.pfm"))
-    moods_sites_file = DATA_DIR / "processed" / "moods_sites.tsv"
+    
+    jaspar_pfm_dir = DATA_DIR / "motif_information" / "mm10" / "JASPAR" / "pfm_files"
+    jaspar_pfm_paths = [os.path.join(jaspar_pfm_dir, f) for f in os.listdir(jaspar_pfm_dir) if f.endswith(".pfm")]
+    moods_sites_file = DATA_DIR / "processed" / "moods_sites.parquet"
     
     peaks_bed_path = Path(peak_bed_file)
     peaks_df = pybedtools.BedTool(peaks_bed_path)
+
+    subset_jaspar_motifs = jaspar_pfm_paths[:50]
     
-    run_moods_scan_batched(
-        peaks_bed=peaks_df, 
-        fasta_path=os.path.join(GENOME_DIR, f"mm10.fa.gz"), 
-        motif_paths=motif_paths, 
-        out_tsv=moods_sites_file, 
-        n_cpus=4,
-        pval_threshold=MOODS_PVAL_THRESHOLD, 
-        bg="auto"
-    )
+    if not os.path.isfile(moods_sites_file):
+        print("Running MOODS TF-peak binding calculation")
+        # run_moods_scan_batched(
+        #     peaks_bed=peak_bed_file, 
+        #     fasta_path=os.path.join(GENOME_DIR, "mm10.fa.gz"), 
+        #     motif_paths=subset_jaspar_motifs, 
+        #     out_file=moods_sites_file, 
+        #     n_cpus=3,
+        #     pval_threshold=1e-3, 
+        #     bg="auto",
+        #     batch_size=500
+        # )
 
-
-
-
+    logging.info(f"\nLoading MOODS TF-peak binding")
+    moods_hits = pd.read_parquet(moods_sites_file, engine="pyarrow")
     
+    # Drop rows with missing TFs just in case
+    moods_hits = moods_hits.dropna()
+    
+    # Strip ".pfm" suffix from TF names if present
+    moods_hits["TF"] = moods_hits["TF"].str.replace(r"\.pfm$", "", regex=True).apply(standardize_name)
+
+    print(moods_hits.head())
+
+    moods_hits = moods_hits.dropna()
+
+    # Calculate Softmax TF-peak binding across all TFs independently
+    # The most likely TF to bind will have a higher score between 0-1
+    moods_hits["logodds__tf_softmax"] = moods_hits.groupby("TF")["logodds"].transform(softmax)
+    print(moods_hits.head())
+
+    norm_atac_df = processed_atac_df.copy()
+    scaler = MinMaxScaler()
+    x = norm_atac_df.values
+    norm_atac_df.loc[:, :] = scaler.fit_transform(x)
+
+    mean_norm_atac = norm_atac_df.mean(axis=1)
+    print(mean_norm_atac.head())
+
+

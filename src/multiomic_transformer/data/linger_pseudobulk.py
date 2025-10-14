@@ -122,7 +122,7 @@ def pseudo_bulk(
     pseudo_bulk_atac = sp.vstack(pseudo_bulk_atac).T
 
     pseudo_bulk_rna = pd.DataFrame(
-        pseudo_bulk_rna.toarray(),
+        pseudo_bulk_rna.toarray(),ee
         index=rna_data.var_names,
         columns=bulk_names,
     )
