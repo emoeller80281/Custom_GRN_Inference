@@ -14,6 +14,8 @@ THIS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(THIS_DIR)) 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+
     STRING_DIR = PKN_DIR / "STRING"
     TRRUST_DIR = PKN_DIR / "TRRUST"
     KEGG_DIR = PKN_DIR / "KEGG"
@@ -30,16 +32,16 @@ if __name__ == "__main__":
         out_csv=str(STRING_DIR / "string_mouse_pkn_directed.csv")
     )
 
-    print("Building TRRUST prior knowledge network")
-    trrust_pkn = trrust_pathway.build_trrust_pkn(
-        species="mouse",
-        out_csv=str(TRRUST_DIR / "trrust_mouse_pkn.csv")
-    )
+    # print("Building TRRUST prior knowledge network")
+    # trrust_pkn = trrust_pathway.build_trrust_pkn(
+    #     species="mouse",
+    #     out_csv=str(TRRUST_DIR / "trrust_mouse_pkn.csv")
+    # )
 
-    print("Building KEGG prior knowledge network")
-    kegg_pkn = kegg_pathways.build_kegg_pkn(
-        dataset_name=DATASET_NAME,
-        output_path=str(KEGG_DIR),
-        organism="mmu",
-        out_csv=str(KEGG_DIR / "kegg_mouse_pkn.csv")
-    )
+    # print("Building KEGG prior knowledge network")
+    # kegg_pkn = kegg_pathways.build_kegg_pkn(
+    #     dataset_name=DATASET_NAME,
+    #     output_path=str(KEGG_DIR),
+    #     organism="mmu",
+    #     out_csv=str(KEGG_DIR / "kegg_mouse_pkn.csv")
+    # )

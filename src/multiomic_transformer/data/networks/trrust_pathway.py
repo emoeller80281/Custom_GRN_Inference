@@ -4,6 +4,7 @@ import os
 import io
 import logging
 import requests
+from typing import Union
 import pandas as pd
 import networkx as nx
 
@@ -26,10 +27,10 @@ def _load_trrust(path_or_url: str) -> pd.DataFrame:
 def build_trrust_pkn(
     species: str = "mouse",              # "mouse" | "human"
     *,
-    trrust_path_or_url: str | None = None,  # if None, uses default URL for species
+    trrust_path_or_url: Union[str, None] = None,  # if None, uses default URL for species
     normalize_case: str = "upper",       # "upper" | "lower" | None
-    out_csv: str | None = None,
-    out_graphml: str | None = None
+    out_csv: Union[str, None] = None,
+    out_graphml: Union[str, None] = None
 ) -> pd.DataFrame:
     """
     Build the FULL TRRUST PKN (directed, signed) for a species.

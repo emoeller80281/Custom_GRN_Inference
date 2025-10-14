@@ -1,11 +1,13 @@
 # string_pathway.py
 
 import os
+import gc
 import logging
 import requests
 import pandas as pd
 import numpy as np
 import networkx as nx
+from typing import Union
 
 # -----------------------------
 # Download helpers (STRING v12)
@@ -70,6 +72,91 @@ def ensure_string_v12_files(string_dir: str, string_org_code: str) -> dict:
     }
 
 # -----------------------------
+# Batched directed/undirected PKN writer
+# -----------------------------
+def write_string_pkn_batched(links_iterable, *, as_directed, out_csv=None, out_graphml=None, normalize_case="upper"):
+    """
+    Writes the STRING PKN in batches, without ever holding the entire dataset in memory.
+
+    Parameters
+    ----------
+    links_iterable : Iterable[pd.DataFrame]
+        Iterator of pre-processed STRING chunks (with protein1, protein2, string_* columns).
+    as_directed : bool
+        Whether to duplicate edges both directions.
+    out_csv : str, optional
+        Path to append CSV output.
+    out_graphml : str, optional
+        If provided and total edges < 5M, build graph in memory and write GraphML.
+    normalize_case : str, optional
+        "upper", "lower", or None.
+    """
+    csv_mode = "w"
+    csv_header = True
+    G = nx.DiGraph() if as_directed else nx.Graph()
+
+    for i, chunk in enumerate(links_iterable, 1):
+        logging.info(f"  Building PKN batch {i} ({len(chunk):,} edges)…")
+
+        # Case normalization (optional)
+        if normalize_case == "upper":
+            chunk["protein1"] = chunk["protein1"].str.upper()
+            chunk["protein2"] = chunk["protein2"].str.upper()
+        elif normalize_case == "lower":
+            chunk["protein1"] = chunk["protein1"].str.lower()
+            chunk["protein2"] = chunk["protein2"].str.lower()
+
+        # ---- Directed ----
+        if as_directed:
+            fwd = chunk.rename(columns={"protein1": "source_id", "protein2": "target_id"})
+            rev = chunk.rename(columns={"protein1": "target_id", "protein2": "source_id"})
+            pkn_chunk = pd.concat([fwd, rev], ignore_index=True)
+            pkn_chunk.drop_duplicates(subset=["source_id", "target_id"], inplace=True)
+        # ---- Undirected ----
+        else:
+            a = chunk["protein1"]
+            b = chunk["protein2"]
+            protein_a = np.where(a <= b, a, b)
+            protein_b = np.where(a <= b, b, a)
+            pkn_chunk = chunk.copy()
+            pkn_chunk.insert(0, "protein_a", protein_a)
+            pkn_chunk.insert(1, "protein_b", protein_b)
+            pkn_chunk.drop(columns=["protein1", "protein2"], inplace=True)
+            pkn_chunk.drop_duplicates(subset=["protein_a", "protein_b"], inplace=True)
+
+        # ---- CSV output (append mode) ----
+        if out_csv:
+            os.makedirs(os.path.dirname(os.path.abspath(out_csv)), exist_ok=True)
+            pkn_chunk.to_csv(out_csv, mode=csv_mode, header=csv_header, index=False)
+            csv_mode, csv_header = "a", False  # subsequent chunks append
+
+        # ---- Optional GraphML accumulation ----
+        if out_graphml and len(G) < 5_000_000:  # guard: skip if too large
+            if as_directed:
+                G.add_edges_from(
+                    zip(pkn_chunk["source_id"], pkn_chunk["target_id"]),
+                    **{k: pkn_chunk[k].tolist() for k in pkn_chunk.columns if k.startswith("string_")}
+                )
+            else:
+                G.add_edges_from(
+                    zip(pkn_chunk["protein_a"], pkn_chunk["protein_b"]),
+                    **{k: pkn_chunk[k].tolist() for k in pkn_chunk.columns if k.startswith("string_")}
+                )
+
+        del pkn_chunk, chunk
+        gc.collect()
+
+    # ---- Write GraphML if requested ----
+    if out_graphml and len(G) < 5_000_000:
+        nx.write_graphml(G, out_graphml)
+        logging.info(f"Wrote STRING PKN GraphML → {out_graphml}")
+    elif out_graphml:
+        logging.warning("Skipping GraphML export (graph too large).")
+
+    logging.info("Finished writing all STRING PKN batches.")
+
+
+# -----------------------------
 # FULL PKN builder (no filtering)
 # -----------------------------
 
@@ -78,10 +165,10 @@ def build_string_pkn(
     string_org_code: str = "10090",
     *,
     normalize_case: str = "upper",       # "upper" | "lower" | None
-    min_combined_score: int | None = None, # keep all if None; STRING scale 0..1000
+    min_combined_score: Union[int, None] = None, # keep all if None; STRING scale 0..1000
     as_directed: bool = False,           # False -> undirected canonical pairs; True -> duplicate rows (both directions)
-    out_csv: str | None = None,          # optional CSV path
-    out_graphml: str | None = None       # optional GraphML path
+    out_csv: Union[str, None] = None,          # optional CSV path
+    out_graphml: Union[str, None] = None       # optional GraphML path
 ) -> pd.DataFrame:
     """
     Build the FULL STRING v12.0 PKN (for one organism) as a tidy edge list with STRING scores.
@@ -108,102 +195,67 @@ def build_string_pkn(
     logging.info("Reading STRING protein.info (v12.0)…")
     protein_info_df = pd.read_csv(protein_info_path, sep="\t", compression="gzip")
 
-    logging.info("Reading STRING protein.links.detailed (v12.0)…")
-    links_df = pd.read_csv(links_path, sep=" ", compression="gzip")
+    logging.info("Reading STRING protein.links.detailed (v12.0) in chunks…")
 
-    # Map to preferred names
+    cols_needed = [
+        "protein1", "protein2",
+        "combined_score", "experimental", "database",
+        "coexpression", "textmining", "neighborhood",
+        "fusion", "cooccurence"
+    ]
+
+    # Map from STRING IDs → preferred names once
     id_col = "#string_protein_id" if "#string_protein_id" in protein_info_df.columns else protein_info_df.columns[0]
     if "preferred_name" not in protein_info_df.columns:
         raise ValueError("STRING protein_info file is missing 'preferred_name' column")
-
     id_to_name = protein_info_df.set_index(id_col)["preferred_name"].to_dict()
-    links_df["protein1"] = links_df["protein1"].map(id_to_name)
-    links_df["protein2"] = links_df["protein2"].map(id_to_name)
 
-    # Drop unmapped
-    before = len(links_df)
-    links_df = links_df.dropna(subset=["protein1", "protein2"])
-    logging.info(f"Dropped {before - len(links_df):,} edges with unmapped protein IDs")
+    # Prepare the output parquet/CSV or a list of processed chunks
+    def processed_chunks():
 
-    # Case normalization
-    def _canon(s: pd.Series) -> pd.Series:
-        s = s.astype(str)
-        if normalize_case == "upper":
-            return s.str.upper()
-        if normalize_case == "lower":
-            return s.str.lower()
-        return s
+        reader = pd.read_csv(
+            links_path,
+            sep=" ",
+            compression="gzip" if links_path.endswith(".gz") else None,
+            usecols=lambda c: c in cols_needed,
+            chunksize=5_000_000,
+            low_memory=False,
+        )
 
-    links_df["protein1"] = _canon(links_df["protein1"])
-    links_df["protein2"] = _canon(links_df["protein2"])
+        for i, chunk in enumerate(reader, start=1):
 
-    # Optional score threshold
-    if min_combined_score is not None:
-        if "combined_score" not in links_df.columns:
-            raise ValueError("STRING links file missing 'combined_score'")
-        pre = len(links_df)
-        links_df = links_df[links_df["combined_score"] >= int(min_combined_score)]
-        logging.info(f"Applied combined_score ≥ {min_combined_score}: kept {len(links_df):,}/{pre:,}")
+            # Filter early by score
+            if min_combined_score is not None and "combined_score" in chunk.columns:
+                chunk = chunk[chunk["combined_score"] >= min_combined_score]
 
-    # Build tidy output with normalized + prefixed columns
-    rename_map = {
-        "combined_score": "string_combined_score",
-        "experimental": "string_experimental_score",
-        "database": "string_database_score",
-        "coexpression": "string_coexpression_score",
-        "textmining": "string_textmining_score",
-        "neighborhood": "string_neighborhood_score",
-        "fusion": "string_fusion_score",
-        "cooccurence": "string_cooccurence_score",
-    }
-    present_cols = [c for c in rename_map if c in links_df.columns]
-    keep_cols = ["protein1", "protein2"] + present_cols
+            # Map STRING IDs → preferred names
+            chunk["protein1"] = chunk["protein1"].map(id_to_name)
+            chunk["protein2"] = chunk["protein2"].map(id_to_name)
+            chunk = chunk.dropna(subset=["protein1", "protein2"])
 
-    df = links_df[keep_cols].rename(columns=rename_map).copy()
+            # Rename columns (no large copy)
+            rename_map = {
+                "combined_score": "string_combined_score",
+                "experimental": "string_experimental_score",
+                "database": "string_database_score",
+                "coexpression": "string_coexpression_score",
+                "textmining": "string_textmining_score",
+                "neighborhood": "string_neighborhood_score",
+                "fusion": "string_fusion_score",
+                "cooccurence": "string_cooccurence_score",
+            }
+            chunk.rename(columns=rename_map, inplace=True)
 
-    # Normalize combined score to [0,1] if present
-    if "string_combined_score" in df.columns:
-        df["string_combined_score"] = df["string_combined_score"] / 1000.0
+            # Normalize combined_score to [0,1]
+            if "string_combined_score" in chunk.columns:
+                chunk["string_combined_score"] = chunk["string_combined_score"] / 1000.0
 
-    if as_directed:
-        # Duplicate as source/target both ways
-        fwd = df.rename(columns={"protein1": "source_id", "protein2": "target_id"})
-        rev = df.rename(columns={"protein1": "target_id", "protein2": "source_id"})
-        pkn = pd.concat([fwd, rev], ignore_index=True)
-        # Optional: drop exact duplicates if any
-        pkn = pkn.drop_duplicates(subset=["source_id", "target_id"] + [c for c in pkn.columns if c.startswith("string_")])
-    else:
-        # Canonicalize undirected pairs (sorted)
-        a = df["protein1"]
-        b = df["protein2"]
-        protein_a = np.where(a <= b, a, b)
-        protein_b = np.where(a <= b, b, a)
-        pkn = df.copy()
-        pkn.insert(0, "protein_a", protein_a)
-        pkn.insert(1, "protein_b", protein_b)
-        pkn = pkn.drop(columns=["protein1", "protein2"])
-        pkn = pkn.drop_duplicates(subset=["protein_a", "protein_b"])
+            yield chunk
 
-    # Optional outputs
-    if out_csv:
-        os.makedirs(os.path.dirname(os.path.abspath(out_csv)), exist_ok=True)
-        pkn.to_csv(out_csv, index=False)
-        logging.info(f"Wrote STRING PKN CSV → {out_csv}")
-
-    if out_graphml:
-        if as_directed:
-            G = nx.from_pandas_edgelist(
-                pkn, source="source_id", target="target_id",
-                edge_attr=[c for c in pkn.columns if c.startswith("string_")],
-                create_using=nx.DiGraph()
-            )
-        else:
-            G = nx.from_pandas_edgelist(
-                pkn, source="protein_a", target="protein_b",
-                edge_attr=[c for c in pkn.columns if c.startswith("string_")],
-                create_using=nx.Graph()
-            )
-        nx.write_graphml(G, out_graphml)
-        logging.info(f"Wrote STRING PKN GraphML → {out_graphml}")
-
-    return pkn
+    write_string_pkn_batched(
+        processed_chunks(),
+        as_directed=as_directed,
+        out_csv=out_csv,
+        out_graphml=out_graphml,
+        normalize_case=normalize_case,
+    )

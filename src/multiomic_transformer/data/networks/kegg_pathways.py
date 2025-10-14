@@ -4,6 +4,7 @@ import requests
 import re
 import pandas as pd
 import numpy as np
+from typing import Union
 from bs4 import BeautifulSoup
 import itertools
 # from rule_inference import *
@@ -777,8 +778,8 @@ def build_kegg_pkn(
     gene_name_file,                 # same here (Pathways init), harmless defaults if you have them
     organism: str = "mmu",          # KEGG org code (e.g., 'mmu', 'hsa'); 'mm10' gets normalized in your code if you added that
     normalize_case: str = "upper",  # "upper" | "lower" | None
-    out_csv: str | None = None,
-    out_graphml: str | None = None, # writes the merged network
+    out_csv: Union[str, None] = None,
+    out_graphml: Union[str, None] = None, # writes the merged network
     write_per_pathway_graphml: bool = False
 ) -> pd.DataFrame:
     """
