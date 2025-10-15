@@ -2,6 +2,7 @@ homer/
 input/*
 LOGS/
 output/*
+dist/
 transformer_data
 macrophage_output/
 reference_genome/
