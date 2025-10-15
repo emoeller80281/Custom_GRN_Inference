@@ -64,6 +64,8 @@ def download_gene_tss_file(
     df = df[["chromosome", "tss", "end", "gene_name"]]
 
     save_file = Path(save_dir) / "gene_tss.bed"
+    save_file.parent.mkdir(parents=True, exist_ok=True)
+    
     df.to_csv(save_file, sep="\t", header=False, index=False)
 
     return df

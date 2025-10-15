@@ -310,6 +310,12 @@ if __name__ == "__main__":
 
     if not os.path.isdir(GENOME_DIR):
         os.makedirs(GENOME_DIR)
+    
+    if not os.path.isfile(GENE_TSS_FILE):
+        download_gene_tss_file(
+            save_dir=GENE_TSS_FILE,
+            gene_dataset_name="mmusculus_gene_ensembl",
+        )
 
     gene_tss_df = make_chrom_gene_tss_df(
         gene_tss_file=GENE_TSS_FILE,
@@ -337,17 +343,10 @@ if __name__ == "__main__":
     peak_locs_df = build_peak_locs_from_index(processed_atac_df.index)
 
     peak_bed_file = DATA_DIR / "processed" / "peaks.bed"
-    gene_tss_file = DATA_DIR / "genome_data" / "genome_annotation" / "mm10" / "gene_tss.bed"
-    
-    if not os.path.isfile(gene_tss_file):
-        download_gene_tss_file(
-            save_dir=gene_tss_file,
-            gene_dataset_name="mmusculus_gene_ensembl",
-        )
 
     peak_to_gene_dist_df = calculate_peak_to_tg_distance_score(
         peak_bed_file=peak_bed_file,
-        tss_bed_file= gene_tss_file,
+        tss_bed_file= GENE_TSS_FILE,
         peak_gene_dist_file= DATA_DIR / "processed" / "peak_to_gene_dist.parquet",
         mesc_atac_peak_loc_df=peak_locs_df,
         gene_tss_df= gene_tss_df,
@@ -360,18 +359,17 @@ if __name__ == "__main__":
 
     # Calculate TF-peak binding score
     moods_sites_file = DATA_DIR / "processed" / "moods_sites.parquet"
-    genome_fasta_file = GENOME_DIR / "mm10.fa.gz"
-
     if not os.path.isfile(moods_sites_file):
-        jaspar_pfm_dir = DATA_DIR / "motif_information" / "mm10" / "JASPAR" / "pfm_files"
 
+        jaspar_pfm_dir = DATA_DIR / "motif_information" / "mm10" / "JASPAR" / "pfm_files"
         if not os.path.isdir(jaspar_pfm_dir):
             download_jaspar_pfms(
                 jaspar_pfm_dir,
                 tax_id="10090",
                 max_workers=3
                 )
-            
+        
+        genome_fasta_file = GENOME_DIR / "mm10.fa.gz"
         if not os.path.isfile(genome_fasta_file):
             download_genome_fasta(
                 organism_code="mm10",
@@ -385,16 +383,16 @@ if __name__ == "__main__":
 
         subset_jaspar_motifs = jaspar_pfm_paths[:50]
         print("Running MOODS TF-peak binding calculation")
-        # run_moods_scan_batched(
-        #     peaks_bed=peak_bed_file, 
-        #     fasta_path=genome_fasta_file, 
-        #     motif_paths=subset_jaspar_motifs, 
-        #     out_file=moods_sites_file, 
-        #     n_cpus=3,
-        #     pval_threshold=1e-3, 
-        #     bg="auto",
-        #     batch_size=500
-        # )
+        run_moods_scan_batched(
+            peaks_bed=peak_bed_file, 
+            fasta_path=genome_fasta_file, 
+            motif_paths=subset_jaspar_motifs, 
+            out_file=moods_sites_file, 
+            n_cpus=3,
+            pval_threshold=1e-3, 
+            bg="auto",
+            batch_size=500
+        )
 
 
     # Get the 0-1 MinMax normalized ATAC accessibility
