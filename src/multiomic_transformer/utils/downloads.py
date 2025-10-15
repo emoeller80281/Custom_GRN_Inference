@@ -1,5 +1,6 @@
 import os
 import pandas as pd
+import subprocess
 from pathlib import Path
 import logging
 from typing import Union, Dict
@@ -10,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from config.settings import *
 
 def download_gene_tss_file(
-    save_dir: Union[Path, str], 
+    save_file: Union[Path, str], 
     gene_dataset_name: str = "mmusculus_gene_ensembl", 
     ensembl_version: str = "useast.ensembl.org"
     ) -> pd.DataFrame:
@@ -19,7 +20,7 @@ def download_gene_tss_file(
 
     Parameters
     ----------
-    save_dir: Union[Path, str]
+    save_file: Union[Path, str]
         Path to save the gene TSS bed file.
         
     ensembl_version : str, optional
@@ -47,122 +48,167 @@ def download_gene_tss_file(
     # Clean up and rename
     df = df.rename(
         columns={
-            "Gene name": "gene_name",
-            "Chromosome/scaffold name": "chromosome",
-            "Transcription start site (TSS)": "tss",
+            "Gene name": "name",
+            "Chromosome/scaffold name": "chrom",
+            "Transcription start site (TSS)": "start",
         }
     )
 
     # Filter out non-standard chromosomes
-    df = df[df["chromosome"].str.match(r"^\d+$|^X$|^Y$")]
+    df = df[df["chrom"].str.match(r"^\d+$|^X$|^Y$")]
+
+    # Add the chr prefix to the chromosomes
+    df["chrom"] = df["chrom"].astype(str)
+    df["chrom"] = df["chrom"].apply(lambda c: f"chr{c}" if not c.startswith("chr") else c)
 
     # Drop duplicates
-    df = df.drop_duplicates(subset=["gene_name", "chromosome", "tss"]).reset_index(drop=True)
+    df = df.drop_duplicates(subset=["name", "chrom", "start"]).reset_index(drop=True)
 
-    df["end"] = df["tss"] + 1
+    df["end"] = df["start"] + 1
 
-    df = df[["chromosome", "tss", "end", "gene_name"]]
+    df = df.dropna()
 
-    save_file = Path(save_dir) / "gene_tss.bed"
+
+    df = df[["chrom", "start", "end", "name"]]
+
     save_file.parent.mkdir(parents=True, exist_ok=True)
     
     df.to_csv(save_file, sep="\t", header=False, index=False)
 
     return df
 
-def download_genome_fasta(organism_code: str, save_location: Union[Path, str]):
+def download_genome_fasta(organism_code: str, save_dir: Union[str, Path]):
     """
-    Downloads a genome FASTA file (e.g., mm10 or hg38) from UCSC's goldenPath.
+    Download a UCSC genome FASTA, convert to BGZF format, and index with samtools.
 
     Parameters
     ----------
     organism_code : str
-        Either 'mm10' (mouse) or 'hg38' (human).
-    save_location : Path or str
-        Destination file path to save the .fa.gz file.
+        Genome assembly (e.g., 'mm10', 'hg38').
+    save_dir : str or Path
+        Directory to save the genome files.
     """
     assert organism_code in ("mm10", "hg38"), \
-        f"Organism code was given '{organism_code}'. Valid codes are 'mm10' or 'hg38'."
+        f"Organism code '{organism_code}' not supported (valid: 'mm10', 'hg38')"
 
-    url = f"https://hgdownload.soe.ucsc.edu/goldenPath/{organism_code}/bigZips/{organism_code}.fa.gz"
+    save_dir = Path(save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
 
-    save_path = Path(save_location)
-    save_path.parent.mkdir(parents=True, exist_ok=True)
+    gz_path = save_dir / f"{organism_code}.fa.gz"
+    bgzf_path = save_dir / f"{organism_code}.fa.bgz"
+    fasta_path = save_dir / f"{organism_code}.fa"
+    fai_path = save_dir / f"{organism_code}.fa.bgz.fai"
 
-    print(f"Downloading {organism_code} genome from:\n  {url}")
-    response = requests.get(url, stream=True)
+    # Step 1. Download genome if not present
+    if not gz_path.exists():
+        url = f"https://hgdownload.soe.ucsc.edu/goldenPath/{organism_code}/bigZips/{organism_code}.fa.gz"
+        logging.info(f"Downloading {organism_code} genome from:\n  {url}")
+        with requests.get(url, stream=True, timeout=120) as r:
+            r.raise_for_status()
+            with open(gz_path, "wb") as f:
+                for chunk in r.iter_content(chunk_size=1 << 20):
+                    if chunk:
+                        f.write(chunk)
+        logging.info(f"✅ Download complete: {gz_path}")
+    else:
+        logging.info(f"✅ Found existing genome file: {gz_path}")
 
-    if response.status_code != 200:
-        raise RuntimeError(f"Failed to download {organism_code}: HTTP {response.status_code}")
+    def _run_cmd(cmd: list[str]):
+        """Run a shell command and raise an error if it fails."""
+        logging.info(f"Running: {' '.join(cmd)}")
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(f"Command failed: {' '.join(cmd)}\n{result.stderr}")
+        return result
 
-    with open(save_path, "wb") as f:
-        for chunk in response.iter_content(chunk_size=10 * 1024):
-            if chunk:
-                f.write(chunk)
+    # Step 2. Convert gzip → BGZF (via samtools)
+    if not bgzf_path.exists():
+        logging.info(f"Converting {gz_path.name} to BGZF format...")
+        _run_cmd(["gunzip", "-c", str(gz_path), "|", "bgzip", ">", str(bgzf_path)])
+        # Some environments may not interpret pipes; safer to split into two steps:
+        # 1. gunzip -> .fa
+        # 2. bgzip -> .fa.bgz
+        if not bgzf_path.exists():
+            _run_cmd(["gunzip", "-c", str(gz_path), ">", str(fasta_path)])
+            _run_cmd(["bgzip", "-f", str(fasta_path)])
+        logging.info(f"Converted to BGZF: {bgzf_path}")
+    else:
+        logging.info(f"Found existing BGZF file: {bgzf_path}")
 
-    print(f"Download complete: {save_path.resolve()}")
-    return save_path
+    # Step 3. Index with samtools
+    if not fai_path.exists():
+        logging.info(f"Indexing {bgzf_path.name} with samtools...")
+        _run_cmd(["samtools", "faidx", str(bgzf_path)])
+        logging.info(f"Index created: {fai_path}")
+    else:
+        logging.info(f"Index already exists: {fai_path}")
+
+    logging.info(f"Genome downloaded and converted to bgzf: {bgzf_path}")
+    return bgzf_path
 
 def download_jaspar_pfms(save_dir: str, tax_id: str = "10090", version: int = 2024, max_workers: int = 8):
     """
-    Download all TF PFM files from JASPAR REST API.
+    Download all JASPAR PFMs for a given organism (e.g., mouse) via REST API.
 
     Parameters
     ----------
     save_dir : str
         Directory to save .pfm files.
     tax_id : str
-        NCBI taxonomy code used by JASPAR
-        (e.g., '10090' for mouse, '9606' for human).
+        NCBI taxonomy ID (e.g., '10090' for mouse, '9606' for human).
     version : int
-        JASPAR database version (default 2024).
+        JASPAR release version.
     max_workers : int
-        Number of parallel threads for downloading.
+        Parallel download threads.
     """
-    base = f"https://jaspar.genereg.net/api/v1/matrix/?tax_id=10090&version={version}&page_size=500"
-
-    logging.info(f"Querying JASPAR {version} mouse matrices...")
-    response = requests.get(base)
-    response.raise_for_status()
-    data = response.json()
-
-    results = data["results"]
-    pfm_urls = {r["matrix_id"]: r["pfm"] for r in results}
-
-    logging.info(f"Found {len(pfm_urls)} motifs for mouse.")
-
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 
+    # List endpoint for this organism
+    list_url = f"https://jaspar.elixir.no/api/v1/matrix/?tax_id={tax_id}&version={version}&page_size=500"
+    logging.info(f"Fetching JASPAR matrices: {list_url}")
+
+    resp = requests.get(list_url)
+    resp.raise_for_status()
+    data = resp.json()
+
+    results = data.get("results", [])
+    logging.info(f"Found {len(results)} motifs for tax_id={tax_id}")
+
+    # Build URLs for PFMs
+    pfm_urls = {
+        r["matrix_id"]: f"{r['url']}?format=pfm"
+        for r in results if "url" in r
+    }
+
+    logging.info(f"Preparing to download {len(pfm_urls)} PFMs...")
+
     def _download(url: str, dest: Path, chunk_size: int = 1 << 18):
-        """Stream download a file to destination."""
+        """Stream a file to disk safely."""
         dest.parent.mkdir(parents=True, exist_ok=True)
         tmp = dest.with_suffix(dest.suffix + ".tmp")
-        try:
-            with requests.get(url, stream=True, timeout=60) as r:
-                r.raise_for_status()
-                with open(tmp, "wb") as f:
-                    for chunk in r.iter_content(chunk_size=chunk_size):
-                        if chunk:
-                            f.write(chunk)
-            tmp.replace(dest)
-            logging.info(f"  - {dest.name}")
-        except Exception as e:
-            logging.error(f"  - Failed to download {url}: {e}")
+        with requests.get(url, stream=True, timeout=60) as r:
+            r.raise_for_status()
+            with open(tmp, "wb") as f:
+                for chunk in r.iter_content(chunk_size=chunk_size):
+                    if chunk:
+                        f.write(chunk)
+        tmp.replace(dest)
+        logging.info(f"Downloaded {dest.name}")
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = []
-        for motif_id, url in pfm_urls.items():
-            dest = save_dir / f"{motif_id}.pfm"
+        for matrix_id, pfm_url in pfm_urls.items():
+            dest = save_dir / f"{matrix_id}.pfm"
             if not dest.exists():
-                futures.append(executor.submit(_download, url, dest))
+                futures.append(executor.submit(_download, pfm_url, dest))
             else:
                 logging.info(f"Already exists: {dest.name}")
-
         for fut in as_completed(futures):
-            fut.result()  # re-raise any exceptions
+            fut.result()
 
     logging.info(f"All PFMs saved under {save_dir.resolve()}")
+
 
 def ensure_string_v12_files(string_dir: str, string_org_code: str) -> Dict[str, str]:
     """

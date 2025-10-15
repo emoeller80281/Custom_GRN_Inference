@@ -343,6 +343,8 @@ if __name__ == "__main__":
     peak_locs_df = build_peak_locs_from_index(processed_atac_df.index)
 
     peak_bed_file = DATA_DIR / "processed" / "peaks.bed"
+    peak_bed_file.parent.mkdir(parents=True, exist_ok=True)
+    peak_locs_df.to_csv(peak_bed_file, sep="\t", header=False, index=False)
 
     peak_to_gene_dist_df = calculate_peak_to_tg_distance_score(
         peak_bed_file=peak_bed_file,
