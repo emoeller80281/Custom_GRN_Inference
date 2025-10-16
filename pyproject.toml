@@ -7,7 +7,7 @@ authors = [
 ]
 license = {text = "MIT License"}
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.9,<4.0"
 dependencies = [
     "anndata>=0.10.8",
     "bokeh>=3.4.2",
@@ -41,6 +41,7 @@ dependencies = [
     "biopython (>=1.85,<2.0)",
     "moods-python (>=1.9.4.1,<2.0.0.0)",
     "openpyxl (>=3.1.5,<4.0.0)",
+    "bioservices (>=1.12.1,<2.0.0)",
 ]
 
 [tool.poetry]

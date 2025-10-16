@@ -21,9 +21,7 @@ class Pathways:
     """
     Reads in and processes the KEGG pathways as networkx graphs
     """
-    def __init__(self, dataset_name, cv_threshold, output_path, data_file, gene_name_file, write_graphml, organism):
-        self.cv_threshold = cv_threshold # The cutoff value threshold for binarizing 
-        self.gene_list = self._find_genes(gene_name_file)
+    def __init__(self, dataset_name, output_path, organism):
         self.pathway_graphs = {}
         self.dataset_name = dataset_name
         self.output_path = os.path.join(output_path, "graphml_files/")
@@ -31,9 +29,6 @@ class Pathways:
         self.pathway_dict = {}
         self.organism = organism
         self.file_paths = {"pathway_xml_files": output_path}
-        
-        if self.cv_threshold:
-            self.filter_data()
 
         os.makedirs(self.output_path, exist_ok=True)
 
@@ -587,7 +582,7 @@ class Pathways:
         self.pathway_dict[pathway_code] = graph
 
 
-    def find_kegg_pathways(self, kegg_pathway_list: list, write_graphml: bool):
+    def find_kegg_pathways(self, kegg_pathway_list: list):
         """
         write_graphml = whether or not to write out a graphml (usually true)
         organism = organism code from kegg. Eg human = 'hsa', mouse = 'mus'
@@ -680,12 +675,6 @@ class Pathways:
 
         logging.info(f'\t\tAdding graphml pathways to rule_inference object...')
 
-        # Get a list of the genes in the dataset
-        if hasattr(self, "cv_genes"):
-            pathway_genes = set(self.cv_genes)
-        elif not hasattr(self, "cv_genes"):
-            pathway_genes = set(self.gene_list)
-
         def create_processed_networkx_graphml(G, pathway):
             """
             Reads in the graph and the pathway and filters out self edges and isolates
@@ -694,27 +683,18 @@ class Pathways:
             """
             nodes = set(G.nodes())
 
-            # Compute the number of nodes that overlap with the pathway genes
-            overlap = len(nodes.intersection(pathway_genes))
-
-            logging.info(f'\t\tPathway: {pathway} Overlap: {overlap} Edges: {len(G.edges())}')
+            logging.info(f'\t\tPathway: {pathway} Edges: {len(G.edges())}')
             nodes = list(G.nodes())
 
             if removeSelfEdges:
                 G.remove_edges_from(nx.selfloop_edges(G))  # remove self loops
-            # remove genes not in dataset
-            for pg in list(G.nodes()):
-                if pg not in pathway_genes:
-                    G.remove_node(pg)
-
 
             # graph post-processing
             # remove singletons/isolates
             G.remove_nodes_from(list(nx.isolates(G)))
 
             self.pathway_graphs[pathway] = G
-            logging.info(f'\t\t\tEdges after processing: {len(G.edges())} Overlap: {len(set(G.nodes()).intersection(pathway_genes))}')
-            filtered_overlap = len(set(G.nodes()).intersection(pathway_genes))
+            logging.info(f'\t\t\tEdges after processing: {len(G.edges())}')
 
             if write_graphml:
                 base = self.output_path
@@ -725,9 +705,6 @@ class Pathways:
                     fname = f"{fname}_processed.graphml"
                 out_path = os.path.join(base, fname)
                 nx.write_graphml(G, out_path, infer_numeric_types=True)
-
-
-        # Create the "_processed.graphml" files
 
         # If pathway_list is a list
         if isinstance(pathway_list, list):
@@ -775,12 +752,10 @@ class Pathways:
 def build_kegg_pkn(
     dataset_name: str,
     output_path,                    # same base dir you already use for KGML cache (e.g., DATA_DIR / "kegg_pathways")
-    gene_name_file,                 # same here (Pathways init), harmless defaults if you have them
     organism: str = "mmu",          # KEGG org code (e.g., 'mmu', 'hsa'); 'mm10' gets normalized in your code if you added that
     normalize_case: str = "upper",  # "upper" | "lower" | None
     out_csv: Union[str, None] = None,
     out_graphml: Union[str, None] = None, # writes the merged network
-    write_per_pathway_graphml: bool = False
 ) -> pd.DataFrame:
     """
     Build the FULL KEGG PKN by parsing all KGML pathways into a global directed graph,
@@ -792,18 +767,14 @@ def build_kegg_pkn(
     # 1) Build (or reuse cached) KEGG global network
     pw = Pathways(
         dataset_name=dataset_name,
-        cv_threshold=None,
         output_path=output_path,
-        gene_name_file=gene_name_file,
-        write_graphml=True,
         organism=organism
     )
-    kegg_pathway_list = []
+    kegg_pathway_list: list[str] = []
 
     logging.info("Discovering KEGG pathways…")
     pdict = pw.find_kegg_pathways(
         kegg_pathway_list=kegg_pathway_list,
-        write_graphml=write_per_pathway_graphml
     )
 
     logging.info("Composing global KEGG network…")

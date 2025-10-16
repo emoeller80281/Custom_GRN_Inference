@@ -122,7 +122,7 @@ def pseudo_bulk(
     pseudo_bulk_atac = sp.vstack(pseudo_bulk_atac).T
 
     pseudo_bulk_rna = pd.DataFrame(
-        pseudo_bulk_rna.toarray(),ee
+        pseudo_bulk_rna.toarray(),
         index=rna_data.var_names,
         columns=bulk_names,
     )
@@ -229,6 +229,37 @@ def filter_and_qc(adata_RNA: AnnData, adata_ATAC: AnnData) -> Tuple[AnnData, Ann
     adata_ATAC = adata_ATAC[common_barcodes].copy()
     
     return adata_RNA, adata_ATAC
+
+def process_10x_to_csv(raw_10x_rna_data_dir, raw_atac_peak_file, sample_name):
+        # --- load raw data ---
+        sample_raw_data_dir = os.path.join(raw_10x_rna_data_dir, sample_name)
+        adata_RNA = load_rna_adata(sample_raw_data_dir)
+        adata_RNA.obs_names = [(sample_name + "." + i).replace("-", ".") for i in adata_RNA.obs_names]
+        # adata_RNA.obs_names = [i.replace("-", ".") for i in adata_RNA.obs_names]
+        logging.info(f"[{sample_name}] Found {len(adata_RNA.obs_names)} RNA barcodes")
+        logging.info(f"  - First RNA barcode: {adata_RNA.obs_names[0]}")
+
+        label = pd.DataFrame({"barcode_use": adata_RNA.obs_names,
+                              "label": ["mESC"] * len(adata_RNA.obs_names)})
+
+        adata_ATAC = get_adata_from_peakmatrix(raw_atac_peak_file, label, sample_name)
+        
+        raw_sc_rna_df = pd.DataFrame(
+            adata_RNA.S,
+            index=adata_RNA.var_names,
+            columns=adata_RNA,
+        )
+        raw_sc_atac_df = pd.DataFrame(
+            adata_ATAC.X,
+            index=adata_ATAC.var_names,
+            columns=adata_ATAC,
+        )
+        
+        raw_rna_out = os.path.join(sample_raw_data_dir, "scRNA_seq_raw.csv")
+        raw_atac_out = os.path.join(sample_raw_data_dir, "scATAC_seq_raw.csv")
+        
+        raw_sc_rna_df.to_csv(raw_rna_out, header=True, index=True)
+        raw_sc_atac_df.to_csv(raw_atac_out, header=True, index=True)
     
 def process_sample(sample_name: str):
     sample_data_dir = os.path.join(SAMPLE_PROCESSED_DATA_DIR, sample_name)

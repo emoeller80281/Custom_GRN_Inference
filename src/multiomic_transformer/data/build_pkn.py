@@ -28,30 +28,34 @@ if __name__ == "__main__":
     trrust_file = TRRUST_DIR / "trrust_mouse_pkn.csv"
     kegg_file = KEGG_DIR / "kegg_mouse_pkn.csv"
 
-    if not os.path.isfile(string_file):
-        print("Building STRING prior knowledge network")
-        string_pkn = string_pathway.build_string_pkn(
-            string_dir=str(STRING_DIR),
-            string_org_code="10090",
-            as_directed=True,
-            out_csv=str(string_file)
+    # if not os.path.isfile(string_file):
+    #     print("Building STRING prior knowledge network")
+    #     string_pkn = string_pathway.build_string_pkn(
+    #         string_dir=str(STRING_DIR),
+    #         string_org_code="10090",
+    #         as_directed=True,
+    #         out_csv=str(string_file)
+    #     )
+    # else:
+    #     string_pkn = pd.read_csv(string_file)
+
+    # if not os.path.isfile(trrust_file):
+    #     print("Building TRRUST prior knowledge network")
+    #     trrust_pkn = trrust_pathway.build_trrust_pkn(
+    #         species="mouse",
+    #         out_csv=str(TRRUST_DIR / "trrust_mouse_pkn.csv")
+    #     )
+    # else:
+    #     trrust_pkn = pd.read_csv(trrust_file)
+
+    if not os.path.isfile(kegg_file):
+        print("Building KEGG prior knowledge network")
+        kegg_pkn = kegg_pathways.build_kegg_pkn(
+            dataset_name=DATASET_NAME,
+            output_path=str(KEGG_DIR),
+            organism="mmu",
+            out_csv=str(kegg_file)
         )
     else:
-        string_pkn = pd.read_csv(string_file)
-
-    if not os.path.isfile(trrust_file):
-        print("Building TRRUST prior knowledge network")
-        trrust_pkn = trrust_pathway.build_trrust_pkn(
-            species="mouse",
-            out_csv=str(TRRUST_DIR / "trrust_mouse_pkn.csv")
-        )
-    else:
-        trrust_pkn = pd.read_csv(trrust_file)
-
-    # print("Building KEGG prior knowledge network")
-    # kegg_pkn = kegg_pathways.build_kegg_pkn(
-    #     dataset_name=DATASET_NAME,
-    #     output_path=str(KEGG_DIR),
-    #     organism="mmu",
-    #     out_csv=str(KEGG_DIR / "kegg_mouse_pkn.csv")
-    # )
+        
+        kegg_pkn = pd.read_csv(kegg_file)

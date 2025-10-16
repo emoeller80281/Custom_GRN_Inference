@@ -394,7 +394,7 @@ def train_tg_gnn(edge_csv, ground_truth_csv, sep, global_features_csv, tf_embedd
 
     loss_fn = nn.BCEWithLogitsLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="max", factor=0.5, patience=10)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="max", factor=0.25, patience=100)
 
     logging.info(f"Using BCEWithLogitsLoss()")
     

@@ -17,7 +17,7 @@ from tqdm import tqdm
 import pybedtools
 
 import sys
-sys.path.append("/home/emoeller/github/grn_inference/src")
+sys.path.append(Path(__file__).resolve().parent.parent.parent)
 
 from multiomic_transformer.data.moods_scan import run_moods_scan_batched
 from multiomic_transformer.utils.standardize import standardize_name
@@ -103,6 +103,13 @@ def create_tf_tg_combination_files(genes):
 
     tf_tg_outdir = DATA_DIR / "tf_tg_combos"
     os.makedirs(tf_tg_outdir, exist_ok=True)
+    
+    if not os.path.isfile(tf_tg_outdir / "total_genes.csv"):
+        print("Writing total genes to 'total_genes.csv'")
+        with open(tf_tg_outdir / "total_genes.csv", 'w') as total_genes_file:
+            total_genes_file.write("Gene\n")
+            for i in genes:
+                total_genes_file.write(f"{i}\n")
     
     if not os.path.isfile(tf_tg_outdir / "tg_list.csv"):
         print("Writing TF list to 'tg_list.csv'")
@@ -276,12 +283,130 @@ def calculate_tf_tg_regulatory_potential(moods_sites_file, tf_tg_reg_pot_file):
     tf_tg_reg_pot.to_parquet(tf_tg_reg_pot_file, engine="pyarrow", compression="snappy")
     logging.info(f"Saved TF–TG regulatory potential with motif density: {tf_tg_reg_pot.shape}")
 
+def load_rna_adata(sample_raw_data_dir: str) -> sc.AnnData:
+    # Look for features file
+    features = [f for f in os.listdir(sample_raw_data_dir) if f.endswith("features.tsv.gz")]
+    assert len(features) == 1, f"Expected 1 features.tsv.gz, found {features}"
+
+    prefix = features[0].replace("features.tsv.gz", "")
+    logging.info(f"Detected RNA prefix: {prefix}")
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="Only considering the two last:")
+        adata = sc.read_10x_mtx(
+            sample_raw_data_dir,
+            var_names="gene_symbols",
+            make_unique=True,
+            prefix=prefix
+        )
+    return adata
+
+def process_10x_to_csv(raw_10x_rna_data_dir, raw_atac_peak_file, rna_outfile_path, atac_outfile_path):
+    
+    def load_rna_adata(sample_raw_data_dir: str) -> sc.AnnData:
+        # Look for features file
+        features = [f for f in os.listdir(sample_raw_data_dir) if f.endswith("features.tsv.gz")]
+        assert len(features) == 1, f"Expected 1 features.tsv.gz, found {features}"
+
+        prefix = features[0].replace("features.tsv.gz", "")
+        logging.info(f"Detected RNA prefix: {prefix}")
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message="Only considering the two last:")
+            adata = sc.read_10x_mtx(
+                sample_raw_data_dir,
+                var_names="gene_symbols",
+                make_unique=True,
+                prefix=prefix
+            )
+        return adata
+    
+    def get_adata_from_peakmatrix(peak_matrix_file: Path, label: pd.DataFrame, sample_name: str) -> AnnData:
+        logging.info(f"[{sample_name}] Reading ATAC peaks")
+        # Read header only
+        all_cols = pd.read_csv(peak_matrix_file, sep="\t", nrows=10).columns[1:]
+        logging.info(f"  - First ATAC Barcode: {all_cols[0]}")
+        
+        # Identify barcodes shared between RNA and ATAC
+        matching_barcodes = set(label["barcode_use"]) & set(all_cols)
+
+        # Map from original index -> normalized barcode
+        col_map = {i: bc for i, bc in enumerate(all_cols)}
+
+        # Always keep the first column (peak IDs)
+        keep_indices = [0] + [i for i, bc in col_map.items() if bc in matching_barcodes]
+
+        # Read only those columns
+        peak_matrix = pd.read_csv(
+            peak_matrix_file,
+            sep="\t",
+            # usecols=keep_indices,
+            index_col=0
+        )
+
+        # Replace column names with normalized barcodes
+        new_cols = [col_map[i] for i in keep_indices[1:]]
+        peak_matrix.columns = new_cols
+        new_cols = peak_matrix.columns
+
+        # Construct AnnData
+        X = sp.csr_matrix(peak_matrix.values)
+        adata_ATAC = AnnData(X=X.T)
+
+        # Assign metadata
+        adata_ATAC.obs_names = new_cols
+        adata_ATAC.obs["barcode"] = new_cols
+        adata_ATAC.obs["sample"] = sample_name
+        adata_ATAC.obs["label"] = label.set_index("barcode_use").loc[new_cols, "label"].values
+
+        adata_ATAC.var_names = peak_matrix.index
+        adata_ATAC.var["gene_ids"] = peak_matrix.index
+
+        return adata_ATAC
+    
+    # --- load raw data ---
+    sample_raw_data_dir = os.path.join(raw_10x_rna_data_dir, sample_name)
+    adata_RNA = load_rna_adata(sample_raw_data_dir)
+    adata_RNA.obs_names = [(sample_name + "." + i).replace("-", ".") for i in adata_RNA.obs_names]
+    # adata_RNA.obs_names = [i.replace("-", ".") for i in adata_RNA.obs_names]
+    logging.info(f"[{sample_name}] Found {len(adata_RNA.obs_names)} RNA barcodes")
+    logging.info(f"  - First RNA barcode: {adata_RNA.obs_names[0]}")
+
+    label = pd.DataFrame({"barcode_use": adata_RNA.obs_names,
+                            "label": ["mESC"] * len(adata_RNA.obs_names)})
+
+    adata_ATAC = get_adata_from_peakmatrix(raw_atac_peak_file, label, sample_name)
+    
+    raw_sc_rna_df = pd.DataFrame(
+        adata_RNA.S,
+        index=adata_RNA.var_names,
+        columns=adata_RNA,
+    )
+    raw_sc_atac_df = pd.DataFrame(
+        adata_ATAC.X,
+        index=adata_ATAC.var_names,
+        columns=adata_ATAC,
+    )
+    
+    os.makedirs(rna_outfile_path, exist_ok=True)
+    os.makedirs(atac_outfile_path, exist_ok=True)
+    
+    raw_sc_rna_df.to_csv(rna_outfile_path, header=True, index=True)
+    raw_sc_atac_df.to_csv(atac_outfile_path, header=True, index=True)
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-
-    rna_file = RAW_DATA / "DS012" / "scRNA_seq.csv"
-    atac_file = RAW_DATA / "DS012" / "peakMatrix.csv"
+    
+    sample_name = "E7.5_rep1"
+    
+    rna_file = RAW_DATA / sample_name / "scRNA_seq_raw.csv"
+    atac_file = RAW_DATA / sample_name / "scATAC_seq_raw.csv"
+    
+    if (not os.path.isfile(rna_file)) or (not os.path.isfile(atac_file)):
+        if RAW_10X_RNA_DATA_DIR is not None:
+            process_10x_to_csv(RAW_10X_RNA_DATA_DIR, RAW_ATAC_PEAK_MATRIX_FILE, rna_file, atac_file)
+        else:
+            logging.error("ERROR: Input RNA or ATAC file not found")
 
     rna_df = pd.read_csv(rna_file, delimiter="\t", header=0, index_col=0)
     atac_df = pd.read_csv(atac_file, delimiter="\t", header=0, index_col=0)
