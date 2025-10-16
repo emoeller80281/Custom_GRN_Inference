@@ -6,8 +6,8 @@
 #SBATCH -p compute
 #SBATCH -N 1
 #SBATCH --ntasks-per-node=1
-#SBATCH -c 32
-#SBATCH --mem=128G
+#SBATCH -c 64
+#SBATCH --mem=256G
 
 set -euo pipefail
 

@@ -147,7 +147,7 @@ def scan_pwms_batch(pfms, names, seqs, pval_threshold=1e-4, bg=None, pseudocount
     logging.debug(f"Using per-motif thresholds at p={pval_threshold}")
 
     fw_hits, rc_hits = [], []
-    for seq in tqdm(seqs, desc="Scanning sequences:", position=1):
+    for seq in tqdm(seqs, desc="Scanning sequences:", position=1, miniters=max(1, len(seqs) // 10)):
         fw_hits.append(MOODS.scan.scan_dna(seq, fwd_mats, thresholds, bg))
         rc_hits.append(MOODS.scan.scan_dna(seq, rc_mats, thresholds, bg))
 
@@ -182,7 +182,7 @@ def run_moods_scan_batched(
     n_cpus,
     pval_threshold=1e-4,
     bg="auto",
-    batch_size=5000,
+    batch_size=100,
 ):
     """
     Memory-efficient MOODS scanning by chunking peaks.

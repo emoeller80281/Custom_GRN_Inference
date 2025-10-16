@@ -108,6 +108,8 @@ def find_genes_near_peaks(
         names=cols,
         low_memory=False
     )
+    print(f"\npeak_tss_overlap_df")
+    print(peak_tss_overlap_df.head())
 
     # Coerce numeric cols safely & drop malformed rows
     for c in ["peak_start", "peak_end", "gene_start", "gene_end"]:

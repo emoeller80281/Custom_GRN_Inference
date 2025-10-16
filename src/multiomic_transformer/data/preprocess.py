@@ -219,6 +219,9 @@ def calculate_peak_to_tg_distance_score(
         logging.warning("Converting peak index to BED format (chr/start/end parsing)")
         mesc_atac_peak_loc_df = build_peak_locs_from_index(mesc_atac_peak_loc_df.index)
 
+    print("\nmesc_atac_peak_loc_df")
+    print(mesc_atac_peak_loc_df.head())
+    
     # Ensure numeric types
     mesc_atac_peak_loc_df["start"] = mesc_atac_peak_loc_df["start"].astype(int)
     mesc_atac_peak_loc_df["end"] = mesc_atac_peak_loc_df["end"].astype(int)
@@ -227,6 +230,9 @@ def calculate_peak_to_tg_distance_score(
     if not {"chrom", "start", "end", "name"}.issubset(gene_tss_df.columns):
         gene_tss_df = gene_tss_df.rename(columns={"chromosome_name": "chrom", "gene_start": "start", "gene_end": "end"})
 
+    print("\gene_tss_df")
+    print(gene_tss_df.head())
+    
     # Step 1: Write valid BED files if missing
     if not os.path.isfile(peak_bed_file) or not os.path.isfile(tss_bed_file) or force_recalculate:
         logging.info("Writing BED files for peaks and gene TSSs")
@@ -434,7 +440,7 @@ if __name__ == "__main__":
         else:
             logging.error("ERROR: Input RNA or ATAC file not found")
 
-    
+    logging.info("Reading RNA and ATAC files")
     rna_df = pd.read_csv(rna_file, delimiter=",", header=0, index_col=0)
     atac_df = pd.read_csv(atac_file, delimiter=",", header=0, index_col=0)
 
@@ -494,6 +500,9 @@ if __name__ == "__main__":
     pybedtools.BedTool.from_dataframe(
         peak_locs_df[["chromosome", "start", "end", "peak_id"]]
     ).saveas(peak_bed_file)
+    
+    print("peak_locs_df")
+    print(peak_locs_df.head())
 
     peak_to_gene_dist_df = calculate_peak_to_tg_distance_score(
         peak_bed_file=peak_bed_file,
@@ -501,6 +510,7 @@ if __name__ == "__main__":
         peak_gene_dist_file=SAMPLE_PROCESSED_DATA_DIR / sample_name / "peak_to_gene_dist.parquet",
         mesc_atac_peak_loc_df=peak_locs_df.rename(columns={"chromosome": "chrom"}),
         gene_tss_df=gene_tss_df,
+        force_recalculate=True
     )
     logging.info("Peak to Gene Distance DataFrame")
     logging.info(peak_to_gene_dist_df.head())
@@ -532,17 +542,16 @@ if __name__ == "__main__":
         peaks_bed_path = Path(peak_bed_file)
         peaks_df = pybedtools.BedTool(peaks_bed_path)
 
-        subset_jaspar_motifs = jaspar_pfm_paths[:50]
         logging.info("Running MOODS TF-peak binding calculation")
         run_moods_scan_batched(
             peaks_bed=peak_bed_file, 
             fasta_path=genome_fasta_file, 
-            motif_paths=subset_jaspar_motifs, 
+            motif_paths=jaspar_pfm_paths, 
             out_file=moods_sites_file, 
-            n_cpus=3,
+            n_cpus=32,
             pval_threshold=1e-3, 
             bg="auto",
-            batch_size=500
+            batch_size=32
         )
 
 
