@@ -100,28 +100,19 @@ def find_genes_near_peaks(
     logging.info(f"Locating peaks that are within {tss_distance_cutoff} bp of each gene's TSS")
     peak_tss_overlap = peak_bed.window(tss_bed, w=tss_distance_cutoff)
     
-    
-    # Define the column types for conversion to DataFrame
-    dtype_dict = {
-        "peak_chr": str,
-        "peak_start": int,
-        "peak_end": int,
-        "peak_id": str,
-        "gene_chr": str,
-        "gene_start": int,
-        "gene_end": int,
-        "gene_id": str
-    }
-    
-    # Convert the BedTool result to a DataFrame for further processing.
+    cols = [
+        "peak_chr", "peak_start", "peak_end", "peak_id",
+        "gene_chr", "gene_start", "gene_end", "gene_id"
+    ]
     peak_tss_overlap_df = peak_tss_overlap.to_dataframe(
-        names = [
-            "peak_chr", "peak_start", "peak_end", "peak_id",
-            "gene_chr", "gene_start", "gene_end", "gene_id"
-        ],
-        dtype=dtype_dict,
-        low_memory=False  # ensures the entire file is read in one go
-    ).rename(columns={"gene_id": "target_id"}).dropna()
+        names=cols,
+        low_memory=False
+    )
+
+    # Coerce numeric cols safely & drop malformed rows
+    for c in ["peak_start", "peak_end", "gene_start", "gene_end"]:
+        peak_tss_overlap_df[c] = pd.to_numeric(peak_tss_overlap_df[c], errors="coerce")
+    peak_tss_overlap_df = peak_tss_overlap_df.dropna(subset=["peak_start", "peak_end", "gene_start", "gene_end"]).copy()
         
     # Calculate the absolute distance in basepairs between the peak's end and gene's start.
     distances = np.abs(peak_tss_overlap_df["peak_end"].values - peak_tss_overlap_df["gene_start"].values)

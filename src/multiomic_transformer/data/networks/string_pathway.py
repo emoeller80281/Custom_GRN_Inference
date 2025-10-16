@@ -133,15 +133,23 @@ def write_string_pkn_batched(links_iterable, *, as_directed, out_csv=None, out_g
         # ---- Optional GraphML accumulation ----
         if out_graphml and len(G) < 5_000_000:  # guard: skip if too large
             if as_directed:
-                G.add_edges_from(
-                    zip(pkn_chunk["source_id"], pkn_chunk["target_id"]),
-                    **{k: pkn_chunk[k].tolist() for k in pkn_chunk.columns if k.startswith("string_")}
-                )
+                # Directed edges
+                for idx, (u, v) in enumerate(zip(pkn_chunk["source_id"], pkn_chunk["target_id"])):
+                    edge_attrs = {
+                        k: pkn_chunk.iloc[idx][k]
+                        for k in pkn_chunk.columns
+                        if k.startswith("string_")
+                    }
+                    G.add_edge(u, v, **edge_attrs)
             else:
-                G.add_edges_from(
-                    zip(pkn_chunk["protein_a"], pkn_chunk["protein_b"]),
-                    **{k: pkn_chunk[k].tolist() for k in pkn_chunk.columns if k.startswith("string_")}
-                )
+                for idx, (u, v) in enumerate(zip(pkn_chunk["protein_a"], pkn_chunk["protein_b"])):
+                    edge_attrs = {
+                        k: pkn_chunk.iloc[idx][k]
+                        for k in pkn_chunk.columns
+                        if k.startswith("string_")
+                    }
+                    G.add_edge(u, v, **edge_attrs)
+
 
         del pkn_chunk, chunk
         gc.collect()
@@ -169,7 +177,7 @@ def build_string_pkn(
     as_directed: bool = False,           # False -> undirected canonical pairs; True -> duplicate rows (both directions)
     out_csv: Union[str, None] = None,          # optional CSV path
     out_graphml: Union[str, None] = None       # optional GraphML path
-) -> pd.DataFrame:
+):
     """
     Build the FULL STRING v12.0 PKN (for one organism) as a tidy edge list with STRING scores.
 

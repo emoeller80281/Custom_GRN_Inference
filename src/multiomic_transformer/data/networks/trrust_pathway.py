@@ -31,7 +31,7 @@ def build_trrust_pkn(
     normalize_case: str = "upper",       # "upper" | "lower" | None
     out_csv: Union[str, None] = None,
     out_graphml: Union[str, None] = None
-) -> pd.DataFrame:
+):
     """
     Build the FULL TRRUST PKN (directed, signed) for a species.
 
@@ -99,5 +99,3 @@ def build_trrust_pkn(
         )
         nx.write_graphml(G, out_graphml)
         logging.info(f"Wrote TRRUST PKN GraphML → {out_graphml}")
-
-    return pkn

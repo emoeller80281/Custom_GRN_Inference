@@ -22,7 +22,7 @@ sys.path.append(Path(__file__).resolve().parent.parent.parent)
 from multiomic_transformer.data.moods_scan import run_moods_scan_batched
 from multiomic_transformer.utils.standardize import standardize_name
 from multiomic_transformer.utils.files import atomic_json_dump
-from multiomic_transformer.utils.peaks import find_genes_near_peaks
+from multiomic_transformer.utils.peaks import find_genes_near_peaks, format_peaks
 from multiomic_transformer.utils.downloads import *
 from config.settings import *
 
@@ -93,54 +93,55 @@ def create_tf_tg_combination_files(genes):
     tfs = overlap_tf["Gene Symbol"].to_list()
     tgs = [gene for gene in genes if gene not in tfs]
 
-    print(f"Number of TFs: {len(tfs):,}")
-    print(f"Number of TGs: {len(tgs):,}")
+    logging.info(f"Number of TFs: {len(tfs):,}")
+    logging.info(f"Number of TGs: {len(tgs):,}")
 
     mux = pd.MultiIndex.from_product([tfs, tgs], names=["TF", "TG"])
     tf_tg_df = mux.to_frame(index=False)
     
-    print(f"TF-TG combinations: {len(tf_tg_df):,}")
+    logging.info(f"TF-TG combinations: {len(tf_tg_df):,}")
 
     tf_tg_outdir = DATA_DIR / "tf_tg_combos"
     os.makedirs(tf_tg_outdir, exist_ok=True)
     
     if not os.path.isfile(tf_tg_outdir / "total_genes.csv"):
-        print("Writing total genes to 'total_genes.csv'")
+        logging.info("Writing total genes to 'total_genes.csv'")
         with open(tf_tg_outdir / "total_genes.csv", 'w') as total_genes_file:
             total_genes_file.write("Gene\n")
             for i in genes:
                 total_genes_file.write(f"{i}\n")
     
     if not os.path.isfile(tf_tg_outdir / "tg_list.csv"):
-        print("Writing TF list to 'tg_list.csv'")
+        logging.info("Writing TF list to 'tg_list.csv'")
         with open(tf_tg_outdir / "tg_list.csv", 'w') as tg_list_file:
             tg_list_file.write("TG\n")
             for i in tgs:
                 tg_list_file.write(f"{i}\n")
     
     if not os.path.isfile(tf_tg_outdir / "tf_list.csv"):
-        print("Writing TF list to 'tf_list.csv'")
+        logging.info("Writing TF list to 'tf_list.csv'")
         with open(tf_tg_outdir / "tf_list.csv", "w") as tf_list_file:
             tf_list_file.write("TF\n")
             for i in tfs:
                 tf_list_file.write(f"{i}\n")
     
     if not os.path.isfile(tf_tg_outdir / "tf_tg_combos.csv"):
-        print("Writing combinations to 'tf_tg_combos.csv'")
+        logging.info("Writing combinations to 'tf_tg_combos.csv'")
         tf_tg_df.to_csv(tf_tg_outdir / "tf_tg_combos.csv", header=True, index=False)
         
-    print("Done!")
+    logging.info("Done!")
 
     return tfs, tgs, tf_tg_df
 
 def make_chrom_gene_tss_df(gene_tss_file, genome_dir):
     gene_tss_bed = pybedtools.BedTool(gene_tss_file)
     gene_tss_df = (
-        gene_tss_bed
-        .saveas(os.path.join(genome_dir, f"gene_tss.bed"))
-        .to_dataframe()
+        gene_tss_bed.to_dataframe(header=None, usecols=[0, 1, 2, 3])
+        .rename(columns={0: "chrom", 1: "start", 2: "end", 3: "name"})
         .sort_values(by="start", ascending=True)
-        )
+    )
+    bed_path = os.path.join(genome_dir, "gene_tss.bed")
+    gene_tss_df.to_csv(bed_path, sep="\t", header=False, index=False)
     return gene_tss_df
 
 def build_global_tg_vocab(gene_tss_file, vocab_file):
@@ -175,19 +176,29 @@ def build_global_tg_vocab(gene_tss_file, vocab_file):
 
     return vocab
 
-def build_peak_locs_from_index(peak_index) -> pd.DataFrame:
+def build_peak_locs_from_index(peak_index: pd.Index) -> pd.DataFrame:
+    """
+    Parse peak IDs like 'chr1:100-200' into BED-format dataframe.
+    Returns columns: chrom, start, end, peak_id
+    """
     rows = []
     for pid in map(str, peak_index):
         m = re.match(r"^(chr)?(\w+)[_:](\d+)[-_:](\d+)$", pid)
         if not m:
-            raise ValueError(f"Cannot parse peak id: {pid!r}; expected formats like 'chr1:100-200'")
+            logging.warning(f"Skipping malformed peak ID: {pid}")
+            continue
         _, chrom_core, start, end = m.groups()
         chrom = f"chr{chrom_core}" if not chrom_core.startswith("chr") else chrom_core
         start, end = int(start), int(end)
         if start > end:
             start, end = end, start
         rows.append((chrom, start, end, pid))
-    return pd.DataFrame(rows, columns=["chrom", "start", "end", "peak_id"])
+
+    df = pd.DataFrame(rows, columns=["chrom", "start", "end", "peak_id"])
+    df = df[df["chrom"].str.match(r"^chr[\dXYM]+$")]  # keep valid chromosomes only
+    df = df.astype({"start": int, "end": int})
+    return df
+
 
 def calculate_peak_to_tg_distance_score(
     peak_bed_file,
@@ -198,35 +209,44 @@ def calculate_peak_to_tg_distance_score(
     max_peak_distance=1e6, 
     distance_factor_scale=25000, 
     force_recalculate=False
-    ) -> pd.DataFrame:
-    if not os.path.isfile(peak_gene_dist_file) or force_recalculate:
-        if not os.path.isfile(peak_bed_file) or not os.path.isfile(tss_bed_file) or force_recalculate:
-        
-            logging.info("Calculating peak to TG distance score")
-            peak_bed = pybedtools.BedTool.from_dataframe(
-                mesc_atac_peak_loc_df[["chrom", "start", "end", "peak_id"]]
-                ).saveas(peak_bed_file)
+) -> pd.DataFrame:
+    """
+    Compute peak-to-gene distance features (BEDTools-based), ensuring BED compliance.
+    """
+    # Validate and convert peaks to BED format
+    required_cols = {"chrom", "start", "end", "peak_id"}
+    if not required_cols.issubset(mesc_atac_peak_loc_df.columns):
+        logging.warning("Converting peak index to BED format (chr/start/end parsing)")
+        mesc_atac_peak_loc_df = build_peak_locs_from_index(mesc_atac_peak_loc_df.index)
 
-            tss_bed = pybedtools.BedTool.from_dataframe(
-                gene_tss_df[["chrom", "start", "end", "name"]]
-                ).saveas(tss_bed_file)
-            
-        peak_bed = pybedtools.BedTool(peak_bed_file)
-        tss_bed = pybedtools.BedTool(tss_bed_file)
-    
-        genes_near_peaks = find_genes_near_peaks(peak_bed, tss_bed, tss_distance_cutoff=max_peak_distance)
+    # Ensure numeric types
+    mesc_atac_peak_loc_df["start"] = mesc_atac_peak_loc_df["start"].astype(int)
+    mesc_atac_peak_loc_df["end"] = mesc_atac_peak_loc_df["end"].astype(int)
 
-        # Restrict to peaks within 1 Mb of a gene TSS
-        genes_near_peaks = genes_near_peaks[genes_near_peaks["TSS_dist"] <= max_peak_distance]
+    # Ensure proper columns for gene_tss_df
+    if not {"chrom", "start", "end", "name"}.issubset(gene_tss_df.columns):
+        gene_tss_df = gene_tss_df.rename(columns={"chromosome_name": "chrom", "gene_start": "start", "gene_end": "end"})
 
-        # Scale the TSS distance score by the exponential scaling factor
-        genes_near_peaks = genes_near_peaks.copy()
-        genes_near_peaks["TSS_dist_score"] = np.exp(-genes_near_peaks["TSS_dist"] / distance_factor_scale)
+    # Step 1: Write valid BED files if missing
+    if not os.path.isfile(peak_bed_file) or not os.path.isfile(tss_bed_file) or force_recalculate:
+        logging.info("Writing BED files for peaks and gene TSSs")
+        pybedtools.BedTool.from_dataframe(mesc_atac_peak_loc_df[["chrom", "start", "end", "peak_id"]]).saveas(peak_bed_file)
+        pybedtools.BedTool.from_dataframe(gene_tss_df[["chrom", "start", "end", "name"]]).saveas(tss_bed_file)
 
-        genes_near_peaks.to_parquet(peak_gene_dist_file, compression="snappy", engine="pyarrow")
-    else:
-        genes_near_peaks = pd.read_parquet(peak_gene_dist_file, engine="pyarrow")
-    
+    # Step 2: Run BEDTools overlap
+    logging.info(f"Locating peaks within ±{max_peak_distance:,} bp of TSSs")
+    peak_bed = pybedtools.BedTool(peak_bed_file)
+    tss_bed = pybedtools.BedTool(tss_bed_file)
+
+    genes_near_peaks = find_genes_near_peaks(peak_bed, tss_bed, tss_distance_cutoff=max_peak_distance)
+
+    # Step 3: Compute distances and scores
+    genes_near_peaks = genes_near_peaks[genes_near_peaks["TSS_dist"] <= max_peak_distance]
+    genes_near_peaks["TSS_dist_score"] = np.exp(-genes_near_peaks["TSS_dist"] / distance_factor_scale)
+
+    # Step 4: Save and return
+    genes_near_peaks.to_parquet(peak_gene_dist_file, compression="snappy", engine="pyarrow")
+    logging.info(f"Saved peak–gene distance table: {genes_near_peaks.shape}")
     return genes_near_peaks
 
 def calculate_tf_tg_regulatory_potential(moods_sites_file, tf_tg_reg_pot_file):
@@ -329,38 +349,44 @@ def process_10x_to_csv(raw_10x_rna_data_dir, raw_atac_peak_file, rna_outfile_pat
         
         # Identify barcodes shared between RNA and ATAC
         matching_barcodes = set(label["barcode_use"]) & set(all_cols)
+        logging.info(f"  - Matched {len(matching_barcodes):,} barcodes with scRNA-seq file")
 
         # Map from original index -> normalized barcode
         col_map = {i: bc for i, bc in enumerate(all_cols)}
 
         # Always keep the first column (peak IDs)
         keep_indices = [0] + [i for i, bc in col_map.items() if bc in matching_barcodes]
+        header = pd.read_csv(peak_matrix_file, sep="\t", nrows=0)
+        first_col = header.columns[0]
+        keep_cols = [first_col] + [c for c in header.columns[1:] if c in matching_barcodes]
+        compression = "gzip" if str(peak_matrix_file).endswith(".gz") else None
 
         # Read only those columns
+        logging.info("  - Reading data for matching barcodes")
         peak_matrix = pd.read_csv(
             peak_matrix_file,
             sep="\t",
-            # usecols=keep_indices,
-            index_col=0
+            usecols=keep_cols,
+            index_col=0,
+            compression=compression,
+            low_memory=False
         )
+        logging.info("\tDone reading filtered peak matrix")
 
         # Replace column names with normalized barcodes
         new_cols = [col_map[i] for i in keep_indices[1:]]
         peak_matrix.columns = new_cols
-        new_cols = peak_matrix.columns
 
         # Construct AnnData
-        X = sp.csr_matrix(peak_matrix.values)
-        adata_ATAC = AnnData(X=X.T)
-
-        # Assign metadata
-        adata_ATAC.obs_names = new_cols
-        adata_ATAC.obs["barcode"] = new_cols
-        adata_ATAC.obs["sample"] = sample_name
-        adata_ATAC.obs["label"] = label.set_index("barcode_use").loc[new_cols, "label"].values
-
+        logging.info("  - Constructing AnnData for scATAC-seq data")
+        adata_ATAC = AnnData(X=sp.csr_matrix(peak_matrix.values.T))
+        adata_ATAC.obs_names = peak_matrix.columns
         adata_ATAC.var_names = peak_matrix.index
-        adata_ATAC.var["gene_ids"] = peak_matrix.index
+        adata_ATAC.obs["barcode"] = adata_ATAC.obs_names
+        adata_ATAC.obs["sample"] = sample_name
+        adata_ATAC.obs["label"] = label.set_index("barcode_use").loc[peak_matrix.columns, "label"].values
+        
+        logging.info("\tDone!")
 
         return adata_ATAC
     
@@ -378,18 +404,18 @@ def process_10x_to_csv(raw_10x_rna_data_dir, raw_atac_peak_file, rna_outfile_pat
     adata_ATAC = get_adata_from_peakmatrix(raw_atac_peak_file, label, sample_name)
     
     raw_sc_rna_df = pd.DataFrame(
-        adata_RNA.S,
-        index=adata_RNA.var_names,
-        columns=adata_RNA,
+        adata_RNA.X.toarray() if sp.issparse(adata_RNA.X) else adata_RNA.X,
+        index=adata_RNA.obs_names,
+        columns=adata_RNA.var_names,
     )
     raw_sc_atac_df = pd.DataFrame(
-        adata_ATAC.X,
-        index=adata_ATAC.var_names,
-        columns=adata_ATAC,
+        adata_ATAC.X.toarray() if sp.issparse(adata_ATAC.X) else adata_ATAC.X,
+        index=adata_ATAC.obs_names,
+        columns=adata_ATAC.var_names,
     )
-    
-    os.makedirs(rna_outfile_path, exist_ok=True)
-    os.makedirs(atac_outfile_path, exist_ok=True)
+
+    os.makedirs(os.path.dirname(rna_outfile_path), exist_ok=True)
+    os.makedirs(os.path.dirname(atac_outfile_path), exist_ok=True)
     
     raw_sc_rna_df.to_csv(rna_outfile_path, header=True, index=True)
     raw_sc_atac_df.to_csv(atac_outfile_path, header=True, index=True)
@@ -408,22 +434,17 @@ if __name__ == "__main__":
         else:
             logging.error("ERROR: Input RNA or ATAC file not found")
 
-    rna_df = pd.read_csv(rna_file, delimiter="\t", header=0, index_col=0)
-    atac_df = pd.read_csv(atac_file, delimiter="\t", header=0, index_col=0)
+    
+    rna_df = pd.read_csv(rna_file, delimiter=",", header=0, index_col=0)
+    atac_df = pd.read_csv(atac_file, delimiter=",", header=0, index_col=0)
 
-    print(f"Number of peaks: {atac_df.shape[0]}")
-
-    atac_df = atac_df.iloc[:1500, :]
-
-    # Temporarily rename columns, the barcodes in my test don't line up
-    rna_df.columns = [f"cell_{i}" for i in range(1, rna_df.shape[1] + 1)]
-    atac_df.columns = [f"cell_{i}" for i in range(1, atac_df.shape[1] + 1)]
+    logging.info(f"Number of peaks: {atac_df.shape[0]}")
 
     genes = rna_df.index.to_list()
     peaks = atac_df.index.to_list()
 
-    print(genes[:5])
-    print(peaks[:5])
+    logging.info(genes[:5])
+    logging.info(peaks[:5])
 
     tfs, tgs, tf_tg_df = create_tf_tg_combination_files(genes)
 
@@ -431,14 +452,14 @@ if __name__ == "__main__":
     adata_atac = AnnData(atac_df.T)
     
     adata_rna_filtered, adata_atac_filtered = filter_and_qc(adata_rna, adata_atac)
-    # print(adata_rna_filtered.shape)
+    # logging.info(adata_rna_filtered.shape)
 
     if not os.path.isdir(GENOME_DIR):
         os.makedirs(GENOME_DIR)
     
     if not os.path.isfile(GENE_TSS_FILE):
         download_gene_tss_file(
-            save_dir=GENE_TSS_FILE,
+            save_file=GENE_TSS_FILE,
             gene_dataset_name="mmusculus_gene_ensembl",
         )
 
@@ -452,46 +473,49 @@ if __name__ == "__main__":
         index=adata_rna_filtered.obs_names,
         columns=adata_rna_filtered.var_names,
     ).T
+    
     processed_atac_df = pd.DataFrame(
         adata_atac_filtered.X,
         index=adata_atac_filtered.obs_names,
         columns=adata_atac_filtered.var_names,
     ).T
 
-    # print("Processed RNA df")
-    # print(processed_rna_df.head())
+    # logging.info("Processed RNA df")
+    # logging.info(processed_rna_df.head())
 
-    # print("\nProcessed ATAC df")
-    # print(processed_atac_df.head())
+    # logging.info("\nProcessed ATAC df")
+    # logging.info(processed_atac_df.head())
 
-    # Build peak locations from original ATAC peak names
-    peak_locs_df = build_peak_locs_from_index(processed_atac_df.index)
+    # Format peaks correctly into BED-compatible dataframe
+    peak_locs_df = format_peaks(pd.Series(processed_atac_df.index))
 
-    peak_bed_file = DATA_DIR / "processed" / "peaks.bed"
+    peak_bed_file = SAMPLE_PROCESSED_DATA_DIR / sample_name / "peaks.bed"
     peak_bed_file.parent.mkdir(parents=True, exist_ok=True)
-    peak_locs_df.to_csv(peak_bed_file, sep="\t", header=False, index=False)
+    pybedtools.BedTool.from_dataframe(
+        peak_locs_df[["chromosome", "start", "end", "peak_id"]]
+    ).saveas(peak_bed_file)
 
     peak_to_gene_dist_df = calculate_peak_to_tg_distance_score(
         peak_bed_file=peak_bed_file,
-        tss_bed_file= GENE_TSS_FILE,
-        peak_gene_dist_file= DATA_DIR / "processed" / "peak_to_gene_dist.parquet",
-        mesc_atac_peak_loc_df=peak_locs_df,
-        gene_tss_df= gene_tss_df,
+        tss_bed_file=GENE_TSS_FILE,
+        peak_gene_dist_file=SAMPLE_PROCESSED_DATA_DIR / sample_name / "peak_to_gene_dist.parquet",
+        mesc_atac_peak_loc_df=peak_locs_df.rename(columns={"chromosome": "chrom"}),
+        gene_tss_df=gene_tss_df,
     )
-    print("Peak to Gene Distance DataFrame")
-    print(peak_to_gene_dist_df.head())
+    logging.info("Peak to Gene Distance DataFrame")
+    logging.info(peak_to_gene_dist_df.head())
 
-    print("\nTF-TG Combinations")
-    print(tf_tg_df.head())
+    logging.info("\nTF-TG Combinations")
+    logging.info(tf_tg_df.head())
 
     # Calculate TF-peak binding score
-    moods_sites_file = DATA_DIR / "processed" / "moods_sites.parquet"
+    moods_sites_file = SAMPLE_PROCESSED_DATA_DIR / sample_name / "moods_sites.parquet"
     if not os.path.isfile(moods_sites_file):
 
-        jaspar_pfm_dir = DATA_DIR / "motif_information" / "mm10" / "JASPAR" / "pfm_files"
+        jaspar_pfm_dir = JASPAR_PFM_DIR
         if not os.path.isdir(jaspar_pfm_dir):
             download_jaspar_pfms(
-                jaspar_pfm_dir,
+                str(jaspar_pfm_dir),
                 tax_id="10090",
                 max_workers=3
                 )
@@ -500,7 +524,7 @@ if __name__ == "__main__":
         if not os.path.isfile(genome_fasta_file):
             download_genome_fasta(
                 organism_code="mm10",
-                save_location=genome_fasta_file
+                save_dir=GENOME_DIR
             )
 
         jaspar_pfm_paths = [os.path.join(jaspar_pfm_dir, f) for f in os.listdir(jaspar_pfm_dir) if f.endswith(".pfm")]
@@ -509,7 +533,7 @@ if __name__ == "__main__":
         peaks_df = pybedtools.BedTool(peaks_bed_path)
 
         subset_jaspar_motifs = jaspar_pfm_paths[:50]
-        print("Running MOODS TF-peak binding calculation")
+        logging.info("Running MOODS TF-peak binding calculation")
         run_moods_scan_batched(
             peaks_bed=peak_bed_file, 
             fasta_path=genome_fasta_file, 
@@ -556,21 +580,21 @@ if __name__ == "__main__":
         .reset_index()
         .rename(columns={"Symbol": "TF", 0: "mean_tf_expr"})
     )
-    print("mean_norm_tf_expr")
-    print(mean_norm_tf_expr)
+    logging.info("mean_norm_tf_expr")
+    logging.info(mean_norm_tf_expr)
 
-    print("\nmean_norm_tg_expr")
-    print(mean_norm_tg_expr)
+    logging.info("\nmean_norm_tg_expr")
+    logging.info(mean_norm_tg_expr)
 
     tf_tg_reg_pot_file = DATA_DIR / "processed" / "tf_tg_regulatory_potential.parquet"
     # if not os.path.isfile(tf_tg_reg_pot_file):
     calculate_tf_tg_regulatory_potential(moods_sites_file, tf_tg_reg_pot_file)
     
-    print("Loading TF-TG regulatory potential scores")
+    logging.info("Loading TF-TG regulatory potential scores")
     tf_tg_reg_pot = pd.read_parquet(tf_tg_reg_pot_file, engine="pyarrow")
-    print(tf_tg_reg_pot.head())
+    logging.info(tf_tg_reg_pot.head())
 
-    print("Loading ChIP-seq Ground Truth for Labeling Edges")
+    logging.info("Loading ChIP-seq Ground Truth for Labeling Edges")
     ground_truth_file = DATA_DIR / "ground_truth" / "RN111.tsv"
     ground_truth_df = read_ground_truth(ground_truth_file)
     ground_truth_df = ground_truth_df[["source_id", "target_id"]].rename(columns={
@@ -580,8 +604,8 @@ if __name__ == "__main__":
     ground_truth_df["TF"] = ground_truth_df["TF"].str.capitalize()
     ground_truth_df["TG"] = ground_truth_df["TG"].str.capitalize()
 
-    print("Merging TF-TG attributes with all combinations")
-    print("  - Merging TF-TG Regulatory Potential")
+    logging.info("Merging TF-TG attributes with all combinations")
+    logging.info("  - Merging TF-TG Regulatory Potential")
     tf_tg_df = pd.merge(
         tf_tg_df,
         tf_tg_reg_pot,
@@ -589,7 +613,7 @@ if __name__ == "__main__":
         on=["TF", "TG"]
     ).fillna(0)
 
-    print("  - Merging mean min-max normalized TF expression")
+    logging.info("  - Merging mean min-max normalized TF expression")
     tf_tg_df = pd.merge(
         tf_tg_df,
         mean_norm_tf_expr,
@@ -597,7 +621,7 @@ if __name__ == "__main__":
         on=["TF"]
     ).dropna(subset="mean_tf_expr")
 
-    print("  - Merging mean min-max normalized TG expression")
+    logging.info("  - Merging mean min-max normalized TG expression")
     tf_tg_df = pd.merge(
         tf_tg_df,
         mean_norm_tg_expr,
@@ -645,10 +669,10 @@ if __name__ == "__main__":
     tf_tg_balanced = pd.concat(balanced_rows, ignore_index=True)
     tf_tg_balanced = tf_tg_balanced.sample(frac=1, random_state=42).reset_index(drop=True)
 
-    print(tf_tg_balanced["label"].value_counts())
+    logging.info(tf_tg_balanced["label"].value_counts())
 
-    print(tf_tg_balanced.head())
+    logging.info(tf_tg_balanced.head())
 
     tf_tg_feature_file = DATA_DIR / "processed" / "tf_tg_data.parquet"
     tf_tg_balanced.to_parquet(tf_tg_feature_file, engine="pyarrow", compression="snappy")
-    print(f"\n Wrote TF-TG features to {tf_tg_feature_file}")
+    logging.info(f"\n Wrote TF-TG features to {tf_tg_feature_file}")

@@ -4,6 +4,7 @@ import requests
 import re
 import pandas as pd
 import numpy as np
+from collections import defaultdict
 from typing import Union
 from bs4 import BeautifulSoup
 import itertools
@@ -29,9 +30,42 @@ class Pathways:
         self.pathway_dict = {}
         self.organism = organism
         self.file_paths = {"pathway_xml_files": output_path}
+        self.pathway_list = self._create_global_organism_pathway_list()
 
         os.makedirs(self.output_path, exist_ok=True)
+        
+    def _create_global_organism_pathway_list(self):
+        
+        def silent_kegg_initialization():
+            """Initializes KEGG quietly"""
+            original_stdout = sys.stdout
+            original_stderr = sys.stderr
+            try:
+                sys.stdout = open('/dev/null', 'w')
+                sys.stderr = open('/dev/null', 'w')
+                kegg = KEGG(verbose=False) 
+            finally:
+                sys.stdout.close()
+                sys.stderr.close()
+                sys.stdout = original_stdout
+                sys.stderr = original_stderr
+            return kegg
+        
+        k = silent_kegg_initialization()  # read KEGG from bioservices
+        k.organism = self.organism
+        try:
+            response = requests.get(f"http://rest.kegg.jp/list/pathway/{self.organism}")
+            response.raise_for_status()
+            # KEGG returns lines like: "path:hsa00010\tGlycolysis / Gluconeogenesis"
+            pathway_list = [line.split("\t")[0].replace("path:", "") for line in response.text.strip().split("\n")]
+            return pathway_list
+        except Exception as e:
+            raise RuntimeError(f"Failed to fetch KEGG pathway list for {self.organism}: {e}")
 
+        
+    # Function to silence KEGG initialization to the terminal
+
+    
     def _count_generator(self, reader):
         b = reader(1024 * 1024)
         while b:
@@ -89,406 +123,140 @@ class Pathways:
             node_list.extend([node_id])
         return node_list
     
-    def read_kegg(self, lines, graph, KEGGdict, hsaDict):
-        # read all lines into a bs4 object using libXML parser
-        logging.info('\t\tReading KEGG xml file')
+    def read_kegg(self, lines, kegg_dict, org_dict, load_subpaths: bool = False):
+        """
+        Parse a KEGG KGML file into a NetworkX directed graph (gene-gene complete graph).
+        """
         soup = BeautifulSoup("".join(lines), "xml")
-        groups = {}  # store group IDs and list of sub-ids
-        id_to_name = {}  # map id numbers to names
+
+        groups = {}
+        id_to_name = {}
         subpaths = []
-        
-        # Look at each entry in the kgml file. Info: (https://www.kegg.jp/kegg/xml/)
+        G = nx.DiGraph()
+
+        # -----------------------------
+        # Parse <entry> elements
+        # -----------------------------
         for entry in soup.find_all("entry"):
+            entry_id = entry.get("id")
+            entry_type = entry.get("type", "")
+            entry_name_raw = entry.get("name", "")
+            parts = entry_name_raw.split(":")
 
-            # Name of each gene in the entry
-            # If there are multiple genes in the entry, store them all with the same id
-            entry_split = entry["name"].split(":")
-
-            # If the entry is part of a group (in the network coded by a group containing lots of related genes)
-            if len(entry_split) > 2:
-
-                # Choose which dictionary to use based on whether the entries are hsa or kegg elements
-                # Entries with hsa correspond to genes, entries with ko correspond to orthologs
-                if entry_split[0] == self.organism or entry_split[0] == "ko":
-                    if entry_split[0] == self.organism:
-                        useDict = hsaDict
-                    elif entry_split[0] == "ko":
-                        useDict = KEGGdict
-                    nameList = []
-                    
-                    # Split off the first name
-                    entry_name = ""
-                    namer = entry_split.pop(0)
-                    namer = entry_split.pop(0)
-                    namer = namer.split()[0]
-
-                    # Either use the dictionary name for the key or use the name directly if its not in the dictionary
-                    entry_name = (
-                        entry_name + useDict[namer]
-                        if namer in useDict.keys()
-                        else entry_name + namer
-                    )
-
-                    # Append each gene name to the list ([gene1, gene2])
-                    for i in range(len(entry_split)):
-                        nameList.append(entry_split[i].split()[0])
-
-                    # For each of the gene names, separate them with a "-" (gene1-gene2)
-                    for namer in nameList:
-                        entry_name = (
-                            entry_name + "-" + useDict[namer]
-                            if namer in useDict.keys()
-                            else entry_name + "-" + namer
-                        )
-                    entry_type = entry["type"]
-                else:
-                    entry_name = entry["name"]
-                    entry_type = entry["type"]
-            
-            # If there is only one name
+            if len(parts) == 1:
+                canonical_name = parts[0]
+            elif parts[0] in {self.organism, "ko"}:
+                d = org_dict if parts[0] == self.organism else kegg_dict
+                genes = [p.split()[0] for p in parts[1:]]
+                names = [d.get(g, g) for g in genes]
+                canonical_name = "-".join(names)
+            elif parts[0] == "path":
+                canonical_name = parts[-1]
+                entry_type = "path"
             else:
-                # If the name is hsa
-                if entry_split[0] == self.organism:
-                    entry_name = entry_split[1] # Get the entry number
-                    entry_type = entry["type"] # Get the entry type
-                    entry_name = ( # Get the gene name from the entry number if its in the hsa gene name dict
-                        hsaDict[entry_name] if entry_name in hsaDict.keys() else entry_name
-                    )
-                # If the name is ko, do the same as above but use the KEGGdict instead of the hsa gene name dict
-                elif entry_split[0] == "ko":
-                    entry_name = entry_split[1]
-                    entry_type = entry["type"]
-                    entry_name = (
-                        KEGGdict[entry_name]
-                        if entry_name in KEGGdict.keys()
-                        else entry_name
-                    )
-                # If the entry is another KEGG pathway number, store the name of the signaling pathway
-                elif entry_split[0] == "path":
-                    entry_name = entry_split[1]
-                    entry_type = "path"
-                # If none of the above, just store the name and type
-                else:
-                    entry_name = entry["name"]
-                    entry_type = entry["type"]
-            
-            # Get the unique entry ID for this pathway
-            entry_id = entry["id"]
+                canonical_name = entry_name_raw
 
-            # Some genes will have ',' at the end if there were more than one gene, remove that
-            entry_name = re.sub(",", "", entry_name)
-
-            # Map the id of the entry to the entry name
-            id_to_name[entry_id] = entry_name
-            # logging.info(f'Entry name: {entry_name} ID: {entry_id}')
-
-            # If the entry is a pathway, store the pathway name
+            canonical_name = re.sub(",", "", canonical_name)
+            id_to_name[entry_id] = canonical_name
             if entry_type == "path":
-                if entry_name not in subpaths:
-                    subpaths.append(entry_name)
-                
+                subpaths.append(canonical_name)
 
-            # If the entry type is a gene group, find all component ids and add them to the id dictionary for the entry
+            # store group members
             if entry_type == "group":
-                group_ids = []
-                for component in entry.find_all("component"):
-                    group_ids.append(component["id"])
-                groups[entry_id] = group_ids
-            
-            # If the entry is not a group, add its attributes to the graph
+                groups[entry_id] = [c["id"] for c in entry.find_all("component")]
             else:
-                graph.add_node(entry_name, name=entry_name, type=entry_type)
+                G.add_node(canonical_name, name=canonical_name, type=entry_type)
+                if entry_type in {"gene", "enzyme"}:
+                    G.nodes[canonical_name]["type"] = "gene"
 
-        # For each of the relationships
-        for relation in soup.find_all("relation"):
-            (color, signal) = ("black", "a")
+        # -----------------------------
+        # Parse <relation> (signaling)
+        # -----------------------------
+        for rel in soup.find_all("relation"):
+            e1, e2 = rel.get("entry1"), rel.get("entry2")
+            subtypes = [s.get("name", "") for s in rel.find_all("subtype")]
+            relation_type = rel.get("type", "")
 
-            relation_entry1 = relation["entry1"] # Upstream node
-            relation_entry2 = relation["entry2"] # Target node
-            relation_type = relation["type"] # Type of relationship (PPel, GEcrel, etc.)
-    
-            subtypes = []
-
-            # Relationship subtypes tell you about whats going on
-            for subtype in relation.find_all("subtype"):
-                subtypes.append(subtype["name"])
-    
-            if (
-                ("activation" in subtypes)
-                or ("expression" in subtypes)
-                or ("glycosylation" in subtypes)
-            ):
-                color = "green"
-                signal = "a"
-            elif ("inhibition" in subtypes) or ("repression" in subtypes):
-                color = "red"
-                signal = "i"
-            elif ("binding/association" in subtypes) or ("compound" in subtypes):
-                color = "purple"
-                signal = "a"
-            elif "phosphorylation" in subtypes:
-                color = "orange"
-                signal = "a"
+            signal = None
+            if any(s in subtypes for s in ["activation", "expression", "glycosylation"]):
+                color, signal = "green", "a"
+            elif any(s in subtypes for s in ["inhibition", "repression"]):
+                color, signal = "red", "i"
             elif "dephosphorylation" in subtypes:
-                color = "pink"
-                signal = "i"
-            elif "indirect effect" in subtypes:
-                color = "cyan"
-                signal = "a"
-            elif "dissociation" in subtypes:
-                color = "yellow"
-                signal = "i"
+                color, signal = "pink", "i"
             elif "ubiquitination" in subtypes:
-                color = "cyan"
-                signal = "i"
+                color, signal = "cyan", "i"
+            elif "phosphorylation" in subtypes:
+                color, signal = "orange", "a"
             else:
-                logging.debug("color not detected. Signal assigned to activation arbitrarily")
-                logging.debug(subtypes)
-                signal = "a"
+                color, signal = "black", None
 
-            # For entries that are a group of genes, get a list of all of the sub-id's in that group
-            entry1_list = self.expand_groups(relation_entry1, groups)
-            entry2_list = self.expand_groups(relation_entry2, groups)
+            for a, b in itertools.product(
+                self.expand_groups(e1, groups), self.expand_groups(e2, groups)
+            ):
+                if a in id_to_name and b in id_to_name:
+                    G.add_edge(
+                        id_to_name[a],
+                        id_to_name[b],
+                        color=color,
+                        subtype="/".join(subtypes),
+                        type=relation_type,
+                        signal=signal or "0",
+                    )
 
-            # Find all connections between objects in the groups and add them to the grapgh
-            for (entry1, entry2) in itertools.product(entry1_list, entry2_list):
-                node1 = id_to_name[entry1]
-                node2 = id_to_name[entry2]
-                # if (node1.count('-') < 10 or node2.count('-') < 10):
-                #     logging.info(f'{node1} --- {signal} ---> {node2}\n\t{"/".join(subtypes)}')
-                graph.add_edge(
-                    node1,
-                    node2,
-                    color=color,
-                    subtype="/".join(subtypes),
-                    type=relation_type,
-                    signal=signal,
-                )
-        
-        # ------------------ UNCOMMENTING THE FOLLOWING LOADS ALL REFERENCED SUBGRAPHS, WORK IN PROGRESS -------------------------------
-        logging.info(f'Subpaths:')
-        for path_name in subpaths:
-            logging.info(f'\t{path_name}')
+        # -----------------------------
+        # Parse <reaction> (metabolic)
+        # -----------------------------
+        # Map reaction IDs to genes
+        reaction_to_genes = defaultdict(set)
+        for entry in soup.find_all("entry"):
+            if entry.get("type") in {"gene", "enzyme"} and entry.get("reaction"):
+                for rid in entry.get("reaction").split():
+                    reaction_to_genes[rid.replace("rn:", "")].add(id_to_name[entry["id"]])
 
-        num_pathways = len(subpaths)
-        for pathway_num, pathway in enumerate(subpaths):
-            for xml_file in os.listdir(f'{self.file_paths["pathway_xml_files"]}/{self.organism}'):
-                xml_pathway_name = xml_file.split('.')[0]
-                if pathway == xml_pathway_name:
-                    with open(f'{self.file_paths["pathway_xml_files"]}/{self.organism}/{xml_file}', 'r') as pathway_file:
-                        text = [line for line in pathway_file]
-                    soup = BeautifulSoup("".join(text), "xml")
-                    for entry in soup.find_all("entry"):
-                        # logging.info(f'\nEntry:')
-                        # logging.info(f'\t{entry}')
+        # Parse reaction substrates/products
+        for rxn in soup.find_all("reaction"):
+            rid = rxn.get("name", "").replace("rn:", "")
+            subs = [s["name"] for s in rxn.find_all("substrate")]
+            prods = [p["name"] for p in rxn.find_all("product")]
 
-                        # Name of each gene in the entry
-                        # If there are multiple genes in the entry, store them all with the same id
-                        entry_split = entry["name"].split(":")
+            # add compound nodes
+            for c in subs + prods:
+                if not G.has_node(c):
+                    G.add_node(c, type="compound")
 
-                        # logging.info(f'\tentry_split: {entry_split}')
-                        # logging.info(f'\tlen(entry_split) : {len(entry_split)}')
-                        # If the entry is part of a group (in the network coded by a group containing lots of related genes)
-                        if len(entry_split) > 2:
+            # connect gene → reaction compounds
+            for g in reaction_to_genes.get(rid, []):
+                for p in prods:
+                    G.add_edge(g, p, type="metabolic_product", signal="0")
+                for s in subs:
+                    G.add_edge(s, g, type="metabolic_substrate", signal="0")
 
-                            # Choose which dictionary to use based on whether the entries are hsa or kegg elements
-                            # Entries with hsa correspond to genes, entries with ko correspond to orthologs
-                            if entry_split[0] == self.organism or entry_split[0] == "ko":
-                                if entry_split[0] == self.organism:
-                                    useDict = hsaDict
-                                elif entry_split[0] == "ko":
-                                    useDict = KEGGdict
-                                nameList = []
-                                
-                                # Split off the first name
-                                entry_name = ""
-                                namer = entry_split.pop(0)
-                                namer = entry_split.pop(0)
-                                namer = namer.split()[0]
+        # -----------------------------
+        # Collapse intermediates: gene→compound→gene
+        # -----------------------------
+        collapsed = nx.DiGraph()
+        for gene in [n for n, d in G.nodes(data=True) if d.get("type") == "gene"]:
+            for compound in G.successors(gene):
+                if G.nodes[compound].get("type") == "compound":
+                    downstream = [
+                        n for n in G.successors(compound)
+                        if G.nodes[n].get("type") == "gene"
+                    ]
+                    for g2 in downstream:
+                        if gene != g2:
+                            collapsed.add_edge(gene, g2, type="metabolic_influence", signal="0")
 
-                                # Either use the dictionary name for the key or use the name directly if its not in the dictionary
-                                entry_name = (
-                                    entry_name + useDict[namer]
-                                    if namer in useDict.keys()
-                                    else entry_name + namer
-                                )
-
-                                # Append each gene name to the list ([gene1, gene2])
-                                for i in range(len(entry_split)):
-                                    nameList.append(entry_split[i].split()[0])
-
-                                # For each of the gene names, separate them with a "-" (gene1-gene2)
-                                for namer in nameList:
-                                    entry_name = (
-                                        entry_name + "-" + useDict[namer]
-                                        if namer in useDict.keys()
-                                        else entry_name + "-" + namer
-                                    )
-                                entry_type = entry["type"]
-                            else:
-                                entry_name = entry["name"]
-                                entry_type = entry["type"]
-                        
-                        # If there is only one name
-                        else:
-                            # If the name is hsa
-                            if entry_split[0] == self.organism:
-                                entry_name = entry_split[1] # Get the entry number
-                                entry_type = entry["type"] # Get the entry type
-                                entry_name = ( # Get the gene name from the entry number if its in the hsa gene name dict
-                                    hsaDict[entry_name] if entry_name in hsaDict.keys() else entry_name
-                                )
-                            # If the name is ko, do the same as above but use the KEGGdict instead of the hsa gene name dict
-                            elif entry_split[0] == "ko":
-                                entry_name = entry_split[1]
-                                entry_type = entry["type"]
-                                entry_name = (
-                                    KEGGdict[entry_name]
-                                    if entry_name in KEGGdict.keys()
-                                    else entry_name
-                                )
-                            # If the entry is another KEGG pathway number, store the name of the signaling pathway
-                            elif entry_split[0] == "path":
-                                entry_name = entry_split[1]
-                                entry_type = "path"
-                            # If none of the above, just store the name and type
-                            else:
-                                entry_name = entry["name"]
-                                entry_type = entry["type"]
-                        
-                        # Get the unique entry ID for this pathway
-                        entry_id = entry["id"]
-
-                        # Some genes will have ',' at the end if there were more than one gene, remove that
-                        entry_name = re.sub(",", "", entry_name)
-
-                        # Map the id of the entry to the entry name
-                        id_to_name[entry_id] = entry_name
-                        # logging.info(f'Entry name: {entry_name} ID: {entry_id}')
-
-                        # # If the entry is a pathway, store the pathway name
-                        # if entry_type == "path":
-                        #     if entry_name not in subpaths:
-                        #         subpaths.append(entry_name)
-                            
-
-                        # If the entry type is a gene group, find all component ids and add them to the id dictionary for the entry
-                        if entry_type == "group":
-                            group_ids = []
-                            for component in entry.find_all("component"):
-                                group_ids.append(component["id"])
-                            groups[entry_id] = group_ids
-                        
-                        # If the entry is not a group, add its attributes to the graph
-                        else:
-                            graph.add_node(entry_name, name=entry_name, type=entry_type)
-
-                    # For each of the relationships
-                    for relation in soup.find_all("relation"):
-                        # logging.info(f'Relation:')
-                        # logging.info(f'\t{relation}')
-                        (color, signal) = ("black", "a")
-
-                        relation_entry1 = relation["entry1"] # Upstream node
-                        relation_entry2 = relation["entry2"] # Target node
-                        relation_type = relation["type"] # Type of relationship (PPel, GEcrel, etc.)
+        G_complete = nx.compose(G, collapsed)
                 
-                        subtypes = []
-
-                        # Relationship subtypes tell you about whats going on
-                        for subtype in relation.find_all("subtype"):
-                            subtypes.append(subtype["name"])
-                
-                        if (
-                            ("activation" in subtypes)
-                            or ("expression" in subtypes)
-                            or ("glycosylation" in subtypes)
-                        ):
-                            color = "green"
-                            signal = "a"
-                        elif ("inhibition" in subtypes) or ("repression" in subtypes):
-                            color = "red"
-                            signal = "i"
-                        elif ("binding/association" in subtypes) or ("compound" in subtypes):
-                            color = "purple"
-                            signal = "a"
-                        elif "phosphorylation" in subtypes:
-                            color = "orange"
-                            signal = "a"
-                        elif "dephosphorylation" in subtypes:
-                            color = "pink"
-                            signal = "i"
-                        elif "indirect effect" in subtypes:
-                            color = "cyan"
-                            signal = "a"
-                        elif "dissociation" in subtypes:
-                            color = "yellow"
-                            signal = "i"
-                        elif "ubiquitination" in subtypes:
-                            color = "cyan"
-                            signal = "i"
-                        else:
-                            logging.debug("color not detected. Signal assigned to activation arbitrarily")
-                            logging.debug(subtypes)
-                            signal = "a"
-
-                        # For entries that are a group of genes, get a list of all of the sub-id's in that group
-                        entry1_list = self.expand_groups(relation_entry1, groups)
-                        entry2_list = self.expand_groups(relation_entry2, groups)
-
-                        # Find all connections between objects in the groups and add them to the grapgh
-                        for (entry1, entry2) in itertools.product(entry1_list, entry2_list):
-                            node1 = id_to_name[entry1]
-                            node2 = id_to_name[entry2]
-                            # if (node1.count('-') < 10 or node2.count('-') < 10):
-                            # logging.info(f'{node1} --- {signal} ---> {node2}\n\t{"/".join(subtypes)}')
-                            graph.add_edge(
-                                node1,
-                                node2,
-                                color=color,
-                                subtype="/".join(subtypes),
-                                type=relation_type,
-                                signal=signal,
-                            )
+        return G_complete
 
 
-        ### --------------------------------------------------------------------------------------------------
-
-
-        # self.add_pathways(subpath_graphs, minOverlap=25, organism=self.organism)
-
-        return graph
-    
-
-    def write_xml_files(self, organism: str, pathway_list: list):
+    def write_xml_files(self, organism: str):
         """
         Reads in all xml files for the organism, faster to do this once at the start and just use
         the cached files. They aren't that big, so I'd rather store them at the beginning.
         """
-        # Function to silence KEGG initialization to the terminal
-        def silent_kegg_initialization():
-            original_stdout = sys.stdout
-            original_stderr = sys.stderr
-            try:
-                sys.stdout = open('/dev/null', 'w')
-                sys.stderr = open('/dev/null', 'w')
-                kegg = KEGG(verbose=False) 
-            finally:
-                sys.stdout.close()
-                sys.stderr.close()
-                sys.stdout = original_stdout
-                sys.stderr = original_stderr
-            return kegg
-    
-        k = silent_kegg_initialization()  # read KEGG from bioservices
-        k.organism = organism
-        try:
-            response = requests.get(f"http://rest.kegg.jp/list/pathway/{organism}")
-            response.raise_for_status()
-            # KEGG returns lines like: "path:hsa00010\tGlycolysis / Gluconeogenesis"
-            pathway_list = [line.split("\t")[0].replace("path:", "") for line in response.text.strip().split("\n")]
-        except Exception as e:
-            raise RuntimeError(f"Failed to fetch KEGG pathway list for {organism}: {e}")
         
         logging.info(f'\t\tDownloading pathway files, this may take a while...')
         base_dir = f'{self.file_paths["pathway_xml_files"]}/{organism}'
@@ -508,7 +276,7 @@ class Pathways:
             except Exception as e:
                 logging.debug(f"could not read code: {code} ({e})")
 
-        for pathway in tqdm(pathway_list):
+        for pathway in tqdm(self.pathway_list):
             # pathway may look like 'path:mmu04110' or 'mmu04110' or 'ko04110' — normalize to numeric id
             raw = pathway.replace("path:", "")
             num = re.sub(r"[a-zA-Z]+", "", raw)   # retain digits only
@@ -528,47 +296,49 @@ class Pathways:
 
     def parse_kegg_pathway(self, graph, pathway_code, pathway_num, num_pathways):
         """
-        Format and optionally write the KEGG pathway graph
-
-        Parameters
-        ----------
-        graph : networkx.DiGraph
-            The parsed pathway graph.
-        pathway_code : str
-            Full KEGG code like 'ko00010' or 'hsa00010'.
-        pathway_num : int
-            Index of the current pathway being processed (for progress logging).
-        num_pathways : int
-            Total number of pathways (for progress logging).
+        Clean and format a KEGG pathway graph:
+        - Split complex nodes (A-B) into separate genes
+        - Rewire incoming/outgoing edges
+        - Remove redundant group edges and self-loops
         """
-        # Remove complexes and rewire components
-        removeNodeList = [gene for gene in graph.nodes() if "-" in gene]
-        for rm in removeNodeList:
-            for start in list(graph.predecessors(rm)):
-                edge1 = graph.get_edge_data(start, rm)["signal"]
-                for element in rm.split("-"):
-                    graph.add_edge(start, element, signal=edge1)
-            for finish in list(graph.successors(rm)):
-                edge2 = graph.get_edge_data(rm, finish)["signal"]
-                for element in rm.split("-"):
-                    graph.add_edge(element, finish, signal=edge2)
+        # --- Attach pathway metadata ---
+        graph.graph["pathway"] = pathway_code
+        graph.graph["source"] = "ko" if pathway_code.startswith("ko") else self.organism
+
+        # --- Rewire complexes ---
+        remove_nodes = [n for n in graph.nodes if "-" in n]
+        for rm in remove_nodes:
+            preds = list(graph.predecessors(rm))
+            succs = list(graph.successors(rm))
+            parts = rm.split("-")
+
+            for start in preds:
+                edge_data = graph.get_edge_data(start, rm) or {}
+                signal = edge_data.get("signal", "a")
+                for g in parts:
+                    graph.add_edge(start, g, **edge_data)
+
+            for end in succs:
+                edge_data = graph.get_edge_data(rm, end) or {}
+                signal = edge_data.get("signal", "a")
+                for g in parts:
+                    graph.add_edge(g, end, **edge_data)
+
             graph.remove_node(rm)
 
-        # Remove redundant group dependency edges
+        # --- Remove redundant group edges ---
         for node in list(graph.nodes()):
-            predlist = list(graph.predecessors(node))
-            for pred in predlist:
+            preds = list(graph.predecessors(node))
+            for pred in preds:
                 if "-" in pred:
                     genes = pred.split("-")
-                    if all(g in predlist for g in genes):
+                    if all(g in preds for g in genes) and graph.has_edge(pred, node):
                         graph.remove_edge(pred, node)
 
-        # Remove self-loops
-        for u, v in list(graph.edges()):
-            if u == v:
-                graph.remove_edge(u, v)
+        # --- Remove self-loops ---
+        graph.remove_edges_from([(u, v) for u, v in graph.edges if u == v])
 
-        logging.info(f'\t\t\tPathway ({pathway_num}/{num_pathways}): {pathway_code} Edges: {len(graph.edges())}')
+        logging.info(f'Pathway ({pathway_num}/{num_pathways}): {pathway_code} Edges: {len(graph.edges())}')
 
         # Optional metadata
         if pathway_code.startswith(self.organism):
@@ -578,11 +348,13 @@ class Pathways:
 
         # Save graph
         out_file = os.path.join(self.output_path, f"{pathway_code}.graphml")
+        
+        graph = self._sanitize_for_graphml(graph)
         nx.write_graphml(graph, out_file)
         self.pathway_dict[pathway_code] = graph
 
 
-    def find_kegg_pathways(self, kegg_pathway_list: list):
+    def find_kegg_pathways(self):
         """
         write_graphml = whether or not to write out a graphml (usually true)
         organism = organism code from kegg. Eg human = 'hsa', mouse = 'mus'
@@ -596,8 +368,8 @@ class Pathways:
         logging.info("\t\t\tLoaded KEGG code dictionary")
         
         pathway_dict_path = f'{self.file_paths["pathway_xml_files"]}/{organism}_dict.csv'
-        aliasDict = {}
-        orgDict = {}
+        alias_dict = {}
+        org_dict = {}
 
         # If the dictionary file exists, use that (much faster than streaming)
         if f'{organism}_dict.csv' in os.listdir(f'{self.file_paths["pathway_xml_files"]}'):
@@ -607,7 +379,7 @@ class Pathways:
                     line = line.strip().split('\t')
                     k = line[0]
                     name = line[1]
-                    orgDict[k] = name
+                    org_dict[k] = name
 
         # If the dictionary file does not exist, write it and stream in the data for the dictionary
         else:
@@ -627,19 +399,19 @@ class Pathways:
                             nameline = name.split(",")
                             name = nameline[0]
                             for entry in range(1, len(nameline)):
-                                aliasDict[nameline[entry].strip()] = name.upper()
-                        orgDict[k] = name
+                                alias_dict[nameline[entry].strip()] = name.upper()
+                        org_dict[k] = name
                         kegg_dict_file.write(f'{k}\t{name}\n')
                 url.close()
             except:
                 logging.info("Could not get library: " + organism)
-
+        
         # Writes xml files for the pathways in the pathway list
-        self.write_xml_files(organism, kegg_pathway_list)
+        self.write_xml_files(organism)
 
         xml_file_path = os.listdir(f'{self.file_paths["pathway_xml_files"]}/{organism}')
 
-        def parse_xml_files(xml_file, pathway_name):
+        def parse_xml_files(xml_file):
             """
             Reads in the pathway xml file and parses the connections. Creates a networkx directed graph of the pathway
             """
@@ -647,24 +419,41 @@ class Pathways:
                 text = [line for line in pathway_file]
 
                 # Read the kegg xml file
-                graph = self.read_kegg(text, nx.DiGraph(), kegg_dict, orgDict)
+                graph = self.read_kegg(text, kegg_dict, org_dict)
 
                 # Parse the kegg pathway
                 pathway_code = xml_file.replace(".xml", "")
                 self.parse_kegg_pathway(graph, pathway_code, pathway_num, num_pathways)
 
-        pathway_list = list(kegg_pathway_list)
-        num_pathways = len(pathway_list)
+        num_pathways = len(self.pathway_list)
 
-        for pathway_num, pathway in tqdm(enumerate(pathway_list)):
-            for xml_pathway_name in xml_file_path:
-                if organism + pathway + '.xml' == xml_pathway_name:
-                    parse_xml_files(xml_pathway_name, pathway)
-
-                elif 'ko' + pathway + '.xml'== xml_pathway_name:
-                    parse_xml_files(xml_pathway_name, pathway)
-
-        return self.pathway_dict
+        for pathway_num, pathway in enumerate(self.pathway_list):
+            num = re.sub(r"[a-zA-Z]+", "", pathway)
+            
+            org_file = f"{organism}{num}.xml"
+            ko_file = f"ko{num}.xml"
+            
+            if org_file in xml_file_path:
+                parse_xml_files(org_file)
+            elif ko_file in xml_file_path:
+                parse_xml_files(ko_file)
+            else:
+                logging.info(f"No KGML file found for pathway {num}")
+                            
+    def _sanitize_for_graphml(self, G: nx.DiGraph):
+        for n, attrs in G.nodes(data=True):
+            for k, v in list(attrs.items()):
+                if isinstance(v, type):  # e.g. <class 'str'>
+                    G.nodes[n][k] = str(v)
+                elif v is None:
+                    G.nodes[n][k] = "0"
+        for u, v, attrs in G.edges(data=True):
+            for k, v in list(attrs.items()):
+                if isinstance(v, type):
+                    G.edges[u, v][k] = str(v)
+                elif v is None:
+                    G.edges[u, v][k] = "0"
+        return G
 
     def add_pathways(self, pathway_list, write_graphml=True, removeSelfEdges=False, organism='hsa'):
         """
@@ -704,7 +493,10 @@ class Pathways:
                 if not fname.endswith("_processed.graphml"):
                     fname = f"{fname}_processed.graphml"
                 out_path = os.path.join(base, fname)
-                nx.write_graphml(G, out_path, infer_numeric_types=True)
+                
+                
+                graph = self._sanitize_for_graphml(G)
+                nx.write_graphml(graph, out_path, infer_numeric_types=True)
 
         # If pathway_list is a list
         if isinstance(pathway_list, list):
@@ -719,19 +511,19 @@ class Pathways:
                 for pathway, G in pathway_list.items():
                     create_processed_networkx_graphml(G, pathway)
         
-    def build_global_network(self, pathway_dict, write_graphml=True, filename="all_kegg_pathways.graphml"):
+    def build_global_network(self, write_graphml=True, filename="all_kegg_pathways.graphml"):
         """
         Combine every pathway graph currently in `self.pathway_dict`
         into a single directed graph and (optionally) write it to disk.
         """
-        if not pathway_dict:
+        if not self.pathway_dict:
             raise ValueError("`pathway_dict` is empty – run `find_kegg_pathways` first")
 
         # Union of all edges/nodes (attributes are preserved; duplicates collapsed)
-        G_global = nx.compose_all(pathway_dict.values())
+        G_global = nx.compose_all(self.pathway_dict.values())
 
         # Tag every edge with the pathway(s) it came from
-        for path_code, g in pathway_dict.items():
+        for path_code, g in self.pathway_dict.items():
             for u, v, data in g.edges(data=True):
                 if (u, v) in G_global.edges:
                     G_global[u][v].setdefault("pathways", set()).add(path_code)
@@ -743,20 +535,88 @@ class Pathways:
                     d["pathways"] = ",".join(sorted(d["pathways"]))
 
             out_path = os.path.join(self.output_path, filename)
-            nx.write_graphml(G_global, out_path, infer_numeric_types=True)
+            graph = self._sanitize_for_graphml(G_global)
+            nx.write_graphml(graph, out_path, infer_numeric_types=True)
             logging.info(f"Wrote merged network with {G_global.number_of_nodes()} nodes "
                         f"and {G_global.number_of_edges()} edges → {out_path}")
 
         return G_global
 
+def collapse_metabolites(G: nx.DiGraph) -> nx.DiGraph:
+    """
+    Collapse compound nodes (CPD:Cxxxxx) into direct gene–gene edges.
+
+    Converts gene → compound → gene paths into gene → gene edges
+    with type='metabolic_influence' and signal='0'.
+    Propagates 'pathways' provenance from adjacent edges.
+    Removes compound nodes entirely.
+    """
+    import re
+    collapsed = nx.DiGraph()
+
+    # --- Identify KEGG compound nodes ---
+    compound_nodes = [
+        n for n, d in G.nodes(data=True)
+        if d.get("type") == "compound" or re.match(r"^CPD:C\d{5}$", str(n))
+    ]
+
+    for c in compound_nodes:
+        # Find all upstream and downstream gene nodes
+        upstream_genes = [
+            u for u in G.predecessors(c)
+            if G.nodes[u].get("type") == "gene"
+        ]
+        downstream_genes = [
+            v for v in G.successors(c)
+            if G.nodes[v].get("type") == "gene"
+        ]
+
+        # Create gene–gene influence edges
+        for g1 in upstream_genes:
+            for g2 in downstream_genes:
+                if g1 == g2:
+                    continue
+
+                # Collect pathways from both source→compound and compound→target edges
+                pathways = set()
+                if G.has_edge(g1, c):
+                    p1 = G[g1][c].get("pathways")
+                    if isinstance(p1, str):
+                        pathways.update(p1.split(","))
+                    elif isinstance(p1, (list, set)):
+                        pathways.update(p1)
+                if G.has_edge(c, g2):
+                    p2 = G[c][g2].get("pathways")
+                    if isinstance(p2, str):
+                        pathways.update(p2.split(","))
+                    elif isinstance(p2, (list, set)):
+                        pathways.update(p2)
+
+                collapsed.add_edge(
+                    g1,
+                    g2,
+                    type="metabolic_influence",
+                    signal="0",
+                    via=c,
+                    pathways=",".join(sorted(p for p in pathways if p)),
+                )
+
+    # --- Remove compound nodes and merge collapsed edges ---
+    G_no_cpds = G.copy()
+    G_no_cpds.remove_nodes_from(compound_nodes)
+    G_final = nx.compose(G_no_cpds, collapsed)
+
+    return G_final
+
+
 def build_kegg_pkn(
     dataset_name: str,
-    output_path,                    # same base dir you already use for KGML cache (e.g., DATA_DIR / "kegg_pathways")
+    output_path: Union[Path, str],
+    out_csv: Union[Path, str],
+    out_graphml: Union[Path, str],
     organism: str = "mmu",          # KEGG org code (e.g., 'mmu', 'hsa'); 'mm10' gets normalized in your code if you added that
     normalize_case: str = "upper",  # "upper" | "lower" | None
-    out_csv: Union[str, None] = None,
-    out_graphml: Union[str, None] = None, # writes the merged network
-) -> pd.DataFrame:
+):
     """
     Build the FULL KEGG PKN by parsing all KGML pathways into a global directed graph,
     then flattening to an edge list with sign and provenance.
@@ -770,15 +630,16 @@ def build_kegg_pkn(
         output_path=output_path,
         organism=organism
     )
-    kegg_pathway_list: list[str] = []
 
     logging.info("Discovering KEGG pathways…")
-    pdict = pw.find_kegg_pathways(
-        kegg_pathway_list=kegg_pathway_list,
-    )
+    pw.find_kegg_pathways()
 
     logging.info("Composing global KEGG network…")
-    G = pw.build_global_network(pdict, write_graphml=bool(out_graphml), filename="all_kegg_pathways.graphml")
+    G = pw.build_global_network(filename="all_kegg_pathways.graphml")
+    
+    G = collapse_metabolites(G)
+    
+    G = pw._sanitize_for_graphml(G)
 
     # 2) Flatten graph to PKN
     rows = []
@@ -815,21 +676,8 @@ def build_kegg_pkn(
         pkn["source_id"] = _canon(pkn["source_id"])
         pkn["target_id"] = _canon(pkn["target_id"])
 
-    # 3) Optional outputs
-    if out_csv:
-        os.makedirs(os.path.dirname(os.path.abspath(out_csv)), exist_ok=True)
-        pkn.to_csv(out_csv, index=False)
-        logging.info(f"Wrote KEGG PKN CSV → {out_csv}")
-
-    if out_graphml:
-        # we already wrote a merged GraphML of the *full* graph in pw.build_global_network if requested;
-        # but if you want a thin edge-attr-only version, we can also write it here:
-        H = nx.from_pandas_edgelist(
-            pkn, source="source_id", target="target_id",
-            edge_attr=["kegg_signal", "kegg_n_pathways", "kegg_pathways"],
-            create_using=nx.DiGraph()
-        )
-        nx.write_graphml(H, out_graphml)
-        logging.info(f"Wrote KEGG PKN GraphML → {out_graphml}")
-
-    return pkn
+    os.makedirs(os.path.dirname(os.path.abspath(out_csv)), exist_ok=True)
+    
+    pkn.to_csv(out_csv, index=False)
+    nx.write_graphml(G, out_graphml)
+    logging.info(f"Wrote KEGG PKN CSV → {out_csv}")

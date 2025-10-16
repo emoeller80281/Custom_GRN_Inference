@@ -109,9 +109,9 @@ def download_genome_fasta(organism_code: str, save_dir: Union[str, Path]):
                 for chunk in r.iter_content(chunk_size=1 << 20):
                     if chunk:
                         f.write(chunk)
-        logging.info(f"✅ Download complete: {gz_path}")
+        logging.info(f"  - Download complete: {gz_path}")
     else:
-        logging.info(f"✅ Found existing genome file: {gz_path}")
+        logging.info(f"  - Found existing genome file: {gz_path}")
 
     def _run_cmd(cmd: list[str]):
         """Run a shell command and raise an error if it fails."""
