@@ -161,8 +161,7 @@ def download_jaspar_pfms(save_dir: str, tax_id: str = "10090", version: int = 20
     max_workers : int
         Parallel download threads.
     """
-    save_dir = Path(save_dir)
-    save_dir.mkdir(parents=True, exist_ok=True)
+    os.makedirs(save_dir, exist_ok=True)
 
     # List endpoint for this organism
     list_url = f"https://jaspar.elixir.no/api/v1/matrix/?tax_id={tax_id}&version={version}&page_size=500"
@@ -183,8 +182,9 @@ def download_jaspar_pfms(save_dir: str, tax_id: str = "10090", version: int = 20
 
     logging.info(f"Preparing to download {len(pfm_urls)} PFMs...")
 
-    def _download(url: str, dest: Path, chunk_size: int = 1 << 18):
+    def _download(url: str, dest: str, chunk_size: int = 1 << 18):
         """Stream a file to disk safely."""
+        dest = Path(dest)
         dest.parent.mkdir(parents=True, exist_ok=True)
         tmp = dest.with_suffix(dest.suffix + ".tmp")
         with requests.get(url, stream=True, timeout=60) as r:
@@ -199,15 +199,15 @@ def download_jaspar_pfms(save_dir: str, tax_id: str = "10090", version: int = 20
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = []
         for matrix_id, pfm_url in pfm_urls.items():
-            dest = save_dir / f"{matrix_id}.pfm"
-            if not dest.exists():
+            dest = os.path.join(save_dir, f"{matrix_id}.pfm")
+            if not os.path.exists(dest):
                 futures.append(executor.submit(_download, pfm_url, dest))
             else:
-                logging.info(f"Already exists: {dest.name}")
+                logging.info(f"Already exists: {dest}")
         for fut in as_completed(futures):
             fut.result()
 
-    logging.info(f"All PFMs saved under {save_dir.resolve()}")
+    logging.info(f"All PFMs saved under {save_dir}")
 
 
 def ensure_string_v12_files(string_dir: str, string_org_code: str) -> Dict[str, str]:

@@ -15,6 +15,7 @@ from typing import Tuple
 from anndata import AnnData
 from tqdm import tqdm
 import pybedtools
+import argparse
 
 import sys
 sys.path.append(Path(__file__).resolve().parent.parent.parent)
@@ -24,6 +25,7 @@ from multiomic_transformer.utils.standardize import standardize_name
 from multiomic_transformer.utils.files import atomic_json_dump
 from multiomic_transformer.utils.peaks import find_genes_near_peaks, format_peaks
 from multiomic_transformer.utils.downloads import *
+from multiomic_transformer.data.sliding_window import run_sliding_window_scan
 from config.settings import *
 
 from grn_inference.utils import read_ground_truth
@@ -199,7 +201,6 @@ def build_peak_locs_from_index(peak_index: pd.Index) -> pd.DataFrame:
     df = df.astype({"start": int, "end": int})
     return df
 
-
 def calculate_peak_to_tg_distance_score(
     peak_bed_file,
     tss_bed_file,
@@ -245,6 +246,8 @@ def calculate_peak_to_tg_distance_score(
     tss_bed = pybedtools.BedTool(tss_bed_file)
 
     genes_near_peaks = find_genes_near_peaks(peak_bed, tss_bed, tss_distance_cutoff=max_peak_distance)
+    
+    genes_near_peaks = genes_near_peaks.rename(columns={"gene_id": "target_id"})
 
     # Step 3: Compute distances and scores
     genes_near_peaks = genes_near_peaks[genes_near_peaks["TSS_dist"] <= max_peak_distance]
@@ -255,59 +258,75 @@ def calculate_peak_to_tg_distance_score(
     logging.info(f"Saved peak–gene distance table: {genes_near_peaks.shape}")
     return genes_near_peaks
 
-def calculate_tf_tg_regulatory_potential(moods_sites_file, tf_tg_reg_pot_file):
-    logging.info(f"\nLoading MOODS TF-peak binding")
-    moods_hits = pd.read_parquet(moods_sites_file, engine="pyarrow")
+def calculate_tf_tg_regulatory_potential(sliding_window_score_file, tf_tg_reg_pot_file):
+    logging.info(f"\nLoading Sliding Window TF-peak binding")
+    sliding_window_df = pd.read_parquet(sliding_window_score_file, engine="pyarrow")
     
-    # Drop rows with missing TFs just in case
-    moods_hits = moods_hits.dropna(subset=["TF", "peak_id", "logodds"])
-    # Strip ".pfm" suffix from TF names if present
-    moods_hits["TF"] = moods_hits["TF"].str.replace(r"\.pfm$", "", regex=True).apply(standardize_name)
-    
-    # Compute per-TF binding probability across peaks
-    moods_hits["logodds_tf_softmax"] = moods_hits.groupby("peak_id")["logodds"].transform(softmax)
+    # --- Clean up ---
+    sliding_window_df = sliding_window_df.dropna(subset=["source_id", "peak_id", "sliding_window_score"])
+    sliding_window_df["source_id"] = (
+        sliding_window_df["source_id"]
+        .str.replace(r"\.pfm$", "", regex=True)
+        .apply(standardize_name)
+    )
 
-    # Merge with peak-to-gene distance scores
+    # --- Compute per-TF binding probability across peaks ---
+    sliding_window_df["sliding_window_tf_softmax"] = (
+        sliding_window_df.groupby("peak_id")["sliding_window_score"].transform(softmax)
+    )
+    
+    print("sliding_window_df peaks example:", sliding_window_df["peak_id"].head())
+    print("peak_to_gene_dist_df peaks example:", peak_to_gene_dist_df["peak_id"].head())
+    print("Common peaks:", set(sliding_window_df["peak_id"]).intersection(peak_to_gene_dist_df["peak_id"]))
+
+
+    # --- Merge with peak-to-gene distance scores ---
+    logging.info("  - Merging sliding window scores with peak-TSS distance scores")
     merged = pd.merge(
-        moods_hits[["peak_id", "TF", "logodds_tf_softmax"]],
+        sliding_window_df[["peak_id", "source_id", "sliding_window_tf_softmax"]],
         peak_to_gene_dist_df[["peak_id", "target_id", "TSS_dist_score"]],
         on="peak_id",
         how="inner"
     )
 
-    # Compute TF–TG contribution per peak
-    merged["tf_tg_contrib"] = merged["logodds_tf_softmax"] * merged["TSS_dist_score"]
+    # --- Compute TF–TG contribution per peak ---
+    merged["tf_tg_contrib"] = merged["sliding_window_tf_softmax"] * merged["TSS_dist_score"]
 
-    # Compute motif density
-    # motif_density = number of unique TF motifs per TF–TG (or per TF–TG–peak normalized)
+    # --- Compute motif density ---
     motif_density_df = (
-        merged.groupby(["TF", "target_id"], as_index=False)
-        .agg({
-            "peak_id": "nunique",                 # how many peaks with that TF
-        })
+        merged.groupby(["source_id", "target_id"], as_index=False)
+        .agg({"peak_id": "nunique"})
         .rename(columns={"peak_id": "motif_density"})
     )
 
-    # Log1p normalize the motif density
-    tf_tg_reg_pot["motif_density"] = np.log1p(tf_tg_reg_pot["motif_density"])
-
-    # Aggregate regulatory potential over peaks
+    # --- Aggregate regulatory potential per TF–TG ---
+    logging.info("  - Aggregating regulatory potential per TF-TG edge")
     tf_tg_reg_pot = (
-        merged.groupby(["TF", "target_id"], as_index=False)
+        merged.groupby(["source_id", "target_id"], as_index=False)
         .agg({"tf_tg_contrib": "sum"})
-        .rename(columns={"target_id": "TG", "tf_tg_contrib": "reg_potential"})
+        .rename(columns={
+            "source_id": "TF",
+            "target_id": "TG",
+            "tf_tg_contrib": "reg_potential"
+        })
     )
 
-    # Merge motif density back in
+    # --- Merge motif density back in ---
+    logging.info("  - Merging motif density to TF-TG regulatory potential DataFrame")
     tf_tg_reg_pot = tf_tg_reg_pot.merge(
-        motif_density_df.rename(columns={"target_id": "TG"}),
+        motif_density_df.rename(columns={"source_id": "TF", "target_id": "TG"}),
         on=["TF", "TG"],
         how="left"
     )
 
-    # Save
+    # --- Log1p normalize the motif density ---
+    logging.info("  - Log1p normalizing the motif density and saving")
+    tf_tg_reg_pot["motif_density"] = np.log1p(tf_tg_reg_pot["motif_density"].fillna(0))
+
+    # --- Save ---
     tf_tg_reg_pot.to_parquet(tf_tg_reg_pot_file, engine="pyarrow", compression="snappy")
     logging.info(f"Saved TF–TG regulatory potential with motif density: {tf_tg_reg_pot.shape}")
+
 
 def load_rna_adata(sample_raw_data_dir: str) -> sc.AnnData:
     # Look for features file
@@ -426,40 +445,106 @@ def process_10x_to_csv(raw_10x_rna_data_dir, raw_atac_peak_file, rna_outfile_pat
     raw_sc_rna_df.to_csv(rna_outfile_path, header=True, index=True)
     raw_sc_atac_df.to_csv(atac_outfile_path, header=True, index=True)
 
+def calculate_summed_tf_tg_score(sliding_window_with_targets: pd.DataFrame):
+    # Group by TF and sum all sliding window scores
+    sum_of_tf_peaks = (
+        sliding_window_with_targets
+        .groupby("source_id")["sliding_window_score"]
+        .sum()
+        .reset_index()
+        .rename(columns={"sliding_window_score":"total_tf_score"})
+        )
+    
+    # Group by TF-TG edge and sum for all peaks for that edge
+    sum_of_tf_tg_peak_scores = (
+        sliding_window_with_targets
+        .groupby(["source_id", "target_id"])["sliding_window_score"]
+        .sum()
+        .reset_index()
+        .rename(columns={"sliding_window_score":"tf_to_tg_peak_scores_summed"})
+        )
+    
+    # Merge the total TF peaks and summed TF-TG edges
+    sliding_window_sum_calculation_df = pd.merge(
+        sum_of_tf_tg_peak_scores, 
+        sum_of_tf_peaks, 
+        how="left", 
+        on="source_id"
+        )
+    
+    
+    sliding_window_sum_calculation_df["sliding_window_score"] = (
+        sliding_window_sum_calculation_df["tf_to_tg_peak_scores_summed"] / sliding_window_sum_calculation_df["total_tf_score"]
+        ) * 1e6
+    # sliding_window_sum_df = sliding_window_sum_calculation_df[["source_id", "target_id", "sliding_window_score"]]
+    
+    return sliding_window_sum_calculation_df
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+    parser = argparse.ArgumentParser(description="Convert NetworkX gpickle to Cosmograph binaries.")
+    parser.add_argument("--num_cpu", required=True, help="Number of cores for parallel processing")
+    args = parser.parse_args()
     
     sample_name = "E7.5_rep1"
     
-    rna_file = RAW_DATA / sample_name / "scRNA_seq_raw.csv"
-    atac_file = RAW_DATA / sample_name / "scATAC_seq_raw.csv"
+    sample_input_dir = RAW_DATA / sample_name
     
-    if (not os.path.isfile(rna_file)) or (not os.path.isfile(atac_file)):
-        if RAW_10X_RNA_DATA_DIR is not None:
-            process_10x_to_csv(RAW_10X_RNA_DATA_DIR, RAW_ATAC_PEAK_MATRIX_FILE, rna_file, atac_file)
-        else:
-            logging.error("ERROR: Input RNA or ATAC file not found")
+    processed_rna_file = sample_input_dir / "scRNA_seq_processed.parquet"
+    processed_atac_file = sample_input_dir / "scATAC_seq_processed.parquet"
+    
+    if (not os.path.isfile(processed_rna_file)) or (not os.path.isfile(processed_atac_file)):
+    
+        rna_file = sample_input_dir / "scRNA_seq_raw.csv"
+        atac_file = sample_input_dir / "scATAC_seq_raw.csv"
+        
+        if (not os.path.isfile(rna_file)) or (not os.path.isfile(atac_file)):
+            if RAW_10X_RNA_DATA_DIR is not None:
+                process_10x_to_csv(RAW_10X_RNA_DATA_DIR, RAW_ATAC_PEAK_MATRIX_FILE, rna_file, atac_file)
+            else:
+                logging.error("ERROR: Input RNA or ATAC file not found")
 
-    logging.info("Reading RNA and ATAC files")
-    rna_df = pd.read_csv(rna_file, delimiter=",", header=0, index_col=0)
-    atac_df = pd.read_csv(atac_file, delimiter=",", header=0, index_col=0)
+        logging.info("Reading RNA and ATAC files")
+        rna_df = pd.read_csv(rna_file, delimiter=",", header=0, index_col=0)
+        atac_df = pd.read_csv(atac_file, delimiter=",", header=0, index_col=0)
 
-    logging.info(f"Number of peaks: {atac_df.shape[0]}")
+        adata_rna = AnnData(rna_df.T)
+        adata_atac = AnnData(atac_df.T)
+        
+        adata_rna_filtered, adata_atac_filtered = filter_and_qc(adata_rna, adata_atac)
+        # logging.info(adata_rna_filtered.shape)
 
-    genes = rna_df.index.to_list()
-    peaks = atac_df.index.to_list()
+        processed_rna_df = pd.DataFrame(
+            adata_rna_filtered.X,
+            index=adata_rna_filtered.obs_names,
+            columns=adata_rna_filtered.var_names,
+        ).T
+        
+        processed_atac_df = pd.DataFrame(
+            adata_atac_filtered.X,
+            index=adata_atac_filtered.obs_names,
+            columns=adata_atac_filtered.var_names,
+        ).T
+        
+        processed_rna_df.to_parquet(sample_input_dir / "scRNA_seq_processed.parquet", engine="pyarrow", compression="snappy")
+        processed_atac_df.to_parquet(sample_input_dir / "scATAC_seq_processed.parquet", engine="pyarrow", compression="snappy")
+
+    else:
+        logging.info("Reading pre-processed RNA and ATAC files")
+        processed_rna_df = pd.read_parquet(processed_rna_file, engine="pyarrow")
+        processed_atac_df = pd.read_parquet(processed_atac_file, engine="pyarrow")
+    
+    logging.info(f"Number of peaks: {processed_atac_df.shape[0]}")
+
+    genes = processed_rna_df.index.to_list()
+    peaks = processed_atac_df.index.to_list()
 
     logging.info(genes[:5])
     logging.info(peaks[:5])
 
     tfs, tgs, tf_tg_df = create_tf_tg_combination_files(genes)
-
-    adata_rna = AnnData(rna_df.T)
-    adata_atac = AnnData(atac_df.T)
     
-    adata_rna_filtered, adata_atac_filtered = filter_and_qc(adata_rna, adata_atac)
-    # logging.info(adata_rna_filtered.shape)
-
+    
     if not os.path.isdir(GENOME_DIR):
         os.makedirs(GENOME_DIR)
     
@@ -474,24 +559,6 @@ if __name__ == "__main__":
         genome_dir=GENOME_DIR
     )
 
-    processed_rna_df = pd.DataFrame(
-        adata_rna_filtered.X,
-        index=adata_rna_filtered.obs_names,
-        columns=adata_rna_filtered.var_names,
-    ).T
-    
-    processed_atac_df = pd.DataFrame(
-        adata_atac_filtered.X,
-        index=adata_atac_filtered.obs_names,
-        columns=adata_atac_filtered.var_names,
-    ).T
-
-    # logging.info("Processed RNA df")
-    # logging.info(processed_rna_df.head())
-
-    # logging.info("\nProcessed ATAC df")
-    # logging.info(processed_atac_df.head())
-
     # Format peaks correctly into BED-compatible dataframe
     peak_locs_df = format_peaks(pd.Series(processed_atac_df.index))
 
@@ -500,9 +567,6 @@ if __name__ == "__main__":
     pybedtools.BedTool.from_dataframe(
         peak_locs_df[["chromosome", "start", "end", "peak_id"]]
     ).saveas(peak_bed_file)
-    
-    print("peak_locs_df")
-    print(peak_locs_df.head())
 
     peak_to_gene_dist_df = calculate_peak_to_tg_distance_score(
         peak_bed_file=peak_bed_file,
@@ -512,23 +576,18 @@ if __name__ == "__main__":
         gene_tss_df=gene_tss_df,
         force_recalculate=True
     )
-    logging.info("Peak to Gene Distance DataFrame")
-    logging.info(peak_to_gene_dist_df.head())
-
-    logging.info("\nTF-TG Combinations")
-    logging.info(tf_tg_df.head())
 
     # Calculate TF-peak binding score
-    moods_sites_file = SAMPLE_PROCESSED_DATA_DIR / sample_name / "moods_sites.parquet"
-    if not os.path.isfile(moods_sites_file):
+    sliding_window_score_file = SAMPLE_PROCESSED_DATA_DIR / sample_name / "sliding_window.parquet"
+    if not os.path.isfile(sliding_window_score_file):
 
-        jaspar_pfm_dir = JASPAR_PFM_DIR
-        if not os.path.isdir(jaspar_pfm_dir):
-            download_jaspar_pfms(
-                str(jaspar_pfm_dir),
-                tax_id="10090",
-                max_workers=3
-                )
+        # jaspar_pfm_dir = JASPAR_PFM_DIR
+        # # if not os.path.isdir(jaspar_pfm_dir):
+        # download_jaspar_pfms(
+        #     str(jaspar_pfm_dir),
+        #     tax_id="10090",
+        #     max_workers=3
+        #     )
         
         genome_fasta_file = GENOME_DIR / "mm10.fa.gz"
         if not os.path.isfile(genome_fasta_file):
@@ -537,23 +596,35 @@ if __name__ == "__main__":
                 save_dir=GENOME_DIR
             )
 
-        jaspar_pfm_paths = [os.path.join(jaspar_pfm_dir, f) for f in os.listdir(jaspar_pfm_dir) if f.endswith(".pfm")]
+        # jaspar_pfm_paths = [os.path.join(jaspar_pfm_dir, f) for f in os.listdir(jaspar_pfm_dir) if f.endswith(".pfm")]
         
         peaks_bed_path = Path(peak_bed_file)
         peaks_df = pybedtools.BedTool(peaks_bed_path)
+        
+        tf_info_file = DATA_DIR / "databases/motif_information/mm10/TF_Information_all_motifs.txt"
+        motif_dir = DATA_DIR / "databases/motif_information/mm10/mm10_motif_meme_files"
 
-        logging.info("Running MOODS TF-peak binding calculation")
-        run_moods_scan_batched(
-            peaks_bed=peak_bed_file, 
-            fasta_path=genome_fasta_file, 
-            motif_paths=jaspar_pfm_paths, 
-            out_file=moods_sites_file, 
-            n_cpus=32,
-            pval_threshold=1e-3, 
-            bg="auto",
-            batch_size=32
+        # logging.info("Running MOODS TF-peak binding calculation")
+        # run_moods_scan_batched(
+        #     peaks_bed=peak_bed_file, 
+        #     fasta_path=genome_fasta_file, 
+        #     motif_paths=jaspar_pfm_paths, 
+        #     out_file=moods_sites_file, 
+        #     n_cpus=min(8, int(args.num_cpu)),
+        #     pval_threshold=1e-4, 
+        #     bg="auto",
+        #     batch_size=25
+        # )
+        
+        run_sliding_window_scan(
+            tf_name_list=tfs,
+            tf_info_file=str(tf_info_file),
+            motif_dir=str(motif_dir),
+            genome_fasta=str(genome_fasta_file),
+            peak_bed_file=str(peak_bed_file),
+            output_dir=str(SAMPLE_PROCESSED_DATA_DIR / sample_name),
+            num_cpu=min(8, int(args.num_cpu))
         )
-
 
     # Get the 0-1 MinMax normalized ATAC accessibility
     def minmax_scale_across_cells(df):
@@ -580,33 +651,28 @@ if __name__ == "__main__":
         norm_tg_df
         .mean(axis=1)
         .reset_index()
-        .rename(columns={"Symbol": "TG", 0: "mean_tg_expr"})
+        .rename(columns={"index": "TG", 0: "mean_tg_expr"})
     )
 
     mean_norm_tf_expr = (
         norm_tf_df
         .mean(axis=1)
         .reset_index()
-        .rename(columns={"Symbol": "TF", 0: "mean_tf_expr"})
+        .rename(columns={"index": "TF", 0: "mean_tf_expr"})
     )
-    logging.info("mean_norm_tf_expr")
-    logging.info(mean_norm_tf_expr)
 
-    logging.info("\nmean_norm_tg_expr")
-    logging.info(mean_norm_tg_expr)
-
-    tf_tg_reg_pot_file = DATA_DIR / "processed" / "tf_tg_regulatory_potential.parquet"
-    # if not os.path.isfile(tf_tg_reg_pot_file):
-    calculate_tf_tg_regulatory_potential(moods_sites_file, tf_tg_reg_pot_file)
+    tf_tg_reg_pot_file = SAMPLE_PROCESSED_DATA_DIR / sample_name / "tf_tg_regulatory_potential.parquet"
+    if not os.path.isfile(tf_tg_reg_pot_file):
+        calculate_tf_tg_regulatory_potential(sliding_window_score_file, tf_tg_reg_pot_file)
     
     logging.info("Loading TF-TG regulatory potential scores")
     tf_tg_reg_pot = pd.read_parquet(tf_tg_reg_pot_file, engine="pyarrow")
     logging.info(tf_tg_reg_pot.head())
 
     logging.info("Loading ChIP-seq Ground Truth for Labeling Edges")
-    ground_truth_file = DATA_DIR / "ground_truth" / "RN111.tsv"
-    ground_truth_df = read_ground_truth(ground_truth_file)
-    ground_truth_df = ground_truth_df[["source_id", "target_id"]].rename(columns={
+    ground_truth_file = DATA_DIR / "ground_truth_files" / "combined_ground_truth_no_rn111_or_rn112_edges.csv"
+    ground_truth_df = pd.read_csv(ground_truth_file)
+    ground_truth_df = ground_truth_df.rename(columns={
         "source_id":"TF",
         "target_id":"TG"
     })
@@ -623,6 +689,10 @@ if __name__ == "__main__":
     ).fillna(0)
 
     logging.info("  - Merging mean min-max normalized TF expression")
+    
+    logging.info(f"tf_tg_df columns: {list(tf_tg_df.columns)}")
+    logging.info(f"mean_norm_tf_expr columns: {list(mean_norm_tf_expr.columns)}")
+
     tf_tg_df = pd.merge(
         tf_tg_df,
         mean_norm_tf_expr,
@@ -637,6 +707,10 @@ if __name__ == "__main__":
         how="left",
         on=["TG"]
     ).dropna(subset="mean_tg_expr")
+    
+    tf_tg_df["expr_product"] = tf_tg_df["mean_tf_expr"] * tf_tg_df["mean_tg_expr"]
+    tf_tg_df["log_reg_pot"] = np.log1p(tf_tg_df["reg_potential"])
+    tf_tg_df["motif_present"] = (tf_tg_df["motif_density"] > 0).astype(int)
 
     # Create a set of ground-truth pairs
     gt_pairs = set(zip(ground_truth_df["TF"], ground_truth_df["TG"]))
@@ -649,6 +723,11 @@ if __name__ == "__main__":
 
     true_df = tf_tg_df[tf_tg_df["label"] == 1]
     false_df = tf_tg_df[tf_tg_df["label"] == 0]
+    
+    print(tf_tg_df["TF"].nunique(), "TFs in training")
+    print(tf_tg_df["TG"].nunique(), "TGs in training")
+    print(tf_tg_df["label"].value_counts())
+    print(tf_tg_df.describe())
 
     # For each TF, randomly choose one false TG for each true TG
     balanced_rows = []
@@ -682,6 +761,6 @@ if __name__ == "__main__":
 
     logging.info(tf_tg_balanced.head())
 
-    tf_tg_feature_file = DATA_DIR / "processed" / "tf_tg_data.parquet"
+    tf_tg_feature_file = SAMPLE_PROCESSED_DATA_DIR / sample_name / "tf_tg_data.parquet"
     tf_tg_balanced.to_parquet(tf_tg_feature_file, engine="pyarrow", compression="snappy")
     logging.info(f"\n Wrote TF-TG features to {tf_tg_feature_file}")

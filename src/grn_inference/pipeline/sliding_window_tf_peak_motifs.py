@@ -390,6 +390,54 @@ def replace_nth(sub,repl,txt,nth):
 
     return part1+repl+part2
 
+def run_sliding_window_scan(
+    peak_to_gene_dist_df: pd.DataFrame,
+    tf_names_file: str,
+    meme_dir: str,
+    reference_genome_dir: str,
+    output_dir: str,
+    species: str,
+    num_cpu: int,
+    fig_dir: str,
+):
+    tmp_dir = f"{output_dir}/tmp"
+    os.makedirs(tmp_dir, exist_ok=True)
+        
+    peak_ids = peak_to_gene_dist_df["peak_id"].drop_duplicates()
+    gene_names = peak_to_gene_dist_df["gene_id"].drop_duplicates()
+    
+    # Read in the peak dataframe containing genomic sequences    
+    parsed_peak_file = f'{tmp_dir}/peak_sequences.pkl'
+    if os.path.isfile(parsed_peak_file):
+        logging.info('Reading ATACseq peaks from pickle file')
+        chr_pos_to_seq = pd.read_pickle(parsed_peak_file)
+        
+    # Create the peak dataframe containing genomic sequences if it doesn't exist
+    else:
+            
+        logging.info(f'  - Identifying ATACseq peak sequences')
+        peak_df = format_peaks(peak_ids)
+        
+        # Get the genomic sequence from the reference genome to each ATACseq peak
+        chr_pos_to_seq = find_ATAC_peak_sequence(peak_df, reference_genome_dir, parsed_peak_file, fig_dir)
+        
+        # Write the peak sequences to a pickle file in the tmp dir
+        logging.info('Writing to pickle file')
+        chr_pos_to_seq.to_pickle(parsed_peak_file)
+        logging.info(f'\tDone!')
+        
+    # Associate the TFs from TF_Information_all_motifs.txt to the motif with the matching motifID
+    df = associate_tf_with_motif_pwm(
+        tf_names_file, meme_dir, chr_pos_to_seq,
+        gene_names, species, num_cpu, output_dir
+    )
+    
+    plot_feature_score_histogram(df, "sliding_window_score", output_dir)
+
+    df.to_parquet(f"{output_dir}/sliding_window.parquet", engine="pyarrow", compression="snappy")
+    logging.info(f"Wrote final TF–peak sliding window scores to sliding_window_tf_to_peak_score.parquet")
+
+
 def main():
     # Parse arguments
     args: argparse.Namespace = parse_args()

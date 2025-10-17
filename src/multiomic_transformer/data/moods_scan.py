@@ -1,17 +1,21 @@
 import os
+import gc
 import numpy as np
 import pandas as pd
+import psutil
 from pathlib import Path
 from pyfaidx import Fasta
-from Bio import motifs
 import pybedtools
+import MOODS.parsers
 import MOODS.scan
 import MOODS.tools
 import logging
 import pyfaidx
+from typing import List, Tuple, Any
 from tqdm import tqdm
 from joblib import Parallel, delayed
 from glob import glob
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(message)s"
@@ -20,24 +24,36 @@ logging.basicConfig(
 DNA = "ACGT"
 IDX = {c:i for i,c in enumerate(DNA)}
 
-def load_pfms(pfm_paths):
-    logging.info(f"Loading PFMs from {len(pfm_paths)} files")
-    pfms, names = [], []
-    for p in pfm_paths:
-        with open(p) as f:
-            for m in motifs.parse(f, "jaspar"):
-                pfm = [[m.counts[nuc][i] for nuc in "ACGT"] for i in range(m.length)]
-                pfms.append(pfm)
-                
-                # prefer motif name, else file basename
-                raw_name = m.name or os.path.basename(p)
-                # strip .pfm suffix if present
-                if raw_name.lower().endswith(".pfm"):
-                    raw_name = raw_name[:-4]
-                # capitalize (first letter uppercase, rest lowercase)
-                clean_name = raw_name.capitalize()
-                names.append(clean_name)
-    return pfms, names
+def load_pfms(pfm_paths, pseudocount=0.001, bg=None):
+    """
+    Load PFMs from .pfm files and convert them directly to log-odds matrices using MOODS.
+
+    Returns:
+        score_mats (list): List of [4 x L] log-odds matrices
+        names (list): Motif names derived from file basenames
+    """
+    if bg is None:
+        bg = MOODS.tools.flat_bg(4)
+
+    score_mats = []
+    names = []
+
+    logging.info(f"Loading {len(pfm_paths)} PFMs using MOODS.parsers.pfm_to_log_odds")
+
+    for path in pfm_paths:
+        mat = MOODS.parsers.pfm_to_log_odds(path, bg, pseudocount)
+        if not mat or len(mat) != 4 or any(len(row) == 0 for row in mat):
+            logging.warning(f"Skipping malformed PFM: {path}")
+            continue
+        score_mats.append(mat)
+        
+        # Derive motif name
+        base = os.path.basename(path)
+        name = os.path.splitext(base)[0]
+        names.append(name.capitalize())
+
+    logging.info(f"Loaded {len(score_mats)} valid PFMs")
+    return score_mats, names
 
 def reverse_complement_pwm(pwm):
     """
@@ -88,89 +104,58 @@ def extract_peak_seqs(fasta, peaks_bed):
     logging.info(f"Extracted {len(seqs)} peak sequences")
     return ids, seqs
 
-
-def build_score_matrices(pfms, bg, pseudocount=0.001):
-    """Convert PFMs to MOODS score matrices with log-odds."""
-    score_mats = []
-    for pfm in pfms:
-        pfm = np.array(pfm, dtype=float)
-        pfm = pfm + pseudocount
-        pfm = pfm / pfm.sum(axis=1, keepdims=True)
-
-        # MOODS expects [4, L]
-        pwm = pfm.T.tolist()                     # ensure nested list
-        bg_vec = [float(x) for x in bg]          # ensure 1D python list
-        pc = float(pseudocount)
-
-        # Use the 3-argument form only
-        sm = MOODS.tools.log_odds(pwm, bg_vec, pc)
-        score_mats.append(sm)
-
-    logging.debug(f"Built {len(score_mats)} score matrices")
-    return score_mats
-
-
-
-def scan_one_sequence(seq, fwd_mats, rc_mats, thresholds, names, bg):
-    s = ''.join(c if c in DNA else 'N' for c in seq)
-    fw_hits = MOODS.scan.scan_dna(s, fwd_mats, thresholds, bg)
-    rc_hits = MOODS.scan.scan_dna(s, rc_mats, thresholds, bg)
-
-    results = []
-    for mi, (fw, rc) in enumerate(zip(fw_hits, rc_hits)):
-        best = None
-        for hit in fw:
-            if best is None or hit.score > best[1]:
-                best = (hit.pos, hit.score, "+")
-        for hit in rc:
-            if best is None or hit.score > best[1]:
-                best = (hit.pos, hit.score, "-")
-        if best is None:
-            results.append((np.nan, np.nan, "."))
-        else:
-            results.append(best)
-    return results
-
-def scan_pwms_batch(pfms, names, seqs, pval_threshold=1e-4, bg=None, pseudocount=0.8):
+def scan_pwms_batch(fwd_mats, rc_mats, thresholds, names, seqs, bg):
     """
-    Batch version using MOODS.scan.scan_dna_batch (much faster).
-    Scans all sequences at once inside the C++ engine.
+    Scan sequences using MOODS.scan.Scanner for faster repeated scanning.
+
+    Parameters
+    ----------
+    fwd_mats : list
+        Forward-strand log-odds matrices
+    rc_mats : list
+        Reverse-complement log-odds matrices
+    thresholds : list
+        Per-motif detection thresholds
+    names : list
+        Motif names
+    seqs : list[str]
+        DNA sequences to scan
+    bg : list[float]
+        Background probabilities
     """
-    logging.debug(f"[MOODS] Scanning {len(pfms)} motifs across {len(seqs)} sequences (batch mode)")
+    # Prepare scanners once per strand
+    max_len = max(len(m[0]) for m in fwd_mats)
+    scanner_fwd = MOODS.scan.Scanner(max_len)
+    scanner_rc = MOODS.scan.Scanner(max_len)
 
-    # Build forward and reverse score matrices once
-    fwd_mats = build_score_matrices(pfms, bg, pseudocount)
-    rc_pfms  = [reverse_complement_pwm(p) for p in pfms]
-    rc_mats  = build_score_matrices(rc_pfms, bg, pseudocount)
+    scanner_fwd.set_motifs(fwd_mats, bg, thresholds)
+    scanner_rc.set_motifs(rc_mats, bg, thresholds)
 
-    thresholds = [MOODS.tools.threshold_from_p(m, bg, pval_threshold) for m in fwd_mats]
-    logging.debug(f"Using per-motif thresholds at p={pval_threshold}")
-
-    fw_hits, rc_hits = [], []
-    for seq in tqdm(seqs, desc="Scanning sequences:", position=1, miniters=max(1, len(seqs) // 10)):
-        fw_hits.append(MOODS.scan.scan_dna(seq, fwd_mats, thresholds, bg))
-        rc_hits.append(MOODS.scan.scan_dna(seq, rc_mats, thresholds, bg))
-
-    # Aggregate the best hit (pos, score, strand) per motif per sequence
     results = {}
+
     for mi, tf in enumerate(names):
         motif_hits = []
-        for si in range(len(seqs)):
-            fwh = fw_hits[si][mi]
-            rch = rc_hits[si][mi]
-            best = None
-            for h in fwh:
-                if best is None or h.score > best[1]:
-                    best = (h.pos, h.score, "+")
-            for h in rch:
-                if best is None or h.score > best[1]:
-                    best = (h.pos, h.score, "-")
-            if best is None:
-                motif_hits.append((np.nan, np.nan, "."))
-            else:
-                motif_hits.append(best)
-        results[tf] = motif_hits
+        for seq in seqs:
+            fw_hits = scanner_fwd.scan(seq)[mi]
+            rc_hits = scanner_rc.scan(seq)[mi]
 
+            # Find best-scoring hit per strand
+            best_fw = max(fw_hits, key=lambda h: h.score, default=None)
+            best_rc = max(rc_hits, key=lambda h: h.score, default=None)
+
+            # Record top hit across both strands
+            if best_fw is None and best_rc is None:
+                motif_hits.append((np.nan, np.nan, "."))
+            elif best_rc is None or (best_fw and best_fw.score >= best_rc.score):
+                motif_hits.append((best_fw.pos, best_fw.score, "+"))
+            else:
+                motif_hits.append((best_rc.pos, best_rc.score, "-"))
+
+        results[tf] = motif_hits
+        
+    del scanner_fwd, scanner_rc
+    gc.collect()
+        
     return results
 
 
@@ -207,55 +192,68 @@ def run_moods_scan_batched(
         Number of peaks to process per batch
     """
     fasta = Fasta(fasta_path, as_raw=True, sequence_always_upper=True)
-    if bg == "auto":
-        pi = build_first_order_bg(fasta, peaks_bed)
-    else:
-        pi = bg
-
-    pfms, names = load_pfms(motif_paths)
+    pi = build_first_order_bg(fasta, peaks_bed) if bg == "auto" else bg
+    
+    # Load motifs directly as log-odds matrices
+    pseudocount = 0.0001
+    pfms, names = load_pfms(motif_paths, pseudocount, bg=pi)
     logging.info(f"Loaded {len(pfms)} PFMs from {len(motif_paths)} motif files")
-
+    thresholds = [MOODS.tools.threshold_from_p(m, pi, pval_threshold) for m in pfms]
+    
+    # Precompute reverse complements
+    rc_pfms = [reverse_complement_pwm(p) for p in pfms]
+    
+    # Extract the DNA sequences from the genome fasta for each peak
     peak_ids, seqs = extract_peak_seqs(fasta, peaks_bed)
-
-    # Split all motifs into chunks of size motif_batch_size
-    motif_batch_size=100
-    motif_batches = [
-        (pfms[j:j+motif_batch_size], names[j:j+motif_batch_size])
+    # Process each peak batch
+    n_total = len(peak_ids)
+    
+    # Split into motif batches
+    motif_batch_size = 25
+    motif_batches: List[Tuple[list[Any], list[Any], list[Any], list[str]]]  = [
+        (
+            pfms[j:j+motif_batch_size],
+            rc_pfms[j:j + motif_batch_size],
+            thresholds[j:j+motif_batch_size],
+            names[j:j+motif_batch_size]
+        )
         for j in range(0, len(pfms), motif_batch_size)
     ]
 
-    # Process each peak batch
-    n_total = len(peak_ids)
     logging.info(f"Running {len(motif_batches)} motif sub-batches in parallel across {n_cpus} cores")
     for i in tqdm(range(0, n_total, batch_size), desc="Peak Batch", position=0):
-        batch_ids = peak_ids[i:i+batch_size]
-        batch_seqs = seqs[i:i+batch_size]
+        logging.info(f"Memory available before batch: {psutil.virtual_memory().available / 1e9:.2f} GB")
 
+        batch_ids = peak_ids[i:i + batch_size]
+        batch_seqs = seqs[i:i + batch_size]
 
         # Parallel scan across motif sub-batches
-        batch_results = Parallel(n_jobs=n_cpus, backend="threading")(
+        batch_results = Parallel(n_jobs=min(n_cpus, len(motif_batches)), backend="threads")(
             delayed(scan_pwms_batch)(
-                pfm_subset,
+                fwd_subset,
+                rc_subset,
+                thresholds_subset,
                 name_subset,
                 batch_seqs,
-                pval_threshold=pval_threshold,
                 bg=pi,
             )
-            for pfm_subset, name_subset in motif_batches
+            for fwd_subset, rc_subset, thresholds_subset, name_subset in motif_batches
         )
 
-        # Write each sub-batch to a uniquely named temporary Parquet file
-        for j, (res, (_, name_subset)) in enumerate(zip(batch_results, motif_batches)):
+        # Write each sub-batch to Parquet
+        for j, (res, (fwd_subset, rc_subset, thresholds_subset, name_subset)) in enumerate(zip(batch_results, motif_batches)):
             rows = [
                 (pid, tf, pos, score, strand)
                 for tf in name_subset
                 for pid, (pos, score, strand) in zip(batch_ids, res[tf])
             ]
-
             df = pd.DataFrame(rows, columns=["peak_id", "TF", "pos", "logodds", "strand"])
             tmp_path = f"{out_file}.batch{i:03d}_motifs{j:03d}.parquet"
             df.to_parquet(tmp_path, compression="snappy", index=False)
-            del res, rows, df  # free memory
+            del res, rows, df
+            
+        del batch_results
+        gc.collect()
 
     # ---------------------------------------------------------------------
     # Final merge: concatenate all batch shards into a single Parquet file

@@ -13,8 +13,8 @@ import logging
 import os
 from tqdm import tqdm
 import sys
-import logging
 from config.settings import *
+import pickle
 
 # from self.file_paths import self.file_paths
 
@@ -276,7 +276,17 @@ class Pathways:
             except Exception as e:
                 logging.debug(f"could not read code: {code} ({e})")
 
-        for pathway in tqdm(self.pathway_list):
+        existing_xml_files = {
+            os.path.splitext(f)[0]  # drop ".xml"
+            for f in os.listdir(base_dir)
+            if f.endswith(".xml")
+        }
+        missing_pathway_file_list = [
+            p for p in self.pathway_list
+            if re.sub(r"^path:", "", p) not in existing_xml_files
+        ]
+        
+        for pathway in tqdm(missing_pathway_file_list):
             # pathway may look like 'path:mmu04110' or 'mmu04110' or 'ko04110' — normalize to numeric id
             raw = pathway.replace("path:", "")
             num = re.sub(r"[a-zA-Z]+", "", raw)   # retain digits only
@@ -613,7 +623,7 @@ def build_kegg_pkn(
     dataset_name: str,
     output_path: Union[Path, str],
     out_csv: Union[Path, str],
-    out_graphml: Union[Path, str],
+    out_gpickle: Union[Path, str],
     organism: str = "mmu",          # KEGG org code (e.g., 'mmu', 'hsa'); 'mm10' gets normalized in your code if you added that
     normalize_case: str = "upper",  # "upper" | "lower" | None
 ):
@@ -679,5 +689,6 @@ def build_kegg_pkn(
     os.makedirs(os.path.dirname(os.path.abspath(out_csv)), exist_ok=True)
     
     pkn.to_csv(out_csv, index=False)
-    nx.write_graphml(G, out_graphml)
+    with open(out_gpickle, 'wb') as f:
+        pickle.dump(G, f, pickle.HIGHEST_PROTOCOL)
     logging.info(f"Wrote KEGG PKN CSV → {out_csv}")

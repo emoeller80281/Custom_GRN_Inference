@@ -3,6 +3,8 @@ import torch.nn as nn
 import pandas as pd
 from torch_geometric.data import Data
 from sklearn.preprocessing import LabelEncoder
+from sklearn.preprocessing import StandardScaler
+
 import torch.optim as optim
 from sklearn.metrics import roc_auc_score, average_precision_score
 from sklearn.model_selection import train_test_split
@@ -10,8 +12,11 @@ from multiomic_transformer.models.tf_tg_classifier import GRN_GAT_Bidirectional
 
 from config.settings import *
 
+sample_name = "E7.5_rep1"
+
 # Load Data
-df = pd.read_parquet(DATA_DIR / "processed" / "tf_tg_data.parquet")
+print("Loading processed data")
+df = pd.read_parquet(SAMPLE_PROCESSED_DATA_DIR / sample_name / "tf_tg_data.parquet")
 
 # Encode TFs and TGs into integer node IDs
 tf_encoder = LabelEncoder()
@@ -33,7 +38,20 @@ edge_index = torch.tensor(
 )
 
 # Edge attributes
-edge_attr = torch.tensor(df[["reg_potential"]].values, dtype=torch.float32)
+edge_features = [
+    "reg_potential",
+    "motif_density",
+    "mean_tf_expr",
+    "mean_tg_expr",
+    "expr_product",
+    "motif_present"
+]
+
+scaler = StandardScaler()
+edge_attr = torch.tensor(
+    scaler.fit_transform(df[edge_features]),
+    dtype=torch.float32
+)
 
 # Node features (mean expression)
 node_features = torch.zeros((n_nodes, 1), dtype=torch.float32)
@@ -93,11 +111,11 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Initialize model
 model = GRN_GAT_Bidirectional(
-    in_node_feats=1,    # e.g., mean expression
-    in_edge_feats=1,    # e.g., reg_potential
-    hidden_dim=64,
+    in_node_feats=1,
+    in_edge_feats=len(edge_features),  # now 6
+    hidden_dim=128,                    # bump up for better expressivity
     heads=4,
-    dropout=0.2,
+    dropout=0.3,
     edge_dropout_p=0.2
 ).to(device)
 

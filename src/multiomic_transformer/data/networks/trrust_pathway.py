@@ -7,6 +7,7 @@ import requests
 from typing import Union
 import pandas as pd
 import networkx as nx
+import pickle
 
 TRRUST_MOUSE_URL = "https://www.grnpedia.org/trrust/data/trrust_rawdata.mouse.tsv"
 TRRUST_HUMAN_URL = "https://www.grnpedia.org/trrust/data/trrust_rawdata.human.tsv"
@@ -30,7 +31,7 @@ def build_trrust_pkn(
     trrust_path_or_url: Union[str, None] = None,  # if None, uses default URL for species
     normalize_case: str = "upper",       # "upper" | "lower" | None
     out_csv: Union[str, None] = None,
-    out_graphml: Union[str, None] = None
+    out_gpickle: Union[str, None] = None
 ):
     """
     Build the FULL TRRUST PKN (directed, signed) for a species.
@@ -91,11 +92,12 @@ def build_trrust_pkn(
         pkn.to_csv(out_csv, index=False)
         logging.info(f"Wrote TRRUST PKN CSV → {out_csv}")
 
-    if out_graphml:
+    if out_gpickle:
         G = nx.from_pandas_edgelist(
             pkn, source="source_id", target="target_id",
             edge_attr=["trrust_sign", "trrust_regulation", "trrust_pmids", "trrust_support_n"],
             create_using=nx.DiGraph()
         )
-        nx.write_graphml(G, out_graphml)
-        logging.info(f"Wrote TRRUST PKN GraphML → {out_graphml}")
+        with open(out_gpickle, 'wb') as f:
+            pickle.dump(G, f, pickle.HIGHEST_PROTOCOL)
+        logging.info(f"Wrote TRRUST PKN GraphML → {out_gpickle}")
