@@ -64,6 +64,14 @@ for tf, idx in zip(tf_encoder.classes_, range(n_tfs)):
 
 for tg, idx in zip(tg_encoder.classes_, range(n_tgs)):
     node_features[n_tfs + idx] = tg_expr[tg]
+    
+node_features = torch.tensor(
+    np.concatenate([
+        tf_expr.reindex(tf_encoder.classes_).fillna(0).to_numpy().reshape(-1,1),
+        tg_expr.reindex(tg_encoder.classes_).fillna(0).to_numpy().reshape(-1,1)
+    ]),
+    dtype=torch.float32
+)
 
 
 # Labels (per-edge)
@@ -113,15 +121,18 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = GRN_GAT_Bidirectional(
     in_node_feats=1,
     in_edge_feats=len(edge_features),  # now 6
-    hidden_dim=128,                    # bump up for better expressivity
-    heads=4,
-    dropout=0.3,
-    edge_dropout_p=0.2
+    hidden_dim=256,                    # bump up for better expressivity
+    heads=6,
+    dropout=0.4,
+    edge_dropout_p=0.4
 ).to(device)
 
 # ----- Training loop -----
 criterion = nn.BCEWithLogitsLoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-4)
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    optimizer, mode='max', patience=10, factor=0.5, min_lr=1e-6
+)
 
 for epoch in range(1, 101):
     model.train()
@@ -135,6 +146,7 @@ for epoch in range(1, 101):
     loss = criterion(logits_train, y_train)
     loss.backward()
     optimizer.step()
+    
 
     # --- Validation ---
     model.eval()
@@ -143,9 +155,12 @@ for epoch in range(1, 101):
         preds_val = torch.sigmoid(logits_val)
         val_loss = criterion(logits_val, y_val)
         auc_val = roc_auc_score(y_val.cpu(), preds_val.cpu())
+        
+    scheduler.step(auc_val)
     
     if epoch % 10 == 0:
         print(f"Epoch {epoch:03d} | TrainLoss={loss.item():.4f} | ValLoss={val_loss.item():.4f} | Val AUROC={auc_val:.3f}")
+        
 
 model.eval()
 with torch.no_grad():
