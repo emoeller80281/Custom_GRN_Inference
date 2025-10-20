@@ -538,6 +538,18 @@ class Pathways:
                 if (u, v) in G_global.edges:
                     G_global[u][v].setdefault("pathways", set()).add(path_code)
 
+        pathway_like_nodes = [
+            n for n in G_global.nodes
+            if re.match(r"^(PATH:|MMU\d{5}|HSA\d{5}|KO\d{5})$", str(n).upper())
+        ]
+        
+        # Remove pathway-like nodes
+        G_global.remove_nodes_from(pathway_like_nodes)
+        
+        print(f"Total nodes: {G_global.number_of_nodes():,}")
+        print(f"Pathway-like nodes remaining: {len(pathway_like_nodes):,}")
+        print("Examples:", pathway_like_nodes[:10])
+
         # Write the graph to disk (after converting unsupported types)
         if write_graphml:
             for u, v, d in G_global.edges(data=True):
@@ -548,7 +560,7 @@ class Pathways:
             graph = self._sanitize_for_graphml(G_global)
             nx.write_graphml(graph, out_path, infer_numeric_types=True)
             logging.info(f"Wrote merged network with {G_global.number_of_nodes()} nodes "
-                        f"and {G_global.number_of_edges()} edges → {out_path}")
+                        f"and {G_global.number_of_edges()} edges to {out_path}")
 
         return G_global
 

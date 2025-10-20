@@ -26,7 +26,7 @@ from multiomic_transformer.utils.files import atomic_json_dump
 from multiomic_transformer.utils.peaks import find_genes_near_peaks, format_peaks
 from multiomic_transformer.utils.downloads import *
 from multiomic_transformer.data.sliding_window import run_sliding_window_scan
-from config.settings import *
+# from config.settings import *
 
 from grn_inference.utils import read_ground_truth
 
@@ -327,13 +327,13 @@ def calculate_tf_tg_regulatory_potential(sliding_window_score_file, tf_tg_reg_po
     tf_tg_reg_pot.to_parquet(tf_tg_reg_pot_file, engine="pyarrow", compression="snappy")
     logging.info(f"Saved TF–TG regulatory potential with motif density: {tf_tg_reg_pot.shape}")
 
-
 def load_rna_adata(sample_raw_data_dir: str) -> sc.AnnData:
     # Look for features file
-    features = [f for f in os.listdir(sample_raw_data_dir) if f.endswith("features.tsv.gz")]
+    features = [f for f in os.listdir(sample_raw_data_dir) if f.endswith("features.tsv.gz") or f.endswith("features.tsv")]
     assert len(features) == 1, f"Expected 1 features.tsv.gz, found {features}"
 
     prefix = features[0].replace("features.tsv.gz", "")
+    prefix = prefix.replace("features.tsv", "")
     logging.info(f"Detected RNA prefix: {prefix}")
 
     with warnings.catch_warnings():
@@ -351,7 +351,8 @@ def process_10x_to_csv(raw_10x_rna_data_dir, raw_atac_peak_file, rna_outfile_pat
     def load_rna_adata(sample_raw_data_dir: str) -> sc.AnnData:
         # Look for features file
         features = [f for f in os.listdir(sample_raw_data_dir) if f.endswith("features.tsv.gz")]
-        assert len(features) == 1, f"Expected 1 features.tsv.gz, found {features}"
+        assert len(features) == 1, \
+            f"Expected 1 features.tsv.gz, found {features}. Make sure the files are gunziped for sc.read_10x_mtx."
 
         prefix = features[0].replace("features.tsv.gz", "")
         logging.info(f"Detected RNA prefix: {prefix}")
@@ -416,8 +417,7 @@ def process_10x_to_csv(raw_10x_rna_data_dir, raw_atac_peak_file, rna_outfile_pat
         return adata_ATAC
     
     # --- load raw data ---
-    sample_raw_data_dir = os.path.join(raw_10x_rna_data_dir, sample_name)
-    adata_RNA = load_rna_adata(sample_raw_data_dir)
+    adata_RNA = load_rna_adata(raw_10x_rna_data_dir)
     adata_RNA.obs_names = [(sample_name + "." + i).replace("-", ".") for i in adata_RNA.obs_names]
     # adata_RNA.obs_names = [i.replace("-", ".") for i in adata_RNA.obs_names]
     logging.info(f"[{sample_name}] Found {len(adata_RNA.obs_names)} RNA barcodes")
@@ -486,46 +486,82 @@ if __name__ == "__main__":
     parser.add_argument("--num_cpu", required=True, help="Number of cores for parallel processing")
     args = parser.parse_args()
     
-    sample_name = "E7.5_rep1"
+    DATASET_NAME = "PBMC"
+    sample_name = "LINGER_PBMC_SC_DATA"
     
+    RAW_DATA = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data/raw") 
+    GENOME_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data/genome_data/genome_annotation/hg38")
     sample_input_dir = RAW_DATA / sample_name
     
     processed_rna_file = sample_input_dir / "scRNA_seq_processed.parquet"
     processed_atac_file = sample_input_dir / "scATAC_seq_processed.parquet"
     
-    if (not os.path.isfile(processed_rna_file)) or (not os.path.isfile(processed_atac_file)):
+    organism_code = "hg38"
+    ensemble_dataset_name = "hsapiens_gene_ensembl"
+    GENE_TSS_FILE = DATA_DIR / "databases/gene_tss/hg38.gene_tss.bed.gz"
+    PROCESSED_DATA = DATA_DIR / "processed"
+    SAMPLE_PROCESSED_DATA_DIR = PROCESSED_DATA / DATASET_NAME
+    RAW_10X_RNA_DATA_DIR = RAW_DATA / sample_name / "PBMC_raw"
+    RAW_ATAC_PEAK_MATRIX_FILE = RAW_DATA / sample_name / "Peaks.txt"
     
-        rna_file = sample_input_dir / "scRNA_seq_raw.csv"
-        atac_file = sample_input_dir / "scATAC_seq_raw.csv"
+    IGNORE_PROCESSED_FILES = False
+    logging.info(f"IGNORE_PROCESSED_FILES: {IGNORE_PROCESSED_FILES}")
+    
+    if (not os.path.isfile(processed_rna_file)) or (not os.path.isfile(processed_atac_file)) or IGNORE_PROCESSED_FILES:
         
-        if (not os.path.isfile(rna_file)) or (not os.path.isfile(atac_file)):
-            if RAW_10X_RNA_DATA_DIR is not None:
-                process_10x_to_csv(RAW_10X_RNA_DATA_DIR, RAW_ATAC_PEAK_MATRIX_FILE, rna_file, atac_file)
+        if (not os.path.isfile(sample_input_dir / "adata_ATAC.h5ad")) or (not os.path.isfile(sample_input_dir / "adata_RNA.h5ad")) or IGNORE_PROCESSED_FILES:
+    
+            rna_file = sample_input_dir / "scRNA_seq_raw.csv"
+            atac_file = sample_input_dir / "scATAC_seq_raw.csv"
+            
+            if (not os.path.isfile(rna_file)) or (not os.path.isfile(atac_file)):
+                if RAW_10X_RNA_DATA_DIR is not None:
+                    process_10x_to_csv(RAW_10X_RNA_DATA_DIR, RAW_ATAC_PEAK_MATRIX_FILE, rna_file, atac_file)
+                else:
+                    logging.error("ERROR: Input RNA or ATAC file not found")
+
+            logging.info("Reading RNA and ATAC files")
+            rna_df = pd.read_csv(rna_file, delimiter=",", header=0, index_col=0)
+            atac_df = pd.read_csv(atac_file, delimiter=",", header=0, index_col=0)
+
+            adata_rna = AnnData(rna_df.T)
+            adata_atac = AnnData(atac_df.T)
+            
+            adata_rna_filtered, adata_atac_filtered = filter_and_qc(adata_rna, adata_atac)
+            # logging.info(adata_rna_filtered.shape)
+        else:
+            logging.info("\nReading pre-filtered RNA and ATAC files")
+            adata_rna_filtered = sc.read_h5ad(sample_input_dir / "adata_RNA.h5ad")
+            adata_atac_filtered = sc.read_h5ad(sample_input_dir / "adata_ATAC.h5ad")
+            
+            if "gene_ids" in adata_atac_filtered.var.columns:
+                adata_atac_filtered.var_names = adata_atac_filtered.var["gene_ids"].astype(str)
+
+        logging.info("  - adata_rna_filtered.obs_names: " + str(adata_rna_filtered.obs_names[:5]))
+        logging.info("  - adata_atac_filtered.obs_names: " + str(adata_atac_filtered.obs_names[:5]))
+        
+        logging.info("  - adata_rna_filtered.var_names: " + str(adata_rna_filtered.var_names[:5]))
+        logging.info("  - adata_atac_filtered.var_names: " + str(adata_atac_filtered.var_names[:5]))
+        
+        logging.info("  - Shape of adata_rna_filtered: " + str(adata_rna_filtered.shape))
+        logging.info("  - Shape of adata_atac_filtered: " + str(adata_atac_filtered.shape))
+        
+        logging.info("\nConverting adata to dense dataframe")
+        
+        def adata_to_dense_df(adata):
+            X = adata.X
+            if sp.issparse(X):
+                X = X.toarray()
             else:
-                logging.error("ERROR: Input RNA or ATAC file not found")
-
-        logging.info("Reading RNA and ATAC files")
-        rna_df = pd.read_csv(rna_file, delimiter=",", header=0, index_col=0)
-        atac_df = pd.read_csv(atac_file, delimiter=",", header=0, index_col=0)
-
-        adata_rna = AnnData(rna_df.T)
-        adata_atac = AnnData(atac_df.T)
+                X = np.asarray(X)
+            return pd.DataFrame(X, index=adata.obs_names, columns=adata.var_names).T
         
-        adata_rna_filtered, adata_atac_filtered = filter_and_qc(adata_rna, adata_atac)
-        # logging.info(adata_rna_filtered.shape)
-
-        processed_rna_df = pd.DataFrame(
-            adata_rna_filtered.X,
-            index=adata_rna_filtered.obs_names,
-            columns=adata_rna_filtered.var_names,
-        ).T
+        logging.info("  - Converting RNA adata to dense dataframe")
+        processed_rna_df  = adata_to_dense_df(adata_rna_filtered)
+        logging.info("  - Converting ATAC adata to dense dataframe")
+        processed_atac_df = adata_to_dense_df(adata_atac_filtered)
         
-        processed_atac_df = pd.DataFrame(
-            adata_atac_filtered.X,
-            index=adata_atac_filtered.obs_names,
-            columns=adata_atac_filtered.var_names,
-        ).T
-        
+        logging.info("\nWriting processed RNA and ATAC files")
         processed_rna_df.to_parquet(sample_input_dir / "scRNA_seq_processed.parquet", engine="pyarrow", compression="snappy")
         processed_atac_df.to_parquet(sample_input_dir / "scATAC_seq_processed.parquet", engine="pyarrow", compression="snappy")
 
@@ -551,7 +587,7 @@ if __name__ == "__main__":
     if not os.path.isfile(GENE_TSS_FILE):
         download_gene_tss_file(
             save_file=GENE_TSS_FILE,
-            gene_dataset_name="mmusculus_gene_ensembl",
+            gene_dataset_name=ensemble_dataset_name,
         )
 
     gene_tss_df = make_chrom_gene_tss_df(
@@ -574,7 +610,7 @@ if __name__ == "__main__":
         peak_gene_dist_file=SAMPLE_PROCESSED_DATA_DIR / sample_name / "peak_to_gene_dist.parquet",
         mesc_atac_peak_loc_df=peak_locs_df.rename(columns={"chromosome": "chrom"}),
         gene_tss_df=gene_tss_df,
-        force_recalculate=True
+        force_recalculate=IGNORE_PROCESSED_FILES
     )
 
     # Calculate TF-peak binding score
@@ -585,14 +621,14 @@ if __name__ == "__main__":
         # # if not os.path.isdir(jaspar_pfm_dir):
         # download_jaspar_pfms(
         #     str(jaspar_pfm_dir),
-        #     tax_id="10090",
+        #     tax_id="9606",
         #     max_workers=3
         #     )
         
-        genome_fasta_file = GENOME_DIR / "mm10.fa.gz"
+        genome_fasta_file = GENOME_DIR / (organism_code + ".fa.gz")
         if not os.path.isfile(genome_fasta_file):
             download_genome_fasta(
-                organism_code="mm10",
+                organism_code=organism_code,
                 save_dir=GENOME_DIR
             )
 
@@ -601,8 +637,8 @@ if __name__ == "__main__":
         peaks_bed_path = Path(peak_bed_file)
         peaks_df = pybedtools.BedTool(peaks_bed_path)
         
-        tf_info_file = DATA_DIR / "databases/motif_information/mm10/TF_Information_all_motifs.txt"
-        motif_dir = DATA_DIR / "databases/motif_information/mm10/mm10_motif_meme_files"
+        tf_info_file = DATA_DIR / "databases" / "motif_information" / organism_code / "TF_Information_all_motifs.txt"
+        motif_dir = DATA_DIR / "databases" / "motif_information" / organism_code / str(organism_code + "_motif_meme_files")
 
         # logging.info("Running MOODS TF-peak binding calculation")
         # run_moods_scan_batched(
