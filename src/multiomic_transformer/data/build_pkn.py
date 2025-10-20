@@ -5,6 +5,8 @@ import os
 import pandas as pd
 import numpy as np
 import networkx as nx
+
+from mygene import MyGeneInfo
 import pickle
 from multiomic_transformer.data.networks import (
     trrust_pathway, string_pathway, kegg_pathways
@@ -92,6 +94,13 @@ if __name__ == "__main__":
     trrust_pkn["source_db"] = "TRRUST"
     kegg_pkn["source_db"] = "KEGG"
     string_pkn["source_db"] = "STRING"
+    mg = MyGeneInfo()
+
+    # Convert Ensembl IDs or aliases in your PKN to HGNC symbols
+    def normalize_genes(gene_list):
+        query = mg.querymany(gene_list, scopes=["symbol", "alias", "ensembl.gene"], fields="symbol", species="human")
+        mapping = {q["query"]: q.get("symbol", q["query"]) for q in query}
+        return [mapping.get(g, g).upper() for g in gene_list]
     
     # Case-normalize the gene names
     for df in [trrust_pkn, kegg_pkn, string_pkn]:
@@ -111,14 +120,8 @@ if __name__ == "__main__":
     print_network_info(kegg_pkn, "KEGG")
     print_network_info(string_pkn, "STRING")
 
-    from mygene import MyGeneInfo
-    mg = MyGeneInfo()
 
-    # Convert Ensembl IDs or aliases in your PKN to HGNC symbols
-    def normalize_genes(gene_list):
-        query = mg.querymany(gene_list, scopes=["symbol", "alias", "ensembl.gene"], fields="symbol", species="human")
-        mapping = {q["query"]: q.get("symbol", q["query"]) for q in query}
-        return [mapping.get(g, g).upper() for g in gene_list]
+
 
     # # --- Merge all sources ---
     # logging.info("\nMerging all PKNs")

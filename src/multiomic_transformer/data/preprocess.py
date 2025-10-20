@@ -772,7 +772,11 @@ if __name__ == "__main__":
     tf_tg_df["expr_product"] = tf_tg_df["mean_tf_expr"] * tf_tg_df["mean_tg_expr"]
     tf_tg_df["log_reg_pot"] = np.log1p(tf_tg_df["reg_potential"])
     tf_tg_df["motif_present"] = (tf_tg_df["motif_density"] > 0).astype(int)
+    
+    tf_tg_df.to_parquet(SAMPLE_PROCESSED_DATA_DIR / sample_name / "tf_tg_data_unlabeled.parquet", index=False)
 
+    
+    
     # Create a set of ground-truth pairs
     gt_pairs = set(zip(ground_truth_df["TF"], ground_truth_df["TG"]))
     logging.info("  - Number of ground truth pairs: " + str(len(gt_pairs)))
@@ -809,8 +813,9 @@ if __name__ == "__main__":
     rng = np.random.default_rng(42)
     upscale_percent = 1.5
 
-    logging.info("  - Balancing TF-TG pairs")
+    logging.info("\nBalancing TF-TG pairs")
     for tf, group in true_df.groupby("TF"):
+        logging.info(f"  - Creating balanced dataset for TF: {tf}")
         true_tgs = group["TG"].tolist()
 
         # candidate false TGs for same TF
@@ -826,8 +831,12 @@ if __name__ == "__main__":
         # randomly resample with replacement to get a % increase in True / False edges per TF
         true_upscaled = group.sample(frac=upscale_percent, replace=True)
         false_upscaled = sampled_false.sample(frac=upscale_percent, replace=True)
+        logging.info(f"      - TF: {tf}, True: {len(true_upscaled)}, False: {len(false_upscaled)}")
 
+
+        
         balanced_rows.append(pd.concat([true_upscaled, false_upscaled], ignore_index=True))
+        logging.info(f"       - Number of unique TGs: {pd.concat(balanced_rows, ignore_index=True)['TG'].nunique()}")
 
     # Combine all TF groups
     tf_tg_balanced = pd.concat(balanced_rows, ignore_index=True)

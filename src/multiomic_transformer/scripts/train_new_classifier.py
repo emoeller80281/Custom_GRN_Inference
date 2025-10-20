@@ -12,11 +12,10 @@ from multiomic_transformer.models.tf_tg_classifier import GRN_GAT_Bidirectional
 
 from config.settings import *
 
-sample_name = "E7.5_rep1"
 
 # Load Data
 print("Loading processed data")
-df = pd.read_parquet(SAMPLE_PROCESSED_DATA_DIR / sample_name / "tf_tg_data.parquet")
+df = pd.read_parquet("data/processed/PBMC/LINGER_PBMC_SC_DATA/tf_tg_data.parquet")
 
 # Encode TFs and TGs into integer node IDs
 tf_encoder = LabelEncoder()
