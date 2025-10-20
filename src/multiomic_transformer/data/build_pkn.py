@@ -16,6 +16,10 @@ sys.path.insert(0, str(THIS_DIR))
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+    logging.info("Building Prior Knowledge Network")
+    ORGANISM_CODE = "hg38"
+    
+    PKN_DIR = DATA_DIR / "prior_knowledge_network_data" / ORGANISM_CODE
 
     STRING_DIR = PKN_DIR / "STRING"
     TRRUST_DIR = PKN_DIR / "TRRUST"
@@ -25,20 +29,20 @@ if __name__ == "__main__":
     TRRUST_DIR.mkdir(parents=True, exist_ok=True)
     KEGG_DIR.mkdir(parents=True, exist_ok=True)
 
-    string_csv_file = STRING_DIR / "string_mouse_pkn.csv"
-    string_gpickle_file = STRING_DIR / "string_mouse_pkn.gpickle"
+    string_csv_file = STRING_DIR / "string_human_pkn.csv"
+    string_gpickle_file = STRING_DIR / "string_human_pkn.gpickle"
     
-    trrust_csv_file = TRRUST_DIR / "trrust_mouse_pkn.csv"
-    trrust_gpickle_file = TRRUST_DIR / "trrust_mouse_pkn.gpickle"
+    trrust_csv_file = TRRUST_DIR / "trrust_human_pkn.csv"
+    trrust_gpickle_file = TRRUST_DIR / "trrust_human_pkn.gpickle"
     
-    kegg_csv_file = KEGG_DIR / "kegg_mouse_pkn.csv"
-    kegg_gpickle_file = KEGG_DIR / "kegg_mouse_pkn.gpickle"
+    kegg_csv_file = KEGG_DIR / "kegg_human_pkn.csv"
+    kegg_gpickle_file = KEGG_DIR / "kegg_human_pkn.gpickle"
 
     # ----- Build TRRUST Graph -----
     if not os.path.isfile(trrust_csv_file):
         logging.info("Building TRRUST prior knowledge network")
         trrust_pathway.build_trrust_pkn(
-            species="mouse",
+            species="human",
             out_csv=str(trrust_csv_file),
             out_gpickle = str(trrust_gpickle_file)
         )
@@ -51,9 +55,9 @@ if __name__ == "__main__":
     if not os.path.isfile(kegg_csv_file):
         logging.info("Building KEGG prior knowledge network")
         kegg_pathways.build_kegg_pkn(
-            dataset_name=DATASET_NAME,
+            dataset_name=ORGANISM_CODE,
             output_path=str(KEGG_DIR),
-            organism="mmu",
+            organism="hsa",
             out_csv=str(kegg_csv_file),
             out_gpickle=str(kegg_gpickle_file)
         )
@@ -67,7 +71,7 @@ if __name__ == "__main__":
         logging.info("Building STRING prior knowledge network")
         string_pathway.build_string_pkn(
             string_dir=str(STRING_DIR),
-            string_org_code="10090",
+            string_org_code="9606",
             min_combined_score=800,
             as_directed=True,
             out_csv=str(string_csv_file),
@@ -93,7 +97,9 @@ if __name__ == "__main__":
     for df in [trrust_pkn, kegg_pkn, string_pkn]:
         df["source_id"] = df["source_id"].str.upper()
         df["target_id"] = df["target_id"].str.upper()
-        
+        df["TF"] = normalize_genes(df["TF"])
+        df["TG"] = normalize_genes(df["TG"])
+
     def print_network_info(df: pd.DataFrame, network_name: str):
         logging.info(f"\n{network_name}")
         logging.info(trrust_pkn.head())
@@ -105,23 +111,32 @@ if __name__ == "__main__":
     print_network_info(kegg_pkn, "KEGG")
     print_network_info(string_pkn, "STRING")
 
-    # --- Merge all sources ---
-    logging.info("\nMerging all PKNs")
-    merged_df = pd.concat([trrust_pkn, kegg_pkn, string_pkn], ignore_index=True)
-    logging.info("Done!")
+    from mygene import MyGeneInfo
+    mg = MyGeneInfo()
+
+    # Convert Ensembl IDs or aliases in your PKN to HGNC symbols
+    def normalize_genes(gene_list):
+        query = mg.querymany(gene_list, scopes=["symbol", "alias", "ensembl.gene"], fields="symbol", species="human")
+        mapping = {q["query"]: q.get("symbol", q["query"]) for q in query}
+        return [mapping.get(g, g).upper() for g in gene_list]
+
+    # # --- Merge all sources ---
+    # logging.info("\nMerging all PKNs")
+    # merged_df = pd.concat([trrust_pkn, kegg_pkn, string_pkn], ignore_index=True)
+    # logging.info("Done!")
     
-    print_network_info(merged_df, "Merged DataFrame")
+    # print_network_info(merged_df, "Merged DataFrame")
 
-    # Drop perfect duplicates (same source-target pair + identical source_db)
-    merged_df.drop_duplicates(subset=["source_id", "target_id", "source_db"], inplace=True)
+    # # Drop perfect duplicates (same source-target pair + identical source_db)
+    # merged_df.drop_duplicates(subset=["source_id", "target_id", "source_db"], inplace=True)
 
-    logging.info(f"\nUnified PKN: {len(merged_df):,} edges across {merged_df['source_db'].nunique()} sources")
+    # logging.info(f"\nUnified PKN: {len(merged_df):,} edges across {merged_df['source_db'].nunique()} sources")
 
-    # --- Save outputs ---
-    merged_df_path_prefix = PKN_DIR / f"{ORGANISM_CODE}_merged_pkn"
-    os.makedirs(os.path.dirname(merged_df_path_prefix), exist_ok=True)
+    # # --- Save outputs ---
+    # merged_df_path_prefix = PKN_DIR / f"{ORGANISM_CODE}_merged_pkn"
+    # os.makedirs(os.path.dirname(merged_df_path_prefix), exist_ok=True)
     
-    merged_df.to_csv(f"{merged_df_path_prefix}.csv", index=False)
-    G_merged = nx.from_pandas_edgelist(merged_df, source="source_id", target="target_id", edge_attr=True, create_using=nx.DiGraph())
-    with open(f"{merged_df_path_prefix}.gpickle", 'wb') as f:
-        pickle.dump(G_merged, f, pickle.HIGHEST_PROTOCOL)
+    # merged_df.to_csv(f"{merged_df_path_prefix}.csv", index=False)
+    # G_merged = nx.from_pandas_edgelist(merged_df, source="source_id", target="target_id", edge_attr=True, create_using=nx.DiGraph())
+    # with open(f"{merged_df_path_prefix}.gpickle", 'wb') as f:
+    #     pickle.dump(G_merged, f, pickle.HIGHEST_PROTOCOL)

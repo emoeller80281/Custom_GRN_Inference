@@ -108,7 +108,7 @@ def get_background_freq(species):
 
     return background_freq
     
-def process_motif_file_and_save(motif_idx, tf_df, bg, score_mats, names, output_dir, peak_ids):
+def process_motif_file_and_save(motif_idx, tf_df, bg, score_mats, names, tmp_dir, peak_ids):
     # 'bg' is unused but kept for potential motif background normalization
     pwm = np.array(score_mats[motif_idx])
     
@@ -122,9 +122,9 @@ def process_motif_file_and_save(motif_idx, tf_df, bg, score_mats, names, output_
     motif_name = names[motif_idx]
     mask = tf_df["Motif_ID"] == motif_name
     tf_names = tf_df.loc[mask]["TF_Name"].values
-
-    tmp_dir = os.path.join(output_dir, "tmp", "sliding_window_tf_scores")
-    os.makedirs(tmp_dir, exist_ok=True)
+    
+    if len(tf_names) == 0:
+        logging.warning(f"No TFs found for motif {motif_name} (motif_idx={motif_idx})")
 
     for tf in tf_names:
         df = pd.DataFrame({
@@ -313,6 +313,7 @@ def associate_tf_with_motif_pwm(tf_info_file, meme_dir, fasta_path, peaks_bed, t
     background_freq = build_first_order_bg(fasta, peaks_bed)
     
     mats, names = load_motifs(motif_paths, pseudocount=0.0001, bg=background_freq)
+    names = [n.upper() for n in names]
     print(f"Loaded {len(mats)} motifs:", names[:5])
     
     logging.info(f"Loaded {len(mats)} PFMs from {len(meme_dir)} motif files")
@@ -349,23 +350,41 @@ def associate_tf_with_motif_pwm(tf_info_file, meme_dir, fasta_path, peaks_bed, t
     tmp_dir = os.path.join(output_dir, "tmp", "sliding_window_tf_scores")
     os.makedirs(tmp_dir, exist_ok=True)
     
-    tf_df = pd.read_csv(tf_info_file, sep="\t", header=0)
-    tf_df = tf_df[tf_df["TF_Name"].isin(tf_name_list)]
+    tf_info_df = pd.read_csv(tf_info_file, sep="\t")
+    tf_info_df["Motif_ID"] = tf_info_df["Motif_ID"].astype(str).str.upper()
+    tf_info_df["TF_Name"] = tf_info_df["TF_Name"].astype(str).str.upper()
+    print(tf_info_df.head())
+    logging.info(f"\nLoaded TF information from {tf_info_file}")
+    logging.info(f"TFs in tf_info_file: {tf_info_df['TF_Name'].nunique()}")
+    logging.info(f"Motif_ID examples: {tf_info_df['Motif_ID'].head()}")
+    logging.info(f"Motif names from JASPAR: {names[:5]}")
+    
+    tf_df = tf_info_df[tf_info_df["TF_Name"].isin(tf_name_list)]
+    
+    def is_valid_parquet(path):
+        return os.path.isfile(path) and os.path.getsize(path) > 0
 
     # Filter motif files for motifs where NOT all associated TF files are cached
-    filtered_indices = [
-        i for i, name in enumerate(names)
-        if not all(
-            is_valid_parquet(os.path.join(tmp_dir, f"{tf}.parquet"))
-            for tf in tf_df.loc[tf_df["Motif_ID"] == name, "TF_Name"]
-        )
-    ]
+    filtered_indices = []
+    for i, name in enumerate(names):
+        tf_list = tf_df.loc[tf_df["Motif_ID"] == name, "TF_Name"].tolist()
+        missing = [tf for tf in tf_list if not is_valid_parquet(os.path.join(tmp_dir, f"{tf}.parquet"))]
+        if missing:
+            filtered_indices.append(i)
+            logging.debug(f"Motif {name}: {len(missing)} TFs missing parquet files → rescoring")
+
+    # If no motifs selected for rescoring but no valid cache exists, force rescoring
+    valid_parquet_files = get_valid_parquet_files(tmp_dir)
+
+    if len(filtered_indices) == 0 and len(valid_parquet_files) == 0:
+        logging.warning("No cached TF motif parquet files found. Forcing rescoring of all motifs.")
+        filtered_indices = list(range(len(names)))
 
     logging.info(f"Filtered to {len(filtered_indices)} motifs needing scoring "
              f"out of {len(names)} total motifs.")
 
     if len(filtered_indices) > 0:
-        logging.info(f"\t- Number of motif files found: {len(filtered_indices)} / {len(tf_name_list)}")
+        logging.info(f"\t- Number of motif files found: {len(filtered_indices)} for {len(tf_name_list)} TFs")
 
         logging.info(f"\nCalculating sliding window motif scores for each ATAC-seq peak")
         logging.info(f"\tUsing {num_cpu} processors")
@@ -374,6 +393,7 @@ def associate_tf_with_motif_pwm(tf_info_file, meme_dir, fasta_path, peaks_bed, t
         plus_shm, plus_shape, plus_dtype = share_numpy_array(seqs_plus)
         minus_shm, minus_shape, minus_dtype = share_numpy_array(seqs_minus) 
 
+        logging.info(f"\nWriting output to {tmp_dir}")
         with ProcessPoolExecutor(
         max_workers=num_cpu,
         initializer=_init_worker,
@@ -382,10 +402,9 @@ def associate_tf_with_motif_pwm(tf_info_file, meme_dir, fasta_path, peaks_bed, t
                 minus_shm, minus_shape, minus_dtype)
         ) as executor:
             futures = {
-                executor.submit(process_motif_file_and_save, i, tf_df, background_freq, mats, names, output_dir, peak_ids): names[i]
+                executor.submit(process_motif_file_and_save, i, tf_df, background_freq, mats, names, tmp_dir, peak_ids): names[i]
                 for i in filtered_indices
             }
-
 
             min_update = max(1, int(0.02 * len(futures)))
             for future in tqdm(as_completed(futures), total=len(futures), desc="Scoring motifs", miniters=min_update):
@@ -395,11 +414,13 @@ def associate_tf_with_motif_pwm(tf_info_file, meme_dir, fasta_path, peaks_bed, t
         logging.info("\nAll TFs have pre-existing parquet files in the tmp directory, reading cached parquet files...")
     
     os.makedirs(output_dir, exist_ok=True)
-    parquet_dir = os.path.join(output_dir, "tmp", "sliding_window_tf_scores")
-    valid_parquet_files = get_valid_parquet_files(parquet_dir)
+    valid_parquet_files = get_valid_parquet_files(tmp_dir)
 
     if not valid_parquet_files:
         raise RuntimeError("No valid TF motif parquet files found after filtering.")
+    
+    all_files = glob.glob(os.path.join(tmp_dir, "*.parquet"))
+    logging.info(f"Found {len(all_files)} parquet files in {tmp_dir}")
 
     ddf = dd.read_parquet(valid_parquet_files)
     df = ddf.compute()
@@ -415,8 +436,7 @@ def run_sliding_window_scan(
     output_dir: str,
     num_cpu: int,
 ):
-    tmp_dir = f"{output_dir}/tmp"
-    os.makedirs(tmp_dir, exist_ok=True)
+    os.makedirs(output_dir, exist_ok=True)
                 
     # Associate the TFs from TF_Information_all_motifs.txt to the motif with the matching motifID
     df = associate_tf_with_motif_pwm(
