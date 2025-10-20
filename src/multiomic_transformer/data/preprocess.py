@@ -88,23 +88,25 @@ def filter_and_qc(adata_RNA: AnnData, adata_ATAC: AnnData) -> Tuple[AnnData, Ann
     
     return adata_RNA, adata_ATAC
 
-def create_tf_tg_combination_files(genes):
-    mouse_tf_df = pd.read_excel(DATA_DIR / "mouse_tfs" / "mouse_tf_list.xlsx", header=6, index_col=None)
-    overlap_tf = mouse_tf_df[mouse_tf_df["Gene Symbol"].isin(genes)].drop_duplicates()
+def create_tf_tg_combination_files(genes, tf_list_file):
+    known_tfs = pd.read_csv(tf_list_file, sep="\t", header=0, index_col=None)
+    overlap_tf = known_tfs[known_tfs["TF_Name"].isin(genes)].drop_duplicates()
 
-    tfs = overlap_tf["Gene Symbol"].to_list()
+    tfs = overlap_tf["TF_Name"].to_list()
     tgs = [gene for gene in genes if gene not in tfs]
 
-    logging.info(f"Number of TFs: {len(tfs):,}")
-    logging.info(f"Number of TGs: {len(tgs):,}")
+    logging.info("\nCreating TF-TG combination files")
+    logging.info(f"  - Number of TFs: {len(tfs):,}")
+    logging.info(f"  - Number of TGs: {len(tgs):,}")
 
     mux = pd.MultiIndex.from_product([tfs, tgs], names=["TF", "TG"])
     tf_tg_df = mux.to_frame(index=False)
     
-    logging.info(f"TF-TG combinations: {len(tf_tg_df):,}")
+    logging.info(f"  - TF-TG combinations: {len(tf_tg_df):,}")
 
     tf_tg_outdir = DATA_DIR / "tf_tg_combos"
     os.makedirs(tf_tg_outdir, exist_ok=True)
+    
     
     if not os.path.isfile(tf_tg_outdir / "total_genes.csv"):
         logging.info("Writing total genes to 'total_genes.csv'")
@@ -114,21 +116,21 @@ def create_tf_tg_combination_files(genes):
                 total_genes_file.write(f"{i}\n")
     
     if not os.path.isfile(tf_tg_outdir / "tg_list.csv"):
-        logging.info("Writing TF list to 'tg_list.csv'")
+        logging.info("  Writing TF list to 'tg_list.csv'")
         with open(tf_tg_outdir / "tg_list.csv", 'w') as tg_list_file:
             tg_list_file.write("TG\n")
             for i in tgs:
                 tg_list_file.write(f"{i}\n")
     
     if not os.path.isfile(tf_tg_outdir / "tf_list.csv"):
-        logging.info("Writing TF list to 'tf_list.csv'")
+        logging.info("  Writing TF list to 'tf_list.csv'")
         with open(tf_tg_outdir / "tf_list.csv", "w") as tf_list_file:
             tf_list_file.write("TF\n")
             for i in tfs:
                 tf_list_file.write(f"{i}\n")
     
     if not os.path.isfile(tf_tg_outdir / "tf_tg_combos.csv"):
-        logging.info("Writing combinations to 'tf_tg_combos.csv'")
+        logging.info("  Writing combinations to 'tf_tg_combos.csv'")
         tf_tg_df.to_csv(tf_tg_outdir / "tf_tg_combos.csv", header=True, index=False)
         
     logging.info("Done!")
@@ -504,6 +506,8 @@ if __name__ == "__main__":
     RAW_10X_RNA_DATA_DIR = RAW_DATA / sample_name / "PBMC_raw"
     RAW_ATAC_PEAK_MATRIX_FILE = RAW_DATA / sample_name / "Peaks.txt"
     
+    tf_file = DATA_DIR / "databases" / "motif_information" / organism_code / "TF_Information_all_motifs.txt"
+    
     IGNORE_PROCESSED_FILES = False
     logging.info(f"IGNORE_PROCESSED_FILES: {IGNORE_PROCESSED_FILES}")
     
@@ -511,6 +515,7 @@ if __name__ == "__main__":
         
         if (not os.path.isfile(sample_input_dir / "adata_ATAC.h5ad")) or (not os.path.isfile(sample_input_dir / "adata_RNA.h5ad")) or IGNORE_PROCESSED_FILES:
     
+            logging.info("\nReading RNA and ATAC files")
             rna_file = sample_input_dir / "scRNA_seq_raw.csv"
             atac_file = sample_input_dir / "scATAC_seq_raw.csv"
             
@@ -562,24 +567,26 @@ if __name__ == "__main__":
         processed_atac_df = adata_to_dense_df(adata_atac_filtered)
         
         logging.info("\nWriting processed RNA and ATAC files")
+        logging.info("  - Writing pre-processed RNA file")
         processed_rna_df.to_parquet(sample_input_dir / "scRNA_seq_processed.parquet", engine="pyarrow", compression="snappy")
+        logging.info("  - Writing pre-processed ATAC file")
         processed_atac_df.to_parquet(sample_input_dir / "scATAC_seq_processed.parquet", engine="pyarrow", compression="snappy")
 
     else:
-        logging.info("Reading pre-processed RNA and ATAC files")
+        logging.info("Pre-processed RNA and ATAC files found, loading...")
+        logging.info("  - Reading pre-processed RNA file")
         processed_rna_df = pd.read_parquet(processed_rna_file, engine="pyarrow")
+        logging.info("  - Reading pre-processed ATAC file")
         processed_atac_df = pd.read_parquet(processed_atac_file, engine="pyarrow")
     
-    logging.info(f"Number of peaks: {processed_atac_df.shape[0]}")
-
     genes = processed_rna_df.index.to_list()
     peaks = processed_atac_df.index.to_list()
-
-    logging.info(genes[:5])
-    logging.info(peaks[:5])
-
-    tfs, tgs, tf_tg_df = create_tf_tg_combination_files(genes)
     
+    logging.info("\nProcessed RNA and ATAC files loaded")
+    logging.info(f"  - Number of genes: {processed_rna_df.shape[0]}: {genes[:3]}")
+    logging.info(f"  - Number of peaks: {processed_atac_df.shape[0]}: {peaks[:3]}")
+
+    tfs, tgs, tf_tg_df = create_tf_tg_combination_files(genes, tf_file)
     
     if not os.path.isdir(GENOME_DIR):
         os.makedirs(GENOME_DIR)

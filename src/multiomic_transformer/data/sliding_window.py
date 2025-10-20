@@ -19,7 +19,7 @@ import pybedtools
 import pyfaidx
 from matplotlib.ticker import FuncFormatter
 import multiprocessing as mp
-
+import MOODS.tools
 
 from numba import njit, prange
 from pyarrow.lib import ArrowInvalid
@@ -190,10 +190,13 @@ def build_first_order_bg(fasta, peaks_bed, sample=200000):
 
 def extract_peak_seqs(fasta, peaks_bed):
     logging.info(f"Extracting sequences from {peaks_bed}")
+    valid_chroms = set(fasta.keys())
     bt = pybedtools.BedTool(peaks_bed)
     seqs, ids = [], []
 
     for iv in bt:
+        if iv.chrom not in valid_chroms:
+            continue
         try:
             seq = fasta[iv.chrom][iv.start:iv.end].upper()
             if len(seq) == 0:
@@ -208,13 +211,6 @@ def extract_peak_seqs(fasta, peaks_bed):
     assert len(seqs) == len(ids), f"Mismatch: {len(seqs)} seqs vs {len(ids)} IDs"
     logging.info(f"Extracted {len(seqs)} peak sequences")
     return ids, seqs
-
-import re
-import numpy as np
-import logging
-import os
-import MOODS.parsers
-import MOODS.tools
 
 def to_log_odds(pfm, bg, pseudocount=1e-4):
     pfm = np.asarray(pfm, dtype=float)
@@ -250,6 +246,7 @@ def load_motifs(motif_paths, pseudocount=0.001, bg=None):
         bg = MOODS.tools.flat_bg(4)
 
     score_mats, names = [], []
+    malformed = 0
 
     for path in motif_paths:
         base = os.path.basename(path)
@@ -280,6 +277,7 @@ def load_motifs(motif_paths, pseudocount=0.001, bg=None):
                 names.append(name.capitalize())
             except Exception as e:
                 logging.debug(f"Skipping malformed PFM: {path}\n  Reason: {e}")
+                malformed += 1
             continue
 
         # --- MEME-format fallback ---
@@ -299,7 +297,7 @@ def load_motifs(motif_paths, pseudocount=0.001, bg=None):
             score_mats.append(_orient_pwm_position_major(log_odds))
             names.append(motif_name.capitalize())
 
-    logging.info(f"Loaded {len(score_mats)} valid motifs")
+    logging.info(f"Loaded {len(score_mats)} valid motifs, {malformed} malformed")
     return score_mats, names
 
 

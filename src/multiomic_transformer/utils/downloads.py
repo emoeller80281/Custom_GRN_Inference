@@ -12,7 +12,7 @@ from config.settings import *
 
 def download_gene_tss_file(
     save_file: Union[Path, str], 
-    gene_dataset_name: str = "mmusculus_gene_ensembl", 
+    gene_dataset_name: str = "hsapiens_gene_ensembl", 
     ensembl_version: str = "useast.ensembl.org"
     ) -> pd.DataFrame:
     """
@@ -77,9 +77,17 @@ def download_gene_tss_file(
 
     return df
 
-def download_genome_fasta(organism_code: str, save_dir: Union[str, Path]):
+import os
+import subprocess
+import shutil
+import logging
+import requests
+from pathlib import Path
+from typing import Union
+
+def download_genome_fasta(organism_code: str, save_dir: Union[str, Path]) -> Path:
     """
-    Download a UCSC genome FASTA, convert to BGZF format, and index with samtools.
+    Download a UCSC genome FASTA, convert it to BGZF format, and index with samtools.
 
     Parameters
     ----------
@@ -87,64 +95,91 @@ def download_genome_fasta(organism_code: str, save_dir: Union[str, Path]):
         Genome assembly (e.g., 'mm10', 'hg38').
     save_dir : str or Path
         Directory to save the genome files.
+
+    Returns
+    -------
+    Path
+        Path to the BGZF-compressed FASTA file.
     """
     assert organism_code in ("mm10", "hg38"), \
-        f"Organism code '{organism_code}' not supported (valid: 'mm10', 'hg38')"
+        f"Organism code '{organism_code}' not supported (valid: 'mm10', 'hg38')."
 
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    gz_path = save_dir / f"{organism_code}.fa.gz"
-    bgzf_path = save_dir / f"{organism_code}.fa.bgz"
+    gz_path   = save_dir / f"{organism_code}.fa.gz"
     fasta_path = save_dir / f"{organism_code}.fa"
-    fai_path = save_dir / f"{organism_code}.fa.bgz.fai"
+    bgzf_path  = save_dir / f"{organism_code}.fa.bgz"
+    fai_path   = save_dir / f"{organism_code}.fa.bgz.fai"
 
-    # Step 1. Download genome if not present
+    # 1. Check dependencies
+    for tool in ["bgzip", "samtools"]:
+        if shutil.which(tool) is None:
+            raise RuntimeError(f"Required tool '{tool}' not found in PATH. "
+                               f"Please install via conda or system package manager.")
+
+    # 2. Download genome if needed
     if not gz_path.exists():
         url = f"https://hgdownload.soe.ucsc.edu/goldenPath/{organism_code}/bigZips/{organism_code}.fa.gz"
         logging.info(f"Downloading {organism_code} genome from:\n  {url}")
         with requests.get(url, stream=True, timeout=120) as r:
             r.raise_for_status()
             with open(gz_path, "wb") as f:
-                for chunk in r.iter_content(chunk_size=1 << 20):
+                for chunk in r.iter_content(chunk_size=1 << 20):  # 1 MB
                     if chunk:
                         f.write(chunk)
         logging.info(f"  - Download complete: {gz_path}")
     else:
         logging.info(f"  - Found existing genome file: {gz_path}")
 
-    def _run_cmd(cmd: list[str]):
-        """Run a shell command and raise an error if it fails."""
-        logging.info(f"Running: {' '.join(cmd)}")
-        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        if result.returncode != 0:
-            raise RuntimeError(f"Command failed: {' '.join(cmd)}\n{result.stderr}")
-        return result
-
-    # Step 2. Convert gzip → BGZF (via samtools)
+    # 3. Convert gzip to BGZF
     if not bgzf_path.exists():
         logging.info(f"Converting {gz_path.name} to BGZF format...")
-        _run_cmd(["gunzip", "-c", str(gz_path), "|", "bgzip", ">", str(bgzf_path)])
-        # Some environments may not interpret pipes; safer to split into two steps:
-        # 1. gunzip -> .fa
-        # 2. bgzip -> .fa.bgz
-        if not bgzf_path.exists():
-            _run_cmd(["gunzip", "-c", str(gz_path), ">", str(fasta_path)])
-            _run_cmd(["bgzip", "-f", str(fasta_path)])
-        logging.info(f"Converted to BGZF: {bgzf_path}")
-    else:
-        logging.info(f"Found existing BGZF file: {bgzf_path}")
 
-    # Step 3. Index with samtools
+        # Decompress safely to .fa
+        logging.info("  - Decompressing original .gz → .fa ...")
+        with subprocess.Popen(["gunzip", "-c", str(gz_path)], stdout=subprocess.PIPE) as gunzip_proc:
+            with open(fasta_path, "wb") as fa_out:
+                for chunk in iter(lambda: gunzip_proc.stdout.read(1 << 20), b""):
+                    if not chunk:
+                        break
+                    fa_out.write(chunk)
+            gunzip_proc.wait()
+            if gunzip_proc.returncode != 0:
+                raise RuntimeError(f"gunzip failed while decompressing {gz_path}")
+
+        # Compress to BGZF
+        logging.info("  - Compressing .fa → .fa.bgz with bgzip ...")
+        result = subprocess.run(["bgzip", "-f", str(fasta_path)],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(f"bgzip failed:\n{result.stderr.strip()}")
+        logging.info(f"  - BGZF-compressed FASTA created: {bgzf_path}")
+
+        # Remove intermediate uncompressed FASTA to save space
+        try:
+            fasta_path.unlink()
+            logging.info(f"  - Removed intermediate file: {fasta_path}")
+        except Exception as e:
+            logging.warning(f"  - Could not delete {fasta_path}: {e}")
+    else:
+        logging.info(f"  - Found existing BGZF file: {bgzf_path}")
+
+    # 4. Index genome (samtools faidx)
     if not fai_path.exists():
-        logging.info(f"Indexing {bgzf_path.name} with samtools...")
-        _run_cmd(["samtools", "faidx", str(bgzf_path)])
-        logging.info(f"Index created: {fai_path}")
+        logging.info(f"Indexing {bgzf_path.name} with samtools faidx ...")
+        result = subprocess.run(["samtools", "faidx", str(bgzf_path)],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(f"samtools faidx failed:\n{result.stderr.strip()}")
+        logging.info(f"  - Index created: {fai_path}")
     else:
-        logging.info(f"Index already exists: {fai_path}")
+        logging.info(f"  - Index already exists: {fai_path}")
 
-    logging.info(f"Genome downloaded and converted to bgzf: {bgzf_path}")
+    # 5. Return final path
+    logging.info(f"Genome ready: {bgzf_path}")
     return bgzf_path
+
 
 def download_jaspar_pfms(save_dir: str, tax_id: str = "10090", version: int = 2024, max_workers: int = 8):
     """
