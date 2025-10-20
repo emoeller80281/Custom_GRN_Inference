@@ -74,25 +74,23 @@ model = GRN_GAT_Encoder(
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-5)
 
 # ============================================================
-# Phase 1 — Self-supervised Deep Graph Infomax
+# Phase 1 — Self-supervised Deep Graph Infomax (DGI)
 # ============================================================
-def corruption(x): return x[torch.randperm(x.size(0))]
+phase1_losses = []
 
-def infomax_loss(h_real, h_fake, g):
-    pos = torch.sum(h_real * g, dim=1)
-    neg = torch.sum(h_fake * g, dim=1)
-    return -torch.mean(F.logsigmoid(pos) + F.logsigmoid(-neg))
-
-data = data.to(device)
-logging.info("=== Phase 1: Self-supervised pretraining ===")
 for epoch in range(1, 201):
-    model.train(); optimizer.zero_grad()
+    model.train()
+    optimizer.zero_grad()
     h_real, g_real = model(data.x, data.edge_index, data.edge_attr)
     h_fake, _ = model(corruption(data.x), data.edge_index, data.edge_attr)
     loss = infomax_loss(h_real, h_fake, g_real)
-    loss.backward(); optimizer.step()
+    loss.backward()
+    optimizer.step()
+    phase1_losses.append(loss.item())
+    
     if epoch % 10 == 0:
         logging.info(f"[DGI] Epoch {epoch:03d} | Loss={loss.item():.6f}")
+
 
 torch.save(model.state_dict(), "outputs/self_supervised_gat.pt")
 logging.info("Saved pretrained weights to outputs/self_supervised_gat.pt")
@@ -142,11 +140,16 @@ if encoder_frozen:
 criterion = nn.BCEWithLogitsLoss()
 optimizer_finetune = torch.optim.Adam(filter(lambda p: p.requires_grad, finetune_model.parameters()), lr=1e-4)
 
+phase2_train_losses, phase2_val_auroc, phase2_val_aupr = [], [], []
+
 for epoch in range(1, 101):
-    finetune_model.train(); optimizer_finetune.zero_grad()
+    finetune_model.train()
+    optimizer_finetune.zero_grad()
     logits = finetune_model(data.x, data.edge_index, data.edge_attr, pairs_train)
     loss = criterion(logits, y_train)
-    loss.backward(); optimizer_finetune.step()
+    loss.backward()
+    optimizer_finetune.step()
+    phase2_train_losses.append(loss.item())
 
     if epoch % 10 == 0:
         finetune_model.eval()
@@ -154,10 +157,47 @@ for epoch in range(1, 101):
             preds = torch.sigmoid(finetune_model(data.x, data.edge_index, data.edge_attr, pairs_test))
             auc = roc_auc_score(y_test.cpu(), preds.cpu())
             aupr = average_precision_score(y_test.cpu(), preds.cpu())
+            phase2_val_auroc.append(auc)
+            phase2_val_aupr.append(aupr)
         logging.info(f"[FineTune] Epoch {epoch:03d} | Loss={loss.item():.4f} | AUROC={auc:.3f} | AUPR={aupr:.3f}")
+
 
 torch.save(finetune_model.state_dict(), "outputs/fine_tuned_gat_classifier.pt")
 logging.info("Saved fine-tuned model to outputs/fine_tuned_gat_classifier.pt")
+
+
+# ============================================================
+# ===  Plot Phase 1 and Phase 2 Loss Curves  ===
+# ============================================================
+import matplotlib.pyplot as plt
+
+plt.figure(figsize=(12,5))
+
+# ---- Phase 1 ----
+plt.subplot(1,2,1)
+plt.plot(range(1, len(phase1_losses)+1), phase1_losses, color='steelblue')
+plt.title("Phase 1: Self-supervised (DGI) Loss")
+plt.xlabel("Epoch")
+plt.ylabel("Loss")
+plt.grid(True, alpha=0.3)
+
+# ---- Phase 2 ----
+plt.subplot(1,2,2)
+plt.plot(range(1, len(phase2_train_losses)+1), phase2_train_losses, color='darkorange', label="Train Loss")
+if len(phase2_val_auroc) > 0:
+    # Plot validation AUROC scaled for visual comparison
+    val_epochs = [i*10 for i in range(1, len(phase2_val_auroc)+1)]
+    plt.twinx()
+    plt.plot(val_epochs, phase2_val_auroc, color='green', label="Val AUROC")
+    plt.ylabel("Validation AUROC", color='green')
+plt.title("Phase 2: Fine-tuning Loss / AUROC")
+plt.xlabel("Epoch")
+plt.grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.savefig("outputs/training_loss_curves.png", dpi=300)
+plt.close()
+logging.info("Saved training loss curves to outputs/training_loss_curves.png")
 
 
 # ============================================================
@@ -218,18 +258,25 @@ neg_sim = cosine_sim(h_final[neg_pairs[:,0]], h_final[neg_pairs[:,1]])
 logging.info(f"Mean cosine similarity — Positives: {pos_sim:.4f}, Negatives: {neg_sim:.4f}")
 
 # ============================================================
-# ===  Feature Importance via Integrated Gradients  ===
+# ===  Feature Importances via Gradients  ===
 # ============================================================
 logging.info("\n=== Computing feature importances via gradients ===")
 
-edge_attr.requires_grad_(True)
-criterion = nn.BCEWithLogitsLoss()
+# Clone edge attributes and enable gradients on GPU
+edge_attr = data.edge_attr.clone().detach().to(device).requires_grad_(True)
 finetune_model.zero_grad()
-logits = finetune_model(data.x, data.edge_index, edge_attr, pairs_test)
-loss = criterion(logits, y_test)
+
+criterion = nn.BCEWithLogitsLoss()
+logits = finetune_model(
+    data.x.to(device),
+    data.edge_index.to(device),
+    edge_attr,
+    pairs_test.to(device)
+)
+loss = criterion(logits, y_test.to(device))
 loss.backward()
 
-# Aggregate absolute gradients across all edges
+# Compute mean absolute gradients per feature
 importance = edge_attr.grad.abs().mean(dim=0).cpu().numpy()
 feature_importance = pd.Series(importance, index=edge_features).sort_values(ascending=False)
 logging.info("\nFeature importance (mean |∂L/∂feature|):\n" + str(feature_importance))
@@ -266,7 +313,7 @@ sens_df.to_csv("outputs/feature_sensitivity.csv")
 
 logging.info("\n=== Evaluating per-TF, per-TG, and KEGG pathway performance ===")
 
-# ----- 1️⃣ Per-TF AUROC / AUPR -----
+# ----- Per-TF AUROC / AUPR -----
 tf_scores = []
 for tf_name, tf_id in zip(tf_encoder.classes_, range(n_tfs)):
     mask = pairs_test[:,0].cpu().numpy() == tf_id
@@ -346,3 +393,214 @@ if "kegg_df" in locals() and not kegg_df.empty:
     plt.tight_layout()
     plt.savefig("outputs/top_KEGG_AUROC.png", dpi=200)
     plt.close()
+
+# ============================================================
+# ===  Integrated Gradients (IG) Feature Attribution  ===
+# ============================================================
+logging.info("\n=== Computing feature importances via Integrated Gradients (IG) ===")
+
+def integrated_gradients(
+    model, data, pairs_test, y_test, edge_features, baseline=None, steps=50
+):
+    """
+    Integrated gradients for edge features.
+    Integrates gradients between a baseline and the actual input.
+    """
+    device = next(model.parameters()).device
+    model.eval()
+
+    # Baseline: zeros or provided
+    if baseline is None:
+        baseline = torch.zeros_like(data.edge_attr).to(device)
+
+    # Scale inputs between baseline and actual edge attributes
+    scaled_inputs = [
+        baseline + (float(i) / steps) * (data.edge_attr - baseline)
+        for i in range(steps + 1)
+    ]
+
+    total_gradients = torch.zeros_like(data.edge_attr).to(device)
+    criterion = nn.BCEWithLogitsLoss()
+
+    for scaled_attr in scaled_inputs:
+        scaled_attr.requires_grad_(True)
+        model.zero_grad()
+
+        logits = finetune_model(
+            data.x.to(device),
+            data.edge_index.to(device),
+            scaled_attr,
+            pairs_test.to(device)
+        )
+        loss = criterion(logits, y_test.to(device))
+        loss.backward()
+
+        total_gradients += scaled_attr.grad.detach()
+
+    avg_gradients = total_gradients / (steps + 1)
+    ig_attributions = (data.edge_attr - baseline) * avg_gradients
+    return ig_attributions.mean(dim=0).cpu().numpy()
+
+# Run IG attribution
+ig_attr = integrated_gradients(
+    finetune_model, data, pairs_test, y_test, edge_features, steps=50
+)
+ig_series = pd.Series(ig_attr, index=edge_features).sort_values(ascending=False)
+logging.info("\nIntegrated Gradients feature importances:\n" + str(ig_series))
+
+# Plot IG feature importances
+plt.figure(figsize=(7,4))
+sns.barplot(x="AUROC", y="TF", hue="TF", data=tf_df.head(10), legend=False, palette="viridis")
+plt.title("Integrated Gradients Feature Importance (Mean Attribution)")
+plt.tight_layout()
+plt.savefig("outputs/feature_importance_IG.png", dpi=200)
+plt.close()
+
+# ============================================================
+# ===  TF-Specific Integrated Gradients Analysis  ===
+# ============================================================
+logging.info("\n=== Computing TF-specific Integrated Gradients ===")
+
+tf_ig_records = []
+
+for tf_name, tf_id in zip(tf_encoder.classes_, range(n_tfs)):
+    mask = pairs_test[:,0].cpu().numpy() == tf_id
+    if mask.sum() < 10:  # need enough edges
+        continue
+
+    sub_pairs = pairs_test[mask]
+    sub_labels = y_test[mask]
+    if len(np.unique(sub_labels.cpu().numpy())) < 2:
+        continue
+
+    ig_attr = integrated_gradients(
+        finetune_model,
+        data,
+        sub_pairs,
+        sub_labels,
+        edge_features,
+        steps=30
+    )
+
+    tf_ig_records.append({
+        "TF": tf_name,
+        **{feat: val for feat, val in zip(edge_features, ig_attr)}
+    })
+
+tf_ig_df = pd.DataFrame(tf_ig_records)
+tf_ig_df.to_csv("outputs/tf_specific_integrated_gradients.csv", index=False)
+logging.info(f"Saved TF-specific IG feature attributions for {len(tf_ig_df)} TFs")
+
+# Optional: visualize top features for top 5 TFs
+top_tfs = tf_df.head(5)["TF"].tolist()
+plt.figure(figsize=(8,5))
+for i, tf in enumerate(top_tfs):
+    vals = tf_ig_df[tf_ig_df["TF"] == tf].iloc[0,1:]
+    plt.subplot(1, len(top_tfs), i+1)
+    sns.barplot(x=vals.values, y=vals.index, orient="h")
+    plt.title(tf)
+plt.tight_layout()
+plt.savefig("outputs/tf_specific_IG_barplots.png", dpi=200)
+plt.close()
+
+# ============================================================
+# ===  TF Embedding Visualization (UMAP / t-SNE) ===
+# ============================================================
+import umap
+import seaborn as sns
+import matplotlib.pyplot as plt
+from sklearn.manifold import TSNE
+from sklearn.preprocessing import StandardScaler
+
+logging.info("\n=== Visualizing TF embeddings ===")
+
+# Extract final node embeddings from self-supervised encoder
+with torch.no_grad():
+    h_final, _ = model(data.x.to(device), data.edge_index.to(device), data.edge_attr.to(device))
+h_final = h_final.cpu().numpy()
+
+# Extract TF-only embeddings (first n_tfs entries)
+tf_embeddings = h_final[:n_tfs]
+tf_names = tf_encoder.classes_
+
+# ------------------------------------------------------------
+# Load per-TF metrics if available
+# ------------------------------------------------------------
+try:
+    tf_metrics = pd.read_csv("outputs/per_TF_metrics.csv")
+    tf_metrics = tf_metrics.set_index("TF")
+    auroc_map = [tf_metrics.loc[tf, "AUROC"] if tf in tf_metrics.index else np.nan for tf in tf_names]
+except FileNotFoundError:
+    logging.warning("per_TF_metrics.csv not found; skipping AUROC coloring.")
+    auroc_map = [np.nan] * len(tf_names)
+
+# ------------------------------------------------------------
+# UMAP projection
+# ------------------------------------------------------------
+scaler = StandardScaler()
+tf_scaled = scaler.fit_transform(tf_embeddings)
+
+umap_model = umap.UMAP(n_neighbors=15, min_dist=0.1, metric="cosine", random_state=42)
+tf_umap = umap_model.fit_transform(tf_scaled)
+
+# Optional: alternative t-SNE view (comment out if large)
+# tsne_model = TSNE(n_components=2, perplexity=20, random_state=42, learning_rate="auto")
+# tf_tsne = tsne_model.fit_transform(tf_scaled)
+
+# ------------------------------------------------------------
+# Combine into DataFrame for plotting
+# ------------------------------------------------------------
+tf_vis_df = pd.DataFrame({
+    "TF": tf_names,
+    "UMAP1": tf_umap[:,0],
+    "UMAP2": tf_umap[:,1],
+    "AUROC": auroc_map
+})
+tf_vis_df.to_csv("outputs/tf_embedding_umap.csv", index=False)
+logging.info(f"Saved TF UMAP embeddings to outputs/tf_embedding_umap.csv")
+
+# ------------------------------------------------------------
+# Plot UMAP colored by AUROC
+# ------------------------------------------------------------
+plt.figure(figsize=(7,6))
+sns.scatterplot(
+    data=tf_vis_df,
+    x="UMAP1", y="UMAP2",
+    hue="AUROC", palette="viridis", s=60, edgecolor="none"
+)
+plt.title("TF Embedding Map (colored by AUROC)")
+plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+plt.tight_layout()
+plt.savefig("outputs/tf_embedding_umap_by_AUROC.png", dpi=300)
+plt.close()
+
+# ------------------------------------------------------------
+# Optional: Cluster labeling
+# ------------------------------------------------------------
+from sklearn.cluster import KMeans
+kmeans = KMeans(n_clusters=8, random_state=42).fit(tf_scaled)
+tf_vis_df["Cluster"] = kmeans.labels_
+
+plt.figure(figsize=(7,6))
+sns.scatterplot(
+    data=tf_vis_df,
+    x="UMAP1", y="UMAP2",
+    hue="Cluster", palette="tab10", s=60, edgecolor="none"
+)
+plt.title("TF Embedding Clusters (KMeans)")
+plt.tight_layout()
+plt.savefig("outputs/tf_embedding_clusters.png", dpi=300)
+plt.close()
+
+# ------------------------------------------------------------
+# Optional: Link clusters to top features (if IG results exist)
+# ------------------------------------------------------------
+try:
+    ig_df = pd.read_csv("outputs/tf_specific_integrated_gradients.csv")
+    ig_summary = ig_df.groupby("TF")[edge_features].mean()
+    ig_summary["Cluster"] = tf_vis_df.set_index("TF")["Cluster"]
+    cluster_summary = ig_summary.groupby("Cluster").mean()
+    cluster_summary.to_csv("outputs/tf_cluster_feature_summary.csv")
+    logging.info("Saved cluster-wise mean feature attributions to outputs/tf_cluster_feature_summary.csv")
+except FileNotFoundError:
+    logging.warning("tf_specific_integrated_gradients.csv not found; skipping feature summary by cluster.")
