@@ -39,7 +39,9 @@ logging.info(f"Total nodes: {n_nodes} ({n_tfs} TFs, {n_tgs} TGs)")
 # ============================================================
 # Build graph
 # ============================================================
-edge_index = torch.tensor([tf_ids, tg_ids], dtype=torch.long)
+# Convert once to NumPy array → fast tensor creation, no warning
+edge_index_np = np.array([tf_ids, tg_ids], dtype=np.int64)
+edge_index = torch.from_numpy(edge_index_np)
 
 edge_features = [
     "reg_potential", "motif_density", "mean_tf_expr",
@@ -52,17 +54,20 @@ tf_expr = df.groupby("TF")["mean_tf_expr"].mean()
 tg_expr = df.groupby("TG")["mean_tg_expr"].mean()
 node_features = torch.tensor(
     np.concatenate([
-        tf_expr.reindex(tf_encoder.classes_).fillna(0).to_numpy().reshape(-1,1),
-        tg_expr.reindex(tg_encoder.classes_).fillna(0).to_numpy().reshape(-1,1)
+        tf_expr.reindex(tf_encoder.classes_).fillna(0).to_numpy().reshape(-1, 1),
+        tg_expr.reindex(tg_encoder.classes_).fillna(0).to_numpy().reshape(-1, 1)
     ]),
     dtype=torch.float32
 )
-data = Data(x=node_features, edge_index=edge_index, edge_attr=edge_attr)
 
 # ============================================================
-# Model
+# Model & device setup
 # ============================================================
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+logging.info(f"Using device: {device}")
+
+data = Data(x=node_features, edge_index=edge_index, edge_attr=edge_attr).to(device)
+
 model = GRN_GAT_Encoder(
     in_node_feats=1,
     in_edge_feats=len(edge_features),
@@ -71,7 +76,48 @@ model = GRN_GAT_Encoder(
     dropout=0.3,
     edge_dropout_p=0.3
 ).to(device)
+
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-5)
+
+# Sanity-check devices
+logging.info(
+    f"Device check → x:{data.x.device}, edge_index:{data.edge_index.device}, "
+    f"edge_attr:{data.edge_attr.device}, model:{next(model.parameters()).device}"
+)
+
+# ============================================================
+# Utility functions for self-supervised DGI training
+# ============================================================
+
+def corruption(x: torch.Tensor) -> torch.Tensor:
+    """
+    Corrupt node features by shuffling rows.
+    Used in Deep Graph Infomax to create negative samples.
+    """
+    idx = torch.randperm(x.size(0))
+    return x[idx]
+
+
+def infomax_loss(h_real: torch.Tensor,
+                 h_fake: torch.Tensor,
+                 g_real: torch.Tensor,
+                 EPS: float = 1e-8) -> torch.Tensor:
+    """
+    Deep Graph Infomax mutual-information objective.
+    Encourages agreement between node embeddings (h_real)
+    and the global summary vector (g_real) while penalizing
+    agreement with corrupted features (h_fake).
+    """
+    # Global discriminator scores
+    score_real = torch.sum(h_real * g_real, dim=1)
+    score_fake = torch.sum(h_fake * g_real, dim=1)
+
+    # Binary cross-entropy losses
+    loss_real = -torch.log(torch.sigmoid(score_real) + EPS).mean()
+    loss_fake = -torch.log(1 - torch.sigmoid(score_fake) + EPS).mean()
+
+    return loss_real + loss_fake
+
 
 # ============================================================
 # Phase 1 — Self-supervised Deep Graph Infomax (DGI)
@@ -379,7 +425,7 @@ import seaborn as sns
 
 # Top 10 TFs by AUROC
 plt.figure(figsize=(8,4))
-sns.barplot(x="AUROC", y="TF", data=tf_df.head(10), palette="viridis")
+sns.barplot(x="AUROC", y="TF", hue="TF", data=tf_df.head(10), legend=False, palette="viridis")
 plt.title("Top 10 TFs by AUROC (Fine-tuned GAT)")
 plt.tight_layout()
 plt.savefig("outputs/top_TF_AUROC.png", dpi=200)
@@ -388,7 +434,7 @@ plt.close()
 # Top 10 KEGG pathways
 if "kegg_df" in locals() and not kegg_df.empty:
     plt.figure(figsize=(8,4))
-    sns.barplot(x="AUROC", y="KEGG_Pathway", data=kegg_df.head(10), palette="mako")
+    sns.barplot(x="AUROC", y="KEGG_Pathway", data=kegg_df.head(10), hue="AUROC", palette="viridis")
     plt.title("Top 10 KEGG Pathways by AUROC")
     plt.tight_layout()
     plt.savefig("outputs/top_KEGG_AUROC.png", dpi=200)
@@ -449,8 +495,8 @@ ig_series = pd.Series(ig_attr, index=edge_features).sort_values(ascending=False)
 logging.info("\nIntegrated Gradients feature importances:\n" + str(ig_series))
 
 # Plot IG feature importances
-plt.figure(figsize=(7,4))
-sns.barplot(x="AUROC", y="TF", hue="TF", data=tf_df.head(10), legend=False, palette="viridis")
+plt.figure(figsize=(7, 4))
+sns.barplot(x=ig_series.values, y=ig_series.index, orient="h")
 plt.title("Integrated Gradients Feature Importance (Mean Attribution)")
 plt.tight_layout()
 plt.savefig("outputs/feature_importance_IG.png", dpi=200)
@@ -491,17 +537,33 @@ tf_ig_df = pd.DataFrame(tf_ig_records)
 tf_ig_df.to_csv("outputs/tf_specific_integrated_gradients.csv", index=False)
 logging.info(f"Saved TF-specific IG feature attributions for {len(tf_ig_df)} TFs")
 
-# Optional: visualize top features for top 5 TFs
+# ------------------------------------------------------------
+# Optional: visualize top features for top 5 TFs (safe version)
+# ------------------------------------------------------------
 top_tfs = tf_df.head(5)["TF"].tolist()
-plt.figure(figsize=(8,5))
-for i, tf in enumerate(top_tfs):
-    vals = tf_ig_df[tf_ig_df["TF"] == tf].iloc[0,1:]
-    plt.subplot(1, len(top_tfs), i+1)
+plt.figure(figsize=(10, 4))
+
+plotted = 0
+for tf in top_tfs:
+    match = tf_ig_df[tf_ig_df["TF"] == tf]
+    if match.empty:
+        logging.warning(f"Skipping {tf} — no IG attribution data found.")
+        continue
+
+    vals = match.iloc[0, 1:]  # feature columns
+    plt.subplot(1, min(5, len(tf_ig_df)), plotted + 1)
     sns.barplot(x=vals.values, y=vals.index, orient="h")
     plt.title(tf)
-plt.tight_layout()
-plt.savefig("outputs/tf_specific_IG_barplots.png", dpi=200)
-plt.close()
+    plotted += 1
+
+if plotted == 0:
+    logging.warning("No TFs had IG attribution data for plotting.")
+else:
+    plt.tight_layout()
+    plt.savefig("outputs/tf_specific_IG_barplots.png", dpi=200)
+    plt.close()
+    logging.info(f"Saved IG feature barplots for {plotted} TFs.")
+
 
 # ============================================================
 # ===  TF Embedding Visualization (UMAP / t-SNE) ===
