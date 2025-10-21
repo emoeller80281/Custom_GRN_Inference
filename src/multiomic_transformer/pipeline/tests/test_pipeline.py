@@ -444,3 +444,4 @@ def test_tf_tg_features_feed_tensorization(tmp_path):
     means = edge_attr.mean(dim=0)
     assert not torch.isnan(means).any(), "Mean of feature tensor contains NaN"
     assert (means >= 0).any(), "All feature means are negative — unexpected"
+

@@ -171,6 +171,15 @@ def run_tf_tg_feature_construction(
         merged["expr_product"] = merged["mean_tf_expr"] * merged["mean_tg_expr"]
         merged["log_reg_pot"] = np.log1p(merged.get("reg_potential", 0))
         merged["motif_present"] = (merged.get("motif_density", 0) > 0).astype(int)
+        
+        numeric_casts = [
+            "reg_potential", "expr_product", "log_reg_pot", "neg_log_tss_dist",
+            "mean_tf_expr", "mean_tg_expr", "pearson_corr", "spearman_corr", "motif_density"
+        ]
+        for col in numeric_casts:
+            if col in merged.columns:
+                merged[col] = pd.to_numeric(merged[col], errors="coerce").fillna(0.0)
+
 
         # ---------------------------------------------------------------
         # 7. Save output

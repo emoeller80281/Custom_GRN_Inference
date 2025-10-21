@@ -71,9 +71,31 @@ def filter_and_qc(adata_RNA: AnnData, adata_ATAC: AnnData) -> Tuple[AnnData, Ann
 
     sc.pp.filter_cells(adata_RNA, min_genes=200)
     sc.pp.filter_genes(adata_RNA, min_cells=3)
-    sc.pp.normalize_total(adata_RNA, target_sum=1e4)
-    sc.pp.log1p(adata_RNA)
-    sc.pp.highly_variable_genes(adata_RNA, min_mean=0.0125, max_mean=3, min_disp=0.5)
+    # Only log-transform if not already logged
+    if (adata_RNA.X.min() >= 0) and (adata_RNA.X.max() <= 20):
+        # heuristically detect raw counts
+        sc.pp.normalize_total(adata_RNA, target_sum=1e4)
+        sc.pp.log1p(adata_RNA)
+    else:
+        logging.warning("Skipping log1p: data appears already log-transformed.")
+
+    # Replace NaNs or infs with zeros before HVG computation
+    adata_RNA.X = np.nan_to_num(adata_RNA.X, nan=0.0, posinf=0.0, neginf=0.0)
+
+    # --- Highly variable genes ---
+    try:
+        sc.pp.highly_variable_genes(
+            adata_RNA,
+            min_mean=0.0125,
+            max_mean=3,
+            min_disp=0.5,
+            n_bins=20,
+            flavor="seurat",
+            inplace=True,
+        )
+    except ValueError as e:
+        logging.warning(f"highly_variable_genes() failed due to non-unique bins: {e}")
+        adata_RNA.var["highly_variable"] = np.ones(adata_RNA.n_vars, dtype=bool)
     adata_RNA = adata_RNA[:, adata_RNA.var.highly_variable].copy()
     sc.pp.scale(adata_RNA, max_value=10)
     sc.tl.pca(adata_RNA, n_comps=25, svd_solver="arpack")
@@ -83,8 +105,31 @@ def filter_and_qc(adata_RNA: AnnData, adata_ATAC: AnnData) -> Tuple[AnnData, Ann
     # ------------------------------------------------------------------
     sc.pp.filter_cells(adata_ATAC, min_genes=200)
     sc.pp.filter_genes(adata_ATAC, min_cells=3)
-    sc.pp.log1p(adata_ATAC)
-    sc.pp.highly_variable_genes(adata_ATAC, min_mean=0.0125, max_mean=3, min_disp=0.5)
+    # Only log-transform if not already logged
+    if (adata_ATAC.X.min() >= 0) and (adata_ATAC.X.max() <= 20):
+        # heuristically detect raw counts
+        sc.pp.normalize_total(adata_ATAC, target_sum=1e4)
+        sc.pp.log1p(adata_ATAC)
+    else:
+        logging.warning("Skipping log1p: data appears already log-transformed.")
+
+    # Replace NaNs or infs with zeros before HVG computation
+    adata_ATAC.X = np.nan_to_num(adata_ATAC.X, nan=0.0, posinf=0.0, neginf=0.0)
+
+    # --- Highly variable genes ---
+    try:
+        sc.pp.highly_variable_genes(
+            adata_ATAC,
+            min_mean=0.0125,
+            max_mean=3,
+            min_disp=0.5,
+            n_bins=20,
+            flavor="seurat",
+            inplace=True,
+        )
+    except ValueError as e:
+        logging.warning(f"highly_variable_genes() failed due to non-unique bins: {e}")
+        adata_ATAC.var["highly_variable"] = np.ones(adata_ATAC.n_vars, dtype=bool)
     adata_ATAC = adata_ATAC[:, adata_ATAC.var.highly_variable].copy()
     sc.pp.scale(adata_ATAC, max_value=10)
     sc.tl.pca(adata_ATAC, n_comps=25, svd_solver="arpack")

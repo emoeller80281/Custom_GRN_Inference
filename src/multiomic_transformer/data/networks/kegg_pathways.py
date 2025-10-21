@@ -634,8 +634,8 @@ def collapse_metabolites(G: nx.DiGraph) -> nx.DiGraph:
 def build_kegg_pkn(
     dataset_name: str,
     output_path: Union[Path, str],
-    out_csv: Union[Path, str],
-    out_gpickle: Union[Path, str],
+    out_csv: Union[str, None],
+    out_gpickle: Union[str, None],
     organism: str = "mmu",          # KEGG org code (e.g., 'mmu', 'hsa'); 'mm10' gets normalized in your code if you added that
     normalize_case: str = "upper",  # "upper" | "lower" | None
 ):
@@ -644,7 +644,7 @@ def build_kegg_pkn(
     then flattening to an edge list with sign and provenance.
 
     Output columns:
-      source_id, target_id, kegg_signal (-1/0/+1), kegg_n_pathways, kegg_pathways
+      TF, TG, kegg_signal (-1/0/+1), kegg_n_pathways, kegg_pathways
     """
     # 1) Build (or reuse cached) KEGG global network
     pw = Pathways(
@@ -677,8 +677,8 @@ def build_kegg_pkn(
         n_paths = 0 if not paths else len([p for p in paths.split(",") if p])
 
         rows.append({
-            "source_id": u,
-            "target_id": v,
+            "TF": u,
+            "TG": v,
             "kegg_signal": sign,
             "kegg_n_pathways": n_paths,
             "kegg_pathways": paths
@@ -695,12 +695,16 @@ def build_kegg_pkn(
         return s
 
     if not pkn.empty:
-        pkn["source_id"] = _canon(pkn["source_id"])
-        pkn["target_id"] = _canon(pkn["target_id"])
+        pkn["TF"] = _canon(pkn["TF"])
+        pkn["TG"] = _canon(pkn["TG"])
 
-    os.makedirs(os.path.dirname(os.path.abspath(out_csv)), exist_ok=True)
-    
-    pkn.to_csv(out_csv, index=False)
-    with open(out_gpickle, 'wb') as f:
-        pickle.dump(G, f, pickle.HIGHEST_PROTOCOL)
-    logging.info(f"Wrote KEGG PKN CSV → {out_csv}")
+    # optional outputs
+    if out_csv:
+        os.makedirs(os.path.dirname(os.path.abspath(out_csv)), exist_ok=True)
+        pkn.to_csv(out_csv, index=False)
+        logging.info(f"Wrote KEGG PKN CSV → {out_csv}")
+
+    if out_gpickle:
+        with open(out_gpickle, 'wb') as f:
+            pickle.dump(G, f, pickle.HIGHEST_PROTOCOL)
+        logging.info(f"Wrote KEGG PKN GraphML → {out_gpickle}")

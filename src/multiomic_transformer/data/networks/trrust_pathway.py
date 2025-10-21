@@ -37,7 +37,7 @@ def build_trrust_pkn(
     Build the FULL TRRUST PKN (directed, signed) for a species.
 
     Output columns:
-      source_id, target_id, trrust_sign (-1/0/+1), trrust_regulation, trrust_pmids, trrust_support_n
+      TF, TG, trrust_sign (-1/0/+1), trrust_regulation, trrust_pmids, trrust_support_n
     """
     if trrust_path_or_url is None:
         if species.lower().startswith("mouse"):
@@ -81,7 +81,6 @@ def build_trrust_pkn(
                   trrust_pmids=("PMIDs", _agg_pmids) if "PMIDs" in trrust.columns else ("Regulation", "size"),
                   trrust_support_n=("Regulation", "size"),
               )
-              .rename(columns={"TF": "source_id", "TG": "target_id"})
     )
     if "trrust_pmids" not in pkn.columns:
         pkn["trrust_pmids"] = ""
@@ -94,7 +93,7 @@ def build_trrust_pkn(
 
     if out_gpickle:
         G = nx.from_pandas_edgelist(
-            pkn, source="source_id", target="target_id",
+            pkn, source="TF", target="TG",
             edge_attr=["trrust_sign", "trrust_regulation", "trrust_pmids", "trrust_support_n"],
             create_using=nx.DiGraph()
         )

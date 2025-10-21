@@ -149,6 +149,7 @@ def build_string_pkn(
 
         # Rename columns
         rename_map = {
+            "protein1": "TF", "protein2": "TG",
             "combined_score": "string_combined_score",
             "experimental": "string_experimental_score",
             "database": "string_database_score",
@@ -171,12 +172,12 @@ def build_string_pkn(
         # Optionally add to NetworkX (guard: skip if huge)
         if out_gpickle and len(G) < 15_000_000:
             if as_directed:
-                for idx, (u, v) in enumerate(zip(chunk["protein1"], chunk["protein2"])):
+                for idx, (u, v) in enumerate(zip(chunk["TF"], chunk["TG"])):
                     edge_attrs = {k: chunk.iloc[idx][k] for k in chunk.columns if k.startswith("string_")}
                     G.add_edge(u, v, **edge_attrs)
                     G.add_edge(v, u, **edge_attrs)  # duplicate reverse
             else:
-                for idx, (u, v) in enumerate(zip(chunk["protein1"], chunk["protein2"])):
+                for idx, (u, v) in enumerate(zip(chunk["TF"], chunk["TG"])):
                     edge_attrs = {k: chunk.iloc[idx][k] for k in chunk.columns if k.startswith("string_")}
                     G.add_edge(min(u, v), max(u, v), **edge_attrs)
 

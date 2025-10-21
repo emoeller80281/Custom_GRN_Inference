@@ -54,10 +54,15 @@ def run_peak_gene_mapping(
     max_distance : window size for BedTools (bp)
     force_recompute : ignore checkpoint if True
     """
+    # --- Normalize paths ---
+    peaks_file = str(peaks_file)
+    tss_bed_file = str(tss_bed_file)
+
     outdir = ensure_dir(Path(outdir or "."))
     checkpoint_flag = outdir / ".peak_gene_mapping.done"
     output_file = outdir / "peak_gene_distance.parquet"
 
+    # --- Checkpoint reuse ---
     if checkpoint_exists(checkpoint_flag) and not force_recompute:
         logging.info(f"[peak_gene_mapping] Using cached result: {output_file}")
         return pd.read_parquet(output_file)
@@ -73,19 +78,22 @@ def run_peak_gene_mapping(
         # --------------------------------------------------------------
         if peaks_file.endswith(".parquet"):
             peaks_df = pd.read_parquet(peaks_file)
+            # If this parquet comes from pseudobulk ATAC, it may not have BED-style columns
             if not {"chrom", "start", "end"}.issubset(peaks_df.columns):
-                raise ValueError("Peaks parquet must contain columns: chrom, start, end.")
+                # Reconstruct BED-format from index like 'chr1:123-456'
+                logging.info("[peak_gene_mapping] Formatting peaks from index...")
+                formatted = format_peaks(pd.Series(peaks_df.index))
+            else:
+                formatted = format_peaks(
+                    pd.Series([f"{c}:{s}-{e}" for c, s, e in zip(peaks_df["chrom"], peaks_df["start"], peaks_df["end"])])
+                )
         elif peaks_file.endswith(".bed") or peaks_file.endswith(".bed.gz"):
-            peaks_df = pd.read_csv(peaks_file, sep="\t", header=None)
-            peaks_df.columns = Index(["chrom", "start", "end"], name="peak_id")
+            peaks_df = pd.read_csv(peaks_file, sep="\t", header=None, names=["chrom", "start", "end"])
+            formatted = format_peaks(pd.Series([f"{c}:{s}-{e}" for c, s, e in zip(peaks_df["chrom"], peaks_df["start"], peaks_df["end"])]))
         else:
             raise ValueError("Unsupported peaks file format. Use .bed, .bed.gz, or .parquet.")
 
-        # Create peak_id using format_peaks (expects a series of 'chr:start-end')
-        formatted = format_peaks(
-            pd.Series([f"{c}:{s}-{e}" for c, s, e in zip(peaks_df["chrom"], peaks_df["start"], peaks_df["end"])])
-        )
-        # format_peaks returns a DataFrame like: chromosome, start, end, strand, peak_id
+        # format_peaks returns a DataFrame with 'chromosome', 'start', 'end', 'peak_id'
         if not isinstance(formatted, pd.DataFrame):
             raise ValueError("format_peaks() must return a DataFrame with a 'peak_id' column.")
         formatted = formatted.rename(columns={"chromosome": "chrom"})
