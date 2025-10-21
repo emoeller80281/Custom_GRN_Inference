@@ -483,6 +483,20 @@ def calculate_summed_tf_tg_score(sliding_window_with_targets: pd.DataFrame):
     
     return sliding_window_sum_calculation_df
 
+def select_pkn_edges_from_df(df: pd.DataFrame, pkn_edges: set[Tuple[str, str]]):
+    df['TF'] = df['TF'].str.upper()
+    df['TG'] = df['TG'].str.upper()
+    
+    df['in_pkn'] = df.apply(
+        lambda r: int((r['TF'], r['TG']) in pkn_edges or (r['TG'], r['TF']) in pkn_edges),
+        axis=1
+    )
+    
+    in_pkn_df = df[df['in_pkn'] == 1]
+    not_in_pkn_df = df[df['in_pkn'] == 0]
+    
+    return in_pkn_df, not_in_pkn_df
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     parser = argparse.ArgumentParser(description="Convert NetworkX gpickle to Cosmograph binaries.")
@@ -507,6 +521,13 @@ if __name__ == "__main__":
     SAMPLE_PROCESSED_DATA_DIR = PROCESSED_DATA / DATASET_NAME
     RAW_10X_RNA_DATA_DIR = RAW_DATA / sample_name / "PBMC_raw"
     RAW_ATAC_PEAK_MATRIX_FILE = RAW_DATA / sample_name / "Peaks.txt"
+    STRING_DIR = DATA_DIR / "prior_knowledge_network_data" / "hg38" / "STRING"
+    TRRUST_DIR = DATA_DIR / "prior_knowledge_network_data" / "hg38" / "TRRUST"
+    KEGG_DIR = DATA_DIR / "prior_knowledge_network_data" / "hg38" / "KEGG"
+
+    string_pkn_file = STRING_DIR / "string_human_pkn.csv"
+    trrust_pkn_file = TRRUST_DIR / "trrust_human_pkn.csv"
+    kegg_pkn_file = KEGG_DIR / "kegg_human_pkn.csv"
     
     tf_file = DATA_DIR / "databases" / "motif_information" / organism_code / "TF_Information_all_motifs.txt"
     
@@ -723,22 +744,9 @@ if __name__ == "__main__":
     tf_tg_reg_pot = pd.read_parquet(tf_tg_reg_pot_file, engine="pyarrow")
     logging.info("  - Example TF-TG regulatory potential: " + str(tf_tg_reg_pot.head()))
 
-    logging.info("\nLoading ChIP-seq ground truth for labeling edges")
-    ground_truth_file = DATA_DIR / "ground_truth_files" / "rn204_macrophage_human_chipseq.tsv"
-    ground_truth_df = pd.read_csv(ground_truth_file, sep="\t", header=0, index_col=None)
-    ground_truth_df = ground_truth_df.rename(columns={
-        "Source":"TF",
-        "Target":"TG"
-    })
-    ground_truth_df["TF"] = ground_truth_df["TF"].str.upper()
-    ground_truth_df["TG"] = ground_truth_df["TG"].str.upper()
     tf_tg_df["TF"] = tf_tg_df["TF"].str.upper()
     tf_tg_df["TG"] = tf_tg_df["TG"].str.upper()
-    
-    logging.info("  - Example ground truth: \n" + str(ground_truth_df.head()))
-    logging.info("  - Number of unique TFs in ground truth: " + str(ground_truth_df["TF"].nunique()))
-    logging.info("  - Number of unique TGs in ground truth: " + str(ground_truth_df["TG"].nunique()))
-    logging.info("  - Number of ground truth edges: " + str(ground_truth_df.shape[0]))
+
 
     logging.info("Merging TF-TG attributes with all combinations")
     logging.info("  - Merging TF-TG Regulatory Potential")
@@ -774,52 +782,49 @@ if __name__ == "__main__":
     tf_tg_df["motif_present"] = (tf_tg_df["motif_density"] > 0).astype(int)
     
     tf_tg_df.to_parquet(SAMPLE_PROCESSED_DATA_DIR / sample_name / "tf_tg_data_unlabeled.parquet", index=False)
-
     
+    logging.info("Merging edge features with PKNs")
+    logging.info("  - Loading STRING PKN")
+    string_pkn_df = pd.read_csv(string_pkn_file).rename(columns={"protein1": "TF", "protein2": "TG"})
+    logging.info("  - Loading TRRUST PKN")
+    trrust_pkn_df = pd.read_csv(trrust_pkn_file).rename(columns={"source_id": "TF", "target_id": "TG"})
+    logging.info("  - Loading KEGG PKN")
+    kegg_pkn_df = pd.read_csv(kegg_pkn_file).rename(columns={"source_id": "TF", "target_id": "TG"})
+
+    string_pkn_df["TF"] = string_pkn_df["TF"].str.upper()
+    string_pkn_df["TG"] = string_pkn_df["TG"].str.upper()
+
+    trrust_pkn_df["TF"] = trrust_pkn_df["TF"].str.upper()
+    trrust_pkn_df["TG"] = trrust_pkn_df["TG"].str.upper()
+
+    kegg_pkn_df["TF"] = kegg_pkn_df["TF"].str.upper()
+    kegg_pkn_df["TG"] = kegg_pkn_df["TG"].str.upper()
     
-    # Create a set of ground-truth pairs
-    gt_pairs = set(zip(ground_truth_df["TF"], ground_truth_df["TG"]))
-    logging.info("  - Number of ground truth pairs: " + str(len(gt_pairs)))
-    logging.info("  - Example ground truth pairs: " + str(list(gt_pairs)[:10]))
+    pkn_edges = set(zip(string_pkn_df["TF"], string_pkn_df["TG"])) | set(zip(trrust_pkn_df["TF"], trrust_pkn_df["TG"])) | set(zip(kegg_pkn_df["TF"], kegg_pkn_df["TG"]))
 
-    # Assign label = 1 if (TF, TG) pair exists in ground truth
-    tf_tg_df["label"] = [
-        1 if (tf, tg) in gt_pairs else 0
-        for tf, tg in zip(tf_tg_df["TF"], tf_tg_df["TG"])
-    ]
-    logging.info("  - Number of positive labels: " + str(tf_tg_df["label"].sum()))
-    logging.info("  - Number of negative labels: " + str((tf_tg_df["label"] == 0).sum()))
+    in_pkn_df, not_in_pkn_df = select_pkn_edges_from_df(tf_tg_df, pkn_edges)
     
-    gt_tfs = set(ground_truth_df["TF"].unique())
-    gt_tgs = set(ground_truth_df["TG"].unique())
-    pred_tfs = set(tf_tg_df["TF"].unique())
-    pred_tgs = set(tf_tg_df["TG"].unique())
-
-    print("TF overlap:", len(gt_tfs & pred_tfs), "/", len(gt_tfs))
-    print("TG overlap:", len(gt_tgs & pred_tgs), "/", len(gt_tgs))
-    print("Example missing TFs:", list(gt_tfs - pred_tfs)[:10])
-    print("Example missing TGs:", list(gt_tgs - pred_tgs)[:10])
-
-    true_df = tf_tg_df[tf_tg_df["label"] == 1]
-    false_df = tf_tg_df[tf_tg_df["label"] == 0]
+    logging.info(f"\nNumber of edges in TF-TG data: {tf_tg_df.shape[0]:,}")
+    logging.info(f"Number of edges in PKN: {len(pkn_edges):,}")
+    logging.info(f"\nNumber of unique TFs not in PKN: {not_in_pkn_df['TF'].nunique():,}")
+    logging.info(f"Number of unique TGs not in PKN: {not_in_pkn_df['TG'].nunique():,}")
+    logging.info(f"\nNumber of edges in TF-TG data that are not in PKN: {not_in_pkn_df.shape[0]:,}")
+    logging.info(f"Number of edges in TF-TG data that are in PKN: {in_pkn_df.shape[0]:,}")
+    logging.info(f"\nFraction of edges in TF-TG data that are in PKN: {in_pkn_df.shape[0] / tf_tg_df.shape[0]:.2f}")
+    logging.info(f"\nNumber of edges in PKN: {len(pkn_edges)}")
     
-    print(tf_tg_df["TF"].nunique(), "TFs in training")
-    print(tf_tg_df["TG"].nunique(), "TGs in training")
-    print(tf_tg_df["label"].value_counts())
-    print(tf_tg_df.describe())
-
     # For each TF, randomly choose one false TG for each true TG
     balanced_rows = []
     rng = np.random.default_rng(42)
     upscale_percent = 1.5
-
+    
     logging.info("\nBalancing TF-TG pairs")
-    for tf, group in true_df.groupby("TF"):
+    for tf, group in in_pkn_df.groupby("TF"):
         logging.info(f"  - Creating balanced dataset for TF: {tf}")
         true_tgs = group["TG"].tolist()
 
         # candidate false TGs for same TF
-        false_candidates = false_df[false_df["TF"] == tf]
+        false_candidates = not_in_pkn_df[not_in_pkn_df["TF"] == tf]
         if false_candidates.empty:
             continue  # skip if no negatives for this TF
 
@@ -842,9 +847,17 @@ if __name__ == "__main__":
     tf_tg_balanced = pd.concat(balanced_rows, ignore_index=True)
     tf_tg_balanced = tf_tg_balanced.sample(frac=1, random_state=42).reset_index(drop=True)
 
-    logging.info("  - Balanced TF-TG pairs loaded")
+    merged_df = tf_tg_balanced.merge(string_pkn_df, on=["TF", "TG"], how="left")
+    merged_df = merged_df.merge(trrust_pkn_df, on=["TF", "TG"], how="left")
+    merged_df = merged_df.merge(kegg_pkn_df, on=["TF", "TG"], how="left")
 
-    logging.info("  - Example balanced TF-TG pairs: " + str(tf_tg_balanced.head()))
+    merged_df.head()
+    
+    logging.info(f"Number of edges in merged dataframe: {merged_df.shape[0]:,}")
+    logging.info(f"Number of unique TFs in merged dataframe: {merged_df['TF'].nunique():,}")
+    logging.info(f"Number of unique TGs in merged dataframe: {merged_df['TG'].nunique():,}")
+    logging.info(f"Number of unique TF-TG pairs in merged dataframe: {merged_df[['TF', 'TG']].drop_duplicates().shape[0]:,}")
+
 
     tf_tg_feature_file = SAMPLE_PROCESSED_DATA_DIR / sample_name / "tf_tg_data.parquet"
     tf_tg_balanced.to_parquet(tf_tg_feature_file, engine="pyarrow", compression="snappy")
