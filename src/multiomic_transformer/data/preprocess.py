@@ -998,8 +998,8 @@ def compute_minmax_expr_mean(
     mean_norm_tg_expr = tg_means.reset_index(name="mean_tg_expr")
     mean_norm_tg_expr["TG"] = mean_norm_tg_expr["TG"].str.upper()
     
-    logging.info(f"\nTF expression means: \n{mean_norm_tf_expr.head()}")
-    logging.info(f"\nTG expression means: \n{mean_norm_tg_expr.head()}")
+    logging.debug(f"\nTF expression means: \n{mean_norm_tf_expr.head()}")
+    logging.debug(f"\nTG expression means: \n{mean_norm_tg_expr.head()}")
     
     return mean_norm_tf_expr, mean_norm_tg_expr
 
@@ -1302,36 +1302,29 @@ def merge_tf_tg_data_with_pkn(
     return tf_tg_balanced_with_pkn_scores, tf_tg_balanced_no_pkn_scores
 
 # ----- MultiomicTransformer Chromsome-Specific Dataset -----
-def build_global_tg_vocab(gene_tss_file, vocab_file):
+def build_global_tg_vocab(gene_tss_file: Union[str, Path], vocab_file: Union[str, Path]) -> dict[str, int]:
     """
-    Build or update a global TG vocab from all genes in the genome.
+    Build a global TG vocab from the TSS file with contiguous IDs [0..N-1].
+    Overwrites existing vocab if it's missing or non-contiguous.
     """
-    # Load existing vocab if present
-    if os.path.isfile(vocab_file):
-        with open(vocab_file) as f:
-            vocab = json.load(f)
-    else:
-        vocab = {}
-
-    # Load all gene names genome-wide
+    # 1) Load all genes genome-wide (bed: chrom start end name)
     gene_tss_bed = pybedtools.BedTool(gene_tss_file)
-    gene_tss_df = (
-        gene_tss_bed
-        .to_dataframe()
-        .sort_values(by="start", ascending=True)
-        )
-    all_genes = [standardize_name(n) for n in gene_tss_df["name"].unique()]
+    gene_tss_df = gene_tss_bed.to_dataframe().sort_values(by="start", ascending=True)
 
-    updated = False
-    for name in sorted(set(all_genes)):
-        if name not in vocab:
-            vocab[name] = len(vocab)
-            updated = True
+    # 2) Canonical symbol list (MUST match downstream normalization)
+    names = [standardize_name(n) for n in gene_tss_df["name"].astype(str).unique()]
+    names = sorted(set(names))  # unique + stable order
 
-    if updated:
-        atomic_json_dump(vocab, vocab_file)
-        logging.info(f"Updated TG vocab: {len(vocab)} genes")
+    # 3) Build fresh contiguous mapping
+    vocab = {name: i for i, name in enumerate(names)}
 
+    # 4) Atomic overwrite
+    tmp = str(vocab_file) + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(vocab, f)
+    os.replace(tmp, vocab_file)
+
+    logging.info(f"Rebuilt TG vocab with {len(vocab)} genes (contiguous).")
     return vocab
 
 def create_single_cell_tensors(
@@ -1789,6 +1782,8 @@ if __name__ == "__main__":
     IGNORE_PROCESSED_FILES = False
     logging.info(f"IGNORE_PROCESSED_FILES: {IGNORE_PROCESSED_FILES}")
     
+    PROCESS_CHROMOSOME_SPECIFIC_DATA = False
+    
     # Sample-specific preprocessing
     total_tf_set: Set[str] = set()
     chrom_set: Set[str] = set()
@@ -1876,7 +1871,7 @@ if __name__ == "__main__":
         
         logging.info("\nPeak to gene distance")
         logging.info("  - Number of peaks to gene distances: " + str(peak_to_gene_dist_df.shape[0]))
-        logging.info("  - Example peak to gene distances: \n" + str(peak_to_gene_dist_df.head()))
+        logging.debug("  - Example peak to gene distances: \n" + str(peak_to_gene_dist_df.head()))
         
         # ----- SLIDING WINDOW TF-PEAK SCORE -----
         if not os.path.isfile(sliding_window_score_file):
@@ -1895,28 +1890,21 @@ if __name__ == "__main__":
             )
 
         tf_df = processed_rna_df[processed_rna_df.index.isin(tfs)]
-        logging.info("\nTFs in RNA data")
-        logging.info(tf_df.head())
+        logging.debug("\nTFs in RNA data")
+        logging.debug(tf_df.head())
         logging.info(f"  - TFs in RNA data: {tf_df.shape[0]}")
         
         tg_df = processed_rna_df[processed_rna_df.index.isin(tgs)]
-        logging.info("\nTGs in RNA data")
-        logging.info(tg_df.head())
+        logging.debug("\nTGs in RNA data")
+        logging.debug(tg_df.head())
         logging.info(f"  - TGs in RNA data: {tg_df.shape[0]}")
         sliding_window_df = pd.read_parquet(sliding_window_score_file, engine="pyarrow")
-        logging.info("  - Example sliding window scores: \n" + str(sliding_window_df.head()))
+        logging.debug("  - Example sliding window scores: \n" + str(sliding_window_df.head()))
         
-        logging.info(f"#genes in RNA matrix: {processed_rna_df.shape[0]}")
-        logging.info(f"RNA index sample: {list(processed_rna_df.index[:5])}")
-
-        # After you build your TF list `tfs`:
-        logging.info(f"#TFs in tfs list: {len(tfs)}")
-        logging.info(f"TF sample: {tfs[:10]}")
-
         # Build tf_df as you do:
         tf_df = processed_rna_df[processed_rna_df.index.isin(tfs)]
-        logging.info(f"tf_df shape: {tf_df.shape}")
-        logging.info(f"tf_df index sample: {list(tf_df.index[:10])}")
+        logging.debug(f"tf_df shape: {tf_df.shape}")
+        logging.debug(f"tf_df index sample: {list(tf_df.index[:10])}")
 
         
         # ----- COMPUTE TF/TG EXPRESSION MEANS -----
@@ -1929,13 +1917,13 @@ if __name__ == "__main__":
         else:
             logging.info("\nLoading TF-TG regulatory potential scores")
             tf_tg_reg_pot = pd.read_parquet(tf_tg_reg_pot_file, engine="pyarrow")
-            logging.info("  - Example TF-TG regulatory potential: " + str(tf_tg_reg_pot.head()))
+            logging.debug("  - Example TF-TG regulatory potential: " + str(tf_tg_reg_pot.head()))
 
         # ----- MERGE TF-TG ATTRIBUTES WITH COMBINATIONS -----
         if not os.path.isfile(tf_tg_combo_attr_file):
             logging.info("\nMerging TF-TG attributes with all combinations")
             tf_tg_df = merge_tf_tg_attributes_with_combinations(
-                tf_tg_df, tf_tg_reg_pot, mean_norm_tf_expr, mean_norm_tg_expr, tf_tg_combo_attr_file, tfs)
+                tf_tg_df, tf_tg_reg_pot, mean_norm_tf_expr, mean_norm_tg_expr, tf_tg_combo_attr_file, set(tfs))
         else:
             logging.info("\nLoading TF-TG attributes with all combinations")
             tf_tg_df = pd.read_parquet(tf_tg_combo_attr_file, engine="pyarrow")
@@ -1948,7 +1936,7 @@ if __name__ == "__main__":
             trrust_csv_file, 
             kegg_csv_file
         )
-        logging.info(f"  - Example of TF-TG data with PKN: {tf_tg_balanced_with_pkn.head()}")
+        logging.debug(f"  - Example of TF-TG data with PKN: {tf_tg_balanced_with_pkn.head()}")
 
         logging.info("\nWriting Final TF-TG GAT training data to parquet")
         tf_tg_balanced_with_pkn.to_parquet(gat_training_file, engine="pyarrow", compression="snappy")
@@ -1958,250 +1946,251 @@ if __name__ == "__main__":
     chrom_list = sorted(list(chrom_set))
     tf_names = list(total_tf_set)
     
-    logging.info(f"  - Number of chromosomes: {len(chrom_list)}: {chrom_list}")
-    for chrom_id in chrom_list:
-        logging.info(f"\n----- Preparing MultiomicTransformer data for {chrom_id} -----")
-        make_chrom_gene_tss_df(GENE_TSS_FILE, chrom_id, GENOME_DIR)
+    if PROCESS_CHROMOSOME_SPECIFIC_DATA:
+        logging.info(f"  - Number of chromosomes: {len(chrom_list)}: {chrom_list}")
+        for chrom_id in chrom_list:
+            logging.info(f"\n----- Preparing MultiomicTransformer data for {chrom_id} -----")
+            make_chrom_gene_tss_df(GENE_TSS_FILE, chrom_id, GENOME_DIR)
+            
+            SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR = SAMPLE_DATA_CACHE_DIR / chrom_id
         
-        SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR = SAMPLE_DATA_CACHE_DIR / chrom_id
-    
-        single_cell_dir = SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / "single_cell"
-        
-        # Chromosome-specific cache files
-        atac_tensor_path: Path =            SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"atac_window_tensor_all_{chrom_id}.pt"
-        tg_tensor_path: Path =              SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"tg_tensor_all_{chrom_id}.pt"
-        sample_tg_name_file: Path =         SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"tg_names_{chrom_id}.json"
-        genome_window_file: Path =          SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"{chrom_id}_windows_{WINDOW_SIZE // 1000}kb.bed"
-        sample_window_map_file: Path =      SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"window_map_{chrom_id}.json"
-        sample_scaler_file: Path =          SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"tg_scaler_{chrom_id}.save"
-        peak_to_tss_dist_path: Path =       SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"genes_near_peaks_{chrom_id}.parquet"
-        dist_bias_file: Path =              SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"dist_bias_{chrom_id}.pt"
-        tg_id_file: Path =                  SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"tg_ids_{chrom_id}.pt"
-        manifest_file: Path =               SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"manifest_{chrom_id}.json"
-        motif_mask_file: Path =             SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"motif_mask_{chrom_id}.pt"
-        chrom_sliding_window_file: Path =   SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"sliding_window_{chrom_id}.tsv"
-        chrom_peak_bed_file: Path =         SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"peak_tmp_{chrom_id}.bed"
-        tss_bed_file: Path =                SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"tss_tmp_{chrom_id}.bed"
+            single_cell_dir = SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / "single_cell"
+            
+            # Chromosome-specific cache files
+            atac_tensor_path: Path =            SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"atac_window_tensor_all_{chrom_id}.pt"
+            tg_tensor_path: Path =              SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"tg_tensor_all_{chrom_id}.pt"
+            sample_tg_name_file: Path =         SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"tg_names_{chrom_id}.json"
+            genome_window_file: Path =          SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"{chrom_id}_windows_{WINDOW_SIZE // 1000}kb.bed"
+            sample_window_map_file: Path =      SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"window_map_{chrom_id}.json"
+            sample_scaler_file: Path =          SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"tg_scaler_{chrom_id}.save"
+            peak_to_tss_dist_path: Path =       SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"genes_near_peaks_{chrom_id}.parquet"
+            dist_bias_file: Path =              SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"dist_bias_{chrom_id}.pt"
+            tg_id_file: Path =                  SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"tg_ids_{chrom_id}.pt"
+            manifest_file: Path =               SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"manifest_{chrom_id}.json"
+            motif_mask_file: Path =             SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"motif_mask_{chrom_id}.pt"
+            chrom_sliding_window_file: Path =   SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"sliding_window_{chrom_id}.tsv"
+            chrom_peak_bed_file: Path =         SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"peak_tmp_{chrom_id}.bed"
+            tss_bed_file: Path =                SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"tss_tmp_{chrom_id}.bed"
 
-        os.makedirs(COMMON_DATA, exist_ok=True)
-        os.makedirs(SAMPLE_DATA_CACHE_DIR, exist_ok=True)
-        os.makedirs(SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR, exist_ok=True)
-        os.makedirs(single_cell_dir, exist_ok=True)
+            os.makedirs(COMMON_DATA, exist_ok=True)
+            os.makedirs(SAMPLE_DATA_CACHE_DIR, exist_ok=True)
+            os.makedirs(SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR, exist_ok=True)
+            os.makedirs(single_cell_dir, exist_ok=True)
+            
+            logging.info(f"\nPreparing data for {DATASET_NAME} {chrom_id}")
+            
+            # Create or load the gene TSS information for the chromosome
+            if not os.path.isfile(os.path.join(GENOME_DIR, f"{chrom_id}_gene_tss.bed")):
+                gene_tss_df = make_chrom_gene_tss_df(
+                    gene_tss_file=GENE_TSS_FILE,
+                    chrom_id=chrom_id,
+                    genome_dir=GENOME_DIR
+                )
+            else:
+                logging.info(f"  - Loading existing gene TSS file for {chrom_id}")
+                gene_tss_df = pd.read_csv(os.path.join(GENOME_DIR, f"{chrom_id}_gene_tss.bed"), sep="\t", header=None, usecols=[0, 1, 2, 3])
+                gene_tss_df.columns = ["chrom", "start", "end", "name"]
+            
+            
+            
+            logging.info(f"  - Aggregating pseudobulk datasets for {chrom_id}")
+            total_TG_pseudobulk_global, total_TG_pseudobulk_chr, total_RE_pseudobulk_chr, total_peaks_df = \
+                aggregate_pseudobulk_datasets(gene_tss_df, SAMPLE_NAMES, RAW_DATA, chrom_id)
         
-        logging.info(f"\nPreparing data for {DATASET_NAME} {chrom_id}")
-        
-        # Create or load the gene TSS information for the chromosome
-        if not os.path.isfile(os.path.join(GENOME_DIR, f"{chrom_id}_gene_tss.bed"))
-            gene_tss_df = make_chrom_gene_tss_df(
-                gene_tss_file=GENE_TSS_FILE,
+            tg_names = total_TG_pseudobulk_chr.index.tolist()
+            
+            # Genome-wide TF expression for all samples
+            genome_wide_tf_expression = total_TG_pseudobulk_global.reindex(tf_names).fillna(0).values.astype("float32")
+            metacell_names = total_TG_pseudobulk_global.columns.tolist()
+            
+            # Scale TG expression
+            scaler = StandardScaler()
+            TG_scaled = scaler.fit_transform(total_TG_pseudobulk_chr.values.astype("float32"))
+            
+            # Create genome windows
+            logging.info(f"  - Creating genomic windows for {chrom_id}")
+            genome_windows = create_or_load_genomic_windows(
+                window_size=WINDOW_SIZE,
                 chrom_id=chrom_id,
-                genome_dir=GENOME_DIR
+                chrom_sizes_file=CHROM_SIZES_FILE,
+                genome_window_file=genome_window_file,
+                force_recalculate=FORCE_RECALCULATE
             )
-        else:
-            logging.info(f"  - Loading existing gene TSS file for {chrom_id}")
-            gene_tss_df = pd.read_csv(os.path.join(GENOME_DIR, f"{chrom_id}_gene_tss.bed"), sep="\t", header=None, usecols=[0, 1, 2, 3])
-            gene_tss_df.columns = ["chrom", "start", "end", "name"]
-        
-        
-        
-        logging.info(f"  - Aggregating pseudobulk datasets for {chrom_id}")
-        total_TG_pseudobulk_global, total_TG_pseudobulk_chr, total_RE_pseudobulk_chr, total_peaks_df = \
-            aggregate_pseudobulk_datasets(gene_tss_df, SAMPLE_NAMES, RAW_DATA, chrom_id)
-    
-        tg_names = total_TG_pseudobulk_chr.index.tolist()
-        
-        # Genome-wide TF expression for all samples
-        genome_wide_tf_expression = total_TG_pseudobulk_global.reindex(tf_names).fillna(0).values.astype("float32")
-        metacell_names = total_TG_pseudobulk_global.columns.tolist()
-        
-        # Scale TG expression
-        scaler = StandardScaler()
-        TG_scaled = scaler.fit_transform(total_TG_pseudobulk_chr.values.astype("float32"))
-        
-        # Create genome windows
-        logging.info(f"  - Creating genomic windows for {chrom_id}")
-        genome_windows = create_or_load_genomic_windows(
-            window_size=WINDOW_SIZE,
-            chrom_id=chrom_id,
-            chrom_sizes_file=CHROM_SIZES_FILE,
-            genome_window_file=genome_window_file,
-            force_recalculate=FORCE_RECALCULATE
-        )
-        num_windows = genome_windows.shape[0]
-        
-            # --- Calculate Peak-to-TG Distance Scores ---
-        genes_near_peaks = calculate_peak_to_tg_distance_score(
-            peak_bed_file=chrom_peak_bed_file,
-            tss_bed_file=tss_bed_file,
-            peak_gene_dist_file=peak_to_tss_dist_path,
-            mesc_atac_peak_loc_df=total_peaks_df,  # peak locations DataFrame
-            gene_tss_df=gene_tss_df,
-            max_peak_distance= MAX_PEAK_DISTANCE,
-            distance_factor_scale= DISTANCE_SCALE_FACTOR,
-            force_recalculate=FORCE_RECALCULATE
-        )
-        
-        # ----- SLIDING WINDOW TF-PEAK SCORE -----
-        if not os.path.isfile(chrom_sliding_window_file):
-
-            peaks_df = pybedtools.BedTool(peak_bed_file)
-
-            logging.info("\nRunning sliding window scan")
-            run_sliding_window_scan(
-                tf_name_list=tfs,
-                tf_info_file=str(TF_FILE),
-                motif_dir=str(MOTIF_DIR),
-                genome_fasta=str(genome_fasta_file),
-                peak_bed_file=str(chrom_peak_bed_file),
-                output_file=chrom_sliding_window_file,
-                num_cpu=num_cpu
+            num_windows = genome_windows.shape[0]
+            
+                # --- Calculate Peak-to-TG Distance Scores ---
+            genes_near_peaks = calculate_peak_to_tg_distance_score(
+                peak_bed_file=chrom_peak_bed_file,
+                tss_bed_file=tss_bed_file,
+                peak_gene_dist_file=peak_to_tss_dist_path,
+                mesc_atac_peak_loc_df=total_peaks_df,  # peak locations DataFrame
+                gene_tss_df=gene_tss_df,
+                max_peak_distance= MAX_PEAK_DISTANCE,
+                distance_factor_scale= DISTANCE_SCALE_FACTOR,
+                force_recalculate=FORCE_RECALCULATE
             )
-            logging.info(f"  - Wrote sliding window scores to {chrom_sliding_window_file}")
-            sliding_window_df = pd.read_parquet(chrom_sliding_window_file, engine="pyarrow")
-        else:
-            logging.info("\nLoading existing sliding window scores")
-            sliding_window_df = pd.read_parquet(chrom_sliding_window_file, engine="pyarrow")
-        
-        logging.info(f"  - Creating peak to window map")
-        window_map = make_peak_to_window_map(
-            peaks_bed=genes_near_peaks,
-            windows_bed=genome_windows,
-        )
-        
-        # Save Precomputed Tensors 
-        logging.info(f"\nPrecomputing TF, TG, and ATAC tensors")
-        tf_tensor_all, tg_tensor_all, atac_window_tensor_all = precompute_input_tensors(
-            output_dir=str(SAMPLE_DATA_CACHE_DIR),
-            genome_wide_tf_expression=genome_wide_tf_expression,
-            TG_scaled=TG_scaled,
-            total_RE_pseudobulk_chr=total_RE_pseudobulk_chr,
-            window_map=window_map,
-            windows=genome_windows,
-        )
-        logging.info(f"\t- Done!")
-        
-        # ----- Load common TF and TG vocab -----
-        # Create a common TG vocabulary for the chromosome using the gene TSS
-        logging.info(f"\nMatching TFs and TGs to global gene vocabulary")
-        
-        tg_names = [standardize_name(n) for n in total_TG_pseudobulk_chr.index.tolist()]
-        
-        if not os.path.exists(common_tf_vocab_file):
-            vocab = {n: i for i, n in enumerate(tf_names)}
-            with open(common_tf_vocab_file, "w") as f:
-                json.dump(vocab, f)
-            logging.info(f"Initialized TF vocab with {len(vocab)} entries")
-        else:
-            with open(common_tf_vocab_file) as f:
-                vocab = json.load(f)
+            
+            # ----- SLIDING WINDOW TF-PEAK SCORE -----
+            if not os.path.isfile(chrom_sliding_window_file):
 
-        # Load global vocab
-        with open(common_tf_vocab_file) as f: tf_vocab = json.load(f)
-        with open(common_tg_vocab_file) as f: tg_vocab = json.load(f)
-        
-        # Match TFs and TGs to global vocab
-        tf_tensor_all, tf_names_kept, tf_ids = align_to_vocab(tf_names, tf_vocab, tf_tensor_all, label="TF")
-        tg_tensor_all, tg_names_kept, tg_ids = align_to_vocab(tg_names, tg_vocab, tg_tensor_all, label="TG")
-        
-        torch.save(torch.tensor(tf_ids, dtype=torch.long), tf_id_file)
-        torch.save(torch.tensor(tg_ids, dtype=torch.long), tg_id_file)
+                peaks_df = pybedtools.BedTool(peak_bed_file)
 
-        logging.info(f"\tMatched {len(tf_names_kept)} TFs to global vocab")
-        logging.info(f"\tMatched {len(tg_names_kept)} TGs to global vocab")
-        logging.info(f"\t- Done!")
-        
-        # Build motif mask using merged info
-        motif_mask = build_motif_mask(
-            tf_names=tf_names_kept,
-            tg_names=tg_names_kept,
-            sliding_window_df=sliding_window_df,
-            genes_near_peaks=genes_near_peaks
-        )
-        logging.info(f"\t- Done!")
+                logging.info("\nRunning sliding window scan")
+                run_sliding_window_scan(
+                    tf_name_list=tfs,
+                    tf_info_file=str(TF_FILE),
+                    motif_dir=str(MOTIF_DIR),
+                    genome_fasta=str(genome_fasta_file),
+                    peak_bed_file=str(chrom_peak_bed_file),
+                    output_file=chrom_sliding_window_file,
+                    num_cpu=num_cpu
+                )
+                logging.info(f"  - Wrote sliding window scores to {chrom_sliding_window_file}")
+                sliding_window_df = pd.read_parquet(chrom_sliding_window_file, engine="pyarrow")
+            else:
+                logging.info("\nLoading existing sliding window scores")
+                sliding_window_df = pd.read_parquet(chrom_sliding_window_file, engine="pyarrow")
+            
+            logging.info(f"  - Creating peak to window map")
+            window_map = make_peak_to_window_map(
+                peaks_bed=genes_near_peaks,
+                windows_bed=genome_windows,
+            )
+            
+            # Save Precomputed Tensors 
+            logging.info(f"\nPrecomputing TF, TG, and ATAC tensors")
+            tf_tensor_all, tg_tensor_all, atac_window_tensor_all = precompute_input_tensors(
+                output_dir=str(SAMPLE_DATA_CACHE_DIR),
+                genome_wide_tf_expression=genome_wide_tf_expression,
+                TG_scaled=TG_scaled,
+                total_RE_pseudobulk_chr=total_RE_pseudobulk_chr,
+                window_map=window_map,
+                windows=genome_windows,
+            )
+            logging.info(f"\t- Done!")
+            
+            # ----- Load common TF and TG vocab -----
+            # Create a common TG vocabulary for the chromosome using the gene TSS
+            logging.info(f"\nMatching TFs and TGs to global gene vocabulary")
+            
+            tg_names = [standardize_name(n) for n in total_TG_pseudobulk_chr.index.tolist()]
+            
+            if not os.path.exists(common_tf_vocab_file):
+                vocab = {n: i for i, n in enumerate(tf_names)}
+                with open(common_tf_vocab_file, "w") as f:
+                    json.dump(vocab, f)
+                logging.info(f"Initialized TF vocab with {len(vocab)} entries")
+            else:
+                with open(common_tf_vocab_file) as f:
+                    vocab = json.load(f)
 
-        if not tf_ids: raise ValueError("No TFs matched the common vocab.")
-        if not tg_ids: raise ValueError("No TGs matched the common vocab.")
-        
-        # Build distance bias [num_windows x num_tg_kept] aligned to kept TGs
-        logging.info(f"\nBuilding distance bias")
-        dist_bias = build_distance_bias(
-            genes_near_peaks=genes_near_peaks,
-            window_map=window_map,
-            tg_names_kept=tg_names_kept,
-            num_windows=num_windows,
-            dtype=torch.float32,
-            mode=DIST_BIAS_MODE
-        )
-        logging.info(f"\t- Done!")
-        
-        create_single_cell_tensors(
-            gene_tss_df=gene_tss_df, 
-            sample_names=FINE_TUNING_DATASETS, 
-            dataset_processed_data_dir=SAMPLE_PROCESSED_DATA_DIR, 
-            tg_vocab=tg_vocab, 
-            tf_vocab=tf_vocab, 
-            chrom_id=chrom_id,
-            single_cell_dir=single_cell_dir
-        )
-        
-        # ----- Writing Output Files -----
-        logging.info(f"\nWriting output files")
-        # Save the Window, TF, and TG expression tensors
-        torch.save(atac_window_tensor_all, atac_tensor_path)
-        torch.save(tg_tensor_all, tg_tensor_path)
-        torch.save(tf_tensor_all, tf_tensor_path)
-        
-        # Write the peak to gene TSS distance scores
-        genes_near_peaks.to_parquet(peak_to_tss_dist_path, compression="snappy", engine="pyarrow")
-        logging.info(f"Saved peak-to-TG distance scores to {peak_to_tss_dist_path}")
+            # Load global vocab
+            with open(common_tf_vocab_file) as f: tf_vocab = json.load(f)
+            with open(common_tg_vocab_file) as f: tg_vocab = json.load(f)
+            
+            # Match TFs and TGs to global vocab
+            tf_tensor_all, tf_names_kept, tf_ids = align_to_vocab(tf_names, tf_vocab, tf_tensor_all, label="TF")
+            tg_tensor_all, tg_names_kept, tg_ids = align_to_vocab(tg_names, tg_vocab, tg_tensor_all, label="TG")
+            
+            torch.save(torch.tensor(tf_ids, dtype=torch.long), tf_id_file)
+            torch.save(torch.tensor(tg_ids, dtype=torch.long), tg_id_file)
 
-        # Save scaler for inverse-transform
-        joblib.dump(scaler, sample_scaler_file)
+            logging.info(f"\tMatched {len(tf_names_kept)} TFs to global vocab")
+            logging.info(f"\tMatched {len(tg_names_kept)} TGs to global vocab")
+            logging.info(f"\t- Done!")
+            
+            # Build motif mask using merged info
+            motif_mask = build_motif_mask(
+                tf_names=tf_names_kept,
+                tg_names=tg_names_kept,
+                sliding_window_df=sliding_window_df,
+                genes_near_peaks=genes_near_peaks
+            )
+            logging.info(f"\t- Done!")
 
-        # Save the peak -> window map for the sample
-        atomic_json_dump(window_map, sample_window_map_file)
+            if not tf_ids: raise ValueError("No TFs matched the common vocab.")
+            if not tg_ids: raise ValueError("No TGs matched the common vocab.")
+            
+            # Build distance bias [num_windows x num_tg_kept] aligned to kept TGs
+            logging.info(f"\nBuilding distance bias")
+            dist_bias = build_distance_bias(
+                genes_near_peaks=genes_near_peaks,
+                window_map=window_map,
+                tg_names_kept=tg_names_kept,
+                num_windows=num_windows,
+                dtype=torch.float32,
+                mode=DIST_BIAS_MODE
+            )
+            logging.info(f"\t- Done!")
+            
+            create_single_cell_tensors(
+                gene_tss_df=gene_tss_df, 
+                sample_names=FINE_TUNING_DATASETS, 
+                dataset_processed_data_dir=SAMPLE_PROCESSED_DATA_DIR, 
+                tg_vocab=tg_vocab, 
+                tf_vocab=tf_vocab, 
+                chrom_id=chrom_id,
+                single_cell_dir=single_cell_dir
+            )
+            
+            # ----- Writing Output Files -----
+            logging.info(f"\nWriting output files")
+            # Save the Window, TF, and TG expression tensors
+            torch.save(atac_window_tensor_all, atac_tensor_path)
+            torch.save(tg_tensor_all, tg_tensor_path)
+            torch.save(tf_tensor_all, tf_tensor_path)
+            
+            # Write the peak to gene TSS distance scores
+            genes_near_peaks.to_parquet(peak_to_tss_dist_path, compression="snappy", engine="pyarrow")
+            logging.info(f"Saved peak-to-TG distance scores to {peak_to_tss_dist_path}")
 
-        # Write TF and TG names and global vocab indices present in the sample
-        atomic_json_dump(tf_names_kept, sample_tf_name_file)
-        atomic_json_dump(tg_names_kept, sample_tg_name_file)
+            # Save scaler for inverse-transform
+            joblib.dump(scaler, sample_scaler_file)
+
+            # Save the peak -> window map for the sample
+            atomic_json_dump(window_map, sample_window_map_file)
+
+            # Write TF and TG names and global vocab indices present in the sample
+            atomic_json_dump(tf_names_kept, sample_tf_name_file)
+            atomic_json_dump(tg_names_kept, sample_tg_name_file)
 
 
-        # Write the distance bias and metacell names for the sample
-        torch.save(dist_bias, dist_bias_file)
-        logging.info(f"Saved distance bias tensor with shape {tuple(dist_bias.shape)}")
+            # Write the distance bias and metacell names for the sample
+            torch.save(dist_bias, dist_bias_file)
+            logging.info(f"Saved distance bias tensor with shape {tuple(dist_bias.shape)}")
 
-        atomic_json_dump(metacell_names, metacell_name_file)
-        
-        torch.save(torch.from_numpy(motif_mask), motif_mask_file)
+            atomic_json_dump(metacell_names, metacell_name_file)
+            
+            torch.save(torch.from_numpy(motif_mask), motif_mask_file)
 
-        # Manifest of general sample info and file paths
-        manifest = {
-            "dataset_name": DATASET_NAME,
-            "chrom": chrom_id,
-            "num_windows": int(num_windows),
-            "num_tfs": int(len(tf_names_kept)),
-            "num_tgs": int(len(tg_names_kept)),
-            "Distance tau": DISTANCE_SCALE_FACTOR,
-            "Max peak-TG distance": MAX_PEAK_DISTANCE,
-            "paths": {
-                "tf_tensor_all": str(tf_tensor_path),
-                "tg_tensor_all": str(tg_tensor_path),
-                "atac_window_tensor_all": str(atac_tensor_path),
-                "dist_bias": str(dist_bias_file),
-                "tf_ids": str(tf_id_file),
-                "tg_ids": str(tg_id_file),
-                "tf_names": str(sample_tf_name_file),
-                "tg_names": str(sample_tg_name_file),
-                "common_tf_vocab": str(common_tf_vocab_file),
-                "common_tg_vocab": str(common_tg_vocab_file),
-                "window_map": str(sample_window_map_file),
-                "genes_near_peaks": str(peak_to_tss_dist_path),
-                "metacell_names": str(metacell_name_file),
-                "tg_scaler": str(sample_scaler_file),
-                "motif_mask": str(motif_mask_file),
+            # Manifest of general sample info and file paths
+            manifest = {
+                "dataset_name": DATASET_NAME,
+                "chrom": chrom_id,
+                "num_windows": int(num_windows),
+                "num_tfs": int(len(tf_names_kept)),
+                "num_tgs": int(len(tg_names_kept)),
+                "Distance tau": DISTANCE_SCALE_FACTOR,
+                "Max peak-TG distance": MAX_PEAK_DISTANCE,
+                "paths": {
+                    "tf_tensor_all": str(tf_tensor_path),
+                    "tg_tensor_all": str(tg_tensor_path),
+                    "atac_window_tensor_all": str(atac_tensor_path),
+                    "dist_bias": str(dist_bias_file),
+                    "tf_ids": str(tf_id_file),
+                    "tg_ids": str(tg_id_file),
+                    "tf_names": str(sample_tf_name_file),
+                    "tg_names": str(sample_tg_name_file),
+                    "common_tf_vocab": str(common_tf_vocab_file),
+                    "common_tg_vocab": str(common_tg_vocab_file),
+                    "window_map": str(sample_window_map_file),
+                    "genes_near_peaks": str(peak_to_tss_dist_path),
+                    "metacell_names": str(metacell_name_file),
+                    "tg_scaler": str(sample_scaler_file),
+                    "motif_mask": str(motif_mask_file),
+                }
             }
-        }
-        with open(manifest_file, "w") as f:
-            json.dump(manifest, f, indent=2)
+            with open(manifest_file, "w") as f:
+                json.dump(manifest, f, indent=2)
 
-        logging.info("\nPreprocessing complete. Wrote per-sample/per-chrom data for MultiomicTransformerDataset.")
+            logging.info("\nPreprocessing complete. Wrote per-sample/per-chrom data for MultiomicTransformerDataset.")

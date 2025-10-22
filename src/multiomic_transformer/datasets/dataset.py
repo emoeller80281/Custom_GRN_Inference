@@ -75,6 +75,29 @@ class MultiomicTransformerDataset(Dataset):
             self.tg_ids = torch.load(tg_ids_file).long()
             with open(tf_names_file) as f: self.tf_names = [self.standardize_name(n) for n in json.load(f)]
             with open(tg_names_file) as f: self.tg_names = [self.standardize_name(n) for n in json.load(f)]
+            
+            # --- REMAP ids to common vocab if available ---
+            if self.tf_name2id is not None:
+                missing_tf = [n for n in self.tf_names if n not in self.tf_name2id]
+                if missing_tf:
+                    logging.warning(f"{len(missing_tf)} TFs not in common vocab (e.g. {missing_tf[:10]})")
+                self.tf_ids = torch.tensor(
+                    [self.tf_name2id.get(n, -1) for n in self.tf_names], dtype=torch.long
+                )
+                if (self.tf_ids < 0).any():
+                    bad = [n for n in self.tf_names if self.tf_name2id.get(n, -1) < 0][:10]
+                    raise ValueError(f"Unmapped TFs present (e.g. {bad})")
+
+            if self.tg_name2id is not None:
+                missing_tg = [n for n in self.tg_names if n not in self.tg_name2id]
+                if missing_tg:
+                    logging.warning(f"{len(missing_tg)} TGs not in common vocab (e.g. {missing_tg[:10]})")
+                self.tg_ids = torch.tensor(
+                    [self.tg_name2id.get(n, -1) for n in self.tg_names], dtype=torch.long
+                )
+                if (self.tg_ids < 0).any():
+                    bad = [n for n in self.tg_names if self.tg_name2id.get(n, -1) < 0][:10]
+                    raise ValueError(f"Unmapped TGs present (e.g. {bad})")
 
             self.num_cells   = self.tg_tensor_all.shape[1]
             self.num_windows = self.atac_window_tensor_all.shape[0]
@@ -158,6 +181,24 @@ class MultiomicTransformerDataset(Dataset):
                 self.motif_mask_tensor = torch.load(motif_mask_path).float()
             else:
                 self.motif_mask_tensor = torch.zeros((self.tg_ids.numel(), self.tf_ids.numel()), dtype=torch.float32)
+                
+            # Make sure counts align with tensors
+            assert self.tf_tensor_all.shape[0] == len(self.tf_names) == self.tf_ids.numel(), \
+                "TF count mismatch between tensor, names, and ids"
+            assert self.tg_tensor_all.shape[0] == len(self.tg_names) == self.tg_ids.numel(), \
+                "TG count mismatch between tensor, names, and ids"
+
+            # Ensure ids fit the *common* vocab if we loaded it
+            if self.tf_name2id is not None:
+                tf_vocab_size = len(self.tf_name2id)
+                assert int(self.tf_ids.max()) < tf_vocab_size and int(self.tf_ids.min()) >= 0, \
+                    f"tf_ids out of range for common vocab (max={int(self.tf_ids.max())}, vocab={tf_vocab_size})"
+                    
+            if self.tg_name2id is not None:
+                tg_vocab_size = len(self.tg_name2id)
+                assert int(self.tg_ids.max()) < tg_vocab_size and int(self.tg_ids.min()) >= 0, \
+                    f"tg_ids out of range for common vocab (max={int(self.tg_ids.max())}, vocab={tg_vocab_size})"
+
 
     # -------- Dataset API --------
     def __len__(self):
@@ -271,4 +312,4 @@ class MultiomicTransformerDataset(Dataset):
         """Convert gene/motif name to capitalization style (e.g. 'Hoxa2')."""
         if not isinstance(name, str):
             return name
-        return name.capitalize()
+        return name.upper()

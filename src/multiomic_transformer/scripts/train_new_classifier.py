@@ -15,6 +15,7 @@ from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score, average_precision_score
 from multiomic_transformer.models.tf_tg_classifier import GRN_GAT_Encoder
+from multiomic_transformer.utils.gene_canonicalizer import GeneCanonicalizer
 import logging, os
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -23,18 +24,27 @@ from config.settings import *
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
+CHIP_GT_PATH = os.getenv("CHIP_GROUND_TRUTH", "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data/ground_truth_files/mESC_beeline_ChIP-seq.csv")  # <-- EDIT
+CHIP_GT_SEP  = os.getenv("CHIP_GROUND_TRUTH_SEP", ",")
+
+canon = GeneCanonicalizer()
+canon.load_gtf("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data/genome_data/genome_annotation/mm10/Mus_musculus.gene_info")
+canon.load_ncbi_gene_info("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data/genome_data/reference_genome/mm10/Mus_musculus.GRCm39.113.gtf", species_taxid="10090")
+logging.info("Map sizes:", canon.coverage_report())
+
 # ============================================================
 # Load data
 # ============================================================
 
 sample_dfs = []
 for sample in SAMPLE_NAMES:
-    logging.info(f"Loading data for {sample}")
-    
-    sample_df = pd.read_parquet(SAMPLE_PROCESSED_DATA_DIR / sample / "tf_tg_data.parquet")
-    logging.info(f"  - Loaded {sample}: {len(sample_df)} edges | {sample_df['TF'].nunique()} TFs | {sample_df['TG'].nunique()} TGs")
+    if os.path.exists(SAMPLE_PROCESSED_DATA_DIR / sample / "tf_tg_data.parquet"):
+        logging.info(f"Loading data for {sample}")
+        
+        sample_df = pd.read_parquet(SAMPLE_PROCESSED_DATA_DIR / sample / "tf_tg_data.parquet")
+        logging.info(f"  - Loaded {sample}: {len(sample_df)} edges | {sample_df['TF'].nunique()} TFs | {sample_df['TG'].nunique()} TGs")
 
-    sample_dfs.append(sample_df)
+        sample_dfs.append(sample_df)
     
 df = pd.concat(sample_dfs, ignore_index=True)
 logging.info(f"Total: {len(df)} edges | {df['TF'].nunique()} TFs | {df['TG'].nunique()} TGs")
@@ -261,24 +271,42 @@ class EdgeClassifier(nn.Module):
         h, _ = self.encoder(x, edge_index, edge_attr)
         tf_emb = h[pairs[:,0]]; tg_emb = h[pairs[:,1]]
         return self.classifier(torch.cat([tf_emb, tg_emb], dim=1)).squeeze(-1)
-
-# Fine-tune only classifier (encoder frozen by default)
-encoder_frozen = True
+    
 finetune_model = EdgeClassifier(model).to(device)
-if encoder_frozen:
-    for p in finetune_model.encoder.parameters():
-        p.requires_grad = False
+# Unfreeze only the last GAT + projection head
+for n, p in finetune_model.encoder.named_parameters():
+    p.requires_grad = ("gat2" in n) or ("proj" in n)
+
+# Different LRs: small for encoder, larger for head
+param_groups = [
+    {"params": [p for n,p in finetune_model.encoder.named_parameters() if p.requires_grad], "lr": 5e-5},
+    {"params": finetune_model.classifier.parameters(), "lr": 1e-4},
+]
+optimizer_finetune = torch.optim.Adam(param_groups, weight_decay=1e-5)
 
 criterion = nn.BCEWithLogitsLoss()
 optimizer_finetune = torch.optim.Adam(filter(lambda p: p.requires_grad, finetune_model.parameters()), lr=1e-4)
 
 phase2_train_losses, phase2_val_auroc, phase2_val_aupr = [], [], []
 
+pretrained_state = {k: v.detach().clone() for k, v in finetune_model.encoder.state_dict().items()}
+lambda_l2sp = 1e-3
+
+# Add L2-SP regularization to penalize deviation from pretrained weights
+def l2sp_loss(module, ref_state):
+    reg = 0.0
+    for (k, p) in module.state_dict().items():
+        if p.dtype.is_floating_point and k in ref_state:
+            reg = reg + (p - ref_state[k]).pow(2).sum()
+    return reg
+
 for epoch in range(1, 101):
     finetune_model.train()
     optimizer_finetune.zero_grad()
     logits = finetune_model(data.x, data.edge_index, data.edge_attr, pairs_train)
     loss = criterion(logits, y_train)
+    loss = loss + lambda_l2sp * l2sp_loss(finetune_model.encoder, pretrained_state)
+
     loss.backward()
     optimizer_finetune.step()
     phase2_train_losses.append(loss.item())
@@ -296,6 +324,351 @@ for epoch in range(1, 101):
 
 torch.save(finetune_model.state_dict(), "outputs/fine_tuned_gat_classifier.pt")
 logging.info("Saved fine-tuned model to outputs/fine_tuned_gat_classifier.pt")
+
+# --- use the SAME encoders used for the graph ---
+# make dicts from the fitted LabelEncoders
+tf_to_local = {name: i for i, name in enumerate(tf_encoder.classes_)}
+tg_to_local = {name: i for i, name in enumerate(tg_encoder.classes_)}
+
+df_scores = df[["TF", "TG"]].copy()
+df_scores["TF"] = df_scores["TF"].astype(str).str.upper().str.strip()
+df_scores["TG"] = df_scores["TG"].astype(str).str.upper().str.strip()
+
+# map to local node ids; TGs must be offset by +n_tfs
+tf_local = df_scores["TF"].map(tf_to_local)
+tg_local = df_scores["TG"].map(tg_to_local)
+
+valid = tf_local.notna() & tg_local.notna()
+pairs_local = np.stack(
+    [tf_local[valid].astype(int).to_numpy(),
+     tg_local[valid].astype(int).to_numpy() + n_tfs],  # <-- offset
+    axis=1
+)
+pairs_local = torch.as_tensor(pairs_local, dtype=torch.long, device=device)
+
+# sanity checks
+assert pairs_local[:,0].min().item() >= 0 and pairs_local[:,0].max().item() < n_tfs
+assert pairs_local[:,1].min().item() >= n_tfs and pairs_local[:,1].max().item() < (n_tfs + n_tgs)
+
+# run batched inference; align back to rows
+probs = np.full(len(df_scores), np.nan, dtype=np.float32)
+finetune_model.eval()
+with torch.no_grad():
+    B = 131072
+    outs = []
+    for i in range(0, pairs_local.shape[0], B):
+        sl = pairs_local[i:i+B]
+        logits = finetune_model(data.x, data.edge_index, data.edge_attr, sl)
+        outs.append(logits.detach().cpu().numpy())
+    logits = np.concatenate(outs, axis=0)
+    probs_valid = 1.0 / (1.0 + np.exp(-logits))
+probs[valid.values] = probs_valid.ravel()
+
+df_scores["Score"] = probs
+
+
+# ============================================================
+# ===  ChIP-seq comparison (TF–TG gold edges)              ===
+# ============================================================
+# Expect a file with first two columns = TF, TG (case-insensitive).
+
+
+def _load_chip_gold(gt_path: str, sep: str) -> pd.DataFrame:
+    gt = pd.read_csv(gt_path, sep=sep)
+    gt = gt.rename(columns={gt.columns[0]: "TF", gt.columns[1]: "TG"})
+    # normalize column names and values
+    tf_col, tg_col = gt.columns[:2]
+    gt = gt.rename(columns={tf_col: "TF", tg_col: "TG"})
+    gt["TF"] = gt["TF"].astype(str).str.upper().str.strip()
+    gt["TG"] = gt["TG"].astype(str).str.upper().str.strip()
+    if "label" not in gt.columns:
+        logging.warning("No 'label' column in ChIP file — assuming all listed edges are positives.")
+        gt["label"] = 1.0
+    gt["label"] = pd.to_numeric(gt["label"], errors="coerce").fillna(0).clip(0, 1).astype(int)
+    return gt[["TF", "TG", "label"]]
+
+def _precision_at_k_over_tfs(score_df: pd.DataFrame, gold_map: dict, ks=(10,20,50,100,200,500)):
+    rows = []
+    for k in ks:
+        vals = []
+        for tf, pos_set in gold_map.items():
+            sub = score_df[score_df["TF"] == tf]
+            if sub.empty:
+                continue
+            s = sub.sort_values("Score", ascending=False).head(k)
+            vals.append(s["TG"].isin(pos_set).mean())
+        rows.append((k, float(np.mean(vals)) if vals else np.nan))
+    return pd.DataFrame(rows, columns=["k","Precision"])
+
+try:
+    if CHIP_GT_PATH and os.path.exists(CHIP_GT_PATH):
+        chip_dir = os.path.join("outputs", "chip_eval")
+        os.makedirs(chip_dir, exist_ok=True)
+        logging.info(f"\n=== ChIP-seq comparison using: {CHIP_GT_PATH} ===")
+        chip = _load_chip_gold(CHIP_GT_PATH, CHIP_GT_SEP)
+        
+        df_scores = canon.standardize_df(df_scores, tf_col="TF", tg_col="TG")
+        chip       = canon.standardize_df(chip,       tf_col="TF", tg_col="TG")
+
+        # Merge labels onto the model scores
+        scored = df_scores.rename(columns={"prob":"Score"}).copy()
+        scored = scored.merge(chip, on=["TF","TG"], how="left")
+        if scored["label"].isna().any():
+            nmiss = int(scored["label"].isna().sum())
+            logging.warning(f"{nmiss:,} TF–TG pairs had no ChIP label — treating as 0.")
+            scored["label"] = scored["label"].fillna(0).astype(int)
+            
+        # === Coverage diagnostics ===
+        tf_chip = set(chip["TF"].unique())
+        tg_chip = set(chip["TG"].unique())
+        tf_model = set(df_scores["TF"].unique())
+        tg_model = set(df_scores["TG"].unique())
+
+        logging.info(f"[ChIP] TFs in file: {len(tf_chip)}, TGs in file: {len(tg_chip)}")
+        logging.info(f"[Model] TFs in graph: {len(tf_model)}, TGs in graph: {len(tg_model)}")
+        logging.info(f"[Overlap] TFs: {len(tf_chip & tf_model)} | TGs: {len(tg_chip & tg_model)}")
+
+        pos_pairs_total = (chip["label"] == 1).sum()
+        pos_pairs_in_model = chip.merge(df_scores[["TF","TG"]], on=["TF","TG"], how="inner")
+        pos_pairs_in_model = pos_pairs_in_model[pos_pairs_in_model["label"] == 1]
+        logging.info(f"[Positives] Total in ChIP file: {pos_pairs_total} | Present in model edges: {len(pos_pairs_in_model)}")
+
+        # Per-TF positive coverage
+        tf_pos_counts = chip[chip["label"]==1].groupby("TF").size().rename("n_pos_chip")
+        tf_pos_in_model = pos_pairs_in_model.groupby("TF").size().rename("n_pos_in_model")
+        tf_cov = pd.concat([tf_pos_counts, tf_pos_in_model], axis=1).fillna(0).astype(int)
+        tf_cov["coverage_pct"] = 100 * tf_cov["n_pos_in_model"] / tf_cov["n_pos_chip"].replace(0, np.nan)
+        tf_cov.sort_values("coverage_pct", ascending=True).to_csv(os.path.join(chip_dir, "tf_positive_coverage.csv"))
+        logging.info(f"Saved TF positive coverage → {os.path.join(chip_dir, 'tf_positive_coverage.csv')}")
+
+        # Overall metrics (if both classes present)
+        chip_dir = os.path.join("outputs", "chip_eval")
+        os.makedirs(chip_dir, exist_ok=True)
+        scored.to_csv(os.path.join(chip_dir, "scored_edges_with_chip.csv"), index=False)
+
+        y_true = scored["label"].values
+        y_pred = scored["Score"].values
+        if np.unique(y_true).size > 1:
+            auroc = roc_auc_score(y_true, y_pred)
+            aupr  = average_precision_score(y_true, y_pred)
+            logging.info(f"[ChIP Overall] AUROC={auroc:.3f} | AUPR={aupr:.3f}")
+
+            fpr, tpr, _ = roc_curve(y_true, y_pred)
+            prec, rec, _ = precision_recall_curve(y_true, y_pred)
+
+            plt.figure(figsize=(10,4))
+            plt.subplot(1,2,1); plt.plot(fpr,tpr); plt.plot([0,1],[0,1],'--',c='gray')
+            plt.title(f"ChIP ROC (AUROC={auroc:.3f})"); plt.xlabel("FPR"); plt.ylabel("TPR")
+            plt.subplot(1,2,2); plt.plot(rec,prec)
+            plt.title(f"ChIP PR (AUPR={aupr:.3f})"); plt.xlabel("Recall"); plt.ylabel("Precision")
+            plt.tight_layout(); plt.savefig(os.path.join(chip_dir, "overall_roc_pr.png"), dpi=180); plt.close()
+        else:
+            logging.warning("ChIP labels contain a single class — skipping overall AUROC/AUPR.")
+
+        # Per-TF metrics and P@k
+        gold_map = (
+            scored.loc[scored["label"] == 1, ["TF","TG"]]
+            .groupby("TF")["TG"].apply(lambda s: set(s.astype(str))).to_dict()
+        )
+
+        per_rows = []
+        for tf, pos_set in gold_map.items():
+            sub = scored[scored["TF"] == tf]
+            if sub.empty: 
+                continue
+            y = sub["TG"].isin(pos_set).astype(int).values
+            s = sub["Score"].values
+            if y.sum() == 0 or y.sum() == len(y):
+                auc_tf, aupr_tf = np.nan, np.nan
+            else:
+                auc_tf = roc_auc_score(y, s)
+                aupr_tf = average_precision_score(y, s)
+            order = np.argsort(-s)
+            p50  = y[order[:50]].mean()  if len(y) >= 50  else y[order].mean()
+            p100 = y[order[:100]].mean() if len(y) >= 100 else y[order].mean()
+            per_rows.append({"TF": tf, "n": int(len(y)), "n_pos": int(y.sum()),
+                             "AUROC": auc_tf, "AUPR": aupr_tf, "P@50": p50, "P@100": p100})
+
+        per_tf = pd.DataFrame(per_rows).sort_values(["AUPR","AUROC"], ascending=False)
+        per_tf.to_csv(os.path.join(chip_dir, "per_TF_metrics.csv"), index=False)
+        logging.info(f"Saved per-TF ChIP metrics for {len(per_tf)} TFs → {os.path.join(chip_dir,'per_TF_metrics.csv')}")
+
+        # Precision@k curve across TFs
+        p_at_k = _precision_at_k_over_tfs(scored.rename(columns={"prob":"Score"}) if "prob" in scored.columns else scored,
+                                          gold_map)
+        p_at_k.to_csv(os.path.join(chip_dir, "precision_at_k.csv"), index=False)
+        plt.figure(figsize=(6,4))
+        plt.plot(p_at_k["k"], p_at_k["Precision"], marker="o")
+        plt.xscale("log"); plt.xlabel("k"); plt.ylabel("Precision"); plt.title("Precision@k (avg over TFs)")
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout(); plt.savefig(os.path.join(chip_dir, "precision_at_k.png"), dpi=180); plt.close()
+        
+        def lift_at_k(y, s, k):
+            order = np.argsort(-s)
+            top = y[order[:k]]
+            base = y.mean() + 1e-12
+            return float(top.mean() / base)
+
+        def recall_at_k(y, s, k):
+            order = np.argsort(-s)
+            top_pos = (y[order[:k]] == 1).sum()
+            total_pos = int((y == 1).sum())
+            return float(top_pos / max(total_pos, 1))
+
+        rows = []
+        for k in (10, 20, 50, 100, 200, 500):
+            lifts, recalls = [], []
+            for tf, sub in scored.groupby("TF"):
+                if sub["label"].sum() == 0:
+                    continue
+                y = sub["label"].to_numpy()
+                s = sub["Score"].to_numpy()
+                lifts.append(lift_at_k(y, s, min(k, len(sub))))
+                recalls.append(recall_at_k(y, s, min(k, len(sub))))
+            rows.append({"k": k, "Lift@k": np.mean(lifts) if lifts else np.nan,
+                            "Recall@k": np.mean(recalls) if recalls else np.nan})
+        pd.DataFrame(rows).to_csv(os.path.join(chip_dir, "lift_recall_at_k.csv"), index=False)
+    else:
+        logging.warning("CHIP_GT_PATH not set or file not found — skipping ChIP comparison.")
+except Exception as e:
+    logging.exception(f"ChIP-seq comparison failed: {e}")
+    
+    # ============================================================
+# === Balanced scoring: macro per-TF and balanced micro     ===
+# ============================================================
+
+# 1) Macro per-TF (each TF contributes equally via simple mean)
+valid_rows = []
+for tf, sub in scored.groupby("TF"):
+    # Need both classes to compute AUCs
+    if sub["label"].nunique() < 2:
+        continue
+    y = sub["label"].to_numpy()
+    s = sub["Score"].to_numpy()
+    try:
+        auc_tf  = roc_auc_score(y, s)
+        aupr_tf = average_precision_score(y, s)
+    except Exception:
+        auc_tf, aupr_tf = np.nan, np.nan
+    valid_rows.append({"TF": tf, "AUROC": auc_tf, "AUPR": aupr_tf,
+                       "n": int(len(sub)), "n_pos": int(sub["label"].sum())})
+
+macro_df = pd.DataFrame(valid_rows)
+macro_auroc = float(np.nanmean(macro_df["AUROC"])) if not macro_df.empty else np.nan
+macro_aupr  = float(np.nanmean(macro_df["AUPR"]))  if not macro_df.empty else np.nan
+logging.info(f"[ChIP Macro] Mean per-TF AUROC={macro_auroc:.3f} | AUPR={macro_aupr:.3f}")
+macro_df.to_csv(os.path.join(chip_dir, "per_TF_macro_metrics.csv"), index=False)
+
+# 2) Balanced micro using per-TF sample weights
+#    Each TF contributes the same total weight; within a TF, positives and negatives
+#    split weight 50/50 (and are spread equally over their counts).
+def per_tf_balanced_weights(df_tf):
+    n = len(df_tf)
+    if n == 0:
+        return np.zeros(0, dtype=np.float64)
+    n_pos = int(df_tf["label"].sum())
+    n_neg = n - n_pos
+    w = np.zeros(n, dtype=np.float64)
+    if n_pos == 0 and n_neg == 0:
+        return w
+    # Within-TF: allocate 0.5 weight mass to each class (if present)
+    if n_pos > 0:
+        w[df_tf["label"].values == 1] = 0.5 / n_pos
+    if n_neg > 0:
+        w[df_tf["label"].values == 0] = 0.5 / n_neg
+    # Will rescale across TFs so each TF sums to 1/N_tf later
+    return w
+
+parts, weights = [], []
+for tf, sub in scored.groupby("TF"):
+    if sub.empty:
+        continue
+    w_tf = per_tf_balanced_weights(sub)
+    if w_tf.sum() == 0:
+        continue
+    parts.append(sub[["label","Score"]].reset_index(drop=True))
+    weights.append(w_tf)
+
+if parts:
+    blended = pd.concat(parts, axis=0, ignore_index=True)
+    w = np.concatenate(weights, axis=0)
+    # Give each TF the same total weight: divide by #TFs that contributed
+    n_tfs_contributing = len(weights)
+    w = w / n_tfs_contributing
+    y_all = blended["label"].to_numpy()
+    s_all = blended["Score"].to_numpy()
+    try:
+        bal_micro_auroc = roc_auc_score(y_all, s_all, sample_weight=w)
+        bal_micro_aupr  = average_precision_score(y_all, s_all, sample_weight=w)
+        logging.info(f"[ChIP Balanced-Micro] AUROC={bal_micro_auroc:.3f} | AUPR={bal_micro_aupr:.3f}  "
+                     f"(TF-equal + class-balanced within TF)")
+        with open(os.path.join(chip_dir, "balanced_micro_summary.txt"), "w") as f:
+            f.write(f"Balanced-Micro AUROC={bal_micro_auroc:.6f}\n")
+            f.write(f"Balanced-Micro AUPR={bal_micro_aupr:.6f}\n")
+            f.write(f"TFs contributing: {n_tfs_contributing}\n")
+            
+        # y_all, s_all, w already defined above in the balanced-micro section
+        fpr_w, tpr_w, _ = roc_curve(y_all, s_all, sample_weight=w)
+        prec_w, rec_w, _ = precision_recall_curve(y_all, s_all, sample_weight=w)
+
+        plt.figure(figsize=(10,4))
+        plt.subplot(1,2,1)
+        plt.plot(fpr_w, tpr_w)
+        plt.plot([0,1],[0,1],'--',c='gray',lw=1)
+        plt.xlabel("FPR"); plt.ylabel("TPR")
+        plt.title(f"Balanced-Micro ROC (AUROC={bal_micro_auroc:.3f})")
+
+        plt.subplot(1,2,2)
+        plt.plot(rec_w, prec_w)
+        plt.xlabel("Recall"); plt.ylabel("Precision")
+        plt.title(f"Balanced-Micro PR (AUPR={bal_micro_aupr:.3f})")
+
+        plt.tight_layout()
+        plt.savefig(os.path.join(chip_dir, "balanced_micro_roc_pr.png"), dpi=180)
+        plt.close()
+
+    except Exception as e:
+        logging.warning(f"Balanced-micro scoring failed: {e}")
+else:
+    logging.warning("No TF groups available for balanced-micro scoring.")
+
+# 3) (Optional) Undersampled micro (equal #pos=#neg per TF) – sanity check
+#    This avoids weighting but keeps strict balance per TF by subsampling.
+try:
+    us_parts = []
+    rng = np.random.default_rng(42)
+    for tf, sub in scored.groupby("TF"):
+        pos = sub[sub["label"] == 1]
+        neg = sub[sub["label"] == 0]
+        if len(pos) == 0 or len(neg) == 0:
+            continue
+        k = min(len(pos), len(neg))
+        pos_s = pos.sample(n=k, random_state=42) if len(pos) > k else pos
+        neg_s = neg.sample(n=k, random_state=42) if len(neg) > k else neg
+        us_parts.append(pd.concat([pos_s, neg_s], axis=0))
+    if us_parts:
+        us = pd.concat(us_parts, axis=0, ignore_index=True)
+        y_us = us["label"].to_numpy()
+        s_us = us["Score"].to_numpy()
+        auroc_us = roc_auc_score(y_us, s_us) if np.unique(y_us).size > 1 else np.nan
+        aupr_us  = average_precision_score(y_us, s_us) if np.unique(y_us).size > 1 else np.nan
+        logging.info(f"[ChIP Undersampled-Micro] AUROC={auroc_us:.3f} | AUPR={aupr_us:.3f}  "
+                     f"(per-TF pos=neg subsample)")
+        us.loc[:, ["TF","TG","Score","label"]].to_csv(os.path.join(chip_dir, "undersampled_micro_eval_table.csv"), index=False)
+    else:
+        logging.warning("No TFs had both classes for undersampled-micro scoring.")
+except Exception as e:
+    logging.warning(f"Undersampled-micro scoring failed: {e}")
+
+# Fair-scope overall: only TFs with ≥1 positive, and only edges for those TFs
+sc_tfs = [tf for tf, grp in scored.groupby("TF") if (grp["label"]==1).any()]
+scoped = scored[scored["TF"].isin(sc_tfs)].copy()
+if scoped["label"].nunique() > 1:
+    auroc_sc = roc_auc_score(scoped["label"].values, scoped["Score"].values)
+    aupr_sc  = average_precision_score(scoped["label"].values, scoped["Score"].values)
+    logging.info(f"[ChIP FairScope Overall] AUROC={auroc_sc:.3f} | AUPR={aupr_sc:.3f}")
+
+
 
 
 # ============================================================
