@@ -3,7 +3,8 @@ import pandas as pd
 import subprocess
 from pathlib import Path
 import logging
-from typing import Union, Dict
+import shutil
+from typing import Union, Dict, Tuple
 import requests
 from pybiomart import Dataset
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -77,13 +78,6 @@ def download_gene_tss_file(
 
     return df
 
-import os
-import subprocess
-import shutil
-import logging
-import requests
-from pathlib import Path
-from typing import Union
 
 def download_genome_fasta(organism_code: str, save_dir: Union[str, Path]) -> Path:
     """
@@ -179,6 +173,42 @@ def download_genome_fasta(organism_code: str, save_dir: Union[str, Path]) -> Pat
     # 5. Return final path
     logging.info(f"Genome ready: {bgzf_path}")
     return bgzf_path
+
+
+def download_chrom_sizes(organism_code: str, save_dir: Union[str, Path]) -> Path:
+    """
+    Download UCSC chrom.sizes for an assembly (mm10 or hg38).
+
+    Returns
+    -------
+    Path
+        Path to the chrom.sizes file.
+    """
+    assert organism_code in ("mm10", "hg38"), \
+        f"Organism code '{organism_code}' not supported (valid: 'mm10', 'hg38')."
+
+    save_dir = Path(save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    url = f"https://hgdownload.soe.ucsc.edu/goldenPath/{organism_code}/bigZips/{organism_code}.chrom.sizes"
+    out_path = save_dir / f"{organism_code}.chrom.sizes"
+
+    if out_path.exists():
+        logging.info(f"Found existing chrom.sizes: {out_path}")
+        return out_path
+
+    logging.info(f"Downloading chrom.sizes:\n  {url}")
+    with requests.get(url, stream=True, timeout=120) as r:
+        r.raise_for_status()
+        tmp = out_path.with_suffix(out_path.suffix + ".tmp")
+        with open(tmp, "wb") as f:
+            for chunk in r.iter_content(chunk_size=1 << 20):
+                if chunk:
+                    f.write(chunk)
+        tmp.replace(out_path)
+
+    logging.info(f"chrom.sizes saved: {out_path}")
+    return out_path
 
 
 def download_jaspar_pfms(save_dir: str, tax_id: str = "10090", version: int = 2024, max_workers: int = 8):

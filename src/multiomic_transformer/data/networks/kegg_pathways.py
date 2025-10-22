@@ -1,3 +1,7 @@
+import sys
+
+sys.path = [p if isinstance(p, str) else str(p) for p in sys.path]
+
 from bioservices.kegg import KEGG
 import networkx as nx
 import requests
@@ -8,15 +12,11 @@ from collections import defaultdict
 from typing import Union
 from bs4 import BeautifulSoup
 import itertools
-# from rule_inference import *
 import logging
 import os
 from tqdm import tqdm
-import sys
 from config.settings import *
 import pickle
-
-# from self.file_paths import self.file_paths
 
 class Pathways:
     """

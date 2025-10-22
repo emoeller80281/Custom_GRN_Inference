@@ -28,7 +28,7 @@ def format_peaks(peak_ids: Union[pd.Series, pd.Index]) -> pd.DataFrame:
     
     peak_ids = peak_ids.drop_duplicates()
 
-    logging.info(f'Formatting {peak_ids.shape[0]} peaks')
+    logging.info(f'  - Formatting {peak_ids.shape[0]} peaks')
 
     # Extract chromosome, start, and end from peak ID strings
     try:
@@ -97,7 +97,6 @@ def find_genes_near_peaks(
             for peak–gene pairs.
     """
     
-    logging.info(f"Locating peaks that are within {tss_distance_cutoff} bp of each gene's TSS")
     peak_tss_overlap = peak_bed.window(tss_bed, w=tss_distance_cutoff)
     
     cols = [
@@ -108,8 +107,6 @@ def find_genes_near_peaks(
         names=cols,
         low_memory=False
     )
-    print(f"\npeak_tss_overlap_df")
-    print(peak_tss_overlap_df.head())
 
     # Coerce numeric cols safely & drop malformed rows
     for c in ["peak_start", "peak_end", "gene_start", "gene_end"]:

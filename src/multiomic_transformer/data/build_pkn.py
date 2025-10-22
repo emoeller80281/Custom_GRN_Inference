@@ -5,6 +5,7 @@ import os
 import pandas as pd
 import numpy as np
 import networkx as nx
+from typing import Union
 
 from mygene import MyGeneInfo
 import pickle
@@ -16,35 +17,42 @@ from config.settings import *
 THIS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(THIS_DIR)) 
 
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
-    logging.info("Building Prior Knowledge Network")
-    ORGANISM_CODE = "hg38"
+def build_organism_pkns(
+    organism_code: str,
+    string_csv_file: Union[str, Path],
+    trrust_csv_file: Union[str, Path],
+    kegg_csv_file: Union[str, Path],
+    ) -> pd.DataFrame:
     
-    PKN_DIR = DATA_DIR / "prior_knowledge_network_data" / ORGANISM_CODE
+    string_csv_file = Path(string_csv_file)
+    trrust_csv_file = Path(trrust_csv_file)
+    kegg_csv_file = Path(kegg_csv_file)
 
-    STRING_DIR = PKN_DIR / "STRING"
-    TRRUST_DIR = PKN_DIR / "TRRUST"
-    KEGG_DIR = PKN_DIR / "KEGG"
+    for p in (string_csv_file.parent, trrust_csv_file.parent, kegg_csv_file.parent):
+        p.mkdir(parents=True, exist_ok=True)
 
-    STRING_DIR.mkdir(parents=True, exist_ok=True)
-    TRRUST_DIR.mkdir(parents=True, exist_ok=True)
-    KEGG_DIR.mkdir(parents=True, exist_ok=True)
+    string_gpickle_file = string_csv_file.with_suffix(".gpickle")
+    trrust_gpickle_file = trrust_csv_file.with_suffix(".gpickle")
+    kegg_gpickle_file = kegg_csv_file.with_suffix(".gpickle")
 
-    string_csv_file = STRING_DIR / "string_human_pkn.csv"
-    string_gpickle_file = STRING_DIR / "string_human_pkn.gpickle"
-    
-    trrust_csv_file = TRRUST_DIR / "trrust_human_pkn.csv"
-    trrust_gpickle_file = TRRUST_DIR / "trrust_human_pkn.gpickle"
-    
-    kegg_csv_file = KEGG_DIR / "kegg_human_pkn.csv"
-    kegg_gpickle_file = KEGG_DIR / "kegg_human_pkn.gpickle"
+    # Check organism code
+    if organism_code == "mm10":
+        trrust_species = "mouse"
+        kegg_organism = "mmu"
+        string_org_code = "10090"
+        
+    elif organism_code == "hg38":
+        trrust_species = "human"
+        kegg_organism = "hsa"
+        string_org_code = "9606"
+    else:
+        raise ValueError(f"Organism not recognized: {organism_code} (must be 'mm10' or 'hg38').")
 
     # ----- Build TRRUST Graph -----
     if not os.path.isfile(trrust_csv_file):
         logging.info("Building TRRUST prior knowledge network")
         trrust_pathway.build_trrust_pkn(
-            species="human",
+            species=trrust_species,
             out_csv=str(trrust_csv_file),
             out_gpickle = str(trrust_gpickle_file)
         )
@@ -57,9 +65,9 @@ if __name__ == "__main__":
     if not os.path.isfile(kegg_csv_file):
         logging.info("Building KEGG prior knowledge network")
         kegg_pathways.build_kegg_pkn(
-            dataset_name=ORGANISM_CODE,
+            dataset_name=organism_code,
             output_path=str(KEGG_DIR),
-            organism="hsa",
+            organism=kegg_organism,
             out_csv=str(kegg_csv_file),
             out_gpickle=str(kegg_gpickle_file)
         )
@@ -72,8 +80,8 @@ if __name__ == "__main__":
     if not os.path.isfile(string_csv_file):
         logging.info("Building STRING prior knowledge network")
         string_pathway.build_string_pkn(
-            string_dir=str(STRING_DIR),
-            string_org_code="9606",
+            string_dir=str(string_csv_file.parent),
+            string_org_code=string_org_code,
             min_combined_score=800,
             as_directed=True,
             out_csv=str(string_csv_file),
@@ -84,62 +92,50 @@ if __name__ == "__main__":
         logging.info("STRING CSV and Graphml files found, loading pkn csv")
         string_pkn = pd.read_csv(string_csv_file)
 
-
-    # --- Harmonize key columns ---
-    # Ensure consistent TF/TG-style naming
-    trrust_pkn.rename(columns={"source": "source_id", "target": "target_id"}, inplace=True)
-    kegg_pkn.rename(columns={"source": "source_id", "target": "target_id"}, inplace=True)
-    string_pkn.rename(columns={"protein1": "source_id", "protein2": "target_id"}, inplace=True)
-
+    # Add source database column
     trrust_pkn["source_db"] = "TRRUST"
     kegg_pkn["source_db"] = "KEGG"
     string_pkn["source_db"] = "STRING"
-    mg = MyGeneInfo()
-
+    
     # Convert Ensembl IDs or aliases in your PKN to HGNC symbols
+    mg = MyGeneInfo()
     def normalize_genes(gene_list):
-        query = mg.querymany(gene_list, scopes=["symbol", "alias", "ensembl.gene"], fields="symbol", species="human")
+        query = mg.querymany(gene_list, scopes=["symbol", "alias", "ensembl.gene"], fields="symbol", species=trrust_species)
         mapping = {q["query"]: q.get("symbol", q["query"]) for q in query}
         return [mapping.get(g, g).upper() for g in gene_list]
     
-    # Case-normalize the gene names
-    for df in [trrust_pkn, kegg_pkn, string_pkn]:
-        df["source_id"] = df["source_id"].str.upper()
-        df["target_id"] = df["target_id"].str.upper()
-        df["TF"] = normalize_genes(df["TF"])
-        df["TG"] = normalize_genes(df["TG"])
-
     def print_network_info(df: pd.DataFrame, network_name: str):
         logging.info(f"\n{network_name}")
         logging.info(trrust_pkn.head())
-        logging.info(f"TFs: {df['source_id'].nunique()}")
-        logging.info(f"TGs: {df['target_id'].nunique()}")
+        logging.info(f"TFs: {df['TF'].nunique()}")
+        logging.info(f"TGs: {df['TG'].nunique()}")
         logging.info(f"Edges: {df.shape[0]}")
+    
+    # Case-normalize the gene names
+    for df in [trrust_pkn, kegg_pkn, string_pkn]:
+        network_name = str(df["source_db"].to_list()[0])
+        df["TF"] = df["TF"].str.upper()
+        df["TG"] = df["TG"].str.upper()
+        df["TF"] = normalize_genes(df["TF"])
+        df["TG"] = normalize_genes(df["TG"])
+        print_network_info(df, network_name)
         
-    print_network_info(trrust_pkn, "TRRUST")
-    print_network_info(kegg_pkn, "KEGG")
-    print_network_info(string_pkn, "STRING")
+        # Save the normalized dataframe
+        if network_name == "TRRUST":
+            df.to_csv(trrust_csv_file, index=False)
+        elif network_name == "KEGG":
+            df.to_csv(kegg_csv_file, index=False)
+        elif network_name == "STRING":
+            df.to_csv(string_csv_file, index=False)
+            
+    return df
 
-
-
-
-    # # --- Merge all sources ---
-    # logging.info("\nMerging all PKNs")
-    # merged_df = pd.concat([trrust_pkn, kegg_pkn, string_pkn], ignore_index=True)
-    # logging.info("Done!")
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    logging.info("Building Prior Knowledge Network")
     
-    # print_network_info(merged_df, "Merged DataFrame")
-
-    # # Drop perfect duplicates (same source-target pair + identical source_db)
-    # merged_df.drop_duplicates(subset=["source_id", "target_id", "source_db"], inplace=True)
-
-    # logging.info(f"\nUnified PKN: {len(merged_df):,} edges across {merged_df['source_db'].nunique()} sources")
-
-    # # --- Save outputs ---
-    # merged_df_path_prefix = PKN_DIR / f"{ORGANISM_CODE}_merged_pkn"
-    # os.makedirs(os.path.dirname(merged_df_path_prefix), exist_ok=True)
+    string_csv_file = STRING_DIR / f"string_{ORGANISM_CODE}_pkn.csv"
+    trrust_csv_file = TRRUST_DIR / f"trrust_{ORGANISM_CODE}_pkn.csv"
+    kegg_csv_file = KEGG_DIR / f"kegg_{ORGANISM_CODE}_pkn.csv"
     
-    # merged_df.to_csv(f"{merged_df_path_prefix}.csv", index=False)
-    # G_merged = nx.from_pandas_edgelist(merged_df, source="source_id", target="target_id", edge_attr=True, create_using=nx.DiGraph())
-    # with open(f"{merged_df_path_prefix}.gpickle", 'wb') as f:
-    #     pickle.dump(G_merged, f, pickle.HIGHEST_PROTOCOL)
+    build_organism_pkns(ORGANISM_CODE, string_csv_file, trrust_csv_file, kegg_csv_file)

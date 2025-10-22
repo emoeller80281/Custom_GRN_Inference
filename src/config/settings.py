@@ -79,12 +79,19 @@ DATA_DIR = ROOT_DIR / "data"
 GENOME_DIR = DATA_DIR / "genome_data" / "reference_genome" / ORGANISM_CODE
 CHROM_SIZES_FILE = GENOME_DIR / "chrom.sizes"
 GENE_TSS_FILE = DATA_DIR / "genome_data" / "genome_annotation" / ORGANISM_CODE / "gene_tss.bed"
+TF_FILE = DATA_DIR / "databases" / "motif_information" / ORGANISM_CODE / "TF_Information_all_motifs.txt"
 JASPAR_PFM_DIR = DATA_DIR / "databases" / "motif_information" / "JASPAR" / "pfm_files"
+MOTIF_DIR = DATA_DIR / "databases" / "motif_information" / ORGANISM_CODE / str(ORGANISM_CODE + "_motif_meme_files")
 
 PROCESSED_DATA = DATA_DIR / "processed"
 TRAINING_DATA_CACHE = DATA_DIR / "training_data_cache"
 RAW_DATA = DATA_DIR / "raw"
 PKN_DIR = DATA_DIR / "prior_knowledge_network_data" / ORGANISM_CODE
+
+# PKN files
+STRING_DIR = DATA_DIR / "prior_knowledge_network_data" / ORGANISM_CODE / "STRING" 
+TRRUST_DIR = DATA_DIR / "prior_knowledge_network_data" / ORGANISM_CODE / "TRRUST" 
+KEGG_DIR = DATA_DIR / "prior_knowledge_network_data" / ORGANISM_CODE / "KEGG" 
 
 COMMON_DATA = TRAINING_DATA_CACHE / "common"
 

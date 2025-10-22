@@ -3,7 +3,7 @@ import multiprocessing as mp
 import os
 import warnings
 from pathlib import Path
-from typing import Tuple
+from typing import Tuple, List
 
 import numpy as np
 import pandas as pd
@@ -77,21 +77,26 @@ def pseudo_bulk(
     # --- Connectivity graph (sparse adjacency) ---
     conn = joint.obsp["connectivities"].tocsr()
 
-    pseudo_bulk_rna = []
-    pseudo_bulk_atac = []
-    bulk_names = []
+    rna_rows: List[sp.csr_matrix] = []
+    atac_rows: List[sp.csr_matrix] = []
+    bulk_names: List[str] = []
     
-    def aggregate_matrix(X, idx, method):
+    def aggregate_matrix(X: sp.spmatrix, idx: np.ndarray, method: str) -> sp.csr_matrix:
+        """
+        Aggregate rows in `X` indexed by `idx` using sum/mean.
+        Returns a 1×n_features CSR matrix.
+        """
         if method == "sum":
-            return sp.csr_matrix(X[idx, :].sum(axis=0))
+            out = X[idx, :].sum(axis=0)
         elif method == "mean":
-            return sp.csr_matrix(X[idx, :].mean(axis=0))
+            out = X[idx, :].mean(axis=0)
         else:
             raise ValueError(f"Unknown aggregate: {method}")
+        # ensure CSR 2D
+        return sp.csr_matrix(out)
 
     for cid in cluster_ids:
         cluster_idx = np.where(clusters == cid)[0]
-
         if len(cluster_idx) == 0:
             continue
         
@@ -99,8 +104,8 @@ def pseudo_bulk(
             # Single pseudobulk
             rna_agg = aggregate_matrix(rna_data.X, cluster_idx, aggregate)
             atac_agg = aggregate_matrix(atac_data.X, cluster_idx, aggregate)
-            pseudo_bulk_rna.append(rna_agg)
-            pseudo_bulk_atac.append(atac_agg)
+            rna_rows.append(rna_agg)
+            atac_rows.append(atac_agg)
             bulk_names.append(f"cluster{cid}")
         else:
             # Multiple pseudobulks
@@ -110,29 +115,30 @@ def pseudo_bulk(
                 group = np.append(neighbors, s)
                 rna_agg = aggregate_matrix(rna_data.X, group, aggregate)
                 atac_agg = aggregate_matrix(atac_data.X, group, aggregate)
-                pseudo_bulk_rna.append(rna_agg)
-                pseudo_bulk_atac.append(atac_agg)
+                rna_rows.append(rna_agg)
+                atac_rows.append(atac_agg)
                 bulk_names.append(f"cluster{cid}_cell{s}")
                 
-    pseudo_bulk_rna = [m if m.ndim == 2 else m.reshape(1, -1) for m in pseudo_bulk_rna]
-    pseudo_bulk_atac = [m if m.ndim == 2 else m.reshape(1, -1) for m in pseudo_bulk_atac]   
+    # Stack to (n_bulks × n_features) then transpose → (n_features × n_bulks)
+    rna_stack: sp.csr_matrix = sp.vstack(rna_rows) if rna_rows else sp.csr_matrix((0, rna_data.n_vars))
+    atac_stack: sp.csr_matrix = sp.vstack(atac_rows) if atac_rows else sp.csr_matrix((0, atac_data.n_vars))
 
-    # --- Convert to DataFrames ---
-    pseudo_bulk_rna = sp.vstack(pseudo_bulk_rna).T
-    pseudo_bulk_atac = sp.vstack(pseudo_bulk_atac).T
+    rna_stack = rna_stack.T
+    atac_stack = atac_stack.T
 
-    pseudo_bulk_rna = pd.DataFrame(
-        pseudo_bulk_rna.toarray(),
+    # Final DataFrames
+    pseudo_bulk_rna_df: pd.DataFrame = pd.DataFrame(
+        rna_stack.toarray(),
         index=rna_data.var_names,
         columns=bulk_names,
     )
-    pseudo_bulk_atac = pd.DataFrame(
-        pseudo_bulk_atac.toarray(),
+    pseudo_bulk_atac_df: pd.DataFrame = pd.DataFrame(
+        atac_stack.toarray(),
         index=atac_data.var_names,
         columns=bulk_names,
     )
 
-    return pseudo_bulk_rna, pseudo_bulk_atac
+    return pseudo_bulk_rna_df, pseudo_bulk_atac_df
 
 def get_adata_from_peakmatrix(peak_matrix_file: Path, label: pd.DataFrame, sample_name: str) -> AnnData:
     # Read header only

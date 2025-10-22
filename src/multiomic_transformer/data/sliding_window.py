@@ -5,6 +5,7 @@ import os
 import glob
 import re
 import sys
+from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Any, Union
 from pyfaidx import Fasta
@@ -129,7 +130,7 @@ def process_motif_file_and_save(motif_idx, tf_df, bg, score_mats, names, tmp_dir
     for tf in tf_names:
         df = pd.DataFrame({
             "peak_id": peak_ids,
-            "source_id": tf,
+            "TF": tf,
             "sliding_window_score": scores
         })
         df = df.dropna()
@@ -302,7 +303,7 @@ def load_motifs(motif_paths, pseudocount=0.001, bg=None):
 
 
 def associate_tf_with_motif_pwm(tf_info_file, meme_dir, fasta_path, peaks_bed, tf_name_list, num_cpu, output_dir) -> pd.DataFrame:
-    logging.info("Preparing for parallel motif scoring...")
+    logging.info("\nPreparing for parallel motif scoring...")
     
     fasta = Fasta(fasta_path, as_raw=True, sequence_always_upper=True)
 
@@ -433,9 +434,11 @@ def run_sliding_window_scan(
     motif_dir: str,
     genome_fasta: str,
     peak_bed_file: str,
-    output_dir: str,
+    output_file: Union[str, Path],
     num_cpu: int,
 ):
+    output_file = Path(output_file)
+    output_dir = output_file.parent
     os.makedirs(output_dir, exist_ok=True)
                 
     # Associate the TFs from TF_Information_all_motifs.txt to the motif with the matching motifID
@@ -446,6 +449,6 @@ def run_sliding_window_scan(
     
     plot_feature_score_histogram(df, "sliding_window_score", output_dir)
 
-    df.to_parquet(f"{output_dir}/sliding_window.parquet", engine="pyarrow", compression="snappy")
+    df.to_parquet(output_file, engine="pyarrow", compression="snappy")
     logging.info(f"Wrote final TF–peak sliding window scores to sliding_window_tf_to_peak_score.parquet")
 

@@ -41,8 +41,6 @@ sample_tf_name_file: Path =   SAMPLE_DATA_CACHE_DIR / "tf_names.json"
 tf_id_file: Path =            SAMPLE_DATA_CACHE_DIR / "tf_ids.pt"
 
 
-
-
 def build_global_tg_vocab(gene_tss_file, vocab_file):
     """
     Build or update a global TG vocab from all genes in the genome.
