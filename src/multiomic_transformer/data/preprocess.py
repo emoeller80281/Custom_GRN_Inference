@@ -70,13 +70,14 @@ def pseudo_bulk(
     atac_data = atac_data[rna_data.obs_names].copy()
     assert (rna_data.obs_names == atac_data.obs_names).all(), "Cell barcodes must be aligned"
 
-        # ----- Ensure PCA exists for both modalities -----
+    # ----- Ensure PCA exists for both modalities -----
     def _ensure_pca(adata: AnnData, n_comps: int) -> None:
-        if "X_pca" not in adata.obsm_keys():
-            # Minimal, assumption-free transform: scale (zero-center) then PCA.
-            # We do NOT filter HVGs here since processed matrices may already be filtered.
+        # cap components to valid range
+        max_comps = int(min(adata.n_obs, adata.n_vars))
+        use_comps = max(1, min(n_comps, max_comps))
+        if "X_pca" not in adata.obsm_keys() or adata.obsm.get("X_pca", np.empty((0,0))).shape[1] < use_comps:
             sc.pp.scale(adata, max_value=10, zero_center=True)
-            sc.tl.pca(adata, n_comps=n_comps, svd_solver="arpack")
+            sc.tl.pca(adata, n_comps=use_comps, svd_solver="arpack")
 
     _ensure_pca(rna_data, pca_components)
     _ensure_pca(atac_data, pca_components)
@@ -627,28 +628,38 @@ def make_gene_tss_bed_file(gene_tss_file, genome_dir):
     gene_tss_df.to_csv(bed_path, sep="\t", header=False, index=False)
     return gene_tss_df
 
-def build_peak_locs_from_index(peak_index: pd.Index) -> pd.DataFrame:
+def build_peak_locs_from_index(
+    peak_index: pd.Index,
+    *,
+    include_regex: str = r"^chr(\d+|X|Y)$",
+    coerce_chr_prefix: bool = True,
+) -> pd.DataFrame:
     """
-    Parse peak IDs like 'chr1:100-200' into BED-format dataframe.
-    Returns columns: chrom, start, end, peak_id
+    Parse peak ids like 'chr1:100-200' (or '1:100-200' if coerce_chr_prefix)
+    into a clean DataFrame and filter to canonical chromosomes (1..n, X, Y).
     """
     rows = []
     for pid in map(str, peak_index):
-        m = re.match(r"^(chr)?(\w+)[_:](\d+)[-_:](\d+)$", pid)
-        if not m:
+        try:
+            chrom_part, se = pid.split(":")
+            if coerce_chr_prefix and not chrom_part.startswith("chr"):
+                chrom = f"chr{chrom_part}"
+            else:
+                chrom = chrom_part
+            s, e = se.split("-")
+            s, e = int(s), int(e)
+            if s > e:
+                s, e = e, s
+            rows.append((chrom, s, e, pid))
+        except Exception:
             logging.warning(f"Skipping malformed peak ID: {pid}")
             continue
-        _, chrom_core, start, end = m.groups()
-        chrom = f"chr{chrom_core}" if not chrom_core.startswith("chr") else chrom_core
-        start, end = int(start), int(end)
-        if start > end:
-            start, end = end, start
-        rows.append((chrom, start, end, pid))
 
-    df = pd.DataFrame(rows, columns=["chrom", "start", "end", "peak_id"])
-    df = df[df["chrom"].str.match(r"^chr[\dXYM]+$")]  # keep valid chromosomes only
-    df = df.astype({"start": int, "end": int})
+    df = pd.DataFrame(rows, columns=["chrom", "start", "end", "peak_id"]).drop_duplicates()
+    # keep only canonical chromosomes
+    df = df[df["chrom"].astype(str).str.match(include_regex)].reset_index(drop=True)
     return df
+
 
 def calculate_peak_to_tg_distance_score(
     peak_bed_file,
@@ -811,32 +822,17 @@ def compute_minmax_expr_mean(
     mean_norm_tg_expr : DataFrame  # columns: ['TG', 'mean_tg_expr']
     """
     # Get the 0-1 MinMax normalized ATAC accessibility
-    def _minmax_scale_across_cells(df):
-        norm_df = df.copy()
-        scaler = MinMaxScaler()
-        x = norm_df.values
-        norm_df.loc[:, :] = scaler.fit_transform(x)
+    def _rowwise_minmax_mean(x: pd.DataFrame) -> pd.Series:
+        # x: genes × cells
+        xmin = x.min(axis=1)
+        xmax = x.max(axis=1)
+        denom = (xmax - xmin).replace(0, np.nan)            # avoid div-by-zero
+        scaled = (x.sub(xmin, axis=0)).div(denom, axis=0)   # row-wise scale
+        scaled = scaled.fillna(0.0)                         # constant rows → 0
+        return scaled.mean(axis=1)
 
-        return norm_df
-
-    norm_tf_df = _minmax_scale_across_cells(tf_df)
-    norm_tg_df = _minmax_scale_across_cells(tg_df)
-
-    # NOTE: Instead of mean, should I pass each cell's expression or pseudobulk?
-    # Calculate the mean TF and TG expression
-    mean_norm_tg_expr = (
-        norm_tg_df
-        .mean(axis=1)
-        .reset_index()
-        .rename(columns={"index": "TG", 0: "mean_tg_expr"})
-    )
-
-    mean_norm_tf_expr = (
-        norm_tf_df
-        .mean(axis=1)
-        .reset_index()
-        .rename(columns={"index": "TF", 0: "mean_tf_expr"})
-    )
+    mean_norm_tg_expr = _rowwise_minmax_mean(tf_df).rename("mean_tf_expr").reset_index().rename(columns={"index": "TF"})
+    mean_norm_tf_expr = _rowwise_minmax_mean(tg_df).rename("mean_tg_expr").reset_index().rename(columns={"index": "TG"})
     
     return mean_norm_tf_expr, mean_norm_tg_expr
 
@@ -932,13 +928,20 @@ def merge_tf_tg_data_with_pkn(
         """Return edge_set ∪ reversed(edge_set)."""
         return edge_set | {(b, a) for (a, b) in edge_set}
 
-    def _split_by_pkn_union_undirected(tf_tg_df: pd.DataFrame, pkn_union_undirected: Set[tuple[str, str]]) -> tuple[pd.DataFrame, pd.DataFrame]:
-        """Return (in_pkn_df, not_in_pkn_df) after uppercasing TF/TG, using undirected membership."""
-        d = tf_tg_df.copy()
-        d["TF"] = d["TF"].astype(str).str.upper()
-        d["TG"] = d["TG"].astype(str).str.upper()
-        mask = d.apply(lambda r: (r["TF"], r["TG"]) in pkn_union_undirected, axis=1)
-        return d[mask].copy(), d[~mask].copy()
+    def _split_by_pkn_union(tf_tg_df: pd.DataFrame, pkn_union: set[tuple[str, str]]) -> tuple[pd.DataFrame, pd.DataFrame]:
+        """
+        Return (in_pkn_df, not_in_pkn_df) after uppercasing TF/TG.
+        Treat PKN edges as undirected: (u,v) is a match if (u,v) or (v,u) is in the union.
+        """
+        df = tf_tg_df.copy()
+        df["TF"] = df["TF"].astype(str).str.upper()
+        df["TG"] = df["TG"].astype(str).str.upper()
+
+        undirected = pkn_union | {(b, a) for (a, b) in pkn_union}
+        pairs = list(map(tuple, df[["TF", "TG"]].to_numpy()))
+        mask = np.fromiter(((u, v) in undirected for (u, v) in pairs), dtype=bool, count=len(pairs))
+
+        return df[mask].copy(), df[~mask].copy()
     
     def _flag_undirected(d: pd.DataFrame, s: Set[tuple[str, str]], col: str) -> None:
         """Set a boolean flag if (TF, TG) or (TG, TF) in source set."""
@@ -1018,7 +1021,7 @@ def merge_tf_tg_data_with_pkn(
 
     # ---------------- split ----------------
     logging.info("  - Splitting positives/negatives by PKN union")
-    in_pkn_df, not_in_pkn_df = _split_by_pkn_union_undirected(df, pkn_union_u)
+    in_pkn_df, not_in_pkn_df = _split_by_pkn_union(df, pkn_union_u)
     logging.info("  - Splitting results:")
     logging.info(f"\tEdges in TF-TG data: {df.shape[0]:,}")
     logging.info(f"\tEdges in PKN union (undirected): {len(pkn_union_u):,}")

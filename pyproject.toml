@@ -60,6 +60,11 @@ mypy = "^1.16.0"
 isort = "^6.0.1"
 pylint = "^3.3.7"
 
+[tool.pytest.ini_options]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+]
+
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
 build-backend = "poetry.core.masonry.api"
