@@ -4,7 +4,7 @@ Two-phase GAT training:
   1. Self-supervised Deep Graph Infomax (DGI)
   2. Semi-supervised fine-tuning on known PKN edges
 """
-
+import optuna
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -24,13 +24,54 @@ from config.settings import *
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
-CHIP_GT_PATH = os.getenv("CHIP_GROUND_TRUTH", "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data/ground_truth_files/mESC_beeline_ChIP-seq.csv")  # <-- EDIT
-CHIP_GT_SEP  = os.getenv("CHIP_GROUND_TRUTH_SEP", ",")
+# =========================
+# Hyperparameters / Config
+# =========================
+SEED = 42
+
+# Model
+HIDDEN_DIM       = 128
+GAT_HEADS        = 6
+DROPOUT          = 0.30
+EDGE_DROPOUT     = 0.30
+
+# Phase 1 (DGI)
+DGI_EPOCHS       = 300
+
+# Phase 2 (fine-tune)
+FINETUNE_EPOCHS  = 150
+TEST_SIZE        = 0.20
+LR_ENCODER       = 5e-5          # for the (partially) unfrozen encoder
+LR_HEAD          = 1e-4          # for the classifier head
+WEIGHT_DECAY     = 1e-5
+L2SP_LAMBDA      = 1e-3          # strength of L2-SP regularization
+
+# Inference
+PAIR_BATCH       = 131072        # batch size for pair scoring
+
+# Plotting
+PLOT_DPI         = 180
+
+# ChIP eval
+PRECISION_AT_K   = (10, 20, 50, 100, 200, 500)
+
+# Canonicalization resources
+NCBI_GENE_INFO   = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data/genome_data/genome_annotation/mm10/Mus_musculus.gene_info"
+GTF_PATH         = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data/genome_data/reference_genome/mm10/Mus_musculus.GRCm39.113.gtf"
+
+# Ground-truth
+CHIP_GT_PATH     = os.getenv("CHIP_GROUND_TRUTH", "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data/ground_truth_files/combined_ground_truth.csv")
+CHIP_GT_SEP      = os.getenv("CHIP_GROUND_TRUTH_SEP", ",")
+
+RUN_OPTUNA       = False
+
+torch.manual_seed(SEED); np.random.seed(SEED)
+if torch.cuda.is_available(): torch.cuda.manual_seed_all(SEED)
 
 canon = GeneCanonicalizer()
-canon.load_gtf("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data/genome_data/genome_annotation/mm10/Mus_musculus.gene_info")
-canon.load_ncbi_gene_info("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data/genome_data/reference_genome/mm10/Mus_musculus.GRCm39.113.gtf", species_taxid="10090")
-logging.info("Map sizes:", canon.coverage_report())
+canon.load_ncbi_gene_info("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data/genome_data/genome_annotation/mm10/Mus_musculus.gene_info", species_taxid="10090")
+canon.load_gtf("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data/genome_data/reference_genome/mm10/Mus_musculus.GRCm39.113.gtf")
+logging.info(f"Map sizes: {canon.coverage_report()}")
 
 # ============================================================
 # Load data
@@ -167,10 +208,10 @@ data = Data(x=node_features, edge_index=edge_index, edge_attr=edge_attr).to(devi
 model = GRN_GAT_Encoder(
     in_node_feats=1,
     in_edge_feats=len(edge_features),
-    hidden_dim=128,
-    heads=4,
-    dropout=0.3,
-    edge_dropout_p=0.3
+    hidden_dim=HIDDEN_DIM,
+    heads=GAT_HEADS,
+    dropout=DROPOUT,
+    edge_dropout_p=EDGE_DROPOUT
 ).to(device)
 
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-5)
@@ -220,7 +261,7 @@ def infomax_loss(h_real: torch.Tensor,
 # ============================================================
 phase1_losses = []
 
-for epoch in range(1, 201):
+for epoch in range(1, DGI_EPOCHS+1):
     model.train()
     optimizer.zero_grad()
     h_real, g_real = model(data.x, data.edge_index, data.edge_attr)
@@ -252,7 +293,8 @@ tf_tg_pairs = torch.tensor(np.stack([tf_ids, tg_ids], axis=1), dtype=torch.long)
 labels = torch.tensor(df["label"].values, dtype=torch.float32)
 
 pairs_train, pairs_test, y_train, y_test = train_test_split(
-    tf_tg_pairs.numpy(), labels.numpy(), test_size=0.2, stratify=labels.numpy(), random_state=42
+    tf_tg_pairs.numpy(), labels.numpy(),
+    test_size=TEST_SIZE, stratify=labels.numpy(), random_state=SEED
 )
 pairs_train, pairs_test = torch.tensor(pairs_train).to(device), torch.tensor(pairs_test).to(device)
 y_train, y_test = torch.tensor(y_train).float().to(device), torch.tensor(y_test).float().to(device)
@@ -279,18 +321,16 @@ for n, p in finetune_model.encoder.named_parameters():
 
 # Different LRs: small for encoder, larger for head
 param_groups = [
-    {"params": [p for n,p in finetune_model.encoder.named_parameters() if p.requires_grad], "lr": 5e-5},
-    {"params": finetune_model.classifier.parameters(), "lr": 1e-4},
+    {"params": [p for n, p in finetune_model.encoder.named_parameters() if p.requires_grad], "lr": LR_ENCODER},
+    {"params": finetune_model.classifier.parameters(), "lr": LR_HEAD},
 ]
-optimizer_finetune = torch.optim.Adam(param_groups, weight_decay=1e-5)
+optimizer_finetune = torch.optim.Adam(param_groups, weight_decay=WEIGHT_DECAY)
 
 criterion = nn.BCEWithLogitsLoss()
-optimizer_finetune = torch.optim.Adam(filter(lambda p: p.requires_grad, finetune_model.parameters()), lr=1e-4)
 
 phase2_train_losses, phase2_val_auroc, phase2_val_aupr = [], [], []
 
 pretrained_state = {k: v.detach().clone() for k, v in finetune_model.encoder.state_dict().items()}
-lambda_l2sp = 1e-3
 
 # Add L2-SP regularization to penalize deviation from pretrained weights
 def l2sp_loss(module, ref_state):
@@ -300,12 +340,12 @@ def l2sp_loss(module, ref_state):
             reg = reg + (p - ref_state[k]).pow(2).sum()
     return reg
 
-for epoch in range(1, 101):
+for epoch in range(1, FINETUNE_EPOCHS+1):
     finetune_model.train()
     optimizer_finetune.zero_grad()
     logits = finetune_model(data.x, data.edge_index, data.edge_attr, pairs_train)
     loss = criterion(logits, y_train)
-    loss = loss + lambda_l2sp * l2sp_loss(finetune_model.encoder, pretrained_state)
+    loss = loss + L2SP_LAMBDA * l2sp_loss(finetune_model.encoder, pretrained_state)
 
     loss.backward()
     optimizer_finetune.step()
@@ -354,7 +394,7 @@ assert pairs_local[:,1].min().item() >= n_tfs and pairs_local[:,1].max().item() 
 probs = np.full(len(df_scores), np.nan, dtype=np.float32)
 finetune_model.eval()
 with torch.no_grad():
-    B = 131072
+    B = PAIR_BATCH
     outs = []
     for i in range(0, pairs_local.shape[0], B):
         sl = pairs_local[i:i+B]
@@ -366,28 +406,61 @@ probs[valid.values] = probs_valid.ravel()
 
 df_scores["Score"] = probs
 
+# all TFxTG combinations (using the same local-id scheme)
+tf_ids = np.arange(n_tfs, dtype=int)
+tg_ids = np.arange(n_tgs, dtype=int) + n_tfs  # offset TG node ids
+
+all_pairs = np.stack(
+    [np.repeat(tf_ids, n_tgs), np.tile(tg_ids, n_tfs)],
+    axis=1
+)
+all_pairs_t = torch.as_tensor(all_pairs, dtype=torch.long, device=device)
+
+# run batched inference on ALL pairs
+finetune_model.eval()
+outs = []
+with torch.no_grad():
+    B = PAIR_BATCH
+    for i in range(0, all_pairs_t.shape[0], B):
+        sl = all_pairs_t[i:i+B]
+        logits = finetune_model(data.x, data.edge_index, data.edge_attr, sl)
+        outs.append(logits.detach().cpu().numpy())
+all_logits = np.concatenate(outs, axis=0)
+all_probs = 1.0 / (1.0 + np.exp(-all_logits)).ravel()
+
+# make a nice table with names
+tf_names = tf_encoder.classes_.astype(str)
+tg_names = tg_encoder.classes_.astype(str)
+df_all = pd.DataFrame({
+    "TF": np.repeat(tf_names, n_tgs),
+    "TG": np.tile(tg_names, n_tfs),
+    "Score": all_probs.astype(np.float32),
+})
+df_all.to_csv("outputs/inferred_grn_all_pairs.csv", index=False)
 
 # ============================================================
 # ===  ChIP-seq comparison (TF–TG gold edges)              ===
 # ============================================================
 # Expect a file with first two columns = TF, TG (case-insensitive).
 
-
 def _load_chip_gold(gt_path: str, sep: str) -> pd.DataFrame:
     gt = pd.read_csv(gt_path, sep=sep)
+    # assume first two columns are TF, TG
     gt = gt.rename(columns={gt.columns[0]: "TF", gt.columns[1]: "TG"})
-    # normalize column names and values
-    tf_col, tg_col = gt.columns[:2]
-    gt = gt.rename(columns={tf_col: "TF", tg_col: "TG"})
-    gt["TF"] = gt["TF"].astype(str).str.upper().str.strip()
-    gt["TG"] = gt["TG"].astype(str).str.upper().str.strip()
+    # If no label column, treat all as positives
     if "label" not in gt.columns:
         logging.warning("No 'label' column in ChIP file — assuming all listed edges are positives.")
         gt["label"] = 1.0
     gt["label"] = pd.to_numeric(gt["label"], errors="coerce").fillna(0).clip(0, 1).astype(int)
+    # strip/upper only (true canonicalization happens later once)
+    for c in ("TF","TG"):
+        gt[c] = gt[c].astype(str).str.upper().str.strip()
+    gt = gt.dropna(subset=["TF","TG"])
+    gt = gt[(gt["TF"]!="") & (gt["TG"]!="")]
     return gt[["TF", "TG", "label"]]
 
-def _precision_at_k_over_tfs(score_df: pd.DataFrame, gold_map: dict, ks=(10,20,50,100,200,500)):
+
+def _precision_at_k_over_tfs(score_df: pd.DataFrame, gold_map: dict, ks=PRECISION_AT_K):
     rows = []
     for k in ks:
         vals = []
@@ -400,24 +473,74 @@ def _precision_at_k_over_tfs(score_df: pd.DataFrame, gold_map: dict, ks=(10,20,5
         rows.append((k, float(np.mean(vals)) if vals else np.nan))
     return pd.DataFrame(rows, columns=["k","Precision"])
 
+scored = pd.DataFrame()  # <--- guard for later sections
+
 try:
     if CHIP_GT_PATH and os.path.exists(CHIP_GT_PATH):
         chip_dir = os.path.join("outputs", "chip_eval")
         os.makedirs(chip_dir, exist_ok=True)
         logging.info(f"\n=== ChIP-seq comparison using: {CHIP_GT_PATH} ===")
         chip = _load_chip_gold(CHIP_GT_PATH, CHIP_GT_SEP)
-        
-        df_scores = canon.standardize_df(df_scores, tf_col="TF", tg_col="TG")
-        chip       = canon.standardize_df(chip,       tf_col="TF", tg_col="TG")
 
-        # Merge labels onto the model scores
-        scored = df_scores.rename(columns={"prob":"Score"}).copy()
-        scored = scored.merge(chip, on=["TF","TG"], how="left")
-        if scored["label"].isna().any():
-            nmiss = int(scored["label"].isna().sum())
-            logging.warning(f"{nmiss:,} TF–TG pairs had no ChIP label — treating as 0.")
-            scored["label"] = scored["label"].fillna(0).astype(int)
-            
+        # --- BEFORE standardization (true pre-std diagnostics)
+        scores_before = df_scores[["TF","TG"]].copy()
+        chip_before   = chip[["TF","TG"]].copy()
+        tf_chip_pre = set(chip_before["TF"].astype(str).str.upper().str.strip().unique())
+        tg_chip_pre = set(chip_before["TG"].astype(str).str.upper().str.strip().unique())
+        tf_mod_pre  = set(scores_before["TF"].astype(str).str.upper().str.strip().unique())
+        tg_mod_pre  = set(scores_before["TG"].astype(str).str.upper().str.strip().unique())
+        logging.info("[Pre-Std] TF overlap=%d  TG overlap=%d",
+                     len(tf_chip_pre & tf_mod_pre), len(tg_chip_pre & tg_mod_pre))
+
+        # --- canonicalize BOTH tables exactly once
+        df_scores = canon.standardize_df(df_scores, tf_col="TF", tg_col="TG")
+        chip      = canon.standardize_df(chip,       tf_col="TF", tg_col="TG")
+
+        # change accounting
+        def changed_count(before_s, after_s):
+            b = before_s.astype(str).str.upper().str.strip()
+            a = after_s.astype(str).str.upper().str.strip()
+            return int((b != a).sum()), int(len(b))
+        tf_chg_scores, tf_tot_scores = changed_count(scores_before["TF"], df_scores["TF"])
+        tg_chg_scores, tg_tot_scores = changed_count(scores_before["TG"], df_scores["TG"])
+        logging.info("Canonicalizer changed %d/%d TFs and %d/%d TGs in model scores",
+                     tf_chg_scores, tf_tot_scores, tg_chg_scores, tg_tot_scores)
+        tf_chg_chip, tf_tot_chip = changed_count(chip_before["TF"], chip["TF"])
+        tg_chg_chip, tg_tot_chip = changed_count(chip_before["TG"], chip["TG"])
+        logging.info("Canonicalizer changed %d/%d TFs and %d/%d TGs in ChIP table",
+                     tf_chg_chip, tf_tot_chip, tg_chg_chip, tg_tot_chip)
+
+        # dedupe after std
+        df_scores = df_scores.drop_duplicates(subset=["TF","TG"], keep="first").reset_index(drop=True)
+        chip      = chip.drop_duplicates(subset=["TF","TG"], keep="first").reset_index(drop=True)
+
+        # model universe (encoder vocab) — optionally canonicalize these too
+        tf_vocab = set(map(str, tf_encoder.classes_))
+        tg_vocab = set(map(str, tg_encoder.classes_))
+        # If your encoders were not trained on canonicalized symbols, do:
+        # tf_vocab = {canon.to_symbol(x) for x in tf_encoder.classes_}
+        # tg_vocab = {canon.to_symbol(x) for x in tg_encoder.classes_}
+        chip_in_universe = chip[chip["TF"].isin(tf_vocab) & chip["TG"].isin(tg_vocab)].copy()
+
+        # AFTER-std overlap logs (the ones you wanted to keep)
+        tf_chip = set(chip["TF"].unique()); tg_chip = set(chip["TG"].unique())
+        tf_mod  = set(df_scores["TF"].unique()); tg_mod  = set(df_scores["TG"].unique())
+        logging.info("[Post-Std] TF overlap=%d  TG overlap=%d",
+                     len(tf_chip & tf_mod), len(tg_chip & tg_mod))
+
+        unmapped_tf = sorted(list(tf_chip - tf_mod))[:20]
+        unmapped_tg = sorted(list(tg_chip - tg_mod))[:20]
+        if unmapped_tf:
+            logging.info("Example TFs present in ChIP but not in model after std: %s",
+                        ", ".join(unmapped_tf[:10]))
+        if unmapped_tg:
+            logging.info("Example TGs present in ChIP but not in model after std: %s",
+                        ", ".join(unmapped_tg[:10]))
+
+        # merge restricted to the model’s universe
+        scored = df_scores.merge(chip_in_universe, on=["TF","TG"], how="left")
+        scored["label"] = scored["label"].fillna(0).astype(int)
+                    
         # === Coverage diagnostics ===
         tf_chip = set(chip["TF"].unique())
         tg_chip = set(chip["TG"].unique())
@@ -461,7 +584,7 @@ try:
             plt.title(f"ChIP ROC (AUROC={auroc:.3f})"); plt.xlabel("FPR"); plt.ylabel("TPR")
             plt.subplot(1,2,2); plt.plot(rec,prec)
             plt.title(f"ChIP PR (AUPR={aupr:.3f})"); plt.xlabel("Recall"); plt.ylabel("Precision")
-            plt.tight_layout(); plt.savefig(os.path.join(chip_dir, "overall_roc_pr.png"), dpi=180); plt.close()
+            plt.tight_layout(); plt.savefig(os.path.join(chip_dir, "overall_roc_pr.png"), dpi=PLOT_DPI); plt.close()
         else:
             logging.warning("ChIP labels contain a single class — skipping overall AUROC/AUPR.")
 
@@ -501,7 +624,7 @@ try:
         plt.plot(p_at_k["k"], p_at_k["Precision"], marker="o")
         plt.xscale("log"); plt.xlabel("k"); plt.ylabel("Precision"); plt.title("Precision@k (avg over TFs)")
         plt.grid(True, alpha=0.3)
-        plt.tight_layout(); plt.savefig(os.path.join(chip_dir, "precision_at_k.png"), dpi=180); plt.close()
+        plt.tight_layout(); plt.savefig(os.path.join(chip_dir, "precision_at_k.png"), dpi=PLOT_DPI); plt.close()
         
         def lift_at_k(y, s, k):
             order = np.argsort(-s)
@@ -533,7 +656,7 @@ try:
 except Exception as e:
     logging.exception(f"ChIP-seq comparison failed: {e}")
     
-    # ============================================================
+# ============================================================
 # === Balanced scoring: macro per-TF and balanced micro     ===
 # ============================================================
 
@@ -624,7 +747,7 @@ if parts:
         plt.title(f"Balanced-Micro PR (AUPR={bal_micro_aupr:.3f})")
 
         plt.tight_layout()
-        plt.savefig(os.path.join(chip_dir, "balanced_micro_roc_pr.png"), dpi=180)
+        plt.savefig(os.path.join(chip_dir, "balanced_micro_roc_pr.png"), dpi=PLOT_DPI)
         plt.close()
 
     except Exception as e:
@@ -669,6 +792,288 @@ if scoped["label"].nunique() > 1:
     logging.info(f"[ChIP FairScope Overall] AUROC={auroc_sc:.3f} | AUPR={aupr_sc:.3f}")
 
 
+# =========================
+# Optuna sweep (small, fast)
+# =========================
+if RUN_OPTUNA:
+    import json, optuna
+    from optuna.pruners import MedianPruner
+
+    OUT_DIR = "outputs"
+    os.makedirs(OUT_DIR, exist_ok=True)
+
+
+    # ---------- Lightweight ChIP eval prep used inside Optuna ----------
+    def _prepare_chip_universe_for_optuna():
+        """Load & canonicalize ChIP once; build a deduped TF/TG table in model vocab."""
+        if not (CHIP_GT_PATH and os.path.exists(CHIP_GT_PATH)):
+            logging.warning("CHIP_GT_PATH missing; Optuna balanced-micro will be skipped.")
+            return None, None
+
+        # 1) minimal load & canonicalize (no plotting, no CSVs)
+        chip = _load_chip_gold(CHIP_GT_PATH, CHIP_GT_SEP)
+        chip = canon.standardize_df(chip, tf_col="TF", tg_col="TG").dropna()
+        chip = chip.drop_duplicates(subset=["TF","TG"], keep="first").reset_index(drop=True)
+
+        # 2) model vocab (encoders you already fit)
+        tf_vocab = set(map(str, tf_encoder.classes_))
+        tg_vocab = set(map(str, tg_encoder.classes_))
+        chip_in_universe = chip[chip["TF"].isin(tf_vocab) & chip["TG"].isin(tg_vocab)].copy()
+
+        # 3) a deduped TF/TG “template” of model edges (no Score yet)
+        df_scores_base = df[["TF","TG"]].copy()
+        df_scores_base = canon.standardize_df(df_scores_base, tf_col="TF", tg_col="TG").dropna()
+        df_scores_base = df_scores_base.drop_duplicates(subset=["TF","TG"], keep="first").reset_index(drop=True)
+
+        return chip_in_universe, df_scores_base
+
+    CHIP_U, DF_SCORES_BASE = _prepare_chip_universe_for_optuna()
+
+
+    def _balanced_micro_auroc_from_scored(scored_df: pd.DataFrame) -> float:
+        """
+        Compute balanced-micro AUROC (equal TF weight, 50/50 within TF),
+        robust to NaNs and degenerate label distributions.
+        Expects columns: TF, Score, label.
+        """
+        # 1) Keep only finite scores
+        s = scored_df.copy()
+        s = s[np.isfinite(s["Score"].to_numpy())]
+
+        # 2) Build per-TF parts with 50/50 class weights; skip TFs with <2 classes
+        def _per_tf_weights(df_tf):
+            lbl = df_tf["label"].to_numpy()
+            n_pos = int(lbl.sum())
+            n_neg = len(lbl) - n_pos
+            w = np.zeros(len(lbl), dtype=np.float64)
+            if n_pos > 0: w[lbl == 1] = 0.5 / n_pos
+            if n_neg > 0: w[lbl == 0] = 0.5 / n_neg
+            return w
+
+        parts, weights = [], []
+        for _, sub in s.groupby("TF", sort=False):
+            # need both classes *after* removing NaNs
+            if sub["label"].nunique() < 2:
+                continue
+            w = _per_tf_weights(sub)
+            if not np.isfinite(w).all() or w.sum() == 0:
+                continue
+            parts.append(sub[["label","Score"]].reset_index(drop=True))
+            weights.append(w)
+
+        if not parts:
+            return float("nan")
+
+        blended = pd.concat(parts, axis=0, ignore_index=True)
+        y_all = blended["label"].to_numpy()
+        s_all = blended["Score"].to_numpy()
+        w_all = (np.concatenate(weights, axis=0) / len(weights)).astype(np.float64)
+
+        # final safety checks
+        if not (np.isfinite(s_all).all() and np.isfinite(w_all).all()):
+            return float("nan")
+        if len(np.unique(y_all)) < 2:
+            return float("nan")
+
+        return float(roc_auc_score(y_all, s_all, sample_weight=w_all))
+
+
+
+    def _score_all_pairs_fast(model_ft) -> pd.Series:
+        """Return a pandas Series of scores aligned to DF_SCORES_BASE rows (named 'Score')."""
+        # map TF/TG to local ids once (encoders already fit)
+        tf_to_local = {name: i for i, name in enumerate(tf_encoder.classes_)}
+        tg_to_local = {name: i for i, name in enumerate(tg_encoder.classes_)}
+
+        sub = DF_SCORES_BASE
+        tf_local = sub["TF"].map(tf_to_local)
+        tg_local = sub["TG"].map(tg_to_local)
+        valid = tf_local.notna() & tg_local.notna()
+        pairs_local = np.stack(
+            [tf_local[valid].astype(int).to_numpy(),
+            tg_local[valid].astype(int).to_numpy() + n_tfs],
+            axis=1
+        )
+        pairs_local = torch.as_tensor(pairs_local, dtype=torch.long, device=device)
+
+        probs = np.full(len(sub), np.nan, dtype=np.float32)
+        model_ft.eval()
+        with torch.no_grad():
+            B = PAIR_BATCH
+            outs = []
+            for i in range(0, pairs_local.shape[0], B):
+                sl = pairs_local[i:i+B]
+                logits = model_ft(data.x, data.edge_index, data.edge_attr, sl)
+                outs.append(torch.sigmoid(logits).detach().cpu().numpy())
+            probs_valid = np.concatenate(outs, axis=0)
+        probs[valid.values] = probs_valid.ravel()
+        return pd.Series(probs, name="Score")
+
+    def build_encoder(hp):
+        return GRN_GAT_Encoder(
+            in_node_feats=1,
+            in_edge_feats=len(edge_features),
+            hidden_dim=hp["hidden_dim"],
+            heads=hp["heads"],
+            dropout=hp["dropout"],
+            edge_dropout_p=hp["edge_dropout"]
+        ).to(device)
+
+    def pretrain_dgi_once(base_hp):
+        """
+        Pretrains an encoder with DGI ONCE and returns its state_dict on CPU.
+        All trials will reuse this snapshot to keep things fair and fast.
+        """
+        enc = build_encoder(base_hp)
+        opt = torch.optim.Adam(enc.parameters(), lr=1e-4, weight_decay=1e-5)
+
+        for epoch in range(1, DGI_EPOCHS + 1):
+            enc.train(); opt.zero_grad()
+            h_real, g_real = enc(data.x, data.edge_index, data.edge_attr)
+            h_fake, _ = enc(corruption(data.x), data.edge_index, data.edge_attr)
+            loss = infomax_loss(h_real, h_fake, g_real)
+            loss.backward(); opt.step()
+            if epoch % 25 == 0:
+                logging.info(f"[DGI/Pretrain] {epoch:03d}/{DGI_EPOCHS} | Loss={loss.item():.4f}")
+        return {k: v.detach().cpu() for k, v in enc.state_dict().items()}
+
+    # Cache a baseline DGI snapshot using your top-level hyperparams
+    BASE_HP = dict(hidden_dim=HIDDEN_DIM, heads=GAT_HEADS, dropout=DROPOUT, edge_dropout=EDGE_DROPOUT)
+    DGI_SNAPSHOT = pretrain_dgi_once(BASE_HP)  # one-time
+
+    def finetune_validate(pretrained_state, hp, report_every=5):
+        """
+        Builds a fresh encoder, loads DGI weights, adds head, fine-tunes with L2-SP,
+        and returns BEST validation AUPR across fine-tune epochs.
+        """
+        # Fresh encoder per trial
+        enc = build_encoder(hp)
+        enc.load_state_dict(pretrained_state, strict=True)
+
+        class EdgeClassifier(nn.Module):
+            def __init__(self, base_model, dim):
+                super().__init__()
+                self.encoder = base_model
+                self.classifier = nn.Sequential(
+                    nn.Linear(dim * 2, dim),
+                    nn.ReLU(),
+                    nn.Linear(dim, 1),
+                )
+            def forward(self, x, edge_index, edge_attr, pairs):
+                h, _ = self.encoder(x, edge_index, edge_attr)
+                tf_emb = h[pairs[:,0]]; tg_emb = h[pairs[:,1]]
+                return self.classifier(torch.cat([tf_emb, tg_emb], dim=1)).squeeze(-1)
+
+        model_ft = EdgeClassifier(enc, hp["hidden_dim"]).to(device)
+
+        # Unfreeze policy: last GAT/proj only (matches your main script)
+        for n, p in model_ft.encoder.named_parameters():
+            p.requires_grad = ("gat2" in n) or ("proj" in n)
+
+        # Param groups
+        param_groups = [
+            {"params": [p for n,p in model_ft.encoder.named_parameters() if p.requires_grad], "lr": hp["lr_encoder"]},
+            {"params": model_ft.classifier.parameters(), "lr": hp["lr_head"]},
+        ]
+        opt = torch.optim.Adam(param_groups, weight_decay=hp["weight_decay"])
+        crit = nn.BCEWithLogitsLoss()
+
+        # L2-SP reference on device
+        ref = {k: v.to(device) for k, v in pretrained_state.items()}
+        def l2sp_loss(module):
+            reg = 0.0
+            for (k, p) in module.state_dict().items():
+                if p.dtype.is_floating_point and k in ref:
+                    reg = reg + (p - ref[k]).pow(2).sum()
+            return reg
+
+        best_val_aupr = -float("inf")
+        for epoch in range(1, FINETUNE_EPOCHS + 1):
+            model_ft.train(); opt.zero_grad()
+            logits = model_ft(data.x, data.edge_index, data.edge_attr, pairs_train)
+            loss = crit(logits, y_train) + hp["l2sp_lambda"] * l2sp_loss(model_ft.encoder)
+            loss.backward(); opt.step()
+
+            if (epoch % report_every == 0) or (epoch == FINETUNE_EPOCHS):
+                model_ft.eval()
+                with torch.no_grad():
+                    preds = torch.sigmoid(model_ft(data.x, data.edge_index, data.edge_attr, pairs_test))
+                    val_aupr = average_precision_score(y_test.cpu(), preds.cpu())
+                    if val_aupr > best_val_aupr:
+                        best_val_aupr = val_aupr
+        return model_ft, float(best_val_aupr)
+
+    def objective(trial: optuna.Trial):
+        if CHIP_U is None or DF_SCORES_BASE is None:
+            raise RuntimeError("ChIP universe was not prepared. Check CHIP_GT_PATH and canonicalizer inputs.")
+
+        hp = {
+            "hidden_dim":   trial.suggest_categorical("hidden_dim", [96, 128, 192]),
+            "heads":        trial.suggest_categorical("heads", [2, 4, 6]),
+            "dropout":      trial.suggest_float("dropout", 0.2, 0.5, step=0.1),
+            "edge_dropout": trial.suggest_float("edge_dropout", 0.2, 0.5, step=0.1),
+            "lr_head":      trial.suggest_float("lr_head", 1e-4, 3e-4, log=True),
+            "lr_encoder":   trial.suggest_float("lr_encoder", 1e-5, 1e-4, log=True),
+            "weight_decay": trial.suggest_float("weight_decay", 1e-6, 1e-4, log=True),
+            "l2sp_lambda":  trial.suggest_float("l2sp_lambda", 1e-4, 3e-3, log=True),
+        }
+
+        # train (reusing global DGI snapshot when possible)
+        try:
+            model_ft, val_aupr = finetune_validate(DGI_SNAPSHOT, hp)
+        except RuntimeError:
+            trial_snapshot = pretrain_dgi_once({
+                "hidden_dim": hp["hidden_dim"],
+                "heads": hp["heads"],
+                "dropout": hp["dropout"],
+                "edge_dropout": hp["edge_dropout"],
+            })
+            model_ft, val_aupr = finetune_validate(trial_snapshot, hp)
+
+        # lightweight scoring
+        scores = _score_all_pairs_fast(model_ft)
+
+        # merge with ChIP_in_universe and compute balanced-micro AUROC
+        # (copy to avoid mutating the cached template)
+        scored_tmp = DF_SCORES_BASE.copy()
+        scored_tmp["Score"] = scores.values
+        scored_tmp = scored_tmp.merge(CHIP_U, on=["TF","TG"], how="left")
+        scored_tmp["label"] = scored_tmp["label"].fillna(0).astype(int)
+
+        bm_auroc = _balanced_micro_auroc_from_scored(scored_tmp)
+        
+        if not np.isfinite(bm_auroc):
+            # annotate why we returned a bad score, then give a low value
+            trial.set_user_attr("bm_auroc_reason", "nan_or_single_class_after_filtering")
+            return -1.0
+
+        # log the secondary metric for later inspection
+        trial.set_user_attr("val_aupr", float(val_aupr))
+
+        # prune/report on the true objective
+        trial.report(bm_auroc, step=FINETUNE_EPOCHS)
+        if trial.should_prune():
+            raise optuna.TrialPruned()
+
+        return bm_auroc
+
+    N_TRIALS = int(os.getenv("OPTUNA_N_TRIALS", "30"))   # set to 0 to skip, or export a smaller number for quick tests
+    PRUNER   = MedianPruner(n_warmup_steps=max(1, FINETUNE_EPOCHS // 5))
+
+    study = optuna.create_study(direction="maximize", pruner=PRUNER, study_name="gat_opt_balanced_micro")
+    logging.info(f"Starting Optuna (objective = balanced-micro AUROC) with {N_TRIALS} trials…")
+    study.optimize(objective, n_trials=N_TRIALS, show_progress_bar=False)
+
+    # Save results
+    best = {"best_value_bm_auroc": study.best_value, "best_params": study.best_trial.params,
+            "best_val_aupr_attr": study.best_trial.user_attrs.get("val_aupr")}
+    with open(os.path.join(OUT_DIR, "optuna_best.json"), "w") as f:
+        json.dump(best, f, indent=2)
+    df_trials = study.trials_dataframe(attrs=("number","value","state","params","user_attrs","datetime_start","datetime_complete"))
+    df_trials.to_csv(os.path.join(OUT_DIR, "optuna_trials.csv"), index=False)
+
+    logging.info(f"Best balanced-micro AUROC: {study.best_value:.4f}")
+    logging.info(f"Best params: {study.best_trial.params}")
 
 
 # ============================================================
@@ -700,7 +1105,7 @@ plt.xlabel("Epoch")
 plt.grid(True, alpha=0.3)
 
 plt.tight_layout()
-plt.savefig("outputs/training_loss_curves.png", dpi=300)
+plt.savefig("outputs/training_loss_curves.png", dpi=PLOT_DPI)
 plt.close()
 logging.info("Saved training loss curves to outputs/training_loss_curves.png")
 
@@ -741,7 +1146,7 @@ plt.subplot(1,2,2)
 plt.plot(recall, precision, label=f"AUPR={aupr_val:.3f}")
 plt.title("Precision-Recall Curve"); plt.xlabel("Recall"); plt.ylabel("Precision"); plt.legend()
 plt.tight_layout()
-plt.savefig("outputs/fine_tune_eval_curves.png", dpi=200)
+plt.savefig("outputs/fine_tune_eval_curves.png", dpi=PLOT_DPI)
 plt.close()
 
 # ============================================================
@@ -788,7 +1193,7 @@ plt.figure(figsize=(7,4))
 sns.barplot(x=feature_importance.values, y=feature_importance.index, orient="h")
 plt.title("Edge Feature Importance (Gradient Magnitude)")
 plt.tight_layout()
-plt.savefig("outputs/feature_importance_barplot.png", dpi=200)
+plt.savefig("outputs/feature_importance_barplot.png", dpi=PLOT_DPI)
 plt.close()
 
 # ============================================================
@@ -884,7 +1289,7 @@ plt.figure(figsize=(8,4))
 sns.barplot(x="AUROC", y="TF", hue="TF", data=tf_df.head(50), legend=False, palette="viridis")
 plt.title("Top 50 TFs by AUROC (Fine-tuned GAT)")
 plt.tight_layout()
-plt.savefig("outputs/top_TF_AUROC.png", dpi=200)
+plt.savefig("outputs/top_TF_AUROC.png", dpi=PLOT_DPI)
 plt.close()
 
 # Top 25 KEGG pathways
@@ -893,7 +1298,7 @@ if "kegg_df" in locals() and not kegg_df.empty:
     sns.barplot(x="AUROC", y="KEGG_Pathway", data=kegg_df.head(25), hue="AUROC", palette="viridis")
     plt.title("Top 25 KEGG Pathways by AUROC")
     plt.tight_layout()
-    plt.savefig("outputs/top_KEGG_AUROC.png", dpi=200)
+    plt.savefig("outputs/top_KEGG_AUROC.png", dpi=PLOT_DPI)
     plt.close()
 
 # ============================================================
@@ -955,7 +1360,7 @@ plt.figure(figsize=(7, 4))
 sns.barplot(x=ig_series.values, y=ig_series.index, orient="h")
 plt.title("Integrated Gradients Feature Importance (Mean Attribution)")
 plt.tight_layout()
-plt.savefig("outputs/feature_importance_IG.png", dpi=200)
+plt.savefig("outputs/feature_importance_IG.png", dpi=PLOT_DPI)
 plt.close()
 
 # ============================================================
@@ -1016,7 +1421,7 @@ if plotted == 0:
     logging.warning("No TFs had IG attribution data for plotting.")
 else:
     plt.tight_layout()
-    plt.savefig("outputs/tf_specific_IG_barplots.png", dpi=200)
+    plt.savefig("outputs/tf_specific_IG_barplots.png", dpi=PLOT_DPI)
     plt.close()
     logging.info(f"Saved IG feature barplots for {plotted} TFs.")
 
@@ -1089,7 +1494,7 @@ sns.scatterplot(
 plt.title("TF Embedding Map (colored by AUROC)")
 plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
 plt.tight_layout()
-plt.savefig("outputs/tf_embedding_umap_by_AUROC.png", dpi=300)
+plt.savefig("outputs/tf_embedding_umap_by_AUROC.png", dpi=PLOT_DPI)
 plt.close()
 
 # ------------------------------------------------------------
@@ -1107,7 +1512,7 @@ sns.scatterplot(
 )
 plt.title("TF Embedding Clusters (KMeans)")
 plt.tight_layout()
-plt.savefig("outputs/tf_embedding_clusters.png", dpi=300)
+plt.savefig("outputs/tf_embedding_clusters.png", dpi=PLOT_DPI)
 plt.close()
 
 # ------------------------------------------------------------

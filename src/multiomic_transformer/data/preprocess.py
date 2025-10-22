@@ -1782,7 +1782,7 @@ if __name__ == "__main__":
     IGNORE_PROCESSED_FILES = False
     logging.info(f"IGNORE_PROCESSED_FILES: {IGNORE_PROCESSED_FILES}")
     
-    PROCESS_CHROMOSOME_SPECIFIC_DATA = False
+    PROCESS_CHROMOSOME_SPECIFIC_DATA = True
     
     # Sample-specific preprocessing
     total_tf_set: Set[str] = set()

@@ -8,6 +8,26 @@ GREEK_FIX = {
     "κ":"K","Κ":"K","Ω":"O","Λ":"L"
 }
 
+_MONTH2PREFIX = {
+    "SEP":  "SEPT",   # SEPT1..SEPT14
+    "MAR":  "MARCH",  # MARCH1..MARCH11
+    # Add more only if you have clear one-to-one mappings; most others are ambiguous.
+}
+
+_date_pat = re.compile(r"^(\d{1,2})-(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)$", re.IGNORECASE)
+
+def _deexcelize_symbol(sym: str) -> str:
+    s = str(sym).strip()
+    m = _date_pat.match(s.upper())
+    if not m:
+        return s
+    num, mon = m.group(1), m.group(2).upper()
+    if mon in _MONTH2PREFIX:
+        return f"{_MONTH2PREFIX[mon]}{int(num)}"  # e.g., 1-SEP -> SEPT1, 10-SEP -> SEPT10, 1-MAR -> MARCH1
+    # ambiguous months: leave unchanged
+    return s
+
+
 def _asciify(s: str) -> str:
     # strip accents & convert common unicode to ascii-ish
     s = "".join(GREEK_FIX.get(ch, ch) for ch in s)
@@ -18,6 +38,7 @@ def _norm_symbol(s: str) -> str:
         return ""
     s = str(s).strip()
     s = _asciify(s)
+    s = _deexcelize_symbol(s)
     s = s.replace("NF-kB","NFKB").replace("NF-kappaB","NFKB").replace("NF-kB1","NFKB1")
     s = s.replace("NF-kB2","NFKB2").replace("NF-kB p65","RELA").replace("NF-kB p50","NFKB1")
     s = s.replace(" ","").replace("\t","")
