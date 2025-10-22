@@ -372,6 +372,69 @@ def process_or_load_rna_atac_data(
         if path.is_file():
             return loader(path)
         return None
+    
+    def _standardize_symbols_index(
+        df: pd.DataFrame,
+        *,
+        strip_version_suffix: bool = True,  # e.g., 'Gm12345.1' -> 'GM12345'
+        uppercase: bool = True,
+        deduplicate: str = "sum",          # {'sum','mean','first','max','min','median', None}
+    ) -> pd.DataFrame:
+        """
+        Standardize gene symbols in the DataFrame index.
+
+        - Assumes rows are genes (index), columns are cells/pseudobulks.
+        - Applies simple, offline normalization:
+            * strip whitespace
+            * optionally strip trailing transcript/version suffixes like '.1', '.2'
+            * optionally uppercase
+        - Optionally aggregates duplicate indices created by normalization.
+
+        Returns a NEW DataFrame.
+        """
+        x = df.copy()
+
+        # ensure index is str
+        idx = x.index.astype(str).str.strip()
+
+        if strip_version_suffix:
+            # remove final dot-number ("ENSG000..", "Gene.1", etc.)
+            idx = idx.str.replace(r"\.\d+$", "", regex=True)
+
+        if uppercase:
+            idx = idx.str.upper()
+
+        x.index = idx
+
+        if deduplicate:
+            if deduplicate == "sum":
+                x = x.groupby(level=0).sum()
+            elif deduplicate == "mean":
+                x = x.groupby(level=0).mean()
+            elif deduplicate == "first":
+                x = x[~x.index.duplicated(keep="first")]
+            elif deduplicate in {"max", "min", "median"}:
+                x = getattr(x.groupby(level=0), deduplicate)()
+            else:
+                raise ValueError(f"Unknown deduplicate policy: {deduplicate}")
+
+        return x
+
+
+    def _standardize_symbols_series_index(
+        s: pd.Series,
+        *,
+        strip_version_suffix: bool = True,
+        uppercase: bool = True,
+        deduplicate: str = "sum",  # aggregation for duplicates, if any
+    ) -> pd.Series:
+        """
+        Same as above, but for a Series (used for pseudobulk TG).
+        """
+        df = _standardize_symbols_index(s.to_frame(), strip_version_suffix=strip_version_suffix,
+                                        uppercase=uppercase, deduplicate=deduplicate)
+        return df.iloc[:, 0]
+
 
     # placeholders
     processed_rna_df: Optional[pd.DataFrame] = None
@@ -386,6 +449,9 @@ def process_or_load_rna_atac_data(
         logging.info("Pre-processed parquet files found, loading...")
         processed_rna_df = pd.read_parquet(processed_rna_file, engine="pyarrow")
         processed_atac_df = pd.read_parquet(processed_atac_file, engine="pyarrow")
+        
+        processed_rna_df = _standardize_symbols_index(processed_rna_df, strip_version_suffix=True, uppercase=True, deduplicate="sum")
+        
     else:
         logging.info("Processed parquet missing or ignored – will (re)build from earlier stages.")
 
@@ -450,6 +516,8 @@ def process_or_load_rna_atac_data(
         processed_rna_df = _adata_to_dense_df(ad_rna)
         processed_atac_df = _adata_to_dense_df(ad_atac)
 
+        processed_rna_df = _standardize_symbols_index(processed_rna_df, strip_version_suffix=True, uppercase=True, deduplicate="sum")
+        
         # Persist processed parquets
         logging.info("Writing processed parquet files")
         processed_rna_df.to_parquet(processed_rna_file, engine="pyarrow", compression="snappy")
@@ -486,6 +554,8 @@ def process_or_load_rna_atac_data(
         TG_pseudobulk_df = TG_pseudobulk_df.fillna(0)
         RE_pseudobulk_df = RE_pseudobulk_df.fillna(0)
         RE_pseudobulk_df[RE_pseudobulk_df > 100] = 100
+        
+        TG_pseudobulk_df = _standardize_symbols_index(TG_pseudobulk_df, strip_version_suffix=True, uppercase=True, deduplicate="sum")
 
         TG_pseudobulk_df.to_csv(pseudobulk_TG_file, sep="\t")
         RE_pseudobulk_df.to_csv(pseudobulk_RE_file, sep="\t")
@@ -493,6 +563,8 @@ def process_or_load_rna_atac_data(
         logging.info("Pseudobulk TSVs found, loading from disk.")
         TG_pseudobulk_df = pd.read_csv(pseudobulk_TG_file, sep="\t", index_col=0)
         RE_pseudobulk_df = pd.read_csv(pseudobulk_RE_file, sep="\t", index_col=0)
+        
+        TG_pseudobulk_df = _standardize_symbols_index(TG_pseudobulk_df, strip_version_suffix=True, uppercase=True, deduplicate="sum")
 
     # Final sanity checks
     for name, df in [
@@ -564,57 +636,138 @@ def filter_and_qc(adata_RNA: AnnData, adata_ATAC: AnnData) -> Tuple[AnnData, Ann
     
     return adata_RNA, adata_ATAC
 
-def create_tf_tg_combination_files(genes, tf_list_file):
-    known_tfs = pd.read_csv(tf_list_file, sep="\t", header=0, index_col=None)
-    overlap_tf = known_tfs[known_tfs["TF_Name"].isin(genes)].drop_duplicates()
+def create_tf_tg_combination_files(
+    genes: Iterable[str],
+    tf_list_file: Union[str, Path],
+    dataset_dir: Union[str, Path],
+    *,
+    tf_name_col: Optional[str] = "TF_Name",  # if None, will auto-detect
+) -> Tuple[List[str], List[str], pd.DataFrame]:
+    """
+    Build and persist TF/TG lists and the full TF–TG Cartesian product, updating any
+    existing files by taking the union with newly supplied genes.
 
-    tfs = overlap_tf["TF_Name"].to_list()
-    tgs = [gene for gene in genes if gene not in tfs]
-    
-    tfs = [tf.upper() for tf in tfs]
-    tgs = [tg.upper() for tg in tgs]
+    Files written to {dataset_dir}/tf_tg_combos/:
+      - total_genes.csv with column 'Gene'
+      - tf_list.csv     with column 'TF'
+      - tg_list.csv     with column 'TG'
+      - tf_tg_combos.csv with columns ['TF','TG']
 
-    logging.info("\nCreating TF-TG combination files")
+    Behavior:
+      - Normalizes all symbols to uppercase and strips Ensembl-like version suffixes (.1, .2, ...).
+      - TFs are defined as the intersection of `genes` with entries in `tf_list_file`.
+      - TGs are defined as the remaining genes (i.e., genes - TFs).
+      - If files already exist, the function unions existing + new and rewrites deterministically
+        (sorted) to make runs reproducible.
+
+    Parameters
+    ----------
+    genes : Iterable[str]
+        Candidate gene symbols (TG or TF). Will be normalized.
+    tf_list_file : str | Path
+        Path to a TF reference list (tabular). If `tf_name_col` is None or missing, the function
+        auto-detects a likely column or uses the only column if single-column.
+    dataset_dir : str | Path
+        Base directory under which the 'tf_tg_combos' folder will be created/updated.
+    tf_name_col : str | None, default 'TF_Name'
+        Column name that holds TF names in `tf_list_file`. If None or not present, auto-detect.
+
+    Returns
+    -------
+    tfs : list[str]
+        Final TF set (sorted, normalized).
+    tgs : list[str]
+        Final TG set (sorted, normalized, guaranteed disjoint from TFs).
+    tf_tg_df : pd.DataFrame
+        Cartesian product of `tfs × tgs`, columns ['TF','TG'].
+    """
+    dataset_dir = Path(dataset_dir)
+    out_dir = dataset_dir / "tf_tg_combos"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    def _canon(x: str) -> str:
+        # strip version suffix and uppercase
+        s = str(x).strip()
+        s = re.sub(r"\.\d+$", "", s)
+        return s.upper()
+
+    # --- normalize incoming genes ---
+    genes_norm = sorted({_canon(g) for g in genes if pd.notna(g)})
+
+    # --- load TF reference file robustly (auto-detect column if needed) ---
+    tf_list_file = Path(tf_list_file)
+    tf_ref = pd.read_csv(tf_list_file, sep=None, engine="python")  # auto-detect delim
+    if tf_name_col and tf_name_col in tf_ref.columns:
+        tf_col = tf_name_col
+    else:
+        # attempt to auto-detect a sensible TF column
+        lower = {c.lower(): c for c in tf_ref.columns}
+        for cand in ("tf_name", "tf", "symbol", "gene_symbol", "gene", "name"):
+            if cand in lower:
+                tf_col = lower[cand]
+                break
+        else:
+            # if exactly one column, use it
+            if tf_ref.shape[1] == 1:
+                tf_col = tf_ref.columns[0]
+            else:
+                raise ValueError(
+                    f"Could not locate TF name column in {tf_list_file}. "
+                    f"Available columns: {list(tf_ref.columns)}"
+                )
+
+    known_tfs = {_canon(x) for x in tf_ref[tf_col].dropna().astype(str).tolist()}
+
+    # --- new sets from this call ---
+    tfs_new = sorted(set(genes_norm) & known_tfs)
+    tgs_new = sorted(set(genes_norm) - set(tfs_new))
+
+    # --- load existing lists (if any) and union ---
+    def _read_list(path: Path, col: str) -> list[str]:
+        if path.is_file():
+            df = pd.read_csv(path)
+            if col not in df.columns and df.shape[1] == 1:
+                # tolerate unnamed single column
+                return sorted({_canon(v) for v in df.iloc[:, 0].astype(str)})
+            return sorted({_canon(v) for v in df[col].dropna().astype(str)})
+        return []
+
+    total_file = out_dir / "total_genes.csv"
+    tf_file    = out_dir / "tf_list.csv"
+    tg_file    = out_dir / "tg_list.csv"
+    combo_file = out_dir / "tf_tg_combos.csv"
+
+    total_existing = _read_list(total_file, "Gene")
+    tf_existing    = _read_list(tf_file, "TF")
+    tg_existing    = _read_list(tg_file, "TG")
+
+    total = sorted(set(total_existing) | set(genes_norm))
+    tfs   = sorted(set(tf_existing)    | set(tfs_new))
+    # ensure TGs exclude any TFs
+    tgs   = sorted((set(tg_existing) | set(tgs_new)) - set(tfs))
+
+    # --- write back deterministically ---
+    pd.DataFrame({"Gene": total}).to_csv(total_file, index=False)
+    pd.DataFrame({"TF": tfs}).to_csv(tf_file, index=False)
+    pd.DataFrame({"TG": tgs}).to_csv(tg_file, index=False)
+
+    # full Cartesian product for current state (always rewrite)
+    if tfs and tgs:
+        mux = pd.MultiIndex.from_product([tfs, tgs], names=["TF", "TG"])
+        tf_tg_df = mux.to_frame(index=False)
+    else:
+        tf_tg_df = pd.DataFrame(columns=["TF", "TG"])
+
+    tf_tg_df.to_csv(combo_file, index=False)
+
+    logging.info("\nCreating TF-TG combination files (updated)")
     logging.info(f"  - Number of TFs: {len(tfs):,}")
     logging.info(f"  - Number of TGs: {len(tgs):,}")
-
-    mux = pd.MultiIndex.from_product([tfs, tgs], names=["TF", "TG"])
-    tf_tg_df = mux.to_frame(index=False)
-    
     logging.info(f"  - TF-TG combinations: {len(tf_tg_df):,}")
-
-    tf_tg_outdir = DATA_DIR / "tf_tg_combos"
-    os.makedirs(tf_tg_outdir, exist_ok=True)
-    
-    
-    if not os.path.isfile(tf_tg_outdir / "total_genes.csv"):
-        logging.info("Writing total genes to 'total_genes.csv'")
-        with open(tf_tg_outdir / "total_genes.csv", 'w') as total_genes_file:
-            total_genes_file.write("Gene\n")
-            for i in genes:
-                total_genes_file.write(f"{i}\n")
-    
-    if not os.path.isfile(tf_tg_outdir / "tg_list.csv"):
-        logging.info("  Writing TF list to 'tg_list.csv'")
-        with open(tf_tg_outdir / "tg_list.csv", 'w') as tg_list_file:
-            tg_list_file.write("TG\n")
-            for i in tgs:
-                tg_list_file.write(f"{i}\n")
-    
-    if not os.path.isfile(tf_tg_outdir / "tf_list.csv"):
-        logging.info("  Writing TF list to 'tf_list.csv'")
-        with open(tf_tg_outdir / "tf_list.csv", "w") as tf_list_file:
-            tf_list_file.write("TF\n")
-            for i in tfs:
-                tf_list_file.write(f"{i}\n")
-    
-    if not os.path.isfile(tf_tg_outdir / "tf_tg_combos.csv"):
-        logging.info("  Writing combinations to 'tf_tg_combos.csv'")
-        tf_tg_df.to_csv(tf_tg_outdir / "tf_tg_combos.csv", header=True, index=False)
-        
-    logging.info("Done!")
+    logging.info(f"  - Files written under: {out_dir}")
 
     return tfs, tgs, tf_tg_df
+
 
 # ----- MultiomicTransformer Global Dataset -----
 def make_gene_tss_bed_file(gene_tss_file, genome_dir):
@@ -660,7 +813,6 @@ def build_peak_locs_from_index(
     df = df[df["chrom"].astype(str).str.match(include_regex)].reset_index(drop=True)
     return df
 
-
 def calculate_peak_to_tg_distance_score(
     peak_bed_file,
     tss_bed_file,
@@ -691,7 +843,7 @@ def calculate_peak_to_tg_distance_score(
     if not {"chrom", "start", "end", "name"}.issubset(gene_tss_df.columns):
         gene_tss_df = gene_tss_df.rename(columns={"chromosome_name": "chrom", "gene_start": "start", "gene_end": "end"})
 
-    print("\gene_tss_df")
+    print("\ngene_tss_df")
     print(gene_tss_df.head())
     
     # Step 1: Write valid BED files if missing
@@ -708,6 +860,7 @@ def calculate_peak_to_tg_distance_score(
     genes_near_peaks = find_genes_near_peaks(peak_bed, tss_bed, tss_distance_cutoff=max_peak_distance)
     
     genes_near_peaks = genes_near_peaks.rename(columns={"gene_id": "target_id"})
+    genes_near_peaks["target_id"] = genes_near_peaks["target_id"].apply(standardize_name)
 
     # Step 3: Compute distances and scores
     genes_near_peaks = genes_near_peaks[genes_near_peaks["TSS_dist"] <= max_peak_distance]
@@ -757,11 +910,12 @@ def calculate_tf_tg_regulatory_potential(
 
     relevant_peaks = set(sliding_window_df["peak_id"].unique())
     peak_to_gene_dist_df = peak_to_gene_dist_df[peak_to_gene_dist_df["peak_id"].isin(relevant_peaks)]
-
     
     # --- Clean ---
     sliding_window_df = sliding_window_df.dropna(subset=["TF", "peak_id", "sliding_window_score"])
+    
     sliding_window_df["TF"] = sliding_window_df["TF"].apply(standardize_name)
+    peak_to_gene_dist_df["target_id"] = peak_to_gene_dist_df["target_id"].apply(standardize_name)
 
     # --- Group by TF ---
     tf_groups = {tf: df for tf, df in sliding_window_df.groupby("TF", sort=False)}
@@ -787,6 +941,12 @@ def calculate_tf_tg_regulatory_potential(
 
     tf_tg_reg_pot = pd.concat(results, ignore_index=True)
     tf_tg_reg_pot["motif_density"] = np.log1p(tf_tg_reg_pot["motif_density"].fillna(0))
+    
+    tf_tg_reg_pot["TF"] = tf_tg_reg_pot["TF"].apply(standardize_name)
+    tf_tg_reg_pot["TG"] = tf_tg_reg_pot["TG"].apply(standardize_name)
+    
+    logging.info("TF-TG regulatory potential")
+    logging.info(tf_tg_reg_pot.head())
 
     # --- Save ---
     tf_tg_reg_pot.to_parquet(tf_tg_reg_pot_file, engine="pyarrow", compression="snappy")
@@ -811,28 +971,39 @@ def select_pkn_edges_from_df(df: pd.DataFrame, pkn_edges: set[Tuple[str, str]]):
 def compute_minmax_expr_mean(
     tf_df: pd.DataFrame, 
     tg_df: pd.DataFrame, 
-    ) -> tuple[pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Min–max normalize RNA (TF/TG) cells/pseudobulks, then
-    return row-wise means as summary features.
+    Min–max normalize across columns (cells/pseudobulks) per row (gene),
+    then return row-wise means.
 
     Returns
     -------
-    mean_norm_tf_expr : DataFrame  # columns: ['TF', 'mean_tf_expr']
-    mean_norm_tg_expr : DataFrame  # columns: ['TG', 'mean_tg_expr']
+    mean_norm_tf_expr : DataFrame with columns ['TF', 'mean_tf_expr']
+    mean_norm_tg_expr : DataFrame with columns ['TG', 'mean_tg_expr']
     """
-    # Get the 0-1 MinMax normalized ATAC accessibility
     def _rowwise_minmax_mean(x: pd.DataFrame) -> pd.Series:
-        # x: genes × cells
         xmin = x.min(axis=1)
         xmax = x.max(axis=1)
-        denom = (xmax - xmin).replace(0, np.nan)            # avoid div-by-zero
-        scaled = (x.sub(xmin, axis=0)).div(denom, axis=0)   # row-wise scale
-        scaled = scaled.fillna(0.0)                         # constant rows → 0
+        denom = (xmax - xmin).replace(0, np.nan)          # avoid div-by-zero
+        scaled = (x.sub(xmin, axis=0)).div(denom, axis=0) # row-wise scale
+        scaled = scaled.fillna(0.0)                       # constant rows → 0
         return scaled.mean(axis=1)
 
-    mean_norm_tg_expr = _rowwise_minmax_mean(tf_df).rename("mean_tf_expr").reset_index().rename(columns={"index": "TF"})
-    mean_norm_tf_expr = _rowwise_minmax_mean(tg_df).rename("mean_tg_expr").reset_index().rename(columns={"index": "TG"})
+    # Force index names so reset_index yields the correct key columns
+    tf_means = _rowwise_minmax_mean(tf_df)
+    tf_means.index = tf_means.index.astype(str)
+    tf_means.index.name = "TF"
+    mean_norm_tf_expr = tf_means.reset_index(name="mean_tf_expr")
+    mean_norm_tf_expr["TF"] = mean_norm_tf_expr["TF"].str.upper()
+
+    tg_means = _rowwise_minmax_mean(tg_df)
+    tg_means.index = tg_means.index.astype(str)
+    tg_means.index.name = "TG"
+    mean_norm_tg_expr = tg_means.reset_index(name="mean_tg_expr")
+    mean_norm_tg_expr["TG"] = mean_norm_tg_expr["TG"].str.upper()
+    
+    logging.info(f"\nTF expression means: \n{mean_norm_tf_expr.head()}")
+    logging.info(f"\nTG expression means: \n{mean_norm_tg_expr.head()}")
     
     return mean_norm_tf_expr, mean_norm_tg_expr
 
@@ -841,42 +1012,86 @@ def merge_tf_tg_attributes_with_combinations(
     tf_tg_reg_pot: pd.DataFrame, 
     mean_norm_tf_expr: pd.DataFrame, 
     mean_norm_tg_expr: pd.DataFrame,
-    tf_tg_combo_attr_file: Union[str, Path]
+    tf_tg_combo_attr_file: Union[str, Path],
+    tf_vocab: Optional[set[str]] = None,
 ) -> pd.DataFrame:
     """
     Merge TF-TG regulatory potential and expression means with all TF-TG combinations.
     """
-    logging.info("  - Merging TF-TG Regulatory Potential")
+    logging.info("\n  - Merging TF-TG Regulatory Potential")
     tf_tg_df = pd.merge(
         tf_tg_df,
         tf_tg_reg_pot,
         how="left",
         on=["TF", "TG"]
     ).fillna(0)
+    logging.info(tf_tg_df.head())
 
-    logging.info("  - Merging mean min-max normalized TF expression")
-    
-    logging.info(f"tf_tg_df columns: {list(tf_tg_df.columns)}")
-    logging.info(f"mean_norm_tf_expr columns: {list(mean_norm_tf_expr.columns)}")
+    logging.info(f"    - Number of unique TFs: {tf_tg_df['TF'].nunique()}")
 
+    logging.info("\n  - Merging mean min-max normalized TF expression")
     tf_tg_df = pd.merge(
         tf_tg_df,
         mean_norm_tf_expr,
         how="left",
         on=["TF"]
     ).dropna(subset="mean_tf_expr")
+    logging.info(tf_tg_df.head())
+    logging.info(f"    - Number of unique TFs: {tf_tg_df['TF'].nunique()}")
 
-    logging.info("  - Merging mean min-max normalized TG expression")
+    logging.info("\n- Merging mean min-max normalized TG expression")
+
     tf_tg_df = pd.merge(
         tf_tg_df,
         mean_norm_tg_expr,
         how="left",
         on=["TG"]
     ).dropna(subset="mean_tg_expr")
+    logging.info(tf_tg_df.head())
+    logging.info(f"    - Number of unique TFs: {tf_tg_df['TF'].nunique()}")
     
     tf_tg_df["expr_product"] = tf_tg_df["mean_tf_expr"] * tf_tg_df["mean_tg_expr"]
     tf_tg_df["log_reg_pot"] = np.log1p(tf_tg_df["reg_potential"])
     tf_tg_df["motif_present"] = (tf_tg_df["motif_density"] > 0).astype(int)
+    
+    # Ensure consistent casing before validation
+    tf_tg_df["TF"] = tf_tg_df["TF"].astype(str).str.upper()
+    tf_tg_df["TG"] = tf_tg_df["TG"].astype(str).str.upper()
+    
+    def _assert_valid_tf_tg(df: pd.DataFrame, tf_vocab: Optional[set[str]] = None) -> pd.DataFrame:
+        """
+        Validate TF/TG columns: must be non-empty strings, not single-letter 'T',
+        and (optionally) TFs must be in tf_vocab. Drops bad rows and logs counts.
+        """
+        d = df.copy()
+
+        # Basic type/emptiness checks
+        d["TF"] = d["TF"].astype(str).str.strip()
+        d["TG"] = d["TG"].astype(str).str.strip()
+
+        bad_len = d["TF"].str.len() <= 1  # catches 'T', '', etc.
+        if bad_len.any():
+            n = int(bad_len.sum())
+            logging.warning(f"Found {n} rows with suspicious TF values (len<=1), dropping.")
+            d = d[~bad_len].copy()
+
+        # Optional: enforce TF vocabulary (from your TF list)
+        if tf_vocab is not None:
+            not_in_vocab = ~d["TF"].isin(tf_vocab)
+            if not_in_vocab.any():
+                n = int(not_in_vocab.sum())
+                sample = d.loc[not_in_vocab, "TF"].unique()[:10]
+                logging.warning(f"{n} rows have TFs not in TF vocabulary; examples: {sample}")
+                # Typically we DROP these because they won't map to PKN or expression means.
+                d = d[~not_in_vocab].copy()
+
+        # Final sanity
+        if d.empty:
+            raise ValueError("All rows were dropped during TF/TG validation. Upstream mutation likely overwrote TFs.")
+        return d
+
+    # Validate and drop any damaged rows (e.g., TF == "T")
+    tf_tg_df = _assert_valid_tf_tg(tf_tg_df, tf_vocab=tf_vocab)
     
     tf_tg_df.to_parquet(tf_tg_combo_attr_file, index=False)
     
@@ -902,18 +1117,25 @@ def merge_tf_tg_data_with_pkn(
     seed: int = 42,
     add_pkn_scores: bool = True,
     pkn_metadata_cols: Optional[dict[str, list[str]]] = None,
+    *,
+    normalize_tf_tg_symbols: bool = True,
+    strip_version_suffix: bool = True,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Build union of STRING/TRRUST/KEGG edges, split positives/negatives, balance per TF,
-    and annotate per-source provenance flags. Returns:
+    Build union of STRING/TRRUST/KEGG edges, split positives/negatives (UNDIRECTED),
+    balance per TF, and annotate per-source provenance flags. Returns:
         (tf_tg_balanced_with_pkn, tf_tg_balanced)
 
-    tf_tg_balanced_with_pkn includes in_STRING/in_TRRUST/in_KEGG and n_sources.
-    tf_tg_balanced is the same rows without the provenance flags.
+    tf_tg_balanced_with_pkn includes in_STRING/in_TRRUST/in_KEGG and n_sources (+ optional metadata).
+    tf_tg_balanced is the same rows without the metadata columns.
+
+    Normalization knobs:
+    - normalize_tf_tg_symbols: uppercase TF/TG in the candidate DF.
+    - strip_version_suffix: remove trailing '.<digits>' from TF/TG (e.g., 'TP53.1' -> 'TP53').
     """
-    
+
+    # -------- helpers (from your current implementation) --------
     def _load_pkn(csv_path: Union[str, Path], tf_col: str = "TF", tg_col: str = "TG") -> tuple[pd.DataFrame, Set[tuple[str, str]]]:
-        """Read a PKN CSV, uppercase TF/TG, drop duplicates, and return (df, edge_set)."""
         pkn_df = pd.read_csv(csv_path)
         if tf_col not in pkn_df.columns or tg_col not in pkn_df.columns:
             raise ValueError(f"{csv_path} must contain columns '{tf_col}' and '{tg_col}'")
@@ -923,28 +1145,20 @@ def merge_tf_tg_data_with_pkn(
         pkn_df = pkn_df.drop_duplicates(subset=[tf_col, tg_col])
         edge_set = set(map(tuple, pkn_df[[tf_col, tg_col]].to_numpy()))
         return pkn_df, edge_set
-    
+
     def _make_undirected(edge_set: Set[tuple[str, str]]) -> Set[tuple[str, str]]:
-        """Return edge_set ∪ reversed(edge_set)."""
         return edge_set | {(b, a) for (a, b) in edge_set}
 
     def _split_by_pkn_union(tf_tg_df: pd.DataFrame, pkn_union: set[tuple[str, str]]) -> tuple[pd.DataFrame, pd.DataFrame]:
-        """
-        Return (in_pkn_df, not_in_pkn_df) after uppercasing TF/TG.
-        Treat PKN edges as undirected: (u,v) is a match if (u,v) or (v,u) is in the union.
-        """
-        df = tf_tg_df.copy()
-        df["TF"] = df["TF"].astype(str).str.upper()
-        df["TG"] = df["TG"].astype(str).str.upper()
-
+        d = tf_tg_df.copy()
+        d["TF"] = d["TF"].astype(str).str.upper()
+        d["TG"] = d["TG"].astype(str).str.upper()
         undirected = pkn_union | {(b, a) for (a, b) in pkn_union}
-        pairs = list(map(tuple, df[["TF", "TG"]].to_numpy()))
+        pairs = list(map(tuple, d[["TF", "TG"]].to_numpy()))
         mask = np.fromiter(((u, v) in undirected for (u, v) in pairs), dtype=bool, count=len(pairs))
+        return d[mask].copy(), d[~mask].copy()
 
-        return df[mask].copy(), df[~mask].copy()
-    
     def _flag_undirected(d: pd.DataFrame, s: Set[tuple[str, str]], col: str) -> None:
-        """Set a boolean flag if (TF, TG) or (TG, TF) in source set."""
         undirected = _make_undirected(s)
         d[col] = d.apply(lambda r: int((r["TF"], r["TG"]) in undirected), axis=1)
 
@@ -954,22 +1168,13 @@ def merge_tf_tg_data_with_pkn(
         keep_cols: list[str],
         prefix: str,
     ) -> pd.DataFrame:
-        """
-        Merge per-source metadata using either edge direction.
-        Prefer direct (TF,TG) metadata; fall back to reversed (TG,TF) if direct is missing.
-        """
-        # keep only available columns
         cols = ["TF", "TG"] + [c for c in keep_cols if c in meta_df.columns]
         if len(cols) <= 2:
-            return base  # nothing to add
+            return base
 
-        # direct orientation DF
         direct = meta_df[cols].drop_duplicates(["TF", "TG"]).copy()
-
-        # reversed orientation DF: swap TF<->TG and rename metadata columns with same names
         reversed_df = meta_df.rename(columns={"TF": "TG", "TG": "TF"})[cols].drop_duplicates(["TF", "TG"]).copy()
 
-        # prefix all non-key columns
         def _pref(df_in: pd.DataFrame) -> pd.DataFrame:
             rn = {c: f"{prefix}_{c}" for c in df_in.columns if c not in ("TF", "TG")}
             return df_in.rename(columns=rn)
@@ -977,20 +1182,30 @@ def merge_tf_tg_data_with_pkn(
         direct_p = _pref(direct)
         rev_p = _pref(reversed_df)
 
-        # merge direct first
-        out = base.merge(direct_p, on=["TF", "TG"], how="left", suffixes=("", ""))
+        out = base.merge(direct_p, on=["TF", "TG"], how="left")
+        out_rev = base.merge(rev_p, on=["TF", "TG"], how="left")
 
-        # merge reversed (only fill where direct missing)
-        out_rev = base.merge(rev_p, on=["TF", "TG"], how="left", suffixes=("", ""))
-
-        # coalesce: for each prefixed column, fill NA from reversed
         meta_cols = [c for c in direct_p.columns if c not in ("TF", "TG")]
         for c in meta_cols:
             out[c] = out[c].where(out[c].notna(), out_rev[c])
 
         return out
-    
-    # 1) Check existence (optional: build if missing)
+
+    # -------- candidate normalization (version-strip + uppercase) --------
+    def _strip_version(s: str) -> str:
+        return re.sub(r"\.\d+$", "", s)
+
+    def _canonicalize_candidates(dfin: pd.DataFrame) -> pd.DataFrame:
+        d = dfin.copy()
+        for col in ("TF", "TG"):
+            d[col] = d[col].astype(str).str.strip()
+            if strip_version_suffix:
+                d[col] = d[col].map(_strip_version)
+            if normalize_tf_tg_symbols:
+                d[col] = d[col].str.upper()
+        return d
+
+    # 1) Check existence of PKNs or build if missing
     missing = [p for p in [string_csv_file, trrust_csv_file, kegg_csv_file] if not os.path.isfile(p)]
     if missing:
         logging.info(f"Missing PKN files: {missing}")
@@ -1002,22 +1217,28 @@ def merge_tf_tg_data_with_pkn(
             "TRRUST": ["trrust_sign", "trrust_regulation", "trrust_pmids", "trrust_support_n"],
             "KEGG":   ["kegg_signal", "kegg_n_pathways", "kegg_pathways"],
         }
-    
+
     # ---------------- load PKNs ----------------
     logging.info("  - Loading PKNs...")
     string_df, string_set = _load_pkn(string_csv_file)
     trrust_df, trrust_set = _load_pkn(trrust_csv_file)
     kegg_df,   kegg_set   = _load_pkn(kegg_csv_file)
 
-    # undirected membership sets
     string_set_u = _make_undirected(string_set)
     trrust_set_u = _make_undirected(trrust_set)
     kegg_set_u   = _make_undirected(kegg_set)
     pkn_union_u  = string_set_u | trrust_set_u | kegg_set_u
-    
+
     logging.info(f"  - Loaded {len(string_set_u):,} STRING, {len(trrust_set_u):,} TRRUST, {len(kegg_set_u):,} KEGG edges")
-    logging.info(f"\tExample PKN edges: {list(pkn_union_u)[:5]}")
-    logging.info(f"\tExample TF-TG data: {list(set(df['TF']) | set(df['TG']))[:5]}")
+
+    # ---------------- normalize candidates ----------------
+    df = _canonicalize_candidates(df)
+
+    try:
+        sample_syms = list(pd.unique(df[["TF", "TG"]].values.ravel()))[:5]
+        logging.info(f"\tExample TF-TG data: {sample_syms}")
+    except Exception:
+        pass
 
     # ---------------- split ----------------
     logging.info("  - Splitting positives/negatives by PKN union")
@@ -1030,6 +1251,9 @@ def merge_tf_tg_data_with_pkn(
     logging.info(f"\tEdges not in PKN: {not_in_pkn_df.shape[0]:,}")
     logging.info(f"\tEdges in PKN: {in_pkn_df.shape[0]:,}")
     logging.info(f"\tFraction of TF-TG edges in PKN: {in_pkn_df.shape[0] / max(1, df.shape[0]):.2f}")
+
+    if in_pkn_df.empty:
+        raise ValueError("No TF–TG positives in PKN union after normalization.")
 
     # ---------------- balance per TF ----------------
     rng = np.random.default_rng(seed)
@@ -1569,8 +1793,8 @@ if __name__ == "__main__":
     logging.info(f"IGNORE_PROCESSED_FILES: {IGNORE_PROCESSED_FILES}")
     
     # Sample-specific preprocessing
-    total_tf_set = set()
-    chrom_set = set()
+    total_tf_set: Set[str] = set()
+    chrom_set: Set[str] = set()
     for sample_name in SAMPLE_NAMES:
         sample_input_dir = RAW_DATA / sample_name
         
@@ -1606,7 +1830,7 @@ if __name__ == "__main__":
             neighbors_k=NEIGHBORS_K,
             leiden_resolution=LEIDEN_RESOLUTION
         )
-        
+                
         # ----- GET TFs, TGs, and TF-TG combinations -----
         genes = processed_rna_df.index.to_list()
         peaks = processed_atac_df.index.to_list()
@@ -1615,7 +1839,7 @@ if __name__ == "__main__":
         logging.info(f"  - Number of genes: {processed_rna_df.shape[0]}: {genes[:3]}")
         logging.info(f"  - Number of peaks: {processed_atac_df.shape[0]}: {peaks[:3]}")
 
-        tfs, tgs, tf_tg_df = create_tf_tg_combination_files(genes, TF_FILE)
+        tfs, tgs, tf_tg_df = create_tf_tg_combination_files(genes, TF_FILE, SAMPLE_PROCESSED_DATA_DIR)
         
         total_tf_set.update(tfs)
 
@@ -1645,6 +1869,7 @@ if __name__ == "__main__":
                 gene_tss_df=gene_tss_df,
                 force_recalculate=IGNORE_PROCESSED_FILES
             )
+            
         else:
             logging.info("Peak to gene distance file found, loading...")
             peak_to_gene_dist_df = pd.read_parquet(peak_to_gene_dist_file, engine="pyarrow")
@@ -1670,8 +1895,29 @@ if __name__ == "__main__":
             )
 
         tf_df = processed_rna_df[processed_rna_df.index.isin(tfs)]
+        logging.info("\nTFs in RNA data")
+        logging.info(tf_df.head())
+        logging.info(f"  - TFs in RNA data: {tf_df.shape[0]}")
+        
         tg_df = processed_rna_df[processed_rna_df.index.isin(tgs)]
-        logging.info(f"  - Example of sliging window scores: {sliding_window_score_file}")
+        logging.info("\nTGs in RNA data")
+        logging.info(tg_df.head())
+        logging.info(f"  - TGs in RNA data: {tg_df.shape[0]}")
+        sliding_window_df = pd.read_parquet(sliding_window_score_file, engine="pyarrow")
+        logging.info("  - Example sliding window scores: \n" + str(sliding_window_df.head()))
+        
+        logging.info(f"#genes in RNA matrix: {processed_rna_df.shape[0]}")
+        logging.info(f"RNA index sample: {list(processed_rna_df.index[:5])}")
+
+        # After you build your TF list `tfs`:
+        logging.info(f"#TFs in tfs list: {len(tfs)}")
+        logging.info(f"TF sample: {tfs[:10]}")
+
+        # Build tf_df as you do:
+        tf_df = processed_rna_df[processed_rna_df.index.isin(tfs)]
+        logging.info(f"tf_df shape: {tf_df.shape}")
+        logging.info(f"tf_df index sample: {list(tf_df.index[:10])}")
+
         
         # ----- COMPUTE TF/TG EXPRESSION MEANS -----
         mean_norm_tf_expr, mean_norm_tg_expr = compute_minmax_expr_mean(tf_df, tg_df)
@@ -1689,7 +1935,7 @@ if __name__ == "__main__":
         if not os.path.isfile(tf_tg_combo_attr_file):
             logging.info("\nMerging TF-TG attributes with all combinations")
             tf_tg_df = merge_tf_tg_attributes_with_combinations(
-                tf_tg_df, tf_tg_reg_pot, mean_norm_tf_expr, mean_norm_tg_expr, tf_tg_combo_attr_file)
+                tf_tg_df, tf_tg_reg_pot, mean_norm_tf_expr, mean_norm_tg_expr, tf_tg_combo_attr_file, tfs)
         else:
             logging.info("\nLoading TF-TG attributes with all combinations")
             tf_tg_df = pd.read_parquet(tf_tg_combo_attr_file, engine="pyarrow")

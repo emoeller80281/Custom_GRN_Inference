@@ -357,6 +357,7 @@ def associate_tf_with_motif_pwm(tf_info_file, meme_dir, fasta_path, peaks_bed, t
     print(tf_info_df.head())
     logging.info(f"\nLoaded TF information from {tf_info_file}")
     logging.info(f"TFs in tf_info_file: {tf_info_df['TF_Name'].nunique()}")
+    logging.info("TF_Name examples: {tf_info_df['TF_Name'].head()}")
     logging.info(f"Motif_ID examples: {tf_info_df['Motif_ID'].head()}")
     logging.info(f"Motif names from JASPAR: {names[:5]}")
     

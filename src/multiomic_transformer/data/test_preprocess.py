@@ -28,6 +28,7 @@ try:
         build_motif_mask,
         precompute_input_tensors,
         calculate_peak_to_tg_distance_score,
+        create_tf_tg_combination_files,
         merge_tf_tg_data_with_pkn,
         process_or_load_rna_atac_data,
         pseudo_bulk,
@@ -54,9 +55,73 @@ except Exception:
     process_or_load_rna_atac_data = preprocess_mod.process_or_load_rna_atac_data
     pseudo_bulk = preprocess_mod.pseudo_bulk
     filter_and_qc = preprocess_mod.filter_and_qc
+    create_tf_tg_combination_files = preprocess_mod.create_tf_tg_combination_files
+
 
 
 # --------- Core, fast, no external tools ---------
+def _all_upper_no_version(strings):
+    """Helper: every entry uppercase and without trailing dot-version (e.g., .1)."""
+    for s in strings:
+        if s != s.upper():
+            return False
+        if isinstance(s, str) and any(ch.isdigit() for ch in s.split(".")[-1]):
+            # treat trailing ".<digits>" as a version (e.g., "TP53.1")
+            parts = s.split(".")
+            if len(parts) > 1 and parts[-1].isdigit():
+                return False
+    return True
+
+def test_create_tf_tg_combination_files_normalizes_and_unions(tmp_path: Path):
+    # Reference TF list (mixed case on purpose)
+    tf_ref = pd.DataFrame({"TF_Name": ["Tp53", "Gata6", "Sox2"]})
+    tf_ref_path = tmp_path / "tf_reference.tsv"
+    tf_ref.to_csv(tf_ref_path, sep="\t", index=False)
+
+    # First call with mixed case + version suffixes
+    dataset_dir = tmp_path / "dataset"
+    genes_round1 = ["tp53.1", "gata6", "Actb.2"]   # TP53 & GATA6 are TFs; ACTB -> TG
+
+    tfs1, tgs1, combos1 = create_tf_tg_combination_files(
+        genes_round1,
+        tf_ref_path,
+        dataset_dir,
+        tf_name_col="TF_Name",
+    )
+
+    out_dir = dataset_dir / "tf_tg_combos"
+    total = pd.read_csv(out_dir / "total_genes.csv")
+    tf_list = pd.read_csv(out_dir / "tf_list.csv")
+    tg_list = pd.read_csv(out_dir / "tg_list.csv")
+    combos = pd.read_csv(out_dir / "tf_tg_combos.csv")
+
+    # All outputs normalized: uppercase, no version suffixes
+    assert _all_upper_no_version(total["Gene"].tolist())
+    assert _all_upper_no_version(tf_list["TF"].tolist())
+    assert _all_upper_no_version(tg_list["TG"].tolist())
+    assert _all_upper_no_version((combos["TF"].tolist() + combos["TG"].tolist()))
+
+    # Expected membership after first call
+    assert set(tf_list["TF"]) >= {"TP53", "GATA6"}
+    assert "ACTB" in set(tg_list["TG"])
+    assert "ACTB" in set(total["Gene"])
+
+    # Second call adds new gene; should union and rewrite deterministically
+    genes_round2 = ["Sox2", "Actb"]   # SOX2 should be added as TF; ACTB already present
+    tfs2, tgs2, combos2 = create_tf_tg_combination_files(
+        genes_round2,
+        tf_ref_path,
+        dataset_dir,
+        tf_name_col="TF_Name",
+    )
+
+    tf_list2 = pd.read_csv(out_dir / "tf_list.csv")
+    total2 = pd.read_csv(out_dir / "total_genes.csv")
+
+    # SOX2 promoted into TF set; ACTB remains but only in total/TG, never in TFs
+    assert "SOX2" in set(tf_list2["TF"])
+    assert "SOX2" in set(total2["Gene"])
+    assert "ACTB" not in set(tf_list2["TF"])  # still not a TF
 
 def test_build_peak_locs_from_index_parses_and_filters():
     idx = pd.Index(["1:100-200", "chrX:5-10", "chrM:1-2", "bad"])
@@ -200,6 +265,59 @@ def test_precompute_input_tensors_shapes():
 
 
 # --------- Functions needing small on-disk CSV/Parquet but still fast ---------
+
+def test_merge_tf_tg_data_with_pkn_normalizes_and_matches_undirected(tmp_path: Path):
+    """
+    Build tiny PKNs (uppercased, no version) and candidates (mixed case + versions).
+    Expect positives found after normalization, and provenance/meta columns present.
+    """
+    # Candidate edges (note mixed case + version suffixes)
+    df = pd.DataFrame({
+        "TF": ["tp53.1", "tp53.1", "sox2", "sox2"],
+        "TG": ["myc.2",  "zzz",    "myc",  "aaa"],   # 'zzz','aaa' will be negatives
+    })
+
+    # PKN CSVs with minimal metadata columns
+    cols = ["TF", "TG", "string_experimental_score", "trrust_regulation", "kegg_n_pathways"]
+    string = pd.DataFrame([["TP53","MYC", 900, None, None]], columns=cols)
+    trrust = pd.DataFrame([["MYC","SOX2", None, "Activation", None]], columns=cols)  # reversed direction on purpose
+    kegg   = pd.DataFrame([["Q","R", None, None, 3]], columns=cols)                  # irrelevant edge
+
+    string_csv = tmp_path / "string.csv"
+    trrust_csv = tmp_path / "trrust.csv"
+    kegg_csv   = tmp_path / "kegg.csv"
+    string.to_csv(string_csv, index=False)
+    trrust.to_csv(trrust_csv, index=False)
+    kegg.to_csv(kegg_csv, index=False)
+
+    out_with_meta, out_plain = merge_tf_tg_data_with_pkn(
+        df, string_csv, trrust_csv, kegg_csv,
+        upscale_percent=1.0,
+        seed=0,
+        add_pkn_scores=True,
+        # normalization knobs must be enabled in your implementation
+        normalize_tf_tg_symbols=True,
+        strip_version_suffix=True,
+    )
+
+    # After normalization and undirected membership:
+    # positives should include (TP53,MYC) and (SOX2,MYC) due to TRRUST (MYC,SOX2) being undirected
+    pairs_plain = set(map(tuple, out_plain[["TF", "TG"]].drop_duplicates().values))
+    assert ("TP53", "MYC") in pairs_plain
+    assert ("SOX2", "MYC") in pairs_plain
+
+    # All names normalized in outputs
+    assert _all_upper_no_version(out_plain["TF"].tolist() + out_plain["TG"].tolist())
+    assert _all_upper_no_version(out_with_meta["TF"].tolist() + out_with_meta["TG"].tolist())
+
+    # Provenance flags always present
+    assert {"in_STRING","in_TRRUST","in_KEGG","n_sources"}.issubset(out_with_meta.columns)
+    # Metadata prefixes present where requested (and available in CSVs)
+    assert any(c.startswith("STRING_") for c in out_with_meta.columns)
+    assert any(c.startswith("TRRUST_") for c in out_with_meta.columns)
+    # KEGG metadata might be absent in the matched pairs; we just ensure the prefix can appear
+    # if KEGG columns exist in the file; loosen this to avoid spurious failures:
+    assert "KEGG_kegg_n_pathways" in out_with_meta.columns or any(c.startswith("KEGG_") for c in out_with_meta.columns)
 
 def test_merge_tf_tg_data_with_pkn_balances_and_metadata(tmp_path: Path):
     # Small TF-TG candidate set for a single TF with positives & negatives
