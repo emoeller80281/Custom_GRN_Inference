@@ -164,6 +164,9 @@ def build_string_pkn(
         # Normalize
         if "string_combined_score" in chunk.columns:
             chunk["string_combined_score"] = chunk["string_combined_score"] / 1000.0
+            
+        chunk["TF"] = chunk["TF"].str.upper()
+        chunk["TG"] = chunk["TG"].str.upper()
 
         # Write batch to CSV
         if out_csv:

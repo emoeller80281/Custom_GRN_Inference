@@ -2,7 +2,7 @@
 #SBATCH --job-name=GAT_data_preprocessing
 #SBATCH --output=LOGS/transformer_logs/02_prepare_transformer_data/%x_%A.log
 #SBATCH --error=LOGS/transformer_logs/02_prepare_transformer_data/%x_%A.err
-#SBATCH --time=16:00:00
+#SBATCH --time=4:00:00
 #SBATCH -p memory
 #SBATCH -N 1
 #SBATCH --ntasks-per-node=1

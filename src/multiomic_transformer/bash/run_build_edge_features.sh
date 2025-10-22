@@ -37,11 +37,13 @@ export TORCH_DISTRIBUTED_DEBUG=DETAIL
 
 #,chr2,chr3,chr4,chr5,chr6,chr7,chr13
 
+PROJECT_DIR="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
+
 python ./src/multiomic_transformer/data/build_edge_features.py \
-  --cache_dir /gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data/training_data_cache/mESC \
-  --model_ckpt /gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC/chr1/model_training_001/trained_model.pt \
-  --chip_file "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data/ground_truth_files/combined_ground_truth_no_rn111_or_rn112_edges.csv" \
-  --out_csv /gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC/combined/model_training_001/classifier/edge_features.csv \
+  --cache_dir $PROJECT_DIR/data/training_data_cache/mESC \
+  --model_ckpt $PROJECT_DIR/experiments/mESC/chr1/model_training_001/trained_model.pt \
+  --chip_file $PROJECT_DIR/data/ground_truth_files/combined_ground_truth_no_rn111_or_rn112_edges.csv \
+  --out_csv $PROJECT_DIR/experiments/mESC/combined/model_training_001/classifier/edge_features.csv \
   --chrom_list "chr1,chr2,chr3,chr4,chr5,chr6,chr7,chr8,chr13" \
   --num_cpu 16
 

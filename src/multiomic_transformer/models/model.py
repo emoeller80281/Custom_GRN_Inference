@@ -56,21 +56,38 @@ class MultiHeadAttention(nn.Module):
         self.W_o = nn.Linear(d_model, d_model) # Output transformation
         
     def scaled_dot_product_attention(self, Q, K, V, mask=None, attn_bias=None):
-        # Calculate attention scores
+        # Expected: Q,K,V = [B,H,L, d_k]
+        assert Q.dim() == 4 and K.dim() == 4 and V.dim() == 4, \
+            f"Q,K,V must be 4D: got {Q.shape}, {K.shape}, {V.shape}"
+        B,H,Lq,Dq = Q.shape
+        Bk,Hk,Lk,Dk = K.shape
+        Bv,Hv,Lv,Dv = V.shape
+        assert (B,H) == (Bk,Hk) == (Bv,Hv), f"Batch/heads mismatch: Q{(B,H)} K{(Bk,Hk)} V{(Bv,Hv)}"
+        assert Dq == Dk == Dv, f"Head dim mismatch: {Dq} vs {Dk} vs {Dv}"
+        assert Lk == Lv, f"K/V length mismatch: Lk={Lk}, Lv={Lv}"
+
+        if attn_bias is not None:
+            attn_bias = attn_bias.to(Q.device, Q.dtype)
+            # Accept [B,1,Lq,Lk] or [B,H,Lq,Lk] (already expanded upstream)
+            assert attn_bias.shape[0] in (1, B), f"attn_bias batch {attn_bias.shape[0]} vs B={B}"
+            assert attn_bias.shape[1] in (1, H), f"attn_bias heads {attn_bias.shape[1]} vs H={H}"
+            assert attn_bias.shape[-2:] == (Lq, Lk), f"attn_bias last dims {attn_bias.shape[-2:]} vs {(Lq,Lk)}"
+
+        if mask is not None:
+            # Expect broadcastable [B,1,Lq,Lk] or [B,H,Lq,Lk]
+            assert mask.shape[-2:] == (Lq, Lk), f"mask last dims {mask.shape[-2:]} vs {(Lq,Lk)}"
+
+        # Finite checks catch NaN/Inf early
+        for name, t in (("Q",Q), ("K",K), ("V",V)):
+            if not torch.isfinite(t).all():
+                raise RuntimeError(f"{name} contains NaN/Inf")
+
         attn_scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.d_k)
-        
-        # Apply mask if provided (useful for preventing attention to certain parts like padding)
         if mask is not None:
             attn_scores = attn_scores.masked_fill(mask == 0, -1e9)
-        
-        # Add the peak-gene distance to the attention scores if its passed
         if attn_bias is not None:
             attn_scores = attn_scores + attn_bias
-        
-        # Softmax is applied to obtain attention probabilities
         attn_probs = torch.softmax(attn_scores, dim=-1)
-        
-        # Multiply by values to obtain the final output
         output = torch.matmul(attn_probs, V)
         return output
         
@@ -305,6 +322,13 @@ class MultiomicTransformer(nn.Module):
         win_emb = win_emb + self.posenc(pos, bsz=B).transpose(0, 1)  # [B,W,D]
         win_emb = self.encoder(win_emb)                               # [B,W,D]
 
+        # Guard against indexing errors with TF and TG vocab
+        assert tf_ids.dtype == torch.long and tg_ids.dtype == torch.long
+        assert tf_ids.min().item() >= 0 and tf_ids.max().item() < self.tf_emb_table.num_embeddings, \
+            f"tf_ids out of range: max={tf_ids.max().item()}, vocab={self.tf_emb_table.num_embeddings}"
+        assert tg_ids.min().item() >= 0 and tg_ids.max().item() < self.tg_emb_table.num_embeddings, \
+            f"tg_ids out of range: max={tg_ids.max().item()}, vocab={self.tg_emb_table.num_embeddings}"
+
         # ----- TF embeddings -----
         tf_base = self.tf_emb_table(tf_ids)                        # [T_eval,D]
         tf_emb = self.tf_dense_layer(tf_expr.unsqueeze(-1))        # [B,T_eval,D]
@@ -317,15 +341,19 @@ class MultiomicTransformer(nn.Module):
         # ----- TG queries ATAC -----
         tg_base = self.tg_emb_table(tg_ids).unsqueeze(0).expand(B, -1, -1)  # [B,G_eval,D]
 
-        if self.use_bias == True:
-            bias = None
-        elif bias is not None:
-            # prepare attention bias for the TF-ATAC cross-attention head
-            # bias: [B,G_eval,W] -> [B,1,G_eval,W] -> [B,H,G_eval,W]
-            bias = bias.unsqueeze(1).expand(B, self.num_heads, -1, -1)
-            bias = self.bias_scale * bias
+        attn_bias = None
+        if self.use_bias and (bias is not None):
+            attn_bias = bias
+            if attn_bias.dim() == 3:
+                attn_bias = attn_bias.unsqueeze(1)  # [B,1,G_eval,W]
+            assert attn_bias.shape[0] == B and attn_bias.shape[-2:] == (tg_base.size(1), win_emb.size(1)), \
+                f"Bias shape {attn_bias.shape} not compatible with (G_eval={tg_base.size(1)}, W={win_emb.size(1)})"
+            # Broadcast over heads
+            if attn_bias.shape[1] == 1:
+                attn_bias = attn_bias.expand(B, self.num_heads, tg_base.size(1), win_emb.size(1))
+            attn_bias = self.bias_scale * attn_bias
 
-        tg_cross = self.cross_tg_to_atac(tg_base, win_emb, attn_bias=bias)   # [B,G_eval,D]
+        tg_cross = self.cross_tg_to_atac(tg_base, win_emb, attn_bias=attn_bias)   # [B,G_eval,D]
 
         # ----- Fuse global context -----
         tf_repr, _   = self.tf_pool(tf_cross)                    # [B,D]

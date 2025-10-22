@@ -90,36 +90,6 @@ class MultiomicTransformerDataset(Dataset):
                          f"{self.tf_tensor_all.shape[0]} TFs, "
                          f"{self.tg_tensor_all.shape[0]} TGs, "
                          f"{self.atac_window_tensor_all.shape[0]} peaks/windows")
-        
-        elif (chrom_dir / f"tg_tensor_all_{chrom_id}.pt").exists() and (chrom_dir / f"edge_index_{chrom_id}.pt").exists():
-            logging.info(f"[Dataset Assembly Mode] Detected tensorization outputs in {chrom_dir}")
-
-            tg_tensor_file = chrom_dir / f"tg_tensor_all_{chrom_id}.pt"
-            edge_index_file = chrom_dir / f"edge_index_{chrom_id}.pt"
-
-            # Load minimal tensors
-            self.tg_tensor_all = torch.load(tg_tensor_file).float()
-            self.edge_index = torch.load(edge_index_file).long()
-
-            # Optionally infer TF/TG vocab sizes if present
-            tf_vocab_path = self.data_dir / "tf_vocab.json"
-            tg_vocab_path = self.data_dir / "tg_vocab.json"
-            if tf_vocab_path.exists():
-                self.tf_name2id = json.load(open(tf_vocab_path))
-            if tg_vocab_path.exists():
-                self.tg_name2id = json.load(open(tg_vocab_path))
-
-            self.tf_ids = torch.arange(len(self.tf_name2id)) if self.tf_name2id else torch.tensor([])
-            self.tg_ids = torch.arange(len(self.tg_name2id)) if self.tg_name2id else torch.tensor([])
-
-            # Minimal placeholders
-            self.tf_tensor_all = torch.zeros((len(self.tf_ids), 1))
-            self.atac_window_tensor_all = torch.zeros((1, 1))
-            self.dist_bias_tensor = None
-            self.motif_mask_tensor = None
-            self.num_cells = 1
-            self.num_windows = 1
-            logging.info(f"Loaded minimal dataset: {self.tg_tensor_all.shape[0]} TF–TG pairs")
 
         # --- Pseudobulk mode ---
         else:

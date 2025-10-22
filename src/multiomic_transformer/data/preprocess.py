@@ -1,9 +1,7 @@
 import os
 import re
 import json
-from more_itertools import sliding_window
 import torch
-import glob
 import joblib
 import pandas as pd
 import scanpy as sc
@@ -14,10 +12,9 @@ import numpy as np
 import scipy.sparse as sp
 import random
 from scipy.special import softmax
-from shap import sample
-from sklearn.preprocessing import MinMaxScaler, StandardScaler
+from sklearn.preprocessing import StandardScaler
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from typing import Tuple, Set, Optional, List, Iterable
+from typing import Tuple, Set, Optional, List, Iterable, Union, Dict
 from anndata import AnnData
 from tqdm import tqdm
 import pybedtools
@@ -26,7 +23,6 @@ import argparse
 import sys
 sys.path.append(Path(__file__).resolve().parent.parent.parent)
 
-from multiomic_transformer.data.moods_scan import run_moods_scan_batched
 from multiomic_transformer.utils.standardize import standardize_name
 from multiomic_transformer.utils.files import atomic_json_dump
 from multiomic_transformer.utils.peaks import find_genes_near_peaks, format_peaks
@@ -34,8 +30,6 @@ from multiomic_transformer.utils.downloads import *
 from multiomic_transformer.data.sliding_window import run_sliding_window_scan
 from multiomic_transformer.data.build_pkn import build_organism_pkns
 from config.settings import *
-
-from grn_inference.utils import read_ground_truth
 
 random.seed(1337)
 np.random.seed(1337)
@@ -180,7 +174,7 @@ def process_10x_to_csv(raw_10x_rna_data_dir, raw_atac_peak_file, rna_outfile_pat
             f"Expected 1 features.tsv.gz, found {features}. Make sure the files are gunziped for sc.read_10x_mtx."
 
         prefix = features[0].replace("features.tsv.gz", "")
-        logging.info(f"Detected RNA prefix: {prefix}")
+        logging.info(f"Detected File Prefix: {prefix}")
 
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", message="Only considering the two last:")
@@ -253,6 +247,7 @@ def process_10x_to_csv(raw_10x_rna_data_dir, raw_atac_peak_file, rna_outfile_pat
 
     adata_ATAC = _get_adata_from_peakmatrix(raw_atac_peak_file, label, sample_name)
     
+    logging.info(f"[{sample_name}] Writing raw data files")
     raw_sc_rna_df = pd.DataFrame(
         adata_RNA.X.toarray() if sp.issparse(adata_RNA.X) else adata_RNA.X,
         index=adata_RNA.obs_names,
@@ -267,8 +262,11 @@ def process_10x_to_csv(raw_10x_rna_data_dir, raw_atac_peak_file, rna_outfile_pat
     os.makedirs(os.path.dirname(rna_outfile_path), exist_ok=True)
     os.makedirs(os.path.dirname(atac_outfile_path), exist_ok=True)
     
-    raw_sc_rna_df.to_csv(rna_outfile_path, header=True, index=True)
-    raw_sc_atac_df.to_csv(atac_outfile_path, header=True, index=True)
+    raw_sc_rna_df = raw_sc_rna_df.astype("float32")
+    raw_sc_atac_df = raw_sc_atac_df.astype("float32")
+    
+    raw_sc_rna_df.to_parquet(rna_outfile_path, engine="pyarrow", compression="snappy")
+    raw_sc_atac_df.to_parquet(atac_outfile_path, engine="pyarrow", compression="snappy")
 
 def process_or_load_rna_atac_data(
     sample_input_dir: Union[str, Path],
@@ -336,8 +334,8 @@ def process_or_load_rna_atac_data(
     processed_rna_file = sample_input_dir / "scRNA_seq_processed.parquet"
     processed_atac_file = sample_input_dir / "scATAC_seq_processed.parquet"
 
-    raw_rna_csv_file = sample_input_dir / "scRNA_seq_raw.csv"
-    raw_atac_csv_file = sample_input_dir / "scATAC_seq_raw.csv"
+    raw_rna_file = sample_input_dir / "scRNA_seq_raw.parquet"
+    raw_atac_file = sample_input_dir / "scATAC_seq_raw.parquet"
 
     adata_rna_file = sample_input_dir / "adata_RNA.h5ad"
     adata_atac_file = sample_input_dir / "adata_ATAC.h5ad"
@@ -355,8 +353,6 @@ def process_or_load_rna_atac_data(
 
     logging.info(f"\n----- Loading or Processing RNA and ATAC data for {sample_name} -----")
     logging.info("Searching for processed RNA/ATAC parquet files:")
-    logging.info(f"  - {processed_rna_file}")
-    logging.info(f"  - {processed_atac_file}")
 
     # helpers
     def _adata_to_dense_df(adata: AnnData) -> pd.DataFrame:
@@ -453,7 +449,7 @@ def process_or_load_rna_atac_data(
         processed_rna_df = _standardize_symbols_index(processed_rna_df, strip_version_suffix=True, uppercase=True, deduplicate="sum")
         
     else:
-        logging.info("Processed parquet missing or ignored – will (re)build from earlier stages.")
+        logging.info("  - Processed parquet missing or ignored – will (re)build from earlier stages.")
 
         # ====================================
         # 2) Try filtered AnnData (.h5ad) pair
@@ -462,17 +458,13 @@ def process_or_load_rna_atac_data(
         ad_atac = _load_or_none(adata_atac_file, sc.read_h5ad)
 
         if ad_rna is None or ad_atac is None or ignore_processed_files:
-            logging.info("Filtered AnnData missing or ignored – will look for raw CSVs.")
-            logging.info(f"  - raw RNA CSV:  {raw_rna_csv_file}")
-            logging.info(f"  - raw ATAC CSV: {raw_atac_csv_file}")
+            logging.info("    - Filtered AnnData missing or ignored – will look for raw CSVs.")
 
             # ===================
             # 3) Try raw CSV pair
             # ===================
-            if not raw_rna_csv_file.is_file() or not raw_atac_csv_file.is_file():
-                logging.info("Raw CSVs missing – will try to create from 10x inputs.")
-                logging.info(f"  - raw_10x_rna_data_dir: {raw_10x_rna_data_dir}")
-                logging.info(f"  - raw_atac_peak_file:  {raw_atac_peak_file}")
+            if not raw_rna_file.is_file() or not raw_atac_file.is_file():
+                logging.info("Raw parquet files missing – will try to create from 10x inputs.")
 
                 if raw_10x_rna_data_dir is None:
                     raise FileNotFoundError(
@@ -484,15 +476,18 @@ def process_or_load_rna_atac_data(
                 if raw_atac_peak_file is None or not raw_atac_peak_file.is_file():
                     raise FileNotFoundError(f"ATAC peak file not found: {raw_atac_peak_file}")
 
-                logging.info("Processing 10x → CSV...")
-                process_10x_to_csv(raw_10x_rna_data_dir, raw_atac_peak_file, raw_rna_csv_file, raw_atac_csv_file)
+                logging.info("Raw 10X RNA and ATAC inputs found, converting to CSVs...")
+                logging.info(f"  - raw_10x_rna_data_dir: {raw_10x_rna_data_dir}")
+                logging.info(f"  - raw_atac_peak_file:  {raw_atac_peak_file}")
+                process_10x_to_csv(raw_10x_rna_data_dir, raw_atac_peak_file, raw_rna_file, raw_atac_file)
 
-            # Load CSVs to AnnData
+            # Load raw data parquet files and convert to AnnData
             logging.info("Reading raw CSVs into AnnData")
-            rna_df = pd.read_csv(raw_rna_csv_file, delimiter=",", header=0, index_col=0)
-            atac_df = pd.read_csv(raw_atac_csv_file, delimiter=",", header=0, index_col=0)
-            ad_rna = AnnData(rna_df.T)
-            ad_atac = AnnData(atac_df.T)
+            rna_df = pd.read_parquet(raw_rna_file, engine="pyarrow")
+            atac_df = pd.read_parquet(raw_atac_file, engine="pyarrow")
+            
+            ad_rna = AnnData(rna_df)
+            ad_atac = AnnData(atac_df)
 
             # QC/filter
             logging.info("Running filter_and_qc on RNA/ATAC AnnData")
@@ -561,6 +556,8 @@ def process_or_load_rna_atac_data(
         RE_pseudobulk_df.to_csv(pseudobulk_RE_file, sep="\t")
     else:
         logging.info("Pseudobulk TSVs found, loading from disk.")
+        logging.info(f"  - Pseudobulk TG Path: {pseudobulk_TG_file}")
+        logging.info(f"  - Pseudobulk RE Path: {pseudobulk_RE_file}")
         TG_pseudobulk_df = pd.read_csv(pseudobulk_TG_file, sep="\t", index_col=0)
         RE_pseudobulk_df = pd.read_csv(pseudobulk_RE_file, sep="\t", index_col=0)
         
@@ -767,7 +764,6 @@ def create_tf_tg_combination_files(
     logging.info(f"  - Files written under: {out_dir}")
 
     return tfs, tgs, tf_tg_df
-
 
 # ----- MultiomicTransformer Global Dataset -----
 def make_gene_tss_bed_file(gene_tss_file, genome_dir):
@@ -1059,33 +1055,23 @@ def merge_tf_tg_attributes_with_combinations(
     tf_tg_df["TG"] = tf_tg_df["TG"].astype(str).str.upper()
     
     def _assert_valid_tf_tg(df: pd.DataFrame, tf_vocab: Optional[set[str]] = None) -> pd.DataFrame:
-        """
-        Validate TF/TG columns: must be non-empty strings, not single-letter 'T',
-        and (optionally) TFs must be in tf_vocab. Drops bad rows and logs counts.
-        """
         d = df.copy()
-
-        # Basic type/emptiness checks
         d["TF"] = d["TF"].astype(str).str.strip()
         d["TG"] = d["TG"].astype(str).str.strip()
 
-        bad_len = d["TF"].str.len() <= 1  # catches 'T', '', etc.
+        # Only consider "too short" as bad if it's not in your TF vocabulary
+        if tf_vocab is not None:
+            bad_len = (d["TF"].str.len() <= 1) & (~d["TF"].isin(tf_vocab))
+        else:
+            # With no vocab, be extremely conservative: drop empties only
+            bad_len = d["TF"].str.len() == 0
+
         if bad_len.any():
             n = int(bad_len.sum())
-            logging.warning(f"Found {n} rows with suspicious TF values (len<=1), dropping.")
+            examples = d.loc[bad_len, "TF"].unique()[:10]
+            logging.warning(f"{n} rows dropped due to invalid TF values; examples: {examples}")
             d = d[~bad_len].copy()
 
-        # Optional: enforce TF vocabulary (from your TF list)
-        if tf_vocab is not None:
-            not_in_vocab = ~d["TF"].isin(tf_vocab)
-            if not_in_vocab.any():
-                n = int(not_in_vocab.sum())
-                sample = d.loc[not_in_vocab, "TF"].unique()[:10]
-                logging.warning(f"{n} rows have TFs not in TF vocabulary; examples: {sample}")
-                # Typically we DROP these because they won't map to PKN or expression means.
-                d = d[~not_in_vocab].copy()
-
-        # Final sanity
         if d.empty:
             raise ValueError("All rows were dropped during TF/TG validation. Upstream mutation likely overwrote TFs.")
         return d
@@ -1166,7 +1152,7 @@ def merge_tf_tg_data_with_pkn(
         base: pd.DataFrame,
         meta_df: pd.DataFrame,
         keep_cols: list[str],
-        prefix: str,
+        prefix: Optional[str] = None,  # <— default: no extra prefixing
     ) -> pd.DataFrame:
         cols = ["TF", "TG"] + [c for c in keep_cols if c in meta_df.columns]
         if len(cols) <= 2:
@@ -1176,14 +1162,25 @@ def merge_tf_tg_data_with_pkn(
         reversed_df = meta_df.rename(columns={"TF": "TG", "TG": "TF"})[cols].drop_duplicates(["TF", "TG"]).copy()
 
         def _pref(df_in: pd.DataFrame) -> pd.DataFrame:
-            rn = {c: f"{prefix}_{c}" for c in df_in.columns if c not in ("TF", "TG")}
+            # If prefix is None/empty -> keep names as-is.
+            if not prefix:
+                return df_in.copy()
+            # Otherwise, add prefix unless the column already starts with it (case-insensitive).
+            rn = {}
+            for c in df_in.columns:
+                if c in ("TF", "TG"):
+                    continue
+                if re.match(rf"^{re.escape(prefix)}[_-]", c, flags=re.I):
+                    rn[c] = c
+                else:
+                    rn[c] = f"{prefix}_{c}"
             return df_in.rename(columns=rn)
 
         direct_p = _pref(direct)
-        rev_p = _pref(reversed_df)
+        rev_p    = _pref(reversed_df)
 
-        out = base.merge(direct_p, on=["TF", "TG"], how="left")
-        out_rev = base.merge(rev_p, on=["TF", "TG"], how="left")
+        out     = base.merge(direct_p, on=["TF", "TG"], how="left")
+        out_rev = base.merge(rev_p,    on=["TF", "TG"], how="left")
 
         meta_cols = [c for c in direct_p.columns if c not in ("TF", "TG")]
         for c in meta_cols:
@@ -1291,13 +1288,13 @@ def merge_tf_tg_data_with_pkn(
     # ---------------- metadata (bi-directional merge with fallback) ----------------
     if add_pkn_scores:
         tf_tg_balanced_with_pkn_scores = _safe_merge_meta_bi(
-            tf_tg_balanced_with_pkn_scores, string_df, pkn_metadata_cols.get("STRING", []), "STRING"
+            tf_tg_balanced_with_pkn_scores, string_df, pkn_metadata_cols.get("STRING", [])
         )
         tf_tg_balanced_with_pkn_scores = _safe_merge_meta_bi(
-            tf_tg_balanced_with_pkn_scores, trrust_df, pkn_metadata_cols.get("TRRUST", []), "TRRUST"
+            tf_tg_balanced_with_pkn_scores, trrust_df, pkn_metadata_cols.get("TRRUST", [])
         )
         tf_tg_balanced_with_pkn_scores = _safe_merge_meta_bi(
-            tf_tg_balanced_with_pkn_scores, kegg_df,   pkn_metadata_cols.get("KEGG", []),   "KEGG"
+            tf_tg_balanced_with_pkn_scores, kegg_df,   pkn_metadata_cols.get("KEGG", [])
         )
     else:
         logging.warning("Skipping PKN metadata merge (add_pkn_scores=False). tf_tg_balanced_with_pkn_scores == tf_tg_balanced_no_pkn_scores")
@@ -1819,17 +1816,20 @@ if __name__ == "__main__":
         logging.info(f"\nOutput Directory: {SAMPLE_PROCESSED_DATA_DIR / sample_name}")
         os.makedirs(SAMPLE_PROCESSED_DATA_DIR / sample_name, exist_ok=True)
         os.makedirs(SAMPLE_DATA_CACHE_DIR, exist_ok=True)
+        
+        sample_raw_10x_rna_data_dir = RAW_10X_RNA_DATA_DIR / sample_name
     
         # ----- LOAD AND PROCESS RNA AND ATAC DATA -----
         processed_rna_df, processed_atac_df, pseudobulk_rna_df, pseudobulk_atac_df = process_or_load_rna_atac_data(
             sample_input_dir, 
             ignore_processed_files=IGNORE_PROCESSED_FILES, 
-            raw_10x_rna_data_dir=RAW_10X_RNA_DATA_DIR, 
+            raw_10x_rna_data_dir=sample_raw_10x_rna_data_dir, 
             raw_atac_peak_file=RAW_ATAC_PEAK_MATRIX_FILE,
             sample_name=sample_name,
             neighbors_k=NEIGHBORS_K,
             leiden_resolution=LEIDEN_RESOLUTION
         )
+        
                 
         # ----- GET TFs, TGs, and TF-TG combinations -----
         genes = processed_rna_df.index.to_list()
@@ -1991,15 +1991,22 @@ if __name__ == "__main__":
         logging.info(f"\nPreparing data for {DATASET_NAME} {chrom_id}")
         
         # Create or load the gene TSS information for the chromosome
-        gene_tss_df = make_chrom_gene_tss_df(
-            gene_tss_file=GENE_TSS_FILE,
-            chrom_id=chrom_id,
-            genome_dir=GENOME_DIR
-        )
+        if not os.path.isfile(os.path.join(GENOME_DIR, f"{chrom_id}_gene_tss.bed"))
+            gene_tss_df = make_chrom_gene_tss_df(
+                gene_tss_file=GENE_TSS_FILE,
+                chrom_id=chrom_id,
+                genome_dir=GENOME_DIR
+            )
+        else:
+            logging.info(f"  - Loading existing gene TSS file for {chrom_id}")
+            gene_tss_df = pd.read_csv(os.path.join(GENOME_DIR, f"{chrom_id}_gene_tss.bed"), sep="\t", header=None, usecols=[0, 1, 2, 3])
+            gene_tss_df.columns = ["chrom", "start", "end", "name"]
+        
+        
         
         logging.info(f"  - Aggregating pseudobulk datasets for {chrom_id}")
         total_TG_pseudobulk_global, total_TG_pseudobulk_chr, total_RE_pseudobulk_chr, total_peaks_df = \
-            aggregate_pseudobulk_datasets(gene_tss_df, SAMPLE_NAMES, SAMPLE_PROCESSED_DATA_DIR, chrom_id)
+            aggregate_pseudobulk_datasets(gene_tss_df, SAMPLE_NAMES, RAW_DATA, chrom_id)
     
         tg_names = total_TG_pseudobulk_chr.index.tolist()
         

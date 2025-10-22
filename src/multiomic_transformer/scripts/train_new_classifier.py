@@ -19,14 +19,103 @@ import logging, os
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.metrics import confusion_matrix, precision_recall_curve, roc_curve
+from config.settings import *
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 # ============================================================
 # Load data
 # ============================================================
-df = pd.read_parquet("data/processed/PBMC/LINGER_PBMC_SC_DATA/tf_tg_merged_features.parquet")
-logging.info(f"Loaded {len(df)} edges | {df['TF'].nunique()} TFs | {df['TG'].nunique()} TGs")
+
+sample_dfs = []
+for sample in SAMPLE_NAMES:
+    logging.info(f"Loading data for {sample}")
+    
+    sample_df = pd.read_parquet(SAMPLE_PROCESSED_DATA_DIR / sample / "tf_tg_data.parquet")
+    logging.info(f"  - Loaded {sample}: {len(sample_df)} edges | {sample_df['TF'].nunique()} TFs | {sample_df['TG'].nunique()} TGs")
+
+    sample_dfs.append(sample_df)
+    
+df = pd.concat(sample_dfs, ignore_index=True)
+logging.info(f"Total: {len(df)} edges | {df['TF'].nunique()} TFs | {df['TG'].nunique()} TGs")
+
+# ---- Edge feature selection ----
+base_feats = [
+    "reg_potential", "motif_density", "mean_tf_expr", 
+    "mean_tg_expr", "expr_product", "motif_present"
+    ]
+
+# Include log_reg_pot if present
+if "log_reg_pot" in df.columns:
+    base_feats.append("log_reg_pot")
+
+# case-insensitive prefix match for extras
+extra_numeric = [
+    c for c in df.columns
+    if (c.lower().startswith("string_") or c.lower().startswith("trrust_") or c.lower().startswith("kegg_"))
+    and pd.api.types.is_numeric_dtype(df[c])
+]
+
+edge_features = base_feats + extra_numeric
+edge_features = list(dict.fromkeys(edge_features))  # dedupe, preserve order
+if not edge_features:
+    raise ValueError("No edge features found.")
+
+# Ensure we have labels
+if "label" not in df.columns:
+    if "in_pkn" in df.columns:
+        df["label"] = (df["in_pkn"] == 1).astype(int)
+        logging.info("Created 'label' from 'in_pkn'.")
+    else:
+        logging.warning("No 'label' or 'in_pkn' found — Phase 2 will be skipped.")
+
+# Keep only what we need going forward
+keep_cols = ["TF", "TG"] + (["label"] if "label" in df.columns else [])
+df = df[edge_features + keep_cols]
+
+# ============================================================
+# Coerce features to numeric & scale (safe)
+# ============================================================
+
+def _flatten_features(feats):
+    flat = []
+    for x in feats:
+        if isinstance(x, (list, tuple, np.ndarray, pd.Index)):
+            flat.extend(list(x))
+        else:
+            flat.append(x)
+    out, seen = [], set()
+    for f in map(str, flat):
+        if f not in seen:
+            seen.add(f)
+            out.append(f)
+    return out
+
+edge_features = _flatten_features(edge_features)
+
+missing = [c for c in edge_features if c not in df.columns]
+if missing:
+    raise ValueError(f"Missing edge feature columns: {missing}")
+
+# Make binary columns float for scaler
+if "motif_present" in df.columns:
+    df["motif_present"] = pd.to_numeric(df["motif_present"], errors="coerce").fillna(0.0).astype(float)
+
+coerced_info = []
+for c in edge_features:
+    s = pd.to_numeric(df[c], errors="coerce")
+    n_null = int(s.isna().sum())
+    df[c] = s.fillna(0.0)
+    if n_null:
+        coerced_info.append(f"{c}({n_null} NaN→0)")
+if coerced_info:
+    logging.info("Coerced edge features: " + "; ".join(coerced_info))
+
+scaler = StandardScaler()
+edge_attr = torch.tensor(scaler.fit_transform(df[edge_features].to_numpy()), dtype=torch.float32)
+
+assert edge_attr.shape[0] == len(df), "edge_attr rows must equal number of edges"
+assert edge_attr.shape[1] == len(edge_features), "edge_attr cols must equal number of features"
 
 # ============================================================
 # Encode nodes
@@ -42,23 +131,17 @@ logging.info(f"Total nodes: {n_nodes} ({n_tfs} TFs, {n_tgs} TGs)")
 # ============================================================
 # Build graph
 # ============================================================
-# Convert once to NumPy array → fast tensor creation, no warning
+# Directed TF->TG edges; the encoder will mirror them internally
 edge_index_np = np.array([tf_ids, tg_ids], dtype=np.int64)
 edge_index = torch.from_numpy(edge_index_np)
 
-edge_features = [
-    "reg_potential", "motif_density", "mean_tf_expr",
-    "mean_tg_expr", "expr_product", "motif_present"
-]
-scaler = StandardScaler()
-edge_attr = torch.tensor(scaler.fit_transform(df[edge_features]), dtype=torch.float32)
-
+# Node features: simple expression priors (shape: n_nodes x 1)
 tf_expr = df.groupby("TF")["mean_tf_expr"].mean()
 tg_expr = df.groupby("TG")["mean_tg_expr"].mean()
 node_features = torch.tensor(
     np.concatenate([
         tf_expr.reindex(tf_encoder.classes_).fillna(0).to_numpy().reshape(-1, 1),
-        tg_expr.reindex(tg_encoder.classes_).fillna(0).to_numpy().reshape(-1, 1)
+        tg_expr.reindex(tg_encoder.classes_).fillna(0).to_numpy().reshape(-1, 1),
     ]),
     dtype=torch.float32
 )
@@ -145,16 +228,16 @@ torch.save(model.state_dict(), "outputs/self_supervised_gat.pt")
 logging.info("Saved pretrained weights to outputs/self_supervised_gat.pt")
 
 # ============================================================
-# Phase 2 — Semi-supervised fine-tuning using in_pkn edges
+# Phase 2 — Semi-supervised fine-tuning using label edges
 # ============================================================
-if "in_pkn" not in df.columns:
-    logging.warning("No 'in_pkn' column found — skipping fine-tuning phase.")
+if "label" not in df.columns:
+    logging.warning("No 'label' column found — skipping fine-tuning phase.")
     exit()
 
 logging.info("=== Phase 2: Semi-supervised fine-tuning on PKN edges ===")
 
-# Prepare labeled edges (1 if in_pkn == 1 else 0)
-df["label"] = (df["in_pkn"] == 1).astype(int)
+# Prepare labeled edges (1 if label == 1 else 0)
+df["label"] = (df["label"] == 1).astype(int)
 tf_tg_pairs = torch.tensor(np.stack([tf_ids, tg_ids], axis=1), dtype=torch.long)
 labels = torch.tensor(df["label"].values, dtype=torch.float32)
 
@@ -666,268 +749,3 @@ try:
     logging.info("Saved cluster-wise mean feature attributions to outputs/tf_cluster_feature_summary.csv")
 except FileNotFoundError:
     logging.warning("tf_specific_integrated_gradients.csv not found; skipping feature summary by cluster.")
-
-from reportlab.lib.pagesizes import letter
-from reportlab.lib import colors
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image, Table, TableStyle
-from datetime import datetime
-
-# Parse the uploaded training log and generate summary plots
-import re
-import os
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-
-log_path = "LOGS/04_testing/GAT_training_3400681_4294967294.err"
-out_dir = "outputs"
-os.makedirs(out_dir, exist_ok=True)
-
-with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
-    lines = f.readlines()
-
-# Containers
-phase1_epochs, phase1_losses = [], []
-phase2_epochs, phase2_train_losses = [], []
-phase2_val_epochs, phase2_val_auroc, phase2_val_aupr = [], [], []
-feature_importance = {}
-
-cos_pos, cos_neg = None, None
-final_metrics = {}
-
-# Regex patterns
-re_dgi = re.compile(r"\[DGI\]\s*Epoch\s*(\d+)\s*\|\s*Loss\s*=\s*([0-9.]+)")
-re_ft = re.compile(r"\[FineTune\]\s*Epoch\s*(\d+)\s*\|\s*Loss=([0-9.]+)\s*\|\s*AUROC=([0-9.]+|nan)\s*\|\s*AUPR=([0-9.]+|nan)")
-re_cos = re.compile(r"Mean cosine similarity — Positives:\s*([0-9.]+),\s*Negatives:\s*([0-9.]+)")
-re_final = re.compile(r"AUROC\s*=\s*([0-9.]+)\s*\|\s*AUPR\s*=\s*([0-9.]+)")
-
-# Parse lines
-capture_features = False
-for i, line in enumerate(lines):
-    line = line.strip()
-
-    # Phase 1 DGI
-    m = re_dgi.search(line)
-    if m:
-        phase1_epochs.append(int(m.group(1)))
-        phase1_losses.append(float(m.group(2)))
-        continue
-
-    # Phase 2 finetune epochs
-    m = re_ft.search(line)
-    if m:
-        epoch = int(m.group(1))
-        phase2_epochs.append(epoch)
-        phase2_train_losses.append(float(m.group(2)))
-        auroc = float(m.group(3)) if m.group(3) != "nan" else np.nan
-        aupr = float(m.group(4)) if m.group(4) != "nan" else np.nan
-        # Validation metrics were logged every 10 epochs; mirror that on x-axis
-        phase2_val_epochs.append(epoch)
-        phase2_val_auroc.append(auroc)
-        phase2_val_aupr.append(aupr)
-        continue
-
-    # Final metrics (from "=== Evaluation Metrics ===" section)
-    m = re_final.search(line)
-    if m:
-        final_metrics["final_auroc"] = float(m.group(1))
-        final_metrics["final_aupr"] = float(m.group(2))
-
-    # Cosine similarity
-    m = re_cos.search(line)
-    if m:
-        cos_pos, cos_neg = float(m.group(1)), float(m.group(2))
-
-    # Start of feature importance block
-    if "Feature importance (mean |∂L/∂feature|):" in line:
-        capture_features = True
-        continue
-
-    # Capture feature lines until a blank or non-feature line
-    if capture_features:
-        if not line or ":" in line:
-            # stop when an empty line or a new section begins
-            capture_features = False
-        else:
-            # Expect formats like: "mean_tf_expr     6.921576e-07"
-            parts = line.split()
-            if len(parts) >= 2:
-                feat = parts[0]
-                try:
-                    val = float(parts[-1].replace(",", ""))
-                    feature_importance[feat] = val
-                except ValueError:
-                    pass
-
-# Convert to DataFrames
-phase1_df = pd.DataFrame({"epoch": phase1_epochs, "dgi_loss": phase1_losses}).sort_values("epoch")
-phase2_df = pd.DataFrame({
-    "epoch": phase2_epochs,
-    "train_loss": phase2_train_losses
-}).sort_values("epoch")
-val_df = pd.DataFrame({
-    "epoch": phase2_val_epochs,
-    "val_auroc": phase2_val_auroc,
-    "val_aupr": phase2_val_aupr
-}).sort_values("epoch")
-
-fi_df = pd.DataFrame(
-    {"feature": list(feature_importance.keys()), "grad_importance": list(feature_importance.values())}
-).sort_values("grad_importance", ascending=False)
-
-# Save CSVs
-phase1_csv = os.path.join(out_dir, "phase1_dgi_loss.csv")
-phase2_csv = os.path.join(out_dir, "phase2_train_loss.csv")
-val_csv = os.path.join(out_dir, "phase2_val_metrics.csv")
-fi_csv = os.path.join(out_dir, "feature_importance_gradients.csv")
-
-phase1_df.to_csv(phase1_csv, index=False)
-phase2_df.to_csv(phase2_csv, index=False)
-val_df.to_csv(val_csv, index=False)
-fi_df.to_csv(fi_csv, index=False)
-
-# Plot 1: Phase 1 DGI loss
-plt.figure(figsize=(7,5))
-plt.plot(phase1_df["epoch"], phase1_df["dgi_loss"])
-plt.xlabel("Epoch")
-plt.ylabel("DGI Loss")
-plt.title("Phase 1: Self-Supervised (DGI) Loss")
-plt.grid(True, alpha=0.3)
-plot1 = os.path.join(out_dir, "phase1_dgi_loss.png")
-plt.savefig(plot1, dpi=200, bbox_inches="tight")
-plt.close()
-
-# Plot 2: Phase 2 train loss
-plt.figure(figsize=(7,5))
-plt.plot(phase2_df["epoch"], phase2_df["train_loss"])
-plt.xlabel("Epoch")
-plt.ylabel("Train Loss (BCE)")
-plt.title("Phase 2: Fine-Tuning Train Loss")
-plt.grid(True, alpha=0.3)
-plot2 = os.path.join(out_dir, "phase2_train_loss.png")
-plt.savefig(plot2, dpi=200, bbox_inches="tight")
-plt.close()
-
-# Plot 3: Phase 2 validation AUROC
-if not val_df.empty and val_df["val_auroc"].notna().any():
-    plt.figure(figsize=(7,5))
-    plt.plot(val_df["epoch"], val_df["val_auroc"], marker="o")
-    plt.xlabel("Epoch")
-    plt.ylabel("Validation AUROC")
-    plt.title("Phase 2: Validation AUROC")
-    plt.grid(True, alpha=0.3)
-    plot3 = os.path.join(out_dir, "phase2_val_auroc.png")
-    plt.savefig(plot3, dpi=200, bbox_inches="tight")
-    plt.close()
-else:
-    plot3 = None
-
-# Plot 4: Phase 2 validation AUPR
-if not val_df.empty and val_df["val_aupr"].notna().any():
-    plt.figure(figsize=(7,5))
-    plt.plot(val_df["epoch"], val_df["val_aupr"], marker="o")
-    plt.xlabel("Epoch")
-    plt.ylabel("Validation AUPR")
-    plt.title("Phase 2: Validation AUPR")
-    plt.grid(True, alpha=0.3)
-    plot4 = os.path.join(out_dir, "phase2_val_aupr.png")
-    plt.savefig(plot4, dpi=200, bbox_inches="tight")
-    plt.close()
-else:
-    plot4 = None
-
-# Plot 5: Feature importance (gradient magnitude)
-if not fi_df.empty:
-    plt.figure(figsize=(7,5))
-    topn = min(10, len(fi_df))
-    plt.barh(fi_df["feature"].head(topn)[::-1], fi_df["grad_importance"].head(topn)[::-1])
-    plt.xlabel("Mean |∂L/∂feature|")
-    plt.title("Top Edge Features by Gradient Importance")
-    plt.tight_layout()
-    plot5 = os.path.join(out_dir, "feature_importance_top10.png")
-    plt.savefig(plot5, dpi=200, bbox_inches="tight")
-    plt.close()
-else:
-    plot5 = None
-
-# Summarize what we parsed
-summary = {
-    "phase1_points": len(phase1_df),
-    "phase2_points": len(phase2_df),
-    "val_points": len(val_df),
-    "features_parsed": len(fi_df),
-    "cosine_positive": cos_pos,
-    "cosine_negative": cos_neg,
-    "final_auroc": final_metrics.get("final_auroc", None),
-    "final_aupr": final_metrics.get("final_aupr", None),
-    "outputs": {
-        "phase1_csv": phase1_csv,
-        "phase2_csv": phase2_csv,
-        "val_csv": val_csv,
-        "fi_csv": fi_csv,
-        "phase1_plot": plot1,
-        "phase2_loss_plot": plot2,
-        "val_auroc_plot": plot3,
-        "val_aupr_plot": plot4,
-        "feature_importance_plot": plot5
-    }
-}
-
-pdf_path = "outputs/GAT_training_report.pdf"
-doc = SimpleDocTemplate(pdf_path, pagesize=letter)
-
-styles = getSampleStyleSheet()
-styleH = styles["Heading1"]
-styleN = styles["Normal"]
-styleT = ParagraphStyle("TableHeader", fontSize=11, leading=14, spaceAfter=6, spaceBefore=6, textColor=colors.white, backColor=colors.HexColor("#333333"))
-
-story = []
-
-# Cover page
-story.append(Paragraph("GAT Training Summary Report", styleH))
-story.append(Spacer(1, 12))
-story.append(Paragraph(f"Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", styleN))
-story.append(Spacer(1, 24))
-
-# Overview table
-data_overview = [
-    ["Metric", "Value"],
-    ["Phase 1 points", str(summary["phase1_points"])],
-    ["Phase 2 points", str(summary["phase2_points"])],
-    ["Validation points", str(summary["val_points"])],
-    ["Cosine Similarity (Pos/Neg)", f"{summary['cosine_positive']:.3f} / {summary['cosine_negative']:.3f}"],
-    ["Final AUROC", f"{summary['final_auroc']:.3f}" if summary["final_auroc"] else "N/A"],
-    ["Final AUPR", f"{summary['final_aupr']:.3f}" if summary["final_aupr"] else "N/A"],
-    ["Features parsed", str(summary["features_parsed"])]
-]
-table = Table(data_overview, colWidths=[200, 200])
-table.setStyle(TableStyle([
-    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#4b8bbe")),
-    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-    ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
-    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-    ("ALIGN", (0, 0), (-1, -1), "CENTER")
-]))
-story.append(table)
-story.append(Spacer(1, 24))
-
-# Add plots
-plot_paths = [
-    ("Phase 1: DGI Loss", summary["outputs"]["phase1_plot"]),
-    ("Phase 2: Train Loss", summary["outputs"]["phase2_loss_plot"]),
-    ("Phase 2: Validation AUROC", summary["outputs"]["val_auroc_plot"]),
-    ("Phase 2: Validation AUPR", summary["outputs"]["val_aupr_plot"]),
-    ("Feature Importance", summary["outputs"]["feature_importance_plot"])
-]
-
-for title, path in plot_paths:
-    if path and os.path.exists(path):
-        story.append(Paragraph(title, styleH))
-        story.append(Spacer(1, 12))
-        story.append(Image(path, width=450, height=300))
-        story.append(Spacer(1, 24))
-
-# Build PDF
-doc.build(story)
-
