@@ -946,27 +946,7 @@ def calculate_peak_to_tg_distance_score(
     logging.info(f"Saved peak–gene distance table: {genes_near_peaks.shape}")
     return genes_near_peaks
 
-def process_single_tf(tf, tf_df, peak_to_gene_dist_df):
-    # Compute softmax per peak (for this TF only)
-    tf_df["sliding_window_tf_softmax"] = tf_df.groupby("peak_id")["sliding_window_score"].transform(softmax)
 
-    merged = pd.merge(
-        tf_df[["peak_id", "sliding_window_tf_softmax"]],
-        peak_to_gene_dist_df,
-        on="peak_id",
-        how="inner"
-    )
-    merged["tf_tg_contrib"] = merged["sliding_window_tf_softmax"] * merged["TSS_dist_score"]
-
-    tf_tg_reg_pot = (
-        merged.groupby("target_id", as_index=False)
-        .agg(reg_potential=("tf_tg_contrib", "sum"),
-             motif_density=("peak_id", "nunique"))
-        .rename(columns={"target_id": "TG"})
-    )
-
-    tf_tg_reg_pot["TF"] = tf
-    return tf_tg_reg_pot
 
 def calculate_tf_tg_regulatory_potential(
     sliding_window_score_file: Union[str, Path], 
@@ -983,24 +963,54 @@ def calculate_tf_tg_regulatory_potential(
     sliding_window_df = pd.read_parquet(sliding_window_score_file, engine="pyarrow")
     peak_to_gene_dist_df = pd.read_parquet(peak_to_gene_dist_file, engine="pyarrow")
 
+    # Subset to only peaks in both the peak-TG distance dataset
     relevant_peaks = set(sliding_window_df["peak_id"].unique())
     peak_to_gene_dist_df = peak_to_gene_dist_df[peak_to_gene_dist_df["peak_id"].isin(relevant_peaks)]
     
-    # --- Clean ---
+    # Clean the column names and drop na
     sliding_window_df = sliding_window_df.dropna(subset=["TF", "peak_id", "sliding_window_score"])
-    
     sliding_window_df["TF"] = sliding_window_df["TF"].apply(standardize_name)
     peak_to_gene_dist_df["target_id"] = peak_to_gene_dist_df["target_id"].apply(standardize_name)
 
-    # --- Group by TF ---
+    # Group the sliding window scores by TF
     tf_groups = {tf: df for tf, df in sliding_window_df.groupby("TF", sort=False)}
 
     logging.info(f"Processing {len(tf_groups)} TFs using {num_cpu} CPUs")
     results = []
+    
+    def _softmax_1d_stable(x: np.ndarray, tau: float = 1.0) -> np.ndarray:
+        z = (x / float(tau)).astype(float)
+        z -= z.max()              # numerical stability
+        p = np.exp(z)
+        s = p.sum()
+        return p / s if s > 0 else np.full_like(p, 1.0 / len(p))
+
+    def _process_single_tf(tf, tf_df, peak_to_gene_dist_df, *, temperature: float = 1.0):
+        # tf_df contains only one TF
+        scores = tf_df["sliding_window_score"].to_numpy()
+        tf_df = tf_df.copy()
+        tf_df["tf_peak_prob"] = _softmax_1d_stable(scores, tau=temperature)
+
+        merged = pd.merge(
+            tf_df[["peak_id", "tf_peak_prob"]],
+            peak_to_gene_dist_df[["peak_id", "target_id", "TSS_dist_score"]],
+            on="peak_id",
+            how="inner",
+        )
+        merged["tf_tg_contrib"] = merged["tf_peak_prob"] * merged["TSS_dist_score"]
+
+        out = (
+            merged.groupby("target_id", as_index=False)
+                .agg(reg_potential=("tf_tg_contrib", "sum"),
+                    motif_density=("peak_id", "nunique"))
+                .rename(columns={"target_id": "TG"})
+        )
+        out["TF"] = tf
+        return out
 
     with ProcessPoolExecutor(max_workers=num_cpu) as ex:
         futures = {
-            ex.submit(process_single_tf, tf, df, peak_to_gene_dist_df): tf
+            ex.submit(_process_single_tf, tf, df, peak_to_gene_dist_df): tf
             for tf, df in tf_groups.items()
         }
         for fut in tqdm(as_completed(futures), total=len(futures), desc="TF processing"):

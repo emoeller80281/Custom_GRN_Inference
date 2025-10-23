@@ -87,6 +87,9 @@ if "label" not in df.columns:
 # Keep only what we need going forward
 keep_cols = ["TF", "TG"] + (["label"] if "label" in df.columns else [])
 df = df[edge_features + keep_cols]
+logging.info(" ----- Final Features -----")
+for i, feature in enumerate(df.columns):
+    logging.info(f"  ({i+1}) {feature.capitalize()}")
 
 # ============================================================
 # Coerce features to numeric & scale (safe)
@@ -407,7 +410,7 @@ def _precision_at_k_over_tfs(score_df: pd.DataFrame, gold_map: dict, ks=(10,20,5
 
 try:
     if CHIP_GT_PATH and os.path.exists(CHIP_GT_PATH):
-        chip_dir = os.path.join("outputs", "chip_eval")
+        chip_dir = os.path.join("GAT_training_outputs", "chip_eval")
         os.makedirs(chip_dir, exist_ok=True)
         logging.info(f"\n=== ChIP-seq comparison using: {CHIP_GT_PATH} ===")
         chip = _load_chip_gold(CHIP_GT_PATH, CHIP_GT_SEP)
