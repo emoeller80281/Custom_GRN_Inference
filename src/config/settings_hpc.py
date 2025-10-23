@@ -38,7 +38,6 @@ WINDOW_SIZE = 25_000                    # Aggregates peaks within WINDOW_SIZE bp
 DISTANCE_SCALE_FACTOR = 250_000         # Weights the peak-gene TSS distance score. Lower numbers = faster dropoff
 MAX_PEAK_DISTANCE = 1_000_000           # Masks out peaks further than this distance from the gene TSS
 DIST_BIAS_MODE = "mean"                 # Method for calcuting window -> gene TSS distance. Options: "max" | "sum" | "mean" | "logsumexp"
-MOODS_PVAL_THRESHOLD = 1e-3             # MOODS binding significance threshold for associating a TF to a peak
 
 # ----- MODEL TRAINING PARAMETERS -----
 TOTAL_EPOCHS=500
@@ -78,7 +77,7 @@ EWC_LAMBDA = 10.0
 # Fixed Paths
 DATA_DIR = ROOT_DIR / "data"
 GENOME_DIR = DATA_DIR / "genome_data" / "reference_genome" / ORGANISM_CODE
-CHROM_SIZES_FILE = GENOME_DIR / "chrom.sizes"
+CHROM_SIZES_FILE = GENOME_DIR / f"{ORGANISM_CODE}.chrom.sizes"
 GENE_TSS_FILE = DATA_DIR / "genome_data" / "genome_annotation" / ORGANISM_CODE / "gene_tss.bed"
 TF_FILE = DATA_DIR / "databases" / "motif_information" / ORGANISM_CODE / "TF_Information_all_motifs.txt"
 JASPAR_PFM_DIR = DATA_DIR / "databases" / "motif_information" / "JASPAR" / "pfm_files"

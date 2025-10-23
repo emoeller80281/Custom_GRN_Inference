@@ -29,7 +29,7 @@ from multiomic_transformer.utils.peaks import find_genes_near_peaks, format_peak
 from multiomic_transformer.utils.downloads import *
 from multiomic_transformer.data.sliding_window import run_sliding_window_scan
 from multiomic_transformer.data.build_pkn import build_organism_pkns
-from config.settings_local import *
+from config.settings import *
 
 random.seed(1337)
 np.random.seed(1337)
@@ -268,6 +268,35 @@ def process_10x_to_csv(raw_10x_rna_data_dir, raw_atac_peak_file, rna_outfile_pat
     raw_sc_rna_df.to_parquet(rna_outfile_path, engine="pyarrow", compression="snappy")
     raw_sc_atac_df.to_parquet(atac_outfile_path, engine="pyarrow", compression="snappy")
 
+def _configured_path(
+    sample_input_dir: Path,
+    key: str,
+    default_name: str,
+    sample_name: str,
+) -> Path:
+    """
+    Look up `key` among names imported via `from config.settings import *`.
+    Falls back to `default_name`. Relative paths are resolved under sample_input_dir.
+    Supports {sample} templating. Accepts str or Path in config.
+    """
+    # settings injected by the star-import live in this module's globals
+    value = globals().get(key, None)
+
+    # accept Path or str from config; fall back to default
+    raw = value if value is not None else default_name
+    if isinstance(raw, Path):
+        raw = str(raw)
+
+    # allow e.g. "outputs/{sample}_RNA.parquet"
+    if isinstance(raw, str):
+        try:
+            raw = raw.format(sample=sample_name)
+        except Exception:
+            pass
+
+    p = Path(raw)
+    return p if p.is_absolute() else (sample_input_dir / p)
+
 def process_or_load_rna_atac_data(
     sample_input_dir: Union[str, Path],
     ignore_processed_files: bool = False,
@@ -275,8 +304,8 @@ def process_or_load_rna_atac_data(
     raw_atac_peak_file: Union[str, Path, None] = None,
     *,
     sample_name: Optional[str] = None,
-    neighbors_k: Optional[int] = None,             # defaults to NEIGHBORS_K if None
-    leiden_resolution: Optional[float] = None,     # defaults to LEIDEN_RESOLUTION if None
+    neighbors_k: Optional[int] = None,
+    leiden_resolution: Optional[float] = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
     Load or build processed scRNA/scATAC matrices and their pseudobulk aggregations.
@@ -331,17 +360,18 @@ def process_or_load_rna_atac_data(
     raw_10x_rna_data_dir = Path(raw_10x_rna_data_dir) if raw_10x_rna_data_dir is not None else None
     raw_atac_peak_file = Path(raw_atac_peak_file) if raw_atac_peak_file is not None else None
 
-    processed_rna_file = sample_input_dir / "scRNA_seq_processed.parquet"
-    processed_atac_file = sample_input_dir / "scATAC_seq_processed.parquet"
+    processed_rna_file  = _configured_path(sample_input_dir, "PROCESSED_RNA_FILENAME",  "scRNA_seq_processed.parquet", sample_name)
+    processed_atac_file = _configured_path(sample_input_dir, "PROCESSED_ATAC_FILENAME", "scATAC_seq_processed.parquet", sample_name)
 
-    raw_rna_file = sample_input_dir / "scRNA_seq_raw.parquet"
-    raw_atac_file = sample_input_dir / "scATAC_seq_raw.parquet"
+    raw_rna_file  = _configured_path(sample_input_dir, "RAW_RNA_FILENAME",  "scRNA_seq_raw.parquet", sample_name)
+    raw_atac_file = _configured_path(sample_input_dir, "RAW_ATAC_FILENAME", "scATAC_seq_raw.parquet", sample_name)
 
-    adata_rna_file = sample_input_dir / "adata_RNA.h5ad"
-    adata_atac_file = sample_input_dir / "adata_ATAC.h5ad"
+    adata_rna_file  = _configured_path(sample_input_dir, "ADATA_RNA_FILENAME",  "adata_RNA.h5ad", sample_name)
+    adata_atac_file = _configured_path(sample_input_dir, "ADATA_ATAC_FILENAME", "adata_ATAC.h5ad", sample_name)
 
-    pseudobulk_TG_file = sample_input_dir / "TG_pseudobulk.tsv"
-    pseudobulk_RE_file = sample_input_dir / "RE_pseudobulk.tsv"
+    pseudobulk_TG_file = _configured_path(sample_input_dir, "PSEUDOBULK_TG_FILENAME", "TG_pseudobulk.tsv", sample_name)
+    pseudobulk_RE_file = _configured_path(sample_input_dir, "PSEUDOBULK_RE_FILENAME", "RE_pseudobulk.tsv", sample_name)
+
 
     # lazy-import pipeline constants if not provided
 
@@ -365,6 +395,68 @@ def process_or_load_rna_atac_data(
         if path.is_file():
             return loader(path)
         return None
+    
+    def _normalize_barcodes(index_like) -> pd.Index:
+        """
+        Normalize 10x barcodes so RNA/ATAC match.
+        - Strip sample prefixes like 'S1:' or 'rna-' at start
+        - Strip modality tags at end: _RNA/_GEX/_ATAC, #GEX/#ATAC
+        - Strip trailing dash/dot + digits: -1, -2, .1, .2
+        - Uppercase to avoid case mismatches
+        """
+        ix = pd.Index(index_like).astype(str)
+
+        # strip leading sample prefixes "S1:", "RNA:", "rna-", etc.
+        ix = ix.str.replace(r'^[A-Za-z0-9]+[:\-]','', regex=True)  # keep if too aggressive, comment out
+
+        # strip modality tags at end
+        ix = ix.str.replace(r'(?:_RNA|_GEX|_ATAC|#GEX|#ATAC)$', '', regex=True, case=False)
+
+        # strip trailing -digits or .digits (10x suffix)
+        ix = ix.str.replace(r'[-\.]\d+$', '', regex=True)
+
+        # unify case
+        ix = ix.str.upper()
+
+        return ix
+
+    def harmonize_and_intersect(ad_rna: AnnData, ad_atac: AnnData, *, verbose: bool=True):
+        rna_norm = _normalize_barcodes(ad_rna.obs_names)
+        atac_norm = _normalize_barcodes(ad_atac.obs_names)
+
+        if verbose:
+            print(f"[SYNC] RNA n={ad_rna.n_obs}, ATAC n={ad_atac.n_obs}")
+            print("[SYNC] Examples:")
+            print("  RNA:", list(rna_norm[:5]))
+            print("  ATAC:", list(atac_norm[:5]))
+
+        # build maps from normalized→original to subset accurately
+        r_map = pd.Series(ad_rna.obs_names, index=rna_norm, dtype="object")
+        a_map = pd.Series(ad_atac.obs_names, index=atac_norm, dtype="object")
+
+        common = r_map.index.intersection(a_map.index)
+        if verbose:
+            print(f"[SYNC] common={len(common)}")
+
+        if len(common) == 0:
+            # Help the user debug: show top 10 of each set difference
+            r_only = r_map.index.difference(a_map.index)[:10]
+            a_only = a_map.index.difference(r_map.index)[:10]
+            raise RuntimeError(
+                "No overlapping barcodes after normalization.\n"
+                f"RNA-only examples: {list(r_only)}\n"
+                f"ATAC-only examples: {list(a_only)}\n"
+                "Adjust normalization rules to your dataset’s naming."
+            )
+
+        # subset both to common, in the same order
+        ad_rna2  = ad_rna[ r_map.loc[common].values, : ].copy()
+        ad_atac2 = ad_atac[ a_map.loc[common].values, : ].copy()
+
+        # set synchronized obs_names to the normalized common IDs
+        ad_rna2.obs_names  = common
+        ad_atac2.obs_names = common
+        return ad_rna2, ad_atac2
     
     def _standardize_symbols_index(
         df: pd.DataFrame,
@@ -413,22 +505,6 @@ def process_or_load_rna_atac_data(
 
         return x
 
-
-    def _standardize_symbols_series_index(
-        s: pd.Series,
-        *,
-        strip_version_suffix: bool = True,
-        uppercase: bool = True,
-        deduplicate: str = "sum",  # aggregation for duplicates, if any
-    ) -> pd.Series:
-        """
-        Same as above, but for a Series (used for pseudobulk TG).
-        """
-        df = _standardize_symbols_index(s.to_frame(), strip_version_suffix=strip_version_suffix,
-                                        uppercase=uppercase, deduplicate=deduplicate)
-        return df.iloc[:, 0]
-
-
     # placeholders
     processed_rna_df: Optional[pd.DataFrame] = None
     processed_atac_df: Optional[pd.DataFrame] = None
@@ -461,7 +537,9 @@ def process_or_load_rna_atac_data(
             # 3) Try raw CSV pair
             # ===================
             if not raw_rna_file.is_file() or not raw_atac_file.is_file():
-                logging.info("Raw parquet files missing – will try to create from 10x inputs.")
+                logging.info("      - Raw parquet files missing – will try to create from 10x inputs.")
+                logging.info(raw_rna_file)
+                logging.info(raw_atac_file)
 
                 if raw_10x_rna_data_dir is None:
                     raise FileNotFoundError(
@@ -483,8 +561,10 @@ def process_or_load_rna_atac_data(
             rna_df = pd.read_parquet(raw_rna_file, engine="pyarrow")
             atac_df = pd.read_parquet(raw_atac_file, engine="pyarrow")
             
-            ad_rna = AnnData(rna_df)
-            ad_atac = AnnData(atac_df)
+            ad_rna = AnnData(rna_df.T)
+            ad_atac = AnnData(atac_df.T)
+            
+            ad_rna, ad_atac = harmonize_and_intersect(ad_rna, ad_atac, verbose=True)
 
             # QC/filter
             logging.info("Running filter_and_qc on RNA/ATAC AnnData")
@@ -579,13 +659,15 @@ def filter_and_qc(adata_RNA: AnnData, adata_ATAC: AnnData) -> Tuple[AnnData, Ann
     adata_ATAC = adata_ATAC.copy()
     
     logging.info(f"[START] RNA shape={adata_RNA.shape}, ATAC shape={adata_ATAC.shape}")
-
+    
+    common_barcodes = adata_RNA.obs_names.isin(adata_ATAC.obs_names)
+    assert len(common_barcodes) > 10, \
+        f"No common barcodes. \n  - RNA: {adata_RNA.obs_names[:2]}\n  - ATAC: {adata_ATAC.obs_names[:2]}"
     
     # Synchronize barcodes
     adata_RNA.obs['barcode'] = adata_RNA.obs_names
     adata_ATAC.obs['barcode'] = adata_ATAC.obs_names
 
-    common_barcodes = adata_RNA.obs['barcode'].isin(adata_ATAC.obs['barcode'])
     n_before = (adata_RNA.n_obs, adata_ATAC.n_obs)
     adata_RNA = adata_RNA[common_barcodes].copy()
     adata_ATAC = adata_ATAC[adata_ATAC.obs['barcode'].isin(adata_RNA.obs['barcode'])].copy()
@@ -1736,11 +1818,10 @@ if __name__ == "__main__":
     if not os.path.isdir(GENOME_DIR):
         os.makedirs(GENOME_DIR)
     
-    if not os.path.isfile(genome_fasta_file):
-        download_genome_fasta(
-            organism_code=ORGANISM_CODE,
-            save_dir=GENOME_DIR
-        )
+    download_genome_fasta(
+        organism_code=ORGANISM_CODE,
+        save_dir=GENOME_DIR
+    )
         
     if not os.path.isfile(chrom_sizes_file):
         download_chrom_sizes(
@@ -1785,7 +1866,7 @@ if __name__ == "__main__":
     total_tf_set: Set[str] = set()
     chrom_set: Set[str] = set()
     for sample_name in SAMPLE_NAMES:
-        sample_input_dir = RAW_DATA / sample_name
+        sample_input_dir = RAW_DATA / DATASET_NAME / sample_name
         
         # Input Files (raw or processed scRNA-seq and scATAC-seq data)
         processed_rna_file = sample_input_dir / "scRNA_seq_processed.parquet"

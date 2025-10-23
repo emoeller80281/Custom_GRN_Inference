@@ -14,8 +14,8 @@ DATASET_NAME = "DS012_mESC"
 CHROM_ID_LIST = chrom_list
 CHROM_ID = "chr1"
 # , "E7.75_rep1", "E8.0_rep2", "E8.5_rep2", "E8.75_rep2", "E7.5_rep2", "E8.0_rep1", "E8.5_rep1"
-SAMPLE_NAMES = ["E7.5_rep1", "E7.5_rep2", "E7.75_rep1", "E8.0_rep2", "E8.5_rep2", "E8.75_rep2", "E7.5_rep2", "E8.0_rep1", "E8.5_rep1"]
-FINE_TUNING_DATASETS = ["E7.5_rep1"]
+SAMPLE_NAMES = ["DS012_sample"]
+FINE_TUNING_DATASETS = ["DS012_sample"]
 
 # Paths to the raw scRNA-seq and scATAC-seq data
 RAW_SINGLE_CELL_DATA = Path("/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/SINGLE_CELL_DATASETS")
@@ -27,6 +27,17 @@ PROCESSED_GSE218576_DIR = ROOT_DIR / "data/processed/GSE218576"
 
 # ----- DATA PREPARATION -----
 # Pseudobulk and Data Preprocessing
+# Change these files to suit what you want the raw or processed files to look like.
+# Please respect the file extensions here
+PROCESSED_RNA_FILENAME = "scRNA_seq_processed.parquet"
+PROCESSED_ATAC_FILENAME = "scATAC_seq_processed.parquet"
+RAW_RNA_FILE = "scRNA_seq_raw.parquet"
+RAW_ATAC_FILE = "scATAC_seq_raw.parquet"
+ADATA_RNA_FILE = "adata_RNA.h5ad"
+ADATA_ATAC_FILE = "adata_ATAC.h5ad"
+PSEUDOBULK_TG_FILE = "TG_pseudobulk.tsv"
+PSEUDOBULK_RE_FILE = "RE_pseudobulk.tsv"
+
 NEIGHBORS_K = 20
 LEIDEN_RESOLUTION = 1.0
 AGGREGATION_METHOD = "mean" # "sum" or "mean"
@@ -38,7 +49,6 @@ WINDOW_SIZE = 25_000                    # Aggregates peaks within WINDOW_SIZE bp
 DISTANCE_SCALE_FACTOR = 250_000         # Weights the peak-gene TSS distance score. Lower numbers = faster dropoff
 MAX_PEAK_DISTANCE = 1_000_000           # Masks out peaks further than this distance from the gene TSS
 DIST_BIAS_MODE = "mean"                 # Method for calcuting window -> gene TSS distance. Options: "max" | "sum" | "mean" | "logsumexp"
-MOODS_PVAL_THRESHOLD = 1e-3             # MOODS binding significance threshold for associating a TF to a peak
 
 # ----- MODEL TRAINING PARAMETERS -----
 TOTAL_EPOCHS=500
