@@ -1500,7 +1500,7 @@ def aggregate_pseudobulk_datasets(gene_tss_df: pd.DataFrame, sample_names: list[
     logging.info(f"  - Sample names: {sample_names}")
     logging.info(f"  - Looking for processed samples in {dataset_processed_data_dir}")
     for sample_name in sample_names:
-        sample_processed_data_dir = dataset_processed_data_dir / sample_name
+        sample_processed_data_dir = dataset_processed_data_dir
         if not os.path.exists(sample_processed_data_dir):
             logging.warning(f"Skipping {sample_name}: directory not found")
             continue
@@ -1823,7 +1823,7 @@ if __name__ == "__main__":
     
     # Genome files
     genome_fasta_file = GENOME_DIR / (ORGANISM_CODE + ".fa.gz")
-    chrom_sizes_file = GENOME_DIR / (ORGANISM_CODE + ".chrom.sizes")
+    chrom_sizes_file = GENOME_DIR / (ORGANISM_CODE + f"{ORGANISM_CODE}.chrom.sizes")
     
     if not os.path.isdir(GENOME_DIR):
         os.makedirs(GENOME_DIR)
@@ -1873,7 +1873,7 @@ if __name__ == "__main__":
     IGNORE_PROCESSED_FILES = False
     logging.info(f"IGNORE_PROCESSED_FILES: {IGNORE_PROCESSED_FILES}")
     
-    PROCESS_CHROMOSOME_SPECIFIC_DATA = False
+    PROCESS_CHROMOSOME_SPECIFIC_DATA = True
     
     # Sample-specific preprocessing
     total_tf_set: Set[str] = set()
@@ -2086,7 +2086,17 @@ if __name__ == "__main__":
             
             logging.info(f"  - Aggregating pseudobulk datasets for {chrom_id}")
             total_TG_pseudobulk_global, total_TG_pseudobulk_chr, total_RE_pseudobulk_chr, total_peaks_df = \
-                aggregate_pseudobulk_datasets(gene_tss_df, SAMPLE_NAMES, RAW_DATA, chrom_id)
+                aggregate_pseudobulk_datasets(gene_tss_df, SAMPLE_NAMES, sample_input_dir, chrom_id)
+                
+            logging.info(
+                f"{chrom_id}: TG pseudobulk shape={total_TG_pseudobulk_chr.shape}, "
+                f"index_examples={total_TG_pseudobulk_chr.index[:5].tolist()}"
+            )
+            
+            vals = total_TG_pseudobulk_chr.values.astype("float32")
+            if vals.shape[0] == 0:
+                logging.warning(f"{chrom_id}: no TG rows after aggregation; skipping this chromosome.")
+                continue
         
             tg_names = total_TG_pseudobulk_chr.index.tolist()
             

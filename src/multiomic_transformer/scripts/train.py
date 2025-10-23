@@ -351,7 +351,6 @@ def prepare_dataloader(dataset, batch_size, world_size=1, rank=0,
     Build train/val/test loaders with the dataset's collate_fn.
     Uses DistributedSampler only when world_size > 1.
     """
-    # --- deterministic split
     g = torch.Generator()
     g.manual_seed(seed)
 
@@ -362,36 +361,52 @@ def prepare_dataloader(dataset, batch_size, world_size=1, rank=0,
 
     train_set, val_set, test_set = random_split(dataset, [n_train, n_val, n_test], generator=g)
 
-    # Initialize the DDP samplers
+    # --- define samplers for all cases
+    train_sampler = val_sampler = test_sampler = None
     if world_size > 1:
-        train_sampler:  DistributedSampler = DistributedSampler(train_set, num_replicas=world_size, rank=rank, drop_last=drop_last)
-        val_sampler:    DistributedSampler = DistributedSampler(val_set,   num_replicas=world_size, rank=rank, drop_last=False)
-        test_sampler:   DistributedSampler = DistributedSampler(test_set,  num_replicas=world_size, rank=rank, drop_last=False)
-        shuffle = False
-    else:
-        shuffle = True
+        train_sampler = DistributedSampler(train_set, num_replicas=world_size, rank=rank, drop_last=drop_last)
+        val_sampler   = DistributedSampler(val_set,   num_replicas=world_size, rank=rank, drop_last=False)
+        test_sampler  = DistributedSampler(test_set,  num_replicas=world_size, rank=rank, drop_last=False)
 
-    # Create separate dataloaders for train / val / split datasets
+    # --- shuffle only when no sampler is set
+    train_shuffle = (train_sampler is None)
+    val_shuffle   = False
+    test_shuffle  = False
+
+    # --- dataloaders
     train_loader = DataLoader(
-        train_set, batch_size=batch_size, shuffle=shuffle,
+        train_set,
+        batch_size=batch_size,
+        shuffle=train_shuffle,
         sampler=train_sampler,
         collate_fn=MultiomicTransformerDataset.collate_fn,
-        num_workers=num_workers, pin_memory=pin_memory, drop_last=drop_last
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        drop_last=drop_last,
     )
     val_loader = DataLoader(
-        val_set, batch_size=batch_size, shuffle=False,
+        val_set,
+        batch_size=batch_size,
+        shuffle=val_shuffle,
         sampler=val_sampler,
         collate_fn=MultiomicTransformerDataset.collate_fn,
-        num_workers=num_workers, pin_memory=pin_memory, drop_last=False
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        drop_last=False,
     )
     test_loader = DataLoader(
-        test_set, batch_size=batch_size, shuffle=False,
+        test_set,
+        batch_size=batch_size,
+        shuffle=test_shuffle,
         sampler=test_sampler,
         collate_fn=MultiomicTransformerDataset.collate_fn,
-        num_workers=num_workers, pin_memory=pin_memory, drop_last=False
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        drop_last=False,
     )
 
     return train_loader, val_loader, test_loader
+
 
 
 def write_run_parameters(dataset, out_dir):

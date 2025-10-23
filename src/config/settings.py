@@ -56,9 +56,9 @@ BATCH_SIZE=32
 PATIENCE=15
 CORR_LOSS_WEIGHT=0.5
 
-D_MODEL = 384
-NUM_HEADS = 6
-NUM_LAYERS = 3
+D_MODEL = 128
+NUM_HEADS = 4
+NUM_LAYERS = 7
 D_FF = 768
 DROPOUT = 0.1
 
@@ -88,7 +88,7 @@ EWC_LAMBDA = 10.0
 # Fixed Paths
 DATA_DIR = ROOT_DIR / "data"
 GENOME_DIR = DATA_DIR / "genome_data" / "reference_genome" / ORGANISM_CODE
-CHROM_SIZES_FILE = GENOME_DIR / "chrom.sizes"
+CHROM_SIZES_FILE = GENOME_DIR / f"{ORGANISM_CODE}.chrom.sizes"
 GTF_FILE_DIR = DATA_DIR / "genome_data" / "genome_annotation" / ORGANISM_CODE
 NCBI_FILE_DIR = DATA_DIR / "genome_data" / "genome_annotation" / ORGANISM_CODE 
 GENE_TSS_FILE = DATA_DIR / "genome_data" / "genome_annotation" / ORGANISM_CODE / "gene_tss.bed"
