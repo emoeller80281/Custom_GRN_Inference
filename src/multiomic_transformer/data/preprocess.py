@@ -29,7 +29,7 @@ from multiomic_transformer.utils.peaks import find_genes_near_peaks, format_peak
 from multiomic_transformer.utils.downloads import *
 from multiomic_transformer.data.sliding_window import run_sliding_window_scan
 from multiomic_transformer.data.build_pkn import build_organism_pkns
-from config.settings import *
+from config.settings_local import *
 
 random.seed(1337)
 np.random.seed(1337)
@@ -344,12 +344,9 @@ def process_or_load_rna_atac_data(
     pseudobulk_RE_file = sample_input_dir / "RE_pseudobulk.tsv"
 
     # lazy-import pipeline constants if not provided
-    try:
-        from config.settings import NEIGHBORS_K as _K, LEIDEN_RESOLUTION as _RES
-    except Exception:
-        _K, _RES = 15, 1.0  # safe fallbacks
-    neighbors_k = neighbors_k if neighbors_k is not None else _K
-    leiden_resolution = leiden_resolution if leiden_resolution is not None else _RES
+
+    neighbors_k = neighbors_k if neighbors_k is not None else NEIGHBORS_K
+    leiden_resolution = leiden_resolution if leiden_resolution is not None else LEIDEN_RESOLUTION
 
     logging.info(f"\n----- Loading or Processing RNA and ATAC data for {sample_name} -----")
     logging.info("Searching for processed RNA/ATAC parquet files:")
