@@ -24,12 +24,17 @@ from config.settings import *
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
-CHIP_GT_PATH = os.getenv("CHIP_GROUND_TRUTH", "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data/ground_truth_files/mESC_beeline_ChIP-seq.csv")  # <-- EDIT
-CHIP_GT_SEP  = os.getenv("CHIP_GROUND_TRUTH_SEP", ",")
+# CHIP_GT_PATH = os.getenv("CHIP_GROUND_TRUTH", "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data/ground_truth_files/mESC_beeline_ChIP-seq.csv")  # <-- EDIT
+# CHIP_GT_SEP  = os.getenv("CHIP_GROUND_TRUTH_SEP", ",")
+
+if ORGANISM_CODE == "mm10":
+    species_taxid = "10090"
+elif ORGANISM_CODE == "hg38":
+    species_taxid = "9606"
 
 canon = GeneCanonicalizer()
-canon.load_gtf("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data/genome_data/genome_annotation/mm10/Mus_musculus.gene_info")
-canon.load_ncbi_gene_info("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data/genome_data/reference_genome/mm10/Mus_musculus.GRCm39.113.gtf", species_taxid="10090")
+canon.load_gtf(str(GTF_FILE_DIR / "Mus_musculus.GRCm39.115.gtf.gz"))
+canon.load_ncbi_gene_info(str(NCBI_FILE_DIR / "Mus_musculus.gene_info.gz"), species_taxid=species_taxid)
 logging.info("Map sizes:", canon.coverage_report())
 
 # ============================================================
@@ -234,8 +239,8 @@ for epoch in range(1, 201):
         logging.info(f"[DGI] Epoch {epoch:03d} | Loss={loss.item():.6f}")
 
 
-torch.save(model.state_dict(), "outputs/self_supervised_gat.pt")
-logging.info("Saved pretrained weights to outputs/self_supervised_gat.pt")
+torch.save(model.state_dict(), ROOT_DIR / "GAT_training_outputs/self_supervised_gat.pt")
+logging.info("Saved pretrained weights to GAT_training_outputs/self_supervised_gat.pt")
 
 # ============================================================
 # Phase 2 — Semi-supervised fine-tuning using label edges
@@ -322,8 +327,8 @@ for epoch in range(1, 101):
         logging.info(f"[FineTune] Epoch {epoch:03d} | Loss={loss.item():.4f} | AUROC={auc:.3f} | AUPR={aupr:.3f}")
 
 
-torch.save(finetune_model.state_dict(), "outputs/fine_tuned_gat_classifier.pt")
-logging.info("Saved fine-tuned model to outputs/fine_tuned_gat_classifier.pt")
+torch.save(finetune_model.state_dict(), "GAT_training_outputs/fine_tuned_gat_classifier.pt")
+logging.info("Saved fine-tuned model to GAT_training_outputs/fine_tuned_gat_classifier.pt")
 
 # --- use the SAME encoders used for the graph ---
 # make dicts from the fitted LabelEncoders
@@ -528,145 +533,148 @@ try:
             rows.append({"k": k, "Lift@k": np.mean(lifts) if lifts else np.nan,
                             "Recall@k": np.mean(recalls) if recalls else np.nan})
         pd.DataFrame(rows).to_csv(os.path.join(chip_dir, "lift_recall_at_k.csv"), index=False)
+        
+        # ============================================================
+        # === Balanced scoring: macro per-TF and balanced micro     ===
+        # ============================================================
+
+        # 1) Macro per-TF (each TF contributes equally via simple mean)
+        valid_rows = []
+        for tf, sub in scored.groupby("TF"):
+            # Need both classes to compute AUCs
+            if sub["label"].nunique() < 2:
+                continue
+            y = sub["label"].to_numpy()
+            s = sub["Score"].to_numpy()
+            try:
+                auc_tf  = roc_auc_score(y, s)
+                aupr_tf = average_precision_score(y, s)
+            except Exception:
+                auc_tf, aupr_tf = np.nan, np.nan
+            valid_rows.append({"TF": tf, "AUROC": auc_tf, "AUPR": aupr_tf,
+                            "n": int(len(sub)), "n_pos": int(sub["label"].sum())})
+
+        macro_df = pd.DataFrame(valid_rows)
+        macro_auroc = float(np.nanmean(macro_df["AUROC"])) if not macro_df.empty else np.nan
+        macro_aupr  = float(np.nanmean(macro_df["AUPR"]))  if not macro_df.empty else np.nan
+        logging.info(f"[ChIP Macro] Mean per-TF AUROC={macro_auroc:.3f} | AUPR={macro_aupr:.3f}")
+        macro_df.to_csv(os.path.join(chip_dir, "per_TF_macro_metrics.csv"), index=False)
+
+        # 2) Balanced micro using per-TF sample weights
+        #    Each TF contributes the same total weight; within a TF, positives and negatives
+        #    split weight 50/50 (and are spread equally over their counts).
+        def per_tf_balanced_weights(df_tf):
+            n = len(df_tf)
+            if n == 0:
+                return np.zeros(0, dtype=np.float64)
+            n_pos = int(df_tf["label"].sum())
+            n_neg = n - n_pos
+            w = np.zeros(n, dtype=np.float64)
+            if n_pos == 0 and n_neg == 0:
+                return w
+            # Within-TF: allocate 0.5 weight mass to each class (if present)
+            if n_pos > 0:
+                w[df_tf["label"].values == 1] = 0.5 / n_pos
+            if n_neg > 0:
+                w[df_tf["label"].values == 0] = 0.5 / n_neg
+            # Will rescale across TFs so each TF sums to 1/N_tf later
+            return w
+
+        parts, weights = [], []
+        for tf, sub in scored.groupby("TF"):
+            if sub.empty:
+                continue
+            w_tf = per_tf_balanced_weights(sub)
+            if w_tf.sum() == 0:
+                continue
+            parts.append(sub[["label","Score"]].reset_index(drop=True))
+            weights.append(w_tf)
+
+        if parts:
+            blended = pd.concat(parts, axis=0, ignore_index=True)
+            w = np.concatenate(weights, axis=0)
+            # Give each TF the same total weight: divide by #TFs that contributed
+            n_tfs_contributing = len(weights)
+            w = w / n_tfs_contributing
+            y_all = blended["label"].to_numpy()
+            s_all = blended["Score"].to_numpy()
+            try:
+                bal_micro_auroc = roc_auc_score(y_all, s_all, sample_weight=w)
+                bal_micro_aupr  = average_precision_score(y_all, s_all, sample_weight=w)
+                logging.info(f"[ChIP Balanced-Micro] AUROC={bal_micro_auroc:.3f} | AUPR={bal_micro_aupr:.3f}  "
+                            f"(TF-equal + class-balanced within TF)")
+                with open(os.path.join(chip_dir, "balanced_micro_summary.txt"), "w") as f:
+                    f.write(f"Balanced-Micro AUROC={bal_micro_auroc:.6f}\n")
+                    f.write(f"Balanced-Micro AUPR={bal_micro_aupr:.6f}\n")
+                    f.write(f"TFs contributing: {n_tfs_contributing}\n")
+                    
+                # y_all, s_all, w already defined above in the balanced-micro section
+                fpr_w, tpr_w, _ = roc_curve(y_all, s_all, sample_weight=w)
+                prec_w, rec_w, _ = precision_recall_curve(y_all, s_all, sample_weight=w)
+
+                plt.figure(figsize=(10,4))
+                plt.subplot(1,2,1)
+                plt.plot(fpr_w, tpr_w)
+                plt.plot([0,1],[0,1],'--',c='gray',lw=1)
+                plt.xlabel("FPR"); plt.ylabel("TPR")
+                plt.title(f"Balanced-Micro ROC (AUROC={bal_micro_auroc:.3f})")
+
+                plt.subplot(1,2,2)
+                plt.plot(rec_w, prec_w)
+                plt.xlabel("Recall"); plt.ylabel("Precision")
+                plt.title(f"Balanced-Micro PR (AUPR={bal_micro_aupr:.3f})")
+
+                plt.tight_layout()
+                plt.savefig(os.path.join(chip_dir, "balanced_micro_roc_pr.png"), dpi=180)
+                plt.close()
+
+            except Exception as e:
+                logging.warning(f"Balanced-micro scoring failed: {e}")
+        else:
+            logging.warning("No TF groups available for balanced-micro scoring.")
+
+        # 3) (Optional) Undersampled micro (equal #pos=#neg per TF) – sanity check
+        #    This avoids weighting but keeps strict balance per TF by subsampling.
+        try:
+            us_parts = []
+            rng = np.random.default_rng(42)
+            for tf, sub in scored.groupby("TF"):
+                pos = sub[sub["label"] == 1]
+                neg = sub[sub["label"] == 0]
+                if len(pos) == 0 or len(neg) == 0:
+                    continue
+                k = min(len(pos), len(neg))
+                pos_s = pos.sample(n=k, random_state=42) if len(pos) > k else pos
+                neg_s = neg.sample(n=k, random_state=42) if len(neg) > k else neg
+                us_parts.append(pd.concat([pos_s, neg_s], axis=0))
+            if us_parts:
+                us = pd.concat(us_parts, axis=0, ignore_index=True)
+                y_us = us["label"].to_numpy()
+                s_us = us["Score"].to_numpy()
+                auroc_us = roc_auc_score(y_us, s_us) if np.unique(y_us).size > 1 else np.nan
+                aupr_us  = average_precision_score(y_us, s_us) if np.unique(y_us).size > 1 else np.nan
+                logging.info(f"[ChIP Undersampled-Micro] AUROC={auroc_us:.3f} | AUPR={aupr_us:.3f}  "
+                            f"(per-TF pos=neg subsample)")
+                us.loc[:, ["TF","TG","Score","label"]].to_csv(os.path.join(chip_dir, "undersampled_micro_eval_table.csv"), index=False)
+            else:
+                logging.warning("No TFs had both classes for undersampled-micro scoring.")
+        except Exception as e:
+            logging.warning(f"Undersampled-micro scoring failed: {e}")
+
+        # Fair-scope overall: only TFs with ≥1 positive, and only edges for those TFs
+        sc_tfs = [tf for tf, grp in scored.groupby("TF") if (grp["label"]==1).any()]
+        scoped = scored[scored["TF"].isin(sc_tfs)].copy()
+        if scoped["label"].nunique() > 1:
+            auroc_sc = roc_auc_score(scoped["label"].values, scoped["Score"].values)
+            aupr_sc  = average_precision_score(scoped["label"].values, scoped["Score"].values)
+            logging.info(f"[ChIP FairScope Overall] AUROC={auroc_sc:.3f} | AUPR={aupr_sc:.3f}")
+
+                
     else:
         logging.warning("CHIP_GT_PATH not set or file not found — skipping ChIP comparison.")
 except Exception as e:
     logging.exception(f"ChIP-seq comparison failed: {e}")
     
-    # ============================================================
-# === Balanced scoring: macro per-TF and balanced micro     ===
-# ============================================================
-
-# 1) Macro per-TF (each TF contributes equally via simple mean)
-valid_rows = []
-for tf, sub in scored.groupby("TF"):
-    # Need both classes to compute AUCs
-    if sub["label"].nunique() < 2:
-        continue
-    y = sub["label"].to_numpy()
-    s = sub["Score"].to_numpy()
-    try:
-        auc_tf  = roc_auc_score(y, s)
-        aupr_tf = average_precision_score(y, s)
-    except Exception:
-        auc_tf, aupr_tf = np.nan, np.nan
-    valid_rows.append({"TF": tf, "AUROC": auc_tf, "AUPR": aupr_tf,
-                       "n": int(len(sub)), "n_pos": int(sub["label"].sum())})
-
-macro_df = pd.DataFrame(valid_rows)
-macro_auroc = float(np.nanmean(macro_df["AUROC"])) if not macro_df.empty else np.nan
-macro_aupr  = float(np.nanmean(macro_df["AUPR"]))  if not macro_df.empty else np.nan
-logging.info(f"[ChIP Macro] Mean per-TF AUROC={macro_auroc:.3f} | AUPR={macro_aupr:.3f}")
-macro_df.to_csv(os.path.join(chip_dir, "per_TF_macro_metrics.csv"), index=False)
-
-# 2) Balanced micro using per-TF sample weights
-#    Each TF contributes the same total weight; within a TF, positives and negatives
-#    split weight 50/50 (and are spread equally over their counts).
-def per_tf_balanced_weights(df_tf):
-    n = len(df_tf)
-    if n == 0:
-        return np.zeros(0, dtype=np.float64)
-    n_pos = int(df_tf["label"].sum())
-    n_neg = n - n_pos
-    w = np.zeros(n, dtype=np.float64)
-    if n_pos == 0 and n_neg == 0:
-        return w
-    # Within-TF: allocate 0.5 weight mass to each class (if present)
-    if n_pos > 0:
-        w[df_tf["label"].values == 1] = 0.5 / n_pos
-    if n_neg > 0:
-        w[df_tf["label"].values == 0] = 0.5 / n_neg
-    # Will rescale across TFs so each TF sums to 1/N_tf later
-    return w
-
-parts, weights = [], []
-for tf, sub in scored.groupby("TF"):
-    if sub.empty:
-        continue
-    w_tf = per_tf_balanced_weights(sub)
-    if w_tf.sum() == 0:
-        continue
-    parts.append(sub[["label","Score"]].reset_index(drop=True))
-    weights.append(w_tf)
-
-if parts:
-    blended = pd.concat(parts, axis=0, ignore_index=True)
-    w = np.concatenate(weights, axis=0)
-    # Give each TF the same total weight: divide by #TFs that contributed
-    n_tfs_contributing = len(weights)
-    w = w / n_tfs_contributing
-    y_all = blended["label"].to_numpy()
-    s_all = blended["Score"].to_numpy()
-    try:
-        bal_micro_auroc = roc_auc_score(y_all, s_all, sample_weight=w)
-        bal_micro_aupr  = average_precision_score(y_all, s_all, sample_weight=w)
-        logging.info(f"[ChIP Balanced-Micro] AUROC={bal_micro_auroc:.3f} | AUPR={bal_micro_aupr:.3f}  "
-                     f"(TF-equal + class-balanced within TF)")
-        with open(os.path.join(chip_dir, "balanced_micro_summary.txt"), "w") as f:
-            f.write(f"Balanced-Micro AUROC={bal_micro_auroc:.6f}\n")
-            f.write(f"Balanced-Micro AUPR={bal_micro_aupr:.6f}\n")
-            f.write(f"TFs contributing: {n_tfs_contributing}\n")
-            
-        # y_all, s_all, w already defined above in the balanced-micro section
-        fpr_w, tpr_w, _ = roc_curve(y_all, s_all, sample_weight=w)
-        prec_w, rec_w, _ = precision_recall_curve(y_all, s_all, sample_weight=w)
-
-        plt.figure(figsize=(10,4))
-        plt.subplot(1,2,1)
-        plt.plot(fpr_w, tpr_w)
-        plt.plot([0,1],[0,1],'--',c='gray',lw=1)
-        plt.xlabel("FPR"); plt.ylabel("TPR")
-        plt.title(f"Balanced-Micro ROC (AUROC={bal_micro_auroc:.3f})")
-
-        plt.subplot(1,2,2)
-        plt.plot(rec_w, prec_w)
-        plt.xlabel("Recall"); plt.ylabel("Precision")
-        plt.title(f"Balanced-Micro PR (AUPR={bal_micro_aupr:.3f})")
-
-        plt.tight_layout()
-        plt.savefig(os.path.join(chip_dir, "balanced_micro_roc_pr.png"), dpi=180)
-        plt.close()
-
-    except Exception as e:
-        logging.warning(f"Balanced-micro scoring failed: {e}")
-else:
-    logging.warning("No TF groups available for balanced-micro scoring.")
-
-# 3) (Optional) Undersampled micro (equal #pos=#neg per TF) – sanity check
-#    This avoids weighting but keeps strict balance per TF by subsampling.
-try:
-    us_parts = []
-    rng = np.random.default_rng(42)
-    for tf, sub in scored.groupby("TF"):
-        pos = sub[sub["label"] == 1]
-        neg = sub[sub["label"] == 0]
-        if len(pos) == 0 or len(neg) == 0:
-            continue
-        k = min(len(pos), len(neg))
-        pos_s = pos.sample(n=k, random_state=42) if len(pos) > k else pos
-        neg_s = neg.sample(n=k, random_state=42) if len(neg) > k else neg
-        us_parts.append(pd.concat([pos_s, neg_s], axis=0))
-    if us_parts:
-        us = pd.concat(us_parts, axis=0, ignore_index=True)
-        y_us = us["label"].to_numpy()
-        s_us = us["Score"].to_numpy()
-        auroc_us = roc_auc_score(y_us, s_us) if np.unique(y_us).size > 1 else np.nan
-        aupr_us  = average_precision_score(y_us, s_us) if np.unique(y_us).size > 1 else np.nan
-        logging.info(f"[ChIP Undersampled-Micro] AUROC={auroc_us:.3f} | AUPR={aupr_us:.3f}  "
-                     f"(per-TF pos=neg subsample)")
-        us.loc[:, ["TF","TG","Score","label"]].to_csv(os.path.join(chip_dir, "undersampled_micro_eval_table.csv"), index=False)
-    else:
-        logging.warning("No TFs had both classes for undersampled-micro scoring.")
-except Exception as e:
-    logging.warning(f"Undersampled-micro scoring failed: {e}")
-
-# Fair-scope overall: only TFs with ≥1 positive, and only edges for those TFs
-sc_tfs = [tf for tf, grp in scored.groupby("TF") if (grp["label"]==1).any()]
-scoped = scored[scored["TF"].isin(sc_tfs)].copy()
-if scoped["label"].nunique() > 1:
-    auroc_sc = roc_auc_score(scoped["label"].values, scoped["Score"].values)
-    aupr_sc  = average_precision_score(scoped["label"].values, scoped["Score"].values)
-    logging.info(f"[ChIP FairScope Overall] AUROC={auroc_sc:.3f} | AUPR={aupr_sc:.3f}")
 
 
 
@@ -700,9 +708,9 @@ plt.xlabel("Epoch")
 plt.grid(True, alpha=0.3)
 
 plt.tight_layout()
-plt.savefig("outputs/training_loss_curves.png", dpi=300)
+plt.savefig("GAT_training_outputs/training_loss_curves.png", dpi=300)
 plt.close()
-logging.info("Saved training loss curves to outputs/training_loss_curves.png")
+logging.info("Saved training loss curves to GAT_training_outputs/training_loss_curves.png")
 
 
 # ============================================================
@@ -741,7 +749,7 @@ plt.subplot(1,2,2)
 plt.plot(recall, precision, label=f"AUPR={aupr_val:.3f}")
 plt.title("Precision-Recall Curve"); plt.xlabel("Recall"); plt.ylabel("Precision"); plt.legend()
 plt.tight_layout()
-plt.savefig("outputs/fine_tune_eval_curves.png", dpi=200)
+plt.savefig("GAT_training_outputs/fine_tune_eval_curves.png", dpi=200)
 plt.close()
 
 # ============================================================
@@ -788,7 +796,7 @@ plt.figure(figsize=(7,4))
 sns.barplot(x=feature_importance.values, y=feature_importance.index, orient="h")
 plt.title("Edge Feature Importance (Gradient Magnitude)")
 plt.tight_layout()
-plt.savefig("outputs/feature_importance_barplot.png", dpi=200)
+plt.savefig("GAT_training_outputs/feature_importance_barplot.png", dpi=200)
 plt.close()
 
 # ============================================================
@@ -807,7 +815,7 @@ for feat in edge_features:
 sens_df = pd.DataFrame.from_dict(results, orient='index', columns=['AUC_after_perturb'])
 sens_df['ΔAUC'] = sens_df['AUC_after_perturb'] - auc_val
 logging.info("\nFeature sensitivity (ΔAUROC when feature +0.1):\n" + str(sens_df.sort_values('ΔAUC', ascending=False)))
-sens_df.to_csv("outputs/feature_sensitivity.csv")
+sens_df.to_csv("GAT_training_outputs/feature_sensitivity.csv")
 
 # ============================================================
 # ===  Per-TF, Per-TG, and Per-Pathway Evaluation  ===
@@ -829,8 +837,8 @@ for tf_name, tf_id in zip(tf_encoder.classes_, range(n_tfs)):
     aupr_tf = average_precision_score(y_true_tf, y_pred_tf)
     tf_scores.append((tf_name, auc_tf, aupr_tf))
 tf_df = pd.DataFrame(tf_scores, columns=["TF", "AUROC", "AUPR"]).sort_values("AUROC", ascending=False)
-tf_df.to_csv("outputs/per_TF_metrics.csv", index=False)
-logging.info(f"Saved per-TF metrics for {len(tf_df)} TFs to outputs/per_TF_metrics.csv")
+tf_df.to_csv("GAT_training_outputs/per_TF_metrics.csv", index=False)
+logging.info(f"Saved per-TF metrics for {len(tf_df)} TFs to GAT_training_outputs/per_TF_metrics.csv")
 
 # ----- Per-TG AUROC -----
 tg_scores = []
@@ -845,8 +853,8 @@ for tg_name, tg_id in zip(tg_encoder.classes_, range(n_tgs)):
     auc_tg = roc_auc_score(y_true_tg, y_pred_tg)
     tg_scores.append((tg_name, auc_tg))
 tg_df = pd.DataFrame(tg_scores, columns=["TG", "AUROC"]).sort_values("AUROC", ascending=False)
-tg_df.to_csv("outputs/per_TG_metrics.csv", index=False)
-logging.info(f"Saved per-TG metrics for {len(tg_df)} TGs to outputs/per_TG_metrics.csv")
+tg_df.to_csv("GAT_training_outputs/per_TG_metrics.csv", index=False)
+logging.info(f"Saved per-TG metrics for {len(tg_df)} TGs to GAT_training_outputs/per_TG_metrics.csv")
 
 # ----- Per-Pathway (KEGG) Evaluation -----
 if "kegg_pathways" in df.columns:
@@ -868,8 +876,8 @@ if "kegg_pathways" in df.columns:
         pathway_metrics.append((pathway, auc_pw, aupr_pw))
     if pathway_metrics:
         kegg_df = pd.DataFrame(pathway_metrics, columns=["KEGG_Pathway","AUROC","AUPR"]).sort_values("AUROC", ascending=False)
-        kegg_df.to_csv("outputs/per_KEGG_metrics.csv", index=False)
-        logging.info(f"Saved per-pathway metrics for {len(kegg_df)} KEGG pathways to outputs/per_KEGG_metrics.csv")
+        kegg_df.to_csv("GAT_training_outputs/per_KEGG_metrics.csv", index=False)
+        logging.info(f"Saved per-pathway metrics for {len(kegg_df)} KEGG pathways to GAT_training_outputs/per_KEGG_metrics.csv")
     else:
         logging.warning("No valid KEGG pathway entries found for evaluation.")
 else:
@@ -884,7 +892,7 @@ plt.figure(figsize=(8,4))
 sns.barplot(x="AUROC", y="TF", hue="TF", data=tf_df.head(50), legend=False, palette="viridis")
 plt.title("Top 50 TFs by AUROC (Fine-tuned GAT)")
 plt.tight_layout()
-plt.savefig("outputs/top_TF_AUROC.png", dpi=200)
+plt.savefig("GAT_training_outputs/top_TF_AUROC.png", dpi=200)
 plt.close()
 
 # Top 25 KEGG pathways
@@ -893,7 +901,7 @@ if "kegg_df" in locals() and not kegg_df.empty:
     sns.barplot(x="AUROC", y="KEGG_Pathway", data=kegg_df.head(25), hue="AUROC", palette="viridis")
     plt.title("Top 25 KEGG Pathways by AUROC")
     plt.tight_layout()
-    plt.savefig("outputs/top_KEGG_AUROC.png", dpi=200)
+    plt.savefig("GAT_training_outputs/top_KEGG_AUROC.png", dpi=200)
     plt.close()
 
 # ============================================================
@@ -955,7 +963,7 @@ plt.figure(figsize=(7, 4))
 sns.barplot(x=ig_series.values, y=ig_series.index, orient="h")
 plt.title("Integrated Gradients Feature Importance (Mean Attribution)")
 plt.tight_layout()
-plt.savefig("outputs/feature_importance_IG.png", dpi=200)
+plt.savefig("GAT_training_outputs/feature_importance_IG.png", dpi=200)
 plt.close()
 
 # ============================================================
@@ -990,7 +998,7 @@ for tf_name, tf_id in zip(tf_encoder.classes_, range(n_tfs)):
     })
 
 tf_ig_df = pd.DataFrame(tf_ig_records)
-tf_ig_df.to_csv("outputs/tf_specific_integrated_gradients.csv", index=False)
+tf_ig_df.to_csv("GAT_training_outputs/tf_specific_integrated_gradients.csv", index=False)
 logging.info(f"Saved TF-specific IG feature attributions for {len(tf_ig_df)} TFs")
 
 # ------------------------------------------------------------
@@ -1016,7 +1024,7 @@ if plotted == 0:
     logging.warning("No TFs had IG attribution data for plotting.")
 else:
     plt.tight_layout()
-    plt.savefig("outputs/tf_specific_IG_barplots.png", dpi=200)
+    plt.savefig("GAT_training_outputs/tf_specific_IG_barplots.png", dpi=200)
     plt.close()
     logging.info(f"Saved IG feature barplots for {plotted} TFs.")
 
@@ -1045,7 +1053,7 @@ tf_names = tf_encoder.classes_
 # Load per-TF metrics if available
 # ------------------------------------------------------------
 try:
-    tf_metrics = pd.read_csv("outputs/per_TF_metrics.csv")
+    tf_metrics = pd.read_csv("GAT_training_outputs/per_TF_metrics.csv")
     tf_metrics = tf_metrics.set_index("TF")
     auroc_map = [tf_metrics.loc[tf, "AUROC"] if tf in tf_metrics.index else np.nan for tf in tf_names]
 except FileNotFoundError:
@@ -1074,8 +1082,8 @@ tf_vis_df = pd.DataFrame({
     "UMAP2": tf_umap[:,1],
     "AUROC": auroc_map
 })
-tf_vis_df.to_csv("outputs/tf_embedding_umap.csv", index=False)
-logging.info(f"Saved TF UMAP embeddings to outputs/tf_embedding_umap.csv")
+tf_vis_df.to_csv("GAT_training_outputs/tf_embedding_umap.csv", index=False)
+logging.info(f"Saved TF UMAP embeddings to GAT_training_outputs/tf_embedding_umap.csv")
 
 # ------------------------------------------------------------
 # Plot UMAP colored by AUROC
@@ -1089,7 +1097,7 @@ sns.scatterplot(
 plt.title("TF Embedding Map (colored by AUROC)")
 plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
 plt.tight_layout()
-plt.savefig("outputs/tf_embedding_umap_by_AUROC.png", dpi=300)
+plt.savefig("GAT_training_outputs/tf_embedding_umap_by_AUROC.png", dpi=300)
 plt.close()
 
 # ------------------------------------------------------------
@@ -1107,18 +1115,18 @@ sns.scatterplot(
 )
 plt.title("TF Embedding Clusters (KMeans)")
 plt.tight_layout()
-plt.savefig("outputs/tf_embedding_clusters.png", dpi=300)
+plt.savefig("GAT_training_outputs/tf_embedding_clusters.png", dpi=300)
 plt.close()
 
 # ------------------------------------------------------------
 # Optional: Link clusters to top features (if IG results exist)
 # ------------------------------------------------------------
 try:
-    ig_df = pd.read_csv("outputs/tf_specific_integrated_gradients.csv")
+    ig_df = pd.read_csv("GAT_training_outputs/tf_specific_integrated_gradients.csv")
     ig_summary = ig_df.groupby("TF")[edge_features].mean()
     ig_summary["Cluster"] = tf_vis_df.set_index("TF")["Cluster"]
     cluster_summary = ig_summary.groupby("Cluster").mean()
-    cluster_summary.to_csv("outputs/tf_cluster_feature_summary.csv")
-    logging.info("Saved cluster-wise mean feature attributions to outputs/tf_cluster_feature_summary.csv")
+    cluster_summary.to_csv("GAT_training_outputs/tf_cluster_feature_summary.csv")
+    logging.info("Saved cluster-wise mean feature attributions to GAT_training_outputs/tf_cluster_feature_summary.csv")
 except FileNotFoundError:
     logging.warning("tf_specific_integrated_gradients.csv not found; skipping feature summary by cluster.")

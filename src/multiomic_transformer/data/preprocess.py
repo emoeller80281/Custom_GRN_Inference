@@ -1843,6 +1843,9 @@ if __name__ == "__main__":
             gene_dataset_name=ensemble_dataset_name,
         )
         
+    download_ncbi_gene_info_mouse()
+    download_ensembl_gtf_mouse(release=115, assembly="GRCm39", decompress=False)
+        
     # Format the gene TSS file to BED format (chrom, start, end, name)
     gene_tss_df = make_gene_tss_bed_file(
         gene_tss_file=GENE_TSS_FILE,

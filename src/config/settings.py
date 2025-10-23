@@ -89,10 +89,15 @@ EWC_LAMBDA = 10.0
 DATA_DIR = ROOT_DIR / "data"
 GENOME_DIR = DATA_DIR / "genome_data" / "reference_genome" / ORGANISM_CODE
 CHROM_SIZES_FILE = GENOME_DIR / "chrom.sizes"
+GTF_FILE_DIR = DATA_DIR / "genome_data" / "genome_annotation" / ORGANISM_CODE
+NCBI_FILE_DIR = DATA_DIR / "genome_data" / "genome_annotation" / ORGANISM_CODE 
 GENE_TSS_FILE = DATA_DIR / "genome_data" / "genome_annotation" / ORGANISM_CODE / "gene_tss.bed"
 TF_FILE = DATA_DIR / "databases" / "motif_information" / ORGANISM_CODE / "TF_Information_all_motifs.txt"
 JASPAR_PFM_DIR = DATA_DIR / "databases" / "motif_information" / "JASPAR" / "pfm_files"
-MOTIF_DIR = DATA_DIR / "databases" / "motif_information" / ORGANISM_CODE / str(ORGANISM_CODE + "_motif_meme_files")
+MOTIF_DIR = DATA_DIR / "databases" / "motif_information" / ORGANISM_CODE / "pwms_all_motifs"
+
+CHIP_GT_PATH = DATA_DIR / "ground_truth_files" / "mESC_beeline_ChIP-seq.csv"
+CHIP_GT_SEP = ","
 
 PROCESSED_DATA = DATA_DIR / "processed"
 TRAINING_DATA_CACHE = DATA_DIR / "training_data_cache"

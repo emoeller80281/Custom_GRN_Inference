@@ -64,12 +64,20 @@ data/prior_knowledge_network_data/**
 data/processed/**
 !data/processed/.gitkeep
 
+# Keep the example DS012 data, ignore the rest of the files in data/raw
 data/raw/**
 !data/raw/.gitkeep
+data/raw/DS012_mESC/**
+!data/raw/DS012_mESC/
+data/raw/DS012_mESC/DS012_sample/**
+!data/raw/DS012_mESC/DS012_sample/
+!data/raw/DS012_mESC/DS012_sample/scATAC_seq_processed.parquet
+!data/raw/DS012_mESC/DS012_sample/scRNA_seq_processed.parquet
 
 data/training_data_cache/**
 !data/training_data_cache/.gitkeep
 
+GAT_training_outputs/
 experiments/*
 motif_pwms/*
 other_method_grns

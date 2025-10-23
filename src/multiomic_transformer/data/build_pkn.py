@@ -12,6 +12,7 @@ import pickle
 from multiomic_transformer.data.networks import (
     trrust_pathway, string_pathway, kegg_pathways
 )
+from multiomic_transformer.utils.gene_canonicalizer import GeneCanonicalizer
 from config.settings import *
 
 THIS_DIR = Path(__file__).resolve().parent
@@ -99,11 +100,10 @@ def build_organism_pkns(
     
     # Convert Ensembl IDs or aliases in your PKN to HGNC symbols
     mg = MyGeneInfo()
-    def normalize_genes(gene_list):
-        query = mg.querymany(gene_list, scopes=["symbol", "alias", "ensembl.gene"], fields="symbol", species=trrust_species)
-        mapping = {q["query"]: q.get("symbol", q["query"]) for q in query}
-        return [mapping.get(g, g).upper() for g in gene_list]
-    
+    canon = GeneCanonicalizer(species=string_org_code, use_mygene=True)
+    canon.load_gtf(str(GTF_FILE_DIR / "Mus_musculus.GRCm39.115.gtf.gz"))
+    canon.load_ncbi_gene_info(str(NCBI_FILE_DIR / "Mus_musculus.gene_info.gz"), species_taxid=string_org_code)
+        
     def print_network_info(df: pd.DataFrame, network_name: str):
         logging.info(f"\n{network_name}")
         logging.info(trrust_pkn.head())
@@ -111,13 +111,9 @@ def build_organism_pkns(
         logging.info(f"TGs: {df['TG'].nunique()}")
         logging.info(f"Edges: {df.shape[0]}")
     
-    # Case-normalize the gene names
+
     for df in [trrust_pkn, kegg_pkn, string_pkn]:
         network_name = str(df["source_db"].to_list()[0])
-        df["TF"] = df["TF"].str.upper()
-        df["TG"] = df["TG"].str.upper()
-        df["TF"] = normalize_genes(df["TF"])
-        df["TG"] = normalize_genes(df["TG"])
         print_network_info(df, network_name)
         
         # Save the normalized dataframe

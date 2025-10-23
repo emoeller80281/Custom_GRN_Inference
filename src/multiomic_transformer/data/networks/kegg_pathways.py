@@ -17,6 +17,13 @@ import os
 from tqdm import tqdm
 from config.settings import *
 import pickle
+import time, threading
+from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+from http.client import RemoteDisconnected
+import random
 
 class Pathways:
     """
@@ -54,7 +61,7 @@ class Pathways:
         k = silent_kegg_initialization()  # read KEGG from bioservices
         k.organism = self.organism
         try:
-            response = requests.get(f"http://rest.kegg.jp/list/pathway/{self.organism}")
+            response = requests.get(f"https://rest.kegg.jp/list/pathway/{self.organism}", timeout=30)
             response.raise_for_status()
             # KEGG returns lines like: "path:hsa00010\tGlycolysis / Gluconeogenesis"
             pathway_list = [line.split("\t")[0].replace("path:", "") for line in response.text.strip().split("\n")]
@@ -93,7 +100,7 @@ class Pathways:
         else:
             logging.info(f'\t\t\tKEGG dictionary not found, downloading...')
 
-            pathway_file = requests.get("http://rest.kegg.jp/get/br:ko00001", stream=True)
+            pathway_file = requests.get("https://rest.kegg.jp/get/br:ko00001", stream=True, timeout=60)
             with open(f'{self.file_paths["pathway_xml_files"]}/kegg_dict.csv', 'w') as kegg_dict_file:
                 for line in pathway_file.iter_lines():
                     line = line.decode("utf-8")
@@ -251,58 +258,148 @@ class Pathways:
                 
         return G_complete
 
+    def write_xml_files(self, organism: str, *, max_workers: int = 4, min_interval_s: float = 0.8):
+        logging.info("\t\tDownloading pathway files in parallel...")
 
-    def write_xml_files(self, organism: str):
-        """
-        Reads in all xml files for the organism, faster to do this once at the start and just use
-        the cached files. They aren't that big, so I'd rather store them at the beginning.
-        """
-        
-        logging.info(f'\t\tDownloading pathway files, this may take a while...')
-        base_dir = f'{self.file_paths["pathway_xml_files"]}/{organism}'
-        os.makedirs(base_dir, exist_ok=True)
+        base_dir = Path(self.file_paths["pathway_xml_files"]) / organism
+        base_dir.mkdir(parents=True, exist_ok=True)
 
-        def _fetch_kgml(code: str, out_path: str) -> None:
-            """Fetch KEGG KGML for `code` (e.g., 'ko00010', 'mmu00010') to `out_path` if missing."""
-            if os.path.exists(out_path):
-                return
-            try:
-                resp = requests.get(f"http://rest.kegg.jp/get/{code}/kgml", stream=True, timeout=30)
-                resp.raise_for_status()
-                with open(out_path, "w") as f:
-                    for chunk in resp.iter_lines():
-                        if chunk:
-                            f.write(chunk.decode("utf-8"))
-            except Exception as e:
-                logging.debug(f"could not read code: {code} ({e})")
+        existing_xml = {Path(f).stem for f in os.listdir(base_dir) if f.endswith(".xml")}
 
-        existing_xml_files = {
-            os.path.splitext(f)[0]  # drop ".xml"
-            for f in os.listdir(base_dir)
-            if f.endswith(".xml")
-        }
-        missing_pathway_file_list = [
-            p for p in self.pathway_list
-            if re.sub(r"^path:", "", p) not in existing_xml_files
-        ]
-        
-        for pathway in tqdm(missing_pathway_file_list):
-            # pathway may look like 'path:mmu04110' or 'mmu04110' or 'ko04110' — normalize to numeric id
-            raw = pathway.replace("path:", "")
-            num = re.sub(r"[a-zA-Z]+", "", raw)   # retain digits only
-            if not num:
-                logging.debug(f"Skipping malformed pathway id: {pathway}")
-                continue
+        def _norm_num(p: str) -> str | None:
+            raw = p.replace("path:", "")
+            num = re.sub(r"[a-zA-Z]+", "", raw)
+            return num or None
 
-            ko_code  = f"ko{num}"
-            org_code = f"{organism}{num}"
+        nums = [_norm_num(p) for p in self.pathway_list]
+        nums = [n for n in nums if n is not None]
 
-            ko_path  = os.path.join(base_dir, f"{ko_code}.xml")
-            org_path = os.path.join(base_dir, f"{org_code}.xml")
+        tasks = []
+        for n in nums:
+            code = f"{organism}{n}"
+            if code not in existing_xml:
+                tasks.append((code, base_dir / f"{code}.xml"))
 
-            logging.debug(f'\t\t\tFetching {ko_code} and {org_code}')
-            _fetch_kgml(ko_code, ko_path)
-            _fetch_kgml(org_code, org_path)
+        if not tasks:
+            logging.info("\t\tAll KGML files already present.")
+            return
+
+        # ----- ONE shared Session + throttle + adaptive slow-down -----
+        retry = Retry(
+            total=4, connect=4, read=4,
+            backoff_factor=0.25,                     # 0.25, 0.5, 1.0, 2.0 ...
+            status_forcelist=(429, 500, 502, 503, 504),
+            allowed_methods=frozenset(["GET"]),
+            raise_on_status=False,
+        )
+        sess = requests.Session()
+        sess.headers.update({
+            "User-Agent": "CustomGRN-KGMLFetcher/1.0 (+https://example.org)",
+            "Accept": "application/xml,text/xml;q=0.9,*/*;q=0.1",
+        })
+        # pool_maxsize ~= max_workers helps reuse connections
+        adapter = HTTPAdapter(max_retries=retry, pool_connections=max_workers, pool_maxsize=max_workers)
+        sess.mount("https://", adapter)
+        sess.mount("http://", adapter)
+
+        throttle_lock = threading.Lock()
+        last_t = {"t": 0.0}
+        base_interval = float(min_interval_s)
+        dyn_interval = {"v": base_interval}
+
+        # simple sliding-window failure counter to slow down if needed
+        fail_lock = threading.Lock()
+        recent_fails = []
+
+        def _throttled_get(url, timeout=(8, 30)):
+            with throttle_lock:
+                now = time.monotonic()
+                wait = last_t["t"] + dyn_interval["v"] - now
+                if wait > 0:
+                    time.sleep(wait)
+                r = sess.get(url, stream=True, timeout=timeout)
+                last_t["t"] = time.monotonic()
+            return r
+
+        def _note_fail():
+            # keep the last ~30 seconds of failures
+            with fail_lock:
+                now = time.monotonic()
+                recent_fails[:] = [t for t in recent_fails if now - t < 30.0]
+                recent_fails.append(now)
+                # if > 8 failures in last 30s, increase pace modestly
+                if len(recent_fails) > 8:
+                    dyn_interval["v"] = min(2.0, dyn_interval["v"] * 1.3)  # cap at 2s
+                else:
+                    # slowly relax back toward base
+                    dyn_interval["v"] = max(base_interval, dyn_interval["v"] * 0.95)
+
+        def _note_success():
+            with fail_lock:
+                # gently move back toward base interval
+                dyn_interval["v"] = max(base_interval, dyn_interval["v"] * 0.9)
+
+        def _fetch_one(code: str, out_path: Path):
+            if out_path.exists() and out_path.stat().st_size > 0:
+                return (code, True, "exists")
+
+            urls_primary = f"https://www.kegg.jp/kegg-bin/download?entry={code}&format=kgml"
+            urls_fallback = f"https://rest.kegg.jp/get/{code}/kgml"
+
+            for attempt in range(2):  # at most two endpoint families: CGI then REST
+                url = urls_primary if attempt == 0 else urls_fallback
+                try:
+                    r = _throttled_get(url, timeout=(8, 30))
+                    if r.status_code != 200:
+                        _note_fail()
+                        continue
+                    text = r.text
+                    if "<pathway" not in text:
+                        _note_fail()
+                        continue
+                    tmp = out_path.with_suffix(out_path.suffix + ".tmp")
+                    out_path.parent.mkdir(parents=True, exist_ok=True)
+                    with open(tmp, "w", encoding="utf-8") as f:
+                        f.write(text)
+                    tmp.replace(out_path)
+                    _note_success()
+                    return (code, True, "ok")
+                except (RemoteDisconnected, requests.exceptions.ChunkedEncodingError,
+                        requests.exceptions.ConnectionError, requests.exceptions.ReadTimeout) as e:
+                    # immediate fallback to the other endpoint on transport issues
+                    _note_fail()
+                    continue
+                except Exception as e:
+                    _note_fail()
+                    # small jitter before retrying anything else
+                    time.sleep(base_interval + random.random() * 0.2)
+                    continue
+
+            return (code, False, "failed")
+
+        # ----- run pool -----
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futs = {ex.submit(_fetch_one, code, outp): (code, outp) for code, outp in tasks}
+            ok = 0; errs = []
+            for fut in tqdm(as_completed(futs), total=len(futs), desc="KGML", unit="file", dynamic_ncols=True):
+                code, outp = futs[fut]
+                try:
+                    _, success, note = fut.result()
+                    if success: ok += 1
+                    else: errs.append((code, note))
+                except Exception as e:
+                    errs.append((code, f"Worker exception: {e!r}"))
+
+        if errs:
+            for c, e in errs[:8]:
+                logging.debug(f"\t\tFailed {c}: {e}")
+            logging.warning(f"\t\tCompleted {ok}/{len(tasks)} KGML files; {len(errs)} failed. "
+                            f"(throttle now {dyn_interval['v']:.2f}s)")
+        else:
+            logging.info(f"\t\tCompleted {ok}/{len(tasks)} KGML files "
+                        f"(throttle {dyn_interval['v']:.2f}s).")
+
+
 
     def parse_kegg_pathway(self, graph, pathway_code, pathway_num, num_pathways):
         """
@@ -395,7 +492,7 @@ class Pathways:
         else:
             logging.info(f'\t\t\tOrganism dictionary not present for {organism}, downloading...')
             try:  # try to retrieve and parse the dictionary containing organism gene names to codes conversion
-                url = requests.get("http://rest.kegg.jp/list/" + organism, stream=True)
+                url = requests.get(f"https://rest.kegg.jp/list/{organism}", stream=True, timeout=60)
                 # reads KEGG dictionary of identifiers between numbers and actual protein names and saves it to a python dictionary
 
                 with open(pathway_dict_path, 'w') as kegg_dict_file:
@@ -419,7 +516,8 @@ class Pathways:
         # Writes xml files for the pathways in the pathway list
         self.write_xml_files(organism)
 
-        xml_file_path = os.listdir(f'{self.file_paths["pathway_xml_files"]}/{organism}')
+        xml_dir = Path(self.file_paths["pathway_xml_files"]) / organism
+        xml_file_names = set(os.listdir(xml_dir))
 
         def parse_xml_files(xml_file):
             """
@@ -441,12 +539,9 @@ class Pathways:
             num = re.sub(r"[a-zA-Z]+", "", pathway)
             
             org_file = f"{organism}{num}.xml"
-            ko_file = f"ko{num}.xml"
             
-            if org_file in xml_file_path:
+            if org_file in xml_file_names:
                 parse_xml_files(org_file)
-            elif ko_file in xml_file_path:
-                parse_xml_files(ko_file)
             else:
                 logging.info(f"No KGML file found for pathway {num}")
                             

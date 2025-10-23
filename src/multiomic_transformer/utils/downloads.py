@@ -4,7 +4,7 @@ import subprocess
 from pathlib import Path
 import logging
 import shutil
-from typing import Union, Dict, Tuple
+from typing import Union, Dict, Tuple, Optional
 import requests
 import gzip
 import pysam
@@ -80,9 +80,6 @@ def download_gene_tss_file(
     df.to_csv(save_file, sep="\t", header=False, index=False)
 
     return df
-
-
-
 
 def download_genome_fasta(organism_code: str, save_dir: Union[str, Path]) -> Path:
     """
@@ -194,7 +191,6 @@ def download_genome_fasta(organism_code: str, save_dir: Union[str, Path]) -> Pat
     logging.info(f"Genome ready: {gz_path}")
     return gz_path
 
-
 def download_chrom_sizes(organism_code: str, save_dir: Union[str, Path]) -> Path:
     """
     Download UCSC chrom.sizes for an assembly (mm10 or hg38).
@@ -229,7 +225,6 @@ def download_chrom_sizes(organism_code: str, save_dir: Union[str, Path]) -> Path
 
     logging.info(f"chrom.sizes saved: {out_path}")
     return out_path
-
 
 def download_jaspar_pfms(save_dir: str, tax_id: str = "10090", version: int = 2024, max_workers: int = 8):
     """
@@ -293,7 +288,6 @@ def download_jaspar_pfms(save_dir: str, tax_id: str = "10090", version: int = 20
             fut.result()
 
     logging.info(f"All PFMs saved under {save_dir}")
-
 
 def ensure_string_v12_files(string_dir: str, string_org_code: str) -> Dict[str, str]:
     """
@@ -366,3 +360,81 @@ def ensure_string_v12_files(string_dir: str, string_org_code: str) -> Dict[str, 
             logging.info(f"Found existing: {path}")
 
     return {**paths, **urls}
+
+# --- tiny shared helper -------------------------------------------------------
+def _stream_download(url: str, dest: Path, chunk: int = 1 << 20, desc: Optional[str] = None):
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(dest.suffix + ".tmp")
+    with requests.get(url, stream=True, timeout=(10, 600)) as r:
+        r.raise_for_status()
+        total = int(r.headers.get("Content-Length", 0)) or None
+        with open(tmp, "wb") as f, tqdm(
+            total=total, unit="B", unit_scale=True, unit_divisor=1024,
+            desc=desc or dest.name, dynamic_ncols=True, mininterval=0.1
+        ) as pbar:
+            for chunk_bytes in r.iter_content(chunk_size=chunk):
+                if not chunk_bytes:
+                    continue
+                f.write(chunk_bytes)
+                pbar.update(len(chunk_bytes))
+    tmp.replace(dest)
+
+def download_ncbi_gene_info_mouse(out_path: Optional[Union[str, Path]] = None) -> Path:
+    """
+    Download NCBI Gene Info for mouse (Mus_musculus.gene_info.gz).
+    Default path: data/genome_data/genome_annotation/mm10/Mus_musculus.gene_info.gz
+    """
+    # Use HTTPS mirror (works anywhere):
+    url = "https://ftp.ncbi.nlm.nih.gov/gene/DATA/GENE_INFO/Mammalia/Mus_musculus.gene_info.gz"
+
+    # Default to your config layout
+    base = NCBI_FILE_DIR
+    dest = Path(out_path) if out_path is not None else (base / "Mus_musculus.gene_info.gz")
+
+    if dest.exists():
+        logging.info(f"Found existing gene_info: {dest}")
+        return dest
+
+    logging.info(f"Downloading NCBI Gene Info:\n  {url}")
+    _stream_download(url, dest, desc=dest.name)
+    logging.info(f"Saved: {dest}")
+    return dest
+
+def download_ensembl_gtf_mouse(
+    release: int = 115,
+    assembly: str = "GRCm39",
+    out_dir: Optional[Union[str, Path]] = None,
+    decompress: bool = False,
+) -> Path:
+    """
+    Download Ensembl GTF for mouse. By default keeps .gtf.gz.
+    If decompress=True, also writes an uncompressed .gtf alongside.
+    Default dir: data/genome_data/reference_genome/mm10
+    """
+    org = "mus_musculus"
+    fn_gz = f"Mus_musculus.{assembly}.{release}.gtf.gz"
+    url = f"https://ftp.ensembl.org/pub/release-{release}/gtf/{org}/{fn_gz}"
+
+    # Default to your reference genome dir
+    out_dir = GTF_FILE_DIR
+    out_dir.mkdir(parents=True, exist_ok=True)
+    dest_gz = out_dir / fn_gz
+    dest_gtf = dest_gz.with_suffix("")  # drop .gz -> .gtf
+
+    if dest_gz.exists():
+        logging.info(f"Found existing GTF: {dest_gz}")
+    else:
+        logging.info(f"Downloading Ensembl GTF:\n  {url}")
+        _stream_download(url, dest_gz, desc=dest_gz.name)
+        logging.info(f"Saved: {dest_gz}")
+
+    if decompress:
+        if dest_gtf.exists():
+            logging.info(f"Uncompressed GTF already exists: {dest_gtf}")
+        else:
+            logging.info(f"Decompressing → {dest_gtf.name}")
+            with gzip.open(dest_gz, "rb") as fin, open(dest_gtf, "wb") as fout:
+                shutil.copyfileobj(fin, fout, length=1 << 20)
+            logging.info(f"Wrote: {dest_gtf}")
+
+    return dest_gtf if decompress else dest_gz
