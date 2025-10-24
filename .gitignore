@@ -42,11 +42,13 @@ data/databases/motif_information/mm10/**
 !data/databases/motif_information/mm10/
 !data/databases/motif_information/mm10/TF_Information_all_motifs.txt
 !data/databases/motif_information/mm10/pwms_all_motifs/
+!data/databases/motif_information/mm10/pwms_all_motifs/**
 
 data/databases/motif_information/hg38/**
 !data/databases/motif_information/hg38/
 !data/databases/motif_information/hg38/TF_Information_all_motifs.txt
 !data/databases/motif_information/hg38/pwms_all_motifs/
+!data/databases/motif_information/hg38/pwms_all_motifs/**
 
 
 data/genome_data/genome_annotation/**
