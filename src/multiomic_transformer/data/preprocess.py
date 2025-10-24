@@ -1491,13 +1491,30 @@ def create_single_cell_tensors(
             f"RE={atac_tensor_sc.shape}"
         )
 
-def aggregate_pseudobulk_datasets(gene_tss_df: pd.DataFrame, sample_names: list[str], dataset_processed_data_dir: Path, chrom_id: str):
+def aggregate_pseudobulk_datasets(gene_tss_df: pd.DataFrame, sample_names: list[str], dataset_processed_data_dir: Path, chrom_id: str, gc: GeneCanonicalizer):
     
     # ----- Combine Pseudobulk Data into a Training Dataset -----
     TG_pseudobulk_global = []
     TG_pseudobulk_samples = []
     RE_pseudobulk_samples = []
     peaks_df_samples = []
+    
+    def _canon_index_sum(df: pd.DataFrame, gc) -> pd.DataFrame:
+        """Canonicalize df.index with GeneCanonicalizer and sum duplicate rows."""
+        if df.empty:
+            return df
+        mapped = gc.canonicalize_series(pd.Series(df.index, index=df.index))
+        out = df.copy()
+        out.index = mapped.values
+        out = out[out.index != ""]                 # drop unmapped
+        if not out.index.is_unique:               # aggregate duplicates
+            out = out.groupby(level=0).sum()
+        return out
+
+    def _canon_series_drop_dups(s: pd.Series, gc) -> pd.Series:
+        """Canonicalize a series of names and drop empties."""
+        cs = gc.canonicalize_series(s.astype(str))
+        return cs[cs != ""]
 
     logging.info("\nLoading processed pseudobulk datasets:")
     logging.info(f"  - Sample names: {sample_names}")
@@ -1514,13 +1531,16 @@ def aggregate_pseudobulk_datasets(gene_tss_df: pd.DataFrame, sample_names: list[
             logging.info(f"  - Processing Pseudobulk data for {sample_name}")
             TG_pseudobulk = pd.read_csv(os.path.join(sample_processed_data_dir, "TG_pseudobulk.tsv"), sep="\t", index_col=0)
             RE_pseudobulk = pd.read_csv(os.path.join(sample_processed_data_dir, "RE_pseudobulk.tsv"), sep="\t", index_col=0)
+            
+            TG_pseudobulk = _canon_index_sum(TG_pseudobulk, gc)
 
             logging.debug("\n  - Total Pseudobulk Genes and Peaks")
             logging.debug(f"\tTG_pseudobulk: {TG_pseudobulk.shape[0]:,} Genes x {TG_pseudobulk.shape[1]} metacells")
             logging.debug(f"\tRE_pseudobulk: {RE_pseudobulk.shape[0]:,} Peaks x {RE_pseudobulk.shape[1]} metacells")
 
-            TG_pseudobulk.index = TG_pseudobulk.index.astype(str).map(standardize_name)
-            gene_tss_df["name"] = gene_tss_df["name"].astype(str).map(standardize_name)
+            gene_tss_df = gene_tss_df.copy()
+            gene_tss_df["name"] = _canon_series_drop_dups(gene_tss_df["name"].astype(str), gc)
+            gene_tss_df = gene_tss_df.drop_duplicates(subset=["name"], keep="first")
                         
             TG_chr_specific = TG_pseudobulk.loc[TG_pseudobulk.index.intersection(gene_tss_df['name'].unique())]
             RE_chr_specific = RE_pseudobulk[RE_pseudobulk.index.str.startswith(f"{chrom_id}:")]
@@ -1703,50 +1723,65 @@ def filter_windows_and_tgs(
 
     return candidate_windows, keep_tgs, new_window_map
 
-
 def make_peak_to_window_map(peaks_bed: pd.DataFrame, windows_bed: pd.DataFrame) -> dict[str, int]:
     """
     Map each peak to the window it overlaps the most.
-    If a peak ties across multiple windows, assign randomly.
-    
-    Parameters
-    ----------
-    peaks_bed : DataFrame
-        Must have ['chrom','start','end','peak_id'] columns
-    windows_bed : DataFrame
-        Must have ['chrom','start','end','win_idx'] columns
-    
-    Returns
-    -------
-    mapping : dict[str, int]
-        peak_id -> window index
+    Ensures the BedTool 'name' field is exactly the `peak_id` column.
     """
-    bedtool_peaks = pybedtools.BedTool.from_dataframe(peaks_bed)
-    bedtool_windows = pybedtools.BedTool.from_dataframe(windows_bed)
+    # Defensive copy & column order
+    pb = peaks_bed.copy()
+    required = ["chrom", "start", "end", "peak_id"]
+    missing = [c for c in required if c not in pb.columns]
+    if missing:
+        raise ValueError(f"peaks_bed missing columns: {missing}")
+
+    pb["chrom"] = pb["chrom"].astype(str)
+    pb["start"] = pb["start"].astype(int)
+    pb["end"]   = pb["end"].astype(int)
+    pb["peak_id"] = pb["peak_id"].astype(str).str.strip()
+
+    # BedTool uses the 4th column as "name" → make it explicitly 'peak_id'
+    pb_for_bed = pb[["chrom", "start", "end", "peak_id"]].rename(columns={"peak_id": "name"})
+    bedtool_peaks   = pybedtools.BedTool.from_dataframe(pb_for_bed)
+
+    # windows: enforce expected columns & dtypes
+    wb = windows_bed.copy()
+    wr = ["chrom", "start", "end", "win_idx"]
+    miss_w = [c for c in wr if c not in wb.columns]
+    if miss_w:
+        raise ValueError(f"windows_bed missing columns: {miss_w}")
+    wb["chrom"] = wb["chrom"].astype(str)
+    wb["start"] = wb["start"].astype(int)
+    wb["end"]   = wb["end"].astype(int)
+    wb["win_idx"] = wb["win_idx"].astype(int)
+    bedtool_windows = pybedtools.BedTool.from_dataframe(wb[["chrom", "start", "end", "win_idx"]])
 
     overlaps = {}
-    for interval in bedtool_peaks.intersect(bedtool_windows, wa=True, wb=True):
-        peak_id = interval.name
-        win_idx = int(interval.fields[-1])  # window index
-        peak_start, peak_end = int(interval.start), int(interval.end)
-        win_start, win_end = int(interval.fields[-3]), int(interval.fields[-2])
+    for iv in bedtool_peaks.intersect(bedtool_windows, wa=True, wb=True):
+        # left fields (peak): chrom, start, end, name
+        peak_id = iv.name  # guaranteed to be the 'name' we set = peak_id
+        # right fields (window): ... chrom, start, end, win_idx (as the last field)
+        win_idx = int(iv.fields[-1])
 
-        # Compute overlap length
-        overlap_len = min(peak_end, win_end) - max(peak_start, win_start)
+        peak_start, peak_end = int(iv.start), int(iv.end)
+        win_start, win_end   = int(iv.fields[-3]), int(iv.fields[-2])
+        overlap_len = max(0, min(peak_end, win_end) - max(peak_start, win_start))
 
-        # Track best overlap for each peak
-        if peak_id not in overlaps:
-            overlaps[peak_id] = []
-        overlaps[peak_id].append((overlap_len, win_idx))
+        if overlap_len <= 0:
+            continue
+        overlaps.setdefault(peak_id, []).append((overlap_len, win_idx))
 
-    # Resolve ties by max overlap, then random choice
+    # resolve ties by max-overlap then random
     mapping = {}
-    for peak_id, ov_list in overlaps.items():
-        max_overlap = max(ov_list, key=lambda x: x[0])[0]
-        candidates = [win_idx for ol, win_idx in ov_list if ol == max_overlap]
-        mapping[peak_id] = random.choice(candidates)  # pick randomly if tie
+    for pid, lst in overlaps.items():
+        if not lst: 
+            continue
+        max_ol = max(lst, key=lambda x: x[0])[0]
+        candidates = [w for ol, w in lst if ol == max_ol]
+        mapping[str(pid)] = int(random.choice(candidates))
 
     return mapping
+
 
 def align_to_vocab(names, vocab, tensor_all, label="genes"):
     """
@@ -2222,7 +2257,7 @@ if __name__ == "__main__":
             
             logging.info(f"Aggregating pseudobulk datasets for {chrom_id}")
             total_TG_pseudobulk_global, total_TG_pseudobulk_chr, total_RE_pseudobulk_chr, total_peaks_df = \
-                aggregate_pseudobulk_datasets(gene_tss_df, SAMPLE_NAMES, sample_input_dir, chrom_id)
+                aggregate_pseudobulk_datasets(gene_tss_df, SAMPLE_NAMES, sample_input_dir, chrom_id, gc)
                 
             logging.info(f"  - {chrom_id}: TG pseudobulk shape={total_TG_pseudobulk_chr.shape}")
             logging.info(f"  - TG Examples:{total_TG_pseudobulk_chr.index[:5].tolist()}")
@@ -2305,12 +2340,6 @@ if __name__ == "__main__":
             )
             strong_peaks = set().union(*tf2peaks_keep.values())
             strong_windows = {window_map[p] for p in strong_peaks if p in window_map}
-            
-            print(f"  - # rows genes_near_peaks: {len(genes_near_peaks):,} | "
-                f"unique peaks near TG: {genes_near_peaks['peak_id'].nunique():,}")
-
-            print(f"  - # TFs scored: {sliding_window_df['TF'].nunique():,} | "
-                f"# rows sliding_window_df: {len(sliding_window_df):,}")
 
             
             n_tf_with_hits = sum(1 for v in tf2peaks_keep.values() if len(v) > 0)
@@ -2331,27 +2360,15 @@ if __name__ == "__main__":
 
             # 1) Log what we’re about to use
             logging.info(f"  - # keep_windows: {len(keep_windows)} | # keep_tgs: {len(keep_tgs)}")
-            if keep_tgs:
-                logging.debug(f"  keep_tgs examples: {list(sorted(keep_tgs))[:10]}")
 
             # 2) Normalize BOTH sides with the same function
             total_TG_pseudobulk_chr.index = gc.canonicalize_series(total_TG_pseudobulk_chr.index)
+            
 
             mask = total_TG_pseudobulk_chr.index.isin(keep_tgs)
             overlap = set(total_TG_pseudobulk_chr.index) & set(keep_tgs)
-            print(f"[Check] TG rows in matrix: {total_TG_pseudobulk_chr.shape[0]} | keep_tgs: {len(keep_tgs)}")
              
             n_match = int(mask.sum())
-
-            if n_match == 0:
-                logging.warning(
-                    f"{chrom_id}: after normalization, 0 TG rows matched keep_tgs "
-                    f"(keep_tgs={len(keep_tgs)}). "
-                    f"\n  - TG index examples: {total_TG_pseudobulk_chr.index[:5].tolist()} | "
-                    f"\n  - keep_tgs examples: {list(sorted(keep_tgs))[:5]}"
-                )
-                # Optional safety net: don't drop the chromosome; keep all TGs
-                # mask[:] = True
 
             # 3) Apply the (now-correct) mask
             total_TG_pseudobulk_chr = total_TG_pseudobulk_chr.loc[mask].copy()
@@ -2368,26 +2385,41 @@ if __name__ == "__main__":
                 logging.warning(f"{chrom_id}: all windows dropped by filters (A+B). Skipping this chromosome.")
                 continue
 
-            # Filter genome_windows to the kept ones and compact win_idx to 0..W'-1
-            genome_windows = genome_windows[genome_windows["win_idx"].isin(keep_windows)].copy()
+            # --- keep only selected windows and compact to [0..W'-1] once ---
+            old_win_idxs = sorted(keep_windows)
+            genome_windows = genome_windows[genome_windows["win_idx"].isin(old_win_idxs)].copy()
             genome_windows = genome_windows.sort_values("win_idx").reset_index(drop=True)
-            genome_windows["win_idx"] = np.arange(len(genome_windows))
+            old2new = {old: new for new, old in enumerate(old_win_idxs)}
+            genome_windows["win_idx"] = genome_windows["win_idx"].map(old2new).astype(int)
 
-            # Restrict TGs BEFORE scaling/tensor-building so everything stays aligned
-            if len(keep_tgs) == 0:
-                logging.warning(f"{chrom_id}: filter (C) dropped all TGs. Skipping this chromosome.")
-                continue
+            # --- remap the *filtered* peak -> window map to compact indices (use new_window_map as source) ---
+            window_map = {str(peak): int(old2new[old_w])
+                        for peak, old_w in new_window_map.items()
+                        if old_w in old2new}
 
-            total_TG_pseudobulk_chr = total_TG_pseudobulk_chr.loc[
-                total_TG_pseudobulk_chr.index.astype(str).str.upper().isin(keep_tgs)
-            ].copy()
+            # --- prune RE to peaks referenced by the (remapped) map ---
+            total_RE_pseudobulk_chr.index = total_RE_pseudobulk_chr.index.astype(str)
+            peaks_we_use = set(window_map.keys())
+            total_RE_pseudobulk_chr = total_RE_pseudobulk_chr.loc[
+                total_RE_pseudobulk_chr.index.intersection(peaks_we_use)
+            ]
 
             # Refit scaler on the kept TGs (or subset the existing scaler if you prefer)
             scaler = StandardScaler()
             TG_scaled = scaler.fit_transform(total_TG_pseudobulk_chr.values.astype("float32"))
+            
+            # Recompute the number of windows *after* filtering/compaction
+            num_windows = int(genome_windows.shape[0])
 
+            # Sanity logs
+            logging.info(f"[{chrom_id}] windows: num={num_windows} "
+                        f"min_win={genome_windows['win_idx'].min()} "
+                        f"max_win={genome_windows['win_idx'].max()}")
+            logging.info(f"[{chrom_id}] window_map: peaks={len(window_map)} "
+                        f"min_idx={min(window_map.values()) if window_map else 'NA'} "
+                        f"max_idx={max(window_map.values()) if window_map else 'NA'}")
+            
             # Build tensors using the *filtered* windows/map
-            window_map = new_window_map
             logging.info(f"Precomputing TF, TG, and ATAC tensors")
             tf_tensor_all, tg_tensor_all, atac_window_tensor_all = precompute_input_tensors(
                 output_dir=str(SAMPLE_DATA_CACHE_DIR),

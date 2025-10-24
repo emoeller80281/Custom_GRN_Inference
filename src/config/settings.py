@@ -13,7 +13,7 @@ ORGANISM_CODE = "mm10"
 DATASET_NAME = "DS012_mESC"
 CHROM_ID_LIST = chrom_list
 CHROM_ID = "chr1"
-CHROM_IDS = ["chr1", "chr2", "chr3"]
+CHROM_IDS = ["chr1", "chr2"]
 # , "E7.75_rep1", "E8.0_rep2", "E8.5_rep2", "E8.75_rep2", "E7.5_rep2", "E8.0_rep1", "E8.5_rep1"
 SAMPLE_NAMES = ["DS012_sample"]
 FINE_TUNING_DATASETS = ["DS012_sample"]
@@ -39,17 +39,17 @@ ADATA_ATAC_FILE = "adata_ATAC.h5ad"
 PSEUDOBULK_TG_FILE = "TG_pseudobulk.tsv"
 PSEUDOBULK_RE_FILE = "RE_pseudobulk.tsv"
 
-NEIGHBORS_K = 15
+NEIGHBORS_K = 20
 LEIDEN_RESOLUTION = 1.0
 AGGREGATION_METHOD = "mean" # "sum" or "mean"
 
 # Data Preprocessing and Caching
 VALIDATION_DATASETS = ["E8.75_rep1"]
 FORCE_RECALCULATE = True                # Recomputes genomic windows, peak-TG distance, and re-runs MOODS TF-peak scan
-WINDOW_SIZE = 5_000                     # Aggregates peaks within WINDOW_SIZE bp genomic tiles
-DISTANCE_SCALE_FACTOR = 5_000           # Weights the peak-gene TSS distance score. Lower numbers = faster dropoff
-MAX_PEAK_DISTANCE = 10_000              # Masks out peaks further than this distance from the gene TSS
-DIST_BIAS_MODE = "max"                  # Method for calcuting window -> gene TSS distance. Options: "max" | "sum" | "mean" | "logsumexp"
+WINDOW_SIZE = 25_000                    # Aggregates peaks within WINDOW_SIZE bp genomic tiles
+DISTANCE_SCALE_FACTOR = 25_000         # Weights the peak-gene TSS distance score. Lower numbers = faster dropoff
+MAX_PEAK_DISTANCE = 100_000           # Masks out peaks further than this distance from the gene TSS
+DIST_BIAS_MODE = "mean"                 # Method for calcuting window -> gene TSS distance. Options: "max" | "sum" | "mean" | "logsumexp"
 
 # ----- MODEL TRAINING PARAMETERS -----
 RESUME=False
