@@ -4,7 +4,7 @@ import logging
 import os
 import sys
 import warnings
-
+import random
 import joblib
 import matplotlib.pyplot as plt
 import numpy as np
@@ -22,7 +22,12 @@ from torch.utils.data import DataLoader, random_split
 from torch.utils.data.distributed import DistributedSampler
 
 from config.settings import *
-from multiomic_transformer.datasets.dataset import MultiomicTransformerDataset
+from multiomic_transformer.datasets.dataset import (
+    MultiomicTransformerDataset,
+    MultiChromosomeDataset,
+    ChromBucketBatchSampler,
+    DistributedBatchSampler
+)
 from multiomic_transformer.models.model import MultiomicTransformer
 from multiomic_transformer.utils.files import unique_path
 from multiomic_transformer.utils import ewc_utils, plotting
@@ -44,6 +49,7 @@ def ddp_setup(rank: int, world_size: int):
     dist.init_process_group(backend="nccl", init_method="env://",
                             rank=rank, world_size=world_size)
     
+
 def setup_logging(rank: int):
     # Remove existing handlers to avoid duplicates
     for handler in logging.root.handlers[:]:
@@ -61,6 +67,32 @@ def setup_logging(rank: int):
         force=True
     )
     
+def _debug_multichrom_stats(mcd):
+    if not isinstance(mcd, MultiChromosomeDataset):
+        logging.info("Not multi-chrom; skip debug.")
+        return
+    logging.info("=== MultiChrom Debug ===")
+    total_windows = 0
+    per_chr = []
+    uniq_tf, uniq_tg, uniq_metacells = set(), set(), set()
+    for cid in mcd.chrom_ids:
+        ds = mcd._load_chrom(cid)
+        per_chr.append({
+            "chrom": cid,
+            "tg_count": len(ds.tg_ids),
+            "tf_count": len(ds.tf_ids),
+            "metacells": len(getattr(ds, "metacell_names", [])),
+            "windows": int(ds.num_windows),
+            "tg_sample": list(map(str, list(ds.tg_ids)[:5])),
+        })
+        uniq_tf.update(list(ds.tf_ids))
+        uniq_tg.update(list(ds.tg_ids))
+        uniq_metacells.update(getattr(ds, "metacell_names", []))
+        total_windows += int(ds.num_windows)
+    logging.info(f"Per-chrom stats: {per_chr}")
+    logging.info(f"Union TG={len(uniq_tg)}, TF={len(uniq_tf)}, Metacells={len(uniq_metacells)}, Windows sum={total_windows}")
+
+
 class Trainer:
     def __init__(
         self,
@@ -140,6 +172,11 @@ class Trainer:
         return total_loss.detach(), mse_loss.detach()
 
     def _validate(self):
+        if self.val_data is None or len(self.val_data) == 0:
+            logging.warning("Validation loader is empty; skipping validation this epoch.")
+            # Return NaNs so downstream logging can handle it gracefully
+            return float("nan"), float("nan"), float("nan")
+        
         self.model.eval()
         total_loss, n_batches = 0.0, 0
         preds_list, tgts_list = [], []
@@ -309,20 +346,54 @@ class Trainer:
             
 
 def load_train_objs():
-    # Load the dataset
-    dataset = MultiomicTransformerDataset(
-        data_dir=SAMPLE_DATA_CACHE_DIR,
-        chrom_id=CHROM_ID,
-        tf_vocab_path=os.path.join(COMMON_DATA, "tf_vocab.json"),
-        tg_vocab_path=os.path.join(COMMON_DATA, "tg_vocab.json"),
-    )
-    
-    assert dataset.tf_name2id is not None
-    assert dataset.tg_name2id is not None
+    """
+    Creates either a single-chromosome dataset (legacy) or a MultiChromosomeDataset.
+    Also returns model and optimizer.
+    """
+    tf_vocab_path = os.path.join(COMMON_DATA, "tf_vocab.json")
+    tg_vocab_path = os.path.join(COMMON_DATA, "tg_vocab.json")
 
-    # global vocab sizes (from common vocab)
-    tf_vocab_size=len(dataset.tf_name2id)
-    tg_vocab_size=len(dataset.tg_name2id)
+    # Prefer a list of chromosomes if provided in settings; otherwise, fall back to CHROM_ID.
+    chrom_ids = None
+    try:
+        chrom_ids = CHROM_IDS
+        if isinstance(chrom_ids, str):
+            chrom_ids = [chrom_ids]
+    except NameError:
+        pass
+
+    if chrom_ids and len(chrom_ids) > 1:
+        # --- Multi-chrom mode ---
+        dataset = MultiChromosomeDataset(
+            data_dir=SAMPLE_DATA_CACHE_DIR,
+            chrom_ids=chrom_ids,
+            tf_vocab_path=tf_vocab_path,
+            tg_vocab_path=tg_vocab_path,
+            fine_tuner=False,
+            sample_name=None,
+            max_cached=2,
+        )
+        # Load vocab sizes from files (MultiChromosomeDataset doesn't expose them directly)
+        with open(tf_vocab_path) as f:
+            tf_vocab_obj = json.load(f)
+        with open(tg_vocab_path) as f:
+            tg_vocab_obj = json.load(f)
+        tf_name2id = tf_vocab_obj.get("name_to_id", tf_vocab_obj)
+        tg_name2id = tg_vocab_obj.get("name_to_id", tg_vocab_obj)
+        tf_vocab_size = len(tf_name2id)
+        tg_vocab_size = len(tg_name2id)
+    else:
+        # --- Single-chrom mode ---
+        dataset = MultiomicTransformerDataset(
+            data_dir=SAMPLE_DATA_CACHE_DIR,
+            chrom_id=CHROM_ID,
+            tf_vocab_path=tf_vocab_path,
+            tg_vocab_path=tg_vocab_path,
+        )
+        assert dataset.tf_name2id is not None
+        assert dataset.tg_name2id is not None
+        tf_vocab_size = len(dataset.tf_name2id)
+        tg_vocab_size = len(dataset.tg_name2id)
 
     # Initiallize the model
     model = MultiomicTransformer(
@@ -348,12 +419,125 @@ def load_train_objs():
 def prepare_dataloader(dataset, batch_size, world_size=1, rank=0,
                        num_workers=4, pin_memory=True, seed=42, drop_last=True):
     """
-    Build train/val/test loaders with the dataset's collate_fn.
-    Uses DistributedSampler only when world_size > 1.
+    Build train/val/test loaders.
+    - Single-chrom: identical to before (random_split + DistributedSampler).
+    - Multi-chrom : split by chromosomes; each split uses ChromBucketBatchSampler
+                    (optionally sharded across ranks via DistributedBatchSampler).
     """
     g = torch.Generator()
     g.manual_seed(seed)
+    
+    def _split_chroms(xs, seed=42):
+        """
+        Deterministic split of chromosome IDs into train/val/test with sensible minima.
+        - For n==1: train=1, val=0, test=0
+        - For n==2: train=1, val=1, test=0   (so validation is never empty)
+        - For n>=3: ~70/15/15 using largest-remainder rounding, then ensure val/test >=1
+        """
+        xs = xs[:]  # copy
+        rnd = random.Random(seed)
+        rnd.shuffle(xs)
+        n = len(xs)
 
+        if n == 0:
+            return [], [], []
+        if n == 1:
+            return xs, [], []
+        if n == 2:
+            return [xs[0]], [xs[1]], []
+
+        # n >= 3: target counts via largest remainder method
+        ratios = (0.70, 0.15, 0.15)
+        targets = [r * n for r in ratios]
+        base = [int(t) for t in targets]  # floors
+        rem = n - sum(base)
+        remainders = [t - b for t, b in zip(targets, base)]
+        # give leftover items to the largest remainders
+        for i in sorted(range(3), key=lambda i: remainders[i], reverse=True)[:rem]:
+            base[i] += 1
+
+        n_train, n_val, n_test = base
+
+        # ensure val/test get at least 1 if possible
+        if n_val == 0 and n_train > 1:
+            n_val, n_train = 1, n_train - 1
+        if n_test == 0 and n_train > 1:
+            n_test, n_train = 1, n_train - 1
+
+        train = xs[:n_train]
+        val   = xs[n_train:n_train + n_val]
+        test  = xs[n_train + n_val:]
+        return train, val, test
+
+
+    # ---------- Multi-chromosome path ----------
+    if isinstance(dataset, MultiChromosomeDataset):
+        train_chrs, val_chrs, test_chrs = _split_chroms(dataset.chrom_ids, seed=seed)
+
+        ds_train = MultiChromosomeDataset(
+            data_dir=dataset.data_dir,
+            chrom_ids=train_chrs,
+            tf_vocab_path=dataset.tf_vocab_path,
+            tg_vocab_path=dataset.tg_vocab_path,
+            fine_tuner=dataset.fine_tuner,
+            sample_name=dataset.sample_name,
+            max_cached=dataset.max_cached,
+        )
+        ds_val = MultiChromosomeDataset(
+            data_dir=dataset.data_dir,
+            chrom_ids=val_chrs,
+            tf_vocab_path=dataset.tf_vocab_path,
+            tg_vocab_path=dataset.tg_vocab_path,
+            fine_tuner=dataset.fine_tuner,
+            sample_name=dataset.sample_name,
+            max_cached=dataset.max_cached,
+        )
+        ds_test = MultiChromosomeDataset(
+            data_dir=dataset.data_dir,
+            chrom_ids=test_chrs,
+            tf_vocab_path=dataset.tf_vocab_path,
+            tg_vocab_path=dataset.tg_vocab_path,
+            fine_tuner=dataset.fine_tuner,
+            sample_name=dataset.sample_name,
+            max_cached=dataset.max_cached,
+        )
+
+        # Bucket batches by chromosome (consistent shapes within batch)
+        base_train_bs = ChromBucketBatchSampler(ds_train, batch_size=batch_size, shuffle=True)
+        base_val_bs   = ChromBucketBatchSampler(ds_val,   batch_size=batch_size, shuffle=False)
+        base_test_bs  = ChromBucketBatchSampler(ds_test,  batch_size=batch_size, shuffle=False)
+
+        if world_size > 1:
+            train_bs = DistributedBatchSampler(base_train_bs, world_size, rank)
+            val_bs   = DistributedBatchSampler(base_val_bs,   world_size, rank)
+            test_bs  = DistributedBatchSampler(base_test_bs,  world_size, rank)
+        else:
+            train_bs, val_bs, test_bs = base_train_bs, base_val_bs, base_test_bs
+
+        train_loader = DataLoader(
+            ds_train,
+            batch_sampler=train_bs,
+            collate_fn=MultiChromosomeDataset.collate_fn,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+        )
+        val_loader = DataLoader(
+            ds_val,
+            batch_sampler=val_bs,
+            collate_fn=MultiChromosomeDataset.collate_fn,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+        )
+        test_loader = DataLoader(
+            ds_test,
+            batch_sampler=test_bs,
+            collate_fn=MultiChromosomeDataset.collate_fn,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+        )
+        return train_loader, val_loader, test_loader
+
+    # ---------- Single-chromosome path (unchanged logic) ----------
     n_total = len(dataset)
     n_train = int(n_total * 0.70)
     n_val   = int(n_total * 0.15)
@@ -361,23 +545,16 @@ def prepare_dataloader(dataset, batch_size, world_size=1, rank=0,
 
     train_set, val_set, test_set = random_split(dataset, [n_train, n_val, n_test], generator=g)
 
-    # --- define samplers for all cases
     train_sampler = val_sampler = test_sampler = None
     if world_size > 1:
         train_sampler = DistributedSampler(train_set, num_replicas=world_size, rank=rank, drop_last=drop_last)
         val_sampler   = DistributedSampler(val_set,   num_replicas=world_size, rank=rank, drop_last=False)
         test_sampler  = DistributedSampler(test_set,  num_replicas=world_size, rank=rank, drop_last=False)
 
-    # --- shuffle only when no sampler is set
-    train_shuffle = (train_sampler is None)
-    val_shuffle   = False
-    test_shuffle  = False
-
-    # --- dataloaders
     train_loader = DataLoader(
         train_set,
         batch_size=batch_size,
-        shuffle=train_shuffle,
+        shuffle=(train_sampler is None),
         sampler=train_sampler,
         collate_fn=MultiomicTransformerDataset.collate_fn,
         num_workers=num_workers,
@@ -387,7 +564,7 @@ def prepare_dataloader(dataset, batch_size, world_size=1, rank=0,
     val_loader = DataLoader(
         val_set,
         batch_size=batch_size,
-        shuffle=val_shuffle,
+        shuffle=False,
         sampler=val_sampler,
         collate_fn=MultiomicTransformerDataset.collate_fn,
         num_workers=num_workers,
@@ -397,69 +574,142 @@ def prepare_dataloader(dataset, batch_size, world_size=1, rank=0,
     test_loader = DataLoader(
         test_set,
         batch_size=batch_size,
-        shuffle=test_shuffle,
+        shuffle=False,
         sampler=test_sampler,
         collate_fn=MultiomicTransformerDataset.collate_fn,
         num_workers=num_workers,
         pin_memory=pin_memory,
         drop_last=False,
     )
-
     return train_loader, val_loader, test_loader
 
 
 
-def write_run_parameters(dataset, out_dir):
 
-    logging.info("\n===== MultiomicTransformerDataset Loaded =====")
-    logging.info(f"Chromosome:          {CHROM_ID}")
-    logging.info(f"Genes:               {len(dataset.tg_ids)}")
-    logging.info(f"Windows (RE):        {dataset.num_windows}")
-    logging.info(f"TFs:                 {len(dataset.tf_ids)}")
-    logging.info(f"Metacells:           {len(dataset.metacell_names)}")
-    logging.info(f"Epochs:              {TOTAL_EPOCHS}")
-    logging.info(f"Batch Size:          {BATCH_SIZE}")
-    logging.info(f"Model Dimension:     {D_MODEL}")
-    logging.info(f"Attention Heads:     {NUM_HEADS}")
-    logging.info(f"Attention Layers:    {NUM_LAYERS}")
-    logging.info(f"Feedforward Layers:  {D_FF}")
-    logging.info(f"Dropout:             {DROPOUT}")
-    logging.info(f"TF-TG Shortcut?:     {USE_SHORTCUT}")
-    logging.info(f"Dist bias?:          {USE_DISTANCE_BIAS}")
-    logging.info(f"Motif Mask?:         {USE_MOTIF_MASK}")
-    logging.info(f"Shortcut L1:         {SHORTCUT_L1}")
-    logging.info(f"Shortcut L2:         {SHORTCUT_L2}")
-    logging.info(f"Shortcut Dropout:    {SHORTCUT_DROPOUT}")
-    logging.info(f"Shortcut Top K:      {SHORTCUT_TOPK}")
-    logging.info("================================================")
-    
-    run_params = {
-        "Genes": dataset.tg_tensor_all.shape[0],
-        "Windows": dataset.num_windows,
-        "TFs": dataset.tf_tensor_all.shape[0],
-        "Metacells": len(dataset.metacell_names),  # store count, not huge list
-        "Epochs": TOTAL_EPOCHS,
-        "Batch Size": BATCH_SIZE,
-        "d_model": D_MODEL,
-        "corr_loss_weight": CORR_LOSS_WEIGHT,
-        "Attention Heads": NUM_HEADS,
-        "Model Layers": NUM_LAYERS,
-        "d_feedforward": D_FF,
-        "Dropout": DROPOUT,
-        "tf_tg_shortcut": USE_SHORTCUT,
-        "Distance Bias":USE_DISTANCE_BIAS,
-        "Distance Bias Scale": ATTN_BIAS_SCALE,
-        "Motif Mask": USE_MOTIF_MASK,
-        "Shortcut L1": SHORTCUT_L1,
-        "Shortcut L2": SHORTCUT_L2,
-        "Shortcut Dropout": SHORTCUT_DROPOUT,
-        "Shortcut Top K": SHORTCUT_TOPK
-    }
+def write_run_parameters(dataset, out_dir):
+    """
+    Logs run settings and writes a run_parameters.json file.
+    """
+    is_multi = isinstance(dataset, MultiChromosomeDataset)
+
+    if not is_multi:
+        # === Single-chrom (original behavior) ===
+        logging.info("\n===== MultiomicTransformerDataset Loaded =====")
+        logging.info(f"Chromosome:          {CHROM_ID}")
+        logging.info(f"Genes:               {len(dataset.tg_ids)}")
+        logging.info(f"Windows (RE):        {dataset.num_windows}")
+        logging.info(f"TFs:                 {len(dataset.tf_ids)}")
+        logging.info(f"Metacells:           {len(dataset.metacell_names)}")
+        logging.info(f"Epochs:              {TOTAL_EPOCHS}")
+        logging.info(f"Batch Size:          {BATCH_SIZE}")
+        logging.info(f"Model Dimension:     {D_MODEL}")
+        logging.info(f"Attention Heads:     {NUM_HEADS}")
+        logging.info(f"Attention Layers:    {NUM_LAYERS}")
+        logging.info(f"Feedforward Layers:  {D_FF}")
+        logging.info(f"Dropout:             {DROPOUT}")
+        logging.info(f"TF-TG Shortcut?:     {USE_SHORTCUT}")
+        logging.info(f"Dist bias?:          {USE_DISTANCE_BIAS}")
+        logging.info(f"Motif Mask?:         {USE_MOTIF_MASK}")
+        logging.info(f"Shortcut L1:         {SHORTCUT_L1}")
+        logging.info(f"Shortcut L2:         {SHORTCUT_L2}")
+        logging.info(f"Shortcut Dropout:    {SHORTCUT_DROPOUT}")
+        logging.info(f"Shortcut Top K:      {SHORTCUT_TOPK}")
+        logging.info("================================================")
+
+        run_params = {
+            "Chromosomes": [CHROM_ID],
+            "Genes": dataset.tg_tensor_all.shape[0],
+            "Windows": dataset.num_windows,
+            "TFs": dataset.tf_tensor_all.shape[0],
+            "Metacells": len(dataset.metacell_names),
+            "Epochs": TOTAL_EPOCHS,
+            "Batch Size": BATCH_SIZE,
+            "d_model": D_MODEL,
+            "corr_loss_weight": CORR_LOSS_WEIGHT,
+            "Attention Heads": NUM_HEADS,
+            "Model Layers": NUM_LAYERS,
+            "d_feedforward": D_FF,
+            "Dropout": DROPOUT,
+            "tf_tg_shortcut": USE_SHORTCUT,
+            "Distance Bias": USE_DISTANCE_BIAS,
+            "Distance Bias Scale": ATTN_BIAS_SCALE,
+            "Motif Mask": USE_MOTIF_MASK,
+            "Shortcut L1": SHORTCUT_L1,
+            "Shortcut L2": SHORTCUT_L2,
+            "Shortcut Dropout": SHORTCUT_DROPOUT,
+            "Shortcut Top K": SHORTCUT_TOPK,
+        }
+
+    else:
+        # === Multi-chrom (aggregate across all chromosomes) ===
+        chrom_list = list(dataset.chrom_ids)
+
+        uniq_tf_ids = set()
+        uniq_tg_ids = set()
+        uniq_metacells = set()
+        total_windows = 0
+
+        for cid in chrom_list:
+            ds = dataset._load_chrom(cid)  # child single-chrom dataset
+            # union of IDs / names
+            uniq_tf_ids.update(list(ds.tf_ids))
+            uniq_tg_ids.update(list(ds.tg_ids))
+            uniq_metacells.update(ds.metacell_names)
+            # windows are chromosome-specific; summing is appropriate
+            total_windows += int(ds.num_windows)
+
+        logging.info("\n===== MultiChromosomeDataset Loaded =====")
+        logging.info(f"Num Chromosomes:     {len(chrom_list)}")
+        logging.info(f"Chromosomes:         {chrom_list}")
+        logging.info(f"Unique TGs:          {len(uniq_tg_ids)}")
+        logging.info(f"Total Windows:       {total_windows}")
+        logging.info(f"Unique TFs:          {len(uniq_tf_ids)}")
+        logging.info(f"Metacells (unique):  {len(uniq_metacells)}")
+        logging.info(f"Epochs:              {TOTAL_EPOCHS}")
+        logging.info(f"Batch Size:          {BATCH_SIZE}")
+        logging.info(f"Model Dimension:     {D_MODEL}")
+        logging.info(f"Attention Heads:     {NUM_HEADS}")
+        logging.info(f"Attention Layers:    {NUM_LAYERS}")
+        logging.info(f"Feedforward Layers:  {D_FF}")
+        logging.info(f"Dropout:             {DROPOUT}")
+        logging.info(f"TF-TG Shortcut?:     {USE_SHORTCUT}")
+        logging.info(f"Dist bias?:          {USE_DISTANCE_BIAS}")
+        logging.info(f"Motif Mask?:         {USE_MOTIF_MASK}")
+        logging.info(f"Shortcut L1:         {SHORTCUT_L1}")
+        logging.info(f"Shortcut L2:         {SHORTCUT_L2}")
+        logging.info(f"Shortcut Dropout:    {SHORTCUT_DROPOUT}")
+        logging.info(f"Shortcut Top K:      {SHORTCUT_TOPK}")
+        logging.info("================================================")
+
+        run_params = {
+            "Chromosomes": chrom_list,
+            "Genes": len(uniq_tg_ids),
+            "Windows": total_windows,
+            "TFs": len(uniq_tf_ids),
+            "Metacells": len(uniq_metacells),
+            "Epochs": TOTAL_EPOCHS,
+            "Batch Size": BATCH_SIZE,
+            "d_model": D_MODEL,
+            "corr_loss_weight": CORR_LOSS_WEIGHT,
+            "Attention Heads": NUM_HEADS,
+            "Model Layers": NUM_LAYERS,
+            "d_feedforward": D_FF,
+            "Dropout": DROPOUT,
+            "tf_tg_shortcut": USE_SHORTCUT,
+            "Distance Bias": USE_DISTANCE_BIAS,
+            "Distance Bias Scale": ATTN_BIAS_SCALE,
+            "Motif Mask": USE_MOTIF_MASK,
+            "Shortcut L1": SHORTCUT_L1,
+            "Shortcut L2": SHORTCUT_L2,
+            "Shortcut Dropout": SHORTCUT_DROPOUT,
+            "Shortcut Top K": SHORTCUT_TOPK,
+        }
 
     path = os.path.join(out_dir, "run_parameters.json")
     with open(path, "w") as f:
-        json.dump(run_params, f, indent=4)  # indent=4 for readability
+        json.dump(run_params, f, indent=4)
     logging.info(f"Run parameters written to {path}")
+
 
 @torch.no_grad()
 def get_mean_tf_tg_attention(model, dataloader, device="cuda"):
@@ -483,17 +733,28 @@ def get_mean_tf_tg_attention(model, dataloader, device="cuda"):
     return attn_accum / max(n, 1)
 
 def write_experiment_settings_and_objects(training_output_dir: Path, dataset: MultiomicTransformerDataset):
+    """
+    Writes vocab files/scaler and calls write_run_parameters().
+    In multi-chrom mode, uses a representative single-chrom dataset to access vocab/scaler.
+    """
+    # Representative dataset for artifacts that live per-chrom (vocab/scaler in your setup)
+    rep = dataset._load_chrom(dataset.chrom_ids[0]) if isinstance(dataset, MultiChromosomeDataset) else dataset
+
+    # Vocab files (same behavior as before, but robust to multi-chrom)
     with open(os.path.join(training_output_dir, "tf_vocab.json"), "w") as f:
-        json.dump(dataset.tf_name2id, f)
+        json.dump(getattr(rep, "tf_name2id", {}), f)
     with open(os.path.join(training_output_dir, "tg_vocab.json"), "w") as f:
-        json.dump(dataset.tg_name2id, f)
-        
-    if getattr(dataset, "scaler", None) is not None:
+        json.dump(getattr(rep, "tg_name2id", {}), f)
+
+    # Optional scaler
+    if getattr(rep, "scaler", None) is not None:
         scaler_out = os.path.join(training_output_dir, "tg_scaler.pkl")
-        joblib.dump(dataset.scaler, scaler_out)
+        joblib.dump(rep.scaler, scaler_out)
         logging.info(f"Saved TG scaler to {scaler_out}")
-        
+
+    # Write the (now multi-chrom aware) parameters JSON + logs
     write_run_parameters(dataset, training_output_dir)
+
 
 def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_size: int):
     
@@ -504,14 +765,22 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
     setup_logging(rank)
     
     try:
+        dataset, model, optimizer = load_train_objs()
+        
+        if isinstance(dataset, MultiChromosomeDataset):
+            out_root = OUTPUT_DIR / "MULTI"
+            _debug_multichrom_stats(dataset)
+        else:
+            out_root = OUTPUT_DIR / CHROM_ID
+        
         training_file_iter_format = "model_training_{:03d}"
-        training_output_dir = unique_path(OUTPUT_DIR / CHROM_ID, training_file_iter_format)
+        training_output_dir = unique_path(out_root, training_file_iter_format)
         
         logging.info(f"\n =========== EXPERIMENT {training_output_dir.name.upper()} ===========")
                 
         os.makedirs(training_output_dir, exist_ok=True)
             
-        dataset, model, optimizer = load_train_objs()
+        
 
         if rank == 0:
             write_experiment_settings_and_objects(training_output_dir, dataset)
@@ -538,17 +807,37 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
             logging.info("Saved final trained model")
             
             ewc_bundle_path = training_output_dir / "ewc_bundle.pth"
-            fisher = ewc_utils.compute_fisher_diag(model, train_loader, device="cuda:0", n_batches=100)
+            fisher = ewc_utils.compute_fisher_diag(trainer.model.module, train_loader, device="cuda:0", n_batches=100)
             ewc_utils.save_ewc_bundle(ewc_bundle_path, model, fisher)
             
             # Save TF→TG attention weights from the shortcut
             if hasattr(trainer.model.module, "shortcut_layer") and hasattr(trainer.model.module.shortcut_layer, "attn"):
                 mean_attn = get_mean_tf_tg_attention(trainer.model.module, test_loader, device=f"cuda:{rank}")
+                
+                # Build ordered name lists from vocab files (IDs -> names)
+                with open(os.path.join(COMMON_DATA, "tf_vocab.json")) as f:
+                    tf_vocab_obj = json.load(f)
+                with open(os.path.join(COMMON_DATA, "tg_vocab.json")) as f:
+                    tg_vocab_obj = json.load(f)
+
+                tf_name2id = tf_vocab_obj.get("name_to_id", tf_vocab_obj)
+                tg_name2id = tg_vocab_obj.get("name_to_id", tg_vocab_obj)
+
+                tf_id2name = [None] * len(tf_name2id)
+                for name, idx in tf_name2id.items():
+                    tf_id2name[idx] = name
+
+                tg_id2name = [None] * len(tg_name2id)
+                for name, idx in tg_name2id.items():
+                    tg_id2name[idx] = name
+
+                # When saving attention (rows=tg, cols=tf as in your code)
                 mean_attn_df = pd.DataFrame(
                     mean_attn.numpy(),
-                    index=dataset.tg_names,
-                    columns=dataset.tf_names
+                    index=tg_id2name,
+                    columns=tf_id2name
                 )
+                
                 mean_attn_df.to_csv(os.path.join(training_output_dir, "tf_tg_mean_attention.csv"))
                 logging.info(f"Saved TF→TG attention weights to 'tf_tg_mean_attention.csv'")
                 
@@ -562,17 +851,15 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
             log_path = os.path.join(training_output_dir, "training_log.csv")
             log_df = pd.read_csv(log_path, header=0)
             
+            chrom_label = CHROM_ID if not isinstance(dataset, MultiChromosomeDataset) else "MULTI"
+            
             pearson_corr_plt = plotting.plot_pearson_corr_across_epochs(
-                df=log_df,
-                dataset_name=DATASET_NAME,
-                chrom_id=CHROM_ID
+                df=log_df, dataset_name=DATASET_NAME, chrom_id=chrom_label
             )
             pearson_corr_plt.savefig(os.path.join(training_output_dir, "pearson_training.png"), dpi=300)
             
             train_val_loss_plt = plotting.plot_train_val_loss(
-                df=log_df,
-                dataset_name=DATASET_NAME,
-                chrom_id=CHROM_ID
+                df=log_df, dataset_name=DATASET_NAME, chrom_id=chrom_label
             )
             train_val_loss_plt.savefig(os.path.join(training_output_dir, "train_val_loss.png"), dpi=300)
             

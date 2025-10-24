@@ -690,19 +690,27 @@ macro_df.to_csv(os.path.join(chip_dir, "per_TF_macro_metrics.csv"), index=False)
 #    Each TF contributes the same total weight; within a TF, positives and negatives
 #    split weight 50/50 (and are spread equally over their counts).
 def per_tf_balanced_weights(df_tf):
+    # Get the length of the TF positives and negatives
     n = len(df_tf)
     if n == 0:
         return np.zeros(0, dtype=np.float64)
+    
+    # Get the number of positive and negatives
     n_pos = int(df_tf["label"].sum())
     n_neg = n - n_pos
+    
+    # Set up a number of weight for each 
     w = np.zeros(n, dtype=np.float64)
     if n_pos == 0 and n_neg == 0:
         return w
+    
     # Within-TF: allocate 0.5 weight mass to each class (if present)
     if n_pos > 0:
         w[df_tf["label"].values == 1] = 0.5 / n_pos
+        
     if n_neg > 0:
         w[df_tf["label"].values == 0] = 0.5 / n_neg
+        
     # Will rescale across TFs so each TF sums to 1/N_tf later
     return w
 
@@ -719,6 +727,7 @@ for tf, sub in scored.groupby("TF"):
 if parts:
     blended = pd.concat(parts, axis=0, ignore_index=True)
     w = np.concatenate(weights, axis=0)
+    
     # Give each TF the same total weight: divide by #TFs that contributed
     n_tfs_contributing = len(weights)
     w = w / n_tfs_contributing

@@ -1,4 +1,4 @@
-import os
+import os, sys
 import json
 import joblib
 import pandas as pd
@@ -6,9 +6,180 @@ import numpy as np
 from sympy import O
 import torch
 from typing import Optional
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Sampler
 from pathlib import Path
 import logging
+from collections import OrderedDict
+import random
+
+
+class DistributedBatchSampler(torch.utils.data.Sampler):
+    """
+    Shards a *batch sampler* across DDP ranks (each rank gets a disjoint
+    subset of batches). This avoids duplicating work without requiring
+    per-sample DistributedSampler, which would break chrom-homogeneous batches.
+    """
+    def __init__(self, batch_sampler, num_replicas, rank):
+        self.batch_sampler = batch_sampler
+        self.num_replicas = num_replicas
+        self.rank = rank
+
+    def __iter__(self):
+        for i, batch in enumerate(self.batch_sampler):
+            if i % self.num_replicas == self.rank:
+                yield batch
+
+    def __len__(self):
+        # ceil division of batches among replicas
+        return (len(self.batch_sampler) + self.num_replicas - 1) // self.num_replicas
+
+class MultiChromosomeDataset(Dataset):
+    """
+    Concatenates per-chromosome MultiomicTransformerDataset instances into one dataset,
+    but only keeps a small number cached in memory to control RAM.
+    """
+    def __init__(self,
+                 data_dir: Path,
+                 chrom_ids,
+                 tf_vocab_path: Optional[Path] = None,
+                 tg_vocab_path: Optional[Path] = None,
+                 fine_tuner: bool = False,
+                 sample_name: Optional[str] = None,
+                 max_cached: int = 2):
+        super().__init__()
+        self.data_dir = Path(data_dir)
+        self.chrom_ids = list(chrom_ids)
+        self.tf_vocab_path = tf_vocab_path
+        self.tg_vocab_path = tg_vocab_path
+        self.fine_tuner = fine_tuner
+        self.sample_name = sample_name
+        self.max_cached = max_cached
+
+        # In pseudobulk mode, num_cells is shared (tf_tensor_all is global).
+        # We can read it once from data_dir (global tf tensor) to avoid loading each chromosome.
+        if not fine_tuner:
+            tf_global = torch.load(self.data_dir / "tf_tensor_all.pt", map_location="cpu")
+            self._num_cells = int(tf_global.shape[1])
+        else:
+            # Fine-tune single-cell mode: number of cells can vary per chromosome.
+            # We'll open a tiny handle per chrom to read shape; still keep it light.
+            self._num_cells = None
+
+        # offsets tell us where each chromosome's indices start in the concatenated space
+        self._offsets = []
+        running = 0
+        if not fine_tuner:
+            for _ in self.chrom_ids:
+                self._offsets.append(running)
+                running += self._num_cells
+            self._length = running
+        else:
+            # Fine-tuner: compute per-chrom lengths on demand
+            self._per_chrom_len = {}
+            for chrom in self.chrom_ids:
+                ds = self._load_chrom(chrom)  # temporary open
+                n = len(ds)
+                self._per_chrom_len[chrom] = n
+                self._offsets.append(running)
+                running += n
+                self._evict_if_needed()  # keep cache small
+            self._length = running
+
+        # Small LRU cache of per-chrom datasets
+        self._cache: OrderedDict[str, MultiomicTransformerDataset] = OrderedDict()
+
+    def _load_chrom(self, chrom_id: str) -> "MultiomicTransformerDataset":
+        # hit
+        if chrom_id in self._cache:
+            ds = self._cache.pop(chrom_id)
+            self._cache[chrom_id] = ds
+            return ds
+        # miss -> create
+        ds = MultiomicTransformerDataset(
+            data_dir=self.data_dir,
+            chrom_id=chrom_id,
+            tf_vocab_path=self.tf_vocab_path,
+            tg_vocab_path=self.tg_vocab_path,
+            fine_tuner=self.fine_tuner,
+            sample_name=self.sample_name
+        )
+        self._cache[chrom_id] = ds
+        self._evict_if_needed()
+        return ds
+
+    def _evict_if_needed(self):
+        while len(self._cache) > self.max_cached:
+            self._cache.popitem(last=False)  # evict oldest
+
+    def __len__(self):
+        return self._length
+
+    def _locate(self, idx):
+        # Binary search over offsets to find chromosome and local idx
+        lo, hi = 0, len(self.chrom_ids)-1
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            start = self._offsets[mid]
+            if mid == len(self.chrom_ids)-1:
+                end = self._length
+            else:
+                end = self._offsets[mid+1]
+            if start <= idx < end:
+                chrom = self.chrom_ids[mid]
+                local = idx - start
+                return chrom, local
+            elif idx < start:
+                hi = mid - 1
+            else:
+                lo = mid + 1
+        raise IndexError(idx)
+
+    def __getitem__(self, idx):
+        chrom, local = self._locate(idx)
+        ds = self._load_chrom(chrom)
+        return ds[local]
+
+    @staticmethod
+    def collate_fn(batch):
+        # Reuse your per-chrom collate (expects within-batch consistent W, G, T)
+        return MultiomicTransformerDataset.collate_fn(batch)
+
+
+class ChromBucketBatchSampler(Sampler[list]):
+    """
+    Produces batches grouped by chromosome so that sequence length W
+    and bias shapes match within the batch (no padding needed).
+    """
+    def __init__(self, dataset: MultiChromosomeDataset, batch_size: int, shuffle: bool = True):
+        self.ds = dataset
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+
+        # Build per-chrom index ranges
+        self._chrom_ranges = []
+        for i, chrom in enumerate(self.ds.chrom_ids):
+            start = self.ds._offsets[i]
+            end = self.ds._offsets[i+1] if i+1 < len(self.ds._offsets) else len(self.ds)
+            idxs = list(range(start, end))
+            self._chrom_ranges.append((chrom, idxs))
+
+    def __iter__(self):
+        chrom_blocks = self._chrom_ranges[:]
+        if self.shuffle:
+            random.shuffle(chrom_blocks)
+
+        for chrom, idxs in chrom_blocks:
+            if self.shuffle:
+                random.shuffle(idxs)
+            for s in range(0, len(idxs), self.batch_size):
+                yield idxs[s:s+self.batch_size]
+
+    def __len__(self):
+        count = 0
+        for _, idxs in self._chrom_ranges:
+            count += (len(idxs) + self.batch_size - 1) // self.batch_size
+        return count
+
 
 class MultiomicTransformerDataset(Dataset):
     """
