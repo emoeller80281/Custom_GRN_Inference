@@ -13,7 +13,7 @@ ORGANISM_CODE = "mm10"
 DATASET_NAME = "DS012_mESC"
 CHROM_ID_LIST = chrom_list
 CHROM_ID = "chr1"
-CHROM_IDS = ["chr1", "chr2"]
+CHROM_IDS = ["chr1", "chr2", "chr3"]
 # , "E7.75_rep1", "E8.0_rep2", "E8.5_rep2", "E8.75_rep2", "E7.5_rep2", "E8.0_rep1", "E8.5_rep1"
 SAMPLE_NAMES = ["DS012_sample"]
 FINE_TUNING_DATASETS = ["DS012_sample"]
@@ -39,19 +39,21 @@ ADATA_ATAC_FILE = "adata_ATAC.h5ad"
 PSEUDOBULK_TG_FILE = "TG_pseudobulk.tsv"
 PSEUDOBULK_RE_FILE = "RE_pseudobulk.tsv"
 
-NEIGHBORS_K = 20
+NEIGHBORS_K = 15
 LEIDEN_RESOLUTION = 1.0
 AGGREGATION_METHOD = "mean" # "sum" or "mean"
 
 # Data Preprocessing and Caching
 VALIDATION_DATASETS = ["E8.75_rep1"]
 FORCE_RECALCULATE = True                # Recomputes genomic windows, peak-TG distance, and re-runs MOODS TF-peak scan
-WINDOW_SIZE = 25_000                    # Aggregates peaks within WINDOW_SIZE bp genomic tiles
-DISTANCE_SCALE_FACTOR = 25_000         # Weights the peak-gene TSS distance score. Lower numbers = faster dropoff
-MAX_PEAK_DISTANCE = 100_000           # Masks out peaks further than this distance from the gene TSS
-DIST_BIAS_MODE = "mean"                 # Method for calcuting window -> gene TSS distance. Options: "max" | "sum" | "mean" | "logsumexp"
+WINDOW_SIZE = 5_000                     # Aggregates peaks within WINDOW_SIZE bp genomic tiles
+DISTANCE_SCALE_FACTOR = 5_000           # Weights the peak-gene TSS distance score. Lower numbers = faster dropoff
+MAX_PEAK_DISTANCE = 10_000              # Masks out peaks further than this distance from the gene TSS
+DIST_BIAS_MODE = "max"                  # Method for calcuting window -> gene TSS distance. Options: "max" | "sum" | "mean" | "logsumexp"
 
 # ----- MODEL TRAINING PARAMETERS -----
+RESUME=False
+
 TOTAL_EPOCHS=500
 BATCH_SIZE=32
 PATIENCE=15
@@ -79,11 +81,39 @@ SHORTCUT_DROPOUT = 0
 # peak-TG distance bias
 ATTN_BIAS_SCALE = 1.0 
 
+# Sampling (optional)
+SUBSAMPLE_MAX_TFS = 150
+SUBSAMPLE_MAX_TGS = 100
+SUBSAMPLE_MAX_WINDOWS_PER_CHROM = 4000  # for example
+SUBSAMPLE_SEED = 42
+
 # ----- FINE TUNING ON SINGLE-CELL DATA -----
 FINE_TUNING_TRAINED_MODEL = "model_training_014"
 FINETUNE_PATIENCE = 20
 FINETUNE_LR = 1e-4       # smaller LR for refinement
 EWC_LAMBDA = 10.0
+
+# ----- GAT CLASSIFIER MODEL -----
+# Model
+HIDDEN_DIM = 128
+GAT_HEADS = 6
+GAT_DROPOUT = 0.30
+EDGE_DROPOUT = 0.30
+
+# Phase 1 (DGI)
+DGI_EPOCHS = 300
+
+# Phase 2 (fine-tune)
+FINETUNE_EPOCHS = 150
+TEST_SIZE = 0.20
+LR_ENCODER = 5e-5       # Learning rate for the (partially) unfrozen encoder
+LR_HEAD = 1e-4          # Learning rate for the classifier head
+WEIGHT_DECAY = 1e-5
+L2SP_LAMBDA = 1e-3      # Strength of L2-SP regularization
+
+# ChIP eval
+PRECISION_AT_K = (10, 20, 50, 100, 200, 500)
+RUN_OPTUNA = False
 
 # ----- PATH SETUP -----
 # Fixed Paths
@@ -123,5 +153,7 @@ FINE_TUNING_DIR = OUTPUT_DIR / FINE_TUNING_TRAINED_MODEL
 
 INFERRED_NETWORK_OUTPUT_DIR = ROOT_DIR / "output" / "transformer_testing_output" / "chrom_inferred_grn_orti_chipatlas_rn117_unique"
 
+# GAT Classifier model
+PRETRAINED_EMB_DIR = OUTPUT_DIR / FINE_TUNING_TRAINED_MODEL
 
 

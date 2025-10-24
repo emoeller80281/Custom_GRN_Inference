@@ -10,11 +10,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 import pandas as pd
 import numpy as np
+import random
+from collections import defaultdict
 from torch_geometric.data import Data
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score, average_precision_score
-from multiomic_transformer.models.tf_tg_classifier import GRN_GAT_Encoder
+from multiomic_transformer.models.tf_tg_classifier import GRN_GAT_Encoder, EdgeClassifier
 from multiomic_transformer.utils.gene_canonicalizer import GeneCanonicalizer
 import logging, os
 import matplotlib.pyplot as plt
@@ -24,46 +26,15 @@ from config.settings import *
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+logging.info(f"Using device: {device}")
+
 # =========================
-# Hyperparameters / Config
+# Config
 # =========================
 SEED = 42
-
-# Model
-HIDDEN_DIM       = 128
-GAT_HEADS        = 6
-DROPOUT          = 0.30
-EDGE_DROPOUT     = 0.30
-
-# Phase 1 (DGI)
-DGI_EPOCHS       = 300
-
-# Phase 2 (fine-tune)
-FINETUNE_EPOCHS  = 150
-TEST_SIZE        = 0.20
-LR_ENCODER       = 5e-5          # for the (partially) unfrozen encoder
-LR_HEAD          = 1e-4          # for the classifier head
-WEIGHT_DECAY     = 1e-5
-L2SP_LAMBDA      = 1e-3          # strength of L2-SP regularization
-
-# Inference
-PAIR_BATCH       = 131072        # batch size for pair scoring
-
-# Plotting
-PLOT_DPI         = 180
-
-# ChIP eval
-PRECISION_AT_K   = (10, 20, 50, 100, 200, 500)
-
-# Canonicalization resources
-NCBI_GENE_INFO   = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data/genome_data/genome_annotation/mm10/Mus_musculus.gene_info"
-GTF_PATH         = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data/genome_data/reference_genome/mm10/Mus_musculus.GRCm39.113.gtf"
-
-# Ground-truth
-CHIP_GT_PATH     = os.getenv("CHIP_GROUND_TRUTH", DATA_DIR / "ground_truth_files" / "mESC_beeline_ChIP-seq.csv")
-CHIP_GT_SEP      = os.getenv("CHIP_GROUND_TRUTH_SEP", ",")
-
-RUN_OPTUNA       = False
+PLOT_DPI = 180
+PAIR_BATCH = 131072        # batch size for pair scoring
 
 torch.manual_seed(SEED); np.random.seed(SEED)
 if torch.cuda.is_available(): torch.cuda.manual_seed_all(SEED)
@@ -76,7 +47,7 @@ elif ORGANISM_CODE == "hg38":
 canon = GeneCanonicalizer()
 canon.load_gtf(str(GTF_FILE_DIR / "Mus_musculus.GRCm39.115.gtf.gz"))
 canon.load_ncbi_gene_info(str(NCBI_FILE_DIR / "Mus_musculus.gene_info.gz"), species_taxid=species_taxid)
-logging.info("Map sizes:", canon.coverage_report())
+logging.info(f"Map sizes: {canon.coverage_report()}")
 # ============================================================
 # Load data
 # ============================================================
@@ -166,55 +137,143 @@ for c in edge_features:
 if coerced_info:
     logging.info("Coerced edge features: " + "; ".join(coerced_info))
 
+# ---- Build pair key and do a group-aware split so identical pairs can't leak
+df = df.copy()
+df["pair"] = list(zip(df["TF"].astype(str), df["TG"].astype(str)))
+
+from sklearn.model_selection import GroupShuffleSplit
+gss = GroupShuffleSplit(n_splits=1, test_size=TEST_SIZE, random_state=SEED)
+train_idx, test_idx = next(gss.split(df, df["label"], groups=df["pair"]))
+df_train = df.iloc[train_idx].reset_index(drop=True)
+df_test  = df.iloc[test_idx].reset_index(drop=True)
+
+# ---- Fit scaler on TRAIN ONLY, then transform ALL edges to keep a single graph
 scaler = StandardScaler()
-edge_attr = torch.tensor(scaler.fit_transform(df[edge_features].to_numpy()), dtype=torch.float32)
+scaler.fit(df_train[edge_features].to_numpy())
 
-assert edge_attr.shape[0] == len(df), "edge_attr rows must equal number of edges"
-assert edge_attr.shape[1] == len(edge_features), "edge_attr cols must equal number of features"
+edge_attr = torch.tensor(
+    scaler.transform(df[edge_features].to_numpy()),
+    dtype=torch.float32
+)
+assert edge_attr.shape[0] == len(df)
+
 
 # ============================================================
-# Encode nodes
+# Load & align pretrained TF/TG embeddings by name
+# (exported from the transformer run)
 # ============================================================
-tf_encoder = LabelEncoder()
-tg_encoder = LabelEncoder()
-tf_ids = tf_encoder.fit_transform(df["TF"])
-tg_ids = tg_encoder.fit_transform(df["TG"]) + len(tf_encoder.classes_)
+import torch, os
+
+# ---- Load the saved vectors + id→name lists
+emb_bundle = torch.load(PRETRAINED_EMB_DIR / "tf_tg_embeddings.pt", map_location="cpu")
+lab_bundle = torch.load(PRETRAINED_EMB_DIR / "tf_tg_vocab_id2name.pt", map_location="cpu")
+tf_vecs = emb_bundle["tf_emb"]          # [T_src, D]
+tg_vecs = emb_bundle["tg_emb"]          # [G_src, D]
+D = tf_vecs.shape[1]                    # embedding dim from the source model
+
+src_tf_id2name = lab_bundle["tf_id2name"]  # list[str], index = old id
+src_tg_id2name = lab_bundle["tg_id2name"]
+
+# Build name→old_index maps (case-insensitive to be safe)
+name_to_old_tf = { (n.upper() if n is not None else None): i
+                   for i, n in enumerate(src_tf_id2name) if n is not None }
+name_to_old_tg = { (n.upper() if n is not None else None): i
+                   for i, n in enumerate(src_tg_id2name) if n is not None }
+
+def _align(encoder_classes, name_to_old, src_vecs, D, init="zeros"):
+    out = torch.zeros(len(encoder_classes), D)
+    if init == "normal":
+        torch.nn.init.normal_(out, mean=0.0, std=0.02)
+    hits = misses = 0
+    for j, name in enumerate(encoder_classes):
+        i = name_to_old.get(str(name).upper(), None)
+        if i is None:
+            misses += 1
+            # keep init for OOV (zeros or normal)
+        else:
+            out[j] = src_vecs[i]
+            hits += 1
+    return out, hits, misses
+
+# ---- Build id tensors (reusing encoders already fit on full df, that's fine for a single graph)
+tf_encoder = LabelEncoder().fit(df["TF"].astype(str))
+tg_encoder = LabelEncoder().fit(df["TG"].astype(str))
+
 n_tfs, n_tgs = len(tf_encoder.classes_), len(tg_encoder.classes_)
 n_nodes = n_tfs + n_tgs
 logging.info(f"Total nodes: {n_nodes} ({n_tfs} TFs, {n_tgs} TGs)")
+
+tf_ids_all = tf_encoder.transform(df["TF"].astype(str)).astype(np.int64)
+tg_ids_all = tg_encoder.transform(df["TG"].astype(str)).astype(np.int64) + n_tfs
+
+pairs_all = torch.tensor(np.stack([tf_ids_all, tg_ids_all], axis=1), dtype=torch.long)
+labels_all = torch.tensor(df["label"].astype(int).values, dtype=torch.float32)
+
+pairs_train = pairs_all[train_idx].to(device)
+pairs_test  = pairs_all[test_idx].to(device)
+y_train     = labels_all[train_idx].float().to(device)
+y_test      = labels_all[test_idx].float().to(device)
+
+tf_emb_aligned, tf_hits, tf_miss = _align(tf_encoder.classes_, name_to_old_tf, tf_vecs, D, init="zeros")
+tg_emb_aligned, tg_hits, tg_miss = _align(tg_encoder.classes_, name_to_old_tg, tg_vecs, D, init="zeros")
+
+os.makedirs("outputs", exist_ok=True)
+
+print(f"[Emb remap] TF matched {tf_hits}/{len(tf_encoder.classes_)}; "
+      f"TG matched {tg_hits}/{len(tg_encoder.classes_)}")
+
+pos_by_tf_ids = defaultdict(list)
+neg_by_tf_ids = defaultdict(list)
+
+train_np = pairs_train.cpu().numpy()
+y_train_np = y_train.cpu().numpy()
+
+for (tf_id, tg_id), y in zip(train_np, y_train_np):
+    if y == 1:
+        pos_by_tf_ids[int(tf_id)].append(int(tg_id))
+    else:
+        neg_by_tf_ids[int(tf_id)].append(int(tg_id))
+
+# Filter to TFs that actually have both classes
+valid_tfs = [tf for tf in pos_by_tf_ids if len(neg_by_tf_ids[tf]) > 0]
+pos_by_tf_ids = {tf: pos_by_tf_ids[tf] for tf in valid_tfs}
+neg_by_tf_ids = {tf: neg_by_tf_ids[tf] for tf in valid_tfs}
 
 # ============================================================
 # Build graph
 # ============================================================
 # Directed TF->TG edges; the encoder will mirror them internally
-edge_index_np = np.array([tf_ids, tg_ids], dtype=np.int64)
+edge_index_np = np.array([tf_ids_all, tg_ids_all], dtype=np.int64)
 edge_index = torch.from_numpy(edge_index_np)
 
-# Node features: simple expression priors (shape: n_nodes x 1)
+# Node priors: simple expression priors (shape: n_nodes x 1)
 tf_expr = df.groupby("TF")["mean_tf_expr"].mean()
 tg_expr = df.groupby("TG")["mean_tg_expr"].mean()
-node_features = torch.tensor(
+
+node_priors = torch.tensor(
     np.concatenate([
         tf_expr.reindex(tf_encoder.classes_).fillna(0).to_numpy().reshape(-1, 1),
         tg_expr.reindex(tg_encoder.classes_).fillna(0).to_numpy().reshape(-1, 1),
     ]),
     dtype=torch.float32
 )
+node_features = torch.cat([torch.cat([tf_emb_aligned, tg_emb_aligned], dim=0), node_priors], dim=1)
+in_node_feats = D + 1
 
 # ============================================================
 # Model & device setup
 # ============================================================
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-logging.info(f"Using device: {device}")
+# Move to device
+node_features = node_features.to(device)
 
 data = Data(x=node_features, edge_index=edge_index, edge_attr=edge_attr).to(device)
 
 model = GRN_GAT_Encoder(
-    in_node_feats=1,
+    in_node_feats=in_node_feats,
     in_edge_feats=len(edge_features),
-    hidden_dim=HIDDEN_DIM,
+    hidden_dim=D_MODEL,
     heads=GAT_HEADS,
-    dropout=DROPOUT,
+    dropout=GAT_DROPOUT,
     edge_dropout_p=EDGE_DROPOUT
 ).to(device)
 
@@ -285,40 +344,42 @@ logging.info("Saved pretrained weights to outputs/self_supervised_gat.pt")
 # ============================================================
 # Phase 2 — Semi-supervised fine-tuning using label edges
 # ============================================================
+class PerTFBalancedSampler:
+    def __init__(self, pos_by_tf, neg_by_tf, batch_tfs=64, k_per_tf=1, seed=SEED):
+        self.pos_by_tf = {tf: v for tf, v in pos_by_tf.items() if len(neg_by_tf.get(tf, [])) > 0}
+        self.neg_by_tf = neg_by_tf
+        self.tfs = list(self.pos_by_tf.keys())
+        self.batch_tfs = batch_tfs
+        self.k = k_per_tf
+        self.rng = random.Random(seed)
+
+    def __iterseqs__(self):
+        self.rng.shuffle(self.tfs)
+        for i in range(0, len(self.tfs), self.batch_tfs):
+            chunk = self.tfs[i:i+self.batch_tfs]
+            batch = []
+            for tf in chunk:
+                pos_tgs = self.pos_by_tf[tf]
+                neg_tgs = self.neg_by_tf[tf]
+                for _ in range(self.k):
+                    if not pos_tgs or not neg_tgs: continue
+                    batch.append((tf, self.rng.choice(pos_tgs), 1))
+                    batch.append((tf, self.rng.choice(neg_tgs), 0))
+            yield batch
+
+    # PyTorch-style iterator:
+    def __iter__(self):
+        yield from self.__iterseqs__()
+
+
 if "label" not in df.columns:
     logging.warning("No 'label' column found — skipping fine-tuning phase.")
     exit()
 
 logging.info("=== Phase 2: Semi-supervised fine-tuning on PKN edges ===")
 
-# Prepare labeled edges (1 if label == 1 else 0)
-df["label"] = (df["label"] == 1).astype(int)
-tf_tg_pairs = torch.tensor(np.stack([tf_ids, tg_ids], axis=1), dtype=torch.long)
-labels = torch.tensor(df["label"].values, dtype=torch.float32)
-
-pairs_train, pairs_test, y_train, y_test = train_test_split(
-    tf_tg_pairs.numpy(), labels.numpy(),
-    test_size=TEST_SIZE, stratify=labels.numpy(), random_state=SEED
-)
-pairs_train, pairs_test = torch.tensor(pairs_train).to(device), torch.tensor(pairs_test).to(device)
-y_train, y_test = torch.tensor(y_train).float().to(device), torch.tensor(y_test).float().to(device)
-
-# Simple classifier head on top of frozen encoder
-class EdgeClassifier(nn.Module):
-    def __init__(self, base_model):
-        super().__init__()
-        self.encoder = base_model
-        self.classifier = nn.Sequential(
-            nn.Linear(128 * 2, 128),
-            nn.ReLU(),
-            nn.Linear(128, 1)
-        )
-    def forward(self, x, edge_index, edge_attr, pairs):
-        h, _ = self.encoder(x, edge_index, edge_attr)
-        tf_emb = h[pairs[:,0]]; tg_emb = h[pairs[:,1]]
-        return self.classifier(torch.cat([tf_emb, tg_emb], dim=1)).squeeze(-1)
-    
-finetune_model = EdgeClassifier(model).to(device)
+embed_dim = D_MODEL
+finetune_model = EdgeClassifier(model, embed_dim).to(device)
 # Unfreeze only the last GAT + projection head
 for n, p in finetune_model.encoder.named_parameters():
     p.requires_grad = ("gat2" in n) or ("proj" in n)
@@ -329,31 +390,39 @@ param_groups = [
     {"params": finetune_model.classifier.parameters(), "lr": LR_HEAD},
 ]
 optimizer_finetune = torch.optim.Adam(param_groups, weight_decay=WEIGHT_DECAY)
-
+sampler = PerTFBalancedSampler(pos_by_tf_ids, neg_by_tf_ids, batch_tfs=64, k_per_tf=4, seed=SEED)
 criterion = nn.BCEWithLogitsLoss()
-
 phase2_train_losses, phase2_val_auroc, phase2_val_aupr = [], [], []
 
 pretrained_state = {k: v.detach().clone() for k, v in finetune_model.encoder.state_dict().items()}
 
-# Add L2-SP regularization to penalize deviation from pretrained weights
 def l2sp_loss(module, ref_state):
-    reg = 0.0
-    for (k, p) in module.state_dict().items():
+    d = next(module.parameters()).device
+    reg = torch.zeros((), device=d)
+    for k, p in module.state_dict().items():
         if p.dtype.is_floating_point and k in ref_state:
-            reg = reg + (p - ref_state[k]).pow(2).sum()
+            reg = reg + (p - ref_state[k].to(d)).pow(2).sum()
     return reg
 
-for epoch in range(1, FINETUNE_EPOCHS+1):
+for epoch in range(1, FINETUNE_EPOCHS + 1):
     finetune_model.train()
-    optimizer_finetune.zero_grad()
-    logits = finetune_model(data.x, data.edge_index, data.edge_attr, pairs_train)
-    loss = criterion(logits, y_train)
-    loss = loss + L2SP_LAMBDA * l2sp_loss(finetune_model.encoder, pretrained_state)
+    running, nb = 0.0, 0
+    for batch in sampler:
+        if len(batch) < 4: # require the batch to have at least 2 pos/neg pairs total
+            continue
+        # batch is a list[(tf_id, tg_id, y)]
+        arr = np.array(batch, dtype=np.int64)
+        pairs_b = torch.tensor(arr[:, :2], dtype=torch.long, device=device)
+        y_b     = torch.tensor(arr[:, 2],  dtype=torch.float32, device=device)
 
-    loss.backward()
-    optimizer_finetune.step()
-    phase2_train_losses.append(loss.item())
+        optimizer_finetune.zero_grad()
+        logits = finetune_model(data.x, data.edge_index, data.edge_attr, pairs_b)
+        loss = criterion(logits, y_b) + L2SP_LAMBDA * l2sp_loss(finetune_model.encoder, pretrained_state)
+        loss.backward(); optimizer_finetune.step()
+        running += float(loss.item()); nb += 1
+
+    if nb:
+        phase2_train_losses.append(running / nb)
 
     if epoch % 10 == 0:
         finetune_model.eval()
@@ -361,11 +430,8 @@ for epoch in range(1, FINETUNE_EPOCHS+1):
             preds = torch.sigmoid(finetune_model(data.x, data.edge_index, data.edge_attr, pairs_test))
             auc = roc_auc_score(y_test.cpu(), preds.cpu())
             aupr = average_precision_score(y_test.cpu(), preds.cpu())
-            phase2_val_auroc.append(auc)
-            phase2_val_aupr.append(aupr)
-        logging.info(f"[FineTune] Epoch {epoch:03d} | Loss={loss.item():.4f} | AUROC={auc:.3f} | AUPR={aupr:.3f}")
-
-
+            phase2_val_auroc.append(auc); phase2_val_aupr.append(aupr)
+        logging.info(f"[FineTune] Epoch {epoch:03d} | Loss={phase2_train_losses[-1]:.4f} | AUROC={auc:.3f} | AUPR={aupr:.3f}")
 torch.save(finetune_model.state_dict(), "outputs/fine_tuned_gat_classifier.pt")
 logging.info("Saved fine-tuned model to outputs/fine_tuned_gat_classifier.pt")
 

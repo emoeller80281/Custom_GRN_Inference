@@ -449,17 +449,17 @@ def run_sliding_window_scan(
     output_file = Path(output_file)
     output_dir = output_file.parent
     os.makedirs(output_dir, exist_ok=True)
+    
+    try:
+        mp.set_start_method("spawn", force=True)
+    except RuntimeError:
+        pass
                 
     # Associate the TFs from TF_Information_all_motifs.txt to the motif with the matching motifID
     df = associate_tf_with_motif_pwm(
         tf_info_file, motif_dir, genome_fasta, peak_bed_file,
         tf_name_list, num_cpu=num_cpu, output_dir=output_dir
     )
-    
-    try:
-        mp.set_start_method("spawn", force=True)
-    except RuntimeError:
-        pass
     
     plot_feature_score_histogram(df, "sliding_window_score", output_dir)
 

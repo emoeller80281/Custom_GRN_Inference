@@ -7,6 +7,8 @@ import warnings
 import random
 import joblib
 import matplotlib.pyplot as plt
+from pathlib import Path
+import re
 import numpy as np
 import pandas as pd
 import seaborn as sns
@@ -31,6 +33,14 @@ from multiomic_transformer.datasets.dataset import (
 from multiomic_transformer.models.model import MultiomicTransformer
 from multiomic_transformer.utils.files import unique_path
 from multiomic_transformer.utils import ewc_utils, plotting
+import signal
+import threading
+
+# global, process-local flag toggled by signal handler
+STOP_REQUESTED = threading.Event()
+
+def _signal_handler(signum, frame):
+    STOP_REQUESTED.set()
 
 warnings.filterwarnings("ignore", message="No device id is provided via `init_process_group`")
 
@@ -42,11 +52,21 @@ def ddp_setup(rank: int, world_size: int):
     """
     
     local_rank = int(os.environ["LOCAL_RANK"])
-    torch.cuda.set_device(local_rank)
+    use_cuda = torch.cuda.is_available()
     
-    torch.backends.cuda.enable_flash_sdp(True)
+    if use_cuda:
+        logging.info("Running training on GPU")
+        torch.cuda.set_device(local_rank)
+        # Guard Flash SDP so CPU-only runs don't crash
+        try:
+            torch.backends.cuda.enable_flash_sdp(True)
+        except Exception as e:
+            logging.warning(f"Flash SDP not available/enabled: {e}")
+    else:
+        logging.info("Running training on CPU")
 
-    dist.init_process_group(backend="nccl", init_method="env://",
+    backend = "nccl" if use_cuda else "gloo"
+    dist.init_process_group(backend=backend, init_method="env://",
                             rank=rank, world_size=world_size)
     
 
@@ -92,6 +112,152 @@ def _debug_multichrom_stats(mcd):
     logging.info(f"Per-chrom stats: {per_chr}")
     logging.info(f"Union TG={len(uniq_tg)}, TF={len(uniq_tf)}, Metacells={len(uniq_metacells)}, Windows sum={total_windows}")
 
+def save_tf_tg_embeddings_from_model(model, out_dir, vocab_dir):
+    model = getattr(model, "module", model)  # unwrap DDP if needed
+    torch.save(
+        {
+            "tf_emb":     model.tf_emb_table.weight.detach().cpu(),   # [T, D]
+            "tg_emb":     model.tg_emb_table.weight.detach().cpu(),   # [G, D]
+            "tg_dec_emb": model.tg_decoder_table.weight.detach().cpu()
+        },
+        os.path.join(out_dir, "tf_tg_embeddings.pt")
+    )
+
+    # Prefer the copies we already wrote into the training_output_dir
+    with open(os.path.join(vocab_dir, "tf_vocab.json")) as f:
+        tf_vocab_obj = json.load(f)
+    with open(os.path.join(vocab_dir, "tg_vocab.json")) as f:
+        tg_vocab_obj = json.load(f)
+
+    tf_name2id = tf_vocab_obj.get("name_to_id", tf_vocab_obj)
+    tg_name2id = tg_vocab_obj.get("name_to_id", tg_vocab_obj)
+
+    tf_id2name = [None] * len(tf_name2id)
+    for name, idx in tf_name2id.items():
+        tf_id2name[idx] = name
+    tg_id2name = [None] * len(tg_name2id)
+    for name, idx in tg_name2id.items():
+        tg_id2name[idx] = name
+
+    torch.save(
+        {"tf_id2name": tf_id2name, "tg_id2name": tg_id2name},
+        os.path.join(out_dir, "tf_tg_vocab_id2name.pt")
+    )
+    
+def save_training_state(trainer, epoch, path, filename="checkpoint.pt"):
+    model = getattr(trainer.model, "module", trainer.model)
+    state = {
+        "epoch": epoch + 1,  # resume from the *next* epoch
+        "model": model.state_dict(),
+        "optimizer": trainer.optimizer.state_dict(),
+        "scaler": trainer.scaler.state_dict(),
+        "scheduler": trainer.scheduler.state_dict(),
+        "history": trainer.history,
+        "best_val_loss": trainer.best_val_loss,
+        "best_pearson": trainer.best_pearson,
+        "patience_counter": trainer.patience_counter,
+        "rng": {
+            "torch": torch.get_rng_state(),
+            "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+            "numpy": np.random.get_state(),
+            "python": random.getstate(),
+        },
+    }
+    torch.save(state, os.path.join(path, filename))
+    
+def load_training_state(trainer, path, map_location="cpu"):
+    state = torch.load(path, map_location=map_location)
+    model = getattr(trainer.model, "module", trainer.model)
+
+    # Backward-compat: if it’s just a raw state_dict (older runs)
+    if isinstance(state, dict) and "model" not in state:
+        model.load_state_dict(state, strict=False)
+        return 0
+
+    # Full state resume
+    model.load_state_dict(state["model"], strict=False)
+    trainer.optimizer.load_state_dict(state["optimizer"])
+    if "scaler" in state and state["scaler"]:
+        trainer.scaler.load_state_dict(state["scaler"])
+    if "scheduler" in state and state["scheduler"]:
+        trainer.scheduler.load_state_dict(state["scheduler"])
+
+    trainer.history = state.get("history", [])
+    trainer.best_val_loss = state.get("best_val_loss", float("inf"))
+    trainer.best_pearson = state.get("best_pearson", 0.0)
+    trainer.patience_counter = state.get("patience_counter", 0)
+
+    # RNG (nice-to-have for exact reproducibility)
+    rng = state.get("rng")
+    if rng:
+        torch.set_rng_state(rng["torch"])
+        if torch.cuda.is_available() and rng.get("cuda"):
+            for dev_idx, dev_state in enumerate(rng["cuda"]):
+                torch.cuda.set_rng_state(dev_state, device=dev_idx)
+        np.random.set_state(rng["numpy"])
+        random.setstate(rng["python"])
+
+    return int(state.get("epoch", 0))
+
+def _pick_ckpt_in_dir(run_dir: Path) -> Path | None:
+    # preference order: best -> trained -> checkpoint
+    for name in ("best_checkpoint.pt", "trained_model.pt", "checkpoint.pt"):
+        p = run_dir / name
+        if p.exists():
+            return p
+    return None
+
+def _latest_run_dir(out_root: Path, prefix: str) -> Path | None:
+    # matches e.g. "model_training_003"
+    rx = re.compile(rf"^{re.escape(prefix)}(\d+)$")
+    best = None
+    best_n = -1
+    if not out_root.exists():
+        return None
+    for p in out_root.iterdir():
+        if not p.is_dir():
+            continue
+        m = rx.match(p.name)
+        if m:
+            n = int(m.group(1))
+            if n > best_n:
+                best_n, best = n, p
+    return best
+
+def resolve_run_and_resume(out_root: Path, name_pattern: str):
+    """
+    Returns (training_output_dir: Path, resume_path: Optional[Path], inplace: bool)
+    - If RESUME_FROM points to a file: resume *in place* in its parent
+    - If RESUME_FROM points to a dir: pick best checkpoint in it and resume *in place*
+    - Else if RESUME=1: pick latest run dir under out_root and resume *in place*
+    - Else: start a *new run dir* (warm start only if RESUME_FROM points to a file AND RESUME_INPLACE=0)
+    """
+    env_resume_from = os.getenv("RESUME_FROM")
+    env_resume = os.getenv("RESUME", "0") == "1"
+    env_inplace = os.getenv("RESUME_INPLACE", "1") == "1"  # default to in-place
+
+    # Case A: explicit RESUME_FROM
+    if env_resume_from:
+        p = Path(env_resume_from)
+        if p.is_file():
+            ckpt = p
+            run_dir = p.parent if env_inplace else unique_path(out_root, name_pattern)
+            return run_dir, ckpt, env_inplace
+        if p.is_dir():
+            ckpt = _pick_ckpt_in_dir(p)
+            if ckpt is None:
+                return p, None, True
+            return p, ckpt, True  # dir implies in-place
+
+    # Case B: RESUME=1 without a path: use latest run dir under out_root
+    if env_resume:
+        latest = _latest_run_dir(out_root, name_pattern.split("{")[0])
+        if latest:
+            ckpt = _pick_ckpt_in_dir(latest)
+            return latest, ckpt, True
+
+    # Case C: fresh run (no resume)
+    return unique_path(out_root, name_pattern), None, False
 
 class Trainer:
     def __init__(
@@ -107,6 +273,7 @@ class Trainer:
         min_delta: float = 1e-3,
 
     ) -> None:
+        self.history = []
         self.gpu_id = gpu_id
         self.model = model.to(gpu_id)
         self.train_data = train_data
@@ -144,7 +311,8 @@ class Trainer:
         )
         self.optimizer.zero_grad(set_to_none=True)
 
-        with autocast(device_type="cuda"):
+        device_type = "cuda" if torch.cuda.is_available() else "cpu"
+        with autocast(device_type=device_type, enabled=(device_type == "cuda")):
             mask_arg = motif_mask if USE_MOTIF_MASK else None
             preds, _ = self.model(
                 atac_wins, tf_tensor, tf_ids=tf_ids, tg_ids=tg_ids, bias=bias, motif_mask=mask_arg
@@ -237,10 +405,14 @@ class Trainer:
         sampler = getattr(self.train_data, "sampler", None)
         if isinstance(sampler, DistributedSampler):
             sampler.set_epoch(epoch)
+            
+        self.model.train()
 
         total_loss, total_mse, n_batches = 0.0, 0.0, 0
 
         for batch in self.train_data:
+            if STOP_REQUESTED.is_set():
+                break
             total_loss_val, mse_loss_val = self._run_batch(batch)
             total_loss += float(total_loss_val)
             total_mse += float(mse_loss_val)
@@ -257,19 +429,40 @@ class Trainer:
 
 
     def _save_checkpoint(self, epoch, path):
-        ckp = self.model.module.state_dict()
-        torch.save(ckp, os.path.join(path, "checkpoint.pt"))
+        save_training_state(self, epoch, path, filename="checkpoint.pt")
         if self.gpu_id == 0:
             logging.info(f"\tTraining checkpoint saved")
         
-    def train(self, max_epochs: int, path: str):
-        best_val_loss = float("inf")
-        best_pearson = float(0)
-        patience_counter = 0
-        history = []  # store per-epoch logs
+    def train(self, max_epochs: int, path: str, start_epoch: int = 0):
+        self.best_val_loss = getattr(self, "best_val_loss", float("inf"))
+        self.best_pearson = getattr(self, "best_pearson", 0.0)
+        self.patience_counter = getattr(self, "patience_counter", 0)
 
-        for epoch in range(max_epochs):
-            train_loss, train_mse, val_loss, pearson_corr, spearman_corr = self._run_epoch(epoch)
+        for epoch in range(start_epoch, max_epochs):
+            # fast exit if a signal was already received before epoch starts
+            if STOP_REQUESTED.is_set():
+                if self.gpu_id == 0:
+                    logging.info("Interrupt received before epoch starts. Saving and exiting...")
+                    self._save_checkpoint(epoch, path)
+                    self._write_log_csv(self.history, path)
+                # broadcast stop to keep all ranks in sync
+                if dist.is_initialized():
+                    stop_tensor = torch.tensor(1, device=self.gpu_id)
+                    dist.broadcast(stop_tensor, src=0)
+                break
+
+            try:
+                train_loss, train_mse, val_loss, pearson_corr, spearman_corr = self._run_epoch(epoch)
+            except KeyboardInterrupt:
+                # local catch just in case; prefer the signal path but handle both
+                if self.gpu_id == 0:
+                    logging.info("KeyboardInterrupt caught during epoch. Saving and exiting...")
+                    self._save_checkpoint(epoch, path)
+                    self._write_log_csv(self.history, path)
+                if dist.is_initialized():
+                    stop_tensor = torch.tensor(1, device=self.gpu_id)
+                    dist.broadcast(stop_tensor, src=0)
+                break
 
             if self.gpu_id == 0:
                 lr = self.optimizer.param_groups[0]['lr']
@@ -280,8 +473,7 @@ class Trainer:
                     f"Pearson: {pearson_corr:.3f} | Spearman: {spearman_corr:.3f} | "
                     f"LR: {lr:.2e}"
                 )
-
-                history.append({
+                self.history.append({
                     "Epoch": epoch+1,
                     "Train Total Loss": train_loss,
                     "Train MSE": train_mse,
@@ -290,50 +482,56 @@ class Trainer:
                     "Spearman": spearman_corr,
                     "LR": lr,
                 })
-                                
-            # Checkpoint + CSV log
-            if epoch % self.save_every == 0:
+
+            if (epoch + 1) % self.save_every == 0:
                 if self.gpu_id == 0:
                     self._save_checkpoint(epoch, path)
-                    self._write_log_csv(history, path)
-                dist.barrier()
+                    self._write_log_csv(self.history, path)
+                if dist.is_initialized():
+                    dist.barrier()
 
-            # Checkpoint + CSV log
+            # build stop flag once per epoch (early stop OR user interrupt)
             stop_tensor = torch.tensor(0, device=self.gpu_id)
 
-            # --- Early stopping check (only rank 0 sets flag) ---
             if self.gpu_id == 0:
-                if (val_loss < best_val_loss - self.min_delta) or (pearson_corr > best_pearson + self.min_delta):
-                    # If either val_loss improved OR pearson improved, reset patience
-                    best_val_loss = val_loss
-                    best_pearson = max(best_pearson, pearson_corr)
-                    patience_counter = 0
+                # Check if the user requested an interrupt
+                if STOP_REQUESTED.is_set():
+                    logging.info("Interrupt requested. Saving and stopping...")
+                    self._save_checkpoint(epoch, path)
+                    self._write_log_csv(self.history, path)
+                    stop_tensor.fill_(1)
                 else:
-                    # No improvement
-                    patience_counter += 1
+                    # Early stopping logic
+                    val_improved = (val_loss < self.best_val_loss - self.min_delta)
+                    pearson_improved = (pearson_corr > self.best_pearson + self.min_delta)
 
-                    if patience_counter >= self.patience:
-                        logging.info("Early stopping triggered.")
-                        self._save_checkpoint(epoch, path)
-                        self._write_log_csv(history, path)
-                        stop_tensor.fill_(1)  # <-- mark stop
-
+                    if val_improved or pearson_improved:
+                        if val_improved:
+                            self.best_val_loss = val_loss
+                        if pearson_improved:
+                            self.best_pearson = pearson_corr
+                        self.patience_counter = 0
                     else:
-                        logging.info(f"    Loss did not improve {patience_counter}/{self.patience}")
+                        self.patience_counter += 1
+                        if self.patience_counter >= self.patience:
+                            logging.info("Early stopping triggered.")
+                            self._save_checkpoint(epoch, path)
+                            self._write_log_csv(self.history, path)
+                            stop_tensor.fill_(1)
+                        else:
+                            logging.info(f"    Loss did not improve {self.patience_counter}/{self.patience}")
 
-            # --- Broadcast stop flag from rank 0 to all ranks ---
-            dist.broadcast(stop_tensor, src=0)
+            if dist.is_initialized():
+                dist.broadcast(stop_tensor, src=0)
 
-            # --- All ranks see the same value now ---
             if stop_tensor.item() == 1:
                 if self.gpu_id == 0:
                     logging.info("All ranks stopping training.")
                 break
 
-
-        # Final save if not early stopped
-        if self.gpu_id == 0 and patience_counter < self.patience:
-            self._write_log_csv(history, path)
+        # Final save if not early stopped or interrupted
+        if self.gpu_id == 0 and not STOP_REQUESTED.is_set() and self.patience_counter < self.patience:
+            self._write_log_csv(self.history, path)
             logging.info("Training loop exited normally.")
     
     def _write_log_csv(self, history, path):
@@ -372,16 +570,12 @@ def load_train_objs():
             fine_tuner=False,
             sample_name=None,
             max_cached=2,
+            # Subsample knobs (optional)
+            max_tfs=SUBSAMPLE_MAX_TFS,
+            max_tgs=SUBSAMPLE_MAX_TGS,
+            max_windows_per_chrom=SUBSAMPLE_MAX_WINDOWS_PER_CHROM,
+            subset_seed=SUBSAMPLE_SEED,
         )
-        # Load vocab sizes from files (MultiChromosomeDataset doesn't expose them directly)
-        with open(tf_vocab_path) as f:
-            tf_vocab_obj = json.load(f)
-        with open(tg_vocab_path) as f:
-            tg_vocab_obj = json.load(f)
-        tf_name2id = tf_vocab_obj.get("name_to_id", tf_vocab_obj)
-        tg_name2id = tg_vocab_obj.get("name_to_id", tg_vocab_obj)
-        tf_vocab_size = len(tf_name2id)
-        tg_vocab_size = len(tg_name2id)
     else:
         # --- Single-chrom mode ---
         dataset = MultiomicTransformerDataset(
@@ -389,11 +583,26 @@ def load_train_objs():
             chrom_id=CHROM_ID,
             tf_vocab_path=tf_vocab_path,
             tg_vocab_path=tg_vocab_path,
+            max_tfs=SUBSAMPLE_MAX_TFS,
+            max_tgs=SUBSAMPLE_MAX_TGS,
+            max_windows=SUBSAMPLE_MAX_WINDOWS_PER_CHROM,
+            subset_seed=SUBSAMPLE_SEED,
         )
         assert dataset.tf_name2id is not None
         assert dataset.tg_name2id is not None
-        tf_vocab_size = len(dataset.tf_name2id)
-        tg_vocab_size = len(dataset.tg_name2id)
+        
+    # Use the dataset’s global sub-vocab (fixed across all chromosomes)
+    tf_vocab_size = len(dataset.tf_name2id_sub) if dataset.tf_name2id_sub else 0
+    tg_vocab_size = len(dataset.tg_name2id_sub) if dataset.tg_name2id_sub else 0
+
+    # Safety: fall back to full vocab (only if you truly didn’t create a sub-vocab)
+    if tf_vocab_size == 0 or tg_vocab_size == 0:
+        with open(tf_vocab_path) as f:
+            tf_vocab_obj = json.load(f)
+        with open(tg_vocab_path) as f:
+            tg_vocab_obj = json.load(f)
+        tf_vocab_size = len(tf_vocab_obj.get("name_to_id", tf_vocab_obj))
+        tg_vocab_size = len(tg_vocab_obj.get("name_to_id", tg_vocab_obj))
 
     # Initiallize the model
     model = MultiomicTransformer(
@@ -482,7 +691,12 @@ def prepare_dataloader(dataset, batch_size, world_size=1, rank=0,
             fine_tuner=dataset.fine_tuner,
             sample_name=dataset.sample_name,
             max_cached=dataset.max_cached,
+            max_tfs=dataset.max_tfs,
+            max_tgs=dataset.max_tgs,
+            max_windows_per_chrom=dataset.max_windows_per_chrom,
+            subset_seed=dataset.subset_seed,
         )
+
         ds_val = MultiChromosomeDataset(
             data_dir=dataset.data_dir,
             chrom_ids=val_chrs,
@@ -491,7 +705,12 @@ def prepare_dataloader(dataset, batch_size, world_size=1, rank=0,
             fine_tuner=dataset.fine_tuner,
             sample_name=dataset.sample_name,
             max_cached=dataset.max_cached,
+            max_tfs=dataset.max_tfs,
+            max_tgs=dataset.max_tgs,
+            max_windows_per_chrom=dataset.max_windows_per_chrom,
+            subset_seed=dataset.subset_seed,
         )
+
         ds_test = MultiChromosomeDataset(
             data_dir=dataset.data_dir,
             chrom_ids=test_chrs,
@@ -500,6 +719,10 @@ def prepare_dataloader(dataset, batch_size, world_size=1, rank=0,
             fine_tuner=dataset.fine_tuner,
             sample_name=dataset.sample_name,
             max_cached=dataset.max_cached,
+            max_tfs=dataset.max_tfs,
+            max_tgs=dataset.max_tgs,
+            max_windows_per_chrom=dataset.max_windows_per_chrom,
+            subset_seed=dataset.subset_seed,
         )
 
         # Bucket batches by chromosome (consistent shapes within batch)
@@ -583,23 +806,40 @@ def prepare_dataloader(dataset, batch_size, world_size=1, rank=0,
     )
     return train_loader, val_loader, test_loader
 
-
-
-
 def write_run_parameters(dataset, out_dir):
-    """
-    Logs run settings and writes a run_parameters.json file.
-    """
+    """Logs run settings and writes a run_parameters.json file."""
     is_multi = isinstance(dataset, MultiChromosomeDataset)
 
+    # helpers: count TF/TG using sub-vocab if present, else fall back
+    def _count_tf(ds):
+        if hasattr(ds, "tf_name2id_sub") and ds.tf_name2id_sub:
+            return len(ds.tf_name2id_sub)
+        if hasattr(ds, "tf_names") and ds.tf_names:
+            return len(ds.tf_names)
+        if hasattr(ds, "tf_ids"):
+            return int(ds.tf_ids.numel())
+        return 0
+
+    def _count_tg(ds):
+        if hasattr(ds, "tg_name2id_sub") and ds.tg_name2id_sub:
+            return len(ds.tg_name2id_sub)
+        if hasattr(ds, "tg_names") and ds.tg_names:
+            return len(ds.tg_names)
+        if hasattr(ds, "tg_ids"):
+            return int(ds.tg_ids.numel())
+        return 0
+
     if not is_multi:
-        # === Single-chrom (original behavior) ===
+        tf_n = _count_tf(dataset)
+        tg_n = _count_tg(dataset)
+        win_n = getattr(dataset, "num_windows", 0)
+
         logging.info("\n===== MultiomicTransformerDataset Loaded =====")
         logging.info(f"Chromosome:          {CHROM_ID}")
-        logging.info(f"Genes:               {len(dataset.tg_ids)}")
-        logging.info(f"Windows (RE):        {dataset.num_windows}")
-        logging.info(f"TFs:                 {len(dataset.tf_ids)}")
-        logging.info(f"Metacells:           {len(dataset.metacell_names)}")
+        logging.info(f"Genes (TG):          {tg_n}")
+        logging.info(f"Windows (RE):        {win_n}")
+        logging.info(f"TFs:                 {tf_n}")
+        logging.info(f"Metacells:           {len(getattr(dataset, 'metacell_names', []))}")
         logging.info(f"Epochs:              {TOTAL_EPOCHS}")
         logging.info(f"Batch Size:          {BATCH_SIZE}")
         logging.info(f"Model Dimension:     {D_MODEL}")
@@ -618,10 +858,10 @@ def write_run_parameters(dataset, out_dir):
 
         run_params = {
             "Chromosomes": [CHROM_ID],
-            "Genes": dataset.tg_tensor_all.shape[0],
-            "Windows": dataset.num_windows,
-            "TFs": dataset.tf_tensor_all.shape[0],
-            "Metacells": len(dataset.metacell_names),
+            "Genes": tg_n,
+            "Windows": win_n,
+            "TFs": tf_n,
+            "Metacells": len(getattr(dataset, "metacell_names", [])),
             "Epochs": TOTAL_EPOCHS,
             "Batch Size": BATCH_SIZE,
             "d_model": D_MODEL,
@@ -641,30 +881,22 @@ def write_run_parameters(dataset, out_dir):
         }
 
     else:
-        # === Multi-chrom (aggregate across all chromosomes) ===
-        chrom_list = list(dataset.chrom_ids)
-
-        uniq_tf_ids = set()
-        uniq_tg_ids = set()
-        uniq_metacells = set()
+        # global sub-vocab sizes (shared across all chromosomes)
+        tf_n = len(getattr(dataset, "tf_name2id_sub", {}) or [])
+        tg_n = len(getattr(dataset, "tg_name2id_sub", {}) or [])
+        # total windows after per-chrom subsampling (sum child.num_windows)
         total_windows = 0
-
-        for cid in chrom_list:
-            ds = dataset._load_chrom(cid)  # child single-chrom dataset
-            # union of IDs / names
-            uniq_tf_ids.update(list(ds.tf_ids))
-            uniq_tg_ids.update(list(ds.tg_ids))
-            uniq_metacells.update(ds.metacell_names)
-            # windows are chromosome-specific; summing is appropriate
-            total_windows += int(ds.num_windows)
+        for cid in dataset.chrom_ids:
+            ds = dataset._load_chrom(cid)
+            total_windows += int(getattr(ds, "num_windows", 0))
 
         logging.info("\n===== MultiChromosomeDataset Loaded =====")
-        logging.info(f"Num Chromosomes:     {len(chrom_list)}")
-        logging.info(f"Chromosomes:         {chrom_list}")
-        logging.info(f"Unique TGs:          {len(uniq_tg_ids)}")
+        logging.info(f"Num Chromosomes:     {len(dataset.chrom_ids)}")
+        logging.info(f"Chromosomes:         {list(dataset.chrom_ids)}")
+        logging.info(f"Unique TGs (global): {tg_n}")
         logging.info(f"Total Windows:       {total_windows}")
-        logging.info(f"Unique TFs:          {len(uniq_tf_ids)}")
-        logging.info(f"Metacells (unique):  {len(uniq_metacells)}")
+        logging.info(f"Unique TFs (global): {tf_n}")
+        logging.info(f"Metacells (unique):  {len(getattr(ds, 'metacell_names', []))}")
         logging.info(f"Epochs:              {TOTAL_EPOCHS}")
         logging.info(f"Batch Size:          {BATCH_SIZE}")
         logging.info(f"Model Dimension:     {D_MODEL}")
@@ -682,11 +914,11 @@ def write_run_parameters(dataset, out_dir):
         logging.info("================================================")
 
         run_params = {
-            "Chromosomes": chrom_list,
-            "Genes": len(uniq_tg_ids),
+            "Chromosomes": list(dataset.chrom_ids),
+            "Genes": tg_n,
             "Windows": total_windows,
-            "TFs": len(uniq_tf_ids),
-            "Metacells": len(uniq_metacells),
+            "TFs": tf_n,
+            "Metacells": len(getattr(ds, "metacell_names", [])),
             "Epochs": TOTAL_EPOCHS,
             "Batch Size": BATCH_SIZE,
             "d_model": D_MODEL,
@@ -755,122 +987,192 @@ def write_experiment_settings_and_objects(training_output_dir: Path, dataset: Mu
     # Write the (now multi-chrom aware) parameters JSON + logs
     write_run_parameters(dataset, training_output_dir)
 
-
 def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_size: int):
-    
-    # Early check to make sure the model dimension can be split evenly among the number of heads
+    # --- Fast guards + signals first ---
     assert D_MODEL % NUM_HEADS == 0, f"{D_MODEL} not divisible by {NUM_HEADS}"
-    
+    signal.signal(signal.SIGINT, _signal_handler)
+    signal.signal(signal.SIGTERM, _signal_handler)
+
+    # --- DDP init + logging ---
     ddp_setup(rank, world_size)
     setup_logging(rank)
-    
+
     try:
+        # --- Build data/model/optim + output dir ---
         dataset, model, optimizer = load_train_objs()
-        
+
         if isinstance(dataset, MultiChromosomeDataset):
             out_root = OUTPUT_DIR / "MULTI"
-            _debug_multichrom_stats(dataset)
+            # _debug_multichrom_stats(dataset)
         else:
             out_root = OUTPUT_DIR / CHROM_ID
+
+        name_pattern = "model_training_{:03d}"
         
-        training_file_iter_format = "model_training_{:03d}"
-        training_output_dir = unique_path(out_root, training_file_iter_format)
-        
-        logging.info(f"\n =========== EXPERIMENT {training_output_dir.name.upper()} ===========")
-                
-        os.makedirs(training_output_dir, exist_ok=True)
-            
-        
+        # --- Resolve training_output_dir and resume target BEFORE making the dir ---
+        training_output_dir, resume_ckpt, resume_inplace = resolve_run_and_resume(out_root, name_pattern)
+
+        # Only create the dir if we're starting fresh or warm-starting into a *new* dir
+        if not training_output_dir.exists():
+            os.makedirs(training_output_dir, exist_ok=True)
 
         if rank == 0:
+            logging.info(f"\n =========== EXPERIMENT {training_output_dir.name.upper()} ===========")
+        
+        if rank == 0 and not resume_inplace:
             write_experiment_settings_and_objects(training_output_dir, dataset)
             logging.info("Wrote experiment settings and objects to training output directory")
             logging.info("Preparing dataloader")
 
-        train_loader, val_loader, test_loader = prepare_dataloader(dataset, batch_size, world_size, rank)
-        
+        train_loader, val_loader, test_loader = prepare_dataloader(
+            dataset, batch_size, world_size, rank
+        )
+
         if rank == 0:
             logging.info("Creating Trainer")
-        
-        loss_fn = nn.MSELoss()    
-        
-        trainer = Trainer(model, train_loader, val_loader, loss_fn, optimizer, gpu_id=rank, save_every=save_every, patience=PATIENCE)
-        
+
+        loss_fn = nn.MSELoss()
+        trainer = Trainer(
+            model, train_loader, val_loader, loss_fn, optimizer,
+            gpu_id=rank, save_every=save_every, patience=PATIENCE
+        )
+
+        # --- Resume path handling ---
+        start_epoch = 0
+        if resume_ckpt and resume_ckpt.exists():
+            if rank == 0:
+                logging.info(f"Resuming from: {resume_ckpt}")
+            if dist.is_initialized():
+                dist.barrier()
+            start_epoch = load_training_state(
+                trainer,
+                str(resume_ckpt),
+                map_location=(f"cuda:{rank}" if torch.cuda.is_available() else "cpu"),
+            )
+            if rank == 0:
+                logging.info(f"Resumed to start at epoch index: {start_epoch}")
+        elif resume_ckpt:
+            if rank == 0:
+                logging.warning(f"Resume checkpoint not found: {resume_ckpt}")
+                
+        if rank == 0:
+            logging.info("\n ----- CUDA DEVICE INFO -----")
+            logging.info(f"  - CUDA available?: {torch.cuda.is_available()}")
+            logging.info(f"  - CUDA device count: {torch.cuda.device_count()}")
+            if torch.cuda.is_available():
+                local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+                try:
+                    logging.info(f"  - CUDA device LOCAL_RANK: {local_rank}")
+                    logging.info(f"  - CUDA device name: {torch.cuda.get_device_name(local_rank)}")
+                except Exception as e:
+                    logging.warning(f"Could not query device name: {e}")
+            # Check model params device
+            try:
+                pdev = next(trainer.model.parameters()).device
+                logging.info(f"  - Model first param device: {pdev}")
+            except StopIteration:
+                logging.info("Model has no parameters? (unexpected)")
+                
+                # id range sanity
+            m = getattr(trainer.model, "module", trainer.model)
+            tf_ids = trainer.train_data.dataset._load_chrom(trainer.train_data.dataset.chrom_ids[0]).tf_ids
+            tg_ids = trainer.train_data.dataset._load_chrom(trainer.train_data.dataset.chrom_ids[0]).tg_ids
+            logging.info(f"  - TF ids: min={int(tf_ids.min())}, max={int(tf_ids.max())}, table={m.tf_emb_table.num_embeddings}")
+            logging.info(f"  - TG ids: min={int(tg_ids.min())}, max={int(tg_ids.max())}, table={m.tg_emb_table.num_embeddings}")
+            assert tf_ids.max().item() < model.tf_emb_table.num_embeddings
+            assert tg_ids.max().item() < model.tg_emb_table.num_embeddings
+
+        # --- Train (Ctrl+C-safe via STOP_REQUESTED path inside Trainer) ---
         if rank == 0:
             logging.info("\n ----- TRAINING STARTED -----")
-        trainer.train(max_epochs=TOTAL_EPOCHS, path=training_output_dir)
-        
+        trainer.train(max_epochs=TOTAL_EPOCHS, path=training_output_dir, start_epoch=start_epoch)
+
         if rank == 0:
-            # Save model checkpoint
-            torch.save(trainer.model.module.state_dict(),
-                    os.path.join(training_output_dir, "trained_model.pt"))
-            logging.info("Saved final trained model")
+            model_for_save = getattr(trainer.model, "module", trainer.model)
+            model_for_save.eval()
+
+            # save embeddings directly (no reload)
+            save_tf_tg_embeddings_from_model(
+                model_for_save,
+                out_dir=training_output_dir,
+                vocab_dir=training_output_dir,
+            )
+
+            # only run the heavy “extras” if not interrupted
+            if not STOP_REQUESTED.is_set():
+                torch.save(model_for_save.state_dict(),
+                        os.path.join(training_output_dir, "trained_model.pt"))
             
-            ewc_bundle_path = training_output_dir / "ewc_bundle.pth"
-            fisher = ewc_utils.compute_fisher_diag(trainer.model.module, train_loader, device="cuda:0", n_batches=100)
-            ewc_utils.save_ewc_bundle(ewc_bundle_path, model, fisher)
-            
-            # Save TF→TG attention weights from the shortcut
-            if hasattr(trainer.model.module, "shortcut_layer") and hasattr(trainer.model.module.shortcut_layer, "attn"):
-                mean_attn = get_mean_tf_tg_attention(trainer.model.module, test_loader, device=f"cuda:{rank}")
+                ewc_bundle_path = training_output_dir / "ewc_bundle.pth"
+                fisher = ewc_utils.compute_fisher_diag(model_for_save, train_loader,
+                                       device=(f"cuda:{rank}" if torch.cuda.is_available() else "cpu"),
+                                       n_batches=100)
+                ewc_utils.save_ewc_bundle(ewc_bundle_path, model_for_save, fisher)
                 
-                # Build ordered name lists from vocab files (IDs -> names)
-                with open(os.path.join(COMMON_DATA, "tf_vocab.json")) as f:
-                    tf_vocab_obj = json.load(f)
-                with open(os.path.join(COMMON_DATA, "tg_vocab.json")) as f:
-                    tg_vocab_obj = json.load(f)
+                # Save TF→TG attention weights from the shortcut
+                if hasattr(model_for_save, "shortcut_layer") and hasattr(model_for_save.shortcut_layer, "attn"):
+                    mean_attn = get_mean_tf_tg_attention(model_for_save, test_loader, device=f"cuda:{rank}")
+                    
+                    # Build ordered name lists from vocab files (IDs -> names)
+                    with open(os.path.join(training_output_dir, "tf_vocab.json")) as f:
+                        tf_vocab_obj = json.load(f)
+                    with open(os.path.join(training_output_dir, "tg_vocab.json")) as f:
+                        tg_vocab_obj = json.load(f)
 
-                tf_name2id = tf_vocab_obj.get("name_to_id", tf_vocab_obj)
-                tg_name2id = tg_vocab_obj.get("name_to_id", tg_vocab_obj)
+                    tf_name2id = tf_vocab_obj.get("name_to_id", tf_vocab_obj)
+                    tg_name2id = tg_vocab_obj.get("name_to_id", tg_vocab_obj)
 
-                tf_id2name = [None] * len(tf_name2id)
-                for name, idx in tf_name2id.items():
-                    tf_id2name[idx] = name
+                    tf_id2name = [None] * len(tf_name2id)
+                    for name, idx in tf_name2id.items():
+                        tf_id2name[idx] = name
 
-                tg_id2name = [None] * len(tg_name2id)
-                for name, idx in tg_name2id.items():
-                    tg_id2name[idx] = name
+                    tg_id2name = [None] * len(tg_name2id)
+                    for name, idx in tg_name2id.items():
+                        tg_id2name[idx] = name
 
-                # When saving attention (rows=tg, cols=tf as in your code)
-                mean_attn_df = pd.DataFrame(
-                    mean_attn.numpy(),
-                    index=tg_id2name,
-                    columns=tf_id2name
+                    # When saving attention (rows=tg, cols=tf as in your code)
+                    mean_attn_df = pd.DataFrame(
+                        mean_attn.numpy(),
+                        index=tg_id2name,
+                        columns=tf_id2name
+                    )
+                    
+                    mean_attn_df.to_csv(os.path.join(training_output_dir, "tf_tg_mean_attention.csv"))
+                    logging.info(f"Saved TF→TG attention weights to 'tf_tg_mean_attention.csv'")
+                    
+                    plt.figure(figsize=(12,8))
+                    sns.heatmap(mean_attn_df.iloc[:50, :50], cmap="viridis")
+                    plt.title("TF→TG attention weights (subset)")
+                    plt.tight_layout()
+                    plt.savefig(os.path.join(training_output_dir, "tf_tg_attention_heatmap.png"))                
+            
+                # Training figures
+                log_path = os.path.join(training_output_dir, "training_log.csv")
+                if os.path.exists(log_path):
+                    log_df = pd.read_csv(log_path, header=0)
+                
+                    chrom_label = CHROM_ID if not isinstance(dataset, MultiChromosomeDataset) else "MULTI"
+                    
+                    pearson_corr_plt = plotting.plot_pearson_corr_across_epochs(
+                        df=log_df, dataset_name=DATASET_NAME, chrom_id=chrom_label
+                    )
+                    pearson_corr_plt.savefig(os.path.join(training_output_dir, "pearson_training.png"), dpi=300)
+                    
+                    train_val_loss_plt = plotting.plot_train_val_loss(
+                        df=log_df, dataset_name=DATASET_NAME, chrom_id=chrom_label
+                    )
+                    train_val_loss_plt.savefig(os.path.join(training_output_dir, "train_val_loss.png"), dpi=300)
+                else:
+                    logging.warning("No training_log.csv yet; skipping training plots.")
+                
+                per_gene_corr_scatter_plt = plotting.plot_per_gene_correlation_scatterplot(
+                    model=model_for_save,
+                    dataloader=test_loader,
+                    use_mask=USE_MOTIF_MASK,
+                    gpu_id=0
                 )
-                
-                mean_attn_df.to_csv(os.path.join(training_output_dir, "tf_tg_mean_attention.csv"))
-                logging.info(f"Saved TF→TG attention weights to 'tf_tg_mean_attention.csv'")
-                
-                plt.figure(figsize=(12,8))
-                sns.heatmap(mean_attn_df.iloc[:50, :50], cmap="viridis")
-                plt.title("TF→TG attention weights (subset)")
-                plt.tight_layout()
-                plt.savefig(os.path.join(training_output_dir, "tf_tg_attention_heatmap.png"))                
+                per_gene_corr_scatter_plt.savefig(os.path.join(training_output_dir, "per_gene_corr_scatter.png"), dpi=300)
             
-            # Training figures
-            log_path = os.path.join(training_output_dir, "training_log.csv")
-            log_df = pd.read_csv(log_path, header=0)
-            
-            chrom_label = CHROM_ID if not isinstance(dataset, MultiChromosomeDataset) else "MULTI"
-            
-            pearson_corr_plt = plotting.plot_pearson_corr_across_epochs(
-                df=log_df, dataset_name=DATASET_NAME, chrom_id=chrom_label
-            )
-            pearson_corr_plt.savefig(os.path.join(training_output_dir, "pearson_training.png"), dpi=300)
-            
-            train_val_loss_plt = plotting.plot_train_val_loss(
-                df=log_df, dataset_name=DATASET_NAME, chrom_id=chrom_label
-            )
-            train_val_loss_plt.savefig(os.path.join(training_output_dir, "train_val_loss.png"), dpi=300)
-            
-            per_gene_corr_scatter_plt = plotting.plot_per_gene_correlation_scatterplot(
-                model=model,
-                dataloader=test_loader,
-                use_mask=USE_MOTIF_MASK,
-                gpu_id=0
-            )
-            per_gene_corr_scatter_plt.savefig(os.path.join(training_output_dir, "per_gene_corr_scatter.png"), dpi=300)
-                
         if rank == 0:
             logging.info("\nIterations complete")
     
@@ -883,8 +1185,12 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
     
 if __name__ == "__main__":
     
-    main(rank=int(os.environ["LOCAL_RANK"]),
-        world_size=int(os.environ["WORLD_SIZE"]),
-        save_every=5,
-        total_epochs=TOTAL_EPOCHS,
-        batch_size=BATCH_SIZE)
+    global_rank = int(os.environ.get("RANK", "0"))
+    local_rank  = int(os.environ.get("LOCAL_RANK", "0"))
+    world_size  = int(os.environ.get("WORLD_SIZE", "1"))
+    
+    main(rank=global_rank,
+         world_size=world_size,
+         save_every=5,
+         total_epochs=TOTAL_EPOCHS,
+         batch_size=BATCH_SIZE)
