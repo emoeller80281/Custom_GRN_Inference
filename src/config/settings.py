@@ -96,8 +96,8 @@ TF_FILE = DATA_DIR / "databases" / "motif_information" / ORGANISM_CODE / "TF_Inf
 JASPAR_PFM_DIR = DATA_DIR / "databases" / "motif_information" / "JASPAR" / "pfm_files"
 MOTIF_DIR = DATA_DIR / "databases" / "motif_information" / ORGANISM_CODE / "pwms_all_motifs"
 
-CHIP_GT_PATH = DATA_DIR / "ground_truth_files" / "mESC_beeline_ChIP-seq.csv"
-CHIP_GT_SEP = ","
+CHIP_GROUND_TRUTH = DATA_DIR / "ground_truth_files" / "mESC_beeline_ChIP-seq.csv"
+CHIP_GROUND_TRUTH_SEP = ","
 
 PROCESSED_DATA = DATA_DIR / "processed"
 TRAINING_DATA_CACHE = DATA_DIR / "training_data_cache"
