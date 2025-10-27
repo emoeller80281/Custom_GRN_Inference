@@ -74,7 +74,7 @@ def _best_orientation(y_true, score_vec):
 # ============================================================
 
 sample_dfs = []
-sample_names = ["E7.5_rep1"]
+sample_names = ["E7.5_rep1", "E7.5_rep2"]
 for sample in sample_names:
     if os.path.exists(SAMPLE_PROCESSED_DATA_DIR / sample / "tf_tg_data.parquet"):
         logging.info(f"Loading data for {sample}")

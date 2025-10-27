@@ -61,23 +61,24 @@ class EdgeClassifier(nn.Module):
     def __init__(self, base_model, embed_dim):
         super().__init__()
         self.encoder = base_model
-        in_dim = embed_dim * 4  # <-- 4 blocks now
+        in_dim = embed_dim * 4  # [tf, tg, tf*tg, |tf-tg|]
+
+        self.bn = nn.BatchNorm1d(in_dim, affine=True)
         self.classifier = nn.Sequential(
-            nn.LayerNorm(embed_dim * 4),
-            nn.Dropout(0.3),
-            nn.Linear(embed_dim * 4, embed_dim // 2),
-            nn.GELU(),
+            nn.Linear(in_dim, 2*embed_dim),
+            nn.ReLU(inplace=True),
             nn.Dropout(0.2),
-            nn.Linear(embed_dim // 2, 1)
+            nn.Linear(2*embed_dim, embed_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.1),
+            nn.Linear(embed_dim, 1)
         )
+        # Init: last layer bias slightly negative
+        nn.init.constant_(self.classifier[-1].bias, -0.2)
 
     def forward(self, x, edge_index, edge_attr, pairs):
-        h, _ = self.encoder(x, edge_index, edge_attr)
-        h = F.normalize(h, p=2, dim=1)
-        tf_emb = h[pairs[:,0]]
-        tg_emb = h[pairs[:,1]]
-        z = torch.cat([tf_emb,
-                       tg_emb,
-                       tf_emb * tg_emb,
-                       torch.abs(tf_emb - tg_emb)], dim=1)
+        h, _ = self.encoder(x, edge_index, edge_attr)  # <-- no F.normalize
+        tf = h[pairs[:,0]]; tg = h[pairs[:,1]]
+        z = torch.cat([tf, tg, tf*tg, (tf - tg).abs()], dim=1)
+        z = self.bn(z)  # BatchNorm instead of LayerNorm
         return self.classifier(z).squeeze(-1)

@@ -5,7 +5,7 @@ import itertools
 ROOT_DIR = Path(__file__).resolve().parent.parent.parent
 
 chr_nums = [f"chr{i}" for i in range(1, 20)]
-chrom_list = chr_nums + ["chrX", "chrY"]
+chrom_list = chr_nums #+ ["chrX", "chrY"]
 
 # ----- SAMPLE INFORMATION -----
 # Sample information
@@ -13,7 +13,7 @@ ORGANISM_CODE = "mm10"
 DATASET_NAME = "mESC"
 CHROM_ID_LIST = chrom_list
 CHROM_ID = "chr1"
-CHROM_IDS = chrom_list
+CHROM_IDS = chr_nums
 # , "E7.75_rep1", "E8.0_rep2", "E8.5_rep2", "E8.75_rep2", "E7.5_rep2", "E8.0_rep1", "E8.5_rep1"
 SAMPLE_NAMES = ["E7.5_rep1", "E7.5_rep2"]
 FINE_TUNING_DATASETS = ["E7.5_rep1"]
@@ -54,8 +54,8 @@ DIST_BIAS_MODE = "mean"                 # Method for calcuting window -> gene TS
 # ----- MODEL TRAINING PARAMETERS -----
 TOTAL_EPOCHS=500
 BATCH_SIZE=32
-PATIENCE=15
-CORR_LOSS_WEIGHT=0.5
+PATIENCE=20
+CORR_LOSS_WEIGHT=0.75
 
 D_MODEL = 384
 NUM_HEADS = 6
@@ -64,8 +64,8 @@ D_FF = 768
 DROPOUT = 0.1
 
 INITIAL_LEARNING_RATE = 1e-3
-SCHEDULER_FACTOR=0.5
-SCHEDULER_PATIENCE=10
+SCHEDULER_FACTOR=0.25
+SCHEDULER_PATIENCE=15
 
 # TF to TG shortcut parameters
 USE_DISTANCE_BIAS = True

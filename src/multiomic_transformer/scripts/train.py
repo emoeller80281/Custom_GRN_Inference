@@ -377,7 +377,6 @@ class Trainer:
         try:
             _ = len(self.val_data)
         except Exception:
-            # some iterable DataLoaders don’t implement __len__
             pass
         if hasattr(self.val_data, "__len__") and len(self.val_data) == 0:
             logging.warning("Validation loader is empty; skipping validation.")
@@ -386,24 +385,32 @@ class Trainer:
         self.model.eval()
         device = next(self.model.parameters()).device
 
-        loss_sum = 0.0
-        n_batches = 0
-
-        # DDP-safe MSE accumulation (sum of squared error + count of elements)
+        loss_sum, n_batches = 0.0, 0
         sse_local = torch.tensor(0.0, device=device, dtype=torch.float64)
         n_local   = torch.tensor(0,   device=device, dtype=torch.long)
+
+        # Optionally buffer flattened preds/targets for correlations
+        try:
+            from scipy.stats import pearsonr, spearmanr
+            want_corr = True
+        except Exception:
+            want_corr = False
+        preds_buf, tgts_buf = [], []
 
         with torch.no_grad():
             for batch in self.val_data:
                 v_loss, v_preds, v_targets = self._run_val_batch(batch)
-                loss_sum += float(v_loss)
-                n_batches += 1
+                loss_sum += float(v_loss); n_batches += 1
 
                 diff = (v_preds - v_targets).to(device)
                 sse_local += (diff * diff).sum(dtype=torch.float64)
                 n_local   += diff.numel()
 
-        # Reduce across ranks to get global MSE
+                if want_corr:
+                    # flatten to 1-D so padding/all_gather is trivial & rank-safe
+                    preds_buf.append(v_preds.detach().reshape(-1))
+                    tgts_buf.append( v_targets.detach().reshape(-1))
+
         import torch.distributed as dist
         if dist.is_initialized():
             vec = torch.stack([sse_local, n_local.to(torch.float64)])
@@ -417,89 +424,63 @@ class Trainer:
         val_mse = (sse_global / n_global) if n_global > 0 else float("nan")
         avg_loss = loss_sum / max(1, n_batches)
 
-        # ---------- Optional: correlations on rank 0 ----------
-        # (Do a shape-safe all_gather with padding; skip if you don't need correlations.)
+        # ---------- correlations (optional) ----------
         pearson_corr, spearman_corr = float("nan"), float("nan")
-        try:
-            from scipy.stats import pearsonr, spearmanr
-            compute_corr = True
-        except Exception:
-            compute_corr = False
-
-        if compute_corr:
-            # Re-run a light pass to gather preds/targets (or store them above if memory allows)
-            preds_bufs, tgts_bufs = [], []
-            with torch.no_grad():
-                for batch in self.val_data:
-                    _, v_preds, v_targets = self._run_val_batch(batch)
-                    preds_bufs.append(v_preds)
-                    tgts_bufs.append(v_targets)
-
-            preds_local = torch.cat(preds_bufs, dim=0) if preds_bufs else torch.empty(0, device=device)
-            tgts_local  = torch.cat(tgts_bufs,  dim=0) if tgts_bufs  else torch.empty(0, device=device)
+        if want_corr:
+            preds_local = torch.cat(preds_buf, dim=0) if preds_buf else torch.empty(0, device=device)
+            tgts_local  = torch.cat(tgts_buf,  dim=0) if tgts_buf  else torch.empty(0, device=device)
 
             if dist.is_initialized():
                 ws = dist.get_world_size()
-                # gather sizes
-                n_local_rows = torch.tensor([preds_local.size(0)], device=device, dtype=torch.long)
-                sizes = [torch.zeros_like(n_local_rows) for _ in range(ws)]
-                dist.all_gather(sizes, n_local_rows)
-                max_rows = int(torch.stack(sizes).max().item())
+                rank = dist.get_rank()
 
-                # pad to same number of rows
-                G = preds_local.size(1) if preds_local.ndim == 2 else 0
-                if max_rows > preds_local.size(0):
-                    pad = max_rows - preds_local.size(0)
-                    pad_pred = torch.zeros((pad, G), device=device, dtype=preds_local.dtype)
-                    pad_tgt  = torch.zeros((pad, G), device=device, dtype=tgts_local.dtype)
-                    preds_pad = torch.cat([preds_local, pad_pred], dim=0)
-                    tgts_pad  = torch.cat([tgts_local,  pad_tgt],  dim=0)
+                # gather true lengths
+                n_local_elems = torch.tensor([preds_local.numel()], device=device, dtype=torch.long)
+                sizes = [torch.zeros_like(n_local_elems) for _ in range(ws)]
+                dist.all_gather(sizes, n_local_elems)
+                sizes = [int(s.item()) for s in sizes]
+                max_len = max(sizes)
+
+                # pad to max_len (still 1-D)
+                pad = max_len - preds_local.numel()
+                if pad > 0:
+                    preds_pad = torch.cat([preds_local, torch.zeros(pad, device=device, dtype=preds_local.dtype)], dim=0)
+                    tgts_pad  = torch.cat([tgts_local,  torch.zeros(pad,  device=device, dtype=tgts_local.dtype)],  dim=0)
                 else:
                     preds_pad, tgts_pad = preds_local, tgts_local
 
-                # gather padded tensors
-                pred_list = [torch.zeros_like(preds_pad) for _ in range(ws)]
-                tgt_list  = [torch.zeros_like(tgts_pad)  for _ in range(ws)]
+                # all_gather padded 1-D blocks
+                pred_list = [torch.empty_like(preds_pad) for _ in range(ws)]
+                tgt_list  = [torch.empty_like(tgts_pad)  for _ in range(ws)]
                 dist.all_gather(pred_list, preds_pad)
                 dist.all_gather(tgt_list,  tgts_pad)
 
-                # rank 0 trims and computes correlations
-                if dist.get_rank() == 0:
-                    # trim each chunk to its true size
-                    chunks = []
-                    tchunks = []
-                    for i, sz in enumerate(sizes):
-                        n_i = int(sz.item())
-                        if n_i > 0:
-                            chunks.append(pred_list[i][:n_i].cpu().numpy())
-                            tchunks.append(tgt_list[i][:n_i].cpu().numpy())
-                    if chunks:
-                        P = np.concatenate(chunks, axis=0)
-                        T = np.concatenate(tchunks, axis=0)
-                        P = np.nan_to_num(P, nan=0.0, posinf=1e6, neginf=-1e6)
-                        T = np.nan_to_num(T, nan=0.0, posinf=1e6, neginf=-1e6)
-                        if np.std(P) > 1e-8 and np.std(T) > 1e-8:
-                            pearson_corr  = float(pearsonr(P.ravel(), T.ravel())[0])
-                            spearman_corr = float(spearmanr(P.ravel(), T.ravel())[0])
-                # broadcast correlations to all ranks
-                if dist.get_rank() == 0:
-                    corr_tensor = torch.tensor([pearson_corr, spearman_corr], device=device, dtype=torch.float32)
-                else:
-                    corr_tensor = torch.zeros(2, device=device, dtype=torch.float32)
-                dist.broadcast(corr_tensor, src=0)
-                pearson_corr, spearman_corr = float(corr_tensor[0].item()), float(corr_tensor[1].item())
+                # rank 0 trims back to true sizes and computes correlations
+                if rank == 0:
+                    P = torch.cat([pred_list[i][:sizes[i]] for i in range(ws)], dim=0).cpu().numpy()
+                    T = torch.cat([tgt_list[i][:sizes[i]]  for i in range(ws)], dim=0).cpu().numpy()
+                    P = np.nan_to_num(P, nan=0.0, posinf=1e6, neginf=-1e6)
+                    T = np.nan_to_num(T, nan=0.0, posinf=1e6, neginf=-1e6)
+                    if P.size and np.std(P) > 1e-8 and np.std(T) > 1e-8:
+                        pearson_corr  = float(pearsonr(P, T)[0])
+                        spearman_corr = float(spearmanr(P, T)[0])
+
+                # broadcast correlations
+                corr = torch.tensor([pearson_corr, spearman_corr], device=device, dtype=torch.float32) if dist.get_rank() == 0 \
+                    else torch.zeros(2, device=device, dtype=torch.float32)
+                dist.broadcast(corr, src=0)
+                pearson_corr, spearman_corr = float(corr[0].item()), float(corr[1].item())
             else:
-                # single-process fallback
+                # single-process
                 P = preds_local.detach().cpu().numpy()
                 T = tgts_local.detach().cpu().numpy()
                 P = np.nan_to_num(P, nan=0.0, posinf=1e6, neginf=-1e6)
                 T = np.nan_to_num(T, nan=0.0, posinf=1e6, neginf=-1e6)
                 if P.size and np.std(P) > 1e-8 and np.std(T) > 1e-8:
-                    pearson_corr  = float(pearsonr(P.ravel(), T.ravel())[0])
-                    spearman_corr = float(spearmanr(P.ravel(), T.ravel())[0])
+                    pearson_corr  = float(pearsonr(P, T)[0])
+                    spearman_corr = float(spearmanr(P, T)[0])
 
         return avg_loss, val_mse, pearson_corr, spearman_corr
-
     
     def _run_epoch(self, epoch: int):
         # Epoch-sync the batch sampler used by the loader
@@ -640,25 +621,26 @@ class Trainer:
                     self._write_log_csv(self.history, path)
                     stop_tensor.fill_(1)
                 else:
-                    # Early stopping logic
-                    val_improved = (val_loss < self.best_val_loss - self.min_delta)
-                    pearson_improved = (pearson_corr > self.best_pearson + self.min_delta)
+                    if epoch > 10: # Wait some time before checking if loss improves
+                        # Early stopping logic
+                        val_improved = (val_loss < self.best_val_loss - self.min_delta)
+                        pearson_improved = (pearson_corr > self.best_pearson + self.min_delta)
 
-                    if val_improved or pearson_improved:
-                        if val_improved:
-                            self.best_val_loss = val_loss
-                        if pearson_improved:
-                            self.best_pearson = pearson_corr
-                        self.patience_counter = 0
-                    else:
-                        self.patience_counter += 1
-                        if self.patience_counter >= self.patience:
-                            logging.info("Early stopping triggered.")
-                            self._save_checkpoint(epoch, path)
-                            self._write_log_csv(self.history, path)
-                            stop_tensor.fill_(1)
+                        if val_improved or pearson_improved:
+                            if val_improved:
+                                self.best_val_loss = val_loss
+                            if pearson_improved:
+                                self.best_pearson = pearson_corr
+                            self.patience_counter = 0
                         else:
-                            logging.info(f"    Loss did not improve {self.patience_counter}/{self.patience}")
+                            self.patience_counter += 1
+                            if self.patience_counter >= self.patience:
+                                logging.info("Early stopping triggered.")
+                                self._save_checkpoint(epoch, path)
+                                self._write_log_csv(self.history, path)
+                                stop_tensor.fill_(1)
+                            else:
+                                logging.info(f"    Loss did not improve {self.patience_counter}/{self.patience}")
 
             if dist.is_initialized():
                 dist.broadcast(stop_tensor, src=0)
@@ -1084,24 +1066,47 @@ def write_run_parameters(dataset, out_dir):
 
 @torch.no_grad()
 def get_mean_tf_tg_attention(model, dataloader, device="cuda"):
+    """
+    Returns mean TF→TG attention aligned to the GLOBAL vocab:
+      shape [G_global, T_global], averaged over all occurrences of each TG.
+    """
     model.eval()
-    attn_accum = None
-    n = 0
+    m = getattr(model, "module", model)
+
+    G_global = m.tg_emb_table.num_embeddings
+    T_global = m.tf_emb_table.num_embeddings
+
+    attn_sum   = torch.zeros(G_global, T_global, device="cpu")
+    tg_counts  = torch.zeros(G_global, dtype=torch.long, device="cpu")
+
     for atac_wins, tf_tensor, _, bias, tf_ids, tg_ids, motif_mask in dataloader:
-        atac_wins, tf_tensor, bias = atac_wins.to(device), tf_tensor.to(device), bias.to(device)
-        tf_ids, tg_ids = tf_ids.to(device), tg_ids.to(device)
-        motif_mask = motif_mask.to(device)
+        atac_wins = atac_wins.to(device)
+        tf_tensor = tf_tensor.to(device)
+        bias      = bias.to(device)
+        tf_ids    = tf_ids.to(device)
+        tg_ids    = tg_ids.to(device)
+        motif_mask= motif_mask.to(device)
 
-        # Forward pass
-        _ = model(atac_wins, tf_tensor, tf_ids=tf_ids, tg_ids=tg_ids,
-                  bias=bias, motif_mask=motif_mask)
+        _ = m(atac_wins, tf_tensor, tf_ids=tf_ids, tg_ids=tg_ids, bias=bias,
+              motif_mask=(motif_mask if getattr(m, "use_motif_mask", False) else None))
 
-        # grab attn from shortcut layer each batch
-        if hasattr(model.shortcut_layer, "attn"):
-            attn_batch = model.shortcut_layer.attn.detach().cpu()
-            attn_accum = attn_batch if attn_accum is None else attn_accum + attn_batch
-            n += 1
-    return attn_accum / max(n, 1)
+        if not hasattr(m.shortcut_layer, "attn"):
+            continue
+        # attn_batch: [G_b, T_b], tf_ids: [T_b], tg_ids: [G_b]
+        attn_batch = m.shortcut_layer.attn.detach().float().cpu()
+        tf_idx_global = tf_ids.detach().long().cpu()
+        tg_idx_global = tg_ids.detach().long().cpu()
+
+        # add into global slots
+        attn_sum[tg_idx_global[:, None], tf_idx_global[None, :]] += attn_batch
+        tg_counts[tg_idx_global] += 1
+
+    # avoid div-by-zero
+    tg_counts = tg_counts.clamp_min(1)
+    mean_attn = attn_sum / tg_counts[:, None]
+
+    return mean_attn
+
 
 def write_experiment_settings_and_objects(training_output_dir: Path, dataset: MultiomicTransformerDataset):
     """

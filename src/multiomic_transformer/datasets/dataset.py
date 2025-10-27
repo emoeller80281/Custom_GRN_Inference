@@ -593,7 +593,7 @@ class MultiomicTransformerDataset(Dataset):
 
             # distance bias: [G, W] -> slice columns
             if getattr(self, "dist_bias_tensor", None) is not None:
-                self.dist_bias_tensor = self.dist_bias_tensor.index_select(1, keep_w_t)
+                self.dist_bias_tensor = self.dist_bias_tensor.index_select(0, keep_tg_t)
 
         # Build name->row index maps from current names
         tf_old_map = {self.standardize_name(n): i for i, n in enumerate(getattr(self, "tf_names", []))}
@@ -621,9 +621,7 @@ class MultiomicTransformerDataset(Dataset):
 
             # motif mask: [G, T] -> slice columns
             if getattr(self, "motif_mask_tensor", None) is not None:
-                self.motif_mask_tensor = self.motif_mask_tensor.index_select(
-                    1, torch.arange(len(keep_tf_names))
-                )
+                self.motif_mask_tensor = self.motif_mask_tensor.index_select(1, keep_tf_t)
 
         # 3) Subsample TGs (affects tg_tensor_all rows, dist_bias rows, motif_mask rows, ids/names, scaler)
         if self._max_tgs is not None and len(self.tg_names) > self._max_tgs:
