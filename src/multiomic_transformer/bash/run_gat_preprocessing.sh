@@ -11,6 +11,6 @@
 
 set -euo pipefail
 
-cd /gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER
+# cd /gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER
 
-poetry run python ./src/multiomic_transformer/data/preprocess.py --num_cpu 64
+poetry run python ./src/multiomic_transformer/data/preprocess.py --num_cpu 8

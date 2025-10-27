@@ -55,3 +55,18 @@ class GRN_GAT_Encoder(nn.Module):
         h_proj = self.proj(h)
         g = self.readout(h_proj)
         return h_proj, g
+
+# Simple classifier head on top of frozen encoder
+class EdgeClassifier(nn.Module):
+    def __init__(self, base_model, embed_dim):
+        super().__init__()
+        self.encoder = base_model
+        self.classifier = nn.Sequential(
+            nn.Linear(embed_dim * 2, embed_dim),
+            nn.ReLU(),
+            nn.Linear(embed_dim, 1)
+        )
+    def forward(self, x, edge_index, edge_attr, pairs):
+        h, _ = self.encoder(x, edge_index, edge_attr)
+        tf_emb = h[pairs[:,0]]; tg_emb = h[pairs[:,1]]
+        return self.classifier(torch.cat([tf_emb, tg_emb], dim=1)).squeeze(-1)

@@ -1,4 +1,4 @@
-import os
+import os, sys
 import json
 import joblib
 import pandas as pd
@@ -6,30 +6,347 @@ import numpy as np
 from sympy import O
 import torch
 from typing import Optional
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Sampler
 from pathlib import Path
 import logging
+from collections import OrderedDict
+import random
+
+
+class DistributedBatchSampler(torch.utils.data.Sampler):
+    """
+    Shards a *batch sampler* across DDP ranks (each rank gets a disjoint
+    subset of batches). This avoids duplicating work without requiring
+    per-sample DistributedSampler, which would break chrom-homogeneous batches.
+    """
+    def __init__(self, batch_sampler, num_replicas, rank):
+        self.batch_sampler = batch_sampler
+        self.num_replicas = num_replicas
+        self.rank = rank
+
+    def __iter__(self):
+        for i, batch in enumerate(self.batch_sampler):
+            if i % self.num_replicas == self.rank:
+                yield batch
+
+    def __len__(self):
+        # ceil division of batches among replicas
+        return (len(self.batch_sampler) + self.num_replicas - 1) // self.num_replicas
+
+class MultiChromosomeDataset(Dataset):
+    def __init__(
+        self,
+        data_dir: Path,
+        chrom_ids,
+        tf_vocab_path: Optional[Path] = None,
+        tg_vocab_path: Optional[Path] = None,
+        fine_tuner: bool = False,
+        sample_name: Optional[str] = None,
+        max_cached: int = 2,
+        max_tfs: Optional[int] = None,
+        max_tgs: Optional[int] = None,
+        max_windows_per_chrom: Optional[int] = None,
+        subset_seed: int = 42,
+    ):
+        super().__init__()
+        self.data_dir = Path(data_dir)
+        self.chrom_ids = list(chrom_ids)
+        self.tf_vocab_path = tf_vocab_path
+        self.tg_vocab_path = tg_vocab_path
+        self.fine_tuner = fine_tuner
+        self.sample_name = sample_name
+        self.max_cached = max_cached
+        self.max_tfs = max_tfs
+        self.max_tgs = max_tgs
+        self.max_windows_per_chrom = max_windows_per_chrom
+        self.subset_seed = subset_seed
+        
+        self._tf_name2id_full = self._load_vocab_dict(tf_vocab_path)
+        self._tg_name2id_full = self._load_vocab_dict(tg_vocab_path)
+
+        # In pseudobulk mode, num_cells is shared (tf_tensor_all is global).
+        # We can read it once from data_dir (global tf tensor) to avoid loading each chromosome.
+        if not fine_tuner:
+            tf_global = torch.load(self.data_dir / "tf_tensor_all.pt", map_location="cpu")
+            self._num_cells = int(tf_global.shape[1])
+        else:
+            # Fine-tune single-cell mode: number of cells can vary per chromosome.
+            # We'll open a tiny handle per chrom to read shape; still keep it light.
+            self._num_cells = None
+
+        # offsets tell us where each chromosome's indices start in the concatenated space
+        self._offsets = []
+        running = 0
+        if not fine_tuner:
+            for _ in self.chrom_ids:
+                self._offsets.append(running)
+                running += self._num_cells
+            self._length = running
+        else:
+            # Fine-tuner: compute per-chrom lengths on demand
+            self._per_chrom_len = {}
+            for chrom in self.chrom_ids:
+                ds = self._load_chrom(chrom)  # temporary open
+                n = len(ds)
+                self._per_chrom_len[chrom] = n
+                self._offsets.append(running)
+                running += n
+                self._evict_if_needed()  # keep cache small
+            self._length = running
+
+        # Small LRU cache of per-chrom datasets
+        self._cache: OrderedDict[str, MultiomicTransformerDataset] = OrderedDict()
+        
+        # Build per-chrom name inventories (fast JSON reads, not big tensors)
+        per_chrom_tf = {}
+        per_chrom_tg = {}
+        for cid in self.chrom_ids:
+            tf_names, tg_names = self._peek_names_for_chrom(cid)
+            per_chrom_tf[cid] = tf_names
+            per_chrom_tg[cid] = tg_names
+
+        rng = np.random.RandomState(self.subset_seed or 42)
+
+        # Guarantee at least one per chromosome, then top up to your global caps
+        self.tf_keep_names = self._build_global_keep(
+            per_chrom_names=per_chrom_tf,
+            max_k=self.max_tfs,
+            rng=rng,
+            ensure_per_chrom=True,
+            min_per_chrom=1,
+        )
+        self.tg_keep_names = self._build_global_keep(
+            per_chrom_names=per_chrom_tg,
+            max_k=self.max_tgs,
+            rng=rng,
+            ensure_per_chrom=True,
+            min_per_chrom=1,
+        )
+
+        # Global contiguous id maps (these define the embedding table sizes)
+        self.tf_name2id_sub = {n: i for i, n in enumerate(self.tf_keep_names)}
+        self.tg_name2id_sub = {n: i for i, n in enumerate(self.tg_keep_names)}
+
+        # store window cap too
+        self.max_windows_per_chrom = max_windows_per_chrom
+
+    def _evict_if_needed(self):
+        while len(self._cache) > self.max_cached:
+            self._cache.popitem(last=False)  # evict oldest
+
+    def __len__(self):
+        return self._length
+
+    def _locate(self, idx):
+        # Binary search over offsets to find chromosome and local idx
+        lo, hi = 0, len(self.chrom_ids)-1
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            start = self._offsets[mid]
+            if mid == len(self.chrom_ids)-1:
+                end = self._length
+            else:
+                end = self._offsets[mid+1]
+            if start <= idx < end:
+                chrom = self.chrom_ids[mid]
+                local = idx - start
+                return chrom, local
+            elif idx < start:
+                hi = mid - 1
+            else:
+                lo = mid + 1
+        raise IndexError(idx)
+
+    def __getitem__(self, idx):
+        chrom, local = self._locate(idx)
+        ds = self._load_chrom(chrom)
+        return ds[local]
+
+    @staticmethod
+    def collate_fn(batch):
+        # Reuse your per-chrom collate (expects within-batch consistent W, G, T)
+        return MultiomicTransformerDataset.collate_fn(batch)
+    
+    
+    @staticmethod
+    def standardize_name(name: str) -> str:
+        if not isinstance(name, str):
+            return name
+        return name.upper()
+
+    def _load_vocab_dict(self, path: Optional[Path]) -> Optional[dict]:
+        if not path or not os.path.exists(path):
+            return None
+        with open(path) as f:
+            obj = json.load(f)
+        # support either {"name_to_id": {...}} or flat dict
+        raw = obj.get("name_to_id", obj)
+        return {self.standardize_name(k): int(v) for k, v in raw.items()}
+
+    def _load_chrom_lazy(self, chrom_id: str) -> "MultiomicTransformerDataset":
+        """Instantiate a child without forcing subsample (internal helper)."""
+        ds = MultiomicTransformerDataset(
+            data_dir=self.data_dir,
+            chrom_id=chrom_id,
+            tf_vocab_path=self.tf_vocab_path,
+            tg_vocab_path=self.tg_vocab_path,
+            fine_tuner=self.fine_tuner,
+            sample_name=self.sample_name
+        )
+        return ds
+
+    def _load_chrom(self, chrom_id: str) -> "MultiomicTransformerDataset":
+        # cache hit
+        if chrom_id in self._cache:
+            ds = self._cache.pop(chrom_id)
+            self._cache[chrom_id] = ds
+            return ds
+
+        # miss -> create
+        ds = self._load_chrom_lazy(chrom_id)
+
+        # Apply the global subsample and contiguous id mapping
+        ds.apply_global_subsample(
+            tf_name2id_sub=self.tf_name2id_sub,
+            tg_name2id_sub=self.tg_name2id_sub,
+            max_windows=self.max_windows_per_chrom,
+            rng_seed=self.subset_seed,
+        )
+
+        self._cache[chrom_id] = ds
+        self._evict_if_needed()
+        return ds
+    
+    def _peek_names_for_chrom(self, chrom_id: str):
+        """
+        Fast, lightweight peek: read only the TF/TG names JSON for a chromosome,
+        without loading big tensors.
+        """
+        chrom_dir = self.data_dir / chrom_id
+        tf_names_json = self.data_dir / "tf_names.json"
+        tg_names_json = chrom_dir / f"tg_names_{chrom_id}.json"
+
+        with open(tf_names_json) as f:
+            tf_names = [self.standardize_name(n) for n in json.load(f)]
+        with open(tg_names_json) as f:
+            tg_names = [self.standardize_name(n) for n in json.load(f)]
+        return tf_names, tg_names
+
+    def _build_global_keep(
+        self,
+        per_chrom_names: dict[str, list[str]],
+        max_k: int | None,
+        rng: np.random.RandomState,
+        ensure_per_chrom: bool = True,
+        min_per_chrom: int = 1,
+    ) -> list[str]:
+        """
+        Build a global keep list given per-chrom name lists. Optionally guarantees
+        at least `min_per_chrom` names from each chromosome (if available), then
+        tops up to max_k from the remaining union.
+        """
+        # union over all chromosomes
+        union = set()
+        for names in per_chrom_names.values():
+            union.update(names)
+
+        if not max_k or max_k >= len(union):
+            # keep everything
+            return sorted(union)
+
+        chosen = set()
+
+        if ensure_per_chrom and min_per_chrom > 0:
+            # seed with a small quota from each chromosome
+            for cid, names in per_chrom_names.items():
+                if not names:
+                    continue
+                take = min(min_per_chrom, len(names))
+                picks = rng.choice(names, size=take, replace=False)
+                chosen.update(picks)
+
+        # top up to max_k from the leftover pool
+        remaining = list(union - chosen)
+        need = max_k - len(chosen)
+        if need > 0 and remaining:
+            extra = rng.choice(remaining, size=min(need, len(remaining)), replace=False)
+            chosen.update(extra)
+
+        # If we still came up short (all chromosomes tiny), just return whatever exists
+        return sorted(chosen)
+
+
+
+class ChromBucketBatchSampler(Sampler[list]):
+    """
+    Produces batches grouped by chromosome so that sequence length W
+    and bias shapes match within the batch (no padding needed).
+    """
+    def __init__(self, dataset: MultiChromosomeDataset, batch_size: int, shuffle: bool = True):
+        self.ds = dataset
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+
+        # Build per-chrom index ranges
+        self._chrom_ranges = []
+        for i, chrom in enumerate(self.ds.chrom_ids):
+            start = self.ds._offsets[i]
+            end = self.ds._offsets[i+1] if i+1 < len(self.ds._offsets) else len(self.ds)
+            idxs = list(range(start, end))
+            self._chrom_ranges.append((chrom, idxs))
+
+    def __iter__(self):
+        chrom_blocks = self._chrom_ranges[:]
+        if self.shuffle:
+            random.shuffle(chrom_blocks)
+
+        for chrom, idxs in chrom_blocks:
+            if self.shuffle:
+                random.shuffle(idxs)
+            for s in range(0, len(idxs), self.batch_size):
+                yield idxs[s:s+self.batch_size]
+
+    def __len__(self):
+        count = 0
+        for _, idxs in self._chrom_ranges:
+            count += (len(idxs) + self.batch_size - 1) // self.batch_size
+        return count
+
+def _subsample_vocab(name2id: dict, max_n: int, rng: np.random.RandomState):
+    if max_n is None or max_n >= len(name2id):
+        return name2id
+    names = list(name2id.keys())
+    keep = set(rng.choice(names, size=max_n, replace=False))
+    # rebuild compact 0..N-1 id map
+    return {n:i for i,n in enumerate(sorted(keep))}
+
+def _reindex_tensor_rows(tensor, old_name2id, new_name2id, axis=0):
+    # assumes rows (axis=0) correspond to vocab order; select rows that survive + in new order
+    keep_names = sorted(new_name2id, key=new_name2id.get)
+    idx = [old_name2id[n] for n in keep_names]
+    return tensor.index_select(axis, torch.tensor(idx, dtype=torch.long))
 
 class MultiomicTransformerDataset(Dataset):
-    """
-    Yields:
-      atac_wins: [W, 1]
-      tf_tensor: [T_eval]
-      tg_tensor: [G_eval]
-      dist_bias: [G_eval, W]   (same for every item; stacked in collate)
-      tf_ids   : [T_eval] (Long) - indices into COMMON TF vocab
-      tg_ids   : [G_eval] (Long) - indices into COMMON TG vocab
-    """
-    def __init__(self,
-                 data_dir: Path,
-                 chrom_id: str,
-                 tf_vocab_path: Optional[Path] = None,
-                 tg_vocab_path: Optional[Path] = None,
-                 fine_tuner: bool = False,
-                 sample_name: Optional[str] = None):
+    def __init__(
+        self,
+        data_dir: Path,
+        chrom_id: str,
+        tf_vocab_path: Optional[Path] = None,
+        tg_vocab_path: Optional[Path] = None,
+        fine_tuner: bool = False,
+        sample_name: Optional[str] = None,
+        max_tfs: Optional[int] = None,
+        max_tgs: Optional[int] = None,
+        max_windows: Optional[int] = None,
+        subset_seed: int = 42,
+    ):
         self.data_dir = Path(data_dir)
         self.chrom_id = chrom_id
         self.sample_name = sample_name
+        self._max_tfs = max_tfs
+        self._max_tgs = max_tgs
+        self._max_windows = max_windows
+        self._subset_rng = np.random.RandomState(subset_seed)
 
         chrom_dir = self.data_dir / chrom_id
         if not chrom_dir.is_dir():
@@ -199,6 +516,7 @@ class MultiomicTransformerDataset(Dataset):
                 assert int(self.tg_ids.max()) < tg_vocab_size and int(self.tg_ids.min()) >= 0, \
                     f"tg_ids out of range for common vocab (max={int(self.tg_ids.max())}, vocab={tg_vocab_size})"
 
+        self._apply_subsampling()
 
     # -------- Dataset API --------
     def __len__(self):
@@ -231,6 +549,90 @@ class MultiomicTransformerDataset(Dataset):
             self.tg_ids,
             motif_mask,
         )
+        
+    def _apply_subsampling(self):
+        """
+        Optionally subsample windows (W), TFs (T), TGs (G) while keeping all
+        tensors, ids, names, bias, motif_mask, and scaler consistent.
+        """
+        # 1) Subsample windows (affects atac_window_tensor_all rows, dist_bias columns)
+        if self._max_windows is not None and self.num_windows > self._max_windows:
+            keep_w = np.sort(self._subset_rng.choice(self.num_windows, size=self._max_windows, replace=False))
+            keep_w_t = torch.as_tensor(keep_w, dtype=torch.long)
+
+            # atac windows: [W, num_cells]
+            self.atac_window_tensor_all = self.atac_window_tensor_all.index_select(0, keep_w_t)
+            self.num_windows = int(self.atac_window_tensor_all.shape[0])
+
+            # distance bias: [G, W] -> slice columns
+            if getattr(self, "dist_bias_tensor", None) is not None:
+                self.dist_bias_tensor = self.dist_bias_tensor.index_select(1, keep_w_t)
+
+        # Build name->row index maps from current names
+        tf_old_map = {self.standardize_name(n): i for i, n in enumerate(getattr(self, "tf_names", []))}
+        tg_old_map = {self.standardize_name(n): i for i, n in enumerate(getattr(self, "tg_names", []))}
+
+        # Bail out early if names aren’t present (shouldn’t happen with your pipeline)
+        if not getattr(self, "tf_names", None) or not getattr(self, "tg_names", None):
+            return
+
+        # 2) Subsample TFs (affects tf_tensor_all rows, motif_mask columns, ids/names)
+        if self._max_tfs is not None and len(self.tf_names) > self._max_tfs:
+            keep_tf_names = list(self._subset_rng.choice(self.tf_names, size=self._max_tfs, replace=False))
+            keep_tf_names = sorted(set(map(self.standardize_name, keep_tf_names)))
+            keep_tf_idx = [tf_old_map[n] for n in keep_tf_names]
+            keep_tf_t = torch.as_tensor(keep_tf_idx, dtype=torch.long)
+
+            # tf tensor: [T, num_cells]
+            self.tf_tensor_all = self.tf_tensor_all.index_select(0, keep_tf_t)
+            self.tf_names = [self.tf_names[i] for i in keep_tf_idx]
+
+            # rebuild compact vocab/id mapping 0..T'-1
+            new_tf_map = {n: i for i, n in enumerate(keep_tf_names)}
+            self.tf_name2id = new_tf_map
+            self.tf_ids = torch.as_tensor([new_tf_map[n] for n in keep_tf_names], dtype=torch.long)
+
+            # motif mask: [G, T] -> slice columns
+            if getattr(self, "motif_mask_tensor", None) is not None:
+                self.motif_mask_tensor = self.motif_mask_tensor.index_select(
+                    1, torch.arange(len(keep_tf_names))
+                )
+
+        # 3) Subsample TGs (affects tg_tensor_all rows, dist_bias rows, motif_mask rows, ids/names, scaler)
+        if self._max_tgs is not None and len(self.tg_names) > self._max_tgs:
+            keep_tg_names = list(self._subset_rng.choice(self.tg_names, size=self._max_tgs, replace=False))
+            keep_tg_names = sorted(set(map(self.standardize_name, keep_tg_names)))
+            keep_tg_idx = [tg_old_map[n] for n in keep_tg_names]
+            keep_tg_t = torch.as_tensor(keep_tg_idx, dtype=torch.long)
+
+            # tg tensor: [G, num_cells]
+            self.tg_tensor_all = self.tg_tensor_all.index_select(0, keep_tg_t)
+            self.tg_names = [self.tg_names[i] for i in keep_tg_idx]
+
+            # rebuild compact vocab/id mapping 0..G'-1
+            new_tg_map = {n: i for i, n in enumerate(keep_tg_names)}
+            self.tg_name2id = new_tg_map
+            self.tg_ids = torch.as_tensor([new_tg_map[n] for n in keep_tg_names], dtype=torch.long)
+
+            # dist bias: [G, W] -> slice rows
+            if getattr(self, "dist_bias_tensor", None) is not None:
+                self.dist_bias_tensor = self.dist_bias_tensor.index_select(
+                    0, torch.arange(len(keep_tg_names))
+                )
+
+            # motif mask: [G, T] -> slice rows
+            if getattr(self, "motif_mask_tensor", None) is not None:
+                self.motif_mask_tensor = self.motif_mask_tensor.index_select(
+                    0, torch.arange(len(keep_tg_names))
+                )
+
+            # scaler is per-gene: subset it
+            if getattr(self, "scaler", None) is not None:
+                try:
+                    self.scaler = self.subset_scaler(self.scaler, keep_tg_idx)
+                except Exception as e:
+                    logging.warning(f"Could not subset scaler to kept TGs: {e}")
+
 
     # -------- utilities --------
     def subset_scaler(self, original_scaler, kept_indices):
@@ -241,6 +643,83 @@ class MultiomicTransformerDataset(Dataset):
         new_scaler.var_ = original_scaler.var_[kept_indices]
         new_scaler.n_features_in_ = len(kept_indices)
         return new_scaler
+    
+    def apply_global_subsample(
+        self,
+        tf_name2id_sub: dict[str, int],
+        tg_name2id_sub: dict[str, int],
+        max_windows: int | None = None,
+        rng_seed: int = 42,
+    ):
+        """
+        Intersect this chromosome's TF/TG with the global sub-vocab and remap IDs so
+        that returned tf_ids/tg_ids index into the global contiguous spaces used by the model.
+        """
+        rng = np.random.RandomState(rng_seed or 42)
+
+        # ---- Intersect names with global keep sets ----
+        tf_keep_names_local = [n for n in self.tf_names if n in tf_name2id_sub]
+        tg_keep_names_local = [n for n in self.tg_names if n in tg_name2id_sub]
+
+        if len(tf_keep_names_local) == 0 or len(tg_keep_names_local) == 0:
+            raise ValueError(
+                f"Subsample produced empty TF or TG set for {self.chrom_id}. "
+                f"TFs={len(tf_keep_names_local)} TGs={len(tg_keep_names_local)}"
+            )
+
+        # Build index lists in the *current* tensor order
+        tf_name_to_local = {n: i for i, n in enumerate(self.tf_names)}
+        tg_name_to_local = {n: i for i, n in enumerate(self.tg_names)}
+
+        tf_keep_idx = [tf_name_to_local[n] for n in tf_keep_names_local]
+        tg_keep_idx = [tg_name_to_local[n] for n in tg_keep_names_local]
+
+        # ---- Slice tensors to the intersection & preserve order of the *local* names ----
+        # Shapes before: tf_tensor_all [T, C], tg_tensor_all [G, C], dist_bias [G, W], motif_mask [G, T]
+        self.tf_tensor_all = self.tf_tensor_all[tf_keep_idx, :]
+        self.tg_tensor_all = self.tg_tensor_all[tg_keep_idx, :]
+
+        if self.motif_mask_tensor is not None:
+            self.motif_mask_tensor = self.motif_mask_tensor[np.ix_(tg_keep_idx, tf_keep_idx)]
+        else:
+            self.motif_mask_tensor = torch.zeros(
+                (len(tg_keep_idx), len(tf_keep_idx)), dtype=torch.float32
+            )
+
+        if self.dist_bias_tensor is not None:
+            self.dist_bias_tensor = self.dist_bias_tensor[tg_keep_idx, :]
+
+        # Update name lists to match sliced tensors
+        self.tf_names = [self.tf_names[i] for i in tf_keep_idx]
+        self.tg_names = [self.tg_names[i] for i in tg_keep_idx]
+
+        # ---- Remap IDs using the *global* contiguous maps (0..|sub|-1) ----
+        self.tf_ids = torch.tensor([tf_name2id_sub[n] for n in self.tf_names], dtype=torch.long)
+        self.tg_ids = torch.tensor([tg_name2id_sub[n] for n in self.tg_names], dtype=torch.long)
+
+        # ---- Optionally subsample windows ----
+        if max_windows is not None and self.num_windows > max_windows:
+            # consistent window subsample across tensors that have W
+            W = self.num_windows
+            keep_w = np.sort(rng.choice(np.arange(W), size=max_windows, replace=False))
+            keep_w_t = torch.tensor(keep_w, dtype=torch.long)
+
+            # atac windows: [W, C] -> [W', C]
+            self.atac_window_tensor_all = self.atac_window_tensor_all[keep_w_t, :]
+
+            # dist bias: [G, W] -> [G, W']
+            if self.dist_bias_tensor is not None:
+                self.dist_bias_tensor = self.dist_bias_tensor[:, keep_w_t]
+
+            self.num_windows = int(self.atac_window_tensor_all.shape[0])
+
+        # ---- Sanity logs (useful during bring-up) ----
+        logging.debug(
+            f"[Subsample] {self.chrom_id}: TFs={len(self.tf_names)} "
+            f"TGs={len(self.tg_names)} Windows={self.num_windows} | "
+            f"tf_ids max={int(self.tf_ids.max())} tg_ids max={int(self.tg_ids.max())}"
+        )
+
     
     def inverse_transform(self, preds, tg_ids=None) -> np.ndarray:
         """

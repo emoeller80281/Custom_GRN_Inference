@@ -1,5 +1,16 @@
 import pandas as pd, numpy as np, re, unicodedata, gzip, io, os
 from collections import defaultdict
+from mygene import MyGeneInfo
+import logging
+
+import warnings
+# silence common HTTP and library chatter
+logging.getLogger("urllib3.connectionpool").setLevel(logging.WARNING)
+logging.getLogger("requests").setLevel(logging.WARNING)
+logging.getLogger("mygene").setLevel(logging.WARNING)
+
+# optionally hide generic warnings (or target a specific category if you identify it)
+warnings.filterwarnings("ignore")
 
 GREEK_FIX = {
     "α":"A","β":"B","γ":"G","δ":"D","ε":"E","ζ":"Z","η":"H","θ":"TH",
@@ -57,11 +68,15 @@ class GeneCanonicalizer:
     Canonicalizes gene identifiers (Ensembl, Entrez, aliases) to a preferred symbol
     using local files (GTF + NCBI/MGI gene_info). Species-agnostic; pass the correct files.
     """
-    def __init__(self):
+    def __init__(self, species: str = "10090", use_mygene: bool = True):
         self.ens2sym = {}      # ENSMUSG000000... -> OFFICIAL_SYMBOL
         self.entrez2sym = {}   # 12345 -> OFFICIAL_SYMBOL
         self.alias2sym = {}    # ALIAS -> OFFICIAL_SYMBOL
         self.sym_ok = set()    # known official symbols
+        self.species = species  # "mouse"/"human" or "10090"/"9606"
+        self.use_mygene = use_mygene
+        self._mg = MyGeneInfo() if use_mygene else None
+        self._cache = {}
 
         # Optional: curated TF alias tweaks
         self.curated = {
@@ -122,37 +137,136 @@ class GeneCanonicalizer:
                         if ens:
                             self.ens2sym[ens] = sym
 
+    def canonicalize_series(self, s: pd.Series, batch_size: int = 1000) -> pd.Series:
+        """Fast path: local maps first; optional batched MyGene fallback for unresolved."""
+        # 1) normalize input
+        s_norm = s.astype(str).map(_norm_symbol)
+
+        # 2) local maps
+        out = s_norm.copy()
+
+        # curated first
+        out = out.map(lambda x: self.curated.get(x, x))
+
+        # already official
+        out = out.map(lambda x: x if x in self.sym_ok else x)
+
+        # Ensembl, Entrez, alias
+        def _local_map(x: str) -> str:
+            if not x:
+                return ""
+            if x in self.sym_ok:
+                return x
+            if x.startswith(("ENSMUSG", "ENSG")) and x in self.ens2sym:
+                return self.ens2sym[x]
+            if x.isdigit() and x in self.entrez2sym:
+                return self.entrez2sym[x]
+            if x in self.alias2sym:
+                return self.alias2sym[x]
+            return x
+
+        out = out.map(_local_map)
+
+        # 3) MyGene fallback (batched) for anything still unmapped
+        if self.use_mygene:
+            unresolved = sorted({x for x in out.unique() if x and x not in self.sym_ok
+                                and not x.isdigit()
+                                and not x.startswith(("ENSMUSG", "ENSG"))
+                                and x == _local_map(x)})
+            # apply cache first
+            unresolved = [u for u in unresolved if u not in self._cache]
+
+            for i in range(0, len(unresolved), batch_size):
+                chunk = unresolved[i:i+batch_size]
+                try:
+                    res = self._mg.querymany(
+                        chunk,
+                        scopes=["symbol", "alias", "ensembl.gene", "entrezgene", "uniprot"],
+                        fields="symbol",
+                        species=self.species,
+                        verbose=False,
+                        returnall=False,
+                    )
+                    if isinstance(res, list):
+                        for r in res:
+                            q = _norm_symbol(r.get("query", ""))
+                            sym = _norm_symbol(r.get("symbol", "")) if not r.get("notfound") else ""
+                            self._cache[q] = sym or q
+                except Exception as e:
+                    logging.debug(f"MyGene batch failed ({len(chunk)} items): {e}")
+
+            # fill from cache (or identity)
+            out = out.map(lambda x: self._cache.get(x, x))
+
+        return out
+    
     def canonical_symbol(self, s: str) -> str:
         s0 = _norm_symbol(s)
         if not s0:
             return ""
-        # curated overrides first
+
+        # 2) curated overrides
         if s0 in self.curated:
             return self.curated[s0]
-        # already an official symbol?
+
+        # 3) already an official symbol
         if s0 in self.sym_ok:
             return s0
-        # Ensembl gene ID?
-        if s0.startswith("ENSMUSG") or s0.startswith("ENSG"):
-            return self.ens2sym.get(s0, s0)  # if unknown, leave as is (will likely get dropped)
-        # Entrez numeric?
+
+        # 4) Ensembl gene ID (strip version already handled in _norm_symbol)
+        if s0.startswith(("ENSMUSG", "ENSG")):
+            sym = self.ens2sym.get(s0)
+            if sym:
+                return sym
+
+        # 5) Entrez numeric
         if s0.isdigit():
-            return self.entrez2sym.get(s0, s0)
-        # alias?
-        if s0 in self.alias2sym:
+            sym = self.entrez2sym.get(s0)
+            if sym:
+                return sym
+
+        # 6) alias
+        sym = self.alias2sym.get(s0)
+        if sym:
+            return sym
+
+        # 7) tiny heuristic
+        if "NFKB" in s0 and s0 in self.alias2sym:
             return self.alias2sym[s0]
-        # try small heuristics for NFkB spelling
-        if "NFKB" in s0 and s0 not in self.sym_ok and s0 in self.alias2sym:
-            return self.alias2sym[s0]
-        return s0  # fallback
+
+        # 8) optional MyGene fallback
+        if self.use_mygene:
+            if s0 in self._cache:
+                return self._cache[s0]
+            try:
+                res = self._mg.querymany(
+                    [s0],
+                    scopes=["symbol", "alias", "ensembl.gene", "entrezgene", "uniprot"],
+                    fields="symbol",
+                    species=self.species,
+                    verbose=False,
+                    returnall=False,
+                )
+                sym = ""
+                if res and isinstance(res, list):
+                    r = res[0]
+                    if not r.get("notfound") and r.get("symbol"):
+                        sym = _norm_symbol(r["symbol"])
+                self._cache[s0] = sym or s0  # fall back to s0 if still unknown
+                return self._cache[s0]
+            except Exception:
+                # stay deterministic if network hiccups
+                return s0
+
+        # fallback: return normalized original
+        return s0
 
     def standardize_df(self, df: pd.DataFrame, tf_col: str, tg_col: str) -> pd.DataFrame:
         out = df.copy()
-        out[tf_col] = out[tf_col].apply(self.canonical_symbol)
-        out[tg_col] = out[tg_col].apply(self.canonical_symbol)
-        # drop empties
+        out[tf_col] = self.canonicalize_series(out[tf_col])
+        out[tg_col] = self.canonicalize_series(out[tg_col])
         before = len(out)
-        out = out[(out[tf_col].astype(str) != "") & (out[tg_col].astype(str) != "")]
+        out = out[(out[tf_col] != "") & (out[tg_col] != "")]
         dropped = before - len(out)
         if dropped:
             print(f"[Canonicalizer] Dropped {dropped} rows with empty/unmappable TF/TG")

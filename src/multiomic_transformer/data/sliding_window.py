@@ -45,6 +45,9 @@ _global_tf_df: Union[None, pd.DataFrame] = None
 _global_bg_freq: Union[None, pd.Series] = None
 _global_plus: Union[None, np.ndarray] = None
 _global_minus: Union[None, np.ndarray] = None
+_global_mats: Union[None, np.ndarray] = None
+_global_names: Union[None, np.ndarray] = None
+_global_peak_ids: Union[None, np.ndarray] = None
 
 def share_numpy_array(arr):
     shm = mp.Array('b', arr.tobytes(), lock=False)
@@ -54,25 +57,32 @@ def share_numpy_array(arr):
 
 def _init_worker(tf_df, bg_freq,
                  plus_shm, plus_shape, plus_dtype,
-                 minus_shm, minus_shape, minus_dtype):
-    """Reconstruct shared arrays inside each worker."""
+                 minus_shm, minus_shape, minus_dtype,
+                 mats, names, peak_ids):
+    """Reconstruct shared arrays and store big read-only objects in each worker."""
     global _global_tf_df, _global_bg_freq, _global_plus, _global_minus
+    global _global_mats, _global_names, _global_peak_ids
+
     _global_tf_df   = tf_df
     _global_bg_freq = bg_freq
     _global_plus  = np.frombuffer(plus_shm, dtype=plus_dtype).reshape(plus_shape)
     _global_minus = np.frombuffer(minus_shm, dtype=minus_dtype).reshape(minus_shape)
+    _global_mats = mats
+    _global_names = names
+    _global_peak_ids = peak_ids
 
-@njit(parallel=True)
+@njit(parallel=True, cache=True)
 def score_all_peaks(seqs_plus, seqs_minus, pwm_values):
     
     n_peaks, L = seqs_plus.shape
+
     wsize = pwm_values.shape[0]
     if wsize > L:
         return np.zeros(n_peaks, dtype=np.float64)
     
     out = np.zeros(n_peaks, dtype=np.float64)
-
-    for i in prange(n_peaks):
+    
+    for i in range(n_peaks):
         total = 0.0
         for strand in (seqs_plus[i], seqs_minus[i]):
             # slide the window
@@ -109,32 +119,30 @@ def get_background_freq(species):
 
     return background_freq
     
-def process_motif_file_and_save(motif_idx, tf_df, bg, score_mats, names, tmp_dir, peak_ids):
-    # 'bg' is unused but kept for potential motif background normalization
-    pwm = np.array(score_mats[motif_idx])
-    
+def process_motif_file_and_save(motif_idx, tmp_dir):
+    pwm = np.array(_global_mats[motif_idx], dtype=np.float32)
     scores = score_all_peaks(_global_plus, _global_minus, pwm)
-    
-    if len(scores) != len(peak_ids):
-        logging.error(f"Length mismatch for motif {names[motif_idx]}: "
-                    f"{len(scores)} scores vs {len(peak_ids)} peaks")
-        return False
 
-    motif_name = names[motif_idx]
-    mask = tf_df["Motif_ID"] == motif_name
-    tf_names = tf_df.loc[mask]["TF_Name"].values
-    
+    motif_name = _global_names[motif_idx]
+    mask = _global_tf_df["Motif_ID"] == motif_name
+    tf_names = _global_tf_df.loc[mask, "TF_Name"].values
+
     if len(tf_names) == 0:
         logging.warning(f"No TFs found for motif {motif_name} (motif_idx={motif_idx})")
+        return True
 
+    # Write one parquet per TF (small, append-only)
+    df = pd.DataFrame({
+        "peak_id": _global_peak_ids,
+        "sliding_window_score": scores
+    })
+    df = df.dropna()
     for tf in tf_names:
-        df = pd.DataFrame({
-            "peak_id": peak_ids,
-            "TF": tf,
-            "sliding_window_score": scores
-        })
-        df = df.dropna()
-        pq.write_table(pa.Table.from_pandas(df), os.path.join(tmp_dir, f"{tf}.parquet"), compression="snappy")
+        df_tf = df.copy()
+        df_tf.insert(1, "TF", tf)
+        pq.write_table(pa.Table.from_pandas(df_tf),
+                       os.path.join(tmp_dir, f"{tf}.parquet"),
+                       compression="snappy")
     return True
 
 
@@ -315,9 +323,9 @@ def associate_tf_with_motif_pwm(tf_info_file, meme_dir, fasta_path, peaks_bed, t
     
     mats, names = load_motifs(motif_paths, pseudocount=0.0001, bg=background_freq)
     names = [n.upper() for n in names]
-    print(f"Loaded {len(mats)} motifs:", names[:5])
+    logging.debug(f"Loaded {len(mats)} motifs:", names[:5])
     
-    logging.info(f"Loaded {len(mats)} PFMs from {len(meme_dir)} motif files")
+    logging.info(f"Loaded {len(mats)} PFMs from {len(motif_paths)} motif files")
     
     # Extract the DNA sequences from the genome fasta for each peak
     peak_ids, seqs = extract_peak_seqs(fasta, peaks_bed)
@@ -336,7 +344,7 @@ def associate_tf_with_motif_pwm(tf_info_file, meme_dir, fasta_path, peaks_bed, t
     encoded_minus = [lookup[np.frombuffer(seq[::-1].translate(str.maketrans('ACGT', 'TGCA')).encode('ascii'), dtype=np.uint8)] for seq in seqs]
 
     max_len = max(len(x) for x in encoded_plus)
-    logging.info(f"\tMaximum peak length: {max_len} bp")
+    logging.debug(f"\tMaximum peak length: {max_len} bp")
 
     def pad_sequences(seqs, fixed_len, pad_val=-1):
         padded = np.full((len(seqs), fixed_len), pad_val, dtype=np.int8)
@@ -354,11 +362,8 @@ def associate_tf_with_motif_pwm(tf_info_file, meme_dir, fasta_path, peaks_bed, t
     tf_info_df = pd.read_csv(tf_info_file, sep="\t")
     tf_info_df["Motif_ID"] = tf_info_df["Motif_ID"].astype(str).str.upper()
     tf_info_df["TF_Name"] = tf_info_df["TF_Name"].astype(str).str.upper()
-    print(tf_info_df.head())
     logging.info(f"\nLoaded TF information from {tf_info_file}")
     logging.info(f"TFs in tf_info_file: {tf_info_df['TF_Name'].nunique()}")
-    logging.info("TF_Name examples: {tf_info_df['TF_Name'].head()}")
-    logging.info(f"Motif_ID examples: {tf_info_df['Motif_ID'].head()}")
     logging.info(f"Motif names from JASPAR: {names[:5]}")
     
     tf_df = tf_info_df[tf_info_df["TF_Name"].isin(tf_name_list)]
@@ -393,24 +398,27 @@ def associate_tf_with_motif_pwm(tf_info_file, meme_dir, fasta_path, peaks_bed, t
         logging.info(f"\tSize of calculation: {len(filtered_indices)} motifs × {len(peak_ids)} peaks")
         
         plus_shm, plus_shape, plus_dtype = share_numpy_array(seqs_plus)
-        minus_shm, minus_shape, minus_dtype = share_numpy_array(seqs_minus) 
+        minus_shm, minus_shape, minus_dtype = share_numpy_array(seqs_minus)
 
         logging.info(f"\nWriting output to {tmp_dir}")
         with ProcessPoolExecutor(
-        max_workers=num_cpu,
-        initializer=_init_worker,
-        initargs=(tf_df, background_freq,
-                plus_shm, plus_shape, plus_dtype,
-                minus_shm, minus_shape, minus_dtype)
+            max_workers=num_cpu,
+            initializer=_init_worker,
+            initargs=(tf_df, background_freq,
+                    plus_shm, plus_shape, plus_dtype,
+                    minus_shm, minus_shape, minus_dtype,
+                    mats, names, peak_ids)
         ) as executor:
-            futures = {
-                executor.submit(process_motif_file_and_save, i, tf_df, background_freq, mats, names, tmp_dir, peak_ids): names[i]
-                for i in filtered_indices
-            }
+            futures = {executor.submit(process_motif_file_and_save, i, tmp_dir): names[i]
+                    for i in filtered_indices}
 
             min_update = max(1, int(0.02 * len(futures)))
-            for future in tqdm(as_completed(futures), total=len(futures), desc="Scoring motifs", miniters=min_update):
-                _ = future.result()
+            for fut in tqdm(as_completed(futures),
+                        total=len(futures),
+                        desc="Scoring motifs",
+                        miniters=min_update):
+                fut.result()
+
         logging.info("Finished scoring all motifs. Reading TF motif parquet files...")
     else:
         logging.info("\nAll TFs have pre-existing parquet files in the tmp directory, reading cached parquet files...")
@@ -441,6 +449,11 @@ def run_sliding_window_scan(
     output_file = Path(output_file)
     output_dir = output_file.parent
     os.makedirs(output_dir, exist_ok=True)
+    
+    try:
+        mp.set_start_method("spawn", force=True)
+    except RuntimeError:
+        pass
                 
     # Associate the TFs from TF_Information_all_motifs.txt to the motif with the matching motifID
     df = associate_tf_with_motif_pwm(
