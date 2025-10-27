@@ -55,7 +55,7 @@ DIST_BIAS_MODE = "mean"                 # Method for calcuting window -> gene TS
 TOTAL_EPOCHS=500
 BATCH_SIZE=32
 PATIENCE=20
-CORR_LOSS_WEIGHT=0.75
+CORR_LOSS_WEIGHT=5
 
 D_MODEL = 384
 NUM_HEADS = 6

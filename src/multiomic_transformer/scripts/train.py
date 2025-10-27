@@ -299,46 +299,74 @@ class Trainer:
 
     def _run_batch(self, batch):
         atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids, motif_mask = batch
-        atac_wins, tf_tensor, targets, bias = (
-            atac_wins.to(self.gpu_id),
-            tf_tensor.to(self.gpu_id),
-            targets.to(self.gpu_id),
-            bias.to(self.gpu_id),
-        )
-        tf_ids, tg_ids, motif_mask = (
-            tf_ids.to(self.gpu_id),
-            tg_ids.to(self.gpu_id),
-            motif_mask.to(self.gpu_id),
-        )
+        dev = self.gpu_id
+
+        # Move + basic sanitization
+        atac_wins = atac_wins.to(dev, non_blocking=True)
+        tf_tensor = tf_tensor.to(dev, non_blocking=True)
+        targets   = targets.to(dev, non_blocking=True)
+        bias      = bias.to(dev, non_blocking=True)
+        tf_ids    = tf_ids.to(dev, non_blocking=True)
+        tg_ids    = tg_ids.to(dev, non_blocking=True)
+        motif_mask= motif_mask.to(dev, non_blocking=True)
+
+        # Prevent softmax pathologies from extreme negatives/NaNs in bias
+        bias = torch.nan_to_num(bias, nan=0.0, posinf=0.0, neginf=0.0)
+        # Optional: clamp too-negative bias to avoid exp overflow: bias = bias.clamp(min=-20.0)
+
         self.optimizer.zero_grad(set_to_none=True)
 
-        device_type = "cuda" if torch.cuda.is_available() else "cpu"
-        with autocast(device_type=device_type, enabled=(device_type == "cuda")):
+        from torch.amp import autocast
+        with autocast(device_type="cuda", enabled=True):
             mask_arg = motif_mask if USE_MOTIF_MASK else None
             preds, _ = self.model(
                 atac_wins, tf_tensor, tf_ids=tf_ids, tg_ids=tg_ids, bias=bias, motif_mask=mask_arg
             )
-
-            # Base MSE loss
             mse_loss = self.loss_fn(preds, targets)
 
-            # Correlation term
-            preds_flat, targets_flat = preds.reshape(-1), targets.reshape(-1)
-            if torch.std(targets_flat) > 1e-8 and torch.std(preds_flat) > 1e-8:
-                vx, vy = preds_flat - preds_flat.mean(), targets_flat - targets_flat.mean()
-                corr_loss = -torch.sum(vx * vy) / (
-                    torch.sqrt(torch.sum(vx**2)) * torch.sqrt(torch.sum(vy**2)) + 1e-8
-                )
-            else:
-                corr_loss = torch.tensor(0.0, device=preds.device)
+        # --------- Cross-rank "step OK?" decision ---------
+        # Check local finiteness
+        local_ok = torch.isfinite(preds).all() & torch.isfinite(mse_loss)
+        # Reduce across ranks: all must be OK to proceed
+        if torch.distributed.is_initialized():
+            ok_tensor = local_ok.to(torch.int32)
+            torch.distributed.all_reduce(ok_tensor, op=torch.distributed.ReduceOp.MIN)
+            step_ok = bool(ok_tensor.item())
+        else:
+            step_ok = bool(local_ok)
 
-            total_loss = mse_loss + CORR_LOSS_WEIGHT * corr_loss
+        if not step_ok:
+            # Everyone agrees to skip this step: no backward, no optimizer step
+            if self.gpu_id == 0:
+                logging.warning("Skipping step due to non-finite forward on at least one rank.")
+            # Return benign tensors so your outer MSE accumulator stays finite
+            # (preds==targets => zero contribution to SSE)
+            return torch.tensor(0.0, device=dev), targets.detach(), targets.detach()
 
+        # -------- Pearson (sample-wise across genes) in fp32 WITH grad --------
+        P = preds.float()   # keep graph
+        T = targets.float() # constant
+
+        Pm = P - P.mean(dim=1, keepdim=True)
+        Tm = T - T.mean(dim=1, keepdim=True)
+        denom = (Pm.pow(2).sum(dim=1).sqrt() * Tm.pow(2).sum(dim=1).sqrt()).clamp_min(1e-8)
+        r = (Pm * Tm).sum(dim=1) / denom
+        r = torch.nan_to_num(r, nan=0.0, posinf=0.0, neginf=0.0)
+        pearson_loss = 1.0 - r.mean()  # in [0, 2]
+
+        corr_term = CORR_LOSS_WEIGHT * pearson_loss
+        total_loss = mse_loss + corr_term
+
+        # Backward + step (identical on all ranks because step_ok is global)
         self.scaler.scale(total_loss).backward()
+        self.scaler.unscale_(self.optimizer)
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
         self.scaler.step(self.optimizer)
         self.scaler.update()
 
-        return total_loss.detach(), preds.detach(), targets.detach()
+        return total_loss.detach(), preds, targets
+
+
     
     def _run_val_batch(self, batch):
         """
@@ -371,16 +399,9 @@ class Trainer:
 
     def _validate(self):
         # empty/disabled loader
-        if self.val_data is None:
-            logging.warning("Validation loader is None; skipping validation.")
-            return float("nan"), float("nan"), float("nan")
-        try:
-            _ = len(self.val_data)
-        except Exception:
-            pass
-        if hasattr(self.val_data, "__len__") and len(self.val_data) == 0:
-            logging.warning("Validation loader is empty; skipping validation.")
-            return float("nan"), float("nan"), float("nan")
+        if self.val_data is None or (hasattr(self.val_data, "__len__") and len(self.val_data) == 0):
+            logging.warning("Validation loader is None/empty; skipping validation.")
+            return float("nan"), float("nan"), float("nan"), float("nan")
 
         self.model.eval()
         device = next(self.model.parameters()).device
@@ -389,13 +410,11 @@ class Trainer:
         sse_local = torch.tensor(0.0, device=device, dtype=torch.float64)
         n_local   = torch.tensor(0,   device=device, dtype=torch.long)
 
-        # Optionally buffer flattened preds/targets for correlations
-        try:
-            from scipy.stats import pearsonr, spearmanr
-            want_corr = True
-        except Exception:
-            want_corr = False
-        preds_buf, tgts_buf = [], []
+        # Per-sample Pearson and Spearman accumulators (macro-averages)
+        pearson_sum_local  = torch.tensor(0.0, device=device, dtype=torch.float64)
+        pearson_cnt_local  = torch.tensor(0,   device=device, dtype=torch.long)
+        spearman_sum_local = torch.tensor(0.0, device=device, dtype=torch.float64)
+        spearman_cnt_local = torch.tensor(0,   device=device, dtype=torch.long)
 
         with torch.no_grad():
             for batch in self.val_data:
@@ -406,81 +425,61 @@ class Trainer:
                 sse_local += (diff * diff).sum(dtype=torch.float64)
                 n_local   += diff.numel()
 
-                if want_corr:
-                    # flatten to 1-D so padding/all_gather is trivial & rank-safe
-                    preds_buf.append(v_preds.detach().reshape(-1))
-                    tgts_buf.append( v_targets.detach().reshape(-1))
+                # -------- Per-sample Pearson across genes (vectorized, GPU) --------
+                P = v_preds.detach().to(torch.float32)
+                T = v_targets.detach().to(torch.float32)
+                Pm = P - P.mean(dim=1, keepdim=True)
+                Tm = T - T.mean(dim=1, keepdim=True)
+                denom = (Pm.pow(2).sum(dim=1).sqrt() * Tm.pow(2).sum(dim=1).sqrt()).clamp_min(1e-8)
+                corr = (Pm * Tm).sum(dim=1) / denom  # [B]
+                mask = torch.isfinite(corr)
+                pearson_sum_local += corr[mask].to(torch.float64).sum()
+                pearson_cnt_local += mask.sum()
+
+                # -------- Per-sample Spearman across genes (CPU loop via scipy) --------
+                # This is robust to variable G across batches/chromosomes.
+                P_np = P.detach().cpu().numpy()
+                T_np = T.detach().cpu().numpy()
+                from scipy.stats import spearmanr
+                s_sum = 0.0
+                s_cnt = 0
+                for b in range(P_np.shape[0]):
+                    pv, tv = P_np[b], T_np[b]
+                    # Skip degenerate rows (constant vectors => undefined correlation)
+                    if np.std(pv) <= 1e-8 or np.std(tv) <= 1e-8:
+                        continue
+                    res = spearmanr(pv, tv)
+                    sp = res.statistic if hasattr(res, "statistic") else res[0]
+                    if np.isfinite(sp):
+                        s_sum += float(sp); s_cnt += 1
+                if s_cnt:
+                    spearman_sum_local += torch.tensor(s_sum, device=device, dtype=torch.float64)
+                    spearman_cnt_local += torch.tensor(s_cnt, device=device, dtype=torch.long)
 
         import torch.distributed as dist
         if dist.is_initialized():
-            vec = torch.stack([sse_local, n_local.to(torch.float64)])
+            vec = torch.stack([
+                sse_local, n_local.to(torch.float64),
+                pearson_sum_local, pearson_cnt_local.to(torch.float64),
+                spearman_sum_local, spearman_cnt_local.to(torch.float64),
+            ])
             dist.all_reduce(vec, op=dist.ReduceOp.SUM)
-            sse_global = vec[0].item()
-            n_global   = int(vec[1].item())
+            sse_g, n_g, p_sum, p_cnt, s_sum, s_cnt = vec.tolist()
+            val_mse       = (sse_g / n_g) if n_g > 0 else float("nan")
+            pearson_corr  = (p_sum / p_cnt) if p_cnt > 0 else float("nan")
+            spearman_corr = (s_sum / s_cnt) if s_cnt > 0 else float("nan")
         else:
-            sse_global = sse_local.item()
-            n_global   = int(n_local.item())
+            sse_g, n_g = sse_local.item(), int(n_local.item())
+            val_mse = (sse_g / n_g) if n_g > 0 else float("nan")
+            p_sum, p_cnt = pearson_sum_local.item(), int(pearson_cnt_local.item())
+            s_sum, s_cnt = spearman_sum_local.item(), int(spearman_cnt_local.item())
+            pearson_corr  = (p_sum / p_cnt) if p_cnt > 0 else float("nan")
+            spearman_corr = (s_sum / s_cnt) if s_cnt > 0 else float("nan")
 
-        val_mse = (sse_global / n_global) if n_global > 0 else float("nan")
         avg_loss = loss_sum / max(1, n_batches)
-
-        # ---------- correlations (optional) ----------
-        pearson_corr, spearman_corr = float("nan"), float("nan")
-        if want_corr:
-            preds_local = torch.cat(preds_buf, dim=0) if preds_buf else torch.empty(0, device=device)
-            tgts_local  = torch.cat(tgts_buf,  dim=0) if tgts_buf  else torch.empty(0, device=device)
-
-            if dist.is_initialized():
-                ws = dist.get_world_size()
-                rank = dist.get_rank()
-
-                # gather true lengths
-                n_local_elems = torch.tensor([preds_local.numel()], device=device, dtype=torch.long)
-                sizes = [torch.zeros_like(n_local_elems) for _ in range(ws)]
-                dist.all_gather(sizes, n_local_elems)
-                sizes = [int(s.item()) for s in sizes]
-                max_len = max(sizes)
-
-                # pad to max_len (still 1-D)
-                pad = max_len - preds_local.numel()
-                if pad > 0:
-                    preds_pad = torch.cat([preds_local, torch.zeros(pad, device=device, dtype=preds_local.dtype)], dim=0)
-                    tgts_pad  = torch.cat([tgts_local,  torch.zeros(pad,  device=device, dtype=tgts_local.dtype)],  dim=0)
-                else:
-                    preds_pad, tgts_pad = preds_local, tgts_local
-
-                # all_gather padded 1-D blocks
-                pred_list = [torch.empty_like(preds_pad) for _ in range(ws)]
-                tgt_list  = [torch.empty_like(tgts_pad)  for _ in range(ws)]
-                dist.all_gather(pred_list, preds_pad)
-                dist.all_gather(tgt_list,  tgts_pad)
-
-                # rank 0 trims back to true sizes and computes correlations
-                if rank == 0:
-                    P = torch.cat([pred_list[i][:sizes[i]] for i in range(ws)], dim=0).cpu().numpy()
-                    T = torch.cat([tgt_list[i][:sizes[i]]  for i in range(ws)], dim=0).cpu().numpy()
-                    P = np.nan_to_num(P, nan=0.0, posinf=1e6, neginf=-1e6)
-                    T = np.nan_to_num(T, nan=0.0, posinf=1e6, neginf=-1e6)
-                    if P.size and np.std(P) > 1e-8 and np.std(T) > 1e-8:
-                        pearson_corr  = float(pearsonr(P, T)[0])
-                        spearman_corr = float(spearmanr(P, T)[0])
-
-                # broadcast correlations
-                corr = torch.tensor([pearson_corr, spearman_corr], device=device, dtype=torch.float32) if dist.get_rank() == 0 \
-                    else torch.zeros(2, device=device, dtype=torch.float32)
-                dist.broadcast(corr, src=0)
-                pearson_corr, spearman_corr = float(corr[0].item()), float(corr[1].item())
-            else:
-                # single-process
-                P = preds_local.detach().cpu().numpy()
-                T = tgts_local.detach().cpu().numpy()
-                P = np.nan_to_num(P, nan=0.0, posinf=1e6, neginf=-1e6)
-                T = np.nan_to_num(T, nan=0.0, posinf=1e6, neginf=-1e6)
-                if P.size and np.std(P) > 1e-8 and np.std(T) > 1e-8:
-                    pearson_corr  = float(pearsonr(P, T)[0])
-                    spearman_corr = float(spearmanr(P, T)[0])
-
         return avg_loss, val_mse, pearson_corr, spearman_corr
+
+
     
     def _run_epoch(self, epoch: int):
         # Epoch-sync the batch sampler used by the loader
@@ -546,7 +545,7 @@ class Trainer:
         torch.distributed.broadcast(val_loss_tensor, src=0)
         self.scheduler.step(val_loss_tensor.item())
 
-        return avg_train_loss, train_mse, avg_val_loss, pearson_corr, spearman_corr
+        return avg_train_loss, train_mse, val_mse, pearson_corr, spearman_corr
 
     def _save_checkpoint(self, epoch, path):
         save_training_state(self, epoch, path, filename="checkpoint.pt")
