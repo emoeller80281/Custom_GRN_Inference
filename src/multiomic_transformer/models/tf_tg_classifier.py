@@ -61,12 +61,23 @@ class EdgeClassifier(nn.Module):
     def __init__(self, base_model, embed_dim):
         super().__init__()
         self.encoder = base_model
+        in_dim = embed_dim * 4  # <-- 4 blocks now
         self.classifier = nn.Sequential(
-            nn.Linear(embed_dim * 2, embed_dim),
-            nn.ReLU(),
-            nn.Linear(embed_dim, 1)
+            nn.LayerNorm(embed_dim * 4),
+            nn.Dropout(0.3),
+            nn.Linear(embed_dim * 4, embed_dim // 2),
+            nn.GELU(),
+            nn.Dropout(0.2),
+            nn.Linear(embed_dim // 2, 1)
         )
+
     def forward(self, x, edge_index, edge_attr, pairs):
         h, _ = self.encoder(x, edge_index, edge_attr)
-        tf_emb = h[pairs[:,0]]; tg_emb = h[pairs[:,1]]
-        return self.classifier(torch.cat([tf_emb, tg_emb], dim=1)).squeeze(-1)
+        h = F.normalize(h, p=2, dim=1)
+        tf_emb = h[pairs[:,0]]
+        tg_emb = h[pairs[:,1]]
+        z = torch.cat([tf_emb,
+                       tg_emb,
+                       tf_emb * tg_emb,
+                       torch.abs(tf_emb - tg_emb)], dim=1)
+        return self.classifier(z).squeeze(-1)

@@ -13,8 +13,9 @@ ORGANISM_CODE = "mm10"
 DATASET_NAME = "mESC"
 CHROM_ID_LIST = chrom_list
 CHROM_ID = "chr1"
+CHROM_IDS = chrom_list
 # , "E7.75_rep1", "E8.0_rep2", "E8.5_rep2", "E8.75_rep2", "E7.5_rep2", "E8.0_rep1", "E8.5_rep1"
-SAMPLE_NAMES = ["E7.5_rep1", "E7.5_rep2", "E7.75_rep1", "E8.0_rep2", "E8.5_rep2", "E8.75_rep2", "E7.5_rep2", "E8.0_rep1", "E8.5_rep1"]
+SAMPLE_NAMES = ["E7.5_rep1", "E7.5_rep2"]
 FINE_TUNING_DATASETS = ["E7.5_rep1"]
 
 # Paths to the raw scRNA-seq and scATAC-seq data
@@ -27,6 +28,17 @@ PROCESSED_GSE218576_DIR = ROOT_DIR / "data/processed/GSE218576"
 
 # ----- DATA PREPARATION -----
 # Pseudobulk and Data Preprocessing
+# Change these files to suit what you want the raw or processed files to look like.
+# Please respect the file extensions here
+PROCESSED_RNA_FILENAME = "scRNA_seq_processed.parquet"
+PROCESSED_ATAC_FILENAME = "scATAC_seq_processed.parquet"
+RAW_RNA_FILE = "scRNA_seq_raw.parquet"
+RAW_ATAC_FILE = "scATAC_seq_raw.parquet"
+ADATA_RNA_FILE = "adata_RNA.h5ad"
+ADATA_ATAC_FILE = "adata_ATAC.h5ad"
+PSEUDOBULK_TG_FILE = "TG_pseudobulk.tsv"
+PSEUDOBULK_RE_FILE = "RE_pseudobulk.tsv"
+
 NEIGHBORS_K = 20
 LEIDEN_RESOLUTION = 1.0
 AGGREGATION_METHOD = "mean" # "sum" or "mean"
@@ -67,21 +79,54 @@ SHORTCUT_DROPOUT = 0
 # peak-TG distance bias
 ATTN_BIAS_SCALE = 1.0 
 
+# Sampling (optional)
+SUBSAMPLE_MAX_TFS = None # 150
+SUBSAMPLE_MAX_TGS = None # 2000
+SUBSAMPLE_MAX_WINDOWS_PER_CHROM = None # 8000
+SUBSAMPLE_SEED = 42
+
 # ----- FINE TUNING ON SINGLE-CELL DATA -----
-FINE_TUNING_TRAINED_MODEL = "model_training_014"
+FINE_TUNING_TRAINED_MODEL = "model_training_011"
 FINETUNE_PATIENCE = 20
 FINETUNE_LR = 1e-4       # smaller LR for refinement
 EWC_LAMBDA = 10.0
+
+# ----- GAT CLASSIFIER MODEL -----
+# Model
+HIDDEN_DIM = 128
+GAT_HEADS = 6
+GAT_DROPOUT = 0.30
+EDGE_DROPOUT = 0.30
+
+# Phase 1 (DGI)
+DGI_EPOCHS = 80
+
+# Phase 2 (fine-tune)
+FINETUNE_EPOCHS = 80
+TEST_SIZE = 0.20
+LR_ENCODER = 1e-5       # Learning rate for the (partially) unfrozen encoder
+LR_HEAD = 1e-4          # Learning rate for the classifier head
+WEIGHT_DECAY = 1e-4
+L2SP_LAMBDA = 0      # Strength of L2-SP regularization
+
+# ChIP eval
+PRECISION_AT_K = (10, 20, 50, 100, 200, 500)
+RUN_OPTUNA = False
 
 # ----- PATH SETUP -----
 # Fixed Paths
 DATA_DIR = ROOT_DIR / "data"
 GENOME_DIR = DATA_DIR / "genome_data" / "reference_genome" / ORGANISM_CODE
 CHROM_SIZES_FILE = GENOME_DIR / f"{ORGANISM_CODE}.chrom.sizes"
+GTF_FILE_DIR = DATA_DIR / "genome_data" / "genome_annotation" / ORGANISM_CODE
+NCBI_FILE_DIR = DATA_DIR / "genome_data" / "genome_annotation" / ORGANISM_CODE 
 GENE_TSS_FILE = DATA_DIR / "genome_data" / "genome_annotation" / ORGANISM_CODE / "gene_tss.bed"
 TF_FILE = DATA_DIR / "databases" / "motif_information" / ORGANISM_CODE / "TF_Information_all_motifs.txt"
 JASPAR_PFM_DIR = DATA_DIR / "databases" / "motif_information" / "JASPAR" / "pfm_files"
-MOTIF_DIR = DATA_DIR / "databases" / "motif_information" / ORGANISM_CODE / str(ORGANISM_CODE + "_motif_meme_files")
+MOTIF_DIR = DATA_DIR / "databases" / "motif_information" / ORGANISM_CODE / "pwms_all_motifs"
+
+CHIP_GROUND_TRUTH = DATA_DIR / "ground_truth_files" / "mESC_beeline_ChIP-seq.csv"
+CHIP_GROUND_TRUTH_SEP = ","
 
 PROCESSED_DATA = DATA_DIR / "processed"
 TRAINING_DATA_CACHE = DATA_DIR / "training_data_cache"
@@ -105,6 +150,10 @@ SAMPLE_DATA_CACHE_DIR = TRAINING_DATA_CACHE / DATASET_NAME
 FINE_TUNING_DIR = OUTPUT_DIR / FINE_TUNING_TRAINED_MODEL
 
 INFERRED_NETWORK_OUTPUT_DIR = ROOT_DIR / "output" / "transformer_testing_output" / "chrom_inferred_grn_orti_chipatlas_rn117_unique"
+
+# GAT Classifier model
+PRETRAINED_EMB_DIR = OUTPUT_DIR / "MULTI" / FINE_TUNING_TRAINED_MODEL
+
 
 
 

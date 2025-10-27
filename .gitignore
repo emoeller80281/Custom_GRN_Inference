@@ -79,6 +79,8 @@ data/raw/DS012_mESC/DS012_sample/**
 data/training_data_cache/**
 !data/training_data_cache/.gitkeep
 
+training_data_cache_old/
+
 GAT_training_outputs/
 experiments/*
 motif_pwms/*

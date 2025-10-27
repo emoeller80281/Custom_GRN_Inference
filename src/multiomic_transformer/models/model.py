@@ -311,18 +311,34 @@ class MultiomicTransformer(nn.Module):
         tg_base = self.tg_emb_table(tg_ids).unsqueeze(0).expand(B, -1, -1)  # [B,G_eval,D]
 
         attn_bias = None
-        if self.use_bias and (bias is not None):
-            attn_bias = bias
-            if attn_bias.dim() == 3:
-                attn_bias = attn_bias.unsqueeze(1)  # [B,1,G_eval,W]
-            assert attn_bias.shape[0] == B and attn_bias.shape[-2:] == (tg_base.size(1), win_emb.size(1)), \
-                f"Bias shape {attn_bias.shape} not compatible with (G_eval={tg_base.size(1)}, W={win_emb.size(1)})"
-            # Broadcast over heads
-            if attn_bias.shape[1] == 1:
-                attn_bias = attn_bias.expand(B, self.num_heads, tg_base.size(1), win_emb.size(1))
-            attn_bias = self.bias_scale * attn_bias
+        mask = None
 
-        tg_cross = self.cross_tg_to_atac(tg_base, win_emb, attn_bias=attn_bias)   # [B,G_eval,D]
+        if self.use_bias and (bias is not None):
+            # bias is [B,G,W] (nearby >0, out-of-range = 0)
+            raw_bias = bias
+            eps = 0.0
+            mask = (raw_bias.abs() > eps).unsqueeze(1)   # [B,1,G,W], broadcasts over heads
+
+            # Ensure at least one True per (B,G)
+            # so we don't end up with all -inf in a row.
+            none_allowed = ~mask.any(dim=-1, keepdim=True)  # [B,1,G,1]
+            if none_allowed.any():
+                # if a row is all False, allow the max-bias window
+                fallback_idx = torch.zeros((B, tg_base.size(1), 1), dtype=torch.long, device=mask.device)  # [B,G,1]
+                mask.scatter_(-1, fallback_idx.unsqueeze(1), True)
+
+            # Keep additive prior too
+            attn_bias = raw_bias.unsqueeze(1)                          # [B,1,G,W]
+            if attn_bias.shape[1] == 1 and self.num_heads > 1:
+                attn_bias = attn_bias.expand(B, self.num_heads, tg_base.size(1), raw_bias.size(-1))
+            attn_bias = self.bias_scale * attn_bias                    # scale the prior
+
+        # Use both: hard mask for strict locality, bias for soft preference within the window
+        tg_cross = self.cross_tg_to_atac(
+            tg_base, win_emb,
+            mask=mask,                 # [B,1 or H,G,W], 1=True keeps, 0=False blocks
+            attn_bias=attn_bias        # [B,H,G,W] additive logits prior
+        )
 
         # ----- Fuse global context -----
         tf_repr, _   = self.tf_pool(tf_cross)                    # [B,D]

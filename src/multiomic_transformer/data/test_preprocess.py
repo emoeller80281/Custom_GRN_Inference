@@ -191,7 +191,6 @@ def test_build_motif_mask_small():
     mask = build_motif_mask(
         tf_names=tf_names,
         sliding_window_df=sliding_min,
-        peaks_index=peaks,
         genes_near_peaks=genes_near_peaks,
     )
     # shape (num_peaks × num_tfs)
@@ -332,7 +331,7 @@ def test_merge_tf_tg_data_with_pkn_balances_and_metadata(tmp_path: Path):
 
     out_with_meta, out_plain = merge_tf_tg_data_with_pkn(
         df, string_csv, trrust_csv, kegg_csv,
-        upscale_percent=1.0, seed=42, add_pkn_scores=True
+        seed=42, add_pkn_scores=True
     )
 
     pos = out_plain[out_plain.get("label", 0) == 1]

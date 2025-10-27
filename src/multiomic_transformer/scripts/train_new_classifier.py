@@ -22,9 +22,10 @@ import logging, os
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.metrics import confusion_matrix, precision_recall_curve, roc_curve
-from config.settings import *
+from config.settings_hpc import *
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 logging.info(f"Using device: {device}")
@@ -48,12 +49,33 @@ canon = GeneCanonicalizer()
 canon.load_gtf(str(GTF_FILE_DIR / "Mus_musculus.GRCm39.115.gtf.gz"))
 canon.load_ncbi_gene_info(str(NCBI_FILE_DIR / "Mus_musculus.gene_info.gz"), species_taxid=species_taxid)
 logging.info(f"Map sizes: {canon.coverage_report()}")
+
+# ============================================================
+# Helper functions
+# ============================================================
+
+def _pick_base_score_column(df: pd.DataFrame) -> str:
+    # Prefer logits; fall back gracefully
+    for c in ("Logit", "Score", "Prob", "prob"):
+        if c in df.columns:
+            return c
+    raise KeyError("No score-like column found (expected one of Logit/Score/Prob).")
+
+def _best_orientation(y_true, score_vec):
+    """Return (best_auc, chosen_name, maybe_flipped_score_vec)."""
+    auc_pos = roc_auc_score(y_true, score_vec)
+    auc_neg = roc_auc_score(y_true, -score_vec)
+    if auc_neg > auc_pos:
+        return auc_neg, "-score", -score_vec
+    return auc_pos, "score", score_vec
+
 # ============================================================
 # Load data
 # ============================================================
 
 sample_dfs = []
-for sample in SAMPLE_NAMES:
+sample_names = ["E7.5_rep1"]
+for sample in sample_names:
     if os.path.exists(SAMPLE_PROCESSED_DATA_DIR / sample / "tf_tg_data.parquet"):
         logging.info(f"Loading data for {sample}")
         
@@ -147,15 +169,28 @@ train_idx, test_idx = next(gss.split(df, df["label"], groups=df["pair"]))
 df_train = df.iloc[train_idx].reset_index(drop=True)
 df_test  = df.iloc[test_idx].reset_index(drop=True)
 
-# ---- Fit scaler on TRAIN ONLY, then transform ALL edges to keep a single graph
-scaler = StandardScaler()
-scaler.fit(df_train[edge_features].to_numpy())
+# Make NaN mask before filling, fit scaler on train, then transform ALL
+X_train = df_train[edge_features].to_numpy()
+mask_train = np.isnan(X_train).astype(np.float32)
+X_train_filled = np.nan_to_num(X_train, nan=0.0)
 
-edge_attr = torch.tensor(
-    scaler.transform(df[edge_features].to_numpy()),
-    dtype=torch.float32
-)
+from sklearn.preprocessing import StandardScaler
+scaler = StandardScaler()
+scaler.fit(X_train_filled)  # fit on train values only
+
+# all edges for one graph
+X_all = df[edge_features].to_numpy()
+mask_all = np.isnan(X_all).astype(np.float32)
+X_all_filled = np.nan_to_num(X_all, nan=0.0)
+X_all_scaled = scaler.transform(X_all_filled).astype(np.float32)
+
+# concatenate value features with missingness mask
+edge_attr_np = np.concatenate([X_all_scaled, mask_all], axis=1)  # shape [E, 2F]
+edge_attr = torch.from_numpy(edge_attr_np).to(torch.float32)
+
 assert edge_attr.shape[0] == len(df)
+num_features = len(edge_features)
+assert edge_attr.shape[1] == 2 * num_features
 
 
 # ============================================================
@@ -185,15 +220,18 @@ def _align(encoder_classes, name_to_old, src_vecs, D, init="zeros"):
     if init == "normal":
         torch.nn.init.normal_(out, mean=0.0, std=0.02)
     hits = misses = 0
+    n_src = src_vecs.shape[0]
+
     for j, name in enumerate(encoder_classes):
         i = name_to_old.get(str(name).upper(), None)
-        if i is None:
+        # Guard against bad / mismatched indices
+        if (i is None) or (i < 0) or (i >= n_src):
             misses += 1
-            # keep init for OOV (zeros or normal)
-        else:
-            out[j] = src_vecs[i]
-            hits += 1
+            continue
+        out[j] = src_vecs[i]
+        hits += 1
     return out, hits, misses
+
 
 # ---- Build id tensors (reusing encoders already fit on full df, that's fine for a single graph)
 tf_encoder = LabelEncoder().fit(df["TF"].astype(str))
@@ -268,16 +306,20 @@ node_features = node_features.to(device)
 
 data = Data(x=node_features, edge_index=edge_index, edge_attr=edge_attr).to(device)
 
+in_node_feats  = data.x.size(1)
+in_edge_feats  = data.edge_attr.size(1)
+
 model = GRN_GAT_Encoder(
     in_node_feats=in_node_feats,
-    in_edge_feats=len(edge_features),
-    hidden_dim=D_MODEL,
-    heads=GAT_HEADS,
-    dropout=GAT_DROPOUT,
-    edge_dropout_p=EDGE_DROPOUT
+    in_edge_feats=in_edge_feats,
+    hidden_dim=128,
+    heads=4,
+    dropout=0.3,
+    edge_dropout_p=0.2
 ).to(device)
-
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-5)
+
+enc_out_dim = model.proj[-1].out_features
 
 # Sanity-check devices
 logging.info(
@@ -324,52 +366,118 @@ def infomax_loss(h_real: torch.Tensor,
 # ============================================================
 phase1_losses = []
 
-for epoch in range(1, DGI_EPOCHS+1):
+scaler = torch.amp.GradScaler(enabled=True)
+
+# EMA for smooth early-stopping
+ema = None
+EMA_ALPHA = 0.1         # smoothing factor (0=no smooth, 1=very slow)
+BEST = float("inf")
+PATIENCE = 30           # epochs with no meaningful improvement before stop
+STALE = 0
+MIN_REL_IMPROVE = 1e-3  # require >=0.1% relative improvement
+
+best_path = "outputs/self_supervised_gat.best.pt"
+
+for epoch in range(1, DGI_EPOCHS + 1):
     model.train()
-    optimizer.zero_grad()
-    h_real, g_real = model(data.x, data.edge_index, data.edge_attr)
-    h_fake, _ = model(corruption(data.x), data.edge_index, data.edge_attr)
-    loss = infomax_loss(h_real, h_fake, g_real)
-    loss.backward()
-    optimizer.step()
-    phase1_losses.append(loss.item())
-    
+    optimizer.zero_grad(set_to_none=True)
+
+    with torch.amp.autocast(device_type="cuda", enabled=True):
+        h_real, g_real = model(data.x, data.edge_index, data.edge_attr)
+        h_fake, _      = model(corruption(data.x), data.edge_index, data.edge_attr)
+        loss = infomax_loss(h_real, h_fake, g_real)
+
+    scaler.scale(loss).backward()
+    scaler.step(optimizer)
+    scaler.update()
+
+    # track raw + EMA loss
+    l = float(loss.item())
+    phase1_losses.append(l)
+    ema = l if ema is None else (EMA_ALPHA * l + (1 - EMA_ALPHA) * ema)
+
+    # keep best (by EMA)
+    if ema < BEST * (1 - MIN_REL_IMPROVE):
+        BEST = ema
+        torch.save(model.state_dict(), best_path)
+        STALE = 0
+    else:
+        STALE += 1
+
     if epoch % 10 == 0:
-        logging.info(f"[DGI] Epoch {epoch:03d} | Loss={loss.item():.6f}")
+        logging.info(f"[DGI] Epoch {epoch:03d} | Loss={l:.6f} | EMA={ema:.6f} | BestEMA={BEST:.6f} | stale={STALE}/{PATIENCE}")
 
+    if STALE >= PATIENCE:
+        logging.info(f"[DGI] Early stopping at epoch {epoch} (no ≥{MIN_REL_IMPROVE*100:.2f}% EMA improvement in {PATIENCE} epochs).")
+        break
 
+# Load/save the best encoder from Phase 1
+model.load_state_dict(torch.load(best_path, map_location=data.x.device))
 torch.save(model.state_dict(), "outputs/self_supervised_gat.pt")
 logging.info("Saved pretrained weights to outputs/self_supervised_gat.pt")
 
 # ============================================================
 # Phase 2 — Semi-supervised fine-tuning using label edges
 # ============================================================
+
 class PerTFBalancedSampler:
-    def __init__(self, pos_by_tf, neg_by_tf, batch_tfs=64, k_per_tf=1, seed=SEED):
-        self.pos_by_tf = {tf: v for tf, v in pos_by_tf.items() if len(neg_by_tf.get(tf, [])) > 0}
-        self.neg_by_tf = neg_by_tf
+    """
+    Yields mini-batches containing, for each sampled TF, k positives and k negatives (balanced within TF).
+    """
+    def __init__(self, pos_by_tf, neg_by_tf, batch_tfs=64, k_per_tf=2, seed=SEED):
+        # only keep TFs that have at least 1 negative (and at least 1 positive implicitly)
+        self.pos_by_tf = {tf: v for tf, v in pos_by_tf.items() if len(v) > 0 and len(neg_by_tf.get(tf, [])) > 0}
+        self.neg_by_tf = {tf: neg_by_tf[tf] for tf in self.pos_by_tf.keys()}
         self.tfs = list(self.pos_by_tf.keys())
         self.batch_tfs = batch_tfs
         self.k = k_per_tf
         self.rng = random.Random(seed)
 
-    def __iterseqs__(self):
+    def _epoch_batches(self):
+        # shuffle TF order each epoch
         self.rng.shuffle(self.tfs)
         for i in range(0, len(self.tfs), self.batch_tfs):
             chunk = self.tfs[i:i+self.batch_tfs]
-            batch = []
+            batch_pairs = []
             for tf in chunk:
                 pos_tgs = self.pos_by_tf[tf]
                 neg_tgs = self.neg_by_tf[tf]
                 for _ in range(self.k):
-                    if not pos_tgs or not neg_tgs: continue
-                    batch.append((tf, self.rng.choice(pos_tgs), 1))
-                    batch.append((tf, self.rng.choice(neg_tgs), 0))
-            yield batch
+                    # 1 positive
+                    tg_pos = self.rng.choice(pos_tgs)
+                    batch_pairs.append((tf, tg_pos, 1))
+                    # 1 negative
+                    tg_neg = self.rng.choice(neg_tgs)
+                    batch_pairs.append((tf, tg_neg, 0))
+            if batch_pairs: 
+                yield batch_pairs
 
-    # PyTorch-style iterator:
     def __iter__(self):
-        yield from self.__iterseqs__()
+        yield from self._epoch_batches()
+
+
+def _build_val_split(pos_by_tf, neg_by_tf, frac=0.1, k_cap=5, seed=SEED):
+    rng = random.Random(seed)
+    pos_by_tf = {tf: list(v) for tf, v in pos_by_tf.items()}
+    neg_by_tf = {tf: list(neg_by_tf.get(tf, [])) for tf in pos_by_tf.keys()}
+
+    val_pairs, val_y = [], []
+    for tf in list(pos_by_tf.keys()):
+        if not pos_by_tf[tf] or not neg_by_tf.get(tf):
+            continue
+        k_pos = min(max(1, int(len(pos_by_tf[tf]) * frac)), k_cap)
+        k_neg = min(max(1, int(len(neg_by_tf[tf]) * frac)), k_cap)
+        rng.shuffle(pos_by_tf[tf]); rng.shuffle(neg_by_tf[tf])
+        pos_val = pos_by_tf[tf][:k_pos]; pos_by_tf[tf] = pos_by_tf[tf][k_pos:]
+        neg_val = neg_by_tf[tf][:k_neg]; neg_by_tf[tf] = neg_by_tf[tf][k_neg:]
+        for tg in pos_val: val_pairs.append((tf, tg)); val_y.append(1)
+        for tg in neg_val: val_pairs.append((tf, tg)); val_y.append(0)
+
+    pos_by_tf = {tf: v for tf, v in pos_by_tf.items() if v and neg_by_tf.get(tf)}
+    neg_by_tf = {tf: neg_by_tf[tf] for tf in pos_by_tf.keys()}
+    return pos_by_tf, neg_by_tf, np.array(val_pairs, np.int64), np.array(val_y, np.int64)
+
+
 
 
 if "label" not in df.columns:
@@ -378,62 +486,161 @@ if "label" not in df.columns:
 
 logging.info("=== Phase 2: Semi-supervised fine-tuning on PKN edges ===")
 
-embed_dim = D_MODEL
-finetune_model = EdgeClassifier(model, embed_dim).to(device)
-# Unfreeze only the last GAT + projection head
-for n, p in finetune_model.encoder.named_parameters():
-    p.requires_grad = ("gat2" in n) or ("proj" in n)
+finetune_model = EdgeClassifier(model, embed_dim=enc_out_dim).to(device)
 
-# Different LRs: small for encoder, larger for head
+for p in finetune_model.encoder.parameters():
+    p.requires_grad = False
+
+# Two-tier learning rates
 param_groups = [
     {"params": [p for n, p in finetune_model.encoder.named_parameters() if p.requires_grad], "lr": LR_ENCODER},
     {"params": finetune_model.classifier.parameters(), "lr": LR_HEAD},
 ]
-optimizer_finetune = torch.optim.Adam(param_groups, weight_decay=WEIGHT_DECAY)
-sampler = PerTFBalancedSampler(pos_by_tf_ids, neg_by_tf_ids, batch_tfs=64, k_per_tf=4, seed=SEED)
-criterion = nn.BCEWithLogitsLoss()
-phase2_train_losses, phase2_val_auroc, phase2_val_aupr = [], [], []
+optimizer_finetune = torch.optim.AdamW(param_groups, weight_decay=WEIGHT_DECAY)
 
-pretrained_state = {k: v.detach().clone() for k, v in finetune_model.encoder.state_dict().items()}
+# Build train/val splits from the per-TF dictionaries (assumed int ids: pos_by_tf_ids, neg_by_tf_ids)
+pos_by_tf_train, neg_by_tf_train, val_pairs_np, val_y_np = _build_val_split(
+    pos_by_tf_ids, neg_by_tf_ids, frac=0.1, k_cap=5, seed=SEED
+)
+sampler = PerTFBalancedSampler(pos_by_tf_train, neg_by_tf_train, batch_tfs=64, k_per_tf=4, seed=SEED)
+
+criterion = nn.BCEWithLogitsLoss()
+
+# L2-SP reference (pretrained encoder weights)
+with torch.no_grad():
+    pretrained_state = {k: v.detach().clone().cpu() for k, v in finetune_model.encoder.state_dict().items()}
 
 def l2sp_loss(module, ref_state):
-    d = next(module.parameters()).device
-    reg = torch.zeros((), device=d)
+    reg = torch.zeros([], device=device, dtype=torch.float32)
     for k, p in module.state_dict().items():
-        if p.dtype.is_floating_point and k in ref_state:
-            reg = reg + (p - ref_state[k].to(d)).pow(2).sum()
+        if p.dtype.is_floating_point and (k in ref_state):
+            reg = reg + (p - ref_state[k].to(device, non_blocking=True)).pow(2).sum()
     return reg
 
+# Validation tensors on device (computed once)
+val_pairs_t = torch.as_tensor(val_pairs_np, device=device, dtype=torch.long)
+val_y_t     = torch.as_tensor(val_y_np,     device=device, dtype=torch.float32)
+
+# AMP + grad clipping + LR scheduler on AUROC (mode='max')
+scaler = torch.amp.GradScaler(enabled=True)
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer_finetune, mode="max", factor=0.5, patience=3)
+
+best_auc = -1.0
+best_path = "outputs/fine_tuned_gat_classifier.best.pt"
+patience = 10
+stale = 0
+
+def _eval_on_val():
+    finetune_model.eval()
+    with torch.no_grad(), torch.amp.autocast(device_type="cuda", enabled=True):
+        logits = finetune_model(data.x, data.edge_index, data.edge_attr, val_pairs_t).view(-1)
+    y_true = val_y_t.cpu().numpy()
+    s_val  = logits.float().cpu().numpy()
+    # Orientation-robust AUROC (use raw logits)
+    auc_pos = roc_auc_score(y_true, s_val)
+    auc_neg = roc_auc_score(y_true, -s_val)
+    if auc_neg > auc_pos:
+        auc = auc_neg
+    else:
+        auc = auc_pos
+    aupr = average_precision_score(y_true, 1.0/(1.0+np.exp(-s_val)))  # PR can use probs
+    return float(auc), float(aupr)
+
+phase2_train_losses, phase2_val_auroc, phase2_val_aupr = [], [], []
+
+UNFROZE = False
+finetune_model.encoder.edge_dropout_p = 0.0
+
 for epoch in range(1, FINETUNE_EPOCHS + 1):
+    
+    # unfreeze after warmup
+    if (epoch == 4) and not UNFROZE:
+        for n, p in finetune_model.encoder.named_parameters():
+            p.requires_grad = ("gat2" in n) or ("proj" in n)
+
+    # REBUILD optimizer so the newly-trainable params are actually optimized
+    optimizer_finetune = torch.optim.AdamW(
+        [
+            {"params": [p for n,p in finetune_model.encoder.named_parameters() if p.requires_grad],
+                "lr": LR_ENCODER},
+            {"params": finetune_model.classifier.parameters(), "lr": LR_HEAD},
+        ],
+        weight_decay=WEIGHT_DECAY
+    )
+    # if you’re using a scheduler tied to the old optimizer, recreate it too
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer_finetune, mode="max", factor=0.5, patience=3)
+
+    UNFROZE = True
+    
     finetune_model.train()
     running, nb = 0.0, 0
-    for batch in sampler:
-        if len(batch) < 4: # require the batch to have at least 2 pos/neg pairs total
-            continue
-        # batch is a list[(tf_id, tg_id, y)]
-        arr = np.array(batch, dtype=np.int64)
-        pairs_b = torch.tensor(arr[:, :2], dtype=torch.long, device=device)
-        y_b     = torch.tensor(arr[:, 2],  dtype=torch.float32, device=device)
+    for _ in range(3):  # 3 reshuffles per epoch
+        for batch in sampler:  # reshuffles TFs every epoch
+            if len(batch) < 4:
+                continue
+            arr = np.asarray(batch, dtype=np.int64)
+            pairs_b = torch.as_tensor(arr[:, :2], device=device)
+            y_b     = torch.as_tensor(arr[:, 2],  device=device, dtype=torch.float32)
 
-        optimizer_finetune.zero_grad()
-        logits = finetune_model(data.x, data.edge_index, data.edge_attr, pairs_b)
-        loss = criterion(logits, y_b) + L2SP_LAMBDA * l2sp_loss(finetune_model.encoder, pretrained_state)
-        loss.backward(); optimizer_finetune.step()
-        running += float(loss.item()); nb += 1
+            optimizer_finetune.zero_grad(set_to_none=True)
+            with torch.amp.autocast(device_type="cuda", enabled=True):
+                logits = finetune_model(data.x, data.edge_index, data.edge_attr, pairs_b).view(-1)
+                loss = criterion(logits, y_b) + L2SP_LAMBDA * l2sp_loss(finetune_model.encoder, pretrained_state)
+            scaler.scale(loss).backward()
+            # gradient clipping for stability
+            scaler.unscale_(optimizer_finetune)
+                    
+            total_norm = torch.nn.utils.clip_grad_norm_(finetune_model.parameters(), max_norm=1.0)
+
+            scaler.step(optimizer_finetune)
+            scaler.update()
+
+            running += float(loss.item()); nb += 1
+            
+    logging.info(f"[Diag] GradNorm={float(total_norm):.3f}")
+
+    with torch.no_grad(), torch.amp.autocast(device_type="cuda", enabled=True):
+        idx_np = np.random.choice(len(pairs_train), size=min(20000, len(pairs_train)), replace=False)
+        idx_t  = torch.from_numpy(idx_np).to(device)
+        pt = pairs_train.index_select(0, idx_t)
+        yt = y_train.index_select(0, idx_t)
+        logits_tt = finetune_model(data.x, data.edge_index, data.edge_attr, pt).view(-1)
+    auc_tr = roc_auc_score(yt.float().cpu().numpy(), logits_tt.float().cpu().numpy())
 
     if nb:
-        phase2_train_losses.append(running / nb)
+        train_loss = running / nb
+        phase2_train_losses.append(train_loss)
+    else:
+        train_loss = float("nan")
 
-    if epoch % 10 == 0:
-        finetune_model.eval()
-        with torch.no_grad():
-            preds = torch.sigmoid(finetune_model(data.x, data.edge_index, data.edge_attr, pairs_test))
-            auc = roc_auc_score(y_test.cpu(), preds.cpu())
-            aupr = average_precision_score(y_test.cpu(), preds.cpu())
-            phase2_val_auroc.append(auc); phase2_val_aupr.append(aupr)
-        logging.info(f"[FineTune] Epoch {epoch:03d} | Loss={phase2_train_losses[-1]:.4f} | AUROC={auc:.3f} | AUPR={aupr:.3f}")
+    # --- evaluate every epoch; you can switch to every N epochs if desired
+    auroc, aupr = _eval_on_val()
+    phase2_val_auroc.append(auroc); phase2_val_aupr.append(aupr)
+    logging.info(f"[FineTune] Epoch {epoch:03d} | Loss={train_loss:.4f} | AUROC={auroc:.3f} | AUPR={aupr:.3f} | "
+                 f"LR_head={optimizer_finetune.param_groups[1]['lr']:.2e} | LR_enc={optimizer_finetune.param_groups[0]['lr']:.2e}")    
+    
+    # scheduler on AUROC (maximize)
+    if epoch > 8:
+        scheduler.step(auroc)
+
+    # early stop on AUROC
+    if auroc > best_auc + 1e-4:
+        best_auc = auroc
+        torch.save(finetune_model.state_dict(), best_path)
+        stale = 0
+    else:
+        stale += 1
+        if stale >= patience:
+            logging.info(f"Early stopping (no AUROC improvement in {patience} epochs).")
+            break
+
+# load best and save a final “served” copy
+finetune_model.load_state_dict(torch.load(best_path, map_location=device))
+
 torch.save(finetune_model.state_dict(), "outputs/fine_tuned_gat_classifier.pt")
+
 logging.info("Saved fine-tuned model to outputs/fine_tuned_gat_classifier.pt")
+
 
 # --- use the SAME encoders used for the graph ---
 # make dicts from the fitted LabelEncoders
@@ -476,36 +683,42 @@ probs[valid.values] = probs_valid.ravel()
 
 df_scores["Score"] = probs
 
-# all TFxTG combinations (using the same local-id scheme)
-tf_ids = np.arange(n_tfs, dtype=int)
-tg_ids = np.arange(n_tgs, dtype=int) + n_tfs  # offset TG node ids
-
-all_pairs = np.stack(
-    [np.repeat(tf_ids, n_tgs), np.tile(tg_ids, n_tfs)],
-    axis=1
-)
-all_pairs_t = torch.as_tensor(all_pairs, dtype=torch.long, device=device)
+n_tfs = len(tf_encoder.classes_)
+n_tgs = len(tg_encoder.classes_)
+tf_idx = np.repeat(np.arange(n_tfs, dtype=np.int64), n_tgs)
+tg_idx = np.tile  (np.arange(n_tgs, dtype=np.int64), n_tfs)
+all_pairs_t = torch.tensor(np.stack([tf_idx, tg_idx], 1), dtype=torch.long, device=device)
 
 # run batched inference on ALL pairs
 finetune_model.eval()
-outs = []
+
+n_pairs = all_pairs_t.shape[0]
+all_logits = np.empty(n_pairs, dtype=np.float32)
 with torch.no_grad():
     B = PAIR_BATCH
-    for i in range(0, all_pairs_t.shape[0], B):
-        sl = all_pairs_t[i:i+B]
-        logits = finetune_model(data.x, data.edge_index, data.edge_attr, sl)
-        outs.append(logits.detach().cpu().numpy())
-all_logits = np.concatenate(outs, axis=0)
-all_probs = 1.0 / (1.0 + np.exp(-all_logits)).ravel()
+    for i in range(0, n_pairs, B):
+        sl = all_pairs_t[i:i+B]                    # [B, 2] -> (tf_idx, tg_idx)
+        # logits shape: [B, 1] or [B]; ensure 1D
+        logits = finetune_model(data.x, data.edge_index, data.edge_attr, sl).view(-1)
+        all_logits[i:i+len(sl)] = logits.float().cpu().numpy()
 
-# make a nice table with names
+# numerically stable sigmoid via torch or scipy; this is fine:
+all_probs = 1.0 / (1.0 + np.exp(-all_logits))      # same as torch.sigmoid
+
+# map names from the actual index pairs (no ordering assumptions)
 tf_names = tf_encoder.classes_.astype(str)
 tg_names = tg_encoder.classes_.astype(str)
+pairs_cpu = all_pairs_t.cpu().numpy()
+tf_idx = pairs_cpu[:, 0].astype(int)
+tg_idx = pairs_cpu[:, 1].astype(int)
+
 df_all = pd.DataFrame({
-    "TF": np.repeat(tf_names, n_tgs),
-    "TG": np.tile(tg_names, n_tfs),
-    "Score": all_probs.astype(np.float32),
+    "TF": tf_names[tf_idx],
+    "TG": tg_names[tg_idx],
+    "Score": all_probs.astype(np.float32)
 })
+
+# CSV for quick looks; Parquet is smaller & faster if this is huge
 df_all.to_csv("outputs/inferred_grn_all_pairs.csv", index=False)
 
 # ============================================================
@@ -543,14 +756,19 @@ def _precision_at_k_over_tfs(score_df: pd.DataFrame, gold_map: dict, ks=PRECISIO
         rows.append((k, float(np.mean(vals)) if vals else np.nan))
     return pd.DataFrame(rows, columns=["k","Precision"])
 
-scored = pd.DataFrame()  # <--- guard for later sections
+scored = pd.DataFrame()
+
+def best_orientation_auc(y_true, score):
+    auc1 = roc_auc_score(y_true, score)
+    auc2 = roc_auc_score(y_true, -score)
+    return (auc1, auc2, "score" if auc1 >= auc2 else "-score")
 
 try:
-    if CHIP_GT_PATH and os.path.exists(CHIP_GT_PATH):
+    if CHIP_GROUND_TRUTH and os.path.exists(CHIP_GROUND_TRUTH):
         chip_dir = os.path.join("outputs", "chip_eval")
         os.makedirs(chip_dir, exist_ok=True)
-        logging.info(f"\n=== ChIP-seq comparison using: {CHIP_GT_PATH} ===")
-        chip = _load_chip_gold(CHIP_GT_PATH, CHIP_GT_SEP)
+        logging.info(f"\n=== ChIP-seq comparison using: {CHIP_GROUND_TRUTH} ===")
+        chip = _load_chip_gold(CHIP_GROUND_TRUTH, CHIP_GROUND_TRUTH_SEP)
 
         # --- BEFORE standardization (true pre-std diagnostics)
         scores_before = df_scores[["TF","TG"]].copy()
@@ -610,6 +828,53 @@ try:
         # merge restricted to the model’s universe
         scored = df_scores.merge(chip_in_universe, on=["TF","TG"], how="left")
         scored["label"] = scored["label"].fillna(0).astype(int)
+        
+        # ---- Score selection & orientation once, then reuse everywhere ----
+        base_col = _pick_base_score_column(scored)
+        y_true_all = scored["label"].to_numpy()
+        s_all = scored[base_col].to_numpy().astype(np.float64)
+
+        # Only evaluate orientation if both classes exist
+        if np.unique(y_true_all).size > 1:
+            best_auc, which, s_oriented = _best_orientation(y_true_all, s_all)
+            logging.info(f"[ChIP] Using base score = '{base_col}', orientation = {which} (overall AUROC={best_auc:.3f})")
+        else:
+            s_oriented = s_all
+            logging.warning("[ChIP] Single class in labels at this stage; keeping base orientation.")
+
+        # canonical “evaluation score” used everywhere below
+        scored["ScoreEval"] = s_oriented.astype(np.float32)
+        
+        # After you compute 's_all' and ScoreEval:
+        tf_sign = {}
+        for tf, sub in scored.groupby("TF"):
+            y = sub["label"].to_numpy()
+            if np.unique(y).size < 2: 
+                continue
+            s = sub[base_col].to_numpy()
+            auc_pos = roc_auc_score(y, s); auc_neg = roc_auc_score(y, -s)
+            tf_sign[tf] = 1.0 if auc_pos >= auc_neg else -1.0
+
+        # Optional TF-wise oriented score for per-TF metrics:
+        scored["ScorePerTF"] = scored.apply(lambda r: tf_sign.get(r["TF"], 1.0) * r[base_col], axis=1)
+
+        
+        # Quick sanity: how many TFs prefer the negative orientation?
+        flip_cnt = 0; total_tf = 0
+        for tf, sub in scored.groupby("TF"):
+            y = sub["label"].to_numpy()
+            if np.unique(y).size < 2: 
+                continue
+            total_tf += 1
+            s = sub[base_col].to_numpy()
+            try:
+                auc_pos = roc_auc_score(y, s); auc_neg = roc_auc_score(y, -s)
+                if auc_neg > auc_pos: flip_cnt += 1
+            except Exception:
+                pass
+        if total_tf:
+            logging.info(f"[ChIP] TFs preferring negative orientation: {flip_cnt}/{total_tf}")
+
                     
         # === Coverage diagnostics ===
         tf_chip = set(chip["TF"].unique())
@@ -640,7 +905,7 @@ try:
         scored.to_csv(os.path.join(chip_dir, "scored_edges_with_chip.csv"), index=False)
 
         y_true = scored["label"].values
-        y_pred = scored["Score"].values
+        y_pred = scored["ScoreEval"].values
         if np.unique(y_true).size > 1:
             auroc = roc_auc_score(y_true, y_pred)
             aupr  = average_precision_score(y_true, y_pred)
@@ -670,7 +935,7 @@ try:
             if sub.empty: 
                 continue
             y = sub["TG"].isin(pos_set).astype(int).values
-            s = sub["Score"].values
+            s = sub["ScoreEval"].values
             if y.sum() == 0 or y.sum() == len(y):
                 auc_tf, aupr_tf = np.nan, np.nan
             else:
@@ -715,14 +980,14 @@ try:
                 if sub["label"].sum() == 0:
                     continue
                 y = sub["label"].to_numpy()
-                s = sub["Score"].to_numpy()
+                s = sub["ScoreEval"].to_numpy()
                 lifts.append(lift_at_k(y, s, min(k, len(sub))))
                 recalls.append(recall_at_k(y, s, min(k, len(sub))))
             rows.append({"k": k, "Lift@k": np.mean(lifts) if lifts else np.nan,
                             "Recall@k": np.mean(recalls) if recalls else np.nan})
         pd.DataFrame(rows).to_csv(os.path.join(chip_dir, "lift_recall_at_k.csv"), index=False)
     else:
-        logging.warning("CHIP_GT_PATH not set or file not found — skipping ChIP comparison.")
+        logging.warning("CHIP_GROUND_TRUTH not set or file not found — skipping ChIP comparison.")
 except Exception as e:
     logging.exception(f"ChIP-seq comparison failed: {e}")
     
@@ -737,7 +1002,7 @@ for tf, sub in scored.groupby("TF"):
     if sub["label"].nunique() < 2:
         continue
     y = sub["label"].to_numpy()
-    s = sub["Score"].to_numpy()
+    s = sub["ScoreEval"].to_numpy()
     try:
         auc_tf  = roc_auc_score(y, s)
         aupr_tf = average_precision_score(y, s)
@@ -751,6 +1016,73 @@ macro_auroc = float(np.nanmean(macro_df["AUROC"])) if not macro_df.empty else np
 macro_aupr  = float(np.nanmean(macro_df["AUPR"]))  if not macro_df.empty else np.nan
 logging.info(f"[ChIP Macro] Mean per-TF AUROC={macro_auroc:.3f} | AUPR={macro_aupr:.3f}")
 macro_df.to_csv(os.path.join(chip_dir, "per_TF_macro_metrics.csv"), index=False)
+
+# === Macro mean per-TF ROC/PR curves ===
+# Use only TFs with both classes to avoid degenerate curves
+tf_groups = []
+for tf, sub in scored.groupby("TF"):
+    y = sub["label"].to_numpy()
+    if np.unique(y).size < 2:
+        continue
+    s = sub["ScoreEval"].to_numpy()
+    # Per-TF ROC + PR
+    fpr, tpr, _ = roc_curve(y, s)
+    prec, rec, _ = precision_recall_curve(y, s)
+    tf_groups.append({"tf": tf, "fpr": fpr, "tpr": tpr, "prec": prec, "rec": rec})
+
+if tf_groups:
+    # Common grids
+    fpr_grid = np.linspace(0.0, 1.0, 501)        # for ROC
+    rec_grid = np.linspace(0.0, 1.0, 501)        # for PR
+
+    # Collect interpolations
+    tpr_grid_vals = []
+    prec_grid_vals = []
+
+    for g in tf_groups:
+        # ROC interpolation on FPR grid
+        # ensure strictly increasing fpr for np.interp
+        fpr, tpr = g["fpr"], g["tpr"]
+        order = np.argsort(fpr)
+        fpr = fpr[order]; tpr = tpr[order]
+        tpr_interp = np.interp(fpr_grid, fpr, tpr)
+        tpr_grid_vals.append(tpr_interp)
+
+        # PR interpolation on recall grid
+        # sklearn returns recall sorted ascending; enforce monotonic precision
+        rec, prec = g["rec"], g["prec"]
+        order = np.argsort(rec)
+        rec = rec[order]; prec = prec[order]
+        # Make precision non-increasing w.r.t. recall (standard PR post-processing)
+        for i in range(len(prec)-2, -1, -1):
+            prec[i] = max(prec[i], prec[i+1])
+        prec_interp = np.interp(rec_grid, rec, prec)
+        prec_grid_vals.append(prec_interp)
+
+    mean_tpr = np.mean(np.vstack(tpr_grid_vals), axis=0)
+    mean_prec = np.mean(np.vstack(prec_grid_vals), axis=0)
+
+    # Plot macro-mean curves
+    plt.figure(figsize=(10,4))
+    # Macro ROC
+    plt.subplot(1,2,1)
+    plt.plot(fpr_grid, mean_tpr, lw=2, label="Macro mean TPR")
+    plt.plot([0,1], [0,1], "--", c="gray", lw=1)
+    plt.xlabel("FPR"); plt.ylabel("TPR")
+    plt.title(f"Macro per-TF ROC (mean AUROC={macro_auroc:.3f})")
+
+    # Macro PR
+    plt.subplot(1,2,2)
+    plt.plot(rec_grid, mean_prec, lw=2, label="Macro mean Precision")
+    plt.xlabel("Recall"); plt.ylabel("Precision")
+    plt.title(f"Macro per-TF PR (mean AUPR={macro_aupr:.3f})")
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(chip_dir, "macro_mean_per_TF_roc_pr.png"), dpi=PLOT_DPI)
+    plt.close()
+else:
+    logging.warning("No TFs with both classes for macro-mean ROC/PR curves.")
+
 
 # 2) Balanced micro using per-TF sample weights
 #    Each TF contributes the same total weight; within a TF, positives and negatives
@@ -787,7 +1119,7 @@ for tf, sub in scored.groupby("TF"):
     w_tf = per_tf_balanced_weights(sub)
     if w_tf.sum() == 0:
         continue
-    parts.append(sub[["label","Score"]].reset_index(drop=True))
+    parts.append(sub[["label","ScoreEval"]].reset_index(drop=True))
     weights.append(w_tf)
 
 if parts:
@@ -798,7 +1130,7 @@ if parts:
     n_tfs_contributing = len(weights)
     w = w / n_tfs_contributing
     y_all = blended["label"].to_numpy()
-    s_all = blended["Score"].to_numpy()
+    s_all = blended["ScoreEval"].to_numpy()
     try:
         bal_micro_auroc = roc_auc_score(y_all, s_all, sample_weight=w)
         bal_micro_aupr  = average_precision_score(y_all, s_all, sample_weight=w)
@@ -818,12 +1150,12 @@ if parts:
         plt.plot(fpr_w, tpr_w)
         plt.plot([0,1],[0,1],'--',c='gray',lw=1)
         plt.xlabel("FPR"); plt.ylabel("TPR")
-        plt.title(f"Balanced-Micro ROC (AUROC={bal_micro_auroc:.3f})")
+        plt.title(f"ROC Balanced True/False per TF (AUROC={bal_micro_auroc:.3f})")
 
         plt.subplot(1,2,2)
         plt.plot(rec_w, prec_w)
         plt.xlabel("Recall"); plt.ylabel("Precision")
-        plt.title(f"Balanced-Micro PR (AUPR={bal_micro_aupr:.3f})")
+        plt.title(f"PR Balanced True/False per TF (AUPR={bal_micro_aupr:.3f})")
 
         plt.tight_layout()
         plt.savefig(os.path.join(chip_dir, "balanced_micro_roc_pr.png"), dpi=PLOT_DPI)
@@ -851,7 +1183,7 @@ try:
     if us_parts:
         us = pd.concat(us_parts, axis=0, ignore_index=True)
         y_us = us["label"].to_numpy()
-        s_us = us["Score"].to_numpy()
+        s_us = us["ScoreEval"].to_numpy()
         auroc_us = roc_auc_score(y_us, s_us) if np.unique(y_us).size > 1 else np.nan
         aupr_us  = average_precision_score(y_us, s_us) if np.unique(y_us).size > 1 else np.nan
         logging.info(f"[ChIP Undersampled-Micro] AUROC={auroc_us:.3f} | AUPR={aupr_us:.3f}  "
@@ -866,9 +1198,32 @@ except Exception as e:
 sc_tfs = [tf for tf, grp in scored.groupby("TF") if (grp["label"]==1).any()]
 scoped = scored[scored["TF"].isin(sc_tfs)].copy()
 if scoped["label"].nunique() > 1:
-    auroc_sc = roc_auc_score(scoped["label"].values, scoped["Score"].values)
-    aupr_sc  = average_precision_score(scoped["label"].values, scoped["Score"].values)
+    auroc_sc = roc_auc_score(scoped["label"].values, scoped["ScoreEval"].values)
+    aupr_sc  = average_precision_score(scoped["label"].values, scoped["ScoreEval"].values)
     logging.info(f"[ChIP FairScope Overall] AUROC={auroc_sc:.3f} | AUPR={aupr_sc:.3f}")
+    
+    y_sc = scoped["label"].to_numpy()
+    s_sc = scoped["ScoreEval"].to_numpy()
+    fpr_sc, tpr_sc, _ = roc_curve(y_sc, s_sc)
+    prec_sc, rec_sc, _ = precision_recall_curve(y_sc, s_sc)
+
+    plt.figure(figsize=(10,4))
+    # ROC
+    plt.subplot(1,2,1)
+    plt.plot(fpr_sc, tpr_sc, lw=2)
+    plt.plot([0,1], [0,1], "--", c="gray", lw=1)
+    plt.xlabel("FPR"); plt.ylabel("TPR")
+    plt.title(f"FairScope ROC (AUROC={auroc_sc:.3f})")
+    # PR
+    plt.subplot(1,2,2)
+    plt.plot(rec_sc, prec_sc, lw=2)
+    plt.xlabel("Recall"); plt.ylabel("Precision")
+    plt.title(f"FairScope PR (AUPR={aupr_sc:.3f})")
+    plt.tight_layout()
+    plt.savefig(os.path.join(chip_dir, "fairscope_roc_pr.png"), dpi=PLOT_DPI)
+    plt.close()
+    
+    
 
 # =========================
 # Optuna sweep (small, fast)
@@ -884,12 +1239,12 @@ if RUN_OPTUNA:
     # ---------- Lightweight ChIP eval prep used inside Optuna ----------
     def _prepare_chip_universe_for_optuna():
         """Load & canonicalize ChIP once; build a deduped TF/TG table in model vocab."""
-        if not (CHIP_GT_PATH and os.path.exists(CHIP_GT_PATH)):
-            logging.warning("CHIP_GT_PATH missing; Optuna balanced-micro will be skipped.")
+        if not (CHIP_GROUND_TRUTH and os.path.exists(CHIP_GROUND_TRUTH)):
+            logging.warning("CHIP_GROUND_TRUTH missing; Optuna balanced-micro will be skipped.")
             return None, None
 
         # 1) minimal load & canonicalize (no plotting, no CSVs)
-        chip = _load_chip_gold(CHIP_GT_PATH, CHIP_GT_SEP)
+        chip = _load_chip_gold(CHIP_GROUND_TRUTH, CHIP_GROUND_TRUTH_SEP)
         chip = canon.standardize_df(chip, tf_col="TF", tg_col="TG").dropna()
         chip = chip.drop_duplicates(subset=["TF","TG"], keep="first").reset_index(drop=True)
 
@@ -916,7 +1271,7 @@ if RUN_OPTUNA:
         """
         # 1) Keep only finite scores
         s = scored_df.copy()
-        s = s[np.isfinite(s["Score"].to_numpy())]
+        s = s[np.isfinite(s["ScoreEval"].to_numpy())]
 
         # 2) Build per-TF parts with 50/50 class weights; skip TFs with <2 classes
         def _per_tf_weights(df_tf):
@@ -936,7 +1291,7 @@ if RUN_OPTUNA:
             w = _per_tf_weights(sub)
             if not np.isfinite(w).all() or w.sum() == 0:
                 continue
-            parts.append(sub[["label","Score"]].reset_index(drop=True))
+            parts.append(sub[["label","ScoreEval"]].reset_index(drop=True))
             weights.append(w)
 
         if not parts:
@@ -944,7 +1299,7 @@ if RUN_OPTUNA:
 
         blended = pd.concat(parts, axis=0, ignore_index=True)
         y_all = blended["label"].to_numpy()
-        s_all = blended["Score"].to_numpy()
+        s_all = blended["ScoreEval"].to_numpy()
         w_all = (np.concatenate(weights, axis=0) / len(weights)).astype(np.float64)
 
         # final safety checks
@@ -958,7 +1313,7 @@ if RUN_OPTUNA:
 
 
     def _score_all_pairs_fast(model_ft) -> pd.Series:
-        """Return a pandas Series of scores aligned to DF_SCORES_BASE rows (named 'Score')."""
+        """Return a pandas Series of scores aligned to DF_SCORES_BASE rows (named 'ScoreEval')."""
         # map TF/TG to local ids once (encoders already fit)
         tf_to_local = {name: i for i, name in enumerate(tf_encoder.classes_)}
         tg_to_local = {name: i for i, name in enumerate(tg_encoder.classes_)}
@@ -985,7 +1340,7 @@ if RUN_OPTUNA:
                 outs.append(torch.sigmoid(logits).detach().cpu().numpy())
             probs_valid = np.concatenate(outs, axis=0)
         probs[valid.values] = probs_valid.ravel()
-        return pd.Series(probs, name="Score")
+        return pd.Series(probs, name="ScoreEval")
 
     def build_encoder(hp):
         return GRN_GAT_Encoder(
@@ -1083,7 +1438,7 @@ if RUN_OPTUNA:
 
     def objective(trial: optuna.Trial):
         if CHIP_U is None or DF_SCORES_BASE is None:
-            raise RuntimeError("ChIP universe was not prepared. Check CHIP_GT_PATH and canonicalizer inputs.")
+            raise RuntimeError("ChIP universe was not prepared. Check CHIP_GROUND_TRUTH and canonicalizer inputs.")
 
         hp = {
             "hidden_dim":   trial.suggest_categorical("hidden_dim", [96, 128, 192]),
@@ -1114,7 +1469,7 @@ if RUN_OPTUNA:
         # merge with ChIP_in_universe and compute balanced-micro AUROC
         # (copy to avoid mutating the cached template)
         scored_tmp = DF_SCORES_BASE.copy()
-        scored_tmp["Score"] = scores.values
+        scored_tmp["ScoreEval"] = scores.values
         scored_tmp = scored_tmp.merge(CHIP_U, on=["TF","TG"], how="left")
         scored_tmp["label"] = scored_tmp["label"].fillna(0).astype(int)
 
@@ -1168,12 +1523,12 @@ if RUN_OPTUNA:
     # ---------- Lightweight ChIP eval prep used inside Optuna ----------
     def _prepare_chip_universe_for_optuna():
         """Load & canonicalize ChIP once; build a deduped TF/TG table in model vocab."""
-        if not (CHIP_GT_PATH and os.path.exists(CHIP_GT_PATH)):
-            logging.warning("CHIP_GT_PATH missing; Optuna balanced-micro will be skipped.")
+        if not (CHIP_GROUND_TRUTH and os.path.exists(CHIP_GROUND_TRUTH)):
+            logging.warning("CHIP_GROUND_TRUTH missing; Optuna balanced-micro will be skipped.")
             return None, None
 
         # 1) minimal load & canonicalize (no plotting, no CSVs)
-        chip = _load_chip_gold(CHIP_GT_PATH, CHIP_GT_SEP)
+        chip = _load_chip_gold(CHIP_GROUND_TRUTH, CHIP_GROUND_TRUTH_SEP)
         chip = canon.standardize_df(chip, tf_col="TF", tg_col="TG").dropna()
         chip = chip.drop_duplicates(subset=["TF","TG"], keep="first").reset_index(drop=True)
 
@@ -1367,7 +1722,7 @@ if RUN_OPTUNA:
 
     def objective(trial: optuna.Trial):
         if CHIP_U is None or DF_SCORES_BASE is None:
-            raise RuntimeError("ChIP universe was not prepared. Check CHIP_GT_PATH and canonicalizer inputs.")
+            raise RuntimeError("ChIP universe was not prepared. Check CHIP_GROUND_TRUTH and canonicalizer inputs.")
 
         hp = {
             "hidden_dim":   trial.suggest_categorical("hidden_dim", [96, 128, 192]),
@@ -1467,9 +1822,9 @@ plt.xlabel("Epoch")
 plt.grid(True, alpha=0.3)
 
 plt.tight_layout()
-plt.savefig("GAT_training_outputs/training_loss_curves.png", dpi=300)
+plt.savefig("outputs/training_loss_curves.png", dpi=300)
 plt.close()
-logging.info("Saved training loss curves to GAT_training_outputs/training_loss_curves.png")
+logging.info("Saved training loss curves to outputs/training_loss_curves.png")
 
 
 # ============================================================
@@ -1508,7 +1863,7 @@ plt.subplot(1,2,2)
 plt.plot(recall, precision, label=f"AUPR={aupr_val:.3f}")
 plt.title("Precision-Recall Curve"); plt.xlabel("Recall"); plt.ylabel("Precision"); plt.legend()
 plt.tight_layout()
-plt.savefig("GAT_training_outputs/fine_tune_eval_curves.png", dpi=200)
+plt.savefig("outputs/fine_tune_eval_curves.png", dpi=200)
 plt.close()
 
 # ============================================================
@@ -1555,7 +1910,7 @@ plt.figure(figsize=(7,4))
 sns.barplot(x=feature_importance.values, y=feature_importance.index, orient="h")
 plt.title("Edge Feature Importance (Gradient Magnitude)")
 plt.tight_layout()
-plt.savefig("GAT_training_outputs/feature_importance_barplot.png", dpi=200)
+plt.savefig("outputs/feature_importance_barplot.png", dpi=200)
 plt.close()
 
 # ============================================================
@@ -1574,7 +1929,7 @@ for feat in edge_features:
 sens_df = pd.DataFrame.from_dict(results, orient='index', columns=['AUC_after_perturb'])
 sens_df['ΔAUC'] = sens_df['AUC_after_perturb'] - auc_val
 logging.info("\nFeature sensitivity (ΔAUROC when feature +0.1):\n" + str(sens_df.sort_values('ΔAUC', ascending=False)))
-sens_df.to_csv("GAT_training_outputs/feature_sensitivity.csv")
+sens_df.to_csv("outputs/feature_sensitivity.csv")
 
 # ============================================================
 # ===  Per-TF, Per-TG, and Per-Pathway Evaluation  ===
@@ -1596,8 +1951,8 @@ for tf_name, tf_id in zip(tf_encoder.classes_, range(n_tfs)):
     aupr_tf = average_precision_score(y_true_tf, y_pred_tf)
     tf_scores.append((tf_name, auc_tf, aupr_tf))
 tf_df = pd.DataFrame(tf_scores, columns=["TF", "AUROC", "AUPR"]).sort_values("AUROC", ascending=False)
-tf_df.to_csv("GAT_training_outputs/per_TF_metrics.csv", index=False)
-logging.info(f"Saved per-TF metrics for {len(tf_df)} TFs to GAT_training_outputs/per_TF_metrics.csv")
+tf_df.to_csv("outputs/per_TF_metrics.csv", index=False)
+logging.info(f"Saved per-TF metrics for {len(tf_df)} TFs to outputs/per_TF_metrics.csv")
 
 # ----- Per-TG AUROC -----
 tg_scores = []
@@ -1612,8 +1967,8 @@ for tg_name, tg_id in zip(tg_encoder.classes_, range(n_tgs)):
     auc_tg = roc_auc_score(y_true_tg, y_pred_tg)
     tg_scores.append((tg_name, auc_tg))
 tg_df = pd.DataFrame(tg_scores, columns=["TG", "AUROC"]).sort_values("AUROC", ascending=False)
-tg_df.to_csv("GAT_training_outputs/per_TG_metrics.csv", index=False)
-logging.info(f"Saved per-TG metrics for {len(tg_df)} TGs to GAT_training_outputs/per_TG_metrics.csv")
+tg_df.to_csv("outputs/per_TG_metrics.csv", index=False)
+logging.info(f"Saved per-TG metrics for {len(tg_df)} TGs to outputs/per_TG_metrics.csv")
 
 # ----- Per-Pathway (KEGG) Evaluation -----
 if "kegg_pathways" in df.columns:
@@ -1635,8 +1990,8 @@ if "kegg_pathways" in df.columns:
         pathway_metrics.append((pathway, auc_pw, aupr_pw))
     if pathway_metrics:
         kegg_df = pd.DataFrame(pathway_metrics, columns=["KEGG_Pathway","AUROC","AUPR"]).sort_values("AUROC", ascending=False)
-        kegg_df.to_csv("GAT_training_outputs/per_KEGG_metrics.csv", index=False)
-        logging.info(f"Saved per-pathway metrics for {len(kegg_df)} KEGG pathways to GAT_training_outputs/per_KEGG_metrics.csv")
+        kegg_df.to_csv("outputs/per_KEGG_metrics.csv", index=False)
+        logging.info(f"Saved per-pathway metrics for {len(kegg_df)} KEGG pathways to outputs/per_KEGG_metrics.csv")
     else:
         logging.warning("No valid KEGG pathway entries found for evaluation.")
 else:
@@ -1651,7 +2006,7 @@ plt.figure(figsize=(8,4))
 sns.barplot(x="AUROC", y="TF", hue="TF", data=tf_df.head(50), legend=False, palette="viridis")
 plt.title("Top 50 TFs by AUROC (Fine-tuned GAT)")
 plt.tight_layout()
-plt.savefig("GAT_training_outputs/top_TF_AUROC.png", dpi=200)
+plt.savefig("outputs/top_TF_AUROC.png", dpi=200)
 plt.close()
 
 # Top 25 KEGG pathways
@@ -1660,7 +2015,7 @@ if "kegg_df" in locals() and not kegg_df.empty:
     sns.barplot(x="AUROC", y="KEGG_Pathway", data=kegg_df.head(25), hue="AUROC", palette="viridis")
     plt.title("Top 25 KEGG Pathways by AUROC")
     plt.tight_layout()
-    plt.savefig("GAT_training_outputs/top_KEGG_AUROC.png", dpi=200)
+    plt.savefig("outputs/top_KEGG_AUROC.png", dpi=200)
     plt.close()
 
 # ============================================================
@@ -1722,7 +2077,7 @@ plt.figure(figsize=(7, 4))
 sns.barplot(x=ig_series.values, y=ig_series.index, orient="h")
 plt.title("Integrated Gradients Feature Importance (Mean Attribution)")
 plt.tight_layout()
-plt.savefig("GAT_training_outputs/feature_importance_IG.png", dpi=200)
+plt.savefig("outputs/feature_importance_IG.png", dpi=200)
 plt.close()
 
 # ============================================================
@@ -1757,7 +2112,7 @@ for tf_name, tf_id in zip(tf_encoder.classes_, range(n_tfs)):
     })
 
 tf_ig_df = pd.DataFrame(tf_ig_records)
-tf_ig_df.to_csv("GAT_training_outputs/tf_specific_integrated_gradients.csv", index=False)
+tf_ig_df.to_csv("outputs/tf_specific_integrated_gradients.csv", index=False)
 logging.info(f"Saved TF-specific IG feature attributions for {len(tf_ig_df)} TFs")
 
 # ------------------------------------------------------------
@@ -1783,7 +2138,7 @@ if plotted == 0:
     logging.warning("No TFs had IG attribution data for plotting.")
 else:
     plt.tight_layout()
-    plt.savefig("GAT_training_outputs/tf_specific_IG_barplots.png", dpi=200)
+    plt.savefig("outputs/tf_specific_IG_barplots.png", dpi=200)
     plt.close()
     logging.info(f"Saved IG feature barplots for {plotted} TFs.")
 
@@ -1812,7 +2167,7 @@ tf_names = tf_encoder.classes_
 # Load per-TF metrics if available
 # ------------------------------------------------------------
 try:
-    tf_metrics = pd.read_csv("GAT_training_outputs/per_TF_metrics.csv")
+    tf_metrics = pd.read_csv("outputs/per_TF_metrics.csv")
     tf_metrics = tf_metrics.set_index("TF")
     auroc_map = [tf_metrics.loc[tf, "AUROC"] if tf in tf_metrics.index else np.nan for tf in tf_names]
 except FileNotFoundError:
@@ -1841,8 +2196,8 @@ tf_vis_df = pd.DataFrame({
     "UMAP2": tf_umap[:,1],
     "AUROC": auroc_map
 })
-tf_vis_df.to_csv("GAT_training_outputs/tf_embedding_umap.csv", index=False)
-logging.info(f"Saved TF UMAP embeddings to GAT_training_outputs/tf_embedding_umap.csv")
+tf_vis_df.to_csv("outputs/tf_embedding_umap.csv", index=False)
+logging.info(f"Saved TF UMAP embeddings to outputs/tf_embedding_umap.csv")
 
 # ------------------------------------------------------------
 # Plot UMAP colored by AUROC
@@ -1856,7 +2211,7 @@ sns.scatterplot(
 plt.title("TF Embedding Map (colored by AUROC)")
 plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
 plt.tight_layout()
-plt.savefig("GAT_training_outputs/tf_embedding_umap_by_AUROC.png", dpi=300)
+plt.savefig("outputs/tf_embedding_umap_by_AUROC.png", dpi=300)
 plt.close()
 
 # ------------------------------------------------------------
@@ -1874,18 +2229,18 @@ sns.scatterplot(
 )
 plt.title("TF Embedding Clusters (KMeans)")
 plt.tight_layout()
-plt.savefig("GAT_training_outputs/tf_embedding_clusters.png", dpi=300)
+plt.savefig("outputs/tf_embedding_clusters.png", dpi=300)
 plt.close()
 
 # ------------------------------------------------------------
 # Optional: Link clusters to top features (if IG results exist)
 # ------------------------------------------------------------
 try:
-    ig_df = pd.read_csv("GAT_training_outputs/tf_specific_integrated_gradients.csv")
+    ig_df = pd.read_csv("outputs/tf_specific_integrated_gradients.csv")
     ig_summary = ig_df.groupby("TF")[edge_features].mean()
     ig_summary["Cluster"] = tf_vis_df.set_index("TF")["Cluster"]
     cluster_summary = ig_summary.groupby("Cluster").mean()
-    cluster_summary.to_csv("GAT_training_outputs/tf_cluster_feature_summary.csv")
-    logging.info("Saved cluster-wise mean feature attributions to GAT_training_outputs/tf_cluster_feature_summary.csv")
+    cluster_summary.to_csv("outputs/tf_cluster_feature_summary.csv")
+    logging.info("Saved cluster-wise mean feature attributions to outputs/tf_cluster_feature_summary.csv")
 except FileNotFoundError:
     logging.warning("tf_specific_integrated_gradients.csv not found; skipping feature summary by cluster.")

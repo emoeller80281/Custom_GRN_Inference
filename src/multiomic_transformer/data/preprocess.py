@@ -30,7 +30,7 @@ from multiomic_transformer.utils.downloads import *
 from multiomic_transformer.data.sliding_window import run_sliding_window_scan
 from multiomic_transformer.data.build_pkn import build_organism_pkns
 from multiomic_transformer.utils.gene_canonicalizer import GeneCanonicalizer
-from config.settings import *
+from config.settings_hpc import *
 
 random.seed(1337)
 np.random.seed(1337)
@@ -1337,13 +1337,15 @@ def merge_tf_tg_data_with_pkn(
     logging.info("  - Splitting positives/negatives by PKN union")
     in_pkn_df, not_in_pkn_df = _split_by_pkn_union(df, pkn_union_u)
     logging.info("  - Splitting results:")
-    logging.info(f"\tEdges in TF-TG data: {df.shape[0]:,}")
-    logging.info(f"\tEdges in PKN union (undirected): {len(pkn_union_u):,}")
-    logging.info(f"\tUnique TFs not in PKN: {not_in_pkn_df['TF'].nunique():,}")
-    logging.info(f"\tUnique TGs not in PKN: {not_in_pkn_df['TG'].nunique():,}")
-    logging.info(f"\tEdges not in PKN: {not_in_pkn_df.shape[0]:,}")
-    logging.info(f"\tEdges in PKN: {in_pkn_df.shape[0]:,}")
-    logging.info(f"\tFraction of TF-TG edges in PKN: {in_pkn_df.shape[0] / max(1, df.shape[0]):.2f}")
+    logging.info(f"\t  Edges in TF-TG data: {df.shape[0]:,}")
+    logging.info(f"\t  Edges in PKN union (undirected): {len(pkn_union_u):,}")
+    logging.info(f"\t  Unique TFs in PKN: {in_pkn_df['TF'].nunique():,}")
+    logging.info(f"\t  Unique TGs in PKN: {in_pkn_df['TG'].nunique():,}")
+    logging.info(f"\t  Unique TFs not in PKN: {not_in_pkn_df['TF'].nunique():,}")
+    logging.info(f"\t  Unique TGs not in PKN: {not_in_pkn_df['TG'].nunique():,}")
+    logging.info(f"\t  Edges not in PKN: {not_in_pkn_df.shape[0]:,}")
+    logging.info(f"\t  Edges in PKN: {in_pkn_df.shape[0]:,}")
+    logging.info(f"\t  Fraction of TF-TG edges in PKN: {in_pkn_df.shape[0] / max(1, df.shape[0]):.2f}")
 
     if in_pkn_df.empty:
         raise ValueError("No TF–TG positives in PKN union after normalization.")
@@ -1542,7 +1544,8 @@ def aggregate_pseudobulk_datasets(gene_tss_df: pd.DataFrame, sample_names: list[
             gene_tss_df["name"] = _canon_series_drop_dups(gene_tss_df["name"].astype(str), gc)
             gene_tss_df = gene_tss_df.drop_duplicates(subset=["name"], keep="first")
                         
-            TG_chr_specific = TG_pseudobulk.loc[TG_pseudobulk.index.intersection(gene_tss_df['name'].unique())]
+            names = gene_tss_df["name"].tolist()
+            TG_chr_specific = TG_pseudobulk.loc[TG_pseudobulk.index.intersection(names)]
             RE_chr_specific = RE_pseudobulk[RE_pseudobulk.index.str.startswith(f"{chrom_id}:")]
 
             logging.debug(f"\n  - Restricted to {chrom_id} Genes and Peaks: ")
@@ -1675,9 +1678,11 @@ def filter_windows_and_tgs(
     if strong_peaks is not None:
         strong_peaks_near_tg = strong_peaks & peaks_near_tg
         strong_windows = {window_map[p] for p in strong_peaks_near_tg if p in window_map}
+    
+    strong_window_set: Set[int] = strong_windows if strong_windows is not None else set()
 
     # --- A ∩ B
-    candidate_windows = set(strong_windows) & windows_near_tg
+    candidate_windows = strong_window_set & windows_near_tg
 
     if log_debug:
         print(f"  - # peaks near TG: {len(peaks_near_tg)}")
@@ -1685,7 +1690,7 @@ def filter_windows_and_tgs(
             print(f"  - # strong peaks (all): {len(strong_peaks)} "
                   f"| strong ∩ near TG: {len(strong_peaks & peaks_near_tg)}")
         print(f"  - # windows_near_tg: {len(windows_near_tg)} "
-              f"| # strong_windows: {len(strong_windows)} "
+              f"| # strong_windows: {len(strong_window_set)} "
               f"| # candidate_windows (A∩B): {len(candidate_windows)}")
 
     # --- Optional step: enforce ≥min_tfs_per_window
@@ -2082,8 +2087,10 @@ if __name__ == "__main__":
             leiden_resolution=LEIDEN_RESOLUTION
         )
         
-        processed_rna_df.index = gc.canonicalize_series(processed_rna_df.index)
-                
+        processed_rna_df.index = pd.Index(
+                gc.canonicalize_series(pd.Series(processed_rna_df.index, dtype=object)).array
+            )
+        
         # ----- GET TFs, TGs, and TF-TG combinations -----
         genes = processed_rna_df.index.to_list()
         peaks = processed_atac_df.index.to_list()
@@ -2251,7 +2258,7 @@ if __name__ == "__main__":
             else:
                 logging.info(f"Loading existing gene TSS file for {chrom_id}")
                 gene_tss_df = pd.read_csv(os.path.join(GENOME_DIR, f"{chrom_id}_gene_tss.bed"), sep="\t", header=None, usecols=[0, 1, 2, 3])
-                gene_tss_df.columns = ["chrom", "start", "end", "name"]
+                gene_tss_df = gene_tss_df.rename(columns={0: "chrom", 1: "start", 2: "end", 3: "name"})
             
             
             
@@ -2329,8 +2336,8 @@ if __name__ == "__main__":
                 windows_bed=genome_windows,
             )
 
-            z_cut = 1
-            pct_fallback=0.2
+            z_cut = 0
+            pct_fallback=0.0
             topk_fallback=1
             tf2thr, tf2peaks_keep = per_tf_thresholds_robust(
                 sliding_window_df,

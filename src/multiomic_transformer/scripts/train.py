@@ -9,6 +9,7 @@ import joblib
 import matplotlib.pyplot as plt
 from pathlib import Path
 import re
+from typing import Optional
 import numpy as np
 import pandas as pd
 import seaborn as sns
@@ -23,7 +24,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, random_split
 from torch.utils.data.distributed import DistributedSampler
 
-from config.settings import *
+from config.settings_hpc import *
 from multiomic_transformer.datasets.dataset import (
     MultiomicTransformerDataset,
     MultiChromosomeDataset,
@@ -199,7 +200,7 @@ def load_training_state(trainer, path, map_location="cpu"):
 
     return int(state.get("epoch", 0))
 
-def _pick_ckpt_in_dir(run_dir: Path) -> Path | None:
+def _pick_ckpt_in_dir(run_dir: Path) -> Optional[Path]:
     # preference order: best -> trained -> checkpoint
     for name in ("best_checkpoint.pt", "trained_model.pt", "checkpoint.pt"):
         p = run_dir / name
@@ -207,7 +208,7 @@ def _pick_ckpt_in_dir(run_dir: Path) -> Path | None:
             return p
     return None
 
-def _latest_run_dir(out_root: Path, prefix: str) -> Path | None:
+def _latest_run_dir(out_root: Path, prefix: str) -> Optional[Path]:
     # matches e.g. "model_training_003"
     rx = re.compile(rf"^{re.escape(prefix)}(\d+)$")
     best = None
@@ -337,96 +338,234 @@ class Trainer:
         self.scaler.step(self.optimizer)
         self.scaler.update()
 
-        return total_loss.detach(), mse_loss.detach()
+        return total_loss.detach(), preds.detach(), targets.detach()
+    
+    def _run_val_batch(self, batch):
+        """
+        Runs a single validation batch.
+        Returns:
+        loss  : scalar tensor (MSE for this batch)
+        preds : [B, G] tensor on current device
+        targets: [B, G] tensor on current device
+        """
+        atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids, motif_mask = batch
+
+        device = next(self.model.parameters()).device
+        atac_wins = atac_wins.to(device, non_blocking=True)
+        tf_tensor = tf_tensor.to(device, non_blocking=True)
+        targets   = targets.to(device, non_blocking=True)
+        bias      = bias.to(device, non_blocking=True)
+        tf_ids    = tf_ids.to(device, non_blocking=True)
+        tg_ids    = tg_ids.to(device, non_blocking=True)
+        motif_mask= motif_mask.to(device, non_blocking=True)
+
+        mask_arg = motif_mask if USE_MOTIF_MASK else None
+
+        # forward (no grad outside)
+        preds, _ = self.model(
+            atac_wins, tf_tensor, tf_ids=tf_ids, tg_ids=tg_ids, bias=bias, motif_mask=mask_arg
+        )
+
+        loss = F.mse_loss(preds, targets)
+        return loss, preds, targets
 
     def _validate(self):
-        if self.val_data is None or len(self.val_data) == 0:
-            logging.warning("Validation loader is empty; skipping validation this epoch.")
-            # Return NaNs so downstream logging can handle it gracefully
+        # empty/disabled loader
+        if self.val_data is None:
+            logging.warning("Validation loader is None; skipping validation.")
             return float("nan"), float("nan"), float("nan")
-        
+        try:
+            _ = len(self.val_data)
+        except Exception:
+            # some iterable DataLoaders don’t implement __len__
+            pass
+        if hasattr(self.val_data, "__len__") and len(self.val_data) == 0:
+            logging.warning("Validation loader is empty; skipping validation.")
+            return float("nan"), float("nan"), float("nan")
+
         self.model.eval()
-        total_loss, n_batches = 0.0, 0
-        preds_list, tgts_list = [], []
+        device = next(self.model.parameters()).device
+
+        loss_sum = 0.0
+        n_batches = 0
+
+        # DDP-safe MSE accumulation (sum of squared error + count of elements)
+        sse_local = torch.tensor(0.0, device=device, dtype=torch.float64)
+        n_local   = torch.tensor(0,   device=device, dtype=torch.long)
+
         with torch.no_grad():
-            for atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids, motif_mask in self.val_data:
-                atac_wins = atac_wins.to(self.gpu_id)
-                tf_tensor = tf_tensor.to(self.gpu_id)
-                targets   = targets.to(self.gpu_id)
-                bias      = bias.to(self.gpu_id)
-                tf_ids    = tf_ids.to(self.gpu_id)
-                tg_ids    = tg_ids.to(self.gpu_id)
-                motif_mask= motif_mask.to(self.gpu_id)
+            for batch in self.val_data:
+                v_loss, v_preds, v_targets = self._run_val_batch(batch)
+                loss_sum += float(v_loss)
+                n_batches += 1
 
-                mask_arg = motif_mask if USE_MOTIF_MASK else None
-                preds, _ = self.model(
-                    atac_wins, tf_tensor, tf_ids=tf_ids, tg_ids=tg_ids, bias=bias, motif_mask=mask_arg
-                )
-                
-                loss  = F.mse_loss(preds, targets)
-                total_loss += loss.item(); n_batches += 1
-                preds_list.append(preds); tgts_list.append(targets)
+                diff = (v_preds - v_targets).to(device)
+                sse_local += (diff * diff).sum(dtype=torch.float64)
+                n_local   += diff.numel()
 
-        # Stack local tensors
-        preds = torch.cat(preds_list, dim=0)
-        tgts = torch.cat(tgts_list, dim=0)
-
-        # All-gather across ranks
-        world_size = dist.get_world_size()
-        gathered_preds = [torch.zeros_like(preds) for _ in range(world_size)]
-        gathered_tgts  = [torch.zeros_like(tgts) for _ in range(world_size)]
-        
-        dist.all_gather(gathered_preds, preds)
-        dist.all_gather(gathered_tgts, tgts)
-
-        # Concatenate global arrays
-        preds = torch.cat(gathered_preds, dim=0).cpu().numpy()
-        tgts  = torch.cat(gathered_tgts, dim=0).cpu().numpy()
-
-        # Replace NaN/inf with safe values
-        preds = np.nan_to_num(preds, nan=0.0, posinf=1e6, neginf=-1e6)
-        tgts  = np.nan_to_num(tgts, nan=0.0, posinf=1e6, neginf=-1e6)
-
-        # Correlations
-        if np.std(tgts) < 1e-8 or np.std(preds) < 1e-8:
-            pearson_corr, spearman_corr = 0.0, 0.0
+        # Reduce across ranks to get global MSE
+        import torch.distributed as dist
+        if dist.is_initialized():
+            vec = torch.stack([sse_local, n_local.to(torch.float64)])
+            dist.all_reduce(vec, op=dist.ReduceOp.SUM)
+            sse_global = vec[0].item()
+            n_global   = int(vec[1].item())
         else:
-            try:
-                pearson_corr, _ = pearsonr(preds.ravel(), tgts.ravel())
-                spearman_corr, _ = spearmanr(preds.ravel(), tgts.ravel())
-            except Exception as e:
-                logging.warning(f"Correlation failed: {e}")
-                pearson_corr, spearman_corr = 0.0, 0.0
+            sse_global = sse_local.item()
+            n_global   = int(n_local.item())
 
-        avg_loss = total_loss / max(1, n_batches)
-        return avg_loss, pearson_corr, spearman_corr
+        val_mse = (sse_global / n_global) if n_global > 0 else float("nan")
+        avg_loss = loss_sum / max(1, n_batches)
+
+        # ---------- Optional: correlations on rank 0 ----------
+        # (Do a shape-safe all_gather with padding; skip if you don't need correlations.)
+        pearson_corr, spearman_corr = float("nan"), float("nan")
+        try:
+            from scipy.stats import pearsonr, spearmanr
+            compute_corr = True
+        except Exception:
+            compute_corr = False
+
+        if compute_corr:
+            # Re-run a light pass to gather preds/targets (or store them above if memory allows)
+            preds_bufs, tgts_bufs = [], []
+            with torch.no_grad():
+                for batch in self.val_data:
+                    _, v_preds, v_targets = self._run_val_batch(batch)
+                    preds_bufs.append(v_preds)
+                    tgts_bufs.append(v_targets)
+
+            preds_local = torch.cat(preds_bufs, dim=0) if preds_bufs else torch.empty(0, device=device)
+            tgts_local  = torch.cat(tgts_bufs,  dim=0) if tgts_bufs  else torch.empty(0, device=device)
+
+            if dist.is_initialized():
+                ws = dist.get_world_size()
+                # gather sizes
+                n_local_rows = torch.tensor([preds_local.size(0)], device=device, dtype=torch.long)
+                sizes = [torch.zeros_like(n_local_rows) for _ in range(ws)]
+                dist.all_gather(sizes, n_local_rows)
+                max_rows = int(torch.stack(sizes).max().item())
+
+                # pad to same number of rows
+                G = preds_local.size(1) if preds_local.ndim == 2 else 0
+                if max_rows > preds_local.size(0):
+                    pad = max_rows - preds_local.size(0)
+                    pad_pred = torch.zeros((pad, G), device=device, dtype=preds_local.dtype)
+                    pad_tgt  = torch.zeros((pad, G), device=device, dtype=tgts_local.dtype)
+                    preds_pad = torch.cat([preds_local, pad_pred], dim=0)
+                    tgts_pad  = torch.cat([tgts_local,  pad_tgt],  dim=0)
+                else:
+                    preds_pad, tgts_pad = preds_local, tgts_local
+
+                # gather padded tensors
+                pred_list = [torch.zeros_like(preds_pad) for _ in range(ws)]
+                tgt_list  = [torch.zeros_like(tgts_pad)  for _ in range(ws)]
+                dist.all_gather(pred_list, preds_pad)
+                dist.all_gather(tgt_list,  tgts_pad)
+
+                # rank 0 trims and computes correlations
+                if dist.get_rank() == 0:
+                    # trim each chunk to its true size
+                    chunks = []
+                    tchunks = []
+                    for i, sz in enumerate(sizes):
+                        n_i = int(sz.item())
+                        if n_i > 0:
+                            chunks.append(pred_list[i][:n_i].cpu().numpy())
+                            tchunks.append(tgt_list[i][:n_i].cpu().numpy())
+                    if chunks:
+                        P = np.concatenate(chunks, axis=0)
+                        T = np.concatenate(tchunks, axis=0)
+                        P = np.nan_to_num(P, nan=0.0, posinf=1e6, neginf=-1e6)
+                        T = np.nan_to_num(T, nan=0.0, posinf=1e6, neginf=-1e6)
+                        if np.std(P) > 1e-8 and np.std(T) > 1e-8:
+                            pearson_corr  = float(pearsonr(P.ravel(), T.ravel())[0])
+                            spearman_corr = float(spearmanr(P.ravel(), T.ravel())[0])
+                # broadcast correlations to all ranks
+                if dist.get_rank() == 0:
+                    corr_tensor = torch.tensor([pearson_corr, spearman_corr], device=device, dtype=torch.float32)
+                else:
+                    corr_tensor = torch.zeros(2, device=device, dtype=torch.float32)
+                dist.broadcast(corr_tensor, src=0)
+                pearson_corr, spearman_corr = float(corr_tensor[0].item()), float(corr_tensor[1].item())
+            else:
+                # single-process fallback
+                P = preds_local.detach().cpu().numpy()
+                T = tgts_local.detach().cpu().numpy()
+                P = np.nan_to_num(P, nan=0.0, posinf=1e6, neginf=-1e6)
+                T = np.nan_to_num(T, nan=0.0, posinf=1e6, neginf=-1e6)
+                if P.size and np.std(P) > 1e-8 and np.std(T) > 1e-8:
+                    pearson_corr  = float(pearsonr(P.ravel(), T.ravel())[0])
+                    spearman_corr = float(spearmanr(P.ravel(), T.ravel())[0])
+
+        return avg_loss, val_mse, pearson_corr, spearman_corr
+
     
-    def _run_epoch(self, epoch):
-        sampler = getattr(self.train_data, "sampler", None)
-        if isinstance(sampler, DistributedSampler):
-            sampler.set_epoch(epoch)
-            
+    def _run_epoch(self, epoch: int):
+        # Epoch-sync the batch sampler used by the loader
+        bs = getattr(self.train_data, "batch_sampler", None)
+        if bs is not None and hasattr(bs, "set_epoch"):
+            bs.set_epoch(epoch)
+        else:
+            s = getattr(self.train_data, "sampler", None)
+            if s is not None and hasattr(s, "set_epoch"):
+                s.set_epoch(epoch)
+
+        # Re-seed RNGs (CPU/NumPy/Python/CUDA) per epoch
+        base_seed = 1234
+        torch.manual_seed(base_seed + epoch)
+        np.random.seed(base_seed + epoch)
+        random.seed(base_seed + epoch)
+        torch.cuda.manual_seed_all(base_seed + epoch)
+
+        # ---------------- TRAIN ----------------
         self.model.train()
 
-        total_loss, total_mse, n_batches = 0.0, 0.0, 0
+        # Accumulate true train MSE: sum of squared error + element count
+        device = next(self.model.parameters()).device
+        sse_local = torch.tensor(0.0, device=device)
+        n_local   = torch.tensor(0,   device=device, dtype=torch.long)
+
+        total_loss = 0.0
+        n_batches  = 0
 
         for batch in self.train_data:
             if STOP_REQUESTED.is_set():
                 break
-            total_loss_val, mse_loss_val = self._run_batch(batch)
+
+            # _run_batch should return the *opt step loss* (with regs) and pure MSE for logging
+            total_loss_val, preds, targets = self._run_batch(batch)  # change to return preds/targets
+
+            # accumulate optimizer loss for logging
             total_loss += float(total_loss_val)
-            total_mse += float(mse_loss_val)
-            n_batches += 1
+            n_batches  += 1
 
+            # accumulate MSE consistently (per-element)
+            with torch.no_grad():
+                diff = preds.detach() - targets.detach()
+                sse_local += (diff * diff).sum()
+                n_local   += diff.numel()
+
+        # DDP reduce to get global train MSE
+        vec = torch.stack([sse_local, n_local.to(torch.float64)])
+        torch.distributed.all_reduce(vec, op=torch.distributed.ReduceOp.SUM)
+        train_mse = (vec[0] / vec[1]).item() if vec[1] > 0 else 0.0
         avg_train_loss = total_loss / max(1, n_batches)
-        avg_train_mse = total_mse / max(1, n_batches)
 
-        avg_val_loss, pearson_corr, spearman_corr = self._validate()
+        # ---------------- VALIDATION ----------------
+        torch.distributed.barrier()  # ensure all ranks finished training loop
 
-        self.scheduler.step(avg_val_loss)
+        # Compute validation loss and correlations
+        avg_val_loss, val_mse, pearson_corr, spearman_corr = self._validate()
 
-        return avg_train_loss, avg_train_mse, avg_val_loss, pearson_corr, spearman_corr
+        # ---------------- LR SCHEDULER ----------------
+        # Ensure all ranks step with the same value (broadcast from rank 0)
+        rank = torch.distributed.get_rank()
+        val_loss_tensor = torch.tensor([avg_val_loss], device=device, dtype=torch.float32)
+        torch.distributed.broadcast(val_loss_tensor, src=0)
+        self.scheduler.step(val_loss_tensor.item())
 
+        return avg_train_loss, train_mse, avg_val_loss, pearson_corr, spearman_corr
 
     def _save_checkpoint(self, epoch, path):
         save_training_state(self, epoch, path, filename="checkpoint.pt")
@@ -588,8 +727,8 @@ def load_train_objs():
             max_windows=SUBSAMPLE_MAX_WINDOWS_PER_CHROM,
             subset_seed=SUBSAMPLE_SEED,
         )
-        assert dataset.tf_name2id is not None
-        assert dataset.tg_name2id is not None
+        assert dataset.tf_name2id_sub is not None
+        assert dataset.tg_name2id_sub is not None
         
     # Use the dataset’s global sub-vocab (fixed across all chromosomes)
     tf_vocab_size = len(dataset.tf_name2id_sub) if dataset.tf_name2id_sub else 0

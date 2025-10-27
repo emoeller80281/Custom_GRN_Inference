@@ -23,7 +23,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, random_split, ConcatDataset, WeightedRandomSampler
 from torch.utils.data.distributed import DistributedSampler
 
-from config.settings import *
+from config.settings_hpc import *
 from multiomic_transformer.data.linger_pseudobulk import pseudo_bulk
 from multiomic_transformer.datasets.dataset import MultiomicTransformerDataset
 from multiomic_transformer.models.model import MultiomicTransformer

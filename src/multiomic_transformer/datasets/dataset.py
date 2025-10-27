@@ -5,7 +5,7 @@ import pandas as pd
 import numpy as np
 from sympy import O
 import torch
-from typing import Optional
+from typing import Optional, Union
 from torch.utils.data import Dataset, Sampler
 from pathlib import Path
 import logging
@@ -19,27 +19,36 @@ class DistributedBatchSampler(torch.utils.data.Sampler):
     subset of batches). This avoids duplicating work without requiring
     per-sample DistributedSampler, which would break chrom-homogeneous batches.
     """
-    def __init__(self, batch_sampler, num_replicas, rank):
+    def __init__(self, batch_sampler, num_replicas, rank, drop_last=True):
         self.batch_sampler = batch_sampler
-        self.num_replicas = num_replicas
-        self.rank = rank
+        self.num_replicas = int(num_replicas)
+        self.rank = int(rank)
+        self.drop_last = bool(drop_last)
+
+    def set_epoch(self, epoch: int):
+        # delegate if inner supports it
+        if hasattr(self.batch_sampler, "set_epoch"):
+            self.batch_sampler.set_epoch(epoch)
 
     def __iter__(self):
-        for i, batch in enumerate(self.batch_sampler):
-            if i % self.num_replicas == self.rank:
-                yield batch
+        batches = list(self.batch_sampler)
+        if self.drop_last:
+            size = (len(batches) // self.num_replicas) * self.num_replicas
+            batches = batches[:size]
+        for i in range(self.rank, len(batches), self.num_replicas):
+            yield batches[i]
 
     def __len__(self):
-        # ceil division of batches among replicas
-        return (len(self.batch_sampler) + self.num_replicas - 1) // self.num_replicas
+        base = len(self.batch_sampler)
+        return (base // self.num_replicas) if self.drop_last else (base + self.num_replicas - 1) // self.num_replicas
 
 class MultiChromosomeDataset(Dataset):
     def __init__(
         self,
         data_dir: Path,
         chrom_ids,
-        tf_vocab_path: Optional[Path] = None,
-        tg_vocab_path: Optional[Path] = None,
+        tf_vocab_path: Optional[Union[str, Path]] = None,
+        tg_vocab_path: Optional[Union[str, Path]] = None,
         fine_tuner: bool = False,
         sample_name: Optional[str] = None,
         max_cached: int = 2,
@@ -51,8 +60,8 @@ class MultiChromosomeDataset(Dataset):
         super().__init__()
         self.data_dir = Path(data_dir)
         self.chrom_ids = list(chrom_ids)
-        self.tf_vocab_path = tf_vocab_path
-        self.tg_vocab_path = tg_vocab_path
+        self.tf_vocab_path = Path(tf_vocab_path)
+        self.tg_vocab_path = Path(tg_vocab_path)
         self.fine_tuner = fine_tuner
         self.sample_name = sample_name
         self.max_cached = max_cached
@@ -235,7 +244,7 @@ class MultiChromosomeDataset(Dataset):
     def _build_global_keep(
         self,
         per_chrom_names: dict[str, list[str]],
-        max_k: int | None,
+        max_k: Optional[int],
         rng: np.random.RandomState,
         ensure_per_chrom: bool = True,
         min_per_chrom: int = 1,
@@ -282,10 +291,27 @@ class ChromBucketBatchSampler(Sampler[list]):
     Produces batches grouped by chromosome so that sequence length W
     and bias shapes match within the batch (no padding needed).
     """
-    def __init__(self, dataset: MultiChromosomeDataset, batch_size: int, shuffle: bool = True):
+    def __init__(self, dataset: MultiChromosomeDataset, batch_size: int, shuffle: bool = True, seed: int = 0):
         self.ds = dataset
         self.batch_size = batch_size
         self.shuffle = shuffle
+        self.seed = int(seed)
+        self.epoch = 0
+        self._chrom_ranges: list[tuple[str, list[int]]] = []
+        self._refresh_ranges()
+        
+    def _refresh_ranges(self):
+        self._chrom_ranges = []
+        # Recompute from dataset offsets/length (works for train/val)
+        for i, chrom in enumerate(self.ds.chrom_ids):
+            start = self.ds._offsets[i]
+            end = self.ds._offsets[i+1] if i+1 < len(self.ds._offsets) else len(self.ds)
+            if end > start:
+                self._chrom_ranges.append((chrom, list(range(start, end))))
+
+
+    def set_epoch(self, epoch: int):
+        self.epoch = epoch
 
         # Build per-chrom index ranges
         self._chrom_ranges = []
@@ -296,13 +322,14 @@ class ChromBucketBatchSampler(Sampler[list]):
             self._chrom_ranges.append((chrom, idxs))
 
     def __iter__(self):
+        rng = np.random.RandomState(self.seed + self.epoch)
         chrom_blocks = self._chrom_ranges[:]
         if self.shuffle:
-            random.shuffle(chrom_blocks)
-
+            rng.shuffle(chrom_blocks)
         for chrom, idxs in chrom_blocks:
+            idxs = idxs[:]  # copy
             if self.shuffle:
-                random.shuffle(idxs)
+                rng.shuffle(idxs)
             for s in range(0, len(idxs), self.batch_size):
                 yield idxs[s:s+self.batch_size]
 
@@ -648,7 +675,7 @@ class MultiomicTransformerDataset(Dataset):
         self,
         tf_name2id_sub: dict[str, int],
         tg_name2id_sub: dict[str, int],
-        max_windows: int | None = None,
+        max_windows: Optional[int] = None,
         rng_seed: int = 42,
     ):
         """
