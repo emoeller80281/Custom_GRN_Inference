@@ -11,6 +11,7 @@ import torch.nn.functional as F
 import pandas as pd
 import numpy as np
 import random
+import math
 from collections import defaultdict
 from torch_geometric.data import Data
 from sklearn.preprocessing import LabelEncoder, StandardScaler
@@ -23,9 +24,13 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.metrics import confusion_matrix, precision_recall_curve, roc_curve
 from config.settings_hpc import *
+from torch.utils.checkpoint import checkpoint
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+torch.set_float32_matmul_precision("high")
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 logging.info(f"Using device: {device}")
@@ -74,7 +79,7 @@ def _best_orientation(y_true, score_vec):
 # ============================================================
 
 sample_dfs = []
-sample_names = ["E7.5_rep1", "E7.5_rep2"]
+sample_names = ["E7.5_rep1"]
 for sample in sample_names:
     if os.path.exists(SAMPLE_PROCESSED_DATA_DIR / sample / "tf_tg_data.parquet"):
         logging.info(f"Loading data for {sample}")
@@ -186,12 +191,15 @@ X_all_scaled = scaler.transform(X_all_filled).astype(np.float32)
 
 # concatenate value features with missingness mask
 edge_attr_np = np.concatenate([X_all_scaled, mask_all], axis=1)  # shape [E, 2F]
-edge_attr = torch.from_numpy(edge_attr_np).to(torch.float32)
+
+from sklearn.decomposition import PCA
+d_edge = 16  # or 16
+pca = PCA(n_components=d_edge, random_state=SEED).fit(edge_attr_np)
+edge_attr_np = pca.transform(edge_attr_np).astype(np.float32)
+edge_attr = torch.from_numpy(edge_attr_np)
 
 assert edge_attr.shape[0] == len(df)
 num_features = len(edge_features)
-assert edge_attr.shape[1] == 2 * num_features
-
 
 # ============================================================
 # Load & align pretrained TF/TG embeddings by name
@@ -302,8 +310,10 @@ in_node_feats = D + 1
 # Model & device setup
 # ============================================================
 # Move to device
-node_features = node_features.to(device)
+node_features = node_features.half()
+edge_attr     = edge_attr.half()
 
+node_features = node_features.to(device)
 data = Data(x=node_features, edge_index=edge_index, edge_attr=edge_attr).to(device)
 
 in_node_feats  = data.x.size(1)
@@ -312,9 +322,9 @@ in_edge_feats  = data.edge_attr.size(1)
 model = GRN_GAT_Encoder(
     in_node_feats=in_node_feats,
     in_edge_feats=in_edge_feats,
-    hidden_dim=128,
-    heads=4,
-    dropout=0.3,
+    hidden_dim=HIDDEN_DIM,
+    heads=GAT_HEADS,
+    dropout=GAT_DROPOUT,
     edge_dropout_p=0.2
 ).to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-5)
@@ -336,8 +346,8 @@ def corruption(x: torch.Tensor) -> torch.Tensor:
     Corrupt node features by shuffling rows.
     Used in Deep Graph Infomax to create negative samples.
     """
-    idx = torch.randperm(x.size(0))
-    return x[idx]
+    idx = torch.randperm(x.size(0), device=x.device)
+    return x.index_select(0, idx)
 
 
 def infomax_loss(h_real: torch.Tensor,
@@ -364,8 +374,6 @@ def infomax_loss(h_real: torch.Tensor,
 # ============================================================
 # Phase 1 — Self-supervised Deep Graph Infomax (DGI)
 # ============================================================
-phase1_losses = []
-
 scaler = torch.amp.GradScaler(enabled=True)
 
 # EMA for smooth early-stopping
@@ -378,25 +386,113 @@ MIN_REL_IMPROVE = 1e-3  # require >=0.1% relative improvement
 
 best_path = "outputs/self_supervised_gat.best.pt"
 
+def enc(x):
+    return model(x, data.edge_index, data.edge_attr)
+
+def sample_induced_subgraph_cpu(
+    x_cpu: torch.Tensor,
+    edge_index_cpu: torch.Tensor,
+    edge_attr_cpu: torch.Tensor = None,
+    node_frac: float = 0.1,
+    min_nodes: int = 2000,
+    rng: torch.Generator = None,
+):
+    """
+    Pure torch CPU induced subgraph sampler:
+      - pick ~node_frac of nodes (at least min_nodes)
+      - keep edges with both endpoints in the set
+      - relabel nodes to 0..k-1
+    Returns (sub_x, sub_edge_index, sub_edge_attr) on CPU.
+    """
+    N = x_cpu.size(0)
+    k = max(min_nodes, int(math.ceil(node_frac * N)))
+    k = min(k, N)
+
+    if rng is None:
+        rng = torch.Generator(device='cpu')
+    perm = torch.randperm(N, generator=rng)
+    keep = perm[:k]
+    keep = keep.sort().values  # stable order helps reproducibility
+
+    # boolean mask for quick edge filtering
+    node_mask = torch.zeros(N, dtype=torch.bool)
+    node_mask[keep] = True
+    e_mask = node_mask[edge_index_cpu[0]] & node_mask[edge_index_cpu[1]]
+
+    ei = edge_index_cpu[:, e_mask].clone()  # [2, E_sub]
+    ea = edge_attr_cpu[e_mask].clone() if edge_attr_cpu is not None else None
+
+    # relabel nodes to 0..k-1
+    remap = torch.full((N,), -1, dtype=torch.long)
+    remap[keep] = torch.arange(k, dtype=torch.long)
+    ei = remap[ei]
+
+    sub_x = x_cpu[keep].clone()
+    return sub_x, ei, ea
+
+phase1_losses = []
+
+# keep full graph on CPU
+full_x_cpu         = data.x.cpu()
+full_ei_cpu        = data.edge_index.cpu()
+full_eattr_cpu     = data.edge_attr.cpu() if getattr(data, "edge_attr", None) is not None else None
+
+cpu_rng = torch.Generator(device='cpu').manual_seed(SEED)
+
+logging.info(" ========== TRAINING STEP 1 ===========")
 for epoch in range(1, DGI_EPOCHS + 1):
     model.train()
-    optimizer.zero_grad(set_to_none=True)
+    running, nb = 0.0, 0
 
-    with torch.amp.autocast(device_type="cuda", enabled=True):
-        h_real, g_real = model(data.x, data.edge_index, data.edge_attr)
-        h_fake, _      = model(corruption(data.x), data.edge_index, data.edge_attr)
-        loss = infomax_loss(h_real, h_fake, g_real)
+    # decide how many subgraphs per epoch (tune to taste)
+    steps_per_epoch = 50
 
-    scaler.scale(loss).backward()
-    scaler.step(optimizer)
-    scaler.update()
+    for _ in range(steps_per_epoch):
+        sub_x_cpu, sub_ei_cpu, sub_eattr_cpu = sample_induced_subgraph_cpu(
+            full_x_cpu, full_ei_cpu, full_eattr_cpu,
+            node_frac=0.3,    # 10% nodes per subgraph (tune)
+            min_nodes=900,   # cap floor to keep batches not-too-small (tune)
+            rng=cpu_rng,
+        )
+        
+        # move subgraph to GPU (FP16 to save memory)
+        sub = Data(
+            x=sub_x_cpu.half().to(device, non_blocking=True),
+            edge_index=sub_ei_cpu.to(device, non_blocking=True),
+            edge_attr=(sub_eattr_cpu.half().to(device, non_blocking=True) if sub_eattr_cpu is not None else None),
+        )
+        
+        E_sub = sub.edge_index.size(1)
+        N_sub = sub.x.size(0)
+        if _ == 0:  # first step per epoch
+            print(f"[Subgraph] nodes={N_sub}, edges={E_sub}, frac={N_sub/2925:.3f}, est_Efrac={(E_sub/683264):.3f}")
 
-    # track raw + EMA loss
-    l = float(loss.item())
+
+        optimizer.zero_grad(set_to_none=True)
+
+        # closure captures subgraph structure; checkpoint sees only x tensor
+        def enc_x(x):
+            return model(x, sub.edge_index, getattr(sub, "edge_attr", None))
+
+        with torch.amp.autocast(device_type="cuda", enabled=(device.type == "cuda")):
+            h_real, g_real = checkpoint(enc_x, sub.x, use_reentrant=False)
+            h_fake, _      = checkpoint(enc_x, corruption(sub.x), use_reentrant=False)
+            loss = infomax_loss(h_real, h_fake, g_real)
+
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
+
+        running += float(loss.item()); nb += 1
+
+        # free subgraph tensors
+        del sub, sub_x_cpu, sub_ei_cpu, sub_eattr_cpu, h_real, h_fake, g_real, loss
+
+    # end epoch bookkeeping: use mean loss over subgraphs
+    l = running / max(1, nb)
     phase1_losses.append(l)
     ema = l if ema is None else (EMA_ALPHA * l + (1 - EMA_ALPHA) * ema)
 
-    # keep best (by EMA)
     if ema < BEST * (1 - MIN_REL_IMPROVE):
         BEST = ema
         torch.save(model.state_dict(), best_path)
@@ -404,13 +500,14 @@ for epoch in range(1, DGI_EPOCHS + 1):
     else:
         STALE += 1
 
-    if epoch % 10 == 0:
-        logging.info(f"[DGI] Epoch {epoch:03d} | Loss={l:.6f} | EMA={ema:.6f} | BestEMA={BEST:.6f} | stale={STALE}/{PATIENCE}")
+    if epoch % 5 == 0:
+        logging.info(f"[DGI] Epoch {epoch:03d} | meanLoss={l:.6f} | EMA={ema:.6f} | BestEMA={BEST:.6f} | stale={STALE}/{PATIENCE}")
+        torch.cuda.empty_cache()
 
     if STALE >= PATIENCE:
         logging.info(f"[DGI] Early stopping at epoch {epoch} (no ≥{MIN_REL_IMPROVE*100:.2f}% EMA improvement in {PATIENCE} epochs).")
         break
-
+    
 # Load/save the best encoder from Phase 1
 model.load_state_dict(torch.load(best_path, map_location=data.x.device))
 torch.save(model.state_dict(), "outputs/self_supervised_gat.pt")
@@ -584,7 +681,8 @@ for epoch in range(1, FINETUNE_EPOCHS + 1):
 
             optimizer_finetune.zero_grad(set_to_none=True)
             with torch.amp.autocast(device_type="cuda", enabled=True):
-                logits = finetune_model(data.x, data.edge_index, data.edge_attr, pairs_b).view(-1)
+                logits = checkpoint(lambda xx: finetune_model(xx, data.edge_index, data.edge_attr, pairs_b),
+                    data.x, use_reentrant=False).view(-1)
                 loss = criterion(logits, y_b) + L2SP_LAMBDA * l2sp_loss(finetune_model.encoder, pretrained_state)
             scaler.scale(loss).backward()
             # gradient clipping for stability
@@ -643,6 +741,13 @@ logging.info("Saved fine-tuned model to outputs/fine_tuned_gat_classifier.pt")
 
 
 # --- use the SAME encoders used for the graph ---
+# make sure graph features match model weights dtype (FP32)
+data.x = data.x.float()
+if getattr(data, "edge_attr", None) is not None:
+    data.edge_attr = data.edge_attr.float()
+
+finetune_model.eval()
+
 # make dicts from the fitted LabelEncoders
 tf_to_local = {name: i for i, name in enumerate(tf_encoder.classes_)}
 tg_to_local = {name: i for i, name in enumerate(tg_encoder.classes_)}
@@ -667,18 +772,17 @@ pairs_local = torch.as_tensor(pairs_local, dtype=torch.long, device=device)
 assert pairs_local[:,0].min().item() >= 0 and pairs_local[:,0].max().item() < n_tfs
 assert pairs_local[:,1].min().item() >= n_tfs and pairs_local[:,1].max().item() < (n_tfs + n_tgs)
 
-# run batched inference; align back to rows
+# ---------- scored subset ----------
 probs = np.full(len(df_scores), np.nan, dtype=np.float32)
-finetune_model.eval()
-with torch.no_grad():
+with torch.no_grad(), torch.amp.autocast(device_type="cuda", dtype=torch.float16, enabled=True):
     B = PAIR_BATCH
     outs = []
     for i in range(0, pairs_local.shape[0], B):
         sl = pairs_local[i:i+B]
-        logits = finetune_model(data.x, data.edge_index, data.edge_attr, sl)
-        outs.append(logits.detach().cpu().numpy())
+        logits = finetune_model(data.x, data.edge_index, data.edge_attr, sl).view(-1)
+        outs.append(logits.detach().float().cpu().numpy())
     logits = np.concatenate(outs, axis=0)
-    probs_valid = 1.0 / (1.0 + np.exp(-logits))
+probs_valid = 1.0 / (1.0 + np.exp(-logits))
 probs[valid.values] = probs_valid.ravel()
 
 df_scores["Score"] = probs
@@ -689,18 +793,17 @@ tf_idx = np.repeat(np.arange(n_tfs, dtype=np.int64), n_tgs)
 tg_idx = np.tile  (np.arange(n_tgs, dtype=np.int64), n_tfs)
 all_pairs_t = torch.tensor(np.stack([tf_idx, tg_idx], 1), dtype=torch.long, device=device)
 
-# run batched inference on ALL pairs
-finetune_model.eval()
-
-n_pairs = all_pairs_t.shape[0]
-all_logits = np.empty(n_pairs, dtype=np.float32)
-with torch.no_grad():
-    B = PAIR_BATCH
-    for i in range(0, n_pairs, B):
-        sl = all_pairs_t[i:i+B]                    # [B, 2] -> (tf_idx, tg_idx)
-        # logits shape: [B, 1] or [B]; ensure 1D
-        logits = finetune_model(data.x, data.edge_index, data.edge_attr, sl).view(-1)
-        all_logits[i:i+len(sl)] = logits.float().cpu().numpy()
+# ---------- ALL pairs ----------
+with torch.no_grad(), torch.amp.autocast(device_type="cuda", enabled=True, dtype=torch.float16):
+    n_pairs = all_pairs_t.shape[0]
+    all_logits = np.empty(n_pairs, dtype=np.float32)
+    with torch.no_grad():
+        B = PAIR_BATCH
+        for i in range(0, n_pairs, B):
+            sl = all_pairs_t[i:i+B]                    # [B, 2] -> (tf_idx, tg_idx)
+            # logits shape: [B, 1] or [B]; ensure 1D
+            logits = finetune_model(data.x, data.edge_index, data.edge_attr, sl).view(-1)
+            all_logits[i:i+len(sl)] = logits.float().cpu().numpy()
 
 # numerically stable sigmoid via torch or scipy; this is fine:
 all_probs = 1.0 / (1.0 + np.exp(-all_logits))      # same as torch.sigmoid

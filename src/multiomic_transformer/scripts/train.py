@@ -1216,14 +1216,6 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
             except StopIteration:
                 logging.info("Model has no parameters? (unexpected)")
                 
-                # id range sanity
-            m = getattr(trainer.model, "module", trainer.model)
-            tf_ids = trainer.train_data.dataset._load_chrom(trainer.train_data.dataset.chrom_ids[0]).tf_ids
-            tg_ids = trainer.train_data.dataset._load_chrom(trainer.train_data.dataset.chrom_ids[0]).tg_ids
-            logging.info(f"  - TF ids: min={int(tf_ids.min())}, max={int(tf_ids.max())}, table={m.tf_emb_table.num_embeddings}")
-            logging.info(f"  - TG ids: min={int(tg_ids.min())}, max={int(tg_ids.max())}, table={m.tg_emb_table.num_embeddings}")
-            assert tf_ids.max().item() < model.tf_emb_table.num_embeddings
-            assert tg_ids.max().item() < model.tg_emb_table.num_embeddings
 
         # --- Train (Ctrl+C-safe via STOP_REQUESTED path inside Trainer) ---
         if rank == 0:

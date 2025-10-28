@@ -25,7 +25,7 @@ dependencies = [
     "pyreadr>=0.5.3",
     "pyarrow>=14.0.2",
     "scanpy>=1.10.3",
-    "scikit-learn>=1.6.1",
+    "scikit-learn (==1.6.1)",
     "scipy>=1.13.1",
     "seaborn>=0.13.2",
     "shap>=0.46.0",
@@ -69,6 +69,7 @@ priority = "explicit"
 torch = {source = "pytorch-gpu-src"}
 torchvision = {source = "pytorch-gpu-src"}
 torchaudio = {source = "pytorch-gpu-src"}
+
 [tool.mypy]
 check_untyped_defs = true
 ignore_missing_imports = true

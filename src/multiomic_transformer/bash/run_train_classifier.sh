@@ -3,10 +3,10 @@
 #SBATCH --output=LOGS/transformer_logs/04_testing/%x_%A_%a.log
 #SBATCH --error=LOGS/transformer_logs/04_testing/%x_%A_%a.err
 #SBATCH --time=12:00:00
-#SBATCH -p dense
+#SBATCH -p gpu
 #SBATCH -N 1
-#SBATCH --gres=gpu:a100:1
-#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:p100:2
+#SBATCH --ntasks-per-node=2
 #SBATCH -c 8
 #SBATCH --mem=64G
 #SBATCH --array=0-7
