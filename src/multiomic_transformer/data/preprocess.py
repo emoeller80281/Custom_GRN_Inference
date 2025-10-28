@@ -1,6 +1,7 @@
 import os
 import re
 import json
+from sympy import dsolve
 import torch
 import joblib
 import pandas as pd
@@ -19,13 +20,19 @@ from anndata import AnnData
 from tqdm import tqdm
 import pybedtools
 import argparse
+import shutil, tempfile
+from functools import partial
+from pybedtools import helpers as pbt_helpers
+import pyarrow as pa
+from pyarrow import dataset as ds, compute as pc, parquet as pq, table as pat
+
 
 import sys
 sys.path.append(Path(__file__).resolve().parent.parent.parent)
 
 from multiomic_transformer.utils.standardize import standardize_name
 from multiomic_transformer.utils.files import atomic_json_dump
-from multiomic_transformer.utils.peaks import find_genes_near_peaks, format_peaks
+from multiomic_transformer.utils.peaks import find_genes_near_peaks, format_peaks, set_tg_as_closest_gene_tss
 from multiomic_transformer.utils.downloads import *
 from multiomic_transformer.data.sliding_window import run_sliding_window_scan
 from multiomic_transformer.data.build_pkn import build_organism_pkns
@@ -904,7 +911,9 @@ def calculate_peak_to_tg_distance_score(
     gene_tss_df, 
     max_peak_distance=1e6, 
     distance_factor_scale=25000, 
-    force_recalculate=False
+    force_recalculate=False,
+    filter_to_nearest_gene=False,
+    promoter_bp=None
 ) -> pd.DataFrame:
     """
     Compute peak-to-gene distance features (BEDTools-based), ensuring BED compliance.
@@ -926,17 +935,12 @@ def calculate_peak_to_tg_distance_score(
     if not {"chrom", "start", "end", "name"}.issubset(gene_tss_df.columns):
         gene_tss_df = gene_tss_df.rename(columns={"chromosome_name": "chrom", "gene_start": "start", "gene_end": "end"})
 
-    print("\ngene_tss_df")
-    print(gene_tss_df.head())
-    
     # Step 1: Write valid BED files if missing
     if not os.path.isfile(peak_bed_file) or not os.path.isfile(tss_bed_file) or force_recalculate:
-        logging.info("Writing BED files for peaks and gene TSSs")
         pybedtools.BedTool.from_dataframe(mesc_atac_peak_loc_df[["chrom", "start", "end", "peak_id"]]).saveas(peak_bed_file)
         pybedtools.BedTool.from_dataframe(gene_tss_df[["chrom", "start", "end", "name"]]).saveas(tss_bed_file)
 
     # Step 2: Run BEDTools overlap
-    logging.info(f"  - Locating peaks within ±{max_peak_distance:,} bp of TSSs")
     peak_bed = pybedtools.BedTool(peak_bed_file)
     tss_bed = pybedtools.BedTool(tss_bed_file)
 
@@ -944,14 +948,28 @@ def calculate_peak_to_tg_distance_score(
     
     genes_near_peaks = genes_near_peaks.rename(columns={"gene_id": "target_id"})
     genes_near_peaks["target_id"] = genes_near_peaks["target_id"].apply(standardize_name)
-
-    # Step 3: Compute distances and scores
+    
+    if "TSS_dist" not in genes_near_peaks.columns:
+        raise ValueError("Expected column 'TSS_dist' missing from find_genes_near_peaks output.")
+    
+    # Compute the distance score
+    genes_near_peaks["TSS_dist_score"] = np.exp(-genes_near_peaks["TSS_dist"] / float(distance_factor_scale))
+    
+    # Drop rows where the peak is too far from the gene
     genes_near_peaks = genes_near_peaks[genes_near_peaks["TSS_dist"] <= max_peak_distance]
-    genes_near_peaks["TSS_dist_score"] = np.exp(-genes_near_peaks["TSS_dist"] / distance_factor_scale)
-
-    # Step 4: Save and return
+    
+    if promoter_bp is not None:
+        # Subset to keep genes that are near gene promoters
+        genes_near_peaks = genes_near_peaks[genes_near_peaks["TSS_dist"] <= int(promoter_bp)]
+        
+    if filter_to_nearest_gene:
+        # Filter to use the gene closest to the peak
+        genes_near_peaks = (genes_near_peaks.sort_values(["TSS_dist_score","TSS_dist","target_id"],
+                             ascending=[False, True, True], kind="mergesort")
+                .drop_duplicates(subset=["peak_id"], keep="first"))
+        
+    # Save and return the dataframe
     genes_near_peaks.to_parquet(peak_gene_dist_file, compression="snappy", engine="pyarrow")
-    logging.info(f"Saved peak–gene distance table: {genes_near_peaks.shape}")
     return genes_near_peaks
 
 
@@ -1590,145 +1608,44 @@ def aggregate_pseudobulk_datasets(gene_tss_df: pd.DataFrame, sample_names: list[
         
     return total_TG_pseudobulk_global, total_TG_pseudobulk_chr, total_RE_pseudobulk_chr, total_peaks_df
 
-def create_or_load_genomic_windows(window_size, chrom_id, genome_window_file, chrom_sizes_file, force_recalculate=False):
+def create_or_load_genomic_windows(
+    window_size,
+    chrom_id,
+    genome_window_file,
+    chrom_sizes_file,
+    force_recalculate=False,
+    promoter_only=False,
+):
+    """
+    Create/load fixed-size genomic windows for a chromosome.
+    When `promoter_only=True`, skip windows entirely and return an empty
+    DataFrame with the expected schema so callers don't break.
+    """
+
+    # Promoter-centric evaluation: no windows needed
+    if promoter_only:
+        return pd.DataFrame(columns=["chrom", "start", "end", "win_idx"])
+
     if not os.path.exists(genome_window_file) or force_recalculate:
-        
         logging.info("\nCreating genomic windows")
         genome_windows = pybedtools.bedtool.BedTool().window_maker(g=chrom_sizes_file, w=window_size)
+        # Ensure consistent column names regardless of BedTool defaults
         chrom_windows = (
             genome_windows
-            .filter(lambda x: x.chrom == chrom_id)  # TEMPORARY Restrict to one chromosome for testing
+            .filter(lambda x: x.chrom == chrom_id)
             .saveas(genome_window_file)
-            .to_dataframe()
+            .to_dataframe(names=["chrom", "start", "end"])
         )
         logging.info(f"  - Created {chrom_windows.shape[0]} windows")
     else:
-        
         logging.info("\nLoading existing genomic windows")
-        chrom_windows = pybedtools.BedTool(genome_window_file).to_dataframe()
-        
+        chrom_windows = pybedtools.BedTool(genome_window_file).to_dataframe(names=["chrom", "start", "end"])
+
     chrom_windows = chrom_windows.reset_index(drop=True)
     chrom_windows["win_idx"] = chrom_windows.index
-    
     return chrom_windows
 
-def per_tf_thresholds_robust(sliding_window_df, z_cut=3.0, pct_fallback=0.99, topk_fallback=50):
-    out = []
-    for tf, g in sliding_window_df.groupby("TF", sort=False):
-        x = g["sliding_window_score"].astype(float).to_numpy()
-        med = np.median(x)
-        mad = np.median(np.abs(x - med)) or 1e-9
-        z = (x - med) / (1.4826 * mad)
-        thr = med + z_cut * (1.4826 * mad)
-
-        keep = g.loc[z >= z_cut, "peak_id"].astype(str).tolist()
-
-        # fallback 1: high percentile per TF
-        if not keep and len(x) > 0:
-            q = np.quantile(x, pct_fallback)
-            keep = g.loc[g["sliding_window_score"] >= q, "peak_id"].astype(str).tolist()
-
-        # fallback 2: always keep top-k per TF
-        if not keep and len(x) > 0 and topk_fallback > 0:
-            idx = np.argsort(-x)[:topk_fallback]
-            keep = g.iloc[idx]["peak_id"].astype(str).tolist()
-
-        out.append((tf, float(thr), set(keep)))
-    return {tf: thr for tf, thr, _ in out}, {tf: kp for tf, _, kp in out}
-
-def filter_windows_and_tgs(
-    *,
-    window_map: dict[str, int],
-    genes_near_peaks: pd.DataFrame,
-    sliding_window_df: pd.DataFrame,
-    strong_windows: Optional[set[int]] = None,
-    binding_thresh: Optional[float] = None,
-    min_tfs_per_window: int = 1,
-    fallback_keep_if_empty: bool = True,     # NEW
-    log_debug: bool = True                   # NEW
-):
-    """
-    A) keep windows with ≥min_tfs_per_window strong TF-peak hits
-    B) keep only windows that map to a TG (via genes_near_peaks)
-    C) drop TGs that have no windows after A+B
-    Returns: keep_windows, keep_tgs, new_window_map
-    """
-    g = genes_near_peaks.copy()
-    g["peak_id"] = g["peak_id"].astype(str)
-
-    # --- peaks near any TG (B)
-    peaks_near_tg = set(g["peak_id"])
-    windows_near_tg = {window_map[p] for p in peaks_near_tg if p in window_map}
-
-    # --- compute strong_windows if not provided (A)
-    if strong_windows is None:
-        if binding_thresh is None:
-            raise ValueError("Provide either strong_windows or binding_thresh")
-        s = sliding_window_df[["peak_id", "sliding_window_score"]].copy()
-        s["peak_id"] = s["peak_id"].astype(str)
-        strong_peaks = set(
-            s.loc[s["sliding_window_score"] >= binding_thresh, "peak_id"].astype(str)
-        )
-    else:
-        # reconstruct strong_peaks from provided strong_windows is not trivial;
-        # instead, just skip and compute intersection with windows_near_tg later
-        strong_peaks = None
-
-    # (New) If we have strong_peaks, **restrict them to peaks_near_tg** first
-    if strong_peaks is not None:
-        strong_peaks_near_tg = strong_peaks & peaks_near_tg
-        strong_windows = {window_map[p] for p in strong_peaks_near_tg if p in window_map}
-    
-    strong_window_set: Set[int] = strong_windows if strong_windows is not None else set()
-
-    # --- A ∩ B
-    candidate_windows = strong_window_set & windows_near_tg
-
-    if log_debug:
-        print(f"  - # peaks near TG: {len(peaks_near_tg)}")
-        if strong_peaks is not None:
-            print(f"  - # strong peaks (all): {len(strong_peaks)} "
-                  f"| strong ∩ near TG: {len(strong_peaks & peaks_near_tg)}")
-        print(f"  - # windows_near_tg: {len(windows_near_tg)} "
-              f"| # strong_windows: {len(strong_window_set)} "
-              f"| # candidate_windows (A∩B): {len(candidate_windows)}")
-
-    # --- Optional step: enforce ≥min_tfs_per_window
-    if min_tfs_per_window > 1 and candidate_windows:
-        s = sliding_window_df.copy()
-        s["peak_id"] = s["peak_id"].astype(str)
-        s = s[s["peak_id"].isin(peaks_near_tg)]
-        s["win"] = s["peak_id"].map(window_map)
-        win_tf_counts = (
-            s.groupby(["win","TF"])["sliding_window_score"]
-             .max()
-             .reset_index()
-             .groupby("win")["TF"].nunique()
-        )
-        candidate_windows = {
-            int(w) for w, n in win_tf_counts.items()
-            if int(w) in candidate_windows and n >= min_tfs_per_window
-        }
-
-    # --- Fallback if empty after A (+ optional TF-count) and B
-    if not candidate_windows and fallback_keep_if_empty:
-        if log_debug:
-            print("candidate_windows empty – falling back to all windows_near_tg")
-        candidate_windows = set(windows_near_tg)
-
-    # --- C) TGs that still have at least one kept window
-    g["win"] = g["peak_id"].map(window_map)
-    keep_tgs = set(g.loc[g["win"].isin(candidate_windows), "target_id"].astype(str))
-
-    # Filter window_map to peaks that are (i) near TG and (ii) in kept windows
-    keep_peaks = set(
-        g.loc[g["win"].isin(candidate_windows), "peak_id"].astype(str).unique()
-    )
-    new_window_map = {p: w for p, w in window_map.items() if p in keep_peaks}
-
-    return candidate_windows, keep_tgs, new_window_map
-
-def make_peak_to_window_map(peaks_bed: pd.DataFrame, windows_bed: pd.DataFrame) -> dict[str, int]:
+def make_peak_to_window_map(peaks_bed: pd.DataFrame, windows_bed: pd.DataFrame, peaks_as_windows: bool = True,) -> dict[str, int]:
     """
     Map each peak to the window it overlaps the most.
     Ensures the BedTool 'name' field is exactly the `peak_id` column.
@@ -1744,8 +1661,12 @@ def make_peak_to_window_map(peaks_bed: pd.DataFrame, windows_bed: pd.DataFrame) 
     pb["start"] = pb["start"].astype(int)
     pb["end"]   = pb["end"].astype(int)
     pb["peak_id"] = pb["peak_id"].astype(str).str.strip()
+    
+    if peaks_as_windows or windows_bed is None or windows_bed.empty:
+        # stable order mapping: as they appear
+        return {pid: int(i) for i, pid in enumerate(pb["peak_id"].tolist())}
 
-    # BedTool uses the 4th column as "name" → make it explicitly 'peak_id'
+    # BedTool uses the 4th column as "name. make it explicitly 'peak_id'
     pb_for_bed = pb[["chrom", "start", "end", "peak_id"]].rename(columns={"peak_id": "name"})
     bedtool_peaks   = pybedtools.BedTool.from_dataframe(pb_for_bed)
 
@@ -1786,7 +1707,6 @@ def make_peak_to_window_map(peaks_bed: pd.DataFrame, windows_bed: pd.DataFrame) 
         mapping[str(pid)] = int(random.choice(candidates))
 
     return mapping
-
 
 def align_to_vocab(names, vocab, tensor_all, label="genes"):
     """
@@ -2216,10 +2136,29 @@ if __name__ == "__main__":
     chrom_list = CHROM_IDS
     tf_names = [gc.canonical_symbol(n) for n in list(total_tf_set)]
 
-    
     if PROCESS_CHROMOSOME_SPECIFIC_DATA:
+        
+        # Aggregate sample-level data
+        sample_level_sliding_window_dfs = []
+        sample_level_peak_to_gene_dist_dfs = []
+        for sample_name in SAMPLE_NAMES:
+            sliding_window_score_file = SAMPLE_PROCESSED_DATA_DIR / sample_name / "sliding_window.parquet"
+            peak_to_gene_dist_file = SAMPLE_PROCESSED_DATA_DIR / sample_name / "peak_to_gene_dist.parquet"
+            
+            
+            sliding_window_df = pd.read_parquet(sliding_window_score_file, engine="pyarrow")
+            sample_level_sliding_window_dfs.append(sliding_window_df)
+            
+            peak_to_gene_dist_df = pd.read_parquet(peak_to_gene_dist_file, engine="pyarrow")
+            sample_level_peak_to_gene_dist_dfs.append(peak_to_gene_dist_df)
+
+        total_sliding_window_score_df = pd.concat(sample_level_sliding_window_dfs)
+        total_peak_gene_dist_df = pd.concat(sample_level_peak_to_gene_dist_dfs)
+        
         logging.info(f"  - Number of chromosomes: {len(chrom_list)}: {chrom_list}")
         for chrom_id in chrom_list:
+            
+            
             logging.info(f"\n----- Preparing MultiomicTransformer data for {DATASET_NAME} {chrom_id} -----")
             make_chrom_gene_tss_df(GENE_TSS_FILE, chrom_id, GENOME_DIR)
             
@@ -2284,6 +2223,8 @@ if __name__ == "__main__":
             scaler = StandardScaler()
             TG_scaled = scaler.fit_transform(total_TG_pseudobulk_chr.values.astype("float32"))
             
+            chrom_peak_ids = set(total_peaks_df["peak_id"].astype(str))
+            
             # Create genome windows
             logging.info(f"Creating genomic windows for {chrom_id}")
             genome_windows = create_or_load_genomic_windows(
@@ -2291,150 +2232,96 @@ if __name__ == "__main__":
                 chrom_id=chrom_id,
                 chrom_sizes_file=CHROM_SIZES_FILE,
                 genome_window_file=genome_window_file,
-                force_recalculate=FORCE_RECALCULATE
+                force_recalculate=FORCE_RECALCULATE,
+                promoter_only=(PROMOTER_BP is not None)
             )
-            num_windows = genome_windows.shape[0]
             
                 # --- Calculate Peak-to-TG Distance Scores ---
-            genes_near_peaks = calculate_peak_to_tg_distance_score(
-                peak_bed_file=chrom_peak_bed_file,
-                tss_bed_file=tss_bed_file,
-                peak_gene_dist_file=peak_to_tss_dist_path,
-                mesc_atac_peak_loc_df=total_peaks_df,  # peak locations DataFrame
-                gene_tss_df=gene_tss_df,
-                max_peak_distance= MAX_PEAK_DISTANCE,
-                distance_factor_scale= DISTANCE_SCALE_FACTOR,
-                force_recalculate=FORCE_RECALCULATE
-            )
+            genes_near_peaks = total_peak_gene_dist_df[total_peak_gene_dist_df["peak_id"].astype(str).isin(chrom_peak_ids)].copy()
+                
+            # genes_near_peaks = calculate_peak_to_tg_distance_score(
+            #     peak_bed_file=chrom_peak_bed_file,
+            #     tss_bed_file=tss_bed_file,
+            #     peak_gene_dist_file=peak_to_tss_dist_path,
+            #     mesc_atac_peak_loc_df=total_peaks_df,  # peak locations DataFrame
+            #     gene_tss_df=gene_tss_df,
+            #     max_peak_distance= MAX_PEAK_DISTANCE,
+            #     distance_factor_scale= DISTANCE_SCALE_FACTOR,
+            #     force_recalculate=FORCE_RECALCULATE,
+            #     filter_to_nearest_gene=FILTER_TO_NEAREST_GENE,
+            #     promoter_bp=PROMOTER_BP
+            # )
             genes_near_peaks["target_id"] = gc.canonicalize_series(genes_near_peaks["target_id"])
+            genes_near_peaks.to_parquet(peak_to_tss_dist_path, engine="pyarrow", compression="snappy")
+            logging.info(f"  - Saved peak-to-TG distance scores to {peak_to_tss_dist_path}")
 
             
             # ----- SLIDING WINDOW TF-PEAK SCORE -----
             if not os.path.isfile(chrom_sliding_window_file):
+                
+                sliding_window_df = total_sliding_window_score_df[
+                    total_sliding_window_score_df["peak_id"].astype(str).isin(chrom_peak_ids)
+                ][["TF","peak_id","sliding_window_score"]].copy()
 
-                peaks_df = pybedtools.BedTool(peak_bed_file)
+                # normalize types/names
+                sliding_window_df["TF"] = sliding_window_df["TF"].astype(str)
+                sliding_window_df["peak_id"] = sliding_window_df["peak_id"].astype(str)
+                sliding_window_df["sliding_window_score"] = pd.to_numeric(sliding_window_df["sliding_window_score"], errors="coerce")
 
-                logging.info("Running sliding window scan")
-                run_sliding_window_scan(
-                    tf_name_list=tfs,
-                    tf_info_file=str(TF_FILE),
-                    motif_dir=str(MOTIF_DIR),
-                    genome_fasta=str(genome_fasta_file),
-                    peak_bed_file=str(chrom_peak_bed_file),
-                    output_file=chrom_sliding_window_file,
-                    num_cpu=num_cpu
+                # collapse duplicates across samples
+                sliding_window_df = (
+                    sliding_window_df
+                    .groupby(["TF","peak_id"], as_index=False, sort=False)
+                    .agg(sliding_window_score=("sliding_window_score","mean"))
                 )
+                
+                sliding_window_df.to_parquet(chrom_sliding_window_file, engine="pyarrow", compression="snappy")
+
+                # peaks_df = pybedtools.BedTool(peak_bed_file)
+
+                # logging.info("Running sliding window scan")
+                # run_sliding_window_scan(
+                #     tf_name_list=tfs,
+                #     tf_info_file=str(TF_FILE),
+                #     motif_dir=str(MOTIF_DIR),
+                #     genome_fasta=str(genome_fasta_file),
+                #     peak_bed_file=str(chrom_peak_bed_file),
+                #     output_file=chrom_sliding_window_file,
+                #     num_cpu=num_cpu
+                # )
                 logging.info(f"  - Wrote sliding window scores to {chrom_sliding_window_file}")
-                sliding_window_df = pd.read_parquet(chrom_sliding_window_file, engine="pyarrow")
+                # sliding_window_df = pd.read_parquet(chrom_sliding_window_file, engine="pyarrow")
             else:
                 logging.info("Loading existing sliding window scores")
                 sliding_window_df = pd.read_parquet(chrom_sliding_window_file, engine="pyarrow")
             
-            logging.info(f"Creating peak to window map")
+            total_peaks_df["peak_id"] = total_peaks_df["peak_id"].astype(str)
+            genes_near_peaks["peak_id"] = genes_near_peaks["peak_id"].astype(str)
+            
+            peaks_as_windows = (PROMOTER_BP is not None)
+
+            if peaks_as_windows:
+                genome_windows = total_peaks_df[["chrom", "start", "end"]].copy().reset_index(drop=True)
+                
+            num_windows = int(genome_windows.shape[0])
+
             window_map = make_peak_to_window_map(
                 peaks_bed=total_peaks_df,
                 windows_bed=genome_windows,
+                peaks_as_windows=peaks_as_windows,
             )
 
-            z_cut = 0
-            pct_fallback=0.0
-            topk_fallback=1
-            tf2thr, tf2peaks_keep = per_tf_thresholds_robust(
-                sliding_window_df,
-                z_cut=z_cut,
-                pct_fallback=pct_fallback,
-                topk_fallback=topk_fallback
+            total_RE_pseudobulk_chr.index = (
+                total_RE_pseudobulk_chr.index.astype(str).str.strip()
             )
-            strong_peaks = set().union(*tf2peaks_keep.values())
-            strong_windows = {window_map[p] for p in strong_peaks if p in window_map}
 
-            
-            n_tf_with_hits = sum(1 for v in tf2peaks_keep.values() if len(v) > 0)
-            strong_peaks = set().union(*tf2peaks_keep.values())
-            print(f"  - per-TF robust z>={z_cut}: TFs with >={topk_fallback} kept peak = {n_tf_with_hits}, union strong peaks = {len(strong_peaks)}")
-
-            print("\n Filtering windows and TGs by the strong windows")
-            keep_windows, keep_tgs, new_window_map = filter_windows_and_tgs(
-                window_map=window_map,
-                genes_near_peaks=genes_near_peaks,
-                sliding_window_df=sliding_window_df,
-                strong_windows=strong_windows,
-                min_tfs_per_window=1,
-            )
-            
-            # normalize keep_tgs to your canonical form everywhere
-            keep_tgs = {gc.canonical_symbol(t) for t in keep_tgs}
-
-            # 1) Log what we’re about to use
-            logging.info(f"  - # keep_windows: {len(keep_windows)} | # keep_tgs: {len(keep_tgs)}")
-
-            # 2) Normalize BOTH sides with the same function
-            total_TG_pseudobulk_chr.index = gc.canonicalize_series(total_TG_pseudobulk_chr.index)
-            
-
-            mask = total_TG_pseudobulk_chr.index.isin(keep_tgs)
-            overlap = set(total_TG_pseudobulk_chr.index) & set(keep_tgs)
-             
-            n_match = int(mask.sum())
-
-            # 3) Apply the (now-correct) mask
-            total_TG_pseudobulk_chr = total_TG_pseudobulk_chr.loc[mask].copy()
-            
-            if total_TG_pseudobulk_chr.empty:
-                logging.warning(f"{chrom_id}: empty TG matrix after filters; skipping chromosome.")
-                continue
-
-            if total_TG_pseudobulk_chr.shape[0] == 0:
-                logging.warning(f"{chrom_id}: no TG rows matched keep_tgs after normalization; skipping.")
-                continue
-
-            if len(keep_windows) == 0:
-                logging.warning(f"{chrom_id}: all windows dropped by filters (A+B). Skipping this chromosome.")
-                continue
-
-            # --- keep only selected windows and compact to [0..W'-1] once ---
-            old_win_idxs = sorted(keep_windows)
-            genome_windows = genome_windows[genome_windows["win_idx"].isin(old_win_idxs)].copy()
-            genome_windows = genome_windows.sort_values("win_idx").reset_index(drop=True)
-            old2new = {old: new for new, old in enumerate(old_win_idxs)}
-            genome_windows["win_idx"] = genome_windows["win_idx"].map(old2new).astype(int)
-
-            # --- remap the *filtered* peak -> window map to compact indices (use new_window_map as source) ---
-            window_map = {str(peak): int(old2new[old_w])
-                        for peak, old_w in new_window_map.items()
-                        if old_w in old2new}
-
-            # --- prune RE to peaks referenced by the (remapped) map ---
-            total_RE_pseudobulk_chr.index = total_RE_pseudobulk_chr.index.astype(str)
-            peaks_we_use = set(window_map.keys())
-            total_RE_pseudobulk_chr = total_RE_pseudobulk_chr.loc[
-                total_RE_pseudobulk_chr.index.intersection(peaks_we_use)
-            ]
-
-            # Refit scaler on the kept TGs (or subset the existing scaler if you prefer)
-            scaler = StandardScaler()
-            TG_scaled = scaler.fit_transform(total_TG_pseudobulk_chr.values.astype("float32"))
-            
-            # Recompute the number of windows *after* filtering/compaction
-            num_windows = int(genome_windows.shape[0])
-
-            # Sanity logs
-            logging.info(f"[{chrom_id}] windows: num={num_windows} "
-                        f"min_win={genome_windows['win_idx'].min()} "
-                        f"max_win={genome_windows['win_idx'].max()}")
-            logging.info(f"[{chrom_id}] window_map: peaks={len(window_map)} "
-                        f"min_idx={min(window_map.values()) if window_map else 'NA'} "
-                        f"max_idx={max(window_map.values()) if window_map else 'NA'}")
-            
-            # Build tensors using the *filtered* windows/map
-            logging.info(f"Precomputing TF, TG, and ATAC tensors")
             tf_tensor_all, tg_tensor_all, atac_window_tensor_all = precompute_input_tensors(
                 output_dir=str(SAMPLE_DATA_CACHE_DIR),
                 genome_wide_tf_expression=genome_wide_tf_expression,
                 TG_scaled=TG_scaled,
                 total_RE_pseudobulk_chr=total_RE_pseudobulk_chr,
                 window_map=window_map,
-                windows=genome_windows,
+                windows=genome_windows,   # now aligned with map
             )
             
             # ----- Load common TF and TG vocab -----
@@ -2504,10 +2391,6 @@ if __name__ == "__main__":
             torch.save(atac_window_tensor_all, atac_tensor_path)
             torch.save(tg_tensor_all, tg_tensor_path)
             torch.save(tf_tensor_all, tf_tensor_path)
-            
-            # Write the peak to gene TSS distance scores
-            genes_near_peaks.to_parquet(peak_to_tss_dist_path, compression="snappy", engine="pyarrow")
-            logging.info(f"  - Saved peak-to-TG distance scores to {peak_to_tss_dist_path}")
 
             # Save scaler for inverse-transform
             joblib.dump(scaler, sample_scaler_file)

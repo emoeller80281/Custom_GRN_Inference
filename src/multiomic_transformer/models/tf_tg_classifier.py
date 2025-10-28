@@ -82,3 +82,4 @@ class EdgeClassifier(nn.Module):
         z = torch.cat([tf, tg, tf*tg, (tf - tg).abs()], dim=1)
         z = self.bn(z)  # BatchNorm instead of LayerNorm
         return self.classifier(z).squeeze(-1)
+    

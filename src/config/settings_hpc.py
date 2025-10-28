@@ -47,9 +47,11 @@ AGGREGATION_METHOD = "mean" # "sum" or "mean"
 VALIDATION_DATASETS = ["E8.75_rep1"]
 FORCE_RECALCULATE = True                # Recomputes genomic windows, peak-TG distance, and re-runs MOODS TF-peak scan
 WINDOW_SIZE = 25_000                    # Aggregates peaks within WINDOW_SIZE bp genomic tiles
-DISTANCE_SCALE_FACTOR = 250_000         # Weights the peak-gene TSS distance score. Lower numbers = faster dropoff
-MAX_PEAK_DISTANCE = 1_000_000           # Masks out peaks further than this distance from the gene TSS
+DISTANCE_SCALE_FACTOR = 5_000           # Weights the peak-gene TSS distance score. Lower numbers = faster dropoff
+MAX_PEAK_DISTANCE = 1_000_000              # Masks out peaks further than this distance from the gene TSS
 DIST_BIAS_MODE = "mean"                 # Method for calcuting window -> gene TSS distance. Options: "max" | "sum" | "mean" | "logsumexp"
+FILTER_TO_NEAREST_GENE = True           # Associate peaks to the nearest gene
+PROMOTER_BP = 5_000
 
 # ----- MODEL TRAINING PARAMETERS -----
 TOTAL_EPOCHS=500
