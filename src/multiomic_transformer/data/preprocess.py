@@ -13,7 +13,6 @@ import numpy as np
 import scipy.sparse as sp
 import random
 from scipy.special import softmax
-from sklearn.preprocessing import StandardScaler
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Tuple, Set, Optional, List, Iterable, Union, Dict
 from anndata import AnnData
@@ -1774,7 +1773,7 @@ def build_motif_mask(tf_names, tg_names, sliding_window_df, genes_near_peaks):
 def precompute_input_tensors(
     output_dir: str,
     genome_wide_tf_expression: np.ndarray,   # [num_TF, num_cells]
-    TG_scaled: np.ndarray,                   # [num_TG_chr, num_cells] (already standardized)
+    genome_wide_tg_expression: np.ndarray,                   # [num_TG_chr, num_cells]
     total_RE_pseudobulk_chr,                 # pd.DataFrame: rows=peak_id, cols=metacells
     window_map,
     windows,                            # pd.DataFrame with shape[0] = num_windows
@@ -1796,9 +1795,9 @@ def precompute_input_tensors(
         np.asarray(genome_wide_tf_expression, dtype=np.float32), dtype=dtype
     )
 
-    # ---- TG tensor (scaled) ----
+    # ---- TG tensor ----
     tg_tensor_all = torch.as_tensor(
-        np.asarray(TG_scaled, dtype=np.float32), dtype=dtype
+        np.asarray(genome_wide_tg_expression, dtype=np.float32), dtype=dtype
     )
 
     # ---- ATAC window tensor ----
@@ -1995,7 +1994,7 @@ if __name__ == "__main__":
         os.makedirs(SAMPLE_DATA_CACHE_DIR, exist_ok=True)
         
         sample_raw_10x_rna_data_dir = RAW_10X_RNA_DATA_DIR / sample_name
-    
+        
         # ----- LOAD AND PROCESS RNA AND ATAC DATA -----
         processed_rna_df, processed_atac_df, pseudobulk_rna_df, pseudobulk_atac_df = process_or_load_rna_atac_data(
             sample_input_dir, 
@@ -2136,8 +2135,7 @@ if __name__ == "__main__":
     chrom_list = CHROM_IDS
     tf_names = [gc.canonical_symbol(n) for n in list(total_tf_set)]
 
-    if PROCESS_CHROMOSOME_SPECIFIC_DATA:
-        
+    if PROCESS_CHROMOSOME_SPECIFIC_DATA:        
         # Aggregate sample-level data
         sample_level_sliding_window_dfs = []
         sample_level_peak_to_gene_dist_dfs = []
@@ -2172,7 +2170,6 @@ if __name__ == "__main__":
             sample_tg_name_file: Path =         SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"tg_names_{chrom_id}.json"
             genome_window_file: Path =          SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"{chrom_id}_windows_{WINDOW_SIZE // 1000}kb.bed"
             sample_window_map_file: Path =      SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"window_map_{chrom_id}.json"
-            sample_scaler_file: Path =          SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"tg_scaler_{chrom_id}.save"
             peak_to_tss_dist_path: Path =       SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"genes_near_peaks_{chrom_id}.parquet"
             dist_bias_file: Path =              SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"dist_bias_{chrom_id}.pt"
             tg_id_file: Path =                  SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"tg_ids_{chrom_id}.pt"
@@ -2220,8 +2217,7 @@ if __name__ == "__main__":
             metacell_names = total_TG_pseudobulk_global.columns.tolist()
             
             # Scale TG expression
-            scaler = StandardScaler()
-            TG_scaled = scaler.fit_transform(total_TG_pseudobulk_chr.values.astype("float32"))
+            TG_expression = total_TG_pseudobulk_chr.values.astype("float32")
             
             chrom_peak_ids = set(total_peaks_df["peak_id"].astype(str))
             
@@ -2318,7 +2314,7 @@ if __name__ == "__main__":
             tf_tensor_all, tg_tensor_all, atac_window_tensor_all = precompute_input_tensors(
                 output_dir=str(SAMPLE_DATA_CACHE_DIR),
                 genome_wide_tf_expression=genome_wide_tf_expression,
-                TG_scaled=TG_scaled,
+                genome_wide_tg_expression=TG_expression,
                 total_RE_pseudobulk_chr=total_RE_pseudobulk_chr,
                 window_map=window_map,
                 windows=genome_windows,   # now aligned with map
@@ -2392,9 +2388,6 @@ if __name__ == "__main__":
             torch.save(tg_tensor_all, tg_tensor_path)
             torch.save(tf_tensor_all, tf_tensor_path)
 
-            # Save scaler for inverse-transform
-            joblib.dump(scaler, sample_scaler_file)
-
             # Save the peak -> window map for the sample
             atomic_json_dump(window_map, sample_window_map_file)
 
@@ -2434,7 +2427,6 @@ if __name__ == "__main__":
                     "window_map": str(sample_window_map_file),
                     "genes_near_peaks": str(peak_to_tss_dist_path),
                     "metacell_names": str(metacell_name_file),
-                    "tg_scaler": str(sample_scaler_file),
                     "motif_mask": str(motif_mask_file),
                 }
             }

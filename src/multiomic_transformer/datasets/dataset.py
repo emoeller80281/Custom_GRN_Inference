@@ -1,16 +1,12 @@
-import os, sys
+import os
 import json
-import joblib
-import pandas as pd
 import numpy as np
-from sympy import O
 import torch
 from typing import Optional, Union
 from torch.utils.data import Dataset, Sampler
 from pathlib import Path
 import logging
 from collections import OrderedDict
-import random
 
 
 class DistributedBatchSampler(torch.utils.data.Sampler):
@@ -135,6 +131,34 @@ class MultiChromosomeDataset(Dataset):
         # Global contiguous id maps (these define the embedding table sizes)
         self.tf_name2id_sub = {n: i for i, n in enumerate(self.tf_keep_names)}
         self.tg_name2id_sub = {n: i for i, n in enumerate(self.tg_keep_names)}
+        
+        # Contiguous 0..T'-1 and 0..G'-1 that match the sub-vocabs above.
+        self.tf_ids_sub = torch.arange(len(self.tf_name2id_sub), dtype=torch.long)
+        self.tg_ids_sub = torch.arange(len(self.tg_name2id_sub), dtype=torch.long)
+
+        # Ordered names (by id) are handy for reports/plots
+        self.tf_names_sub = [n for n, _ in sorted(self.tf_name2id_sub.items(), key=lambda kv: kv[1])]
+        self.tg_names_sub = [n for n, _ in sorted(self.tg_name2id_sub.items(), key=lambda kv: kv[1])]
+
+        # Expose legacy attribute names expected by logging code
+        # (These are "global across chromosomes", not per-batch)
+        self.tf_ids = self.tf_ids_sub
+        self.tg_ids = self.tg_ids_sub
+        self.tf_names = self.tf_names_sub
+        self.tg_names = self.tg_names_sub
+        
+        # --- Total number of ATAC windows across all chromosomes (after subsampling) ---
+        # We load each per-chrom dataset via the same path used for training (apply_global_subsample),
+        # read its num_windows, and sum them. This is deterministic across ranks if subset_seed is fixed.
+        self._windows_per_chrom = {}
+        _total_windows = 0
+        for cid in self.chrom_ids:
+            ds = self._load_chrom(cid)   # uses cache + applies global sub-vocab + max_windows_per_chrom
+            w = int(ds.num_windows)
+            self._windows_per_chrom[cid] = w
+            _total_windows += w
+            self._evict_if_needed()
+        self.num_windows = int(_total_windows)
 
         # store window cap too
         self.max_windows_per_chrom = max_windows_per_chrom
@@ -446,8 +470,6 @@ class MultiomicTransformerDataset(Dataset):
             self.num_cells   = self.tg_tensor_all.shape[1]
             self.num_windows = self.atac_window_tensor_all.shape[0]
             
-            self.scaler = None
-
             # in fine-tune mode we skip pseudobulk dist_bias + motif_mask
             self.dist_bias_tensor = None
             self.motif_mask_tensor = None
@@ -463,7 +485,6 @@ class MultiomicTransformerDataset(Dataset):
             tf_path   = self.data_dir / "tf_tensor_all.pt"
             tg_path   = chrom_dir / f"tg_tensor_all_{chrom_id}.pt"
             atac_path = chrom_dir / f"atac_window_tensor_all_{chrom_id}.pt"
-            scaler_path = chrom_dir / f"tg_scaler_{chrom_id}.save"
             window_map_path = chrom_dir / f"window_map_{chrom_id}.json"
             dist_bias_path  = chrom_dir / f"dist_bias_{chrom_id}.pt"
             tf_ids_path     = self.data_dir / "tf_ids.pt"
@@ -474,7 +495,7 @@ class MultiomicTransformerDataset(Dataset):
             motif_mask_path = chrom_dir / f"motif_mask_{chrom_id}.pt"
 
             required = [
-                tf_path, tg_path, atac_path, scaler_path,
+                tf_path, tg_path, atac_path,
                 window_map_path, metacell_names_path,
                 tf_names_json, tg_names_json,
                 tf_ids_path, tg_ids_path
@@ -482,12 +503,6 @@ class MultiomicTransformerDataset(Dataset):
             for f in required:
                 if not f.exists():
                     raise FileNotFoundError(f"Required file not found: {f}")
-                
-            if os.path.exists(scaler_path):
-                self.scaler = joblib.load(scaler_path)
-            else:
-                logging.warning(f"Scaler not found at {scaler_path}, setting to None")
-                self.scaler = None
 
             # load tensors
             self.tf_tensor_all = torch.load(tf_path).float()
@@ -580,7 +595,7 @@ class MultiomicTransformerDataset(Dataset):
     def _apply_subsampling(self):
         """
         Optionally subsample windows (W), TFs (T), TGs (G) while keeping all
-        tensors, ids, names, bias, motif_mask, and scaler consistent.
+        tensors, ids, names, bias, and motif_mask consistent.
         """
         # 1) Subsample windows (affects atac_window_tensor_all rows, dist_bias columns)
         if self._max_windows is not None and self.num_windows > self._max_windows:
@@ -593,7 +608,7 @@ class MultiomicTransformerDataset(Dataset):
 
             # distance bias: [G, W] -> slice columns
             if getattr(self, "dist_bias_tensor", None) is not None:
-                self.dist_bias_tensor = self.dist_bias_tensor.index_select(0, keep_tg_t)
+                self.dist_bias_tensor = self.dist_bias_tensor.index_select(1, keep_w_t)
 
         # Build name->row index maps from current names
         tf_old_map = {self.standardize_name(n): i for i, n in enumerate(getattr(self, "tf_names", []))}
@@ -623,7 +638,7 @@ class MultiomicTransformerDataset(Dataset):
             if getattr(self, "motif_mask_tensor", None) is not None:
                 self.motif_mask_tensor = self.motif_mask_tensor.index_select(1, keep_tf_t)
 
-        # 3) Subsample TGs (affects tg_tensor_all rows, dist_bias rows, motif_mask rows, ids/names, scaler)
+        # 3) Subsample TGs (affects tg_tensor_all rows, dist_bias rows, motif_mask rows, ids/names)
         if self._max_tgs is not None and len(self.tg_names) > self._max_tgs:
             keep_tg_names = list(self._subset_rng.choice(self.tg_names, size=self._max_tgs, replace=False))
             keep_tg_names = sorted(set(map(self.standardize_name, keep_tg_names)))
@@ -651,24 +666,7 @@ class MultiomicTransformerDataset(Dataset):
                     0, torch.arange(len(keep_tg_names))
                 )
 
-            # scaler is per-gene: subset it
-            if getattr(self, "scaler", None) is not None:
-                try:
-                    self.scaler = self.subset_scaler(self.scaler, keep_tg_idx)
-                except Exception as e:
-                    logging.warning(f"Could not subset scaler to kept TGs: {e}")
-
-
     # -------- utilities --------
-    def subset_scaler(self, original_scaler, kept_indices):
-        from sklearn.preprocessing import StandardScaler
-        new_scaler = StandardScaler()
-        new_scaler.mean_ = original_scaler.mean_[kept_indices]
-        new_scaler.scale_ = original_scaler.scale_[kept_indices]
-        new_scaler.var_ = original_scaler.var_[kept_indices]
-        new_scaler.n_features_in_ = len(kept_indices)
-        return new_scaler
-    
     def apply_global_subsample(
         self,
         tf_name2id_sub: dict[str, int],
@@ -745,20 +743,6 @@ class MultiomicTransformerDataset(Dataset):
             f"tf_ids max={int(self.tf_ids.max())} tg_ids max={int(self.tg_ids.max())}"
         )
 
-    
-    def inverse_transform(self, preds, tg_ids=None) -> np.ndarray:
-        """
-        Inverse-transform predictions back to raw scale.
-        preds: [num_samples, num_genes]
-        tg_ids: tensor or array of target gene IDs (indices into vocab).
-        """
-        if tg_ids is None:
-            # assume same number of TGs as scaler
-            return self.scaler.inverse_transform(preds)
-
-        tg_ids = np.array(tg_ids, dtype=int)
-        sub_scaler = self.subset_scaler(self.scaler, tg_ids)
-        return sub_scaler.inverse_transform(preds)
 
     def filter_genes(self, subset_genes):
         subset = set(subset_genes)

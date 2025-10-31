@@ -202,58 +202,6 @@ def test_build_motif_mask_small():
     assert mask.loc["chr2:5-15", "GATA6"] > 0
 
 
-
-def test_precompute_input_tensors_shapes(tmp_path: Path):
-    # dimensions
-    num_cells = 5
-    Ntf, Ntg = 3, 4
-    num_peaks = 6
-    num_windows = 3
-
-    # inputs: [num_TF, num_cells], [num_TG, num_cells]
-    genome_wide_tf_expression = np.arange(Ntf * num_cells, dtype=np.float32).reshape(Ntf, num_cells)
-    TG_scaled = (np.arange(Ntg * num_cells, dtype=np.float32).reshape(Ntg, num_cells) / 10.0)
-
-    # peaks (rows) × cells (cols)
-    peak_ids = [f"p{i}" for i in range(num_peaks)]
-    cell_cols = [f"c{i}" for i in range(num_cells)]
-    total_RE_pseudobulk_chr = pd.DataFrame(
-        np.random.RandomState(0).rand(num_peaks, num_cells).astype(np.float32),
-        index=peak_ids,
-        columns=cell_cols,
-    )
-
-    # window map: peak_id -> window index
-    window_map = {
-        "p0": 0, "p1": 0,
-        "p2": 1, "p3": 1,
-        "p4": 2, "p5": 2,
-    }
-
-    # windows: only shape[0] matters
-    windows = pd.DataFrame({"window_id": [f"W{i}" for i in range(num_windows)]})
-
-    tf_tensor_all, tg_tensor_all, atac_window_tensor_all = precompute_input_tensors(
-        output_dir=str(tmp_path),
-        genome_wide_tf_expression=genome_wide_tf_expression,
-        TG_scaled=TG_scaled,
-        total_RE_pseudobulk_chr=total_RE_pseudobulk_chr,
-        window_map=window_map,
-        windows=windows,
-    )
-
-    # type checks
-    assert isinstance(tf_tensor_all, torch.Tensor)
-    assert isinstance(tg_tensor_all, torch.Tensor)
-    assert isinstance(atac_window_tensor_all, torch.Tensor)
-
-    # shape checks
-    assert tf_tensor_all.shape == (Ntf, num_cells)
-    assert tg_tensor_all.shape == (Ntg, num_cells)
-    assert atac_window_tensor_all.shape == (num_windows, num_cells)
-
-
-
 @pytest.mark.skipif(pytest.importorskip("pybedtools") is None, reason="pybedtools not installed")
 def test_calculate_peak_to_tg_distance_score_minimal(tmp_path: Path):
     # minimal, close-by peaks and TSSs

@@ -54,21 +54,54 @@ SLIDING_SCHEMA = pa.schema([
     pa.field("sliding_window_score", pa.float32()),
 ])
 
-def coalesce_sliding_window_scores_pyarrow(input_glob: str, out_parquet: str):
-    dataset = ds.dataset(input_glob, format="parquet", partitioning="hive")  # partitioning optional
-    # Read only needed cols & cast to a consistent schema
-    cols = ["TF","peak_id","sliding_window_score"]
-    scanner = dataset.scanner(columns=cols, use_threads=True)
-    table = scanner.to_table()
-    # Normalize schema (prevents “some files had int, others float” stalls)
+def coalesce_sliding_window_scores_pyarrow(input_dir: str, out_parquet: str, pattern: str = "*.parquet"):
+    """
+    Coalesce many parquet shards into one file.
+    - Expands glob explicitly (pyarrow won't expand wildcards in a single string).
+    - Avoids 'hive' partitioning for flat folders.
+    - Streams batches and enforces a consistent schema.
+    """
+    # 1) Expand the glob to real files
+    paths = sorted(glob.glob(os.path.join(input_dir, pattern)))
+    if not paths:
+        raise FileNotFoundError(f"No parquet files matched: {os.path.join(input_dir, pattern)}")
+
+    # 2) Build a dataset from explicit paths (flat layout → no 'partitioning=\"hive\"')
+    dataset = ds.dataset(paths, format="parquet")
+
+    # 3) Columns we need + target schema
+    cols = ["TF", "peak_id", "sliding_window_score"]
     target_schema = pa.schema([
         pa.field("TF", pa.string()),
         pa.field("peak_id", pa.string()),
         pa.field("sliding_window_score", pa.float32()),
     ])
-    table = table.cast(target_schema, safe=False)
+
+    # 4) Helper to add missing cols and cast
+    def _normalize_table(tbl: pa.Table) -> pa.Table:
+        # Add any missing columns as nulls with the right type
+        for field in target_schema:
+            if field.name not in tbl.schema.names:
+                tbl = tbl.append_column(
+                    field.name,
+                    pa.nulls(len(tbl), type=field.type)
+                )
+        # Reorder and cast
+        tbl = tbl.select(target_schema.names)
+        return tbl.cast(target_schema, safe=False)
+
+    # 5) Stream and write
     Path(out_parquet).parent.mkdir(parents=True, exist_ok=True)
-    pq.write_table(table, out_parquet, compression="snappy")
+    writer = pq.ParquetWriter(out_parquet, target_schema, compression="snappy")
+
+    # Scanner lets us read only required columns and iterate in batches
+    scanner = ds.Scanner.from_dataset(dataset, columns=cols, use_threads=True)
+    for batch in scanner.to_batches():
+        tbl = pa.Table.from_batches([batch])
+        tbl = _normalize_table(tbl)
+        writer.write_table(tbl)
+
+    writer.close()
 
 def process_motif_file_and_save(motif_idx, tf_df, bg, score_mats, names, tmp_dir, peak_ids):
     pwm = np.array(score_mats[motif_idx])
@@ -452,8 +485,9 @@ def associate_tf_with_motif_pwm(tf_info_file, meme_dir, fasta_path, peaks_bed, t
     # Write a single final parquet from the temporary per-TF files
     out_parquet = os.path.join(output_dir, "sliding_window.parquet")
     coalesce_sliding_window_scores_pyarrow(
-        input_glob=os.path.join(tmp_dir, "*.parquet"),
+        input_dir=os.path.join(tmp_dir),
         out_parquet=out_parquet,
+        pattern="*.parquet"
     )
     logging.info(f"Wrote coalesced sliding window scores → {out_parquet}")
     return out_parquet

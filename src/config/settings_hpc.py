@@ -15,7 +15,7 @@ CHROM_ID_LIST = chrom_list
 CHROM_ID = "chr1"
 CHROM_IDS = chr_nums
 # , "E7.75_rep1", "E8.0_rep2", "E8.5_rep2", "E8.75_rep2", "E7.5_rep2", "E8.0_rep1", "E8.5_rep1"
-SAMPLE_NAMES = ["E7.5_rep1", "E7.5_rep2"]
+SAMPLE_NAMES = ["E7.5_rep1", "E7.5_rep2", "E7.75_rep1", "E8.0_rep2", "E8.5_rep2", "E8.75_rep2", "E7.5_rep2", "E8.0_rep1", "E8.5_rep1"]
 FINE_TUNING_DATASETS = ["E7.5_rep1"]
 
 # Paths to the raw scRNA-seq and scATAC-seq data
@@ -51,7 +51,7 @@ DISTANCE_SCALE_FACTOR = 5_000           # Weights the peak-gene TSS distance sco
 MAX_PEAK_DISTANCE = 1_000_000              # Masks out peaks further than this distance from the gene TSS
 DIST_BIAS_MODE = "mean"                 # Method for calcuting window -> gene TSS distance. Options: "max" | "sum" | "mean" | "logsumexp"
 FILTER_TO_NEAREST_GENE = True           # Associate peaks to the nearest gene
-PROMOTER_BP = 5_000
+PROMOTER_BP = 10_000
 
 # ----- MODEL TRAINING PARAMETERS -----
 TOTAL_EPOCHS=500
@@ -67,7 +67,7 @@ DROPOUT = 0.1
 
 INITIAL_LEARNING_RATE = 1e-3
 SCHEDULER_FACTOR=0.25
-SCHEDULER_PATIENCE=15
+SCHEDULER_PATIENCE=12
 
 # TF to TG shortcut parameters
 USE_DISTANCE_BIAS = True
@@ -95,8 +95,8 @@ EWC_LAMBDA = 10.0
 
 # ----- GAT CLASSIFIER MODEL -----
 # Model
-HIDDEN_DIM = 96
-GAT_HEADS = 3
+HIDDEN_DIM = 384
+GAT_HEADS = 6
 GAT_DROPOUT = 0.30
 EDGE_DROPOUT = 0.30
 

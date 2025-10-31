@@ -8,6 +8,7 @@ transformer_data
 macrophage_output/
 reference_networks/
 .venv/
+poster_results/
 checkpoint.pt
 dev/notebooks/sliding_window_calculation_method_testing_cache
 *.png
