@@ -91,7 +91,14 @@ class Trainer:
 
         # Learning rate scheduler
         self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, mode="min", factor=SCHEDULER_FACTOR, patience=SCHEDULER_PATIENCE
+            self.optimizer, 
+            mode=MODE, 
+            factor=SCHEDULER_FACTOR, 
+            patience=SCHEDULER_PATIENCE,
+            threshold=THRESHOLD,
+            threshold_mode=THRESHOLD_MODE,
+            cooldown=COOLDOWN,
+            min_lr=MIN_LR,
         )
         
         # Early stopping
@@ -236,7 +243,7 @@ class Trainer:
 
         avg_val_loss, pearson_corr, spearman_corr = self._validate()
 
-        self.scheduler.step(avg_val_loss)
+        self.scheduler.step(pearson_corr)
 
         return avg_train_loss, avg_train_mse, avg_val_loss, pearson_corr, spearman_corr
 
@@ -588,9 +595,9 @@ def save_tf_tg_embeddings_from_model(model, out_dir, vocab_dir):
     model = getattr(model, "module", model)  # unwrap DDP if needed
     torch.save(
         {
-            "tf_emb":     model.tf_emb_table.weight.detach().cpu(),   # [T, D]
-            "tg_emb":     model.tg_emb_table.weight.detach().cpu(),   # [G, D]
-            "tg_dec_emb": model.tg_decoder_table.weight.detach().cpu()
+            "tf_emb":     model.tf_identity_emb.weight.detach().cpu(),   # [T, D]
+            "tg_query_emb":     model.tg_query_emb.weight.detach().cpu(),   # [G, D]
+            "tg_emb": model.tg_identity_emb.weight.detach().cpu()
         },
         os.path.join(out_dir, "tf_tg_embeddings.pt")
     )

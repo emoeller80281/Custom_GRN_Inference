@@ -10,7 +10,7 @@ chrom_list = chr_nums #+ ["chrX", "chrY"]
 # ----- SAMPLE INFORMATION -----
 # Sample information
 ORGANISM_CODE = "mm10"
-DATASET_NAME = "mESC_soft_clustering"
+DATASET_NAME = "mESC"
 CHROM_ID_LIST = chrom_list
 CHROM_ID = "chr1"
 CHROM_IDS = chr_nums
@@ -49,26 +49,32 @@ VALIDATION_DATASETS = ["E8.75_rep1"]
 FORCE_RECALCULATE = True                # Recomputes genomic windows, peak-TG distance, and re-runs MOODS TF-peak scan
 WINDOW_SIZE = 25_000                    # Aggregates peaks within WINDOW_SIZE bp genomic tiles
 DISTANCE_SCALE_FACTOR = 5_000           # Weights the peak-gene TSS distance score. Lower numbers = faster dropoff
-MAX_PEAK_DISTANCE = 1_000_000             # Masks out peaks further than this distance from the gene TSS
+MAX_PEAK_DISTANCE = 20_000              # Masks out peaks further than this distance from the gene TSS
 DIST_BIAS_MODE = "mean"                 # Method for calcuting window -> gene TSS distance. Options: "max" | "sum" | "mean" | "logsumexp"
-FILTER_TO_NEAREST_GENE = True           # Associate peaks to the nearest gene
+FILTER_TO_NEAREST_GENE = False           # Associate peaks to the nearest gene
 PROMOTER_BP = 10_000
 
 # ----- MODEL TRAINING PARAMETERS -----
 TOTAL_EPOCHS=500
-BATCH_SIZE=32
-PATIENCE=20
-CORR_LOSS_WEIGHT=5
+BATCH_SIZE=16
+PATIENCE=35
+CORR_LOSS_WEIGHT=0.5
 
 D_MODEL = 384
 NUM_HEADS = 6
 NUM_LAYERS = 3
-D_FF = 768
-DROPOUT = 0.1
+D_FF = 1536
+DROPOUT = 0.2
 
-INITIAL_LEARNING_RATE = 1e-3
-SCHEDULER_FACTOR=0.25
-SCHEDULER_PATIENCE=12
+# Training scheduler settings
+MODE="max"                      # min = improvement means a lower number; max = improvement means a higher number
+INITIAL_LEARNING_RATE = 1e-3    # Initial learning rate for the model
+SCHEDULER_FACTOR=0.75            # How much to reduce the learning rate on a plateau
+SCHEDULER_PATIENCE=15           # How long to wait with no improvement without dropping the learning rate
+THRESHOLD=1e-3                  # Defines how much better the 
+THRESHOLD_MODE="rel"            # rel helps filter noise for datasets with different loss scales. new best = previous best * (1 - threshold) difference
+COOLDOWN=4                      # How many epochs to pause after a drop before testing for improvement, lets the training stabilize a bit
+MIN_LR=1e-5                     # Wont drop the learning rate below this, prevents learning from stalling due to tiny lr
 
 # TF to TG shortcut parameters
 USE_DISTANCE_BIAS = True

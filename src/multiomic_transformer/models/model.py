@@ -226,7 +226,7 @@ class MultiomicTransformer(nn.Module):
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(d_ff, d_model, bias=False),
-            nn.LayerNorm(d_model)
+            nn.LayerNorm(d_model, eps=1e-5)
         )
         
         # ATAC dense layer - Projects the ATAC window accessibility to [n_windows x d_model]
@@ -235,7 +235,7 @@ class MultiomicTransformer(nn.Module):
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(d_ff, d_model, bias=False),
-            nn.LayerNorm(d_model)
+            nn.LayerNorm(d_model, eps=1e-5)
         )
         
         # ATAC positional embedding - Adds a positional embedding to the windows so the model can learn how the relative 
@@ -283,23 +283,42 @@ class MultiomicTransformer(nn.Module):
         
         # Pooled Cross-Attention Output Dense Layer
         #     Pass the output of the TF -> ATAC and ATAC -> TF cross-attention through a dense layer
-        #     to reduce the dimensionality back down from [2*d_model] -> [d_model]
-        self.pooled_cross_attn_dense_layer = nn.Sequential(
-            nn.Linear(2*d_model, d_ff, bias=False),
-            # GELU helps to keep small negatives rather than zeroing them out like RELU
-            nn.GELU(),  
+        self.pooled_cross_attn_dense_2d = nn.Sequential(
+            nn.Linear(2*d_model, 2*d_model, bias=True),
+            nn.GELU(),
             nn.Dropout(self.dropout),
-            nn.Linear(d_ff, d_model, bias=False),
-            nn.LayerNorm(d_model)
+            nn.LayerNorm(2*d_model, eps=1e-5),
         )
+        
+        # Projects back to d_model after fusing with the TG-ATAC cross-attention output
+        self.tg_fuse = nn.Sequential(
+            nn.Linear(d_model + 2*d_model, d_model, bias=True),
+            nn.GELU(),
+            nn.Dropout(self.dropout),
+            nn.LayerNorm(d_model, eps=1e-5),
+        )
+        
+        # --- FiLM conditioning for global context -> TGs
+        self.film = nn.Sequential(
+            nn.Linear(2*d_model, 2*d_model, bias=True),
+            nn.Tanh()  # gentle; can drop or use SiLU
+        )
+        self.film_norm = nn.LayerNorm(d_model, eps=1e-5)
+        self.film_dropout = nn.Dropout(self.dropout)
         
         # TG -> ATAC Cross Attention "Which windows matter for this TG?"
         #    TG query vector attends to the ATAC windows.
         #    Distance bias is added 
         self.cross_tg_to_atac = CrossAttention(d_model, num_heads, dropout)
         
-        # Cast the TG prediction from [n_tgs, d_model] to [n_tgs]
-        self.gene_pred_dense = nn.Linear(d_model, 1)
+        # Create the final TG prediction using an MLP head [n_tgs, d_model] to [n_tgs]
+        self.gene_pred_dense = nn.Sequential(
+            nn.Linear(d_model, d_model, bias=True),
+            nn.GELU(),
+            nn.Dropout(self.dropout),
+            nn.Linear(d_model, 1, bias=True)
+        )
+        self.tg_norm = nn.LayerNorm(d_model, eps=1e-5)
         
         # Adds TF->TG weights at the end to directly modify the final TG expression predictions
         # Optional TF→TG shortcut that adapts to any TF/TG set
@@ -315,11 +334,16 @@ class MultiomicTransformer(nn.Module):
         bias         : [batch_size, n_tgs, n_window] or None   (distance bias)
         returns      : [batch_size, n_tgs]
         """
+        atac_windows = torch.nan_to_num(atac_windows, nan=0.0, posinf=1e6, neginf=-1e6)
+        tf_expr      = torch.nan_to_num(tf_expr,      nan=0.0, posinf=1e6, neginf=-1e6)
+                
         batch_size, n_window, _ = atac_windows.shape
         device = atac_windows.device
 
         # ----- ATAC encoding -----
         win_emb = self.atac_acc_dense_input_layer(atac_windows)       # [batch_size,n_window,d_model]
+        win_emb = torch.nan_to_num(win_emb, nan=0.0, posinf=1e6, neginf=-1e6)
+        
         pos = torch.arange(n_window, device=device, dtype=torch.float32)
         win_emb = win_emb + self.posenc(pos, bsz=batch_size).transpose(0, 1)  # [batch_size,n_window,d_model]
         win_emb = self.encoder(win_emb)                               # [batch_size,n_window,d_model]
@@ -337,6 +361,7 @@ class MultiomicTransformer(nn.Module):
         
         # Pass the TF expression through the dense layer to project to d_model
         tf_expr_emb = self.tf_expr_dense_input_layer(tf_expr.unsqueeze(-1))        # [batch_size,n_tfs,d_model]
+        tf_expr_emb = torch.nan_to_num(tf_expr_emb, nan=0.0, posinf=1e6, neginf=-1e6)
         
         # Add TF expression projection to TF identity embedding
         tf_emb = tf_expr_emb + tf_id_emb.unsqueeze(0)                     
@@ -349,8 +374,8 @@ class MultiomicTransformer(nn.Module):
         tf_repr, _   = self.tf_to_atac_cross_attn_pool(tf_cross)                    # [batch_size,d_model]
         atac_repr, _ = self.atac_to_tf_cross_attn_pool(atac_cross)                # [batch_size,d_model]
         
-        # Dense layer projection back to d_model
-        tf_atac_cross_attn_output = self.pooled_cross_attn_dense_layer(torch.cat([tf_repr, atac_repr], dim=-1))  # [batch_size,d_model]
+        # Global context block (keeps 2*d_model)
+        tf_atac_cross_attn_output = self.pooled_cross_attn_dense_2d(torch.cat([tf_repr, atac_repr], dim=-1))  # [batch_size,2*d_model]
         
         # ----- TG - ATAC Cross Attention -----
         tg_base = self.tg_query_emb(tg_ids).unsqueeze(0).expand(batch_size, -1, -1)  # [batch_size,n_tgs,d_model]
@@ -366,29 +391,49 @@ class MultiomicTransformer(nn.Module):
             if attn_bias.shape[1] == 1:
                 attn_bias = attn_bias.expand(batch_size, self.num_heads, tg_base.size(1), win_emb.size(1))
             attn_bias = self.bias_scale * attn_bias
-
+        
         # TG-ATAC cross attention with distance bias
-        tg_cross = self.cross_tg_to_atac(tg_base, win_emb, attn_bias=attn_bias)                             # [batch_size,n_tgs,d_model]
+        tg_cross = self.cross_tg_to_atac(tg_base, win_emb, attn_bias=attn_bias)                             # [batch_size, n_tgs, d_model]
         
         # Expand the TF-ATAC cross attention output for each TG
-        tf_atac_cross_attn_output = tf_atac_cross_attn_output.unsqueeze(1).expand(-1, tg_cross.size(1), -1) # [batch_size,n_tgs,d_model]
+        tf_atac_cross_attn_output_exp = tf_atac_cross_attn_output.unsqueeze(1).expand(-1, tg_cross.size(1), -1) # [batch_size, n_tgs, 2*d_model]
         
-        # For each TG, sum the outputs from the TG-ATAC cross attention 
-        # with the fused TF-ATAC and ATAC-TF cross attn output
-        tg_cross_attn_repr = tg_cross + tf_atac_cross_attn_output                                                      # [batch_size,n_tgs,d_model]
+        # Concatenate the TF-ATAC cross attention output to the TG-ATAC cross attention output
+        tg_cross_attn_repr = self.tg_fuse(torch.cat([tg_cross, tf_atac_cross_attn_output_exp], dim=-1))         # [batch_size, n_tgs, d_model]
         
+        # Add FiLM conditioning to let the TF-ATAC vector scale the TG features
+        gamma_beta = self.film(tf_atac_cross_attn_output)      # [B,2d]
+        
+        # FiLM conditioning adds a scaling factor
+        # Gamma: per-feature scaling
+        # Beta: per-feature shift
+        gamma, beta = torch.chunk(gamma_beta, 2, dim=-1)  # [B,d], [B,d]
 
-        # ----- TG identity to Cross-attention output dot product -----
+        # residual-style scale: 1 + gamma starts near identity
+        tg_cross_attn_repr = (1.0 + gamma)[:, None, :] * tg_cross_attn_repr + beta[:, None, :]
+        
+        # LayerNorm and Dropout
+        tg_cross_attn_repr = self.film_dropout(self.film_norm(tg_cross_attn_repr))       
+        
+        tg_cross_attn_repr = torch.nan_to_num(
+            tg_cross_attn_repr, nan=0.0, posinf=1e6, neginf=-1e6
+        )      
+        
         # Create TG identity embeddings
-        tg_emb = self.tg_identity_emb(tg_ids)                   # [n_tgs,d_model]
+        tg_emb = self.tg_identity_emb(tg_ids)                   # [batch_size, n_tgs, d_model]
         
-        # Dot product between teach TG's global context from attention and the TG identity embedding
+        # Cosine similarity between teach TG's global context from attention and the TG identity embedding
         #     If the TG ID embedding and global context agree, supports TG expression
-        tg_similarity_to_attn_output = (tg_cross_attn_repr * tg_emb).sum(dim=-1)     # [batch_size,n_tgs]
+        a = F.normalize(tg_cross_attn_repr, dim=-1, eps=1e-8)
+        b = F.normalize(tg_emb, dim=-1, eps=1e-8)
+        cos_sim = (a * b).sum(dim=-1).clamp_(-1.0, 1.0)   # [batch_size, n_tgs]
+                
+        # Layer normalize the TG cross attention output and pass it through an MLP [batch_size, n_tgs, d_model] -> [batch_size, n_tgs]
+        feat = self.tg_norm(tg_cross_attn_repr)
+        mlp_out = self.gene_pred_dense(feat).squeeze(-1)
         
-        # Sum the TG similarity score and the per-TG cross attention output
-        # If both similarit and weighted context features are high, predicts higher expression
-        tg_pred = tg_similarity_to_attn_output + self.gene_pred_dense(tg_cross_attn_repr).squeeze(-1)
+        # Add the cosine similarity score to the TG prediction from the MLP
+        tg_pred = cos_sim + mlp_out # [batch_size, n_tgs]
         
         if motif_mask is not None and self.use_motif_mask:
             assert motif_mask.shape == (tg_emb.size(0), tf_id_emb.size(0)), \
