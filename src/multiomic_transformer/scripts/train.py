@@ -165,41 +165,40 @@ class Trainer:
                 total_loss += loss.item(); n_batches += 1
                 preds_list.append(preds); tgts_list.append(targets)
 
-        # Stack local tensors
-        preds = torch.cat(preds_list, dim=0)
-        tgts = torch.cat(tgts_list, dim=0)
+        # flatten and pad preds with different size (from different chromosomes)
+        device = preds_list[0].device if preds_list else torch.device(f"cuda:{self.gpu_id}")
 
-        # ---- PADDED ALL_GATHER (variable N_local across ranks) ----
-        world_size = dist.get_world_size()
-        device = preds.device
+        # 0) flatten per-batch and concatenate locally into 1D vectors
+        preds_1d = torch.cat([p.reshape(-1) for p in preds_list], dim=0) if preds_list else torch.tensor([], device=device)
+        tgts_1d  = torch.cat([t.reshape(-1) for t in tgts_list],  dim=0) if tgts_list  else torch.tensor([], device=device)
 
         # 1) gather local lengths
-        n_local = torch.tensor([preds.shape[0]], device=device, dtype=torch.int64)
+        world_size = dist.get_world_size()
+        n_local = torch.tensor([preds_1d.numel()], device=device, dtype=torch.int64)
         n_list = [torch.zeros(1, device=device, dtype=torch.int64) for _ in range(world_size)]
-        dist.all_gather(n_list, n_local)  # all ranks receive all lengths
+        dist.all_gather(n_list, n_local)
         sizes = [int(t.item()) for t in n_list]
-        max_n = max(sizes)
+        max_n = max(sizes) if sizes else 0
 
-        # 2) pad preds/tgts to max_n rows
-        def pad_rows(x, target_rows):
-            n, d = x.shape
-            if n == target_rows:
+        # 2) pad 1D vectors to max_n
+        def pad_1d(x, target_len):
+            if x.numel() == target_len:
                 return x
-            pad = torch.zeros((target_rows - n, d), device=x.device, dtype=x.dtype)
+            pad = torch.zeros(target_len - x.numel(), device=x.device, dtype=x.dtype)
             return torch.cat([x, pad], dim=0)
 
-        preds_pad = pad_rows(preds, max_n)
-        tgts_pad  = pad_rows(tgts,  max_n)
+        preds_pad_1d = pad_1d(preds_1d, max_n)
+        tgts_pad_1d  = pad_1d(tgts_1d,  max_n)
 
-        # 3) all_gather padded tensors
-        gathered_preds = [torch.empty_like(preds_pad) for _ in range(world_size)]
-        gathered_tgts  = [torch.empty_like(tgts_pad)  for _ in range(world_size)]
-        dist.all_gather(gathered_preds, preds_pad)
-        dist.all_gather(gathered_tgts,  tgts_pad)
+        # 3) all_gather padded 1D tensors
+        gathered_preds_1d = [torch.empty_like(preds_pad_1d) for _ in range(world_size)]
+        gathered_tgts_1d  = [torch.empty_like(tgts_pad_1d)  for _ in range(world_size)]
+        dist.all_gather(gathered_preds_1d, preds_pad_1d)
+        dist.all_gather(gathered_tgts_1d,  tgts_pad_1d)
 
-        # 4) trim back to true sizes and stack
-        preds_all = torch.cat([gp[:sizes[r], :] for r, gp in enumerate(gathered_preds)], dim=0).cpu().numpy()
-        tgts_all  = torch.cat([gt[:sizes[r], :] for r, gt in enumerate(gathered_tgts)],  dim=0).cpu().numpy()
+        # 4) trim back to true sizes and stack globally
+        preds_all = torch.cat([gp[:sizes[r]] for r, gp in enumerate(gathered_preds_1d)], dim=0).cpu().numpy()
+        tgts_all  = torch.cat([gt[:sizes[r]] for r, gt in enumerate(gathered_tgts_1d)],  dim=0).cpu().numpy()
 
         # Replace NaN/inf (safety)
         preds_all = np.nan_to_num(preds_all, nan=0.0, posinf=1e6, neginf=-1e6)

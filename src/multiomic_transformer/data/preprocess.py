@@ -46,128 +46,107 @@ torch.manual_seed(1337)
 def pseudo_bulk(
     rna_data: AnnData,
     atac_data: AnnData,
-    use_single: bool = False,
     neighbors_k: int = 20,
-    resolution: float = 0.5,
-    aggregate: str = "mean",
-    pca_components: int = 25
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+    pca_components: int = 25,
+    hops: int = 1,
+    self_weight: float = 1.0,
+    renormalize_each_hop: bool = True,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Generate pseudobulk RNA and ATAC profiles by clustering cells and 
-    aggregating their neighbors.
+    Soft 'metacells' that DO NOT reduce the number of cells.
+
+    Builds a joint KNN graph on concatenated PCA (RNA||ATAC), forms a row-stochastic
+    weight matrix W (including self loops), and returns neighborhood-averaged profiles:
+        X_soft = W @ X
+
+    Args
+    ----
+    neighbors_k: K for the joint KNN graph.
+    pca_components: # PCs per modality before concatenation.
+    hops: how many times to diffuse (W^h). Larger = smoother.
+    self_weight: diagonal weight (>=0) added before row-normalization.
+    renormalize_each_hop: if True, row-normalize after every hop to keep rows summing to 1.
+
+    Returns
+    -------
+    soft_rna_df:  genes × cells (same cells as input)
+    soft_atac_df: peaks × cells (same cells as input)
     """
+    # --- copy and align cells across modalities (same as in your function) ---
+    rna = rna_data.copy()
+    atac = atac_data.copy()
 
-    rna_data = rna_data.copy()
-    atac_data = atac_data.copy()
-
-    # ----- Ensure the same cells and order in both modalities -----
-    # Align to common obs_names (intersection) and same order
-    common = rna_data.obs_names.intersection(atac_data.obs_names)
+    common = rna.obs_names.intersection(atac.obs_names)
     if len(common) == 0:
         raise ValueError("No overlapping cell barcodes between RNA and ATAC.")
-    rna_data = rna_data[common].copy()
-    atac_data = atac_data[common].copy()
-    # strictly enforce identical order
-    atac_data = atac_data[rna_data.obs_names].copy()
-    assert (rna_data.obs_names == atac_data.obs_names).all(), "Cell barcodes must be aligned"
+    rna = rna[common].copy()
+    atac = atac[common].copy()
+    atac = atac[rna.obs_names].copy()
+    assert (rna.obs_names == atac.obs_names).all()
 
-    # ----- Ensure PCA exists for both modalities -----
+    # --- ensure PCA in both modalities (caps to valid range) ---
     def _ensure_pca(adata: AnnData, n_comps: int) -> None:
-        # cap components to valid range
         max_comps = int(min(adata.n_obs, adata.n_vars))
         use_comps = max(1, min(n_comps, max_comps))
         if "X_pca" not in adata.obsm_keys() or adata.obsm.get("X_pca", np.empty((0,0))).shape[1] < use_comps:
             sc.pp.scale(adata, max_value=10, zero_center=True)
             sc.tl.pca(adata, n_comps=use_comps, svd_solver="arpack")
 
-    _ensure_pca(rna_data, pca_components)
-    _ensure_pca(atac_data, pca_components)
-    
-    # --- Joint embedding ---
-    combined_pca = np.concatenate(
-        (rna_data.obsm["X_pca"], atac_data.obsm["X_pca"]), axis=1
-    )
-    rna_data.obsm["X_combined"] = combined_pca
-    atac_data.obsm["X_combined"] = combined_pca
+    _ensure_pca(rna, pca_components)
+    _ensure_pca(atac, pca_components)
 
-    # --- Build joint neighbors + Leiden clusters ---
-    # Create empty placeholder matrix (not used, but AnnData requires X)
-    X_placeholder = sp.csr_matrix((rna_data.n_obs, 0))  
-
-    joint = AnnData(X=X_placeholder, obs=rna_data.obs.copy())
-    joint.obsm['X_combined'] = combined_pca
+    # --- joint embedding, neighbors on it ---
+    combined_pca = np.concatenate((rna.obsm["X_pca"], atac.obsm["X_pca"]), axis=1)
+    # tiny placeholder X to satisfy AnnData; graph lives in .obsp
+    joint = AnnData(X=sp.csr_matrix((rna.n_obs, 0)), obs=rna.obs.copy())
+    joint.obsm["X_combined"] = combined_pca
     sc.pp.neighbors(joint, n_neighbors=neighbors_k, use_rep="X_combined")
-    sc.tl.leiden(joint, resolution=resolution, key_added="cluster")
 
-    clusters = joint.obs["cluster"].astype(str)
-    cluster_ids = clusters.unique()
+    # base connectivities (symmetric KNN graph; values ~[0,1])
+    W = joint.obsp["connectivities"].tocsr().astype(np.float32)
 
-    # attach clusters back
-    rna_data.obs["cluster"] = clusters
-    atac_data.obs["cluster"] = clusters
+    # add self-loops
+    if self_weight > 0:
+        W = W + sp.diags(np.full(W.shape[0], self_weight, dtype=np.float32), format="csr")
 
-    # --- Connectivity graph (sparse adjacency) ---
-    conn = joint.obsp["connectivities"].tocsr()
+    # row-normalize to make W row-stochastic
+    def _row_norm(mat: sp.csr_matrix) -> sp.csr_matrix:
+        row_sum = np.asarray(mat.sum(axis=1)).ravel()
+        row_sum[row_sum == 0] = 1.0
+        inv = sp.diags(1.0 / row_sum, dtype=np.float32)
+        return inv @ mat
 
-    rna_rows: List[sp.csr_matrix] = []
-    atac_rows: List[sp.csr_matrix] = []
-    bulk_names: List[str] = []
-    
-    def aggregate_matrix(X: sp.spmatrix, idx: np.ndarray, method: str) -> sp.csr_matrix:
-        """
-        Aggregate rows in `X` indexed by `idx` using sum/mean.
-        Returns a 1×n_features CSR matrix.
-        """
-        if method == "sum":
-            out = X[idx, :].sum(axis=0)
-        elif method == "mean":
-            out = X[idx, :].mean(axis=0)
-        else:
-            raise ValueError(f"Unknown aggregate: {method}")
-        # ensure CSR 2D
-        return sp.csr_matrix(out)
+    W = _row_norm(W)
 
-    for cid in cluster_ids:
-        cluster_idx = np.where(clusters == cid)[0]
-        if len(cluster_idx) == 0:
-            continue
-        
-        if use_single or len(cluster_idx) < neighbors_k:
-            # Single pseudobulk
-            rna_agg = aggregate_matrix(rna_data.X, cluster_idx, aggregate)
-            atac_agg = aggregate_matrix(atac_data.X, cluster_idx, aggregate)
-            rna_rows.append(rna_agg)
-            atac_rows.append(atac_agg)
-            bulk_names.append(f"cluster{cid}")
-        else:
-            # Multiple pseudobulks
-            seeds = np.random.choice(cluster_idx, size=int(np.sqrt(len(cluster_idx))), replace=False)
-            for s in seeds:
-                neighbors = conn[s].indices
-                group = np.append(neighbors, s)
-                rna_agg = aggregate_matrix(rna_data.X, group, aggregate)
-                atac_agg = aggregate_matrix(atac_data.X, group, aggregate)
-                rna_rows.append(rna_agg)
-                atac_rows.append(atac_agg)
-                bulk_names.append(f"cluster{cid}_cell{s}")
-                
-    # Stack to (n_bulks × n_features) then transpose → (n_features × n_bulks)
-    rna_stack: sp.csr_matrix = sp.vstack(rna_rows) if rna_rows else sp.csr_matrix((0, rna_data.n_vars))
-    atac_stack: sp.csr_matrix = sp.vstack(atac_rows) if atac_rows else sp.csr_matrix((0, atac_data.n_vars))
+    # multi-hop diffusion: W <- W^h (staying row-stochastic)
+    if hops > 1:
+        W_h = W
+        for _ in range(1, int(hops)):
+            W_h = W_h @ W
+            if renormalize_each_hop:
+                W_h = _row_norm(W_h)
+        W = W_h
+    # one last normalization for safety (keeps rows summing to 1 exactly)
+    W = _row_norm(W)
 
-    rna_stack = rna_stack.T
-    atac_stack = atac_stack.T
+    # --- apply smoothing per modality ---
+    # X matrices are cells × features (CSR recommended)
+    X_rna = rna.X.tocsr() if not sp.isspmatrix_csr(rna.X) else rna.X
+    X_atac = atac.X.tocsr() if not sp.isspmatrix_csr(atac.X) else atac.X
 
-    # Final DataFrames
-    pseudo_bulk_rna_df: pd.DataFrame = pd.DataFrame(
-        rna_stack.toarray(),
-        index=rna_data.var_names,
-        columns=bulk_names,
+    X_rna_soft = W @ X_rna      # cells × genes
+    X_atac_soft = W @ X_atac    # cells × peaks
+
+    # return DataFrames as features × cells (to mirror your pseudo_bulk shapes)
+    pseudo_bulk_rna_df = pd.DataFrame(
+        X_rna_soft.T.toarray(),
+        index=rna.var_names,
+        columns=rna.obs_names,
     )
-    pseudo_bulk_atac_df: pd.DataFrame = pd.DataFrame(
-        atac_stack.toarray(),
-        index=atac_data.var_names,
-        columns=bulk_names,
+    pseudo_bulk_atac_df = pd.DataFrame(
+        X_atac_soft.T.toarray(),
+        index=atac.var_names,
+        columns=atac.obs_names,
     )
 
     return pseudo_bulk_rna_df, pseudo_bulk_atac_df
@@ -312,7 +291,9 @@ def process_or_load_rna_atac_data(
     *,
     sample_name: Optional[str] = None,
     neighbors_k: Optional[int] = None,
-    leiden_resolution: Optional[float] = None,
+    pca_components: Optional[int] = None,
+    hops: Optional[int] = None,
+    self_weight: Optional[float] = None
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
     Load or build processed scRNA/scATAC matrices and their pseudobulk aggregations.
@@ -340,10 +321,24 @@ def process_or_load_rna_atac_data(
     sample_name : str | None, keyword-only
         Pretty name for logging; defaults to the directory name if None.
     neighbors_k : int | None, keyword-only
-        Neighborhood size for multi-pseudobulk; defaults to NEIGHBORS_K if None.
-    leiden_resolution : float | None, keyword-only
-        Clustering resolution; defaults to LEIDEN_RESOLUTION if None.
+        Number of nearest neighbors per cell for the joint KNN graph used by
+        pseudobulk grouping and/or soft metacell smoothing. Larger values yield
+        stronger smoothing / broader neighborhoods. If None, defaults to NEIGHBORS_K.
 
+    pca_components : int | None, keyword-only
+        Number of principal components per modality (RNA and ATAC) before
+        concatenation for the joint neighbor graph. If None, defaults to
+        PCA_COMPONENTS. Capped internally by min(n_cells, n_features).
+
+    hops : int | None, keyword-only
+        Diffusion depth for soft metacells (applies W^h over the KNN graph).
+        Higher values spread information to neighbors-of-neighbors. Typical 1–3.
+        If None, defaults to SOFT_HOPS.
+
+    self_weight : float | None, keyword-only
+        Additional diagonal weight added before row-normalization of the graph
+        (self-loops). Higher values keep a cell closer to its original profile.
+        If None, defaults to SOFT_SELF_WEIGHT.
     Returns
     -------
     processed_rna_df : DataFrame
@@ -618,15 +613,14 @@ def process_or_load_rna_atac_data(
             ad_rna = AnnData(processed_rna_df.T)
             ad_atac = AnnData(processed_atac_df.T)
 
-        # Single-pseudobulk heuristic: keep your <100 rule
-        singlepseudobulk = ad_rna.n_obs < 100
-
         TG_pseudobulk_df, RE_pseudobulk_df = pseudo_bulk(
             rna_data=ad_rna,
             atac_data=ad_atac,
-            use_single=singlepseudobulk,
             neighbors_k=neighbors_k,
-            resolution=leiden_resolution,
+            pca_components=pca_components,
+            hops=hops,
+            self_weight=self_weight,
+            renormalize_each_hop=True
         )
 
         # Post-processing as in your original
@@ -2003,7 +1997,9 @@ if __name__ == "__main__":
             raw_atac_peak_file=RAW_ATAC_PEAK_MATRIX_FILE,
             sample_name=sample_name,
             neighbors_k=NEIGHBORS_K,
-            leiden_resolution=LEIDEN_RESOLUTION
+            pca_components=PCA_COMPONENTS,
+            hops=HOPS,
+            self_weight=SELF_WEIGHT,
         )
         
         processed_rna_df.index = pd.Index(

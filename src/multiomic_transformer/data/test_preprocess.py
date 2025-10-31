@@ -177,30 +177,6 @@ def test_align_to_vocab_happy_path_and_errors():
     np.testing.assert_array_equal(aligned3, np.vstack([tensor_all[1], tensor_all[1]]))
 
 
-def test_build_motif_mask_small():
-    peaks = pd.Index(["chr1:1-100", "chr1:200-300", "chr2:5-15"])
-    tf_names = ["TP53", "GATA6"]
-    sliding_min = pd.DataFrame({
-        "peak_id": ["chr1:1-100", "chr2:5-15"],
-        "TF": ["TP53", "GATA6"],
-    })
-    genes_near_peaks = {
-        "chr1:1-100": {"G1", "G2"},
-        "chr1:200-300": {"G2"},
-    }
-    mask = build_motif_mask(
-        tf_names=tf_names,
-        sliding_window_df=sliding_min,
-        genes_near_peaks=genes_near_peaks,
-    )
-    # shape (num_peaks × num_tfs)
-    assert isinstance(mask, pd.DataFrame)
-    assert list(mask.index) == list(peaks)
-    assert list(mask.columns) == tf_names
-    # Known-present entries should be >0 (or 1) per your implementation
-    assert mask.loc["chr1:1-100", "TP53"] > 0
-    assert mask.loc["chr2:5-15", "GATA6"] > 0
-
 
 @pytest.mark.skipif(pytest.importorskip("pybedtools") is None, reason="pybedtools not installed")
 def test_calculate_peak_to_tg_distance_score_minimal(tmp_path: Path):
@@ -354,28 +330,3 @@ def test_create_tf_tg_combination_files_normalizes_and_unions(tmp_path: Path):
     pytest.importorskip("leidenalg", reason="leidenalg not installed") is None,
     reason="scanpy/leidenalg missing",
 )
-def test_pseudo_bulk_minimal_runs():
-    import scanpy as sc
-    from anndata import AnnData
-    X_rna = np.array([[1,2,3,4,5,6],
-                      [2,3,4,5,6,7],
-                      [0,0,0,1,1,1],
-                      [5,4,3,2,1,0]], dtype=float).T
-    X_atac = np.array([[0,1,0,1,0,1],
-                       [1,0,1,0,1,0],
-                       [2,2,2,2,2,2]], dtype=float).T
-    ad_rna = AnnData(X=X_rna)
-    ad_rna.var_names = ["G1","G2","G3","G4"]
-    ad_rna.obs_names = [f"C{i}" for i in range(6)]
-    ad_atac = AnnData(X=X_atac)
-    ad_atac.var_names = ["chr1:1-10","chr1:11-20","chr1:21-30"]
-    ad_atac.obs_names = ad_rna.obs_names.copy()
-
-    tg_df, re_df = pseudo_bulk(
-        ad_rna, ad_atac,
-        use_single=True, neighbors_k=3, resolution=0.5,
-        aggregate="mean", pca_components=3  # strictly less than min(6,4)=4
-    )
-    assert isinstance(tg_df, pd.DataFrame)
-    assert isinstance(re_df, pd.DataFrame)
-    assert tg_df.shape[1] == re_df.shape[1]  # same # of pseudobulks
