@@ -138,8 +138,8 @@ def pseudo_bulk(
         return sp.csr_matrix(np.asarray(X, dtype=dtype, order="C"))
     
     # X matrices are cells × features (CSR recommended)
-    X_rna  = _as_csr(rna.X)     # cells × genes
-    X_atac = _as_csr(atac.X)    # cells × peaks
+    X_rna  = _as_csr(rna.layers["log1p"])     # cells × genes
+    X_atac = _as_csr(atac.layers["log1p"])    # cells × peaks
 
     X_rna_soft = W @ X_rna      # cells × genes
     X_atac_soft = W @ X_atac    # cells × peaks
@@ -388,7 +388,7 @@ def process_or_load_rna_atac_data(
 
     # helpers
     def _adata_to_dense_df(adata: AnnData) -> pd.DataFrame:
-        X = adata.X
+        X = adata.layers["log1p"]
         if sp.issparse(X):
             X = X.toarray()
         else:
@@ -582,6 +582,7 @@ def process_or_load_rna_atac_data(
                 # Try as-is (no transpose)
                 ad_rna = AnnData(rna_df)
                 ad_atac = AnnData(atac_df)
+                
                 if _obs_overlap(ad_rna, ad_atac) == 0:
                     raise RuntimeError("No overlapping barcodes after initial orientation.")
                 ad_rna, ad_atac = harmonize_and_intersect(ad_rna, ad_atac, verbose=True)
@@ -598,6 +599,11 @@ def process_or_load_rna_atac_data(
                         "if cells×genes, use transposed. Adjust normalization if needed."
                     ) from e1
                 ad_rna, ad_atac = harmonize_and_intersect(ad_rna, ad_atac, verbose=True)
+            
+            # Save the expression to a layer so that scaling for PCA does not apply to the gene expression
+            # (we want to scale all of the samples together later so they are in the same z-space)
+            ad_rna.layers["log1p"]  = ad_rna.X.copy()
+            ad_atac.layers["log1p"] = ad_atac.X.copy()
 
             # QC/filter
             logging.info("Running filter_and_qc on RNA/ATAC AnnData")
@@ -725,13 +731,15 @@ def filter_and_qc(adata_RNA: AnnData, adata_ATAC: AnnData) -> Tuple[AnnData, Ann
     sc.pp.normalize_total(adata_RNA, target_sum=1e4)
     sc.pp.log1p(adata_RNA)
     sc.pp.highly_variable_genes(adata_RNA, min_mean=0.0125, max_mean=3, min_disp=0.5)
-    adata_RNA = adata_RNA[:, adata_RNA.var.highly_variable]
+    adata_RNA.layers["log1p"] = adata_RNA.X.copy()
     sc.pp.scale(adata_RNA, max_value=10)
+    adata_RNA = adata_RNA[:, adata_RNA.var.highly_variable]
     sc.tl.pca(adata_RNA, n_comps=25, svd_solver="arpack")
 
     # Preprocess ATAC
     sc.pp.log1p(adata_ATAC)
     sc.pp.highly_variable_genes(adata_ATAC, min_mean=0.0125, max_mean=3, min_disp=0.5)
+    adata_ATAC.layers["log1p"] = adata_ATAC.X.copy()
     adata_ATAC = adata_ATAC[:, adata_ATAC.var.highly_variable]
     sc.pp.scale(adata_ATAC, max_value=10, zero_center=True)
     sc.tl.pca(adata_ATAC, n_comps=25, svd_solver="arpack")
@@ -1564,7 +1572,7 @@ def aggregate_pseudobulk_datasets(gene_tss_df: pd.DataFrame, sample_names: list[
     logging.info(f"  - Sample names: {sample_names}")
     logging.info(f"  - Looking for processed samples in {dataset_processed_data_dir}")
     for sample_name in sample_names:
-        sample_processed_data_dir = dataset_processed_data_dir
+        sample_processed_data_dir = os.path.join(dataset_processed_data_dir, sample_name)
         if not os.path.exists(sample_processed_data_dir):
             logging.warning(f"Skipping {sample_name}: directory not found")
             continue

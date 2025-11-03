@@ -10,7 +10,7 @@ chrom_list = chr_nums #+ ["chrX", "chrY"]
 # ----- SAMPLE INFORMATION -----
 # Sample information
 ORGANISM_CODE = "mm10"
-DATASET_NAME = "mESC"
+DATASET_NAME = "mESC_soft_clustering"
 CHROM_ID_LIST = chrom_list
 CHROM_ID = "chr1"
 CHROM_IDS = chr_nums
