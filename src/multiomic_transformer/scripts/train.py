@@ -536,24 +536,97 @@ def write_run_parameters(dataset, out_dir):
 
 @torch.no_grad()
 def get_mean_tf_tg_attention(model, dataloader, device="cuda"):
+    """
+    Returns a [num_tg_vocab, num_tf_vocab] tensor with the mean attention,
+    aggregated in global vocab index space using tg_ids/tf_ids from each batch.
+    Works even when batches have different (TG, TF) counts (e.g., per-chrom).
+    """
     model.eval()
-    attn_accum = None
-    n = 0
-    for atac_wins, tf_tensor, _, bias, tf_ids, tg_ids, motif_mask in dataloader:
-        atac_wins, tf_tensor, bias = atac_wins.to(device), tf_tensor.to(device), bias.to(device)
-        tf_ids, tg_ids = tf_ids.to(device), tg_ids.to(device)
-        motif_mask = motif_mask.to(device)
 
-        # Forward pass
-        _ = model(atac_wins, tf_tensor, tf_ids=tf_ids, tg_ids=tg_ids,
-                  bias=bias, motif_mask=motif_mask)
+    attn_sum = None      # shape: [TG_vocab, TF_vocab]
+    attn_count = None    # same shape, for averaging
 
-        # grab attn from shortcut layer each batch
-        if hasattr(model.shortcut_layer, "attn"):
-            attn_batch = model.shortcut_layer.attn.detach().cpu()
-            attn_accum = attn_batch if attn_accum is None else attn_accum + attn_batch
-            n += 1
-    return attn_accum / max(n, 1)
+    for batch in dataloader:
+        # Unpack (keep names flexible in case your Dataset adds fields)
+        atac_wins, tf_tensor, _, bias, tf_ids, tg_ids, motif_mask = batch
+        atac_wins  = atac_wins.to(device, non_blocking=True)
+        tf_tensor  = tf_tensor.to(device, non_blocking=True)
+        bias       = bias.to(device, non_blocking=True)
+        tf_ids     = tf_ids.to(device, non_blocking=True).long()
+        tg_ids     = tg_ids.to(device, non_blocking=True).long()
+        motif_mask = motif_mask.to(device, non_blocking=True)
+
+        # Forward (we don't need logits; we only read model.shortcut_layer.attn)
+        _ = model(
+            atac_wins, tf_tensor,
+            tf_ids=tf_ids, tg_ids=tg_ids,
+            bias=bias, motif_mask=motif_mask
+        )
+
+        # Fetch attention produced by the model
+        if not hasattr(model.shortcut_layer, "attn"):
+            # Nothing to aggregate for this batch
+            continue
+
+        attn_batch = model.shortcut_layer.attn  # device unknown; shape unknown
+        # Ensure on CPU for aggregation and detach
+        attn_batch = attn_batch.detach().float().cpu()
+
+        # Reduce to [TG, TF]:
+        # If attn has extra dims (e.g., [B, H, TG, TF] or [H, TG, TF]), mean over leading dims
+        while attn_batch.ndim > 2:
+            attn_batch = attn_batch.mean(dim=0)
+
+        # Sanity: attn_batch should be [len(tg_ids), len(tf_ids)]
+        if attn_batch.shape != (tg_ids.numel(), tf_ids.numel()):
+            # Try transposing if it looks like [TF, TG]
+            if attn_batch.shape == (tf_ids.numel(), tg_ids.numel()):
+                attn_batch = attn_batch.T
+            else:
+                raise RuntimeError(
+                    f"Attention shape {tuple(attn_batch.shape)} does not match "
+                    f"(TG={tg_ids.numel()}, TF={tf_ids.numel()})."
+                )
+
+        # Ensure we have CPU copies of ids for indexing numpy-like; keep as tensors for advanced indexing
+        tg_ids_cpu = tg_ids.cpu()
+        tf_ids_cpu = tf_ids.cpu()
+
+        # Lazy-init or grow accumulators to fit max ids
+        tgt_TG = int(tg_ids_cpu.max().item()) + 1
+        tgt_TF = int(tf_ids_cpu.max().item()) + 1
+
+        def _grow(mat, new_rows, new_cols):
+            if mat is None:
+                return torch.zeros((new_rows, new_cols), dtype=torch.float32)
+            r, c = mat.shape
+            if new_rows <= r and new_cols <= c:
+                return mat
+            out = torch.zeros((max(r, new_rows), max(c, new_cols)), dtype=mat.dtype)
+            out[:r, :c] = mat
+            return out
+
+        attn_sum   = _grow(attn_sum,   tgt_TG, tgt_TF)
+        attn_count = _grow(attn_count, tgt_TG, tgt_TF)
+
+        # Scatter-add this batch’s attention into global grid
+        # attn_sum[tg_ids, tf_ids] += attn_batch
+        attn_sum[tg_ids_cpu.unsqueeze(1), tf_ids_cpu.unsqueeze(0)] += attn_batch
+
+        # Update counts (each cell got one observation from this batch)
+        attn_count[tg_ids_cpu.unsqueeze(1), tf_ids_cpu.unsqueeze(0)] += 1.0
+
+    if attn_sum is None:
+        # No batches produced attention; return an empty tensor
+        return torch.empty(0, 0)
+
+    # Avoid division by zero
+    mask = attn_count > 0
+    mean_attn = torch.zeros_like(attn_sum)
+    mean_attn[mask] = attn_sum[mask] / attn_count[mask]
+
+    return mean_attn
+
 
 def _mapping_to_ordered_list(name2id: dict):
     # convert {name: id} → [names] in id order

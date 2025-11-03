@@ -6,8 +6,8 @@ import glob
 import re
 import sys
 from pathlib import Path
-from concurrent.futures import ProcessPoolExecutor, as_completed
-from typing import Any, Union
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from typing import Any, Union, Optional
 from pyfaidx import Fasta
 import dask.dataframe as dd
 import matplotlib.pyplot as plt
@@ -365,26 +365,35 @@ def load_motifs(motif_paths, pseudocount=0.001, bg=None):
     logging.info(f"Loaded {len(score_mats)} valid motifs, {malformed} malformed")
     return score_mats, names
 
-
-def associate_tf_with_motif_pwm(tf_info_file, meme_dir, fasta_path, peaks_bed, tf_name_list, num_cpu, output_dir) -> str:
+def associate_tf_with_motif_pwm(
+    tf_info_file,
+    meme_dir,
+    fasta_path,
+    peaks_bed,
+    tf_name_list,
+    num_cpu,
+    output_dir,
+    *,
+    inner_executor: str = "auto",
+    inner_workers: Optional[int] = None  # NEW: override worker count for inner parallelism
+) -> str:
     logging.info("\nPreparing for parallel motif scoring...")
-    
+
     fasta = Fasta(fasta_path, as_raw=True, sequence_always_upper=True)
 
     motif_paths = glob.glob(os.path.join(meme_dir, "**/*.pfm"), recursive=True) \
             + glob.glob(os.path.join(meme_dir, "**/*.txt"), recursive=True)
-    
+
     # Background nucleotide frequencies
     background_freq = build_first_order_bg(fasta, peaks_bed)
-    
+
     mats, names = load_motifs(motif_paths, pseudocount=0.0001, bg=background_freq)
     names = [n.upper() for n in names]
-    
+
     logging.debug(f"Loaded {len(mats)} PFMs from {len(meme_dir)} motif files")
-    
+
     # Extract the DNA sequences from the genome fasta for each peak
     peak_ids, seqs = extract_peak_seqs(fasta, peaks_bed)
-
     logging.debug(f"Number of peaks: {len(peak_ids)}")
 
     # Encode sequences into numeric format
@@ -395,7 +404,7 @@ def associate_tf_with_motif_pwm(tf_info_file, meme_dir, fasta_path, peaks_bed, t
     lookup[ord('T')] = 3
     lookup[ord('N')] = 4
 
-    encoded_plus = [lookup[np.frombuffer(seq.encode('ascii'), dtype=np.uint8)] for seq in seqs]
+    encoded_plus  = [lookup[np.frombuffer(seq.encode('ascii'), dtype=np.uint8)] for seq in seqs]
     encoded_minus = [lookup[np.frombuffer(seq[::-1].translate(str.maketrans('ACGT', 'TGCA')).encode('ascii'), dtype=np.uint8)] for seq in seqs]
 
     max_len = max(len(x) for x in encoded_plus)
@@ -407,24 +416,21 @@ def associate_tf_with_motif_pwm(tf_info_file, meme_dir, fasta_path, peaks_bed, t
             padded[i, :len(seq)] = seq[:fixed_len]
         return padded
 
-    seqs_plus = pad_sequences(encoded_plus, max_len)
+    seqs_plus  = pad_sequences(encoded_plus,  max_len)
     seqs_minus = pad_sequences(encoded_minus, max_len)
 
     # Directory for cached output
     tmp_dir = os.path.join(output_dir, "tmp", "sliding_window_tf_scores")
     os.makedirs(tmp_dir, exist_ok=True)
-    
+
     tf_info_df = pd.read_csv(tf_info_file, sep="\t")
     tf_info_df["Motif_ID"] = tf_info_df["Motif_ID"].astype(str).str.upper()
-    tf_info_df["TF_Name"] = tf_info_df["TF_Name"].astype(str).str.upper()
+    tf_info_df["TF_Name"]  = tf_info_df["TF_Name"].astype(str).str.upper()
     logging.debug(f"\nLoaded TF information from {tf_info_file}")
     logging.debug(f"TFs in tf_info_file: {tf_info_df['TF_Name'].nunique()}")
-    logging.debug("TF_Name examples: {tf_info_df['TF_Name'].head()}")
-    logging.debug(f"Motif_ID examples: {tf_info_df['Motif_ID'].head()}")
-    logging.debug(f"Motif names from JASPAR: {names[:5]}")
-    
+
     tf_df = tf_info_df[tf_info_df["TF_Name"].isin(tf_name_list)]
-    
+
     def is_valid_parquet(path):
         return os.path.isfile(path) and os.path.getsize(path) > 0
 
@@ -439,44 +445,103 @@ def associate_tf_with_motif_pwm(tf_info_file, meme_dir, fasta_path, peaks_bed, t
 
     # If no motifs selected for rescoring but no valid cache exists, force rescoring
     valid_parquet_files = get_valid_parquet_files(tmp_dir)
-
     if len(filtered_indices) == 0 and len(valid_parquet_files) == 0:
         logging.warning("No cached TF motif parquet files found. Forcing rescoring of all motifs.")
         filtered_indices = list(range(len(names)))
 
     logging.info(f"Filtered to {len(filtered_indices)} motifs needing scoring "
-             f"out of {len(names)} total motifs.")
+                 f"out of {len(names)} total motifs.")
 
     if len(filtered_indices) > 0:
         logging.debug(f"\t- Number of motif files found: {len(filtered_indices)} for {len(tf_name_list)} TFs")
-
         logging.info(f"\nCalculating sliding window motif scores for each ATAC-seq peak")
-        logging.debug(f"\tUsing {num_cpu} processors")
-        logging.debug(f"\tSize of calculation: {len(filtered_indices)} motifs × {len(peak_ids)} peaks")
-        
-        plus_shm, plus_shape, plus_dtype = share_numpy_array(seqs_plus)
-        minus_shm, minus_shape, minus_dtype = share_numpy_array(seqs_minus) 
 
-        logging.debug(f"\nWriting output to {tmp_dir}")
-        with ProcessPoolExecutor(
-        max_workers=num_cpu,
-        initializer=_init_worker,
-        initargs=(tf_df, background_freq,
-                plus_shm, plus_shape, plus_dtype,
-                minus_shm, minus_shape, minus_dtype)
-        ) as executor:
-            futures = {
-                executor.submit(process_motif_file_and_save, i, tf_df, background_freq, mats, names, tmp_dir, peak_ids): names[i]
-                for i in filtered_indices
-            }
+        # ---------- NEW: choose inner execution mode safely ----------
+        in_worker = (mp.parent_process() is not None)
+        if inner_executor not in {"auto", "process", "thread", "none"}:
+            raise ValueError(f"inner_executor must be one of auto|process|thread|none, got {inner_executor}")
 
-            min_update = max(1, int(0.02 * len(futures)))
-            for future in tqdm(as_completed(futures), total=len(futures), desc="Scoring motifs", miniters=min_update):
-                _ = future.result()
+        if inner_executor == "auto":
+            use_threads = in_worker     # thread when inside a worker process
+            use_process = not in_worker
+            serial      = False
+        elif inner_executor == "thread":
+            use_threads = True
+            use_process = False
+            serial      = False
+        elif inner_executor == "process":
+            use_threads = False
+            use_process = True
+            serial      = False
+        else:  # "none"
+            use_threads = False
+            use_process = False
+            serial      = True
+
+        # Default worker count
+        if inner_workers is None or inner_workers <= 0:
+            inner_workers = max(1, num_cpu)
+
+        logging.debug(f"\tInner executor mode: "
+                      f"{'threads' if use_threads else ('processes' if use_process else 'serial')} "
+                      f"with {inner_workers if not serial else 1} workers")
+
+        if use_process:
+            # Shared memory + initializer for processes (your original path)
+            plus_shm, plus_shape, plus_dtype   = share_numpy_array(seqs_plus)
+            minus_shm, minus_shape, minus_dtype= share_numpy_array(seqs_minus)
+
+            logging.debug(f"\nWriting output to {tmp_dir}")
+            with ProcessPoolExecutor(
+                max_workers=inner_workers,
+                initializer=_init_worker,
+                initargs=(tf_df, background_freq,
+                          plus_shm, plus_shape, plus_dtype,
+                          minus_shm, minus_shape, minus_dtype)
+            ) as executor:
+                futures = {
+                    executor.submit(process_motif_file_and_save, i, tf_df, background_freq, mats, names, tmp_dir, peak_ids): names[i]
+                    for i in filtered_indices
+                }
+                min_update = max(1, int(0.02 * len(futures)))
+                for _ in tqdm(as_completed(futures), total=len(futures), desc="Scoring motifs", miniters=min_update):
+                    _ = _.result()
+
+        elif use_threads:
+            # For threads/serial, we can reuse the same globals the initializer sets,
+            # but do it *in this process* using the same function.
+            # We still create shared views so the code path stays identical.
+            plus_shm, plus_shape, plus_dtype   = share_numpy_array(seqs_plus)
+            minus_shm, minus_shape, minus_dtype= share_numpy_array(seqs_minus)
+            # Call initializer to populate module-level globals for this process
+            _init_worker(tf_df, background_freq,
+                         plus_shm, plus_shape, plus_dtype,
+                         minus_shm, minus_shape, minus_dtype)
+
+            with ThreadPoolExecutor(max_workers=inner_workers) as executor:
+                futures = {
+                    executor.submit(process_motif_file_and_save, i, tf_df, background_freq, mats, names, tmp_dir, peak_ids): names[i]
+                    for i in filtered_indices
+                }
+                min_update = max(1, int(0.02 * len(futures)))
+                for _ in tqdm(as_completed(futures), total=len(futures), desc="Scoring motifs", miniters=min_update):
+                    _ = _.result()
+
+        else:
+            # Serial path; same globals setup
+            plus_shm, plus_shape, plus_dtype   = share_numpy_array(seqs_plus)
+            minus_shm, minus_shape, minus_dtype= share_numpy_array(seqs_minus)
+            _init_worker(tf_df, background_freq,
+                         plus_shm, plus_shape, plus_dtype,
+                         minus_shm, minus_shape, minus_dtype)
+
+            for i in tqdm(filtered_indices, desc="Scoring motifs", total=len(filtered_indices)):
+                process_motif_file_and_save(i, tf_df, background_freq, mats, names, tmp_dir, peak_ids)
+
         logging.info("Finished scoring all motifs. Reading TF motif parquet files...")
     else:
         logging.info("\nAll TFs have pre-existing parquet files in the tmp directory, reading cached parquet files...")
-    
+
     os.makedirs(output_dir, exist_ok=True)
     valid_parquet_files = get_valid_parquet_files(tmp_dir)
     if not valid_parquet_files:
@@ -500,21 +565,38 @@ def run_sliding_window_scan(
     peak_bed_file: str,
     output_file: Union[str, Path],
     num_cpu: int,
-):
+    *,
+    inner_executor: str = "auto",          # "auto" | "process" | "thread" | "none"
+    inner_workers: Optional[int] = None,   # defaults to num_cpu if not given
+) -> None:
+    """
+    Wrapper around associate_tf_with_motif_pwm that writes the final parquet to `output_file`.
+    `inner_executor` and `inner_workers` control the *inner* parallelism inside motif scoring.
+    """
     output_file = Path(output_file)
     output_dir = output_file.parent
     os.makedirs(output_dir, exist_ok=True)
-                
-    # Associate the TFs from TF_Information_all_motifs.txt to the motif with the matching motifID
+
+    # choose inner worker count (default: mirror num_cpu passed to this function)
+    if inner_workers is None or inner_workers <= 0:
+        inner_workers = max(1, int(num_cpu))
+
     final_parquet = associate_tf_with_motif_pwm(
-        tf_info_file, motif_dir, genome_fasta, peak_bed_file,
-        tf_name_list, num_cpu=num_cpu, output_dir=output_dir
+        tf_info_file=tf_info_file,
+        meme_dir=motif_dir,
+        fasta_path=genome_fasta,
+        peaks_bed=peak_bed_file,
+        tf_name_list=tf_name_list,
+        num_cpu=inner_workers,          # used for inner pool sizing
+        output_dir=str(output_dir),
+        inner_executor=inner_executor,  # NEW: safely select process/thread/serial
+        inner_workers=inner_workers,    # NEW: explicit inner worker count
     )
-    
+
+    # If the scorer wrote to a different file, atomically move into place
     if Path(final_parquet) != output_file:
         tmp = output_file.with_suffix(".tmp.parquet")
         os.replace(final_parquet, tmp)
         os.replace(tmp, output_file)
 
     logging.info(f"Wrote final TF–peak sliding window scores to {output_file}")
-

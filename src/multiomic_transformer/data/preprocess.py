@@ -1007,11 +1007,15 @@ def calculate_peak_to_tg_distance_score(
 
 
 def _softmax_1d_stable(x: np.ndarray, tau: float = 1.0) -> np.ndarray:
-    z = (x / float(tau)).astype(float)
-    z -= z.max()              # numerical stability
-    p = np.exp(z)
+    tau = float(tau)
+    if not np.isfinite(tau) or tau <= 0:
+        tau = 1.0
+    z = (x / tau).astype(float)
+    z -= np.nanmax(z)  # safe if any NaN present
+    p = np.exp(np.nan_to_num(z, neginf=-1e9))  # avoid -inf->nan
     s = p.sum()
-    return p / s if s > 0 else np.full_like(p, 1.0 / len(p))
+    return p / s if s > 0 else np.full_like(p, 1.0 / max(1, len(p)))
+
 
 def _process_single_tf(tf, tf_df, peak_to_gene_dist_df, *, temperature: float = 1.0):
     # tf_df contains only one TF
@@ -1047,48 +1051,94 @@ def calculate_tf_tg_regulatory_potential(
     tf_tg_reg_pot_file = Path(tf_tg_reg_pot_file)
     peak_to_gene_dist_file = Path(peak_to_gene_dist_file)
     
-    logging.info("Calculating TF–TG regulatory potential (per TF mode)")
+    def _norm_peak_id(s: pd.Series) -> pd.Series:
+        s = s.astype(str).str.strip()
+        # normalize numeric chrom to chrN (adjust to your convention)
+        s = s.str.replace(r"^(\d+):", r"chr\1:", regex=True)
+        s = s.str.replace(r"^chrchr", "chr", regex=True)  # defensive
+        return s
+
+    def _canon_name(s: pd.Series) -> pd.Series:
+        return standardize_name(s.astype(str))
+
     sliding_window_df = pd.read_parquet(sliding_window_score_file, engine="pyarrow")
     peak_to_gene_dist_df = pd.read_parquet(peak_to_gene_dist_file, engine="pyarrow")
 
-    # Subset to only peaks in both the peak-TG distance dataset
+    # drop junk early
+    sliding_window_df = sliding_window_df.dropna(subset=["TF", "peak_id", "sliding_window_score"])
+
+    # normalize join keys
+    sliding_window_df["peak_id"]      = _norm_peak_id(sliding_window_df["peak_id"])
+    peak_to_gene_dist_df["peak_id"]   = _norm_peak_id(peak_to_gene_dist_df["peak_id"])
+
+    # canonicalize names
+    sliding_window_df["TF"]           = _canon_name(sliding_window_df["TF"])
+    peak_to_gene_dist_df["target_id"] = _canon_name(peak_to_gene_dist_df["target_id"])
+
+    # ensure the column names you will use later exist
+    if "TSS_dist_score" not in peak_to_gene_dist_df.columns:
+        if "distance_score" in peak_to_gene_dist_df.columns:
+            peak_to_gene_dist_df = peak_to_gene_dist_df.rename(columns={"distance_score": "TSS_dist_score"})
+        else:
+            raise KeyError("peak_to_gene_dist_df must have 'TSS_dist_score' (or 'distance_score').")
+
+    # restrict to shared peaks (after normalization!)
     relevant_peaks = set(sliding_window_df["peak_id"].unique())
     peak_to_gene_dist_df = peak_to_gene_dist_df[peak_to_gene_dist_df["peak_id"].isin(relevant_peaks)]
-    
-    # Clean the column names and drop na
-    sliding_window_df = sliding_window_df.dropna(subset=["TF", "peak_id", "sliding_window_score"])
-    sliding_window_df["TF"] = sliding_window_df["TF"].apply(standardize_name)
-    peak_to_gene_dist_df["target_id"] = peak_to_gene_dist_df["target_id"].apply(standardize_name)
 
-    # Group the sliding window scores by TF
     tf_groups = {tf: df for tf, df in sliding_window_df.groupby("TF", sort=False)}
-
     logging.info(f"Processing {len(tf_groups)} TFs using {num_cpu} CPUs")
-    results = []
-    
 
+    results = []
+    empty = 0
+
+    # (Optional perf) pre-slice P2G per TF to reduce IPC
+    def _p2g_slice(df_tf, p2g):
+        peaks_tf = df_tf["peak_id"].unique()
+        return p2g[p2g["peak_id"].isin(peaks_tf)]
 
     with ProcessPoolExecutor(max_workers=num_cpu) as ex:
         futures = {
-            ex.submit(_process_single_tf, tf, df, peak_to_gene_dist_df): tf
+            ex.submit(_process_single_tf, tf, df, _p2g_slice(df, peak_to_gene_dist_df)): tf
             for tf, df in tf_groups.items()
         }
         for fut in tqdm(as_completed(futures), total=len(futures), desc="TF processing"):
             tf = futures[fut]
             try:
-                results.append(fut.result())
+                df_out = fut.result()
+                if df_out is None or df_out.empty:
+                    empty += 1
+                else:
+                    results.append(df_out)
             except Exception as e:
                 logging.error(f"TF {tf} failed: {e}")
+                empty += 1
 
-    # --- Concatenate all TF results ---
+    logging.info(f"Non-empty TFs: {len(results)}/{len(tf_groups)} (empties: {empty})")
+
     if not results:
-        raise RuntimeError("No TF results were successfully computed.")
+        sw_tfs   = sliding_window_df["TF"].nunique()
+        sw_peaks = sliding_window_df["peak_id"].nunique()
+        p2g_peaks = peak_to_gene_dist_df["peak_id"].nunique()
+        shared = len(set(sliding_window_df["peak_id"]).intersection(peak_to_gene_dist_df["peak_id"]))
+        raise RuntimeError(
+            f"No TF results. Pre-check: SW_TFs={sw_tfs}, SW_peaks={sw_peaks}, "
+            f"P2G_peaks={p2g_peaks}, shared_peaks={shared}"
+        )
 
     tf_tg_reg_pot = pd.concat(results, ignore_index=True)
-    tf_tg_reg_pot["motif_density"] = np.log1p(tf_tg_reg_pot["motif_density"].fillna(0))
-    
-    tf_tg_reg_pot["TF"] = tf_tg_reg_pot["TF"].apply(standardize_name)
-    tf_tg_reg_pot["TG"] = tf_tg_reg_pot["TG"].apply(standardize_name)
+    # Ensure expected columns exist and are typed
+    needed = {"TF", "TG", "reg_potential", "motif_density"}
+    missing = needed - set(tf_tg_reg_pot.columns)
+    if missing:
+        raise KeyError(f"Missing columns in tf_tg_reg_pot: {missing}")
+
+    # Stabilize motif density transform
+    tf_tg_reg_pot["motif_density"] = np.log1p(tf_tg_reg_pot["motif_density"].clip(lower=0).fillna(0))
+
+    # Final standardization pass (lightweight)
+    tf_tg_reg_pot["TF"] = _canon_name(tf_tg_reg_pot["TF"])
+    tf_tg_reg_pot["TG"] = _canon_name(tf_tg_reg_pot["TG"])
     
     logging.info("TF-TG regulatory potential")
     logging.info(tf_tg_reg_pot.head())
@@ -1492,6 +1542,8 @@ def create_single_cell_tensors(
 
         if not (tg_sc_file.exists() and re_sc_file.exists()):
             logging.warning(f"Skipping {sample_name}: missing TG/RE single-cell files")
+            logging.warning(f"  - {tg_sc_file}")
+            logging.warning(f"  - {re_sc_file}")
             continue
 
         TG_sc = pd.read_csv(tg_sc_file, sep="\t", index_col=0)
@@ -2004,6 +2056,7 @@ if __name__ == "__main__":
     os.environ.setdefault("MKL_NUM_THREADS", "1")
     os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
     os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+    os.environ.setdefault("KMP_INIT_AT_FORK", "FALSE")
 
     def per_sample_stage(sample_name: str) -> dict:
         """
@@ -2093,7 +2146,9 @@ if __name__ == "__main__":
                     genome_fasta=str(genome_fasta_path),
                     peak_bed_file=str(peak_bed_file),
                     output_file=sliding_window_score_file,
-                    num_cpu=max(1, num_cpu // 2),   # modest internal threads
+                    num_cpu=max(1, num_cpu // 2),
+                    inner_executor="thread",          # <— important
+                    inner_workers=max(1, num_cpu // 2)
                 )
 
             # ---- 6) TF/TG mean normalization (for attributes) ----
