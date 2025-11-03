@@ -24,7 +24,8 @@ from torch.utils.data.distributed import DistributedSampler
 from config.settings_hpc import *
 from multiomic_transformer.datasets.dataset import (
     MultiomicTransformerDataset, MultiChromosomeDataset,
-    ChromBucketBatchSampler, DistributedBatchSampler
+    ChromBucketBatchSampler, DistributedBatchSampler,
+    StandardizeTransform
     )
 from multiomic_transformer.models.model import MultiomicTransformer
 from multiomic_transformer.utils.files import unique_path
@@ -377,6 +378,45 @@ def load_train_objs():
     optimizer = torch.optim.Adam(model.parameters(), lr=INITIAL_LEARNING_RATE)
     return dataset, model, optimizer
 
+def compute_train_stats(train_ds: MultiChromosomeDataset):
+    # Aggregate over all items (cells) from train set
+    # Efficient way: read per-chrom tensors directly instead of looping items.
+    tf_sum = None; tf_sq = None; tf_N = 0
+    tg_sum = None; tg_sq = None; tg_N = 0
+    atac_stats = {}  # chrom_id -> mean/std over cells (per window)
+
+    for cid in train_ds.chrom_ids:
+        ds = train_ds._load_chrom(cid)  # already sub-vocabbed & subsampled
+        # TF/TG: aggregate across cells
+        tf = ds.tf_tensor_all.float()        # [T_eval, C]
+        tg = ds.tg_tensor_all.float()        # [G_eval, C]
+        tf_sum = (tf_sum if tf_sum is not None else tf.sum(1)) + tf.sum(1)
+        tf_sq  = (tf_sq  if tf_sq  is not None else (tf**2).sum(1)) + (tf**2).sum(1)
+        tg_sum = (tg_sum if tg_sum is not None else tg.sum(1)) + tg.sum(1)
+        tg_sq  = (tg_sq  if tg_sq  is not None else (tg**2).sum(1)) + (tg**2).sum(1)
+        tf_N += tf.shape[1]; tg_N += tg.shape[1]
+
+        # ATAC per chrom: mean/std per window over cells
+        atac = ds.atac_window_tensor_all.float()  # [W, C]
+        mean_w = atac.mean(dim=1)                 # [W]
+        std_w  = atac.std(dim=1, unbiased=False)  # [W]
+        atac_stats[cid] = {"mean": mean_w.tolist(), "std": std_w.tolist()}
+
+        train_ds._evict_if_needed()
+
+    tf_mean = (tf_sum / tf_N).tolist()
+    tf_std  = torch.sqrt((tf_sq / tf_N) - (torch.tensor(tf_mean)**2)).tolist()
+    tg_mean = (tg_sum / tg_N).tolist()
+    tg_std  = torch.sqrt((tg_sq / tg_N) - (torch.tensor(tg_mean)**2)).tolist()
+
+    # Build name-keyed dicts (names are global sub-vocab from train_ds)
+    tf_names = train_ds.tf_names_sub
+    tg_names = train_ds.tg_names_sub
+    tf_stats = {"mean": dict(zip(tf_names, tf_mean)), "std": dict(zip(tf_names, tf_std))}
+    tg_stats = {"mean": dict(zip(tg_names, tg_mean)), "std": dict(zip(tg_names, tg_std))}
+    return tf_stats, tg_stats, atac_stats
+
+
 def prepare_dataloader(dataset, batch_size, world_size=1, rank=0,
                        num_workers=4, pin_memory=True, seed=42, drop_last=True):
     """
@@ -425,7 +465,28 @@ def prepare_dataloader(dataset, batch_size, world_size=1, rank=0,
             max_tgs=dataset.max_tgs,
             max_windows_per_chrom=dataset.max_windows_per_chrom,
             subset_seed=dataset.subset_seed,
+            transform=None
         )
+        
+        # ----- Generate scaler for train chrs, apply to train, text, val chrs -----
+        ds_train_for_stats = MultiChromosomeDataset(chrom_ids=train_chrs, **ds_args)
+        
+        stats_name = f"scaler_stats_mt_{dataset.max_tfs}_{dataset.max_tgs}_{dataset.max_windows_per_chrom}_{dataset.subset_seed}.json"
+        STATS_JSON = (dataset.data_dir / stats_name)
+
+        if rank == 0:
+            if not STATS_JSON.exists():
+                tf_stats, tg_stats, atac_stats = compute_train_stats(ds_train_for_stats)
+                STATS_JSON.parent.mkdir(parents=True, exist_ok=True)
+                with open(STATS_JSON, "w") as f:
+                    json.dump({"tf": tf_stats, "tg": tg_stats, "atac": atac_stats}, f)
+        dist.barrier()
+        
+        with open(STATS_JSON) as f:
+            stats = json.load(f)
+        transform = StandardizeTransform(stats["tf"], stats["tg"], stats["atac"])
+        ds_args["transform"] = transform
+        
         ds_train = MultiChromosomeDataset(chrom_ids=train_chrs, **ds_args)
         ds_val   = MultiChromosomeDataset(chrom_ids=val_chrs,   **ds_args)
         ds_test  = MultiChromosomeDataset(chrom_ids=test_chrs,  **ds_args)
