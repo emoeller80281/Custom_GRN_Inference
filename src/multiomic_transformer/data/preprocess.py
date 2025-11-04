@@ -1596,14 +1596,16 @@ def create_single_cell_tensors(
             f"RE={atac_tensor_sc.shape}"
         )
 
-def aggregate_pseudobulk_datasets(gene_tss_df: pd.DataFrame, sample_names: list[str], dataset_processed_data_dir: Path, chrom_id: str, gc: GeneCanonicalizer):
-    
+def aggregate_pseudobulk_datasets(
+    gene_tss_df: pd.DataFrame, sample_names: list[str],
+    dataset_processed_data_dir: Path, chrom_id: str, gc: GeneCanonicalizer
+):
     # ----- Combine Pseudobulk Data into a Training Dataset -----
     TG_pseudobulk_global = []
     TG_pseudobulk_samples = []
     RE_pseudobulk_samples = []
     peaks_df_samples = []
-    
+
     def _canon_index_sum(df: pd.DataFrame, gc) -> pd.DataFrame:
         """Canonicalize df.index with GeneCanonicalizer and sum duplicate rows."""
         if df.empty:
@@ -1611,13 +1613,16 @@ def aggregate_pseudobulk_datasets(gene_tss_df: pd.DataFrame, sample_names: list[
         mapped = gc.canonicalize_series(pd.Series(df.index, index=df.index))
         out = df.copy()
         out.index = mapped.values
-        out = out[out.index != ""]                 # drop unmapped
-        if not out.index.is_unique:               # aggregate duplicates
-            out = out.groupby(level=0).sum()
+        out = out[out.index != ""]  # drop unmapped
+        if not out.index.is_unique:
+            # ensure low-precision before reduce
+            out = out.astype("float32", copy=False)
+            out = out.groupby(level=0).sum(numeric_only=True).astype("float32", copy=False)
+        else:
+            out = out.astype("float32", copy=False)
         return out
 
     def _canon_series_drop_dups(s: pd.Series, gc) -> pd.Series:
-        """Canonicalize a series of names and drop empties."""
         cs = gc.canonicalize_series(s.astype(str))
         return cs[cs != ""]
 
@@ -1632,66 +1637,86 @@ def aggregate_pseudobulk_datasets(gene_tss_df: pd.DataFrame, sample_names: list[
         if sample_name in VALIDATION_DATASETS:
             logging.warning(f"Skipping {sample_name}: in VALIDATION_DATASETS list")
             continue
-        else:
-            logging.info(f"  - Processing Pseudobulk data for {sample_name}")
-            TG_pseudobulk = pd.read_csv(os.path.join(sample_processed_data_dir, "TG_pseudobulk.tsv"), sep="\t", index_col=0)
-            RE_pseudobulk = pd.read_csv(os.path.join(sample_processed_data_dir, "RE_pseudobulk.tsv"), sep="\t", index_col=0)
-            
-            TG_pseudobulk = _canon_index_sum(TG_pseudobulk, gc)
 
-            logging.debug("\n  - Total Pseudobulk Genes and Peaks")
-            logging.debug(f"\tTG_pseudobulk: {TG_pseudobulk.shape[0]:,} Genes x {TG_pseudobulk.shape[1]} metacells")
-            logging.debug(f"\tRE_pseudobulk: {RE_pseudobulk.shape[0]:,} Peaks x {RE_pseudobulk.shape[1]} metacells")
+        logging.info(f"  - Processing Pseudobulk data for {sample_name}")
+        TG_pseudobulk = pd.read_csv(
+            os.path.join(sample_processed_data_dir, "TG_pseudobulk.tsv"),
+            sep="\t", index_col=0
+        ).astype("float32", copy=False)
+        RE_pseudobulk = pd.read_csv(
+            os.path.join(sample_processed_data_dir, "RE_pseudobulk.tsv"),
+            sep="\t", index_col=0
+        ).astype("float32", copy=False)
 
-            gene_tss_df = gene_tss_df.copy()
-            gene_tss_df["name"] = _canon_series_drop_dups(gene_tss_df["name"].astype(str), gc)
-            gene_tss_df = gene_tss_df.drop_duplicates(subset=["name"], keep="first")
-                        
-            names = gene_tss_df["name"].tolist()
-            TG_chr_specific = TG_pseudobulk.loc[TG_pseudobulk.index.intersection(names)]
-            RE_chr_specific = RE_pseudobulk[RE_pseudobulk.index.str.startswith(f"{chrom_id}:")]
+        TG_pseudobulk = _canon_index_sum(TG_pseudobulk, gc)
 
-            logging.debug(f"\n  - Restricted to {chrom_id} Genes and Peaks: ")
-            logging.info(f"\tTG_chr_specific: {TG_chr_specific.shape[0]} Genes x {TG_chr_specific.shape[1]} metacells")
-            logging.info(f"\tRE_chr_specific: {RE_chr_specific.shape[0]:,} Peaks x {RE_chr_specific.shape[1]} metacells")
+        logging.debug("\n  - Total Pseudobulk Genes and Peaks")
+        logging.debug(f"\tTG_pseudobulk: {TG_pseudobulk.shape[0]:,} Genes x {TG_pseudobulk.shape[1]} metacells")
+        logging.debug(f"\tRE_pseudobulk: {RE_pseudobulk.shape[0]:,} Peaks x {RE_pseudobulk.shape[1]} metacells")
 
-            peaks_df = (
-                RE_chr_specific.index.to_series()
-                .str.split("[:-]", expand=True)
-                .rename(columns={0: "chrom", 1: "start", 2: "end"})
-            )
-            peaks_df["start"] = peaks_df["start"].astype(int)
-            peaks_df["end"] = peaks_df["end"].astype(int)
-            peaks_df["peak_id"] = RE_chr_specific.index
-            
-            TG_pseudobulk_global.append(TG_pseudobulk)
-            TG_pseudobulk_samples.append(TG_chr_specific)
-            RE_pseudobulk_samples.append(RE_chr_specific)
-            peaks_df_samples.append(peaks_df)
-            
+        gtd = gene_tss_df.copy()
+        gtd["name"] = _canon_series_drop_dups(gtd["name"].astype(str), gc)
+        gtd = gtd.drop_duplicates(subset=["name"], keep="first")
+
+        names = gtd["name"].tolist()
+        TG_chr_specific = TG_pseudobulk.loc[TG_pseudobulk.index.intersection(names)].astype("float32", copy=False)
+        RE_chr_specific = RE_pseudobulk[RE_pseudobulk.index.str.startswith(f"{chrom_id}:")].astype("float32", copy=False)
+
+        logging.debug(f"\n  - Restricted to {chrom_id} Genes and Peaks: ")
+        logging.info(f"\tTG_chr_specific: {TG_chr_specific.shape[0]} Genes x {TG_chr_specific.shape[1]} metacells")
+        logging.info(f"\tRE_chr_specific: {RE_chr_specific.shape[0]:,} Peaks x {RE_chr_specific.shape[1]} metacells")
+
+        peaks_df = (
+            RE_chr_specific.index.to_series()
+            .str.split("[:-]", expand=True)
+            .rename(columns={0: "chrom", 1: "start", 2: "end"})
+        )
+        peaks_df["start"] = peaks_df["start"].astype(int)
+        peaks_df["end"] = peaks_df["end"].astype(int)
+        peaks_df["peak_id"] = RE_chr_specific.index
+
+        TG_pseudobulk_global.append(TG_pseudobulk)      # float32 already
+        TG_pseudobulk_samples.append(TG_chr_specific)   # float32 already
+        RE_pseudobulk_samples.append(RE_chr_specific)   # float32 already
+        peaks_df_samples.append(peaks_df)
+
+    # ---- memory-friendly reducers ----
     def _agg_sum(dfs: list[pd.DataFrame]) -> pd.DataFrame:
-        """Sum rows across samples; rows are aligned by index."""
-        if len(dfs) == 0:
+        """Sum rows across samples; aligned by index without building a giant concat."""
+        if not dfs:
             raise ValueError("No DataFrames provided to aggregate.")
-        if len(dfs) == 1:
-            return dfs[0]
-        return pd.concat(dfs).groupby(level=0).sum()
+        acc = dfs[0].astype("float32", copy=False)
+        for d in dfs[1:]:
+            d = d.astype("float32", copy=False)
+            acc = acc.add(d, fill_value=0.0)
+            acc = acc.astype("float32", copy=False)
+        return acc
 
     def _agg_first(dfs: list[pd.DataFrame]) -> pd.DataFrame:
         """Keep first occurrence per index (for metadata like peak coords)."""
-        if len(dfs) == 0:
+        if not dfs:
             raise ValueError("No DataFrames provided to aggregate.")
         if len(dfs) == 1:
             return dfs[0]
-        return pd.concat(dfs).groupby(level=0).first()
-    
+        # Use a dict to avoid a large concat; last write wins -> we want first, so iterate once
+        seen = set()
+        out_parts = []
+        for df in dfs:
+            # take rows whose index we haven't seen yet
+            mask = ~df.index.to_series().isin(seen)
+            part = df[mask]
+            out_parts.append(part)
+            seen.update(part.index.tolist())
+        return pd.concat(out_parts, axis=0)
+
     # Aggregate the pseudobulk for all samples
     total_TG_pseudobulk_global = _agg_sum(TG_pseudobulk_global)
     total_TG_pseudobulk_chr    = _agg_sum(TG_pseudobulk_samples)
     total_RE_pseudobulk_chr    = _agg_sum(RE_pseudobulk_samples)
     total_peaks_df             = _agg_first(peaks_df_samples)
-        
+
     return total_TG_pseudobulk_global, total_TG_pseudobulk_chr, total_RE_pseudobulk_chr, total_peaks_df
+
 
 def create_or_load_genomic_windows(
     window_size,
@@ -2243,16 +2268,12 @@ if __name__ == "__main__":
         ignore_index=True
     )
 
-    # (Optional) you can also keep a list of final per-sample GAT files if needed downstream:
-    per_sample_gat_files = [r["gat_training_file"] for r in ok_results]
-
 
     # This will be used in chrom workers
     tf_names_global = [gc.canonical_symbol(n) for n in sorted(total_tf_set)]
     
     global_tf_name_file = SAMPLE_DATA_CACHE_DIR / "tf_names.json"   # you already write this
     global_tf_ids_pt    = SAMPLE_DATA_CACHE_DIR / "tf_ids.pt"       # legacy torch tensor
-    global_tf_ids_json  = SAMPLE_DATA_CACHE_DIR / "tf_ids.json"     # optional convenience
 
     # Build or load the TF vocab mapping (name -> id)
     if not os.path.exists(common_tf_vocab_file):
@@ -2266,13 +2287,11 @@ if __name__ == "__main__":
     # Create global tf_ids aligned to tf_names.json order
     tf_ids = [int(tf_vocab[n]) for n in tf_names_global if n in tf_vocab]
 
-    # Save in both formats (PT for legacy, JSON if your newer code prefers)
+    # Save in both formats
     torch.save(torch.tensor(tf_ids, dtype=torch.long), global_tf_ids_pt)
-    with open(global_tf_ids_json, "w") as f:
-        json.dump(tf_ids, f)
 
     logging.info(f"Wrote global TF assets: names={global_tf_name_file}, "
-                f"ids_pt={global_tf_ids_pt}, ids_json={global_tf_ids_json}")
+                f"ids_pt={global_tf_ids_pt}")
 
     # ---------------------- Per-chromosome worker ------------------------
     def per_chrom_stage(chrom_id: str) -> dict:
@@ -2289,6 +2308,7 @@ if __name__ == "__main__":
             # All paths are chrom-scoped here
             atac_tensor_path         = chrom_cache / f"atac_window_tensor_all_{chrom_id}.pt"
             tg_tensor_path           = chrom_cache / f"tg_tensor_all_{chrom_id}.pt"
+            tf_tensor_path           = chrom_cache / f"tf_tensor_all_{chrom_id}.pt"
             tf_id_file               = chrom_cache / f"tf_ids_{chrom_id}.pt"
             tg_id_file               = chrom_cache / f"tg_ids_{chrom_id}.pt"
             motif_mask_file          = chrom_cache / f"motif_mask_{chrom_id}.pt"
@@ -2431,8 +2451,7 @@ if __name__ == "__main__":
             # Write outputs
             torch.save(atac_window_tensor_all, atac_tensor_path)
             torch.save(tg_tensor_all,         tg_tensor_path)
-            if not os.path.exists(SAMPLE_DATA_CACHE_DIR / "tf_tensor_all.pt"):
-                torch.save(tf_tensor_all,         SAMPLE_DATA_CACHE_DIR / "tf_tensor_all.pt")
+            torch.save(tf_tensor_all,         tf_tensor_path)
             torch.save(dist_bias,             dist_bias_file)
             torch.save(torch.from_numpy(motif_mask), motif_mask_file)
 
