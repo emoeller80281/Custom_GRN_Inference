@@ -2083,6 +2083,19 @@ if __name__ == "__main__":
             out_dir = SAMPLE_PROCESSED_DATA_DIR / sample_name
             out_dir.mkdir(parents=True, exist_ok=True)
             SAMPLE_DATA_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            
+            # Output Files
+            peak_bed_file = out_dir / "peaks.bed"
+            peak_to_gene_dist_file = out_dir / "peak_to_gene_dist.parquet"
+            sliding_window_score_file = out_dir / "sliding_window.parquet"
+            tf_tg_reg_pot_file = out_dir / "tf_tg_regulatory_potential.parquet"
+            tf_tg_combo_attr_file = out_dir / "tf_tg_combos_with_attributes.parquet"
+            gat_training_file = out_dir / "tf_tg_data.parquet"
+            
+            # Sample-specific cache files
+            sample_tf_name_file: Path =   SAMPLE_DATA_CACHE_DIR / "tf_names.json"
+            tf_id_file: Path =            SAMPLE_DATA_CACHE_DIR / "tf_ids.pt"
+            
 
             # ---- 1) Build/load processed + pseudobulk ----
             processed_rna_df, processed_atac_df, pseudobulk_rna_df, pseudobulk_atac_df = process_or_load_rna_atac_data(
@@ -2179,13 +2192,14 @@ if __name__ == "__main__":
             # ---- 9) Merge with PKN + final write ----
             gat_training_file = out_dir / "tf_tg_data.parquet"
             logging.info(f"[{sample_name}] Merging with PKN and writing final TF–TG parquet")
-            tf_tg_labeled_with_pkn, tf_tg_unlabeled = merge_tf_tg_data_with_pkn(
-                tf_tg_df,
-                string_csv_file,
-                trrust_csv_file,
-                kegg_csv_file
-            )
-            tf_tg_labeled_with_pkn.to_parquet(gat_training_file, engine="pyarrow", compression="snappy")
+            if not gat_training_file.exists():
+                tf_tg_labeled_with_pkn, tf_tg_unlabeled = merge_tf_tg_data_with_pkn(
+                    tf_tg_df,
+                    string_csv_file,
+                    trrust_csv_file,
+                    kegg_csv_file
+                )
+                tf_tg_labeled_with_pkn.to_parquet(gat_training_file, engine="pyarrow", compression="snappy")
 
             return {
                 "sample": sample_name,
@@ -2236,9 +2250,29 @@ if __name__ == "__main__":
     # This will be used in chrom workers
     tf_names_global = [gc.canonical_symbol(n) for n in sorted(total_tf_set)]
     
+    global_tf_name_file = SAMPLE_DATA_CACHE_DIR / "tf_names.json"   # you already write this
+    global_tf_ids_pt    = SAMPLE_DATA_CACHE_DIR / "tf_ids.pt"       # legacy torch tensor
+    global_tf_ids_json  = SAMPLE_DATA_CACHE_DIR / "tf_ids.json"     # optional convenience
+
+    # Build or load the TF vocab mapping (name -> id)
     if not os.path.exists(common_tf_vocab_file):
+        tf_vocab = {n: i for i, n in enumerate(tf_names_global)}
         with open(common_tf_vocab_file, "w") as f:
-            json.dump({n: i for i, n in enumerate(tf_names_global)}, f)
+            json.dump(tf_vocab, f)
+    else:
+        with open(common_tf_vocab_file) as f:
+            tf_vocab = json.load(f)
+
+    # Create global tf_ids aligned to tf_names.json order
+    tf_ids = [int(tf_vocab[n]) for n in tf_names_global if n in tf_vocab]
+
+    # Save in both formats (PT for legacy, JSON if your newer code prefers)
+    torch.save(torch.tensor(tf_ids, dtype=torch.long), global_tf_ids_pt)
+    with open(global_tf_ids_json, "w") as f:
+        json.dump(tf_ids, f)
+
+    logging.info(f"Wrote global TF assets: names={global_tf_name_file}, "
+                f"ids_pt={global_tf_ids_pt}, ids_json={global_tf_ids_json}")
 
     # ---------------------- Per-chromosome worker ------------------------
     def per_chrom_stage(chrom_id: str) -> dict:
