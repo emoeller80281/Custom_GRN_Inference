@@ -2270,6 +2270,41 @@ if __name__ == "__main__":
         dataset_processed_data_dir = RAW_DATA / DATASET_NAME
         total_TG_pseudobulk_global, pseudobulk_chrom_dict = \
             aggregate_pseudobulk_datasets(SAMPLE_NAMES, dataset_processed_data_dir, chrom_list, gc)
+            
+        global_tf_tensor_path   = SAMPLE_DATA_CACHE_DIR / "tf_tensor_all.pt"
+        global_tf_ids_path      = SAMPLE_DATA_CACHE_DIR / "tf_ids.pt"
+        global_tf_names_path    = SAMPLE_DATA_CACHE_DIR / "tf_names.json"
+        global_metacell_path    = SAMPLE_DATA_CACHE_DIR / "metacell_names.json"
+
+        # genome-wide TF expression for all metacells (columns)
+        genome_wide_tf_expression = (
+            total_TG_pseudobulk_global
+            .reindex(tf_names)           # ensure row order matches your TF list
+            .fillna(0)
+            .values.astype("float32")
+        )
+        tf_tensor_all = torch.from_numpy(genome_wide_tf_expression)  # [T, C]
+
+        # ensure common TF vocab exists, else initialize from tf_names
+        if not os.path.exists(common_tf_vocab_file):
+            with open(common_tf_vocab_file, "w") as f:
+                json.dump({n: i for i, n in enumerate(tf_names)}, f)
+
+        with open(common_tf_vocab_file) as f:
+            tf_vocab = json.load(f)
+
+        # align TF tensor to vocab order (and get kept names/ids)
+        tf_tensor_all_aligned, tf_names_kept, tf_ids = align_to_vocab(
+            tf_names, tf_vocab, tf_tensor_all, label="TF"
+        )
+
+        # save once, globally
+        torch.save(tf_tensor_all_aligned, global_tf_tensor_path)
+        torch.save(torch.tensor(tf_ids, dtype=torch.long), global_tf_ids_path)
+        atomic_json_dump(tf_names_kept, global_tf_names_path)
+        atomic_json_dump(total_TG_pseudobulk_global.columns.tolist(), global_metacell_path)
+        logging.info(f"Saved GLOBAL TF tensor to {global_tf_tensor_path} "
+                    f"with {len(tf_names_kept)} TFs and {tf_tensor_all_aligned.shape[1]} metacells.")
         
         logging.info(f"  - Number of chromosomes: {len(chrom_list)}: {chrom_list}")
         for chrom_id in chrom_list:
@@ -2426,7 +2461,7 @@ if __name__ == "__main__":
                 total_RE_pseudobulk_chr.index.astype(str).str.strip()
             )
 
-            tf_tensor_all, tg_tensor_all, atac_window_tensor_all = precompute_input_tensors(
+            _, tg_tensor_all, atac_window_tensor_all = precompute_input_tensors(
                 output_dir=str(SAMPLE_DATA_CACHE_DIR),
                 genome_wide_tf_expression=genome_wide_tf_expression,
                 genome_wide_tg_expression=TG_expression,
@@ -2458,7 +2493,6 @@ if __name__ == "__main__":
             tf_tensor_all, tf_names_kept, tf_ids = align_to_vocab(tf_names, tf_vocab, tf_tensor_all, label="TF")
             tg_tensor_all, tg_names_kept, tg_ids = align_to_vocab(tg_names, tg_vocab, tg_tensor_all, label="TG")
             
-            torch.save(torch.tensor(tf_ids, dtype=torch.long), tf_id_file)
             torch.save(torch.tensor(tg_ids, dtype=torch.long), tg_id_file)
 
             logging.info(f"\tMatched {len(tf_names_kept)} TFs to global vocab")
@@ -2501,7 +2535,6 @@ if __name__ == "__main__":
             # Save the Window, TF, and TG expression tensors
             torch.save(atac_window_tensor_all, atac_tensor_path)
             torch.save(tg_tensor_all, tg_tensor_path)
-            torch.save(tf_tensor_all, tf_tensor_path)
 
             # Save the peak -> window map for the sample
             atomic_json_dump(window_map, sample_window_map_file)

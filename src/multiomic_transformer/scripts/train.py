@@ -154,7 +154,7 @@ class Trainer:
         self.scaler.step(self.optimizer)
         self.scaler.update()
 
-        return total_loss.detach(), mse_loss.detach(), mean_corr.detach(), corr_weight.detach
+        return total_loss.detach(), mse_loss.detach(), mean_corr.detach(), corr_weight.detach()
 
     def _validate(self):
         self.model.eval()
@@ -245,10 +245,10 @@ class Trainer:
             total_mse += float(mse_loss_val)
             n_batches += 1
             
-            if (iteration % 100 == 0) and (self.gpu_id == 0):
+            if (iteration % 100 == 0) and (self.gpu_id == 0) and (len(self.train_data) > 750):
                 logging.info(
-                    f"    [{round(iteration / len(self.train_data) * 100,0)}%] Iter {iteration} |Total Loss: {total_loss_val:.4f} | "
-                    f"MSE: {mse_loss_val:.4f} | Mean Pearson: {mean_corr:.2f} | Mean Pearson Weight: {corr_weight:.4f}"
+                    f"    [{int(round(iteration / len(self.train_data) * 100,0))}%] Iter {iteration} | MSE + Corr: {total_loss_val:.4f} | "
+                    f"MSE Loss: {mse_loss_val:.4f} | Pearson Loss: {corr_weight:.4f} | Mean Pearson: {mean_corr:.2f}"
                 )
 
         avg_train_loss = total_loss / max(1, n_batches)
@@ -362,6 +362,7 @@ def load_train_objs():
         max_tfs=SUBSAMPLE_MAX_TFS,
         max_tgs=SUBSAMPLE_MAX_TGS,
         max_windows_per_chrom=SUBSAMPLE_MAX_WINDOWS_PER_CHROM,
+        max_cells=SUBSAMPLE_MAX_CELLS,
         subset_seed=SUBSAMPLE_SEED,
     )
 
@@ -438,6 +439,7 @@ def prepare_dataloader(dataset, batch_size, world_size=1, rank=0,
             max_tgs=dataset.max_tgs,
             max_windows_per_chrom=dataset.max_windows_per_chrom,
             subset_seed=dataset.subset_seed,
+            max_cells=dataset.max_cells
         )
         ds_train = MultiChromosomeDataset(chrom_ids=train_chrs, **ds_args)
         ds_val   = MultiChromosomeDataset(chrom_ids=val_chrs,   **ds_args)

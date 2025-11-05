@@ -51,6 +51,7 @@ class MultiChromosomeDataset(Dataset):
         max_tfs: Optional[int] = None,
         max_tgs: Optional[int] = None,
         max_windows_per_chrom: Optional[int] = None,
+        max_cells: Optional[int] = None,
         subset_seed: int = 42,
     ):
         super().__init__()
@@ -64,6 +65,7 @@ class MultiChromosomeDataset(Dataset):
         self.max_tfs = max_tfs
         self.max_tgs = max_tgs
         self.max_windows_per_chrom = max_windows_per_chrom
+        self.max_cells = max_cells
         self.subset_seed = subset_seed
         
         self._tf_name2id_full = self._load_vocab_dict(tf_vocab_path)
@@ -74,6 +76,13 @@ class MultiChromosomeDataset(Dataset):
         if not fine_tuner:
             tf_global = torch.load(self.data_dir / "tf_tensor_all.pt", map_location="cpu")
             self._num_cells = int(tf_global.shape[1])
+            
+            # Subset the number of metacells to self.max_cells
+            self._cell_idx = None
+            if self.max_cells is not None and self._num_cells > self.max_cells:
+                rng = np.random.RandomState(self.subset_seed or 42)
+                self._cell_idx = np.sort(rng.choice(self._num_cells, size=self.max_cells, replace=False))
+                self._num_cells = int(self._cell_idx.size)
         else:
             # Fine-tune single-cell mode: number of cells can vary per chromosome.
             # We'll open a tiny handle per chrom to read shape; still keep it light.
@@ -152,17 +161,21 @@ class MultiChromosomeDataset(Dataset):
         # read its num_windows, and sum them. This is deterministic across ranks if subset_seed is fixed.
         self._windows_per_chrom = {}
         _total_windows = 0
-        metacell_names = set()
+        self.metacell_names = None
         for cid in self.chrom_ids:
             ds = self._load_chrom(cid)   # uses cache + applies global sub-vocab + max_windows_per_chrom
             w = int(ds.num_windows)
             self._windows_per_chrom[cid] = w
             _total_windows += w
             self._evict_if_needed()
-            metacell_names.update(ds.metacell_names)
+            
+            if self.metacell_names is None:
+                self.metacell_names = list(ds.metacell_names)  # keep order
+            else:
+                if list(ds.metacell_names) != self.metacell_names:
+                    logging.warning(f"metacell_names differ on {cid}; using the first set.")
             
         self.num_windows = int(_total_windows)
-        self.metacell_names = metacell_names
 
         # store window cap too
         self.max_windows_per_chrom = max_windows_per_chrom
@@ -249,6 +262,7 @@ class MultiChromosomeDataset(Dataset):
             tg_name2id_sub=self.tg_name2id_sub,
             max_windows=self.max_windows_per_chrom,
             rng_seed=self.subset_seed,
+            cell_idx=self._cell_idx,
         )
 
         self._cache[chrom_id] = ds
@@ -528,6 +542,14 @@ class MultiomicTransformerDataset(Dataset):
             with open(metacell_names_path, "r") as f:
                 self.metacell_names = json.load(f)
 
+            self.num_cells = self.tf_tensor_all.shape[1]  # already set
+            if not isinstance(self.metacell_names, list) or len(self.metacell_names) != self.num_cells:
+                logging.warning(
+                    f"metacell_names length ({len(self.metacell_names) if isinstance(self.metacell_names, list) else 'N/A'}) "
+                    f"!= num_cells ({self.num_cells}); regenerating labels."
+                )
+                self.metacell_names = [f"cell_{i}" for i in range(self.num_cells)]
+
             # distance bias
             if dist_bias_path.exists():
                 bias_WG = torch.load(dist_bias_path).float()
@@ -678,12 +700,37 @@ class MultiomicTransformerDataset(Dataset):
         tg_name2id_sub: dict[str, int],
         max_windows: Optional[int] = None,
         rng_seed: int = 42,
+        cell_idx: Optional[np.ndarray] = None,
     ):
         """
         Intersect this chromosome's TF/TG with the global sub-vocab and remap IDs so
         that returned tf_ids/tg_ids index into the global contiguous spaces used by the model.
         """
         rng = np.random.RandomState(rng_seed or 42)
+        
+        # Subsample the number of cells
+        if cell_idx is not None:
+            keep_c = torch.as_tensor(cell_idx, dtype=torch.long)
+            # [T, C] / [G, C] / [W, C]
+            self.tf_tensor_all          = self.tf_tensor_all.index_select(1, keep_c)
+            self.tg_tensor_all          = self.tg_tensor_all.index_select(1, keep_c)
+            self.atac_window_tensor_all = self.atac_window_tensor_all.index_select(1, keep_c)
+
+            # IMPORTANT: update counts
+            self.num_cells = int(self.tf_tensor_all.shape[1])
+
+            # Keep metacell_names aligned (regenerate if missing or wrong length)
+            if hasattr(self, "metacell_names") and isinstance(self.metacell_names, list):
+                if len(self.metacell_names) != self.tf_tensor_all.shape[1] + (len(keep_c) if False else 0):
+                    # before slicing, length should have matched original C; if not, reinit
+                    # since we just sliced to len(keep_c), simply rebuild labels here
+                    pass  # fall through to reinit
+                try:
+                    self.metacell_names = [self.metacell_names[i] for i in keep_c.tolist()]
+                except Exception:
+                    self.metacell_names = [f"cell_{i}" for i in range(self.num_cells)]
+            else:
+                self.metacell_names = [f"cell_{i}" for i in range(self.num_cells)]
 
         # ---- Intersect names with global keep sets ----
         tf_keep_names_local = [n for n in self.tf_names if n in tf_name2id_sub]
