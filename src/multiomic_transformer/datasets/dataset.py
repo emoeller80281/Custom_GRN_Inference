@@ -152,13 +152,17 @@ class MultiChromosomeDataset(Dataset):
         # read its num_windows, and sum them. This is deterministic across ranks if subset_seed is fixed.
         self._windows_per_chrom = {}
         _total_windows = 0
+        metacell_names = set()
         for cid in self.chrom_ids:
             ds = self._load_chrom(cid)   # uses cache + applies global sub-vocab + max_windows_per_chrom
             w = int(ds.num_windows)
             self._windows_per_chrom[cid] = w
             _total_windows += w
             self._evict_if_needed()
+            metacell_names.update(ds.metacell_names)
+            
         self.num_windows = int(_total_windows)
+        self.metacell_names = metacell_names
 
         # store window cap too
         self.max_windows_per_chrom = max_windows_per_chrom
@@ -226,6 +230,7 @@ class MultiChromosomeDataset(Dataset):
             fine_tuner=self.fine_tuner,
             sample_name=self.sample_name
         )
+        
         return ds
 
     def _load_chrom(self, chrom_id: str) -> "MultiomicTransformerDataset":
@@ -482,14 +487,14 @@ class MultiomicTransformerDataset(Dataset):
 
         # --- Pseudobulk mode ---
         else:
-            tf_path   = chrom_dir / f"tf_tensor_all_{chrom_id}.pt"
+            tf_path   = self.data_dir / f"tf_tensor_all.pt"
             tg_path   = chrom_dir / f"tg_tensor_all_{chrom_id}.pt"
             atac_path = chrom_dir / f"atac_window_tensor_all_{chrom_id}.pt"
             window_map_path = chrom_dir / f"window_map_{chrom_id}.json"
             dist_bias_path  = chrom_dir / f"dist_bias_{chrom_id}.pt"
-            tf_ids_path     = chrom_dir / f"tf_ids_{chrom_id}.pt"
+            tf_ids_path     = self.data_dir / f"tf_ids.pt"
             tg_ids_path     = chrom_dir / f"tg_ids_{chrom_id}.pt"
-            tf_names_json   = chrom_dir / f"tf_names_{chrom_id}.json"
+            tf_names_json   = self.data_dir / f"tf_names.json"
             tg_names_json   = chrom_dir / f"tg_names_{chrom_id}.json"
             metacell_names_path = self.data_dir / "metacell_names.json"
             motif_mask_path = chrom_dir / f"motif_mask_{chrom_id}.pt"

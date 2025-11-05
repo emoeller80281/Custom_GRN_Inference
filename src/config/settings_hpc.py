@@ -4,7 +4,7 @@ import itertools
 
 ROOT_DIR = Path(__file__).resolve().parent.parent.parent
 
-chr_nums = [f"chr{i}" for i in range(1, 20)]
+chr_nums = [f"chr{i}" for i in range(1, 10)]
 chrom_list = chr_nums #+ ["chrX", "chrY"]
 
 # ----- SAMPLE INFORMATION -----
@@ -56,14 +56,14 @@ PROMOTER_BP = 10_000
 
 # ----- MODEL TRAINING PARAMETERS -----
 TOTAL_EPOCHS=500
-BATCH_SIZE=16
+BATCH_SIZE=32
 PATIENCE=35
 CORR_LOSS_WEIGHT=0.5
 
-D_MODEL = 384
+D_MODEL = 256
 NUM_HEADS = 4
 NUM_LAYERS = 3
-D_FF = 1536
+D_FF = D_MODEL * 4
 DROPOUT = 0.2
 
 # Training scheduler settings
@@ -89,9 +89,9 @@ SHORTCUT_DROPOUT = 0
 ATTN_BIAS_SCALE = 1.0 
 
 # Sampling (optional)
-SUBSAMPLE_MAX_TFS = None # 150
-SUBSAMPLE_MAX_TGS = None # 2000
-SUBSAMPLE_MAX_WINDOWS_PER_CHROM = None # 8000
+SUBSAMPLE_MAX_TFS = 150 # 150
+SUBSAMPLE_MAX_TGS = 1000 # 2000
+SUBSAMPLE_MAX_WINDOWS_PER_CHROM = 2000 # 8000
 SUBSAMPLE_SEED = 42
 
 # ----- FINE TUNING ON SINGLE-CELL DATA -----

@@ -120,6 +120,7 @@ class Trainer:
             tg_ids.to(self.gpu_id),
             motif_mask.to(self.gpu_id),
         )
+        
         self.optimizer.zero_grad(set_to_none=True)
 
         with autocast(device_type="cuda"):
@@ -128,26 +129,32 @@ class Trainer:
                 atac_wins, tf_tensor, tf_ids=tf_ids, tg_ids=tg_ids, bias=bias, motif_mask=mask_arg
             )
 
-            # Base MSE loss
+            preds = preds.float()
+            targets = targets.float()
+
             mse_loss = self.loss_fn(preds, targets)
 
-            # Correlation term
-            preds_flat, targets_flat = preds.reshape(-1), targets.reshape(-1)
-            if torch.std(targets_flat) > 1e-8 and torch.std(preds_flat) > 1e-8:
-                vx, vy = preds_flat - preds_flat.mean(), targets_flat - targets_flat.mean()
-                corr_loss = -torch.sum(vx * vy) / (
-                    torch.sqrt(torch.sum(vx**2)) * torch.sqrt(torch.sum(vy**2)) + 1e-8
-                )
-            else:
-                corr_loss = torch.tensor(0.0, device=preds.device)
+            # compute Pearson per gene across the batch
+            eps = 1e-8
+            px = preds - preds.mean(dim=0, keepdim=True)     # [B, G]
+            py = targets - targets.mean(dim=0, keepdim=True) # [B, G]
+            num = (px * py).sum(dim=0)                       # [G]
+            den = torch.sqrt((px**2).sum(dim=0) + eps) * torch.sqrt((py**2).sum(dim=0) + eps)  # [G]
+            r_per_gene = num / (den + eps)                   # [G]
+            # ignore degenerate genes with ~zero variance in targets
+            valid = (py.std(dim=0) > 1e-8)
+            mean_r = (r_per_gene[valid].mean() if valid.any() else preds.new_tensor(0.0))
 
-            total_loss = mse_loss + CORR_LOSS_WEIGHT * corr_loss
+            total_loss = mse_loss + CORR_LOSS_WEIGHT * (1.0 - mean_r)
 
+            mean_corr = mean_r
+            corr_weight = CORR_LOSS_WEIGHT * (1.0 - mean_r)
+        
         self.scaler.scale(total_loss).backward()
         self.scaler.step(self.optimizer)
         self.scaler.update()
 
-        return total_loss.detach(), mse_loss.detach()
+        return total_loss.detach(), mse_loss.detach(), mean_corr.detach(), corr_weight.detach
 
     def _validate(self):
         self.model.eval()
@@ -232,11 +239,17 @@ class Trainer:
 
         total_loss, total_mse, n_batches = 0.0, 0.0, 0
 
-        for batch in self.train_data:
-            total_loss_val, mse_loss_val = self._run_batch(batch)
+        for iteration, batch in enumerate(self.train_data):
+            total_loss_val, mse_loss_val, mean_corr, corr_weight = self._run_batch(batch)
             total_loss += float(total_loss_val)
             total_mse += float(mse_loss_val)
             n_batches += 1
+            
+            if (iteration % 100 == 0) and (self.gpu_id == 0):
+                logging.info(
+                    f"    [{round(iteration / len(self.train_data) * 100,0)}%] Iter {iteration} |Total Loss: {total_loss_val:.4f} | "
+                    f"MSE: {mse_loss_val:.4f} | Mean Pearson: {mean_corr:.2f} | Mean Pearson Weight: {corr_weight:.4f}"
+                )
 
         avg_train_loss = total_loss / max(1, n_batches)
         avg_train_mse = total_mse / max(1, n_batches)
@@ -489,7 +502,7 @@ def write_run_parameters(dataset, out_dir):
     logging.info(f"Genes:               {len(dataset.tg_ids)}")
     logging.info(f"Windows (RE):        {dataset.num_windows}")
     logging.info(f"TFs:                 {len(dataset.tf_ids)}")
-    logging.info(f"Metacells:           {len(dataset)}")
+    logging.info(f"Metacells:           {len(dataset.metacell_names)}")
     logging.info(f"Epochs:              {TOTAL_EPOCHS}")
     logging.info(f"Batch Size:          {BATCH_SIZE}")
     logging.info(f"Model Dimension:     {D_MODEL}")
@@ -510,7 +523,7 @@ def write_run_parameters(dataset, out_dir):
         "Genes": len(dataset.tg_ids),
         "Windows": dataset.num_windows,
         "TFs": len(dataset.tf_ids),
-        "Metacells": len(dataset),  # store count, not huge list
+        "Metacells": len(dataset.metacell_names),
         "Epochs": TOTAL_EPOCHS,
         "Batch Size": BATCH_SIZE,
         "d_model": D_MODEL,

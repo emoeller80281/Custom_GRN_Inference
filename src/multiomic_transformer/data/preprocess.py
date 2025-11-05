@@ -392,6 +392,28 @@ def process_or_load_rna_atac_data(
     pseudobulk_RE_file = _configured_path(sample_input_dir, "PSEUDOBULK_RE_FILENAME", "RE_pseudobulk.parquet", sample_name)
 
     neighbors_k = neighbors_k if neighbors_k is not None else NEIGHBORS_K
+    
+    # If load is set to False, check that all of the preprocessed files exist
+    if load == False:
+        files_missing = False
+        
+        files = [
+            processed_rna_file,
+            processed_atac_file,
+            adata_rna_file,
+            adata_atac_file,
+            pseudobulk_TG_file,
+            pseudobulk_RE_file
+            ]
+        
+        for file in files:
+            if not file.is_file():
+                files_missing = True
+    
+        if not files_missing:
+            logging.info("All preprocessed files exist")
+            return None, None, None, None
+        
 
     logging.info(f"\n----- Loading or Processing RNA and ATAC data for {sample_name} -----")
     logging.info("Searching for processed RNA/ATAC parquet files:")
@@ -530,9 +552,6 @@ def process_or_load_rna_atac_data(
     # 1) Try processed parquet
     # =========================
     if not force_recalculate and processed_rna_file.is_file() and processed_atac_file.is_file():
-        if load == False:
-            logging.info(f"[{sample_name}] Pre-Processed data files found")
-            return None, None, None, None
         logging.info(f"[{sample_name}] Pre-processed data files found, loading...")
         processed_rna_df = pd.read_parquet(processed_rna_file, engine="pyarrow")
         processed_atac_df = pd.read_parquet(processed_atac_file, engine="pyarrow")
@@ -1078,8 +1097,6 @@ def calculate_tf_tg_regulatory_potential(
     logging.info(f"Processing {len(tf_groups)} TFs using {num_cpu} CPUs")
     results = []
     
-
-
     with ProcessPoolExecutor(max_workers=num_cpu) as ex:
         futures = {
             ex.submit(_process_single_tf, tf, df, peak_to_gene_dist_df): tf
@@ -1503,7 +1520,7 @@ def create_single_cell_tensors(
         re_sc_file = sample_processed_data_dir / "RE_singlecell.tsv"
 
         if not (tg_sc_file.exists() and re_sc_file.exists()):
-            logging.warning(f"Skipping {sample_name}: missing TG/RE single-cell files")
+            logging.debug(f"Skipping {sample_name}: missing TG/RE single-cell files")
             continue
 
         TG_sc = pd.read_csv(tg_sc_file, sep="\t", index_col=0)
@@ -1611,6 +1628,8 @@ def aggregate_pseudobulk_datasets(sample_names: list[str], dataset_processed_dat
     # Extract the chromosome-specific pseudobulk data from all samples
     pseudobulk_chrom_dict = {}
     for chrom_id in chroms:
+        logging.info(f"Aggregating data for {chrom_id}")
+        
         TG_pseudobulk_samples = []
         RE_pseudobulk_samples = []
         peaks_df_samples = []
@@ -1624,7 +1643,6 @@ def aggregate_pseudobulk_datasets(sample_names: list[str], dataset_processed_dat
                 genome_dir=GENOME_DIR
             )
         else:
-            logging.info(f"Loading existing gene TSS file for {chrom_id}")
             gene_tss_chrom = pd.read_csv(chrom_tss_path, sep="\t", header=None, usecols=[0, 1, 2, 3])
             gene_tss_chrom = gene_tss_chrom.rename(columns={0: "chrom", 1: "start", 2: "end", 3: "name"})
 
@@ -1633,10 +1651,10 @@ def aggregate_pseudobulk_datasets(sample_names: list[str], dataset_processed_dat
         gene_tss_chrom = gene_tss_chrom.drop_duplicates(subset=["name"], keep="first")
         genes_on_chrom = gene_tss_chrom["name"].tolist()
         
-        for sample_name in sample_names:
+        for sample_name in (pbar := tqdm(sample_names)):
+            pbar.set_description(f"Processing {sample_name}")
             sample_processed_data_dir = dataset_processed_data_dir / sample_name
             
-            logging.info(f"  - Processing Pseudobulk data for {sample_name}")
             RE_pseudobulk = pd.read_parquet(sample_processed_data_dir / "RE_pseudobulk.parquet", engine="pyarrow")
             
             TG_chr_specific = per_sample_TG[sample_name].loc[
