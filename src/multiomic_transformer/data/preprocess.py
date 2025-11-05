@@ -292,7 +292,7 @@ def _configured_path(
 
 def process_or_load_rna_atac_data(
     sample_input_dir: Union[str, Path],
-    ignore_processed_files: bool = False,
+    force_recalculate: bool = False,
     raw_10x_rna_data_dir: Union[str, Path, None] = None,
     raw_atac_peak_file: Union[str, Path, None] = None,
     *,
@@ -325,7 +325,7 @@ def process_or_load_rna_atac_data(
     ----------
     sample_input_dir : str | Path
         Directory that contains/should contain the processed files for one sample.
-    ignore_processed_files : bool, default False
+    force_recalculate : bool, default False
         Force recomputation even if processed/parquet/h5ad exists.
     raw_10x_rna_data_dir : str | Path | None
         Path to the 10x RNA directory if CSVs need to be generated.
@@ -371,7 +371,7 @@ def process_or_load_rna_atac_data(
     -----
     - ATAC pseudobulk values are clipped to 100 to limit extreme counts.
     - If adata_ATAC has a 'gene_ids' column in .var, it becomes var_names.
-    - Will use existing artifacts when available unless `ignore_processed_files=True`.
+    - Will use existing artifacts when available unless `force_recalculate=True`.
     """
     # ---- resolve paths and names ----
     sample_input_dir = Path(sample_input_dir)
@@ -388,8 +388,8 @@ def process_or_load_rna_atac_data(
     adata_rna_file  = _configured_path(sample_input_dir, "ADATA_RNA_FILENAME",  "adata_RNA.h5ad", sample_name)
     adata_atac_file = _configured_path(sample_input_dir, "ADATA_ATAC_FILENAME", "adata_ATAC.h5ad", sample_name)
 
-    pseudobulk_TG_file = _configured_path(sample_input_dir, "PSEUDOBULK_TG_FILENAME", "TG_pseudobulk.tsv", sample_name)
-    pseudobulk_RE_file = _configured_path(sample_input_dir, "PSEUDOBULK_RE_FILENAME", "RE_pseudobulk.tsv", sample_name)
+    pseudobulk_TG_file = _configured_path(sample_input_dir, "PSEUDOBULK_TG_FILENAME", "TG_pseudobulk.parquet", sample_name)
+    pseudobulk_RE_file = _configured_path(sample_input_dir, "PSEUDOBULK_RE_FILENAME", "RE_pseudobulk.parquet", sample_name)
 
     neighbors_k = neighbors_k if neighbors_k is not None else NEIGHBORS_K
 
@@ -529,11 +529,11 @@ def process_or_load_rna_atac_data(
     # =========================
     # 1) Try processed parquet
     # =========================
-    if not ignore_processed_files and processed_rna_file.is_file() and processed_atac_file.is_file():
+    if not force_recalculate and processed_rna_file.is_file() and processed_atac_file.is_file():
         if load == False:
             logging.info(f"[{sample_name}] Pre-Processed data files found")
             return None, None, None, None
-        logging.info("[{sample_name}] Pre-processed data files found, loading...")
+        logging.info(f"[{sample_name}] Pre-processed data files found, loading...")
         processed_rna_df = pd.read_parquet(processed_rna_file, engine="pyarrow")
         processed_atac_df = pd.read_parquet(processed_atac_file, engine="pyarrow")
         
@@ -548,7 +548,7 @@ def process_or_load_rna_atac_data(
         ad_rna = _load_or_none(adata_rna_file, sc.read_h5ad)
         ad_atac = _load_or_none(adata_atac_file, sc.read_h5ad)
 
-        if ad_rna is None or ad_atac is None or ignore_processed_files:
+        if ad_rna is None or ad_atac is None or force_recalculate:
             logging.info("    - Filtered AnnData missing or ignored – will look for raw CSVs.")
 
             # ===================
@@ -653,15 +653,14 @@ def process_or_load_rna_atac_data(
     need_TG = not pseudobulk_TG_file.is_file()
     need_RE = not pseudobulk_RE_file.is_file()
 
-    if need_TG or need_RE or ignore_processed_files:
+    if need_TG or need_RE or force_recalculate:
         logging.info("Pseudobulk files missing or ignored – computing pseudobulk now.")
 
-        # If adatas were not loaded above, reconstruct them from the processed matrices
-        # to run `pseudo_bulk` (it expects AnnData + (optionally) ATAC frame).
-        if 'ad_rna' not in locals() or 'ad_atac' not in locals():
-            logging.info("Rebuilding AnnData objects from processed dense DataFrames for pseudobulk.")
-            ad_rna = AnnData(processed_rna_df.T)
-            ad_atac = AnnData(processed_atac_df.T)
+        ad_rna = _load_or_none(adata_rna_file, sc.read_h5ad)
+        ad_atac = _load_or_none(adata_atac_file, sc.read_h5ad)
+        
+        assert (ad_rna != None) and (ad_atac != None) \
+            f"AnnData RNA or ATAC must exist!\nad_rna = {ad_rna}\nad_atac = {ad_atac}"
 
         TG_pseudobulk_df, RE_pseudobulk_df = pseudo_bulk(
             rna_data=ad_rna,
@@ -680,14 +679,14 @@ def process_or_load_rna_atac_data(
         
         TG_pseudobulk_df = _standardize_symbols_index(TG_pseudobulk_df, strip_version_suffix=True, uppercase=True, deduplicate="sum")
 
-        TG_pseudobulk_df.to_csv(pseudobulk_TG_file, sep="\t")
-        RE_pseudobulk_df.to_csv(pseudobulk_RE_file, sep="\t")
+        TG_pseudobulk_df.to_parquet(pseudobulk_TG_file, engine="pyarrow", compression="snappy")
+        RE_pseudobulk_df.to_parquet(pseudobulk_RE_file, engine="pyarrow", compression="snappy")
     else:
         logging.info("Pseudobulk TSVs found, loading from disk.")
         logging.info(f"  - Pseudobulk TG Path: {pseudobulk_TG_file}")
         logging.info(f"  - Pseudobulk RE Path: {pseudobulk_RE_file}")
-        TG_pseudobulk_df = pd.read_csv(pseudobulk_TG_file, sep="\t", index_col=0)
-        RE_pseudobulk_df = pd.read_csv(pseudobulk_RE_file, sep="\t", index_col=0)
+        TG_pseudobulk_df = pd.read_parquet(pseudobulk_TG_file, engine="pyarrow")
+        RE_pseudobulk_df = pd.read_parquet(pseudobulk_RE_file, engine="pyarrow")
         
         TG_pseudobulk_df = _standardize_symbols_index(TG_pseudobulk_df, strip_version_suffix=True, uppercase=True, deduplicate="sum")
 
@@ -1557,14 +1556,9 @@ def create_single_cell_tensors(
             f"RE={atac_tensor_sc.shape}"
         )
 
-def aggregate_pseudobulk_datasets(gene_tss_df: pd.DataFrame, sample_names: list[str], dataset_processed_data_dir: Path, chrom_id: str, gc: GeneCanonicalizer):
+def aggregate_pseudobulk_datasets(sample_names: list[str], dataset_processed_data_dir: Path, chroms: list[str], gc: GeneCanonicalizer):
     
     # ----- Combine Pseudobulk Data into a Training Dataset -----
-    TG_pseudobulk_global = []
-    TG_pseudobulk_samples = []
-    RE_pseudobulk_samples = []
-    peaks_df_samples = []
-    
     def _canon_index_sum(df: pd.DataFrame, gc) -> pd.DataFrame:
         """Canonicalize df.index with GeneCanonicalizer and sum duplicate rows."""
         if df.empty:
@@ -1577,59 +1571,12 @@ def aggregate_pseudobulk_datasets(gene_tss_df: pd.DataFrame, sample_names: list[
             out = out.groupby(level=0).sum()
         return out
 
-    def _canon_series_drop_dups(s: pd.Series, gc) -> pd.Series:
-        """Canonicalize a series of names and drop empties."""
+    def _canon_series_same_len(s: pd.Series, gc) -> pd.Series:
+        """Canonicalize to same length; replace non-mapped with '' (then caller filters rows)."""
         cs = gc.canonicalize_series(s.astype(str))
-        return cs[cs != ""]
-
-    logging.info("\nLoading processed pseudobulk datasets:")
-    logging.info(f"  - Sample names: {sample_names}")
-    logging.info(f"  - Looking for processed samples in {dataset_processed_data_dir}")
-    for sample_name in sample_names:
-        sample_processed_data_dir = os.path.join(dataset_processed_data_dir, sample_name)
-        if not os.path.exists(sample_processed_data_dir):
-            logging.warning(f"Skipping {sample_name}: directory not found")
-            continue
-        if sample_name in VALIDATION_DATASETS:
-            logging.warning(f"Skipping {sample_name}: in VALIDATION_DATASETS list")
-            continue
-        else:
-            logging.info(f"  - Processing Pseudobulk data for {sample_name}")
-            TG_pseudobulk = pd.read_csv(os.path.join(sample_processed_data_dir, "TG_pseudobulk.tsv"), sep="\t", index_col=0)
-            RE_pseudobulk = pd.read_csv(os.path.join(sample_processed_data_dir, "RE_pseudobulk.tsv"), sep="\t", index_col=0)
-            
-            TG_pseudobulk = _canon_index_sum(TG_pseudobulk, gc)
-
-            logging.debug("\n  - Total Pseudobulk Genes and Peaks")
-            logging.debug(f"\tTG_pseudobulk: {TG_pseudobulk.shape[0]:,} Genes x {TG_pseudobulk.shape[1]} metacells")
-            logging.debug(f"\tRE_pseudobulk: {RE_pseudobulk.shape[0]:,} Peaks x {RE_pseudobulk.shape[1]} metacells")
-
-            gene_tss_df = gene_tss_df.copy()
-            gene_tss_df["name"] = _canon_series_drop_dups(gene_tss_df["name"].astype(str), gc)
-            gene_tss_df = gene_tss_df.drop_duplicates(subset=["name"], keep="first")
-                        
-            names = gene_tss_df["name"].tolist()
-            TG_chr_specific = TG_pseudobulk.loc[TG_pseudobulk.index.intersection(names)]
-            RE_chr_specific = RE_pseudobulk[RE_pseudobulk.index.str.startswith(f"{chrom_id}:")]
-
-            logging.debug(f"\n  - Restricted to {chrom_id} Genes and Peaks: ")
-            logging.info(f"\tTG_chr_specific: {TG_chr_specific.shape[0]} Genes x {TG_chr_specific.shape[1]} metacells")
-            logging.info(f"\tRE_chr_specific: {RE_chr_specific.shape[0]:,} Peaks x {RE_chr_specific.shape[1]} metacells")
-
-            peaks_df = (
-                RE_chr_specific.index.to_series()
-                .str.split("[:-]", expand=True)
-                .rename(columns={0: "chrom", 1: "start", 2: "end"})
-            )
-            peaks_df["start"] = peaks_df["start"].astype(int)
-            peaks_df["end"] = peaks_df["end"].astype(int)
-            peaks_df["peak_id"] = RE_chr_specific.index
-            
-            TG_pseudobulk_global.append(TG_pseudobulk)
-            TG_pseudobulk_samples.append(TG_chr_specific)
-            RE_pseudobulk_samples.append(RE_chr_specific)
-            peaks_df_samples.append(peaks_df)
-            
+        cs = cs.fillna("")
+        return cs
+    
     def _agg_sum(dfs: list[pd.DataFrame]) -> pd.DataFrame:
         """Sum rows across samples; rows are aligned by index."""
         if len(dfs) == 0:
@@ -1645,14 +1592,85 @@ def aggregate_pseudobulk_datasets(gene_tss_df: pd.DataFrame, sample_names: list[
         if len(dfs) == 1:
             return dfs[0]
         return pd.concat(dfs).groupby(level=0).first()
+
+    logging.info("\nLoading processed pseudobulk datasets:")
+    logging.info(f"  - Sample names: {sample_names}")
+    logging.info(f"  - Looking for processed samples in {dataset_processed_data_dir}")
     
-    # Aggregate the pseudobulk for all samples
-    total_TG_pseudobulk_global = _agg_sum(TG_pseudobulk_global)
-    total_TG_pseudobulk_chr    = _agg_sum(TG_pseudobulk_samples)
-    total_RE_pseudobulk_chr    = _agg_sum(RE_pseudobulk_samples)
-    total_peaks_df             = _agg_first(peaks_df_samples)
+    # Combine the TG pseudobulk for all samples into one dataframe
+    per_sample_TG = {}
+    for sample_name in sample_names:
+        sdir = dataset_processed_data_dir / sample_name
+        tg_path = sdir / "TG_pseudobulk.parquet"
+        TG_pseudobulk = pd.read_parquet(tg_path, engine="pyarrow")
+        TG_pseudobulk = _canon_index_sum(TG_pseudobulk, gc)
+        per_sample_TG[sample_name] = TG_pseudobulk
+
+    total_TG_pseudobulk_global = _agg_sum(list(per_sample_TG.values()))
+    
+    # Extract the chromosome-specific pseudobulk data from all samples
+    pseudobulk_chrom_dict = {}
+    for chrom_id in chroms:
+        TG_pseudobulk_samples = []
+        RE_pseudobulk_samples = []
+        peaks_df_samples = []
         
-    return total_TG_pseudobulk_global, total_TG_pseudobulk_chr, total_RE_pseudobulk_chr, total_peaks_df
+        # Get a name of the genes on the chromosome from the gene TSS file
+        chrom_tss_path = GENOME_DIR / f"{chrom_id}_gene_tss.bed"
+        if not chrom_tss_path.is_file():
+            gene_tss_chrom = make_chrom_gene_tss_df(
+                gene_tss_file=GENE_TSS_FILE,
+                chrom_id=chrom_id,
+                genome_dir=GENOME_DIR
+            )
+        else:
+            logging.info(f"Loading existing gene TSS file for {chrom_id}")
+            gene_tss_chrom = pd.read_csv(chrom_tss_path, sep="\t", header=None, usecols=[0, 1, 2, 3])
+            gene_tss_chrom = gene_tss_chrom.rename(columns={0: "chrom", 1: "start", 2: "end", 3: "name"})
+
+        gene_tss_chrom["name"] = _canon_series_same_len(gene_tss_chrom["name"], gc)
+        gene_tss_chrom = gene_tss_chrom[gene_tss_chrom["name"] != ""]
+        gene_tss_chrom = gene_tss_chrom.drop_duplicates(subset=["name"], keep="first")
+        genes_on_chrom = gene_tss_chrom["name"].tolist()
+        
+        for sample_name in sample_names:
+            sample_processed_data_dir = dataset_processed_data_dir / sample_name
+            
+            logging.info(f"  - Processing Pseudobulk data for {sample_name}")
+            RE_pseudobulk = pd.read_parquet(sample_processed_data_dir / "RE_pseudobulk.parquet", engine="pyarrow")
+            
+            TG_chr_specific = per_sample_TG[sample_name].loc[
+                per_sample_TG[sample_name].index.intersection(genes_on_chrom)
+            ]
+            RE_chr_specific = RE_pseudobulk[RE_pseudobulk.index.str.startswith(f"{chrom_id}:")]
+
+            peaks_df = (
+                RE_chr_specific.index.to_series()
+                .str.split("[:-]", expand=True)
+                .rename(columns={0: "chrom", 1: "start", 2: "end"})
+            )
+            peaks_df["start"] = peaks_df["start"].astype(int)
+            peaks_df["end"] = peaks_df["end"].astype(int)
+            peaks_df["peak_id"] = RE_chr_specific.index
+            
+            # Add the chromosome-specific data for the sample to a list
+            TG_pseudobulk_samples.append(TG_chr_specific)
+            RE_pseudobulk_samples.append(RE_chr_specific)
+            peaks_df_samples.append(peaks_df)
+        
+        # Aggregate the data from the samples for the current chromosome
+        total_TG_pseudobulk_chr    = _agg_sum(TG_pseudobulk_samples)
+        total_RE_pseudobulk_chr    = _agg_sum(RE_pseudobulk_samples)
+        total_peaks_df             = _agg_first(peaks_df_samples)
+    
+        # Add the aggregated data to a dictionary by chrom_id
+        pseudobulk_chrom_dict[chrom_id] = {
+            "total_TG_pseudobulk_chr" : total_TG_pseudobulk_chr,
+            "total_RE_pseudobulk_chr" : total_RE_pseudobulk_chr,
+            "total_peaks_df" : total_peaks_df
+            }
+    
+    return total_TG_pseudobulk_global, pseudobulk_chrom_dict
 
 def create_or_load_genomic_windows(
     window_size,
@@ -2007,11 +2025,12 @@ if __name__ == "__main__":
     trrust_csv_file = TRRUST_DIR / f"trrust_{ORGANISM_CODE}_pkn.csv"
     kegg_csv_file = KEGG_DIR / f"kegg_{ORGANISM_CODE}_pkn.csv"
     
-    IGNORE_PROCESSED_FILES = False
-    logging.info(f"IGNORE_PROCESSED_FILES: {IGNORE_PROCESSED_FILES}")
+    logging.info(f"FORCE_RECALCULATE: {FORCE_RECALCULATE}")
     
     PROCESS_SAMPLE_DATA = True
+    logging.info(f"PROCESS_SAMPLE_DATA: {PROCESS_SAMPLE_DATA}")
     PROCESS_CHROMOSOME_SPECIFIC_DATA = True
+    logging.info(f"PROCESS_CHROMOSOME_SPECIFIC_DATA: {PROCESS_CHROMOSOME_SPECIFIC_DATA}")
     
     def _per_sample_worker(sample_name: str) -> dict:
         try:
@@ -2022,7 +2041,7 @@ if __name__ == "__main__":
             
             process_or_load_rna_atac_data(
                 sample_input_dir,
-                ignore_processed_files=IGNORE_PROCESSED_FILES,
+                force_recalculate=FORCE_RECALCULATE,
                 raw_10x_rna_data_dir=RAW_10X_RNA_DATA_DIR / sample_name,
                 raw_atac_peak_file=RAW_ATAC_PEAK_MATRIX_FILE,
                 sample_name=sample_name,
@@ -2084,7 +2103,7 @@ if __name__ == "__main__":
             
             processed_rna_df, processed_atac_df, pseudobulk_rna_df, pseudobulk_atac_df = process_or_load_rna_atac_data(
                 sample_input_dir,
-                ignore_processed_files=IGNORE_PROCESSED_FILES,
+                force_recalculate=FORCE_RECALCULATE,
                 raw_10x_rna_data_dir=RAW_10X_RNA_DATA_DIR / sample_name,
                 raw_atac_peak_file=RAW_ATAC_PEAK_MATRIX_FILE,
                 sample_name=sample_name,
@@ -2124,7 +2143,7 @@ if __name__ == "__main__":
             
             # ----- CALCULATE PEAK TO TG DISTANCE -----
             # Calculate the distance from each peak to each gene TSS
-            if not os.path.isfile(peak_to_gene_dist_file) or IGNORE_PROCESSED_FILES:
+            if not os.path.isfile(peak_to_gene_dist_file) or FORCE_RECALCULATE:
                 # Download the gene TSS file from Ensembl if missing
 
                 logging.info("\nCalculating peak to TG distance score")
@@ -2136,7 +2155,7 @@ if __name__ == "__main__":
                     gene_tss_df=gene_tss_df,
                     max_peak_distance = MAX_PEAK_DISTANCE,
                     distance_factor_scale = DISTANCE_SCALE_FACTOR,
-                    force_recalculate=IGNORE_PROCESSED_FILES
+                    force_recalculate=FORCE_RECALCULATE
                 )
             
                 logging.info("\nPeak to gene distance")
@@ -2212,7 +2231,7 @@ if __name__ == "__main__":
         total_tf_list_file = SAMPLE_PROCESSED_DATA_DIR / "tf_tg_combos" / "tf_list.csv"
         tf_names = _read_list(total_tf_list_file, "TF")
         
-        # Aggregate sample-level data
+        # Aggregate sample-level data for sliding window scores and peak to gene distance
         sample_level_sliding_window_dfs = []
         sample_level_peak_to_gene_dist_dfs = []
         for sample_name in SAMPLE_NAMES:
@@ -2229,10 +2248,13 @@ if __name__ == "__main__":
         total_sliding_window_score_df = pd.concat(sample_level_sliding_window_dfs)
         total_peak_gene_dist_df = pd.concat(sample_level_peak_to_gene_dist_dfs)
         
+        logging.info(f"Aggregating pseudobulk datasets")
+        dataset_processed_data_dir = RAW_DATA / DATASET_NAME
+        total_TG_pseudobulk_global, pseudobulk_chrom_dict = \
+            aggregate_pseudobulk_datasets(SAMPLE_NAMES, dataset_processed_data_dir, chrom_list, gc)
+        
         logging.info(f"  - Number of chromosomes: {len(chrom_list)}: {chrom_list}")
         for chrom_id in chrom_list:
-            
-            
             logging.info(f"\n----- Preparing MultiomicTransformer data for {DATASET_NAME} {chrom_id} -----")
             make_chrom_gene_tss_df(GENE_TSS_FILE, chrom_id, GENOME_DIR)
             
@@ -2271,12 +2293,11 @@ if __name__ == "__main__":
                 logging.info(f"Loading existing gene TSS file for {chrom_id}")
                 gene_tss_df = pd.read_csv(os.path.join(GENOME_DIR, f"{chrom_id}_gene_tss.bed"), sep="\t", header=None, usecols=[0, 1, 2, 3])
                 gene_tss_df = gene_tss_df.rename(columns={0: "chrom", 1: "start", 2: "end", 3: "name"})
-            
-            
-            
-            logging.info(f"Aggregating pseudobulk datasets for {chrom_id}")
-            total_TG_pseudobulk_global, total_TG_pseudobulk_chr, total_RE_pseudobulk_chr, total_peaks_df = \
-                aggregate_pseudobulk_datasets(gene_tss_df, SAMPLE_NAMES, RAW_DATA / DATASET_NAME, chrom_id, gc)
+                
+                
+            total_TG_pseudobulk_chr = pseudobulk_chrom_dict[chrom_id]["total_TG_pseudobulk_chr"]
+            total_RE_pseudobulk_chr = pseudobulk_chrom_dict[chrom_id]["total_RE_pseudobulk_chr"]
+            total_peaks_df = pseudobulk_chrom_dict[chrom_id]["total_peaks_df"]
                 
             logging.info(f"  - {chrom_id}: TG pseudobulk shape={total_TG_pseudobulk_chr.shape}")
             logging.info(f"  - TG Examples:{total_TG_pseudobulk_chr.index[:5].tolist()}")
@@ -2510,3 +2531,4 @@ if __name__ == "__main__":
                 json.dump(manifest, f, indent=2)
 
             logging.info("Preprocessing complete. Wrote per-sample/per-chrom data for MultiomicTransformerDataset.")
+            

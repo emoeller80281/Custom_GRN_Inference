@@ -15,7 +15,7 @@ CHROM_ID_LIST = chrom_list
 CHROM_ID = "chr1"
 CHROM_IDS = chr_nums
 # , "E7.75_rep1", "E8.0_rep2", "E8.5_rep2", "E8.75_rep2", "E7.5_rep2", "E8.0_rep1", "E8.5_rep1"
-SAMPLE_NAMES = ["E7.5_rep1", "E7.5_rep2", "E7.75_rep1", "E8.0_rep2", "E8.5_rep2", "E8.75_rep2", "E7.5_rep2", "E8.0_rep1", "E8.5_rep1"]
+SAMPLE_NAMES = ["E7.5_rep1", "E7.5_rep2", "E7.75_rep1", "E8.0_rep2", "E8.5_rep2", "E8.75_rep2", "E8.0_rep1", "E8.5_rep1"]
 FINE_TUNING_DATASETS = ["E7.5_rep1"]
 
 # Paths to the raw scRNA-seq and scATAC-seq data
@@ -46,7 +46,7 @@ SELF_WEIGHT = 1.0       # How much to weight the cells own gene expression. High
 
 # Data Preprocessing and Caching
 VALIDATION_DATASETS = ["E8.75_rep1"]
-FORCE_RECALCULATE = True                # Recomputes genomic windows, peak-TG distance, and re-runs MOODS TF-peak scan
+FORCE_RECALCULATE = False                # Recomputes genomic windows, peak-TG distance, and re-runs MOODS TF-peak scan
 WINDOW_SIZE = 25_000                    # Aggregates peaks within WINDOW_SIZE bp genomic tiles
 DISTANCE_SCALE_FACTOR = 5_000           # Weights the peak-gene TSS distance score. Lower numbers = faster dropoff
 MAX_PEAK_DISTANCE = 20_000              # Masks out peaks further than this distance from the gene TSS
