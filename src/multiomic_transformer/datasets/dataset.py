@@ -8,6 +8,66 @@ from pathlib import Path
 import logging
 from collections import OrderedDict
 
+from dataclasses import dataclass
+
+@dataclass
+class SimpleScaler:
+    mean: torch.Tensor   # shape [D]
+    std:  torch.Tensor   # shape [D]
+    eps:  float = 1e-6
+
+    def transform(self, x: torch.Tensor) -> torch.Tensor:
+        # x shape can be [B, D] or [D]
+        return (x - self.mean) / torch.clamp(self.std, min=self.eps)
+
+    def inverse(self, x: torch.Tensor) -> torch.Tensor:
+        return x * torch.clamp(self.std, min=self.eps) + self.mean
+
+
+@torch.no_grad()
+def fit_simple_scalers(train_loader) -> tuple[SimpleScaler, SimpleScaler]:
+    """
+    Estimate per-feature mean/std on the **training split only**.
+    Returns: (tf_scaler, tg_scaler)
+      - tf_scaler for TF inputs [T]
+      - tg_scaler for TG targets [G]
+    """
+    tf_sum = tf_sumsq = None
+    tg_sum = tg_sumsq = None
+    n = 0  # number of *items* (cells/metacells) seen
+
+    for atac_wins, tf_tensor, tg_tensor, bias, tf_ids, tg_ids, motif_mask in train_loader:
+        # tf_tensor, tg_tensor: [B, T] and [B, G]
+        tf = tf_tensor.float()   # [B, T]
+        tg = tg_tensor.float()   # [B, G]
+
+        if tf_sum is None:
+            tf_sum   = tf.sum(dim=0)           # [T]
+            tf_sumsq = (tf * tf).sum(dim=0)    # [T]
+            tg_sum   = tg.sum(dim=0)           # [G]
+            tg_sumsq = (tg * tg).sum(dim=0)    # [G]
+        else:
+            tf_sum   += tf.sum(dim=0)
+            tf_sumsq += (tf * tf).sum(dim=0)
+            tg_sum   += tg.sum(dim=0)
+            tg_sumsq += (tg * tg).sum(dim=0)
+
+        n += tf.shape[0]  # add batch size
+
+    # Handle empty (degenerate) case
+    if n == 0:
+        raise RuntimeError("fit_simple_scalers: training loader yielded no batches.")
+
+    tf_mean = tf_sum / n
+    tg_mean = tg_sum / n
+
+    tf_var = torch.clamp(tf_sumsq / n - tf_mean * tf_mean, min=0.0)
+    tg_var = torch.clamp(tg_sumsq / n - tg_mean * tg_mean, min=0.0)
+
+    tf_std = torch.sqrt(tf_var)
+    tg_std = torch.sqrt(tg_var)
+
+    return SimpleScaler(tf_mean, tf_std), SimpleScaler(tg_mean, tg_std)
 
 class DistributedBatchSampler(torch.utils.data.Sampler):
     """
