@@ -10,64 +10,110 @@ from collections import OrderedDict
 
 from dataclasses import dataclass
 
+# in datasets/dataset.py (or wherever you defined fit_simple_scalers)
+import torch
+from dataclasses import dataclass
+
 @dataclass
 class SimpleScaler:
-    mean: torch.Tensor   # shape [D]
-    std:  torch.Tensor   # shape [D]
-    eps:  float = 1e-6
+    mean: torch.Tensor  # shape [D] on the correct device
+    std:  torch.Tensor  # shape [D] on the correct device
 
-    def transform(self, x: torch.Tensor) -> torch.Tensor:
-        # x shape can be [B, D] or [D]
-        return (x - self.mean) / torch.clamp(self.std, min=self.eps)
+    def transform(self, x: torch.Tensor, ids: torch.Tensor | None = None) -> torch.Tensor:
+        """
+        If ids is provided (shape [D_batch]), we slice global stats to match x's last dim.
+        x can be [B, D_batch] (TF/TG) or any tensor with last-dim == len(ids).
+        """
+        eps = 1e-6
+        if ids is not None:
+            # ids and mean/std must be on the same device
+            mu  = self.mean.index_select(0, ids)
+            sig = self.std.index_select(0, ids).clamp_min(eps)
+        else:
+            # fallback: whole-dim scaling
+            mu, sig = self.mean, self.std.clamp_min(eps)
 
-    def inverse(self, x: torch.Tensor) -> torch.Tensor:
-        return x * torch.clamp(self.std, min=self.eps) + self.mean
-
+        # broadcast over batch/time dims (subtract along last axis)
+        return (x - mu) / sig
 
 @torch.no_grad()
-def fit_simple_scalers(train_loader) -> tuple[SimpleScaler, SimpleScaler]:
+def fit_simple_scalers(
+    train_loader,
+    T_expected: int,
+    G_expected: int,
+    device_for_reduce: str | torch.device = "cuda",
+    use_ddp_reduce: bool = False,
+):
     """
-    Estimate per-feature mean/std on the **training split only**.
-    Returns: (tf_scaler, tg_scaler)
-      - tf_scaler for TF inputs [T]
-      - tg_scaler for TG targets [G]
+    Computes per-dimension mean/std for TF and TG over the entire training set,
+    even if batches have different T_eval/G_eval. Uses tf_ids/tg_ids to scatter-add
+    into fixed-size accumulators of length T_expected/G_expected.
     """
-    tf_sum = tf_sumsq = None
-    tg_sum = tg_sumsq = None
-    n = 0  # number of *items* (cells/metacells) seen
+    # global accumulators on CPU (memory-light, avoids GPU growth)
+    tf_sum   = torch.zeros(T_expected, dtype=torch.float64, device="cpu")
+    tf_sqsum = torch.zeros(T_expected, dtype=torch.float64, device="cpu")
+    tf_count = torch.zeros(T_expected, dtype=torch.float64, device="cpu")
 
-    for atac_wins, tf_tensor, tg_tensor, bias, tf_ids, tg_ids, motif_mask in train_loader:
-        # tf_tensor, tg_tensor: [B, T] and [B, G]
-        tf = tf_tensor.float()   # [B, T]
-        tg = tg_tensor.float()   # [B, G]
+    tg_sum   = torch.zeros(G_expected, dtype=torch.float64, device="cpu")
+    tg_sqsum = torch.zeros(G_expected, dtype=torch.float64, device="cpu")
+    tg_count = torch.zeros(G_expected, dtype=torch.float64, device="cpu")
 
-        if tf_sum is None:
-            tf_sum   = tf.sum(dim=0)           # [T]
-            tf_sumsq = (tf * tf).sum(dim=0)    # [T]
-            tg_sum   = tg.sum(dim=0)           # [G]
-            tg_sumsq = (tg * tg).sum(dim=0)    # [G]
-        else:
-            tf_sum   += tf.sum(dim=0)
-            tf_sumsq += (tf * tf).sum(dim=0)
-            tg_sum   += tg.sum(dim=0)
-            tg_sumsq += (tg * tg).sum(dim=0)
+    for batch in train_loader:
+        # unpack like your collate_fn returns
+        atac_wins, tf_tensor, tg_tensor, bias, tf_ids, tg_ids, motif_mask = batch
+        # move minimal things to GPU to sum efficiently, then bring back to CPU
+        tf_tensor = tf_tensor.to(device_for_reduce, non_blocking=True)   # [B,T_eval]
+        tg_tensor = tg_tensor.to(device_for_reduce, non_blocking=True)   # [B,G_eval]
+        tf_ids    = tf_ids.to(device_for_reduce, non_blocking=True)      # [T_eval] global ids 0..T'-1
+        tg_ids    = tg_ids.to(device_for_reduce, non_blocking=True)      # [G_eval] global ids 0..G'-1
 
-        n += tf.shape[0]  # add batch size
+        # per-batch reductions over batch dimension
+        tf_batch_sum   = tf_tensor.sum(dim=0)                # [T_eval]
+        tf_batch_sqsum = (tf_tensor**2).sum(dim=0)           # [T_eval]
+        tf_batch_cnt   = torch.full_like(tf_batch_sum, fill_value=tf_tensor.shape[0], dtype=torch.float64)
 
-    # Handle empty (degenerate) case
-    if n == 0:
-        raise RuntimeError("fit_simple_scalers: training loader yielded no batches.")
+        tg_batch_sum   = tg_tensor.sum(dim=0)                # [G_eval]
+        tg_batch_sqsum = (tg_tensor**2).sum(dim=0)           # [G_eval]
+        tg_batch_cnt   = torch.full_like(tg_batch_sum, fill_value=tg_tensor.shape[0], dtype=torch.float64)
 
-    tf_mean = tf_sum / n
-    tg_mean = tg_sum / n
+        # move to CPU for index_add_
+        tf_ids_cpu = tf_ids.to("cpu")
+        tg_ids_cpu = tg_ids.to("cpu")
 
-    tf_var = torch.clamp(tf_sumsq / n - tf_mean * tf_mean, min=0.0)
-    tg_var = torch.clamp(tg_sumsq / n - tg_mean * tg_mean, min=0.0)
+        tf_sum.index_add_(0, tf_ids_cpu, tf_batch_sum.to("cpu", dtype=torch.float64))
+        tf_sqsum.index_add_(0, tf_ids_cpu, tf_batch_sqsum.to("cpu", dtype=torch.float64))
+        tf_count.index_add_(0, tf_ids_cpu, tf_batch_cnt.to("cpu", dtype=torch.float64))
 
-    tf_std = torch.sqrt(tf_var)
-    tg_std = torch.sqrt(tg_var)
+        tg_sum.index_add_(0, tg_ids_cpu, tg_batch_sum.to("cpu", dtype=torch.float64))
+        tg_sqsum.index_add_(0, tg_ids_cpu, tg_batch_sqsum.to("cpu", dtype=torch.float64))
+        tg_count.index_add_(0, tg_ids_cpu, tg_batch_cnt.to("cpu", dtype=torch.float64))
+
+    # Optionally all-reduce across DDP ranks (sum the accumulators)
+    if use_ddp_reduce and torch.distributed.is_initialized():
+        for acc in (tf_sum, tf_sqsum, tf_count, tg_sum, tg_sqsum, tg_count):
+            acc_cuda = acc.to(device_for_reduce)
+            torch.distributed.all_reduce(acc_cuda, op=torch.distributed.ReduceOp.SUM)
+            acc.copy_(acc_cuda.to("cpu"))
+
+    # means and stds (unseen dims keep mean=0, std=1)
+    tf_mean = torch.zeros(T_expected, dtype=torch.float32)
+    tf_std  = torch.ones(T_expected,  dtype=torch.float32)
+    mask_tf = tf_count > 0
+    tf_mean[mask_tf] = (tf_sum[mask_tf] / tf_count[mask_tf]).to(torch.float32)
+    tf_var = torch.zeros_like(tf_mean)
+    tf_var[mask_tf] = (tf_sqsum[mask_tf] / tf_count[mask_tf]).to(torch.float32) - tf_mean[mask_tf]**2
+    tf_std = torch.sqrt(torch.clamp(tf_var, min=1e-6))
+
+    tg_mean = torch.zeros(G_expected, dtype=torch.float32)
+    tg_std  = torch.ones(G_expected,  dtype=torch.float32)
+    mask_tg = tg_count > 0
+    tg_mean[mask_tg] = (tg_sum[mask_tg] / tg_count[mask_tg]).to(torch.float32)
+    tg_var = torch.zeros_like(tg_mean)
+    tg_var[mask_tg] = (tg_sqsum[mask_tg] / tg_count[mask_tg]).to(torch.float32) - tg_mean[mask_tg]**2
+    tg_std = torch.sqrt(torch.clamp(tg_var, min=1e-6))
 
     return SimpleScaler(tf_mean, tf_std), SimpleScaler(tg_mean, tg_std)
+
 
 class DistributedBatchSampler(torch.utils.data.Sampler):
     """

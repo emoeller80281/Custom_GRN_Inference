@@ -301,7 +301,12 @@ class MultiomicTransformer(nn.Module):
         # The output from pooled_cross_attn_dense_layer is added to each TG in cross_tg_to_atac's output
         
         # Cast the TG prediction from [n_tgs, d_model] to [n_tgs]
-        self.gene_pred_dense = nn.Linear(d_model, 1)
+        self.gene_pred_dense = nn.Sequential(
+            nn.Linear(d_model, d_ff, bias=False), 
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_ff, 1, bias=False),
+            )
         
         # Adds TF->TG weights at the end to directly modify the final TG expression predictions
         # Optional TF→TG shortcut that adapts to any TF/TG set

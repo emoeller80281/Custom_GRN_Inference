@@ -24,7 +24,8 @@ from torch.utils.data.distributed import DistributedSampler
 from config.settings_hpc import *
 from multiomic_transformer.datasets.dataset import (
     MultiomicTransformerDataset, MultiChromosomeDataset,
-    ChromBucketBatchSampler, DistributedBatchSampler, fit_simple_scalers
+    ChromBucketBatchSampler, DistributedBatchSampler, fit_simple_scalers,
+    SimpleScaler
     )
 from multiomic_transformer.models.model import MultiomicTransformer
 from multiomic_transformer.utils.files import unique_path
@@ -110,85 +111,86 @@ class Trainer:
 
     def _run_batch(self, batch):
         atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids, motif_mask = batch
-        atac_wins, tf_tensor, targets, bias = (
-            atac_wins.to(self.gpu_id),
-            tf_tensor.to(self.gpu_id),
-            targets.to(self.gpu_id),
-            bias.to(self.gpu_id),
-        )
-        tf_ids, tg_ids, motif_mask = (
-            tf_ids.to(self.gpu_id),
-            tg_ids.to(self.gpu_id),
-            motif_mask.to(self.gpu_id),
-        )
+        atac_wins = atac_wins.to(self.gpu_id)
+        tf_tensor = tf_tensor.to(self.gpu_id)
+        targets   = targets.to(self.gpu_id)
+        bias      = bias.to(self.gpu_id)
+        tf_ids    = tf_ids.to(self.gpu_id)
+        tg_ids    = tg_ids.to(self.gpu_id)
+        motif_mask= motif_mask.to(self.gpu_id)
 
         self.optimizer.zero_grad(set_to_none=True)
 
-        if hasattr(self, "tf_scaler") and self.tf_scaler is not None:
-            tf_tensor = self.tf_scaler.transform(tf_tensor)
-        if hasattr(self, "tg_scaler") and self.tg_scaler is not None:
-            targets  = self.tg_scaler.transform(targets)
-        
+        # Optional feature scaling (id-aware)
+        if getattr(self, "tf_scaler", None) is not None:
+            tf_tensor = self.tf_scaler.transform(tf_tensor, tf_ids)
+        if getattr(self, "tg_scaler", None) is not None:
+            targets  = self.tg_scaler.transform(targets, tg_ids)
+
         with autocast(device_type="cuda"):
             mask_arg = motif_mask if USE_MOTIF_MASK else None
             preds, _ = self.model(
                 atac_wins, tf_tensor, tf_ids=tf_ids, tg_ids=tg_ids, bias=bias, motif_mask=mask_arg
             )
 
-            # keep MSE in fp32 to avoid under/overflow
-            preds32   = preds.float()
-            targets32 = targets.float()
+        # ---- loss & penalty in fp32 for stability ----
+        preds32   = torch.nan_to_num(preds.float(),   nan=0.0, posinf=1e6, neginf=-1e6)
+        targets32 = torch.nan_to_num(targets.float(), nan=0.0, posinf=1e6, neginf=-1e6)
 
-            # basic sanitization (won’t propagate NaNs)
-            preds32   = torch.nan_to_num(preds32, nan=0.0, posinf=1e6, neginf=-1e6)
-            targets32 = torch.nan_to_num(targets32, nan=0.0, posinf=1e6, neginf=-1e6)
+        # Mean MSE (same scale every batch)
+        mse_loss = self.loss_fn(preds32, targets32)
 
-            mse_loss = self.loss_fn(preds32, targets32)
+        # ---------- R^2 penalty via per-gene Pearson r^2 ----------
+        # shapes: [B, G]
+        x = preds32
+        y = targets32
+        x = x - x.mean(dim=0, keepdim=True)
+        y = y - y.mean(dim=0, keepdim=True)
 
-            # ----- R^2 penalty (per gene across the batch) -----
-            # NOTE: if your batch is small, this statistic is noisy. Consider annealing its weight.
-            eps   = 1e-6
-            diff  = preds32 - targets32                    # [B, G]
-            sse_g = (diff ** 2).sum(dim=0)                 # Σ_b (y - ŷ)^2, per gene
-            y     = targets32
-            ybar  = y.mean(dim=0)                          # ȳ_g
-            sst_g = ((y - ybar) ** 2).sum(dim=0)           # Σ_b (y - ȳ)^2, per gene
+        eps = 1e-8
+        x_ss = (x * x).sum(dim=0)     # per gene
+        y_ss = (y * y).sum(dim=0)     # per gene
+        denom = (x_ss * y_ss).clamp_min(eps).sqrt()
+        # valid genes need variance in both preds and targets
+        valid = (x_ss > eps) & (y_ss > eps)
 
-            # clamp to avoid tiny denominators → huge negatives
-            sst_g = torch.clamp(sst_g, min=eps)
+        corr = torch.zeros_like(denom)
+        corr[valid] = (x[ :, valid] * y[ :, valid]).sum(dim=0) / denom[valid]
+        corr = corr.clamp_(-1.0, 1.0)
+        r2_g = corr * corr
 
-            r2_g = 1.0 - sse_g / sst_g
-            # ignore degenerate/near-constant targets in this batch
-            r2_g = torch.where(sst_g > 10*eps, r2_g, torch.zeros_like(r2_g))
-            mean_r2 = r2_g.mean()
+        if valid.any():
+            mean_r2 = r2_g[valid].mean()
+        else:
+            mean_r2 = torch.tensor(0.0, device=preds32.device, dtype=preds32.dtype)
 
-            # anneal the penalty from 0 → CORR_LOSS_WEIGHT over first few epochs
-            if hasattr(self, "epoch"):
-                warm = max(1, getattr(self, "r2_warmup_epochs", 3))
-                anneal = min(1.0, (self.epoch + 1) / warm)
-            else:
-                anneal = 1.0
+        # Warmup the penalty weight over first few epochs
+        warm = max(1, getattr(self, "r2_warmup_epochs", 3))
+        cur_epoch = getattr(self, "epoch", 0)  # set by your loop before calling _run_batch
+        anneal = float(min(1.0, (cur_epoch + 1) / warm))
 
-            r2_penalty = (CORR_LOSS_WEIGHT * anneal) * (1.0 - mean_r2)
+        r2_penalty = (CORR_LOSS_WEIGHT * anneal) * (1.0 - mean_r2)  # bounded ~[0, 2*lambda]
 
-            total_loss = mse_loss + r2_penalty
+        total_loss = mse_loss + r2_penalty
 
-        # if something still went wrong, skip the step gracefully
+        # Safety: if something went numerically wrong, skip the step
         if not torch.isfinite(total_loss):
-            # zero grads and return large finite loss to keep loop going
             self.optimizer.zero_grad(set_to_none=True)
-            return torch.tensor(0.0, device=self.gpu_id), torch.tensor(0.0, device=self.gpu_id), torch.tensor(0.0, device=self.gpu_id), torch.tensor(0.0, device=self.gpu_id)
+            return (torch.tensor(0.0, device=self.gpu_id),
+                    torch.tensor(0.0, device=self.gpu_id),
+                    torch.tensor(0.0, device=self.gpu_id),
+                    torch.tensor(0.0, device=self.gpu_id))
 
+        # AMP step
         self.scaler.scale(total_loss).backward()
-
-        # gradient clipping AFTER scale but BEFORE step (unscale first)
         self.scaler.unscale_(self.optimizer)
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-
         self.scaler.step(self.optimizer)
         self.scaler.update()
 
+        # For logging: return components
         return total_loss.detach(), mse_loss.detach(), mean_r2.detach(), r2_penalty.detach()
+
 
 
     def _validate(self):
@@ -200,11 +202,6 @@ class Trainer:
         sum_y   = torch.zeros(1, device=self.gpu_id)  # Σ y
         sum_y2  = torch.zeros(1, device=self.gpu_id)  # Σ y^2
         n_elems = torch.zeros(1, device=self.gpu_id)  # N
-        
-        if hasattr(self, "tf_scaler") and self.tf_scaler is not None:
-            tf_tensor = self.tf_scaler.transform(tf_tensor)
-        if hasattr(self, "tg_scaler") and self.tg_scaler is not None:
-            targets  = self.tg_scaler.transform(targets)
 
         with torch.no_grad():
             for atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids, motif_mask in self.val_data:
@@ -217,18 +214,25 @@ class Trainer:
                 motif_mask= motif_mask.to(self.gpu_id)
 
                 mask_arg = motif_mask if USE_MOTIF_MASK else None
+                
+                if hasattr(self, "tf_scaler") and self.tf_scaler is not None:
+                    tf_tensor = self.tf_scaler.transform(tf_tensor, tf_ids)
+                if hasattr(self, "tg_scaler") and self.tg_scaler is not None:
+                    targets  = self.tg_scaler.transform(targets, tg_ids)
+                
                 preds, _ = self.model(
                     atac_wins, tf_tensor, tf_ids=tf_ids, tg_ids=tg_ids, bias=bias, motif_mask=mask_arg
                 )
 
                 # Val loss as MSE
-                loss = F.mse_loss(preds, targets)
+                preds32   = torch.nan_to_num(preds.float(),   nan=0.0, posinf=1e6, neginf=-1e6)
+                targets32 = torch.nan_to_num(targets.float(), nan=0.0, posinf=1e6, neginf=-1e6)
+
+                loss = F.mse_loss(preds32, targets32)
                 total_loss += float(loss.item()); n_batches += 1
 
-                # Flatten per-batch and update running stats
-                p = preds.reshape(-1)
-                y = targets.reshape(-1)
-
+                p = preds32.reshape(-1)
+                y = targets32.reshape(-1)
                 sse     += torch.sum((y - p) ** 2)
                 sum_y   += torch.sum(y)
                 sum_y2  += torch.sum(y ** 2)
@@ -246,17 +250,20 @@ class Trainer:
         eps = 1e-12
         ybar = sum_y / torch.clamp(n_elems, min=1.0)
         sst  = sum_y2 - n_elems * (ybar ** 2)
-        r2   = 1.0 - (sse / torch.clamp(sst, min=eps))
-        r2   = torch.where(sst <= eps, torch.zeros_like(r2), r2)  # if variance ~0
+        r2   = torch.where(sst <= eps, torch.zeros_like(sst), 1.0 - sse / torch.clamp(sst, min=eps))
 
         avg_loss = total_loss / max(1, n_batches)
-        return float(avg_loss), float(r2.item())  # (val_mse, R^2)
+        return float(avg_loss), float(r2.item())
 
     
     def _run_epoch(self, epoch):
         sampler = getattr(self.train_data, "sampler", None)
         if isinstance(sampler, DistributedSampler):
             sampler.set_epoch(epoch)
+
+        bs = getattr(self.train_data, "batch_sampler", None)
+        if hasattr(bs, "set_epoch"):
+            bs.set_epoch(epoch)
 
         total_loss, total_mse, n_batches = 0.0, 0.0, 0
         self.epoch = epoch
@@ -690,13 +697,28 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
         
         trainer = Trainer(model, train_loader, val_loader, loss_fn, optimizer, gpu_id=rank, save_every=save_every, patience=PATIENCE)
         
-        if rank == 0:
-            tf_scaler, tg_scaler = fit_simple_scalers(train_loader)
-        
-        if dist.is_initialized():
-            # assume rank 0 has computed the scalers
-            for t in (tf_scaler.mean, tf_scaler.std, tg_scaler.mean, tg_scaler.std):
-                dist.broadcast(t, src=0)
+        T = len(dataset.tf_name2id_sub)
+        G = len(dataset.tg_name2id_sub)
+
+        # pick rank device
+        rank_device = torch.device(f"cuda:{rank}" if torch.cuda.is_available() else "cpu")
+
+        if torch.distributed.is_initialized():
+            # Option A (recommended): exact global stats via all-reduce
+            tf_scaler, tg_scaler = fit_simple_scalers(
+                train_loader, T_expected=T, G_expected=G,
+                device_for_reduce=rank_device, use_ddp_reduce=True
+            )
+        else:
+            # single process
+            tf_scaler, tg_scaler = fit_simple_scalers(
+                train_loader, T_expected=T, G_expected=G,
+                device_for_reduce=rank_device, use_ddp_reduce=False
+            )
+
+        # keep scalers on GPU to match tensors you feed into model
+        tf_scaler = SimpleScaler(tf_scaler.mean.to(rank_device), tf_scaler.std.to(rank_device))
+        tg_scaler = SimpleScaler(tg_scaler.mean.to(rank_device), tg_scaler.std.to(rank_device))
 
         trainer.tf_scaler = tf_scaler
         trainer.tg_scaler = tg_scaler
