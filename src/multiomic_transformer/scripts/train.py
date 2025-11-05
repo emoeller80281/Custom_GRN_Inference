@@ -24,8 +24,7 @@ from torch.utils.data.distributed import DistributedSampler
 from config.settings_hpc import *
 from multiomic_transformer.datasets.dataset import (
     MultiomicTransformerDataset, MultiChromosomeDataset,
-    ChromBucketBatchSampler, DistributedBatchSampler,
-    StandardizeTransform
+    ChromBucketBatchSampler, DistributedBatchSampler
     )
 from multiomic_transformer.models.model import MultiomicTransformer
 from multiomic_transformer.utils.files import unique_path
@@ -378,45 +377,6 @@ def load_train_objs():
     optimizer = torch.optim.Adam(model.parameters(), lr=INITIAL_LEARNING_RATE)
     return dataset, model, optimizer
 
-def compute_train_stats(train_ds: MultiChromosomeDataset):
-    # Aggregate over all items (cells) from train set
-    # Efficient way: read per-chrom tensors directly instead of looping items.
-    tf_sum = None; tf_sq = None; tf_N = 0
-    tg_sum = None; tg_sq = None; tg_N = 0
-    atac_stats = {}  # chrom_id -> mean/std over cells (per window)
-
-    for cid in train_ds.chrom_ids:
-        ds = train_ds._load_chrom(cid)  # already sub-vocabbed & subsampled
-        # TF/TG: aggregate across cells
-        tf = ds.tf_tensor_all.float()        # [T_eval, C]
-        tg = ds.tg_tensor_all.float()        # [G_eval, C]
-        tf_sum = (tf_sum if tf_sum is not None else tf.sum(1)) + tf.sum(1)
-        tf_sq  = (tf_sq  if tf_sq  is not None else (tf**2).sum(1)) + (tf**2).sum(1)
-        tg_sum = (tg_sum if tg_sum is not None else tg.sum(1)) + tg.sum(1)
-        tg_sq  = (tg_sq  if tg_sq  is not None else (tg**2).sum(1)) + (tg**2).sum(1)
-        tf_N += tf.shape[1]; tg_N += tg.shape[1]
-
-        # ATAC per chrom: mean/std per window over cells
-        atac = ds.atac_window_tensor_all.float()  # [W, C]
-        mean_w = atac.mean(dim=1)                 # [W]
-        std_w  = atac.std(dim=1, unbiased=False)  # [W]
-        atac_stats[cid] = {"mean": mean_w.tolist(), "std": std_w.tolist()}
-
-        train_ds._evict_if_needed()
-
-    tf_mean = (tf_sum / tf_N).tolist()
-    tf_std  = torch.sqrt((tf_sq / tf_N) - (torch.tensor(tf_mean)**2)).tolist()
-    tg_mean = (tg_sum / tg_N).tolist()
-    tg_std  = torch.sqrt((tg_sq / tg_N) - (torch.tensor(tg_mean)**2)).tolist()
-
-    # Build name-keyed dicts (names are global sub-vocab from train_ds)
-    tf_names = train_ds.tf_names_sub
-    tg_names = train_ds.tg_names_sub
-    tf_stats = {"mean": dict(zip(tf_names, tf_mean)), "std": dict(zip(tf_names, tf_std))}
-    tg_stats = {"mean": dict(zip(tg_names, tg_mean)), "std": dict(zip(tg_names, tg_std))}
-    return tf_stats, tg_stats, atac_stats
-
-
 def prepare_dataloader(dataset, batch_size, world_size=1, rank=0,
                        num_workers=4, pin_memory=True, seed=42, drop_last=True):
     """
@@ -465,28 +425,7 @@ def prepare_dataloader(dataset, batch_size, world_size=1, rank=0,
             max_tgs=dataset.max_tgs,
             max_windows_per_chrom=dataset.max_windows_per_chrom,
             subset_seed=dataset.subset_seed,
-            transform=None
         )
-        
-        # ----- Generate scaler for train chrs, apply to train, text, val chrs -----
-        ds_train_for_stats = MultiChromosomeDataset(chrom_ids=train_chrs, **ds_args)
-        
-        stats_name = f"scaler_stats_mt_{dataset.max_tfs}_{dataset.max_tgs}_{dataset.max_windows_per_chrom}_{dataset.subset_seed}.json"
-        STATS_JSON = (dataset.data_dir / stats_name)
-
-        if rank == 0:
-            if not STATS_JSON.exists():
-                tf_stats, tg_stats, atac_stats = compute_train_stats(ds_train_for_stats)
-                STATS_JSON.parent.mkdir(parents=True, exist_ok=True)
-                with open(STATS_JSON, "w") as f:
-                    json.dump({"tf": tf_stats, "tg": tg_stats, "atac": atac_stats}, f)
-        dist.barrier()
-        
-        with open(STATS_JSON) as f:
-            stats = json.load(f)
-        transform = StandardizeTransform(stats["tf"], stats["tg"], stats["atac"])
-        ds_args["transform"] = transform
-        
         ds_train = MultiChromosomeDataset(chrom_ids=train_chrs, **ds_args)
         ds_val   = MultiChromosomeDataset(chrom_ids=val_chrs,   **ds_args)
         ds_test  = MultiChromosomeDataset(chrom_ids=test_chrs,  **ds_args)
@@ -597,97 +536,24 @@ def write_run_parameters(dataset, out_dir):
 
 @torch.no_grad()
 def get_mean_tf_tg_attention(model, dataloader, device="cuda"):
-    """
-    Returns a [num_tg_vocab, num_tf_vocab] tensor with the mean attention,
-    aggregated in global vocab index space using tg_ids/tf_ids from each batch.
-    Works even when batches have different (TG, TF) counts (e.g., per-chrom).
-    """
     model.eval()
+    attn_accum = None
+    n = 0
+    for atac_wins, tf_tensor, _, bias, tf_ids, tg_ids, motif_mask in dataloader:
+        atac_wins, tf_tensor, bias = atac_wins.to(device), tf_tensor.to(device), bias.to(device)
+        tf_ids, tg_ids = tf_ids.to(device), tg_ids.to(device)
+        motif_mask = motif_mask.to(device)
 
-    attn_sum = None      # shape: [TG_vocab, TF_vocab]
-    attn_count = None    # same shape, for averaging
+        # Forward pass
+        _ = model(atac_wins, tf_tensor, tf_ids=tf_ids, tg_ids=tg_ids,
+                  bias=bias, motif_mask=motif_mask)
 
-    for batch in dataloader:
-        # Unpack (keep names flexible in case your Dataset adds fields)
-        atac_wins, tf_tensor, _, bias, tf_ids, tg_ids, motif_mask = batch
-        atac_wins  = atac_wins.to(device, non_blocking=True)
-        tf_tensor  = tf_tensor.to(device, non_blocking=True)
-        bias       = bias.to(device, non_blocking=True)
-        tf_ids     = tf_ids.to(device, non_blocking=True).long()
-        tg_ids     = tg_ids.to(device, non_blocking=True).long()
-        motif_mask = motif_mask.to(device, non_blocking=True)
-
-        # Forward (we don't need logits; we only read model.shortcut_layer.attn)
-        _ = model(
-            atac_wins, tf_tensor,
-            tf_ids=tf_ids, tg_ids=tg_ids,
-            bias=bias, motif_mask=motif_mask
-        )
-
-        # Fetch attention produced by the model
-        if not hasattr(model.shortcut_layer, "attn"):
-            # Nothing to aggregate for this batch
-            continue
-
-        attn_batch = model.shortcut_layer.attn  # device unknown; shape unknown
-        # Ensure on CPU for aggregation and detach
-        attn_batch = attn_batch.detach().float().cpu()
-
-        # Reduce to [TG, TF]:
-        # If attn has extra dims (e.g., [B, H, TG, TF] or [H, TG, TF]), mean over leading dims
-        while attn_batch.ndim > 2:
-            attn_batch = attn_batch.mean(dim=0)
-
-        # Sanity: attn_batch should be [len(tg_ids), len(tf_ids)]
-        if attn_batch.shape != (tg_ids.numel(), tf_ids.numel()):
-            # Try transposing if it looks like [TF, TG]
-            if attn_batch.shape == (tf_ids.numel(), tg_ids.numel()):
-                attn_batch = attn_batch.T
-            else:
-                raise RuntimeError(
-                    f"Attention shape {tuple(attn_batch.shape)} does not match "
-                    f"(TG={tg_ids.numel()}, TF={tf_ids.numel()})."
-                )
-
-        # Ensure we have CPU copies of ids for indexing numpy-like; keep as tensors for advanced indexing
-        tg_ids_cpu = tg_ids.cpu()
-        tf_ids_cpu = tf_ids.cpu()
-
-        # Lazy-init or grow accumulators to fit max ids
-        tgt_TG = int(tg_ids_cpu.max().item()) + 1
-        tgt_TF = int(tf_ids_cpu.max().item()) + 1
-
-        def _grow(mat, new_rows, new_cols):
-            if mat is None:
-                return torch.zeros((new_rows, new_cols), dtype=torch.float32)
-            r, c = mat.shape
-            if new_rows <= r and new_cols <= c:
-                return mat
-            out = torch.zeros((max(r, new_rows), max(c, new_cols)), dtype=mat.dtype)
-            out[:r, :c] = mat
-            return out
-
-        attn_sum   = _grow(attn_sum,   tgt_TG, tgt_TF)
-        attn_count = _grow(attn_count, tgt_TG, tgt_TF)
-
-        # Scatter-add this batch’s attention into global grid
-        # attn_sum[tg_ids, tf_ids] += attn_batch
-        attn_sum[tg_ids_cpu.unsqueeze(1), tf_ids_cpu.unsqueeze(0)] += attn_batch
-
-        # Update counts (each cell got one observation from this batch)
-        attn_count[tg_ids_cpu.unsqueeze(1), tf_ids_cpu.unsqueeze(0)] += 1.0
-
-    if attn_sum is None:
-        # No batches produced attention; return an empty tensor
-        return torch.empty(0, 0)
-
-    # Avoid division by zero
-    mask = attn_count > 0
-    mean_attn = torch.zeros_like(attn_sum)
-    mean_attn[mask] = attn_sum[mask] / attn_count[mask]
-
-    return mean_attn
-
+        # grab attn from shortcut layer each batch
+        if hasattr(model.shortcut_layer, "attn"):
+            attn_batch = model.shortcut_layer.attn.detach().cpu()
+            attn_accum = attn_batch if attn_accum is None else attn_accum + attn_batch
+            n += 1
+    return attn_accum / max(n, 1)
 
 def _mapping_to_ordered_list(name2id: dict):
     # convert {name: id} → [names] in id order

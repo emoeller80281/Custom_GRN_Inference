@@ -8,46 +8,6 @@ from pathlib import Path
 import logging
 from collections import OrderedDict
 
-class StandardizeTransform:
-    """
-    Frozen, name-aware standardization:
-      - TF/TG: per-feature z-score using train-only mean/std, keyed by names.
-      - ATAC: per-window z-score, stored per chromosome, keyed by index (after window subsample).
-    NOTE: std is clamped to avoid div-by-zero.
-    """
-    def __init__(self, tf_stats: dict, tg_stats: dict, atac_stats_per_chrom: dict):
-        # tf_stats, tg_stats: {"mean": {NAME: float, ...}, "std": {NAME: float, ...}}
-        # atac_stats_per_chrom: {chrom_id: {"mean": list[W], "std": list[W]}}
-        self.tf_mean = tf_stats["mean"]
-        self.tf_std  = tf_stats["std"]
-        self.tg_mean = tg_stats["mean"]
-        self.tg_std  = tg_stats["std"]
-        self.atac = atac_stats_per_chrom
-
-    @staticmethod
-    def _z(x: torch.Tensor, mean: torch.Tensor, std: torch.Tensor) -> torch.Tensor:
-        return (x - mean) / std.clamp_min(1e-6)
-
-    def __call__(self, *, atac_wins, tf_tensor, tg_tensor, chrom_id, tf_names, tg_names):
-        # Map TF/TG means/stds by names -> tensors’ order
-        tf_mean = torch.tensor([self.tf_mean[n] for n in tf_names], dtype=torch.float32, device=tf_tensor.device)
-        tf_std  = torch.tensor([self.tf_std[n]  for n in tf_names], dtype=torch.float32, device=tf_tensor.device)
-        tg_mean = torch.tensor([self.tg_mean[n] for n in tg_names], dtype=torch.float32, device=tg_tensor.device)
-        tg_std  = torch.tensor([self.tg_std[n]  for n in tg_names], dtype=torch.float32, device=tg_tensor.device)
-
-        tf_tensor = self._z(tf_tensor, tf_mean, tf_std)                    # [T_eval]
-        tg_tensor = self._z(tg_tensor, tg_mean, tg_std)                    # [G_eval]
-
-        # ATAC per chromosome: stats vector length W (matches after deterministic subsampling)
-        if chrom_id not in self.atac:
-            # If you prefer, raise instead; but falling back to identity is okay
-            return atac_wins, tf_tensor, tg_tensor
-        aw = self.atac[chrom_id]
-        w_mean = torch.tensor(aw["mean"], dtype=torch.float32, device=atac_wins.device).unsqueeze(-1)  # [W,1]
-        w_std  = torch.tensor(aw["std"],  dtype=torch.float32, device=atac_wins.device).unsqueeze(-1)  # [W,1]
-        atac_wins = self._z(atac_wins, w_mean, w_std)                      # [W,1]
-        return atac_wins, tf_tensor, tg_tensor
-
 
 class DistributedBatchSampler(torch.utils.data.Sampler):
     """
@@ -92,7 +52,6 @@ class MultiChromosomeDataset(Dataset):
         max_tgs: Optional[int] = None,
         max_windows_per_chrom: Optional[int] = None,
         subset_seed: int = 42,
-        transform = None
     ):
         super().__init__()
         self.data_dir = Path(data_dir)
@@ -106,7 +65,6 @@ class MultiChromosomeDataset(Dataset):
         self.max_tgs = max_tgs
         self.max_windows_per_chrom = max_windows_per_chrom
         self.subset_seed = subset_seed
-        self.transform = transform
         
         self._tf_name2id_full = self._load_vocab_dict(tf_vocab_path)
         self._tg_name2id_full = self._load_vocab_dict(tg_vocab_path)
@@ -266,8 +224,7 @@ class MultiChromosomeDataset(Dataset):
             tf_vocab_path=self.tf_vocab_path,
             tg_vocab_path=self.tg_vocab_path,
             fine_tuner=self.fine_tuner,
-            sample_name=self.sample_name,
-            transform=self.transform
+            sample_name=self.sample_name
         )
         return ds
 
@@ -433,7 +390,6 @@ class MultiomicTransformerDataset(Dataset):
         max_tgs: Optional[int] = None,
         max_windows: Optional[int] = None,
         subset_seed: int = 42,
-        transform=None
     ):
         self.data_dir = Path(data_dir)
         self.chrom_id = chrom_id
@@ -442,7 +398,6 @@ class MultiomicTransformerDataset(Dataset):
         self._max_tgs = max_tgs
         self._max_windows = max_windows
         self._subset_rng = np.random.RandomState(subset_seed)
-        self.transform = transform
 
         chrom_dir = self.data_dir / chrom_id
         if not chrom_dir.is_dir():
@@ -527,14 +482,14 @@ class MultiomicTransformerDataset(Dataset):
 
         # --- Pseudobulk mode ---
         else:
-            tf_path   = self.data_dir / "tf_tensor_all.pt"
+            tf_path   = chrom_dir / f"tf_tensor_all_{chrom_id}.pt"
             tg_path   = chrom_dir / f"tg_tensor_all_{chrom_id}.pt"
             atac_path = chrom_dir / f"atac_window_tensor_all_{chrom_id}.pt"
             window_map_path = chrom_dir / f"window_map_{chrom_id}.json"
             dist_bias_path  = chrom_dir / f"dist_bias_{chrom_id}.pt"
-            tf_ids_path     = self.data_dir / "tf_ids.pt"
+            tf_ids_path     = chrom_dir / f"tf_ids_{chrom_id}.pt"
             tg_ids_path     = chrom_dir / f"tg_ids_{chrom_id}.pt"
-            tf_names_json   = self.data_dir / "tf_names.json"
+            tf_names_json   = chrom_dir / f"tf_names_{chrom_id}.json"
             tg_names_json   = chrom_dir / f"tg_names_{chrom_id}.json"
             metacell_names_path = self.data_dir / "metacell_names.json"
             motif_mask_path = chrom_dir / f"motif_mask_{chrom_id}.pt"
@@ -627,17 +582,15 @@ class MultiomicTransformerDataset(Dataset):
         else:
             motif_mask = torch.zeros((self.tg_ids.numel(), self.tf_ids.numel()), dtype=torch.float32)
 
-        if self.transform is not None:
-            atac_wins, tf_tensor, tg_tensor = self.transform(
-                atac_wins=atac_wins,
-                tf_tensor=tf_tensor,
-                tg_tensor=tg_tensor,
-                chrom_id=self.chrom_id,
-                tf_names=self.tf_names,     # name order after subsample
-                tg_names=self.tg_names,     # name order after subsample
-            )
-
-        return atac_wins, tf_tensor, tg_tensor, dist_bias, self.tf_ids, self.tg_ids, motif_mask
+        return (
+            atac_wins,
+            tf_tensor,
+            tg_tensor,
+            dist_bias,
+            self.tf_ids,
+            self.tg_ids,
+            motif_mask,
+        )
         
     def _apply_subsampling(self):
         """
