@@ -19,7 +19,7 @@ class SimpleScaler:
     mean: torch.Tensor  # shape [D] on the correct device
     std:  torch.Tensor  # shape [D] on the correct device
 
-    def transform(self, x: torch.Tensor, ids: torch.Tensor | None = None) -> torch.Tensor:
+    def transform(self, x: torch.Tensor, ids: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
         If ids is provided (shape [D_batch]), we slice global stats to match x's last dim.
         x can be [B, D_batch] (TF/TG) or any tensor with last-dim == len(ids).
@@ -35,13 +35,32 @@ class SimpleScaler:
 
         # broadcast over batch/time dims (subtract along last axis)
         return (x - mu) / sig
+    
+    def inverse_transform(self, x: torch.Tensor, ids: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        Undo z-scoring that was applied by `transform`.
+        Works with either global stats or a sliced subset via `ids`.
+        - x:   [..., D_batch]
+        - ids: [D_batch] (global ids used during transform), or None for full-dim inverse
+        """
+        eps = 1e-6
+        if ids is not None:
+            mu  = self.mean.index_select(0, ids)
+            sig = self.std.index_select(0, ids).clamp_min(eps)
+        else:
+            mu, sig = self.mean, self.std.clamp_min(eps)
+
+        # ensure same device as x, rely on broadcasting over leading dims
+        mu  = mu.to(x.device)
+        sig = sig.to(x.device)
+        return x * sig + mu
 
 @torch.no_grad()
 def fit_simple_scalers(
     train_loader,
     T_expected: int,
     G_expected: int,
-    device_for_reduce: str | torch.device = "cuda",
+    device_for_reduce: Union[str, torch.device] = "cuda",
     use_ddp_reduce: bool = False,
 ):
     """
@@ -114,6 +133,110 @@ def fit_simple_scalers(
 
     return SimpleScaler(tf_mean, tf_std), SimpleScaler(tg_mean, tg_std)
 
+class IndexedChromBucketBatchSampler(Sampler):
+    """
+    Batches over a provided {chrom: [indices]} mapping.
+
+    Guarantees:
+      - Only uses the given indices (so you can pre-split train/val/test).
+      - Each batch contains indices from a single chromosome (shape-safe).
+      - Optionally shuffles chromosomes and indices per epoch.
+    """
+    def __init__(self, chrom_to_indices, batch_size, shuffle=True, seed=0):
+        self.chrom_to_indices = {
+            chrom: list(idxs)
+            for chrom, idxs in chrom_to_indices.items()
+            if len(idxs) > 0
+        }
+        self.batch_size = int(batch_size)
+        self.shuffle = bool(shuffle)
+        self.seed = int(seed)
+        self.epoch = 0
+
+    def set_epoch(self, epoch: int):
+        self.epoch = int(epoch)
+
+    def __iter__(self):
+        import numpy as np
+
+        rng = np.random.RandomState(self.seed + self.epoch)
+
+        chroms = list(self.chrom_to_indices.keys())
+        if self.shuffle:
+            rng.shuffle(chroms)
+
+        for chrom in chroms:
+            idxs = self.chrom_to_indices[chrom][:]
+            if self.shuffle:
+                rng.shuffle(idxs)
+            n = len(idxs)
+            for s in range(0, n, self.batch_size):
+                batch = idxs[s:s + self.batch_size]
+                if batch:
+                    yield batch
+
+    def __len__(self):
+        total = 0
+        for _, idxs in self.chrom_to_indices.items():
+            n = len(idxs)
+            total += (n + self.batch_size - 1) // self.batch_size
+        return total
+
+
+class ChromSubsetBatchSampler(Sampler):
+    """
+    Batch sampler that:
+        - Operates on a shared MultiChromosomeDataset.
+        - Restricts indices to a given subset of chromosomes.
+        - Keeps batches chromosome-homogeneous (no shape mismatches).
+    """
+    def __init__(self, ds, chrom_subset, batch_size, shuffle=True, seed=0):
+        self.ds = ds
+        self.chrom_subset = set(chrom_subset)
+        self.batch_size = int(batch_size)
+        self.shuffle = bool(shuffle)
+        self.seed = int(seed)
+        self.epoch = 0
+        self._build_ranges()
+
+    def _build_ranges(self):
+        self._chrom_ranges = []
+        # dataset._offsets[i] is the start index for ds.chrom_ids[i]
+        for i, chrom in enumerate(self.ds.chrom_ids):
+            if chrom not in self.chrom_subset:
+                continue
+            start = self.ds._offsets[i]
+            end = self.ds._offsets[i+1] if i + 1 < len(self.ds._offsets) else len(self.ds)
+            if end > start:
+                idxs = list(range(start, end))
+                self._chrom_ranges.append((chrom, idxs))
+
+    def set_epoch(self, epoch: int):
+        self.epoch = int(epoch)
+
+    def __iter__(self):
+        if not self._chrom_ranges:
+            return
+        rng = np.random.RandomState(self.seed + self.epoch)
+        chrom_blocks = self._chrom_ranges[:]
+        if self.shuffle:
+            rng.shuffle(chrom_blocks)
+        for _, idxs in chrom_blocks:
+            idxs = idxs[:]  # copy
+            if self.shuffle:
+                rng.shuffle(idxs)
+            for s in range(0, len(idxs), self.batch_size):
+                batch = idxs[s:s + self.batch_size]
+                if batch:  # non-empty
+                    yield batch
+
+    def __len__(self):
+        count = 0
+        for _, idxs in self._chrom_ranges:
+            if not idxs:
+                continue
+            count += (len(idxs) + self.batch_size - 1) // self.batch_size
+        return count
 
 class DistributedBatchSampler(torch.utils.data.Sampler):
     """

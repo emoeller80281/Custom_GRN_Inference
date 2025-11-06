@@ -5,7 +5,7 @@
 #SBATCH --time=12:00:00
 #SBATCH -p dense
 #SBATCH -N 1
-#SBATCH --gres=gpu:a100:4
+#SBATCH --gres=gpu:v100:4
 #SBATCH --ntasks-per-node=4
 #SBATCH -c 8
 #SBATCH --mem=128G
@@ -13,6 +13,8 @@
 set -euo pipefail
 
 cd /gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER
+
+source .venv/bin/activate
 
 # --- Memory + math ---
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,max_split_size_mb:32

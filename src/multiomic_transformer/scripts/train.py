@@ -4,7 +4,12 @@ import logging
 import os
 import sys
 import warnings
+from pathlib import Path
 
+import sys
+sys.path.append(Path(__file__).resolve().parent.parent.parent)
+
+import random
 import joblib
 import matplotlib.pyplot as plt
 import numpy as np
@@ -18,14 +23,14 @@ from scipy.stats import pearsonr, spearmanr
 from torch.amp import GradScaler, autocast
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, random_split, Sampler
 from torch.utils.data.distributed import DistributedSampler
 
 from config.settings_hpc import *
 from multiomic_transformer.datasets.dataset import (
     MultiomicTransformerDataset, MultiChromosomeDataset,
-    ChromBucketBatchSampler, DistributedBatchSampler, fit_simple_scalers,
-    SimpleScaler
+    ChromSubsetBatchSampler, DistributedBatchSampler, fit_simple_scalers,
+    SimpleScaler, IndexedChromBucketBatchSampler
     )
 from multiomic_transformer.models.model import MultiomicTransformer
 from multiomic_transformer.utils.files import unique_path
@@ -126,7 +131,20 @@ class Trainer:
             tf_tensor = self.tf_scaler.transform(tf_tensor, tf_ids)
         if getattr(self, "tg_scaler", None) is not None:
             targets  = self.tg_scaler.transform(targets, tg_ids)
+            
+        tf_tensor  = torch.nan_to_num(tf_tensor,  nan=0.0, posinf=1e6, neginf=-1e6)
+        atac_wins  = torch.nan_to_num(atac_wins,  nan=0.0, posinf=1e6, neginf=-1e6)
+        bias       = torch.nan_to_num(bias,       nan=0.0, posinf=5.0, neginf=-5.0)
+        motif_mask = torch.nan_to_num(motif_mask, nan=0.0)
 
+        for name, t in {
+            "atac_wins": atac_wins, "tf_tensor": tf_tensor, "targets": targets,
+            "bias": bias, "motif_mask": motif_mask
+        }.items():
+            if not torch.isfinite(t).all():
+                bad = (~torch.isfinite(t)).nonzero(as_tuple=False)[:5]
+                raise RuntimeError(f"{name} has non-finite values; examples idx={bad}")
+        
         with autocast(device_type="cuda"):
             mask_arg = motif_mask if USE_MOTIF_MASK else None
             preds, _ = self.model(
@@ -191,69 +209,117 @@ class Trainer:
         # For logging: return components
         return total_loss.detach(), mse_loss.detach(), mean_r2.detach(), r2_penalty.detach()
 
-
-
     def _validate(self):
         self.model.eval()
-        total_loss, n_batches = 0.0, 0
 
-        # DDP-safe accumulators (live on GPU)
-        sse     = torch.zeros(1, device=self.gpu_id)  # Σ (y-ŷ)^2
-        sum_y   = torch.zeros(1, device=self.gpu_id)  # Σ y
-        sum_y2  = torch.zeros(1, device=self.gpu_id)  # Σ y^2
-        n_elems = torch.zeros(1, device=self.gpu_id)  # N
+        total_loss_scaled = 0.0
+        total_loss_unscaled = 0.0
+        n_batches = 0
+
+        # global accumulators (scaled space)
+        sse_s   = torch.zeros(1, device=self.gpu_id)
+        sumy_s  = torch.zeros(1, device=self.gpu_id)
+        sumy2_s = torch.zeros(1, device=self.gpu_id)
+        n_s     = torch.zeros(1, device=self.gpu_id)
+
+        # global accumulators (UNSCALED space)
+        sse_u   = torch.zeros(1, device=self.gpu_id)
+        sumy_u  = torch.zeros(1, device=self.gpu_id)
+        sumy2_u = torch.zeros(1, device=self.gpu_id)
+        n_u     = torch.zeros(1, device=self.gpu_id)
 
         with torch.no_grad():
-            for atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids, motif_mask in self.val_data:
-                atac_wins = atac_wins.to(self.gpu_id)
-                tf_tensor = tf_tensor.to(self.gpu_id)
-                targets   = targets.to(self.gpu_id)
-                bias      = bias.to(self.gpu_id)
-                tf_ids    = tf_ids.to(self.gpu_id)
-                tg_ids    = tg_ids.to(self.gpu_id)
-                motif_mask= motif_mask.to(self.gpu_id)
+            for batch in self.val_data:
+                (atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids, motif_mask) = batch
+
+                atac_wins  = atac_wins.to(self.gpu_id, non_blocking=True)
+                tf_tensor  = tf_tensor.to(self.gpu_id, non_blocking=True)
+                targets    = targets.to(self.gpu_id, non_blocking=True)
+                bias       = bias.to(self.gpu_id, non_blocking=True)
+                tf_ids     = tf_ids.to(self.gpu_id, non_blocking=True)
+                tg_ids     = tg_ids.to(self.gpu_id, non_blocking=True)
+                motif_mask = motif_mask.to(self.gpu_id, non_blocking=True)
+
+                # scale inputs/targets as in training (scaled space)
+                if getattr(self, "tf_scaler", None) is not None:
+                    tf_tensor = self.tf_scaler.transform(tf_tensor, tf_ids)
+                if getattr(self, "tg_scaler", None) is not None:
+                    targets_s = self.tg_scaler.transform(targets, tg_ids)
+                else:
+                    targets_s = targets
 
                 mask_arg = motif_mask if USE_MOTIF_MASK else None
-                
-                if hasattr(self, "tf_scaler") and self.tf_scaler is not None:
-                    tf_tensor = self.tf_scaler.transform(tf_tensor, tf_ids)
-                if hasattr(self, "tg_scaler") and self.tg_scaler is not None:
-                    targets  = self.tg_scaler.transform(targets, tg_ids)
-                
+
                 preds, _ = self.model(
-                    atac_wins, tf_tensor, tf_ids=tf_ids, tg_ids=tg_ids, bias=bias, motif_mask=mask_arg
+                    atac_wins, tf_tensor,
+                    tf_ids=tf_ids, tg_ids=tg_ids,
+                    bias=bias, motif_mask=mask_arg,
                 )
 
-                # Val loss as MSE
-                preds32   = torch.nan_to_num(preds.float(),   nan=0.0, posinf=1e6, neginf=-1e6)
-                targets32 = torch.nan_to_num(targets.float(), nan=0.0, posinf=1e6, neginf=-1e6)
+                # numeric safety before metrics
+                preds_s   = torch.nan_to_num(preds.float(),   nan=0.0, posinf=1e6, neginf=-1e6)
+                targets_s = torch.nan_to_num(targets_s.float(), nan=0.0, posinf=1e6, neginf=-1e6)
 
-                loss = F.mse_loss(preds32, targets32)
-                total_loss += float(loss.item()); n_batches += 1
+                # --- MSE in scaled space (status quo) ---
+                loss_s = F.mse_loss(preds_s, targets_s)
+                total_loss_scaled += float(loss_s.item())
+                n_batches += 1
 
-                p = preds32.reshape(-1)
-                y = targets32.reshape(-1)
-                sse     += torch.sum((y - p) ** 2)
-                sum_y   += torch.sum(y)
-                sum_y2  += torch.sum(y ** 2)
-                n_elems += torch.tensor([y.numel()], device=self.gpu_id, dtype=torch.float32)
+                # accumulate for scaled R²
+                y_s = targets_s.reshape(-1)
+                p_s = preds_s.reshape(-1)
+                sse_s   += torch.sum((y_s - p_s) ** 2)
+                sumy_s  += torch.sum(y_s)
+                sumy2_s += torch.sum(y_s ** 2)
+                n_s     += y_s.numel()
+            
 
-        # Guard against empty val set
-        if n_batches == 0:
-            return 0.0, 0.0, 0.0  # avg_val_loss, R2, (optional) placeholder
+                # ---------- Unscaled metrics ----------
+                if getattr(self, "tg_scaler", None) is not None:
+                    targets_u = self.tg_scaler.inverse_transform(targets_s, tg_ids)
+                    preds_u   = self.tg_scaler.inverse_transform(preds_s,   tg_ids)
+                else:
+                    targets_u, preds_u = targets_s, preds_s
 
-        # All-reduce the scalars across ranks
-        for t in (sse, sum_y, sum_y2, n_elems):
-            dist.all_reduce(t, op=dist.ReduceOp.SUM)
+                targets_u = torch.nan_to_num(targets_u.float(), nan=0.0, posinf=1e6, neginf=-1e6)
+                preds_u   = torch.nan_to_num(preds_u.float(),   nan=0.0, posinf=1e6, neginf=-1e6)
 
-        # Compute global R^2
+                loss_u = F.mse_loss(preds_u, targets_u)
+                total_loss_unscaled += float(loss_u.item())
+                
+                y_u = targets_u.reshape(-1)
+                p_u = preds_u.reshape(-1)
+                sse_u   += torch.sum((y_u - p_u) ** 2)
+                sumy_u  += torch.sum(y_u)
+                sumy2_u += torch.sum(y_u ** 2)
+                n_u     += y_u.numel()
+
+        if n_batches == 0 or n_s.item() == 0:
+            return 0.0, 0.0, 0.0, 0.0
+
+        # DDP all-reduce
+        if dist.is_available() and dist.is_initialized():
+            for t in (sse_s, sumy_s, sumy2_s, n_s, sse_u, sumy_u, sumy2_u, n_u):
+                dist.all_reduce(t, op=dist.ReduceOp.SUM)
+
         eps = 1e-12
-        ybar = sum_y / torch.clamp(n_elems, min=1.0)
-        sst  = sum_y2 - n_elems * (ybar ** 2)
-        r2   = torch.where(sst <= eps, torch.zeros_like(sst), 1.0 - sse / torch.clamp(sst, min=eps))
 
-        avg_loss = total_loss / max(1, n_batches)
-        return float(avg_loss), float(r2.item())
+        # scaled R²
+        ybar_s = sumy_s / torch.clamp(n_s, min=1.0)
+        sst_s  = sumy2_s - n_s * (ybar_s ** 2)
+        r2_s   = torch.where(sst_s <= eps, torch.zeros_like(sst_s), 1.0 - sse_s / torch.clamp(sst_s, min=eps))
+
+        # unscaled R²
+        ybar_u = sumy_u / torch.clamp(n_u, min=1.0)
+        sst_u  = sumy2_u - n_u * (ybar_u ** 2)
+        r2_u   = torch.where(sst_u <= eps, torch.zeros_like(sst_u), 1.0 - sse_u / torch.clamp(sst_u, min=eps))
+
+        avg_loss_scaled = total_loss_scaled / max(1, n_batches)
+        avg_loss_unscaled = total_loss_unscaled / max(1, n_batches)
+
+
+        # Return both: (scaled MSE, scaled R2, unscaled R2)
+        return float(avg_loss_scaled), float(avg_loss_unscaled), float(r2_s.item()), float(r2_u.item())
 
     
     def _run_epoch(self, epoch):
@@ -282,18 +348,51 @@ class Trainer:
         avg_train_loss = total_loss / max(1, n_batches)
         avg_train_mse = total_mse / max(1, n_batches)
 
-        avg_val_loss, r2 = self._validate()
+        avg_val_loss_scaled, avg_val_loss_unscaled, r2_s, r2_u = self._validate()
+        self.scheduler.step(avg_val_loss_unscaled)
 
-        self.scheduler.step(avg_val_loss)
-
-        return avg_train_loss, avg_train_mse, avg_val_loss, r2
+        return avg_train_loss, avg_train_mse, avg_val_loss_unscaled, r2_s, r2_u
 
 
-    def _save_checkpoint(self, epoch, path):
-        ckp = self.model.module.state_dict()
-        torch.save(ckp, os.path.join(path, "checkpoint.pt"))
-        if self.gpu_id == 0:
-            logging.info(f"\tTraining checkpoint saved")
+    def _save_checkpoint(self, epoch: int, path: str):
+        # Only rank 0 writes to disk
+        if self.gpu_id != 0:
+            return
+
+        # Handle DDP vs non-DDP models
+        if hasattr(self.model, "module"):
+            model_state = self.model.module.state_dict()
+        else:
+            model_state = self.model.state_dict()
+
+        ckpt = {
+            "epoch": epoch,
+            "model_state_dict": model_state,
+        }
+
+        # Optional: save optimizer/scheduler too
+        if hasattr(self, "optimizer") and self.optimizer is not None:
+            ckpt["optimizer_state_dict"] = self.optimizer.state_dict()
+        if hasattr(self, "scheduler") and self.scheduler is not None:
+            ckpt["scheduler_state_dict"] = self.scheduler.state_dict()
+
+        # ---- Save scalers if present ----
+        # Ensure they’re on CPU so checkpoint is portable
+        if hasattr(self, "tf_scaler") and self.tf_scaler is not None:
+            ckpt["tf_scaler_mean"] = self.tf_scaler.mean.detach().cpu()
+            ckpt["tf_scaler_std"]  = self.tf_scaler.std.detach().cpu()
+
+        if hasattr(self, "tg_scaler") and self.tg_scaler is not None:
+            ckpt["tg_scaler_mean"] = self.tg_scaler.mean.detach().cpu()
+            ckpt["tg_scaler_std"]  = self.tg_scaler.std.detach().cpu()
+            
+
+
+        os.makedirs(path, exist_ok=True)
+        out_path = os.path.join(path, "checkpoint.pt")
+        torch.save(ckpt, out_path)
+        logging.info(f"\tTraining checkpoint saved to {out_path}")
+
         
     def train(self, max_epochs: int, path: str):
         best_val_loss = float("inf")
@@ -302,7 +401,7 @@ class Trainer:
         history = []  # store per-epoch logs
 
         for epoch in range(max_epochs):
-            train_loss, train_mse, val_loss, r2 = self._run_epoch(epoch)
+            train_loss, train_mse, val_loss, r2_s, r2_u = self._run_epoch(epoch)
 
             if self.gpu_id == 0:
                 lr = self.optimizer.param_groups[0]['lr']
@@ -310,7 +409,8 @@ class Trainer:
                     f"Epoch {epoch+1} | Train Total Loss: {train_loss:.4f} | "
                     f"Train MSE: {train_mse:.4f} | "
                     f"Val MSE: {val_loss:.4f} | "
-                    f"R2: {r2:.3f} | "
+                    f"R2 (Unscaled): {r2_u:.3f} | "
+                    f"R2 (Scaled): {r2_s:.3f} | "
                     f"LR: {lr:.2e}"
                 )
 
@@ -319,7 +419,7 @@ class Trainer:
                     "Train Total Loss": train_loss,
                     "Train MSE": train_mse,
                     "Val MSE": val_loss,
-                    "R2": r2,
+                    "R2": r2_s,
                     "LR": lr,
                 })
                                 
@@ -335,10 +435,10 @@ class Trainer:
 
             # --- Early stopping check (only rank 0 sets flag) ---
             if self.gpu_id == 0:
-                if (val_loss < best_val_loss - self.min_delta) or (r2 > best_r2 + self.min_delta):
-                    # If either val_loss improved OR r2 improved, reset patience
+                if (val_loss < best_val_loss - self.min_delta) or (r2_s > best_r2 + self.min_delta):
+                    # If either val_loss improved OR r2_s improved, reset patience
                     best_val_loss = val_loss
-                    best_r2 = max(best_r2, r2)
+                    best_r2 = max(best_r2, r2_s)
                     patience_counter = 0
                 else:
                     # No improvement
@@ -422,81 +522,115 @@ def prepare_dataloader(dataset, batch_size, world_size=1, rank=0,
                        num_workers=4, pin_memory=True, seed=42, drop_last=True):
     """
     Build train/val/test loaders.
-    - Single-chrom: same as before (random_split + DistributedSampler).
-    - Multi-chrom : split by chromosomes; each split uses ChromBucketBatchSampler
-                    (optionally sharded across ranks via DistributedBatchSampler).
+
+    For MultiChromosomeDataset:
+      - Use ONE shared dataset instance.
+      - For EACH chromosome:
+          * split its indices into train/val/test subsets
+      - For EACH split:
+          * use an IndexedChromBucketBatchSampler over its per-chrom index subsets
+          * -> every split sees all chromosomes (by indices),
+             but each batch is still single-chromosome (shape-safe).
+
+    For other datasets:
+      - Fallback to legacy random_split + DistributedSampler.
     """
     import random
-    g = torch.Generator(); g.manual_seed(seed)
+    g = torch.Generator()
+    g.manual_seed(seed)
 
     # ---------- Multi-chromosome path ----------
     if isinstance(dataset, MultiChromosomeDataset):
-        # deterministic split of chromosome IDs
-        def _split_chroms(xs, seed=42):
-            xs = xs[:]
-            rnd = random.Random(seed); rnd.shuffle(xs)
-            n = len(xs)
-            if n == 0: return [], [], []
-            if n == 1: return xs, [], []
-            if n == 2: return [xs[0]], [xs[1]], []
-            # n >= 3: ~70/15/15 with largest-remainder rounding; ensure val/test >= 1
-            ratios = (0.70, 0.15, 0.15)
-            targets = [r * n for r in ratios]; base = [int(t) for t in targets]
-            rem = n - sum(base)
-            remainders = [t - b for t, b in zip(targets, base)]
-            for i in sorted(range(3), key=lambda i: remainders[i], reverse=True)[:rem]:
-                base[i] += 1
-            n_train, n_val, n_test = base
-            if n_val == 0 and n_train > 1:  n_val,  n_train = 1, n_train - 1
-            if n_test == 0 and n_train > 1: n_test, n_train = 1, n_train - 1
-            train = xs[:n_train]; val = xs[n_train:n_train+n_val]; test = xs[n_train+n_val:]
-            return train, val, test
+        # 1) Build per-chrom index ranges from dataset._offsets
+        chrom_to_indices = {}
+        for i, chrom in enumerate(dataset.chrom_ids):
+            start = dataset._offsets[i]
+            end = dataset._offsets[i + 1] if i + 1 < len(dataset._offsets) else len(dataset)
+            if end > start:
+                chrom_to_indices[chrom] = list(range(start, end))
 
-        train_chrs, val_chrs, test_chrs = _split_chroms(dataset.chrom_ids, seed=seed)
+        # 2) For each chrom, split its indices into train/val/test
+        train_map = {}
+        val_map = {}
+        test_map = {}
 
-        # re-instantiate per-split datasets with the SAME sub-vocab config
-        ds_args = dict(
-            data_dir=dataset.data_dir,
-            tf_vocab_path=dataset.tf_vocab_path,
-            tg_vocab_path=dataset.tg_vocab_path,
-            fine_tuner=dataset.fine_tuner,
-            sample_name=dataset.sample_name,
-            max_cached=dataset.max_cached,
-            max_tfs=dataset.max_tfs,
-            max_tgs=dataset.max_tgs,
-            max_windows_per_chrom=dataset.max_windows_per_chrom,
-            subset_seed=dataset.subset_seed,
-            max_cells=dataset.max_cells
+        for chrom, idxs in chrom_to_indices.items():
+            n = len(idxs)
+            if n == 0:
+                continue
+
+            # deterministic per-chrom shuffle
+            rnd = random.Random(seed + hash(chrom) % 10_000_000)
+            idxs_shuf = idxs[:]
+            rnd.shuffle(idxs_shuf)
+
+            n_train = int(0.70 * n)
+            n_val   = int(0.15 * n)
+            n_test  = n - n_train - n_val
+
+            # ensure we don't drop everything for tiny chromosomes
+            if n_val == 0 and n_train > 1:
+                n_val += 1
+                n_train -= 1
+            if n_test == 0 and n_train > 1:
+                n_test += 1
+                n_train -= 1
+
+            train_idx = idxs_shuf[:n_train]
+            val_idx   = idxs_shuf[n_train:n_train + n_val]
+            test_idx  = idxs_shuf[n_train + n_val:]
+
+            if train_idx:
+                train_map[chrom] = train_idx
+            if val_idx:
+                val_map[chrom] = val_idx
+            if test_idx:
+                test_map[chrom] = test_idx
+
+        # 3) Build base batch samplers (chrom-homogeneous, but all chroms per split)
+        base_train_bs = IndexedChromBucketBatchSampler(
+            train_map, batch_size=batch_size, shuffle=True, seed=seed
         )
-        ds_train = MultiChromosomeDataset(chrom_ids=train_chrs, **ds_args)
-        ds_val   = MultiChromosomeDataset(chrom_ids=val_chrs,   **ds_args)
-        ds_test  = MultiChromosomeDataset(chrom_ids=test_chrs,  **ds_args)
+        base_val_bs = IndexedChromBucketBatchSampler(
+            val_map, batch_size=batch_size, shuffle=False, seed=seed
+        )
+        base_test_bs = IndexedChromBucketBatchSampler(
+            test_map, batch_size=batch_size, shuffle=False, seed=seed
+        )
 
-        # bucket batches by chromosome (keeps shapes consistent within a batch)
-        base_train_bs = ChromBucketBatchSampler(ds_train, batch_size=batch_size, shuffle=True,  seed=seed)
-        base_val_bs   = ChromBucketBatchSampler(ds_val,   batch_size=batch_size, shuffle=False, seed=seed)
-        base_test_bs  = ChromBucketBatchSampler(ds_test,  batch_size=batch_size, shuffle=False, seed=seed)
-
-        # shard whole batches across ranks in DDP
+        # 4) Optionally shard batches across ranks for DDP
         if world_size > 1:
-            train_bs = DistributedBatchSampler(base_train_bs, world_size, rank, drop_last=True)
+            train_bs = DistributedBatchSampler(base_train_bs, world_size, rank, drop_last=drop_last)
             val_bs   = DistributedBatchSampler(base_val_bs,   world_size, rank, drop_last=False)
             test_bs  = DistributedBatchSampler(base_test_bs,  world_size, rank, drop_last=False)
         else:
             train_bs, val_bs, test_bs = base_train_bs, base_val_bs, base_test_bs
 
-        train_loader = DataLoader(ds_train, batch_sampler=train_bs,
-                                  collate_fn=MultiChromosomeDataset.collate_fn,
-                                  num_workers=num_workers, pin_memory=pin_memory)
-        val_loader   = DataLoader(ds_val,   batch_sampler=val_bs,
-                                  collate_fn=MultiChromosomeDataset.collate_fn,
-                                  num_workers=num_workers, pin_memory=pin_memory)
-        test_loader  = DataLoader(ds_test,  batch_sampler=test_bs,
-                                  collate_fn=MultiChromosomeDataset.collate_fn,
-                                  num_workers=num_workers, pin_memory=pin_memory)
+        # 5) Single shared dataset; samplers decide which indices belong to which split
+        train_loader = DataLoader(
+            dataset,
+            batch_sampler=train_bs,
+            collate_fn=MultiChromosomeDataset.collate_fn,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+        )
+        val_loader = DataLoader(
+            dataset,
+            batch_sampler=val_bs,
+            collate_fn=MultiChromosomeDataset.collate_fn,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+        )
+        test_loader = DataLoader(
+            dataset,
+            batch_sampler=test_bs,
+            collate_fn=MultiChromosomeDataset.collate_fn,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+        )
         return train_loader, val_loader, test_loader
 
-    # ---------- Single-chromosome path (unchanged) ----------
+    # ---------- Single-chromosome / legacy path (unchanged) ----------
     n_total = len(dataset)
     n_train = int(n_total * 0.70)
     n_val   = int(n_total * 0.15)
@@ -510,19 +644,37 @@ def prepare_dataloader(dataset, batch_size, world_size=1, rank=0,
         val_sampler   = DistributedSampler(val_set,   num_replicas=world_size, rank=rank, drop_last=False)
         test_sampler  = DistributedSampler(test_set,  num_replicas=world_size, rank=rank, drop_last=False)
 
-    train_loader = DataLoader(train_set, batch_size=batch_size,
-                              shuffle=(train_sampler is None), sampler=train_sampler,
-                              collate_fn=MultiomicTransformerDataset.collate_fn,
-                              num_workers=num_workers, pin_memory=pin_memory, drop_last=drop_last)
-    val_loader   = DataLoader(val_set, batch_size=batch_size, shuffle=False, sampler=val_sampler,
-                              collate_fn=MultiomicTransformerDataset.collate_fn,
-                              num_workers=num_workers, pin_memory=pin_memory, drop_last=False)
-    test_loader  = DataLoader(test_set, batch_size=batch_size, shuffle=False, sampler=test_sampler,
-                              collate_fn=MultiomicTransformerDataset.collate_fn,
-                              num_workers=num_workers, pin_memory=pin_memory, drop_last=False)
+    train_loader = DataLoader(
+        train_set,
+        batch_size=batch_size,
+        shuffle=(train_sampler is None),
+        sampler=train_sampler,
+        collate_fn=MultiomicTransformerDataset.collate_fn,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        drop_last=drop_last,
+    )
+    val_loader = DataLoader(
+        val_set,
+        batch_size=batch_size,
+        shuffle=False,
+        sampler=val_sampler,
+        collate_fn=MultiomicTransformerDataset.collate_fn,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        drop_last=False,
+    )
+    test_loader = DataLoader(
+        test_set,
+        batch_size=batch_size,
+        shuffle=False,
+        sampler=test_sampler,
+        collate_fn=MultiomicTransformerDataset.collate_fn,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        drop_last=False,
+    )
     return train_loader, val_loader, test_loader
-
-
 
 def write_run_parameters(dataset, out_dir):
 
@@ -738,12 +890,15 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
                 vocab_dir=training_output_dir,
             )
             # Save model checkpoint
-            torch.save(model_for_save.state_dict(),
-                    os.path.join(training_output_dir, "trained_model.pt"))
+            torch.save({
+                "model_state_dict": model.state_dict(),
+                "tf_scaler_mean": tf_scaler.mean,
+                "tf_scaler_std": tf_scaler.std,
+                "tg_scaler_mean": tg_scaler.mean,
+                "tg_scaler_std": tg_scaler.std,
+            }, os.path.join(training_output_dir, "trained_model.pt"))
+                    
             logging.info("Saved final trained model")
-            
-            torch.save(model_for_save.state_dict(),
-                    os.path.join(training_output_dir, "trained_model.pt"))
         
             ewc_bundle_path = training_output_dir / "ewc_bundle.pth"
             fisher = ewc_utils.compute_fisher_diag(model_for_save, train_loader,
@@ -799,13 +954,13 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
             )
             train_val_loss_plt.savefig(os.path.join(training_output_dir, "train_val_loss.png"), dpi=300)
             
-            per_gene_corr_scatter_plt = plotting.plot_per_gene_correlation_scatterplot(
-                model=model,
-                dataloader=test_loader,
-                use_mask=USE_MOTIF_MASK,
-                gpu_id=0
-            )
-            per_gene_corr_scatter_plt.savefig(os.path.join(training_output_dir, "per_gene_corr_scatter.png"), dpi=300)
+            # per_gene_corr_scatter_plt = plotting.plot_per_gene_correlation_scatterplot(
+            #     model=model,
+            #     dataloader=test_loader,
+            #     use_mask=USE_MOTIF_MASK,
+            #     gpu_id=0
+            # )
+            # per_gene_corr_scatter_plt.savefig(os.path.join(training_output_dir, "per_gene_corr_scatter.png"), dpi=300)
                 
         if rank == 0:
             logging.info("\nIterations complete")

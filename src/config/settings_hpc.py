@@ -12,8 +12,8 @@ chrom_list = chr_nums #+ ["chrX", "chrY"]
 ORGANISM_CODE = "mm10"
 DATASET_NAME = "mESC_no_scale_linear"
 CHROM_ID_LIST = chrom_list
-CHROM_ID = "chr1"
-CHROM_IDS = chr_nums
+CHROM_ID = "chr19"
+CHROM_IDS = ["chr18", "chr19"] # chr_nums
 # , "E7.75_rep1", "E8.0_rep2", "E8.5_rep2", "E8.75_rep2", "E7.5_rep2", "E8.0_rep1", "E8.5_rep1"
 SAMPLE_NAMES = ["E7.5_rep1", "E7.5_rep2", "E7.75_rep1", "E8.0_rep2", "E8.5_rep2", "E8.75_rep2", "E8.0_rep1", "E8.5_rep1"]
 FINE_TUNING_DATASETS = ["E7.5_rep1"]
@@ -55,10 +55,10 @@ FILTER_TO_NEAREST_GENE = False           # Associate peaks to the nearest gene
 PROMOTER_BP = 10_000
 
 # ----- MODEL TRAINING PARAMETERS -----
-TOTAL_EPOCHS=500
+TOTAL_EPOCHS=250
 BATCH_SIZE=32
-PATIENCE=35
-CORR_LOSS_WEIGHT=0.1
+PATIENCE=25
+CORR_LOSS_WEIGHT=0.1            # Testing with no R2 metric
 
 D_MODEL = 256
 NUM_HEADS = 4
@@ -67,10 +67,10 @@ D_FF = D_MODEL * 4
 DROPOUT = 0.2
 
 # Training scheduler settings
-MODE="max"                      # min = improvement means a lower number; max = improvement means a higher number
+MODE="min"                      # min = improvement means a lower number; max = improvement means a higher number
 INITIAL_LEARNING_RATE = 1e-3    # Initial learning rate for the model
-SCHEDULER_FACTOR=0.75            # How much to reduce the learning rate on a plateau
-SCHEDULER_PATIENCE=15           # How long to wait with no improvement without dropping the learning rate
+SCHEDULER_FACTOR=0.5            # How much to reduce the learning rate on a plateau
+SCHEDULER_PATIENCE=5           # How long to wait with no improvement without dropping the learning rate
 THRESHOLD=1e-3                  # Defines how much better the 
 THRESHOLD_MODE="rel"            # rel helps filter noise for datasets with different loss scales. new best = previous best * (1 - threshold) difference
 COOLDOWN=4                      # How many epochs to pause after a drop before testing for improvement, lets the training stabilize a bit
@@ -81,18 +81,18 @@ USE_DISTANCE_BIAS = True
 USE_SHORTCUT = True
 USE_MOTIF_MASK = False
 SHORTCUT_L1 = 0
-SHORTCUT_L2 = 0
+SHORTCUT_L2 = 0 #1e-3
 SHORTCUT_TOPK = None
-SHORTCUT_DROPOUT = 0
+SHORTCUT_DROPOUT = 0 #0.1
 
 # peak-TG distance bias
 ATTN_BIAS_SCALE = 1.0 
 
 # Sampling (optional)
-SUBSAMPLE_MAX_TFS = 150 # 150
-SUBSAMPLE_MAX_TGS = 1000 # 2000
-SUBSAMPLE_MAX_WINDOWS_PER_CHROM = 2000 # 8000
-SUBSAMPLE_MAX_CELLS=5000
+SUBSAMPLE_MAX_TFS = None # 150
+SUBSAMPLE_MAX_TGS = None # 2000
+SUBSAMPLE_MAX_WINDOWS_PER_CHROM = None # 8000
+SUBSAMPLE_MAX_CELLS=1000
 SUBSAMPLE_SEED = 42
 
 # ----- FINE TUNING ON SINGLE-CELL DATA -----
