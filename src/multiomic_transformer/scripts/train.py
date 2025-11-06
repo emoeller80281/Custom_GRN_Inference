@@ -419,7 +419,8 @@ class Trainer:
                     "Train Total Loss": train_loss,
                     "Train MSE": train_mse,
                     "Val MSE": val_loss,
-                    "R2": r2_s,
+                    "R2_u": r2_u,
+                    "R2_s": r2_s,
                     "LR": lr,
                 })
                                 
@@ -462,20 +463,18 @@ class Trainer:
                     logging.info("All ranks stopping training.")
                 break
 
-
         # Final save if not early stopped
         if self.gpu_id == 0 and patience_counter < self.patience:
             self._write_log_csv(history, path)
             logging.info("Training loop exited normally.")
     
     def _write_log_csv(self, history, path):
-        fieldnames = ["Epoch", "Train Total Loss", "Train MSE", "Val MSE", "R2", "LR"]
+        fieldnames = ["Epoch", "Train Total Loss", "Train MSE", "Val MSE", "R2_u", "R2_s", "LR"]
         log_path = os.path.join(path, "training_log.csv")
         with open(log_path, "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerows(history)
-            
 
 def load_train_objs():
     # Load the dataset

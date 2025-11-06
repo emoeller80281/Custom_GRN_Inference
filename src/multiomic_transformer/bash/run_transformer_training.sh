@@ -47,11 +47,21 @@ echo "WORLD_SIZE      = " $WORLD_SIZE
 echo "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX "
 echo ""
 
-# Create logs & start GPU sampler
-mkdir -p LOGS
+# ---------- Logging ----------
+LOGDIR="$PWD/LOGS/transformer_logs/03_training"
+mkdir -p "$LOGDIR"
+JOB=transformer_training
+ID=${SLURM_JOB_ID:-$PPID}                 # fall back to shell PID if no SLURM_JOB_ID
+TS=$(date +%Y%m%d_%H%M%S)
+OUT="$LOGDIR/${JOB}_${ID}.${TS}.log"
+ERR="${OUT%.log}.err"
+GPULOG="$LOGDIR/gpu_usage_${JOB}_${ID}.${TS}.csv"
+
+# ---------- GPU sampler ----------
 trap 'pkill -P $$ || true' EXIT
 nvidia-smi -L
 nvidia-smi --query-gpu=timestamp,index,name,utilization.gpu,memory.used,memory.total \
-  --format=csv -l 30 > LOGS/gpu_usage_transformer_training.log &
+  --format=csv -l 30 > "$GPULOG" &
+
 
 torchrun --standalone --nproc_per_node=$SLURM_NTASKS_PER_NODE src/multiomic_transformer/scripts/train.py
