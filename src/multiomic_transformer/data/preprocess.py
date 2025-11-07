@@ -677,9 +677,6 @@ def process_or_load_rna_atac_data(
 
         ad_rna = _load_or_none(adata_rna_file, sc.read_h5ad)
         ad_atac = _load_or_none(adata_atac_file, sc.read_h5ad)
-        
-        assert (ad_rna != None) and (ad_atac != None) \
-            f"AnnData RNA or ATAC must exist!\nad_rna = {ad_rna}\nad_atac = {ad_atac}"
 
         TG_pseudobulk_df, RE_pseudobulk_df = pseudo_bulk(
             rna_data=ad_rna,
@@ -1916,31 +1913,27 @@ def build_distance_bias(
     dtype: torch.dtype = torch.float32,
     device: Optional[torch.device] = None,
     mode: str = "logsumexp",   # "max" | "sum" | "mean" | "logsumexp"
-) -> torch.Tensor:
+    prune_empty_windows: bool = True,
+):
     """
-    Build a [num_windows x num_tg_kept] distance-bias tensor aligned to the kept TGs.
+    Build a [num_windows x num_tg_kept] (or pruned) distance-bias tensor aligned to the kept TGs.
 
-    Args:
-        genes_near_peaks: DataFrame with at least columns:
-            - 'peak_id' (str): peak identifier that matches keys in window_map
-            - 'target_id' (str): TG name
-            - 'TSS_dist_score' (float): precomputed distance score
-        window_map: dict mapping peak_id -> window index (0..num_windows-1).
-        tg_names_kept: iterable of TG names kept after vocab filtering; column order target.
-        num_windows: total number of genomic windows.
-        dtype: torch dtype for the output tensor (default: torch.float32).
-        device: optional torch device for the output tensor.
-        mode: pooling strategy if multiple peaks map to the same (window, TG).
-              Options = {"max", "sum", "mean", "logsumexp"}
+    If prune_empty_windows is True, windows with no peaks (no entries in genes_near_peaks)
+    are removed and indices are compacted.
 
     Returns:
-        dist_bias: torch.Tensor of shape [num_windows, len(tg_names_kept)],
-                   where each entry is an aggregated TSS distance score.
+        If prune_empty_windows is False:
+            dist_bias
+        If True:
+            dist_bias, new_window_map, kept_window_indices
+
+        where:
+            - dist_bias: [num_kept_windows, num_tg_kept]
+            - new_window_map: peak_id -> new_window_idx (only for kept windows)
+            - kept_window_indices: list mapping new_window_idx -> original_window_idx
     """
     tg_names_kept = list(tg_names_kept)
     num_tg_kept = len(tg_names_kept)
-
-    dist_bias = torch.zeros((num_windows, num_tg_kept), dtype=dtype, device=device)
     tg_index_map = {tg: i for i, tg in enumerate(tg_names_kept)}
 
     from collections import defaultdict
@@ -1953,22 +1946,56 @@ def build_distance_bias(
         if win_idx is not None and tg_idx is not None:
             scores_map[(win_idx, tg_idx)].append(float(row["TSS_dist_score"]))
 
-    # Aggregate according to pooling mode
+    # If not pruning, keep all windows regardless of whether they have peaks
+    if not prune_empty_windows:
+        dist_bias = torch.zeros((num_windows, num_tg_kept), dtype=dtype, device=device)
+        for (win_idx, tg_idx), scores in scores_map.items():
+            scores_tensor = torch.tensor(scores, dtype=dtype, device=device)
+            if mode == "max":
+                dist_bias[win_idx, tg_idx] = scores_tensor.max()
+            elif mode == "sum":
+                dist_bias[win_idx, tg_idx] = scores_tensor.sum()
+            elif mode == "mean":
+                dist_bias[win_idx, tg_idx] = scores_tensor.mean()
+            elif mode == "logsumexp":
+                dist_bias[win_idx, tg_idx] = torch.logsumexp(scores_tensor, dim=0)
+            else:
+                raise ValueError(f"Unknown pooling mode: {mode}")
+        return dist_bias
+
+    # --- Pruned version: only keep windows that appear in scores_map ---
+    used_windows = sorted({win for (win, _) in scores_map.keys()})
+    num_kept = len(used_windows)
+    old2new = {w: i for i, w in enumerate(used_windows)}
+
+    dist_bias = torch.zeros((num_kept, num_tg_kept), dtype=dtype, device=device)
+
     for (win_idx, tg_idx), scores in scores_map.items():
+        new_win_idx = old2new[win_idx]
         scores_tensor = torch.tensor(scores, dtype=dtype, device=device)
 
         if mode == "max":
-            dist_bias[win_idx, tg_idx] = scores_tensor.max()
+            dist_bias[new_win_idx, tg_idx] = scores_tensor.max()
         elif mode == "sum":
-            dist_bias[win_idx, tg_idx] = scores_tensor.sum()
+            dist_bias[new_win_idx, tg_idx] = scores_tensor.sum()
         elif mode == "mean":
-            dist_bias[win_idx, tg_idx] = scores_tensor.mean()
+            dist_bias[new_win_idx, tg_idx] = scores_tensor.mean()
         elif mode == "logsumexp":
-            dist_bias[win_idx, tg_idx] = torch.logsumexp(scores_tensor, dim=0)
+            dist_bias[new_win_idx, tg_idx] = torch.logsumexp(scores_tensor, dim=0)
         else:
             raise ValueError(f"Unknown pooling mode: {mode}")
 
-    return dist_bias
+    # Build a new window_map in the compressed index space
+    new_window_map: Dict[str, int] = {}
+    used_set = set(used_windows)
+    for peak_id, old_idx in window_map.items():
+        if old_idx in used_set:
+            new_window_map[peak_id] = old2new[old_idx]
+
+    kept_window_indices = used_windows
+
+    return dist_bias, new_window_map, kept_window_indices
+
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -2403,7 +2430,7 @@ if __name__ == "__main__":
 
             
             # ----- SLIDING WINDOW TF-PEAK SCORE -----
-            if not os.path.isfile(chrom_sliding_window_file):
+            if (not os.path.isfile(chrom_sliding_window_file)) or (FORCE_RECALCULATE == True):
                 
                 sliding_window_df = total_sliding_window_score_df[
                     total_sliding_window_score_df["peak_id"].astype(str).isin(chrom_peak_ids)
@@ -2517,7 +2544,8 @@ if __name__ == "__main__":
                 tg_names_kept=tg_names_kept,
                 num_windows=num_windows,
                 dtype=torch.float32,
-                mode=DIST_BIAS_MODE
+                mode=DIST_BIAS_MODE,
+                prune_empty_windows=True
             )
             
             create_single_cell_tensors(

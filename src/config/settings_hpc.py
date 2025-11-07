@@ -4,7 +4,7 @@ import itertools
 
 ROOT_DIR = Path(__file__).resolve().parent.parent.parent
 
-chr_nums = [f"chr{i}" for i in range(1, 10)]
+chr_nums = [f"chr{i}" for i in range(1, 19)]
 chrom_list = chr_nums #+ ["chrX", "chrY"]
 
 # ----- SAMPLE INFORMATION -----
@@ -13,7 +13,7 @@ ORGANISM_CODE = "mm10"
 DATASET_NAME = "mESC_no_scale_linear"
 CHROM_ID_LIST = chrom_list
 CHROM_ID = "chr19"
-CHROM_IDS = ["chr19"] # chr_nums
+CHROM_IDS = chr_nums
 # , "E7.75_rep1", "E8.0_rep2", "E8.5_rep2", "E8.75_rep2", "E7.5_rep2", "E8.0_rep1", "E8.5_rep1"
 SAMPLE_NAMES = ["E7.5_rep1", "E7.5_rep2", "E7.75_rep1", "E8.0_rep2", "E8.5_rep2", "E8.75_rep2", "E8.0_rep1", "E8.5_rep1"]
 FINE_TUNING_DATASETS = ["E7.5_rep1"]
@@ -46,31 +46,34 @@ SELF_WEIGHT = 1.0       # How much to weight the cells own gene expression. High
 
 # Data Preprocessing and Caching
 VALIDATION_DATASETS = ["E8.75_rep1"]
-FORCE_RECALCULATE = False                # Recomputes genomic windows, peak-TG distance, and re-runs MOODS TF-peak scan
-WINDOW_SIZE = 1_000                    # Aggregates peaks within WINDOW_SIZE bp genomic tiles
+FORCE_RECALCULATE = False                # Recomputes genomic windows, peak-TG distance, and re-runs sliding window TF-peak scan
+WINDOW_SIZE = 1_000                     # Aggregates peaks within WINDOW_SIZE bp genomic tiles
 DISTANCE_SCALE_FACTOR = 5_000           # Weights the peak-gene TSS distance score. Lower numbers = faster dropoff
 MAX_PEAK_DISTANCE = 20_000              # Masks out peaks further than this distance from the gene TSS
-DIST_BIAS_MODE = "mean"                 # Method for calcuting window -> gene TSS distance. Options: "max" | "sum" | "mean" | "logsumexp"
-FILTER_TO_NEAREST_GENE = False           # Associate peaks to the nearest gene
-PROMOTER_BP = 10_000
+DIST_BIAS_MODE = "logsumexp"            # Method for calcuting window -> gene TSS distance. Options: "max" | "sum" | "mean" | "logsumexp"
+FILTER_TO_NEAREST_GENE = True           # Associate peaks to the nearest gene
+PROMOTER_BP = None #10_000
 
 # ----- MODEL TRAINING PARAMETERS -----
 TOTAL_EPOCHS=50
-BATCH_SIZE=32
+BATCH_SIZE=16
 PATIENCE=15
 CORR_LOSS_WEIGHT=0.1            # Testing with no R2 metric
 
-D_MODEL = 320
+D_MODEL = 128
 NUM_HEADS = 4
 NUM_LAYERS = 3
 D_FF = D_MODEL * 4
 DROPOUT = 0.2
 
+SAVE_EVERY_N_EPOCHS=1           # Chooses how many epochs to run before saving a checkpoint
+RESUME_CHECKPOINT_PATH=None
+
 # Training scheduler settings
 MODE="min"                      # min = improvement means a lower number; max = improvement means a higher number
-INITIAL_LEARNING_RATE = 1e-3    # Initial learning rate for the model
+INITIAL_LEARNING_RATE = 3e-4    # Initial learning rate for the model
 SCHEDULER_FACTOR=0.5            # How much to reduce the learning rate on a plateau
-SCHEDULER_PATIENCE=5           # How long to wait with no improvement without dropping the learning rate
+SCHEDULER_PATIENCE=5            # How long to wait with no improvement without dropping the learning rate
 THRESHOLD=1e-3                  # Defines how much better the 
 THRESHOLD_MODE="rel"            # rel helps filter noise for datasets with different loss scales. new best = previous best * (1 - threshold) difference
 COOLDOWN=4                      # How many epochs to pause after a drop before testing for improvement, lets the training stabilize a bit
@@ -91,7 +94,7 @@ ATTN_BIAS_SCALE = 1.0
 # Sampling (optional)
 SUBSAMPLE_MAX_TFS = None # 150
 SUBSAMPLE_MAX_TGS = None # 2000
-SUBSAMPLE_MAX_WINDOWS_PER_CHROM = None # 8000
+SUBSAMPLE_MAX_WINDOWS_PER_CHROM = None #8000
 SUBSAMPLE_MAX_CELLS=10000
 SUBSAMPLE_SEED = 42
 

@@ -28,37 +28,40 @@ class MultiHeadAttention(nn.Module):
         # Expected: Q,K,V = [batch_size,H,L, d_k]
         assert Q.dim() == 4 and K.dim() == 4 and V.dim() == 4, \
             f"Q,K,V must be 4D: got {Q.shape}, {K.shape}, {V.shape}"
+            
         batch_size,H,Lq,Dq = Q.shape
         Bk,Hk,Lk,Dk = K.shape
         Bv,Hv,Lv,Dv = V.shape
         assert (batch_size,H) == (Bk,Hk) == (Bv,Hv), f"Batch/heads mismatch: Q{(batch_size,H)} K{(Bk,Hk)} V{(Bv,Hv)}"
         assert Dq == Dk == Dv, f"Head dim mismatch: {Dq} vs {Dk} vs {Dv}"
         assert Lk == Lv, f"K/V length mismatch: Lk={Lk}, Lv={Lv}"
-
+        
+        # 0) sanitize inputs early
+        Q = torch.nan_to_num(Q, nan=0.0, posinf=1e4, neginf=-1e4)
+        K = torch.nan_to_num(K, nan=0.0, posinf=1e4, neginf=-1e4)
+        V = torch.nan_to_num(V, nan=0.0, posinf=1e4, neginf=-1e4)
         if attn_bias is not None:
-            attn_bias = attn_bias.to(Q.device, Q.dtype)
-            # Accept [batch_size,1,Lq,Lk] or [batch_size,H,Lq,Lk] (already expanded upstream)
-            assert attn_bias.shape[0] in (1, batch_size), f"attn_bias batch {attn_bias.shape[0]} vs batch_size={batch_size}"
-            assert attn_bias.shape[1] in (1, H), f"attn_bias heads {attn_bias.shape[1]} vs H={H}"
-            assert attn_bias.shape[-2:] == (Lq, Lk), f"attn_bias last dims {attn_bias.shape[-2:]} vs {(Lq,Lk)}"
+            attn_bias = torch.nan_to_num(attn_bias, nan=0.0, posinf=1e4, neginf=-1e4)
 
-        if mask is not None:
-            # Expect broadcastable [batch_size,1,Lq,Lk] or [batch_size,H,Lq,Lk]
-            assert mask.shape[-2:] == (Lq, Lk), f"mask last dims {mask.shape[-2:]} vs {(Lq,Lk)}"
+        # 1) compute logits in fp32 for numeric headroom
+        scale = 1.0 / math.sqrt(self.d_k)
+        logits = torch.matmul(Q.float(), K.float().transpose(-2, -1)) * scale  # [B,H,Lq,Lk]
 
-        # Finite checks catch NaN/Inf early
-        for name, t in (("Q",Q), ("K",K), ("V",V)):
-            if not torch.isfinite(t).all():
-                raise RuntimeError(f"{name} contains NaN/Inf")
-
-        attn_scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.d_k)
-        if mask is not None:
-            attn_scores = attn_scores.masked_fill(mask == 0, torch.finfo(attn_scores.dtype).min)
+        # 2) add bias (clamped)
         if attn_bias is not None:
-            attn_scores = attn_scores + attn_bias
-        attn_probs = torch.softmax(attn_scores, dim=-1)
-        output = torch.matmul(attn_probs, V)
-        return output
+            logits = logits + attn_bias.float().clamp_(-1e4, 1e4)
+
+        # 3) apply mask with dtype-aware large negative
+        if mask is not None:
+            large_neg = -1e4  # fp16/bf16-safe (instead of -1e9)
+            # assume mask==0 means "masked"
+            logits = logits.masked_fill(mask == 0, large_neg)
+
+        # 4) softmax in fp32, then cast back to original dtype
+        probs = torch.softmax(logits, dim=-1)
+        probs = torch.nan_to_num(probs, nan=0.0)
+        out = torch.matmul(probs, V.float()).to(Q.dtype)
+        return out
         
     def split_heads(self, x):
         
@@ -106,14 +109,17 @@ class CrossAttention(nn.Module):
     def __init__(self, d_model, num_heads, dropout):
         super().__init__()
         self.attn = MultiHeadAttention(d_model, num_heads)
-        self.norm = nn.LayerNorm(d_model)
+        self.norm = nn.LayerNorm(d_model, eps=1e-5)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, query, key_value, mask=None, attn_bias=None):
         # query: [batch_size, len_query, d_model]
         # key_value: [batch_size, len_key_val, d_model]
         attn_out = self.attn(query, key_value, key_value, mask, attn_bias=attn_bias)
-        out = self.norm(query + self.dropout(attn_out))  # residual
+        attn_out = torch.nan_to_num(attn_out, nan=0.0, posinf=1e4, neginf=-1e4)
+        res = query + self.dropout(attn_out)
+        res = res.clamp_(-1e4, 1e4)
+        out = self.norm(res)
         return out
 
 class TFtoTGShortcut(nn.Module):
@@ -139,11 +145,17 @@ class TFtoTGShortcut(nn.Module):
 
         # Apply motif mask if provided (zero's out TFs with no peaks near the TG)
         if self.use_motif_mask and motif_mask is not None:
-            sim = sim.masked_fill(motif_mask == 0, float("-inf"))
+            sim = sim.masked_fill(motif_mask == 0, -1e4)
+        
+        sim = sim.clamp_(-50, 50)
 
         # Softmax attention between each TF and TG
         attn = torch.softmax(sim, dim=-1)  # [G,T]        
         attn = torch.nan_to_num(attn, nan=0.0)
+        
+        # handle all-masked rows: if a row sums to 0, leave it zero (no TF contribution)
+        row_sums = attn.sum(dim=-1, keepdim=True)
+        attn = torch.where(row_sums > 0, attn / row_sums, attn)
 
         # Optional Top-K masking, only consider the top K values
         if self.topk is not None:
@@ -324,6 +336,9 @@ class MultiomicTransformer(nn.Module):
         """
         batch_size, n_window, _ = atac_windows.shape
         device = atac_windows.device
+        
+        atac_windows = torch.nan_to_num(atac_windows, nan=0.0, posinf=1e6, neginf=-1e6).clamp_(-10.0, 10.0)
+        tf_expr      = torch.nan_to_num(tf_expr,      nan=0.0, posinf=1e6, neginf=-1e6).clamp_(-10.0, 10.0)
 
         # ----- ATAC encoding -----
         win_emb = self.atac_acc_dense_input_layer(atac_windows)       # [batch_size,n_window,d_model]
@@ -372,7 +387,8 @@ class MultiomicTransformer(nn.Module):
                 f"Bias shape {attn_bias.shape} not compatible with (n_tgs={tg_base.size(1)}, n_window={win_emb.size(1)})"
             if attn_bias.shape[1] == 1:
                 attn_bias = attn_bias.expand(batch_size, self.num_heads, tg_base.size(1), win_emb.size(1))
-            attn_bias = self.bias_scale * attn_bias
+            attn_bias = torch.nan_to_num(attn_bias, nan=0.0, posinf=1e4, neginf=-1e4)
+            attn_bias = (self.bias_scale * attn_bias).clamp_(-20.0, 20.0)
 
         # TG-ATAC cross attention with distance bias
         tg_cross = self.cross_tg_to_atac(tg_base, win_emb, attn_bias=attn_bias)                             # [batch_size,n_tgs,d_model]

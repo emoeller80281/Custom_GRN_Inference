@@ -92,9 +92,9 @@ class Trainer:
         self.optimizer = optimizer
         self.save_every = save_every
         self.model = DDP(model, device_ids=[gpu_id])
-        self.r2_warmup_epochs = 3 
+        self.corr_sq_warmup_epochs = 3 
         
-        self.scaler = GradScaler()
+        self.scaler = GradScaler(init_scale=1024, growth_factor=1.5, backoff_factor=0.5, growth_interval=200)
 
         # Learning rate scheduler
         self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -113,6 +113,43 @@ class Trainer:
         self.patience = patience
         self.min_delta = min_delta
         self.patience_counter = 0
+        
+    def _save_trained_model(self, path: str):
+        if self.gpu_id != 0:
+            return
+
+        if hasattr(self.model, "module"):
+            model = self.model.module
+        else:
+            model = self.model
+
+        model.eval()
+        ckpt = {
+            "model_state_dict": model.state_dict(),
+        }
+
+        if hasattr(self, "tf_scaler") and self.tf_scaler is not None:
+            ckpt["tf_scaler_mean"] = self.tf_scaler.mean.detach().cpu()
+            ckpt["tf_scaler_std"]  = self.tf_scaler.std.detach().cpu()
+        if hasattr(self, "tg_scaler") and self.tg_scaler is not None:
+            ckpt["tg_scaler_mean"] = self.tg_scaler.mean.detach().cpu()
+            ckpt["tg_scaler_std"]  = self.tg_scaler.std.detach().cpu()
+
+        out_path = os.path.join(path, "trained_model.pt")
+        torch.save(ckpt, out_path)
+        logging.info(f"Saved trained model to {out_path}")
+
+    def _handle_abort(self, epoch, path, history, reason: str):
+        # Only rank 0 writes, but all ranks should sync.
+        if self.gpu_id == 0:
+            logging.info(f"{reason}: saving checkpoint and logs before exit.")
+            last_epoch = max(0, epoch)
+            self._save_checkpoint(last_epoch, path)
+            self._write_log_csv(history, path)
+            self._save_trained_model(path)
+
+        if dist.is_available() and dist.is_initialized():
+            dist.barrier()
 
     def _run_batch(self, batch):
         atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids, motif_mask = batch
@@ -158,7 +195,7 @@ class Trainer:
         # Mean MSE (same scale every batch)
         mse_loss = self.loss_fn(preds32, targets32)
 
-        # ---------- R^2 penalty via per-gene Pearson r^2 ----------
+        # ---------- Correlation penalty via per-gene Pearson r^2 ----------
         # shapes: [B, G]
         x = preds32
         y = targets32
@@ -183,7 +220,7 @@ class Trainer:
             mean_r2 = torch.tensor(0.0, device=preds32.device, dtype=preds32.dtype)
 
         # Warmup the penalty weight over first few epochs
-        warm = max(1, getattr(self, "r2_warmup_epochs", 3))
+        warm = max(1, getattr(self, "corr_sq_warmup_epochs", 3))
         cur_epoch = getattr(self, "epoch", 0)  # set by your loop before calling _run_batch
         anneal = float(min(1.0, (cur_epoch + 1) / warm))
 
@@ -341,8 +378,8 @@ class Trainer:
             
             if (iteration % 100 == 0) and (self.gpu_id == 0) and (len(self.train_data) > 750):
                 logging.info(
-                    f"    [{int(round(iteration / len(self.train_data) * 100,0))}%] Iter {iteration} | MSE + R2 penalty: {total_loss_val:.4f} | "
-                    f"MSE Loss: {mse_loss_val:.4f} | R2 penalty: {corr_weight:.4f} | Mean R2: {mean_corr:.2f}"
+                    f"    [{int(round(iteration / len(self.train_data) * 100,0))}%] Iter {iteration} | MSE + pearson r2 penalty: {total_loss_val:.4f} | "
+                    f"MSE Loss: {mse_loss_val:.4f} | pearson r2 penalty: {corr_weight:.4f} | Mean pearson r2: {mean_corr:.2f}"
                 )
 
         avg_train_loss = total_loss / max(1, n_batches)
@@ -394,80 +431,94 @@ class Trainer:
         logging.info(f"\tTraining checkpoint saved to {out_path}")
 
         
-    def train(self, max_epochs: int, path: str):
+    def train(self, max_epochs: int, path: str, start_epoch: int = 0):
         best_val_loss = float("inf")
         best_r2 = float(0)
         patience_counter = 0
         history = []  # store per-epoch logs
+        
+        try:
+            for epoch in range(max_epochs):
+                train_loss, train_mse, val_loss, r2_s, r2_u = self._run_epoch(epoch)
 
-        for epoch in range(max_epochs):
-            train_loss, train_mse, val_loss, r2_s, r2_u = self._run_epoch(epoch)
-
-            if self.gpu_id == 0:
-                lr = self.optimizer.param_groups[0]['lr']
-                logging.info(
-                    f"Epoch {epoch+1} | Train Total Loss: {train_loss:.4f} | "
-                    f"Train MSE: {train_mse:.4f} | "
-                    f"Val MSE: {val_loss:.4f} | "
-                    f"R2 (Unscaled): {r2_u:.3f} | "
-                    f"R2 (Scaled): {r2_s:.3f} | "
-                    f"LR: {lr:.2e}"
-                )
-
-                history.append({
-                    "Epoch": epoch+1,
-                    "Train Total Loss": train_loss,
-                    "Train MSE": train_mse,
-                    "Val MSE": val_loss,
-                    "R2_u": r2_u,
-                    "R2_s": r2_s,
-                    "LR": lr,
-                })
-                                
-            # Checkpoint + CSV log
-            if epoch % self.save_every == 0:
                 if self.gpu_id == 0:
-                    self._save_checkpoint(epoch, path)
-                    self._write_log_csv(history, path)
-                dist.barrier()
+                    lr = self.optimizer.param_groups[0]['lr']
+                    logging.info(
+                        f"Epoch {epoch+1} | Train Total Loss: {train_loss:.4f} | "
+                        f"Train MSE: {train_mse:.4f} | "
+                        f"Val MSE: {val_loss:.4f} | "
+                        f"R2 (Unscaled): {r2_u:.3f} | "
+                        f"R2 (Scaled): {r2_s:.3f} | "
+                        f"LR: {lr:.2e}"
+                    )
 
-            # Checkpoint + CSV log
-            stop_tensor = torch.tensor(0, device=self.gpu_id)
-
-            # --- Early stopping check (only rank 0 sets flag) ---
-            if self.gpu_id == 0:
-                if (val_loss < best_val_loss - self.min_delta) or (r2_s > best_r2 + self.min_delta):
-                    # If either val_loss improved OR r2_s improved, reset patience
-                    best_val_loss = val_loss
-                    best_r2 = max(best_r2, r2_s)
-                    patience_counter = 0
-                else:
-                    # No improvement
-                    patience_counter += 1
-
-                    if patience_counter >= self.patience:
-                        logging.info("Early stopping triggered.")
+                    history.append({
+                        "Epoch": epoch+1,
+                        "Train Total Loss": train_loss,
+                        "Train MSE": train_mse,
+                        "Val MSE": val_loss,
+                        "R2_u": r2_u,
+                        "R2_s": r2_s,
+                        "LR": lr,
+                    })
+                                    
+                # Checkpoint + CSV log
+                if epoch % self.save_every == 0:
+                    if self.gpu_id == 0:
                         self._save_checkpoint(epoch, path)
                         self._write_log_csv(history, path)
-                        stop_tensor.fill_(1)  # <-- mark stop
+                    dist.barrier()
 
-                    else:
-                        logging.info(f"    Loss did not improve {patience_counter}/{self.patience}")
+                # Checkpoint + CSV log
+                stop_tensor = torch.tensor(0, device=self.gpu_id)
 
-            # --- Broadcast stop flag from rank 0 to all ranks ---
-            dist.broadcast(stop_tensor, src=0)
-
-            # --- All ranks see the same value now ---
-            if stop_tensor.item() == 1:
+                # --- Early stopping check (only rank 0 sets flag) ---
                 if self.gpu_id == 0:
-                    logging.info("All ranks stopping training.")
-                break
+                    if (val_loss < best_val_loss - self.min_delta) or (r2_s > best_r2 + self.min_delta):
+                        # If either val_loss improved OR r2_s improved, reset patience
+                        best_val_loss = val_loss
+                        best_r2 = max(best_r2, r2_s)
+                        patience_counter = 0
+                    else:
+                        # No improvement
+                        patience_counter += 1
 
-        # Final save if not early stopped
-        if self.gpu_id == 0 and patience_counter < self.patience:
-            self._write_log_csv(history, path)
-            logging.info("Training loop exited normally.")
-    
+                        if patience_counter >= self.patience:
+                            logging.info("Early stopping triggered.")
+                            self._save_checkpoint(epoch, path)
+                            self._write_log_csv(history, path)
+                            stop_tensor.fill_(1)  # <-- mark stop
+
+                        else:
+                            logging.info(f"    Loss did not improve {patience_counter}/{self.patience}")
+
+                # --- Broadcast stop flag from rank 0 to all ranks ---
+                dist.broadcast(stop_tensor, src=0)
+
+                # --- All ranks see the same value now ---
+                if stop_tensor.item() == 1:
+                    if self.gpu_id == 0:
+                        logging.info("All ranks stopping training.")
+                    break
+
+            # Final save if not early stopped
+            if self.gpu_id == 0 and patience_counter < self.patience:
+                self._write_log_csv(history, path)
+                logging.info("Training loop exited normally.")
+
+        except KeyboardInterrupt:
+            # graceful Ctrl+C
+            epoch = locals().get("epoch", start_epoch)
+            self._handle_abort(epoch, path, history, "KeyboardInterrupt")
+            raise
+
+        except RuntimeError as e:
+            # catch CUDA OOM and save before dying
+            if "out of memory" in str(e).lower():
+                epoch = locals().get("epoch", start_epoch)
+                self._handle_abort(epoch, path, history, "CUDA OOM")
+            raise
+        
     def _write_log_csv(self, history, path):
         fieldnames = ["Epoch", "Train Total Loss", "Train MSE", "Val MSE", "R2_u", "R2_s", "LR"]
         log_path = os.path.join(path, "training_log.csv")
@@ -475,6 +526,46 @@ class Trainer:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerows(history)
+
+def load_checkpoint(ckpt_path: str, trainer: Trainer, device: torch.device) -> int:
+    """
+    Load model/optimizer/scheduler/scalers from a checkpoint file.
+    Returns the epoch index to resume from (next epoch after the one in ckpt).
+    """
+    logging.info(f"Loading checkpoint from {ckpt_path}")
+    ckpt = torch.load(ckpt_path, map_location=device)
+
+    # model weights
+    if hasattr(trainer.model, "module"):
+        trainer.model.module.load_state_dict(ckpt["model_state_dict"])
+    else:
+        trainer.model.load_state_dict(ckpt["model_state_dict"])
+
+    # optimizer
+    if "optimizer_state_dict" in ckpt and trainer.optimizer is not None:
+        trainer.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+
+    # scheduler
+    if "scheduler_state_dict" in ckpt and trainer.scheduler is not None:
+        trainer.scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+
+    # scalers (if present)
+    tf_mean = ckpt.get("tf_scaler_mean", None)
+    tf_std  = ckpt.get("tf_scaler_std", None)
+    if tf_mean is not None and tf_std is not None:
+        trainer.tf_scaler = SimpleScaler(tf_mean.to(device), tf_std.to(device))
+
+    tg_mean = ckpt.get("tg_scaler_mean", None)
+    tg_std  = ckpt.get("tg_scaler_std", None)
+    if tg_mean is not None and tg_std is not None:
+        trainer.tg_scaler = SimpleScaler(tg_mean.to(device), tg_std.to(device))
+
+    start_epoch = ckpt.get("epoch", -1) + 1
+    if start_epoch < 0:
+        start_epoch = 0
+
+    logging.info(f"Resuming training from epoch {start_epoch}")
+    return start_epoch
 
 def load_train_objs():
     # Load the dataset
@@ -824,11 +915,18 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
     ddp_setup(rank, world_size)
     setup_logging(rank)
     
+    # optional: path to an existing checkpoint
+    resume_ckpt = RESUME_CHECKPOINT_PATH
+    
     try:
-        training_file_iter_format = "model_training_{:03d}"
-        training_output_dir = unique_path(OUTPUT_DIR / CHROM_ID, training_file_iter_format)
-        
-        logging.info(f"\n =========== EXPERIMENT {training_output_dir.name.upper()} ===========")
+        if resume_ckpt and os.path.isfile(resume_ckpt):
+            resume_ckpt = Path(resume_ckpt)
+            training_output_dir = resume_ckpt.parent
+            logging.info(f"\n =========== RESUMING FROM {resume_ckpt} ===========")
+        else:
+            training_file_iter_format = "model_training_{:03d}"
+            training_output_dir = unique_path(OUTPUT_DIR / CHROM_ID, training_file_iter_format)
+            logging.info(f"\n =========== EXPERIMENT {training_output_dir.name.upper()} ===========")
                 
         os.makedirs(training_output_dir, exist_ok=True)
             
@@ -874,9 +972,15 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
         trainer.tf_scaler = tf_scaler
         trainer.tg_scaler = tg_scaler
         
+        # Start from epoch 0 or from the checkpoint epoch if reloading
+        start_epoch = 0
+        if resume_ckpt and resume_ckpt.is_file():
+            start_epoch = load_checkpoint(str(resume_ckpt), trainer, rank_device)
+        
         if rank == 0:
             logging.info("\n ----- TRAINING STARTED -----")
-        trainer.train(max_epochs=TOTAL_EPOCHS, path=training_output_dir)
+            
+        trainer.train(max_epochs=TOTAL_EPOCHS, path=training_output_dir, start_epoch=start_epoch)
         
         if rank == 0:
             model_for_save = getattr(trainer.model, "module", trainer.model)
@@ -939,19 +1043,19 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
             log_path = os.path.join(training_output_dir, "training_log.csv")
             log_df = pd.read_csv(log_path, header=0)
             
-            pearson_corr_plt = plotting.plot_pearson_corr_across_epochs(
-                df=log_df,
-                dataset_name=DATASET_NAME,
-                chrom_id=CHROM_ID
-            )
-            pearson_corr_plt.savefig(os.path.join(training_output_dir, "pearson_training.png"), dpi=300)
+            # pearson_corr_plt = plotting.plot_pearson_corr_across_epochs(
+            #     df=log_df,
+            #     dataset_name=DATASET_NAME,
+            #     chrom_id=CHROM_ID
+            # )
+            # pearson_corr_plt.savefig(os.path.join(training_output_dir, "pearson_training.png"), dpi=300)
             
-            train_val_loss_plt = plotting.plot_train_val_loss(
-                df=log_df,
-                dataset_name=DATASET_NAME,
-                chrom_id=CHROM_ID
-            )
-            train_val_loss_plt.savefig(os.path.join(training_output_dir, "train_val_loss.png"), dpi=300)
+            # train_val_loss_plt = plotting.plot_train_val_loss(
+            #     df=log_df,
+            #     dataset_name=DATASET_NAME,
+            #     chrom_id=CHROM_ID
+            # )
+            # train_val_loss_plt.savefig(os.path.join(training_output_dir, "train_val_loss.png"), dpi=300)
             
             # per_gene_corr_scatter_plt = plotting.plot_per_gene_correlation_scatterplot(
             #     model=model,
@@ -975,6 +1079,6 @@ if __name__ == "__main__":
     
     main(rank=int(os.environ["LOCAL_RANK"]),
         world_size=int(os.environ["WORLD_SIZE"]),
-        save_every=5,
+        save_every=SAVE_EVERY_N_EPOCHS,
         total_epochs=TOTAL_EPOCHS,
         batch_size=BATCH_SIZE)
