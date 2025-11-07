@@ -1001,21 +1001,59 @@ class MultiomicTransformerDataset(Dataset):
         self.tf_ids = torch.tensor([tf_name2id_sub[n] for n in self.tf_names], dtype=torch.long)
         self.tg_ids = torch.tensor([tg_name2id_sub[n] for n in self.tg_names], dtype=torch.long)
 
-        # ---- Optionally subsample windows ----
+        # ---- Optionally subsample windows (by accessibility) ----
         if max_windows is not None and self.num_windows > max_windows:
-            # consistent window subsample across tensors that have W
-            W = self.num_windows
-            keep_w = np.sort(rng.choice(np.arange(W), size=max_windows, replace=False))
-            keep_w_t = torch.tensor(keep_w, dtype=torch.long)
+            # self.atac_window_tensor_all: [W, C] (windows x metacells)
+            atac = self.atac_window_tensor_all
+
+            # Compute an accessibility score per window.
+            # Using mean over cells; sum would be equivalent for ranking.
+            # Stay on CPU to avoid extra GPU use.
+            if isinstance(atac, torch.Tensor):
+                window_scores = atac.float().mean(dim=1)
+            else:
+                # in case it's a numpy array
+                window_scores = torch.as_tensor(atac, dtype=torch.float32).mean(dim=1)
+
+            # Number of windows to keep
+            k = int(min(max_windows, self.num_windows))
+
+            # Indices of top-k most accessible windows (unsorted genomic-wise)
+            topk = torch.topk(window_scores, k=k, largest=True, sorted=False).indices
+
+            # Sort to preserve original genomic order
+            keep_w_t = torch.sort(topk).values.to(dtype=torch.long)
+
+            # ---- Apply selection consistently across tensors ----
 
             # atac windows: [W, C] -> [W', C]
-            self.atac_window_tensor_all = self.atac_window_tensor_all[keep_w_t, :]
+            if isinstance(atac, torch.Tensor):
+                self.atac_window_tensor_all = atac.index_select(0, keep_w_t)
+            else:
+                self.atac_window_tensor_all = atac[keep_w_t.numpy(), :]
 
             # dist bias: [G, W] -> [G, W']
-            if self.dist_bias_tensor is not None:
-                self.dist_bias_tensor = self.dist_bias_tensor[:, keep_w_t]
+            if getattr(self, "dist_bias_tensor", None) is not None:
+                # dist_bias_tensor is [G, W]
+                self.dist_bias_tensor = self.dist_bias_tensor.index_select(1, keep_w_t)
 
+            # Update num_windows
             self.num_windows = int(self.atac_window_tensor_all.shape[0])
+
+            # window_map: remap peak_id -> new window index, if present
+            if hasattr(self, "window_map") and isinstance(self.window_map, dict):
+                # original: peak_id -> old_w_idx
+                # build inverse: old_w_idx -> [peak_ids]
+                idx_to_peaks = {}
+                for peak_id, old_idx in self.window_map.items():
+                    idx_to_peaks.setdefault(int(old_idx), []).append(peak_id)
+
+                new_window_map = {}
+                for new_idx, old_idx in enumerate(keep_w_t.tolist()):
+                    for peak_id in idx_to_peaks.get(int(old_idx), []):
+                        new_window_map[peak_id] = new_idx
+
+                self.window_map = new_window_map
 
         # ---- Sanity logs (useful during bring-up) ----
         logging.debug(

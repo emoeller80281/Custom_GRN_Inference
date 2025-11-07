@@ -20,6 +20,7 @@ from anndata import AnnData
 from tqdm import tqdm
 import pybedtools
 import argparse
+import pickle
 import shutil, tempfile
 from functools import partial
 from pybedtools import helpers as pbt_helpers
@@ -1570,9 +1571,14 @@ def create_single_cell_tensors(
             f"RE={atac_tensor_sc.shape}"
         )
 
-def aggregate_pseudobulk_datasets(sample_names: list[str], dataset_processed_data_dir: Path, chroms: list[str], gc: GeneCanonicalizer):
-    
-    # ----- Combine Pseudobulk Data into a Training Dataset -----
+def aggregate_pseudobulk_datasets(
+    sample_names: list[str],
+    dataset_processed_data_dir: Path,
+    chroms: list[str],
+    gc: GeneCanonicalizer,
+    force_recalculate: bool = False,
+):
+    # ----- Helpers -----
     def _canon_index_sum(df: pd.DataFrame, gc) -> pd.DataFrame:
         """Canonicalize df.index with GeneCanonicalizer and sum duplicate rows."""
         if df.empty:
@@ -1580,112 +1586,154 @@ def aggregate_pseudobulk_datasets(sample_names: list[str], dataset_processed_dat
         mapped = gc.canonicalize_series(pd.Series(df.index, index=df.index))
         out = df.copy()
         out.index = mapped.values
-        out = out[out.index != ""]                 # drop unmapped
-        if not out.index.is_unique:               # aggregate duplicates
+        out = out[out.index != ""]  # drop unmapped
+        if not out.index.is_unique:
             out = out.groupby(level=0).sum()
         return out
 
     def _canon_series_same_len(s: pd.Series, gc) -> pd.Series:
-        """Canonicalize to same length; replace non-mapped with '' (then caller filters rows)."""
+        """Canonicalize to same length; replace non-mapped with '' (caller filters)."""
         cs = gc.canonicalize_series(s.astype(str))
-        cs = cs.fillna("")
-        return cs
-    
+        return cs.fillna("")
+
     def _agg_sum(dfs: list[pd.DataFrame]) -> pd.DataFrame:
-        """Sum rows across samples; rows are aligned by index."""
-        if len(dfs) == 0:
+        if not dfs:
             raise ValueError("No DataFrames provided to aggregate.")
         if len(dfs) == 1:
             return dfs[0]
         return pd.concat(dfs).groupby(level=0).sum()
 
     def _agg_first(dfs: list[pd.DataFrame]) -> pd.DataFrame:
-        """Keep first occurrence per index (for metadata like peak coords)."""
-        if len(dfs) == 0:
+        if not dfs:
             raise ValueError("No DataFrames provided to aggregate.")
         if len(dfs) == 1:
             return dfs[0]
         return pd.concat(dfs).groupby(level=0).first()
 
-    logging.info("\nLoading processed pseudobulk datasets:")
-    logging.info(f"  - Sample names: {sample_names}")
-    logging.info(f"  - Looking for processed samples in {dataset_processed_data_dir}")
-    
-    # Combine the TG pseudobulk for all samples into one dataframe
-    per_sample_TG = {}
-    for sample_name in sample_names:
-        sdir = dataset_processed_data_dir / sample_name
-        tg_path = sdir / "TG_pseudobulk.parquet"
-        TG_pseudobulk = pd.read_parquet(tg_path, engine="pyarrow")
-        TG_pseudobulk = _canon_index_sum(TG_pseudobulk, gc)
-        per_sample_TG[sample_name] = TG_pseudobulk
+    total_tg_pseudobulk_path = dataset_processed_data_dir / "total_TG_pseudobulk_global.parquet"
+    pseudobulk_chrom_dict_path = dataset_processed_data_dir / "pseudobulk_chrom_dict.pkl"
 
-    total_TG_pseudobulk_global = _agg_sum(list(per_sample_TG.values()))
-    
-    # Extract the chromosome-specific pseudobulk data from all samples
-    pseudobulk_chrom_dict = {}
-    for chrom_id in chroms:
-        logging.info(f"Aggregating data for {chrom_id}")
-        
-        TG_pseudobulk_samples = []
-        RE_pseudobulk_samples = []
-        peaks_df_samples = []
-        
-        # Get a name of the genes on the chromosome from the gene TSS file
-        chrom_tss_path = GENOME_DIR / f"{chrom_id}_gene_tss.bed"
-        if not chrom_tss_path.is_file():
-            gene_tss_chrom = make_chrom_gene_tss_df(
-                gene_tss_file=GENE_TSS_FILE,
-                chrom_id=chrom_id,
-                genome_dir=GENOME_DIR
-            )
-        else:
-            gene_tss_chrom = pd.read_csv(chrom_tss_path, sep="\t", header=None, usecols=[0, 1, 2, 3])
-            gene_tss_chrom = gene_tss_chrom.rename(columns={0: "chrom", 1: "start", 2: "end", 3: "name"})
+    # Decide whether to recompute everything
+    need_recalc = (
+        force_recalculate
+        or not total_tg_pseudobulk_path.is_file()
+        or not pseudobulk_chrom_dict_path.is_file()
+    )
 
-        gene_tss_chrom["name"] = _canon_series_same_len(gene_tss_chrom["name"], gc)
-        gene_tss_chrom = gene_tss_chrom[gene_tss_chrom["name"] != ""]
-        gene_tss_chrom = gene_tss_chrom.drop_duplicates(subset=["name"], keep="first")
-        genes_on_chrom = gene_tss_chrom["name"].tolist()
-        
-        for sample_name in (pbar := tqdm(sample_names)):
-            pbar.set_description(f"Processing {sample_name}")
-            sample_processed_data_dir = dataset_processed_data_dir / sample_name
-            
-            RE_pseudobulk = pd.read_parquet(sample_processed_data_dir / "RE_pseudobulk.parquet", engine="pyarrow")
-            
-            TG_chr_specific = per_sample_TG[sample_name].loc[
-                per_sample_TG[sample_name].index.intersection(genes_on_chrom)
-            ]
-            RE_chr_specific = RE_pseudobulk[RE_pseudobulk.index.str.startswith(f"{chrom_id}:")]
+    if need_recalc:
+        logging.info("\nLoading processed pseudobulk datasets:")
+        logging.info(f"  - Sample names: {sample_names}")
+        logging.info(f"  - Looking for processed samples in {dataset_processed_data_dir}")
 
-            peaks_df = (
-                RE_chr_specific.index.to_series()
-                .str.split("[:-]", expand=True)
-                .rename(columns={0: "chrom", 1: "start", 2: "end"})
-            )
-            peaks_df["start"] = peaks_df["start"].astype(int)
-            peaks_df["end"] = peaks_df["end"].astype(int)
-            peaks_df["peak_id"] = RE_chr_specific.index
-            
-            # Add the chromosome-specific data for the sample to a list
-            TG_pseudobulk_samples.append(TG_chr_specific)
-            RE_pseudobulk_samples.append(RE_chr_specific)
-            peaks_df_samples.append(peaks_df)
-        
-        # Aggregate the data from the samples for the current chromosome
-        total_TG_pseudobulk_chr    = _agg_sum(TG_pseudobulk_samples)
-        total_RE_pseudobulk_chr    = _agg_sum(RE_pseudobulk_samples)
-        total_peaks_df             = _agg_first(peaks_df_samples)
-    
-        # Add the aggregated data to a dictionary by chrom_id
-        pseudobulk_chrom_dict[chrom_id] = {
-            "total_TG_pseudobulk_chr" : total_TG_pseudobulk_chr,
-            "total_RE_pseudobulk_chr" : total_RE_pseudobulk_chr,
-            "total_peaks_df" : total_peaks_df
+        # ---- 1) Build per-sample TG pseudobulk (canonicalized) ----
+        per_sample_TG: dict[str, pd.DataFrame] = {}
+        for sample_name in sample_names:
+            sdir = dataset_processed_data_dir / sample_name
+            tg_path = sdir / "TG_pseudobulk.parquet"
+            TG_pseudobulk = pd.read_parquet(tg_path, engine="pyarrow")
+            TG_pseudobulk = _canon_index_sum(TG_pseudobulk, gc)
+            per_sample_TG[sample_name] = TG_pseudobulk
+
+        # Global TG pseudobulk across all samples
+        total_TG_pseudobulk_global = _agg_sum(list(per_sample_TG.values()))
+
+        # ---- 2) Build per-chromosome aggregates ----
+        pseudobulk_chrom_dict: dict[str, dict] = {}
+
+        for chrom_id in chroms:
+            logging.info(f"\n-- Aggregating data for {chrom_id} --")
+
+            TG_pseudobulk_samples = []
+            RE_pseudobulk_samples = []
+            peaks_df_samples = []
+
+            # gene TSS for this chromosome
+            chrom_tss_path = GENOME_DIR / f"{chrom_id}_gene_tss.bed"
+            if not chrom_tss_path.is_file():
+                gene_tss_chrom = make_chrom_gene_tss_df(
+                    gene_tss_file=GENE_TSS_FILE,
+                    chrom_id=chrom_id,
+                    genome_dir=GENOME_DIR,
+                )
+            else:
+                gene_tss_chrom = pd.read_csv(
+                    chrom_tss_path,
+                    sep="\t",
+                    header=None,
+                    usecols=[0, 1, 2, 3],
+                )
+                gene_tss_chrom = gene_tss_chrom.rename(
+                    columns={0: "chrom", 1: "start", 2: "end", 3: "name"}
+                )
+
+            gene_tss_chrom["name"] = _canon_series_same_len(gene_tss_chrom["name"], gc)
+            gene_tss_chrom = gene_tss_chrom[gene_tss_chrom["name"] != ""]
+            gene_tss_chrom = gene_tss_chrom.drop_duplicates(subset=["name"], keep="first")
+            genes_on_chrom = gene_tss_chrom["name"].tolist()
+
+            for sample_name in (pbar := tqdm(sample_names)):
+                pbar.set_description(f"Processing {sample_name}")
+                sample_processed_data_dir = dataset_processed_data_dir / sample_name
+
+                # RE pseudobulk: peaks x metacells
+                re_path = sample_processed_data_dir / "RE_pseudobulk.parquet"
+                RE_pseudobulk = pd.read_parquet(re_path, engine="pyarrow")
+
+                # TG: restrict to genes on this chrom
+                TG_chr_specific = per_sample_TG[sample_name].loc[
+                    per_sample_TG[sample_name].index.intersection(genes_on_chrom)
+                ]
+
+                # RE: restrict to this chrom
+                RE_chr_specific = RE_pseudobulk[
+                    RE_pseudobulk.index.str.startswith(f"{chrom_id}:")
+                ]
+
+                # Build peaks df from RE index
+                peaks_df = (
+                    RE_chr_specific.index.to_series()
+                    .str.split("[:-]", expand=True)
+                    .rename(columns={0: "chrom", 1: "start", 2: "end"})
+                )
+                peaks_df["start"] = peaks_df["start"].astype(int)
+                peaks_df["end"] = peaks_df["end"].astype(int)
+                peaks_df["peak_id"] = RE_chr_specific.index
+
+                TG_pseudobulk_samples.append(TG_chr_specific)
+                RE_pseudobulk_samples.append(RE_chr_specific)
+                peaks_df_samples.append(peaks_df)
+
+            total_TG_pseudobulk_chr = _agg_sum(TG_pseudobulk_samples)
+            total_RE_pseudobulk_chr = _agg_sum(RE_pseudobulk_samples)
+            total_peaks_df = _agg_first(peaks_df_samples)
+
+            pseudobulk_chrom_dict[chrom_id] = {
+                "total_TG_pseudobulk_chr": total_TG_pseudobulk_chr,
+                "total_RE_pseudobulk_chr": total_RE_pseudobulk_chr,
+                "total_peaks_df": total_peaks_df,
             }
-    
+
+        # ---- 3) Save aggregates ----
+        total_TG_pseudobulk_global.to_parquet(
+            total_tg_pseudobulk_path,
+            engine="pyarrow",
+            compression="snappy",
+        )
+        with open(pseudobulk_chrom_dict_path, "wb") as f:
+            pickle.dump(pseudobulk_chrom_dict, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+    else:
+        # Load both from disk
+        logging.info("Found existing global and per-chrom pseudobulk; loading...")
+        total_TG_pseudobulk_global = pd.read_parquet(
+            total_tg_pseudobulk_path,
+            engine="pyarrow",
+        )
+        with open(pseudobulk_chrom_dict_path, "rb") as f:
+            pseudobulk_chrom_dict = pickle.load(f)
+
     return total_TG_pseudobulk_global, pseudobulk_chrom_dict
+
 
 def create_or_load_genomic_windows(
     window_size,
@@ -2272,6 +2320,7 @@ if __name__ == "__main__":
         
     # ----- CHROMOSOME-SPECIFIC PREPROCESSING -----
     if PROCESS_CHROMOSOME_SPECIFIC_DATA:        
+        logging.info("\n\n===== PROCESSING PER-CHROMOSOME DATA =====")
         chrom_list = CHROM_IDS
         total_tf_list_file = SAMPLE_PROCESSED_DATA_DIR / "tf_tg_combos" / "tf_list.csv"
         tf_names = _read_list(total_tf_list_file, "TF")
@@ -2517,7 +2566,6 @@ if __name__ == "__main__":
             with open(common_tg_vocab_file) as f: tg_vocab = json.load(f)
             
             # Match TFs and TGs to global vocab
-            tf_tensor_all, tf_names_kept, tf_ids = align_to_vocab(tf_names, tf_vocab, tf_tensor_all, label="TF")
             tg_tensor_all, tg_names_kept, tg_ids = align_to_vocab(tg_names, tg_vocab, tg_tensor_all, label="TG")
             
             torch.save(torch.tensor(tg_ids, dtype=torch.long), tg_id_file)
@@ -2538,7 +2586,7 @@ if __name__ == "__main__":
             
             # Build distance bias [num_windows x num_tg_kept] aligned to kept TGs
             logging.info(f"Building distance bias")
-            dist_bias = build_distance_bias(
+            dist_bias, new_window_map, kept_window_indices = build_distance_bias(
                 genes_near_peaks=genes_near_peaks,
                 window_map=window_map,
                 tg_names_kept=tg_names_kept,
@@ -2547,6 +2595,17 @@ if __name__ == "__main__":
                 mode=DIST_BIAS_MODE,
                 prune_empty_windows=True
             )
+            
+            if kept_window_indices is not None:
+                keep_t = torch.tensor(kept_window_indices, dtype=torch.long)
+
+                # atac_window_tensor_all: [W, C] -> [W', C]
+                atac_window_tensor_all = atac_window_tensor_all.index_select(0, keep_t)
+
+                # also prune genome_windows to match, if you use it later / in manifest
+                genome_windows = genome_windows.iloc[kept_window_indices].reset_index(drop=True)
+
+                num_windows = len(kept_window_indices)
             
             create_single_cell_tensors(
                 gene_tss_df=gene_tss_df, 
@@ -2565,7 +2624,7 @@ if __name__ == "__main__":
             torch.save(tg_tensor_all, tg_tensor_path)
 
             # Save the peak -> window map for the sample
-            atomic_json_dump(window_map, sample_window_map_file)
+            atomic_json_dump(new_window_map, sample_window_map_file)
 
             # Write TF and TG names and global vocab indices present in the sample
             atomic_json_dump(tf_names_kept, sample_tf_name_file)
