@@ -10,6 +10,7 @@ import sys
 sys.path.append(Path(__file__).resolve().parent.parent.parent)
 
 import random
+import signal
 import joblib
 import matplotlib.pyplot as plt
 import numpy as np
@@ -37,6 +38,17 @@ from multiomic_transformer.utils.files import unique_path
 from multiomic_transformer.utils import ewc_utils, plotting
 
 warnings.filterwarnings("ignore", message="No device id is provided via `init_process_group`")
+
+STOP_REQUESTED = False
+
+def _signal_handler(signum, frame):
+    # Mark that we should shut down gracefully.
+    global STOP_REQUESTED
+    STOP_REQUESTED = True
+
+# Register for both Ctrl+C and elastic's terminate
+signal.signal(signal.SIGINT, _signal_handler)
+signal.signal(signal.SIGTERM, _signal_handler)
 
 def ddp_setup(rank: int, world_size: int):
     """
@@ -93,6 +105,7 @@ class Trainer:
         self.save_every = save_every
         self.model = DDP(model, device_ids=[gpu_id])
         self.corr_sq_warmup_epochs = 3 
+        self.stop_requested = False
         
         self.scaler = GradScaler(init_scale=1024, growth_factor=1.5, backoff_factor=0.5, growth_interval=200)
 
@@ -113,7 +126,11 @@ class Trainer:
         self.patience = patience
         self.min_delta = min_delta
         self.patience_counter = 0
-        
+    
+    def _should_stop(self):
+        global STOP_REQUESTED
+        return self.stop_requested or STOP_REQUESTED
+    
     def _save_trained_model(self, path: str):
         if self.gpu_id != 0:
             return
@@ -267,6 +284,8 @@ class Trainer:
 
         with torch.no_grad():
             for batch in self.val_data:
+                if self._should_stop():
+                    raise KeyboardInterrupt()
                 (atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids, motif_mask) = batch
 
                 atac_wins  = atac_wins.to(self.gpu_id, non_blocking=True)
@@ -371,6 +390,9 @@ class Trainer:
         total_loss, total_mse, n_batches = 0.0, 0.0, 0
         self.epoch = epoch
         for iteration, batch in enumerate(self.train_data):
+            if self._should_stop():
+                raise KeyboardInterrupt()
+            
             total_loss_val, mse_loss_val, mean_corr, corr_weight = self._run_batch(batch)
             total_loss += float(total_loss_val)
             total_mse += float(mse_loss_val)
@@ -438,8 +460,14 @@ class Trainer:
         history = []  # store per-epoch logs
         
         try:
-            for epoch in range(max_epochs):
+            for epoch in range(start_epoch, max_epochs):
+                if self._should_stop():
+                    raise KeyboardInterrupt()
+                
                 train_loss, train_mse, val_loss, r2_s, r2_u = self._run_epoch(epoch)
+                
+                if self._should_stop():
+                    raise KeyboardInterrupt()
 
                 if self.gpu_id == 0:
                     lr = self.optimizer.param_groups[0]['lr']
@@ -467,7 +495,8 @@ class Trainer:
                     if self.gpu_id == 0:
                         self._save_checkpoint(epoch, path)
                         self._write_log_csv(history, path)
-                    dist.barrier()
+                    if dist.is_available() and dist.is_initialized():
+                        dist.barrier()
 
                 # Checkpoint + CSV log
                 stop_tensor = torch.tensor(0, device=self.gpu_id)

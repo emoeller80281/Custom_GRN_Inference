@@ -2120,7 +2120,7 @@ if __name__ == "__main__":
     
     logging.info(f"FORCE_RECALCULATE: {FORCE_RECALCULATE}")
     
-    PROCESS_SAMPLE_DATA = True
+    PROCESS_SAMPLE_DATA = False
     logging.info(f"PROCESS_SAMPLE_DATA: {PROCESS_SAMPLE_DATA}")
     PROCESS_CHROMOSOME_SPECIFIC_DATA = True
     logging.info(f"PROCESS_CHROMOSOME_SPECIFIC_DATA: {PROCESS_CHROMOSOME_SPECIFIC_DATA}")
@@ -2184,7 +2184,6 @@ if __name__ == "__main__":
             
             # Sample-specific cache files
             tf_tensor_path: Path =        SAMPLE_DATA_CACHE_DIR / "tf_tensor_all.pt"
-            metacell_name_file: Path =    SAMPLE_DATA_CACHE_DIR / "metacell_names.json"
             sample_tf_name_file: Path =   SAMPLE_DATA_CACHE_DIR / "tf_names.json"
             tf_id_file: Path =            SAMPLE_DATA_CACHE_DIR / "tf_ids.pt"
             
@@ -2345,7 +2344,7 @@ if __name__ == "__main__":
         logging.info(f"Aggregating pseudobulk datasets")
         dataset_processed_data_dir = RAW_DATA / DATASET_NAME
         total_TG_pseudobulk_global, pseudobulk_chrom_dict = \
-            aggregate_pseudobulk_datasets(SAMPLE_NAMES, dataset_processed_data_dir, chrom_list, gc)
+            aggregate_pseudobulk_datasets(SAMPLE_NAMES, dataset_processed_data_dir, chrom_list, gc, force_recalculate=True)
             
         global_tf_tensor_path   = SAMPLE_DATA_CACHE_DIR / "tf_tensor_all.pt"
         global_tf_ids_path      = SAMPLE_DATA_CACHE_DIR / "tf_ids.pt"
@@ -2570,7 +2569,6 @@ if __name__ == "__main__":
             
             torch.save(torch.tensor(tg_ids, dtype=torch.long), tg_id_file)
 
-            logging.info(f"\tMatched {len(tf_names_kept)} TFs to global vocab")
             logging.info(f"\tMatched {len(tg_names_kept)} TGs to global vocab")
             
             # Build motif mask using merged info
@@ -2627,15 +2625,12 @@ if __name__ == "__main__":
             atomic_json_dump(new_window_map, sample_window_map_file)
 
             # Write TF and TG names and global vocab indices present in the sample
-            atomic_json_dump(tf_names_kept, sample_tf_name_file)
             atomic_json_dump(tg_names_kept, sample_tg_name_file)
 
 
             # Write the distance bias and metacell names for the sample
             torch.save(dist_bias, dist_bias_file)
             logging.info(f"  - Saved distance bias tensor with shape {tuple(dist_bias.shape)} to {dist_bias_file}")
-
-            atomic_json_dump(metacell_names, metacell_name_file)
             
             torch.save(torch.from_numpy(motif_mask), motif_mask_file)
 
@@ -2649,19 +2644,18 @@ if __name__ == "__main__":
                 "Distance tau": DISTANCE_SCALE_FACTOR,
                 "Max peak-TG distance": MAX_PEAK_DISTANCE,
                 "paths": {
-                    "tf_tensor_all": str(tf_tensor_path),
+                    "tf_tensor_all": str(global_tf_tensor_path),
                     "tg_tensor_all": str(tg_tensor_path),
                     "atac_window_tensor_all": str(atac_tensor_path),
                     "dist_bias": str(dist_bias_file),
-                    "tf_ids": str(tf_id_file),
+                    "tf_ids": str(global_tf_ids_path),
                     "tg_ids": str(tg_id_file),
-                    "tf_names": str(sample_tf_name_file),
+                    "tf_names": str(global_tf_names_path),
                     "tg_names": str(sample_tg_name_file),
                     "common_tf_vocab": str(common_tf_vocab_file),
                     "common_tg_vocab": str(common_tg_vocab_file),
                     "window_map": str(sample_window_map_file),
                     "genes_near_peaks": str(peak_to_tss_dist_path),
-                    "metacell_names": str(metacell_name_file),
                     "motif_mask": str(motif_mask_file),
                 }
             }

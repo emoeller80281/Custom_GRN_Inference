@@ -4,7 +4,7 @@ import itertools
 
 ROOT_DIR = Path(__file__).resolve().parent.parent.parent
 
-chr_nums = [f"chr{i}" for i in range(1, 19)]
+chr_nums = [f"chr{i}" for i in range(1, 20)]
 chrom_list = chr_nums #+ ["chrX", "chrY"]
 
 # ----- SAMPLE INFORMATION -----
