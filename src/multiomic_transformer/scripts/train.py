@@ -94,6 +94,8 @@ class Trainer:
         save_every: int,
         patience: int = 20,
         min_delta: float = 1e-3,
+        grad_accum_steps: int = 1,
+        use_grad_accumulation: bool = False,
 
     ) -> None:
         self.gpu_id = gpu_id
@@ -106,6 +108,8 @@ class Trainer:
         self.model = DDP(model, device_ids=[gpu_id])
         self.corr_sq_warmup_epochs = 3 
         self.stop_requested = False
+        self.grad_accum_steps = max(1, grad_accum_steps)
+        self.use_grad_accumulation = use_grad_accumulation
         
         self.scaler = GradScaler(init_scale=1024, growth_factor=1.5, backoff_factor=0.5, growth_interval=200)
 
@@ -178,8 +182,6 @@ class Trainer:
         tg_ids    = tg_ids.to(self.gpu_id)
         motif_mask= motif_mask.to(self.gpu_id)
 
-        self.optimizer.zero_grad(set_to_none=True)
-
         # Optional feature scaling (id-aware)
         if getattr(self, "tf_scaler", None) is not None:
             tf_tensor = self.tf_scaler.transform(tf_tensor, tf_ids)
@@ -209,8 +211,21 @@ class Trainer:
         preds32   = torch.nan_to_num(preds.float(),   nan=0.0, posinf=1e6, neginf=-1e6)
         targets32 = torch.nan_to_num(targets.float(), nan=0.0, posinf=1e6, neginf=-1e6)
 
-        # Mean MSE (same scale every batch)
+        # Mean MSE in scaled space
         mse_loss = self.loss_fn(preds32, targets32)
+        
+        # ----- Unscaled MSE for logging (no grad) -----
+        if getattr(self, "tg_scaler", None) is not None:
+            with torch.no_grad():
+                targets_u = self.tg_scaler.inverse_transform(targets32, tg_ids)
+                preds_u   = self.tg_scaler.inverse_transform(preds32,   tg_ids)
+
+                targets_u = torch.nan_to_num(targets_u.float(), nan=0.0, posinf=1e6, neginf=-1e6)
+                preds_u   = torch.nan_to_num(preds_u.float(),   nan=0.0, posinf=1e6, neginf=-1e6)
+
+                mse_loss_unscaled = F.mse_loss(preds_u, targets_u).detach()
+        else:
+            mse_loss_unscaled = mse_loss.detach()
 
         # ---------- Correlation penalty via per-gene Pearson r^2 ----------
         # shapes: [B, G]
@@ -247,21 +262,13 @@ class Trainer:
 
         # Safety: if something went numerically wrong, skip the step
         if not torch.isfinite(total_loss):
-            self.optimizer.zero_grad(set_to_none=True)
             return (torch.tensor(0.0, device=self.gpu_id),
                     torch.tensor(0.0, device=self.gpu_id),
                     torch.tensor(0.0, device=self.gpu_id),
                     torch.tensor(0.0, device=self.gpu_id))
 
-        # AMP step
-        self.scaler.scale(total_loss).backward()
-        self.scaler.unscale_(self.optimizer)
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-        self.scaler.step(self.optimizer)
-        self.scaler.update()
-
         # For logging: return components
-        return total_loss.detach(), mse_loss.detach(), mean_r2.detach(), r2_penalty.detach()
+        return total_loss, mse_loss.detach(), mse_loss_unscaled, mean_r2.detach(), r2_penalty.detach()
 
     def _validate(self):
         self.model.eval()
@@ -386,31 +393,86 @@ class Trainer:
         bs = getattr(self.train_data, "batch_sampler", None)
         if hasattr(bs, "set_epoch"):
             bs.set_epoch(epoch)
-
-        total_loss, total_mse, n_batches = 0.0, 0.0, 0
+            
+        total_loss_sum = 0.0
+        total_mse_scaled_sum = 0.0
+        total_mse_unscaled_sum = 0.0
+        n_batches = 0
         self.epoch = epoch
+        
+        self.optimizer.zero_grad(set_to_none=True)
+        progress_marks = [25, 50, 75]
+        next_mark_idx = 0
+        
         for iteration, batch in enumerate(self.train_data):
             if self._should_stop():
                 raise KeyboardInterrupt()
-            
-            total_loss_val, mse_loss_val, mean_corr, corr_weight = self._run_batch(batch)
-            total_loss += float(total_loss_val)
-            total_mse += float(mse_loss_val)
+
+            out = self._run_batch(batch)
+            if out[0] is None:
+                self.optimizer.zero_grad(set_to_none=True)
+                continue
+
+            (total_loss_val,
+             mse_scaled,
+             mse_unscaled,
+             mean_corr,
+             corr_weight) = out
+
+            if not total_loss_val.requires_grad:
+                raise RuntimeError("Bug: total_loss_val has no grad_fn")
+
+            loss_for_backprop = total_loss_val / self.grad_accum_steps
+            self.scaler.scale(loss_for_backprop).backward()
+
+            if ((iteration + 1) % self.grad_accum_steps == 0
+                or (iteration + 1) == len(self.train_data)):
+                self.scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+                self.optimizer.zero_grad(set_to_none=True)
+
+            total_loss_sum          += float(total_loss_val.detach())
+            total_mse_scaled_sum    += float(mse_scaled)
+            total_mse_unscaled_sum  += float(mse_unscaled)
             n_batches += 1
             
-            if (iteration % 100 == 0) and (self.gpu_id == 0) and (len(self.train_data) > 750):
-                logging.info(
-                    f"    [{int(round(iteration / len(self.train_data) * 100,0))}%] Iter {iteration} | MSE + pearson r2 penalty: {total_loss_val:.4f} | "
-                    f"MSE Loss: {mse_loss_val:.4f} | pearson r2 penalty: {corr_weight:.4f} | Mean pearson r2: {mean_corr:.2f}"
-                )
+            
+            # ----- sparse progress logging -----
+            if (
+                self.gpu_id == 0
+                and len(self.train_data) > 0
+                and next_mark_idx < len(progress_marks)
+            ):
+                pct = int(100 * (iteration + 1) / len(self.train_data))
+                # log when we *cross* the next mark
+                if pct >= progress_marks[next_mark_idx]:
+                    logging.info(
+                        f"    [{progress_marks[next_mark_idx]}%] Iter {iteration}"
+                    )
+                    next_mark_idx += 1
+                            # f"MSE + pearson r2 penalty: {total_loss_val:.4f} | "
+                            # f"MSE Loss: {mse_loss_scaled:.4f} | "
+                            # f"pearson r2 penalty: {corr_weight:.4f} | "
+                            # f"Mean pearson r2: {mean_corr:.2f}"     
 
-        avg_train_loss = total_loss / max(1, n_batches)
-        avg_train_mse = total_mse / max(1, n_batches)
+        avg_train_loss          = total_loss_sum / max(1, n_batches)
+        avg_train_mse_scaled    = total_mse_scaled_sum / max(1, n_batches)
+        avg_train_mse_unscaled  = total_mse_unscaled_sum / max(1, n_batches)
 
-        avg_val_loss_scaled, avg_val_loss_unscaled, r2_s, r2_u = self._validate()
-        self.scheduler.step(avg_val_loss_unscaled)
+        avg_val_mse_scaled, avg_val_mse_unscaled, r2_s, r2_u = self._validate()
+        self.scheduler.step(avg_val_mse_unscaled)
 
-        return avg_train_loss, avg_train_mse, avg_val_loss_unscaled, r2_s, r2_u
+        return (
+            avg_train_loss,
+            avg_train_mse_scaled,
+            avg_train_mse_unscaled,
+            avg_val_mse_scaled,
+            avg_val_mse_unscaled,
+            r2_s,
+            r2_u,
+        )
 
 
     def _save_checkpoint(self, epoch: int, path: str):
@@ -464,7 +526,13 @@ class Trainer:
                 if self._should_stop():
                     raise KeyboardInterrupt()
                 
-                train_loss, train_mse, val_loss, r2_s, r2_u = self._run_epoch(epoch)
+                (avg_train_loss,
+                 avg_train_mse_scaled, 
+                 avg_train_mse_unscaled, 
+                 avg_val_mse_scaled, 
+                 avg_val_mse_unscaled, 
+                 r2_s, 
+                 r2_u) = self._run_epoch(epoch)
                 
                 if self._should_stop():
                     raise KeyboardInterrupt()
@@ -472,9 +540,9 @@ class Trainer:
                 if self.gpu_id == 0:
                     lr = self.optimizer.param_groups[0]['lr']
                     logging.info(
-                        f"Epoch {epoch+1} | Train Total Loss: {train_loss:.4f} | "
-                        f"Train MSE: {train_mse:.4f} | "
-                        f"Val MSE: {val_loss:.4f} | "
+                        f"Epoch {epoch+1} | Train Total Loss: {avg_train_loss:.4f} | "
+                        f"Train MSE: {avg_train_mse_unscaled:.4f} | "
+                        f"Val MSE: {avg_val_mse_unscaled:.4f} | "
                         f"R2 (Unscaled): {r2_u:.3f} | "
                         f"R2 (Scaled): {r2_s:.3f} | "
                         f"LR: {lr:.2e}"
@@ -482,9 +550,9 @@ class Trainer:
 
                     history.append({
                         "Epoch": epoch+1,
-                        "Train Total Loss": train_loss,
-                        "Train MSE": train_mse,
-                        "Val MSE": val_loss,
+                        "Train Total Loss": avg_train_loss,
+                        "Train MSE": avg_train_mse_unscaled,
+                        "Val MSE": avg_val_mse_unscaled,
                         "R2_u": r2_u,
                         "R2_s": r2_s,
                         "LR": lr,
@@ -503,9 +571,9 @@ class Trainer:
 
                 # --- Early stopping check (only rank 0 sets flag) ---
                 if self.gpu_id == 0:
-                    if (val_loss < best_val_loss - self.min_delta) or (r2_s > best_r2 + self.min_delta):
+                    if (avg_val_mse_unscaled < best_val_loss - self.min_delta) or (r2_s > best_r2 + self.min_delta):
                         # If either val_loss improved OR r2_s improved, reset patience
-                        best_val_loss = val_loss
+                        best_val_loss = avg_val_mse_unscaled
                         best_r2 = max(best_r2, r2_s)
                         patience_counter = 0
                     else:
@@ -632,7 +700,8 @@ def load_train_objs():
         lambda_l1=SHORTCUT_L1,
         lambda_l2=SHORTCUT_L2,
         topk=SHORTCUT_TOPK,
-        shortcut_dropout=SHORTCUT_DROPOUT
+        shortcut_dropout=SHORTCUT_DROPOUT,
+        use_gradient_checkpointing=USE_GRAD_CHECKPOINTING
     )
     optimizer = torch.optim.Adam(model.parameters(), lr=INITIAL_LEARNING_RATE)
     return dataset, model, optimizer
@@ -805,6 +874,13 @@ def write_run_parameters(dataset, out_dir):
     logging.info(f"Metacells:           {len(dataset.metacell_names)}")
     logging.info(f"Epochs:              {TOTAL_EPOCHS}")
     logging.info(f"Batch Size:          {BATCH_SIZE}")
+    logging.info(f"Grad Accum Steps:    {GRAD_ACCUM_STEPS}")   
+    if USE_GRAD_ACCUMULATION:
+        logging.info(f"Effctve Batch Size:  {BATCH_SIZE * GRAD_ACCUM_STEPS}")   
+    else:
+        logging.info(f"Effctve Batch Size:  {BATCH_SIZE}")   
+    logging.info(f"Use Grad Accum?:     {USE_GRAD_ACCUMULATION}")   
+    logging.info(f"Use Grad Chkpt?:     {USE_GRAD_CHECKPOINTING}") 
     logging.info(f"Model Dimension:     {D_MODEL}")
     logging.info(f"Attention Heads:     {NUM_HEADS}")
     logging.info(f"Attention Layers:    {NUM_LAYERS}")
@@ -826,6 +902,9 @@ def write_run_parameters(dataset, out_dir):
         "Metacells": len(dataset.metacell_names),
         "Epochs": TOTAL_EPOCHS,
         "Batch Size": BATCH_SIZE,
+        "Grad Accum Steps": GRAD_ACCUM_STEPS,
+        "Use Grad Accum": USE_GRAD_ACCUMULATION,
+        "Use Grad Chkpt": USE_GRAD_CHECKPOINTING,
         "d_model": D_MODEL,
         "corr_loss_weight": CORR_LOSS_WEIGHT,
         "Attention Heads": NUM_HEADS,
@@ -847,26 +926,131 @@ def write_run_parameters(dataset, out_dir):
         json.dump(run_params, f, indent=4)  # indent=4 for readability
     logging.info(f"Run parameters written to {path}")
 
+import torch
+import torch.distributed as dist
+from torch.utils._contextlib import _DecoratorContextManager  # if needed elsewhere
+
+
 @torch.no_grad()
-def get_mean_tf_tg_attention(model, dataloader, device="cuda"):
+def get_mean_tf_tg_attention_ddp(model,
+                                 dataloader,
+                                 num_tfs: int,
+                                 num_tgs: int,
+                                 device: str | torch.device):
+    """
+    Compute global mean TF–TG attention over a (possibly DDP) dataloader.
+
+    Assumes:
+      - model.shortcut_layer.attn is set on each forward.
+      - attn shape is one of:
+          [B, H, G, T], [B, G, T], or [G, T]
+        where G = #TG in batch, T = #TF in batch.
+      - tf_ids and tg_ids in the batch give TF/TG indices in [0,num_tfs) / [0,num_tgs),
+        either shape [B, T] (same across batch) or [T]; similarly for TG.
+
+    Returns:
+      mean_attn: [num_tgs, num_tfs] tensor on current device
+                 (after all_reduce: identical on all ranks).
+    """
+    if isinstance(device, str):
+        device = torch.device(device)
+
     model.eval()
-    attn_accum = None
-    n = 0
-    for atac_wins, tf_tensor, _, bias, tf_ids, tg_ids, motif_mask in dataloader:
-        atac_wins, tf_tensor, bias = atac_wins.to(device), tf_tensor.to(device), bias.to(device)
-        tf_ids, tg_ids = tf_ids.to(device), tg_ids.to(device)
-        motif_mask = motif_mask.to(device)
 
-        # Forward pass
-        _ = model(atac_wins, tf_tensor, tf_ids=tf_ids, tg_ids=tg_ids,
-                  bias=bias, motif_mask=motif_mask)
+    # global accumulators on this rank
+    attn_sum = torch.zeros(num_tgs, num_tfs, device=device)
+    attn_cnt = torch.zeros(num_tgs, num_tfs, device=device)
 
-        # grab attn from shortcut layer each batch
-        if hasattr(model.shortcut_layer, "attn"):
-            attn_batch = model.shortcut_layer.attn.detach().cpu()
-            attn_accum = attn_batch if attn_accum is None else attn_accum + attn_batch
-            n += 1
-    return attn_accum / max(n, 1)
+    for batch in dataloader:
+        atac_wins, tf_tensor, _, bias, tf_ids, tg_ids, motif_mask = batch
+
+        atac_wins  = atac_wins.to(device, non_blocking=True)
+        tf_tensor  = tf_tensor.to(device, non_blocking=True)
+        bias       = bias.to(device, non_blocking=True)
+        tf_ids     = tf_ids.to(device, non_blocking=True)
+        tg_ids     = tg_ids.to(device, non_blocking=True)
+        motif_mask = motif_mask.to(device, non_blocking=True)
+
+        # forward pass (no grad)
+        _ = model(
+            atac_wins,
+            tf_tensor,
+            tf_ids=tf_ids,
+            tg_ids=tg_ids,
+            bias=bias,
+            motif_mask=motif_mask,
+        )
+
+        if not hasattr(model, "shortcut_layer"):
+            raise RuntimeError("Model has no shortcut_layer; cannot read TF–TG attention.")
+
+        if not hasattr(model.shortcut_layer, "attn"):
+            # no attention recorded for this batch; skip
+            continue
+
+        attn = model.shortcut_layer.attn
+        if attn is None:
+            continue
+        attn = attn.detach()
+
+        # ---- Collapse attn to [G, T] ----
+        if attn.dim() == 4:
+            # [B, H, G, T] -> average over batch + heads
+            attn_mat = attn.mean(dim=(0, 1))
+        elif attn.dim() == 3:
+            # [B, G, T] -> average over batch
+            attn_mat = attn.mean(dim=0)
+        elif attn.dim() == 2:
+            # [G, T]
+            attn_mat = attn
+        else:
+            raise RuntimeError(f"Unexpected attn dim {attn.shape}")
+
+        G_b, T_b = attn_mat.shape
+
+        # ---- Get TF/TG ids for this batch ----
+        # If [B, T] with same row, take first; if [T], use as is.
+        if tf_ids.dim() == 2:
+            tf_ids_b = tf_ids[0]
+        else:
+            tf_ids_b = tf_ids
+        if tg_ids.dim() == 2:
+            tg_ids_b = tg_ids[0]
+        else:
+            tg_ids_b = tg_ids
+
+        if tf_ids_b.numel() != T_b or tg_ids_b.numel() != G_b:
+            raise RuntimeError(
+                f"Mismatch: attn_mat {attn_mat.shape}, "
+                f"tf_ids {tf_ids_b.shape}, tg_ids {tg_ids_b.shape}"
+            )
+
+        # ---- Scatter into global [num_tgs, num_tfs] ----
+        # Build all (tg_idx, tf_idx) pairs for this block
+        tf_idx = tf_ids_b.view(1, -1).expand(G_b, -1).reshape(-1)   # [G_b*T_b]
+        tg_idx = tg_ids_b.view(-1, 1).expand(-1, T_b).reshape(-1)   # [G_b*T_b]
+        vals   = attn_mat.reshape(-1)
+
+        # Safety: keep only in-range indices
+        valid = (tf_idx >= 0) & (tf_idx < num_tfs) & (tg_idx >= 0) & (tg_idx < num_tgs)
+        if not valid.all():
+            tf_idx = tf_idx[valid]
+            tg_idx = tg_idx[valid]
+            vals   = vals[valid]
+
+        one = torch.ones_like(vals, device=device)
+
+        attn_sum.index_put_((tg_idx, tf_idx), vals, accumulate=True)
+        attn_cnt.index_put_((tg_idx, tf_idx), one,  accumulate=True)
+
+    # ---- All-reduce across ranks ----
+    if dist.is_available() and dist.is_initialized():
+        dist.all_reduce(attn_sum, op=dist.ReduceOp.SUM)
+        dist.all_reduce(attn_cnt, op=dist.ReduceOp.SUM)
+
+    mean_attn = attn_sum / attn_cnt.clamp_min(1e-8)
+    return mean_attn
+
 
 def _mapping_to_ordered_list(name2id: dict):
     # convert {name: id} → [names] in id order
@@ -973,7 +1157,18 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
         
         loss_fn = nn.MSELoss()    
         
-        trainer = Trainer(model, train_loader, val_loader, loss_fn, optimizer, gpu_id=rank, save_every=save_every, patience=PATIENCE)
+        trainer = Trainer(
+            model, 
+            train_loader, 
+            val_loader, 
+            loss_fn, 
+            optimizer, 
+            gpu_id=rank, 
+            save_every=save_every, 
+            patience=PATIENCE,
+            grad_accum_steps=GRAD_ACCUM_STEPS,
+            use_grad_accumulation=USE_GRAD_ACCUMULATION,
+            )
         
         T = len(dataset.tf_name2id_sub)
         G = len(dataset.tg_name2id_sub)
@@ -1010,38 +1205,59 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
             logging.info("\n ----- TRAINING STARTED -----")
             
         trainer.train(max_epochs=TOTAL_EPOCHS, path=training_output_dir, start_epoch=start_epoch)
-        
-        if rank == 0:
-            model_for_save = getattr(trainer.model, "module", trainer.model)
-            model_for_save.eval()
 
-            # save embeddings directly (no reload)
+        # unwrap for eval on each rank
+        model_for_eval = getattr(trainer.model, "module", trainer.model)
+        model_for_eval.to(rank_device)
+
+        # ----- Rank-0: save embeddings & checkpoint -----
+        if rank == 0:
+            model_for_eval.eval()
             save_tf_tg_embeddings_from_model(
-                model_for_save,
+                model_for_eval,
                 out_dir=training_output_dir,
                 vocab_dir=training_output_dir,
             )
-            # Save model checkpoint
             torch.save({
-                "model_state_dict": model.state_dict(),
+                "model_state_dict": model_for_eval.state_dict(),
                 "tf_scaler_mean": tf_scaler.mean,
                 "tf_scaler_std": tf_scaler.std,
                 "tg_scaler_mean": tg_scaler.mean,
                 "tg_scaler_std": tg_scaler.std,
             }, os.path.join(training_output_dir, "trained_model.pt"))
-                    
             logging.info("Saved final trained model")
-        
+
+        # ----- EWC fisher (rank 0 only) -----
+        if rank == 0:
             ewc_bundle_path = training_output_dir / "ewc_bundle.pth"
-            fisher = ewc_utils.compute_fisher_diag(model_for_save, train_loader,
-                                    device=(f"cuda:{rank}" if torch.cuda.is_available() else "cpu"),
-                                    n_batches=100)
-            ewc_utils.save_ewc_bundle(ewc_bundle_path, model_for_save, fisher)
-            
-            # Save TF→TG attention weights from the shortcut
-            if hasattr(model_for_save, "shortcut_layer") and hasattr(model_for_save.shortcut_layer, "attn"):
-                mean_attn = get_mean_tf_tg_attention(model_for_save, test_loader, device=f"cuda:{rank}")
-                
+            fisher = ewc_utils.compute_fisher_diag(
+                model_for_eval, train_loader,
+                device=rank_device,
+                n_batches=100,
+            )
+            ewc_utils.save_ewc_bundle(ewc_bundle_path, model_for_eval, fisher)
+
+        # ----- Global mean TF–TG attention via DDP all-reduce -----
+        mean_attn = None
+        if hasattr(model_for_eval, "shortcut_layer"):
+            mean_attn = get_mean_tf_tg_attention_ddp(
+                model_for_eval,
+                test_loader,
+                num_tfs=T,
+                num_tgs=G,
+                device=rank_device,
+            )
+
+            if rank == 0:
+                mean_attn_cpu = mean_attn.detach().cpu()
+                torch.save(
+                    mean_attn_cpu,
+                    training_output_dir / "mean_tf_tg_attention.pt"
+                )
+                logging.info("Saved global mean TF–TG attention matrix")
+
+        # ----- Rank-0: save attention CSV + plots -----
+        if rank == 0:
             # Build ordered name lists from vocab files (IDs -> names)
             with open(os.path.join(training_output_dir, "tf_vocab.json")) as f:
                 tf_vocab_obj = json.load(f)
@@ -1059,41 +1275,18 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
             for name, idx in tg_name2id.items():
                 tg_id2name[idx] = name
 
-            # When saving attention (rows=tg, cols=tf as in your code)
-            mean_attn_df = pd.DataFrame(
-                mean_attn.numpy(),
-                index=tg_id2name,
-                columns=tf_id2name
-            )
-            
-            mean_attn_df.to_csv(os.path.join(training_output_dir, "tf_tg_mean_attention.csv"))
-            logging.info(f"Saved TF→TG attention weights to 'tf_tg_mean_attention.csv'")
+            if mean_attn is not None:
+                mean_attn_df = pd.DataFrame(
+                    mean_attn.detach().cpu().numpy(),
+                    index=tg_id2name,
+                    columns=tf_id2name,
+                )
+                mean_attn_df.to_csv(os.path.join(training_output_dir, "tf_tg_mean_attention.csv"))
+                logging.info("Saved TF→TG attention weights to 'tf_tg_mean_attention.csv'")
+
             # Training figures
             log_path = os.path.join(training_output_dir, "training_log.csv")
-            log_df = pd.read_csv(log_path, header=0)
-            
-            # pearson_corr_plt = plotting.plot_pearson_corr_across_epochs(
-            #     df=log_df,
-            #     dataset_name=DATASET_NAME,
-            #     chrom_id=CHROM_ID
-            # )
-            # pearson_corr_plt.savefig(os.path.join(training_output_dir, "pearson_training.png"), dpi=300)
-            
-            # train_val_loss_plt = plotting.plot_train_val_loss(
-            #     df=log_df,
-            #     dataset_name=DATASET_NAME,
-            #     chrom_id=CHROM_ID
-            # )
-            # train_val_loss_plt.savefig(os.path.join(training_output_dir, "train_val_loss.png"), dpi=300)
-            
-            # per_gene_corr_scatter_plt = plotting.plot_per_gene_correlation_scatterplot(
-            #     model=model,
-            #     dataloader=test_loader,
-            #     use_mask=USE_MOTIF_MASK,
-            #     gpu_id=0
-            # )
-            # per_gene_corr_scatter_plt.savefig(os.path.join(training_output_dir, "per_gene_corr_scatter.png"), dpi=300)
-                
+
         if rank == 0:
             logging.info("\nIterations complete")
     

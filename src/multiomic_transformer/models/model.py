@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from torch_geometric.nn import GCNConv, GATConv, GINEConv
 from torch_geometric.data import Data
 from torch_geometric.utils import negative_sampling
+import torch.utils.checkpoint as cp
 import numpy as np
 import math
 
@@ -211,7 +212,8 @@ class MultiomicTransformer(nn.Module):
                  lambda_l1=1e-4, 
                  lambda_l2=0.0,
                  topk=None,
-                 shortcut_dropout=0.2
+                 shortcut_dropout=0.2,
+                 use_gradient_checkpointing: bool = False,
                  ):
         super().__init__()
         
@@ -223,6 +225,7 @@ class MultiomicTransformer(nn.Module):
         self.use_motif_mask = use_motif_mask
         self.use_shortcut = use_shortcut
         self.bias_scale = bias_scale
+        self.use_gradient_checkpointing = use_gradient_checkpointing
 
         # TF and TG embedding tables - generates identities for TFs and TGs
         self.tf_identity_emb = nn.Embedding(tf_vocab_size, d_model)
@@ -344,7 +347,10 @@ class MultiomicTransformer(nn.Module):
         win_emb = self.atac_acc_dense_input_layer(atac_windows)       # [batch_size,n_window,d_model]
         pos = torch.arange(n_window, device=device, dtype=torch.float32)
         win_emb = win_emb + self.posenc(pos, bsz=batch_size).transpose(0, 1)  # [batch_size,n_window,d_model]
-        win_emb = self.encoder(win_emb)                               # [batch_size,n_window,d_model]
+        if self.use_gradient_checkpointing and self.training:
+            win_emb = self._encode_with_checkpointing(win_emb)
+        else:
+            win_emb = self.encoder(win_emb)                               # [batch_size,n_window,d_model]
 
         # Guard against indexing errors with TF and TG vocab
         assert tf_ids.dtype == torch.long and tg_ids.dtype == torch.long
@@ -364,8 +370,8 @@ class MultiomicTransformer(nn.Module):
         tf_emb = tf_expr_emb + tf_id_emb.unsqueeze(0)                     
 
         # ----- TF-ATAC and ATAC-TF Cross Attention -----
-        tf_cross   = self.cross_tf_to_atac(tf_emb, win_emb)        # [batch_size,n_tfs,d_model]
-        atac_cross = self.cross_atac_to_tf(win_emb, tf_emb)        # [batch_size,n_window,d_model]
+        tf_cross   = self._maybe_checkpoint(self.cross_tf_to_atac, tf_emb, win_emb)        # [batch_size,n_tfs,d_model]
+        atac_cross = self._maybe_checkpoint(self.cross_atac_to_tf, win_emb, tf_emb)        # [batch_size,n_window,d_model]
 
         # Attention pooling
         tf_repr, _   = self.tf_to_atac_cross_attn_pool(tf_cross)                    # [batch_size,d_model]
@@ -392,6 +398,15 @@ class MultiomicTransformer(nn.Module):
 
         # TG-ATAC cross attention with distance bias
         tg_cross = self.cross_tg_to_atac(tg_base, win_emb, attn_bias=attn_bias)                             # [batch_size,n_tgs,d_model]
+        if self.use_gradient_checkpointing and self.training and attn_bias is not None:
+            def tg_attn_fn(tg_x, win_x, bias_x):
+                return self.cross_tg_to_atac(tg_x, win_x, attn_bias=bias_x)
+            tg_cross = cp.checkpoint(tg_attn_fn, tg_base, win_emb, attn_bias, use_reentrant=False)
+        elif self.use_gradient_checkpointing and self.training:
+            # no bias branch
+            tg_cross = self._maybe_checkpoint(self.cross_tg_to_atac, tg_base, win_emb)
+        else:
+            tg_cross = self.cross_tg_to_atac(tg_base, win_emb, attn_bias=attn_bias)
         
         # Expand the TF-ATAC cross attention output for each TG
         tf_atac_cross_attn_output = tf_atac_cross_attn_output.unsqueeze(1).expand(-1, tg_cross.size(1), -1) # [batch_size,n_tgs,d_model]
@@ -431,3 +446,31 @@ class MultiomicTransformer(nn.Module):
         
 
         return tg_pred, attn
+    
+    def _encode_with_checkpointing(self, win_emb):
+        """
+        Run self.encoder with gradient checkpointing over its layers.
+        Assumes self.encoder is an nn.TransformerEncoder.
+        """
+        encoder = self.encoder
+
+        for layer in encoder.layers:
+            # each layer: (x) -> (x_out)
+            win_emb = cp.checkpoint(layer, win_emb, use_reentrant=False)
+
+        if encoder.norm is not None:
+            win_emb = encoder.norm(win_emb)
+
+        return win_emb
+
+    def _maybe_checkpoint(self, module, *args):
+        """
+        Conditionally run `module(*args)` under torch.utils.checkpoint.
+        Assumes all args are Tensors (no kwargs).
+        """
+        if self.use_gradient_checkpointing and self.training:
+            def fn(*inputs):
+                return module(*inputs)
+            return cp.checkpoint(fn, *args, use_reentrant=False)
+        else:
+            return module(*args)

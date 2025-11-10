@@ -55,28 +55,32 @@ FILTER_TO_NEAREST_GENE = True           # Associate peaks to the nearest gene
 PROMOTER_BP = None #10_000
 
 # ----- MODEL TRAINING PARAMETERS -----
-TOTAL_EPOCHS=50
+TOTAL_EPOCHS=100
 BATCH_SIZE=16
-PATIENCE=15
-CORR_LOSS_WEIGHT=0.1            # Testing with no R2 metric
+PATIENCE=10
+CORR_LOSS_WEIGHT=0.1            
 
-D_MODEL = 128
+D_MODEL = 256
 NUM_HEADS = 4
-NUM_LAYERS = 3
+NUM_LAYERS = 4
 D_FF = D_MODEL * 4
 DROPOUT = 0.2
 
 SAVE_EVERY_N_EPOCHS=1           # Chooses how many epochs to run before saving a checkpoint
-RESUME_CHECKPOINT_PATH=None
+RESUME_CHECKPOINT_PATH="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC_no_scale_linear/chr19/model_training_035/checkpoint.pt"
+
+GRAD_ACCUM_STEPS=2
+USE_GRAD_ACCUMULATION=True
+USE_GRAD_CHECKPOINTING=True
 
 # Training scheduler settings
 MODE="min"                      # min = improvement means a lower number; max = improvement means a higher number
 INITIAL_LEARNING_RATE = 3e-4    # Initial learning rate for the model
 SCHEDULER_FACTOR=0.5            # How much to reduce the learning rate on a plateau
-SCHEDULER_PATIENCE=5            # How long to wait with no improvement without dropping the learning rate
-THRESHOLD=1e-3                  # Defines how much better the 
+SCHEDULER_PATIENCE=3            # How long to wait with no improvement without dropping the learning rate
+THRESHOLD=1e-3                  # Defines how much better the next epoch has to be to count as being "better"
 THRESHOLD_MODE="rel"            # rel helps filter noise for datasets with different loss scales. new best = previous best * (1 - threshold) difference
-COOLDOWN=4                      # How many epochs to pause after a drop before testing for improvement, lets the training stabilize a bit
+COOLDOWN=3                      # How many epochs to pause after a drop before testing for improvement, lets the training stabilize a bit
 MIN_LR=1e-5                     # Wont drop the learning rate below this, prevents learning from stalling due to tiny lr
 
 # TF to TG shortcut parameters
