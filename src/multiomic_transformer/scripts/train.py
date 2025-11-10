@@ -81,6 +81,21 @@ def setup_logging(rank: int):
         handlers=[handler],
         force=True
     )
+
+def load_run_parameters_from_dir(run_dir: Path) -> dict:
+    """
+    Load run_parameters.json from an existing training directory, if present.
+    Returns {} if not found.
+    """
+    param_path = run_dir / "run_parameters.json"
+    if not param_path.is_file():
+        logging.warning(f"No run_parameters.json found in {run_dir}, using current config.")
+        return {}
+    with open(param_path, "r") as f:
+        params = json.load(f)
+    logging.info(f"Loaded run parameters from {param_path}")
+    return params
+
     
 class Trainer:
     def __init__(
@@ -1129,19 +1144,62 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
     setup_logging(rank)
     
     # optional: path to an existing checkpoint
+    # optional: path to an existing checkpoint
     resume_ckpt = RESUME_CHECKPOINT_PATH
-    
+
     try:
         if resume_ckpt and os.path.isfile(resume_ckpt):
             resume_ckpt = Path(resume_ckpt)
             training_output_dir = resume_ckpt.parent
             logging.info(f"\n =========== RESUMING FROM {resume_ckpt} ===========")
+
+            # ---- load and apply stored run parameters ----
+            run_params = load_run_parameters_from_dir(training_output_dir)
+
+            # Make sure all ranks use the same overrides
+            # (All ranks read the same JSON from shared FS.)
+
+            global TOTAL_EPOCHS, BATCH_SIZE, GRAD_ACCUM_STEPS
+            global USE_GRAD_ACCUMULATION, USE_GRAD_CHECKPOINTING
+            global D_MODEL, NUM_HEADS, NUM_LAYERS, D_FF, DROPOUT
+            global USE_SHORTCUT, USE_DISTANCE_BIAS, ATTN_BIAS_SCALE
+            global USE_MOTIF_MASK, SHORTCUT_L1, SHORTCUT_L2
+            global SHORTCUT_DROPOUT, SHORTCUT_TOPK, CORR_LOSS_WEIGHT
+
+            # Core training knobs
+            TOTAL_EPOCHS          = int(run_params.get("Epochs", TOTAL_EPOCHS))
+            BATCH_SIZE            = int(run_params.get("Batch Size", BATCH_SIZE))
+            GRAD_ACCUM_STEPS      = int(run_params.get("Grad Accum Steps", GRAD_ACCUM_STEPS))
+            USE_GRAD_ACCUMULATION = bool(run_params.get("Use Grad Accum", USE_GRAD_ACCUMULATION))
+            USE_GRAD_CHECKPOINTING= bool(run_params.get("Use Grad Chkpt", USE_GRAD_CHECKPOINTING))
+
+            # Architecture: must match checkpoint to load successfully
+            D_MODEL        = int(run_params.get("d_model", D_MODEL))
+            NUM_HEADS      = int(run_params.get("Attention Heads", NUM_HEADS))
+            NUM_LAYERS     = int(run_params.get("Model Layers", NUM_LAYERS))
+            D_FF           = int(run_params.get("d_feedforward", D_FF))
+            DROPOUT        = float(run_params.get("Dropout", DROPOUT))
+
+            # Shortcut & bias config
+            USE_SHORTCUT       = bool(run_params.get("tf_tg_shortcut", USE_SHORTCUT))
+            USE_DISTANCE_BIAS  = bool(run_params.get("Distance Bias", USE_DISTANCE_BIAS))
+            ATTN_BIAS_SCALE    = float(run_params.get("Distance Bias Scale", ATTN_BIAS_SCALE))
+            USE_MOTIF_MASK     = bool(run_params.get("Motif Mask", USE_MOTIF_MASK))
+            SHORTCUT_L1        = float(run_params.get("Shortcut L1", SHORTCUT_L1))
+            SHORTCUT_L2        = float(run_params.get("Shortcut L2", SHORTCUT_L2))
+            SHORTCUT_DROPOUT   = float(run_params.get("Shortcut Dropout", SHORTCUT_DROPOUT))
+            SHORTCUT_TOPK      = run_params.get("Shortcut Top K", SHORTCUT_TOPK)
+            CORR_LOSS_WEIGHT   = float(run_params.get("corr_loss_weight", CORR_LOSS_WEIGHT))
+
+            logging.info("Resumed run hyperparameters have been loaded from run_parameters.json")
+
         else:
             training_file_iter_format = "model_training_{:03d}"
             training_output_dir = unique_path(OUTPUT_DIR / CHROM_ID, training_file_iter_format)
             logging.info(f"\n =========== EXPERIMENT {training_output_dir.name.upper()} ===========")
-                
+
         os.makedirs(training_output_dir, exist_ok=True)
+
             
         dataset, model, optimizer = load_train_objs()
 
