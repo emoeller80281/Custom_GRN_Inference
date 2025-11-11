@@ -274,7 +274,7 @@ def count_hits_per_peak(seqs_plus, seqs_minus, lengths, pwm_values, threshold):
     return out
 
 def get_background_freq(species):
-    if species == "human" or species == "hg38" or species == "mmusculus":
+    if species == "human" or species == "hg38" or species == "hsapiens":
         background_freq = pd.Series({
             "A": 0.29182,
             "C": 0.20818,
@@ -282,7 +282,7 @@ def get_background_freq(species):
             "T": 0.29182
         })
     
-    elif species == "mouse" or species == "mm10" or species == "hsapiens":
+    elif species == "mouse" or species == "mm10" or species == "mmusculus":
         background_freq = pd.Series({
         "A": 0.2917,
         "C": 0.2083,
@@ -427,7 +427,7 @@ def load_motifs(motif_paths, pseudocount=0.001, bg=None):
                 pfm = np.array(rows, dtype=float)  # shape (L, 4)
 
                 if pfm.shape[1] != 4:
-                    raise ValueError("PFM must have 4 rows for A,C,G,T")
+                    raise ValueError("PFM must have 4 columns for A,C,G,T")
 
                 log_odds = to_log_odds(pfm.T.tolist(), bg, pseudocount)
                 score_mats.append(_orient_pwm_position_major(log_odds))
@@ -481,8 +481,6 @@ def associate_tf_with_motif_pwm(
 
     mats, names = load_motifs(motif_paths, pseudocount=0.0001, bg=background_freq)
     names = [n.upper() for n in names]
-
-    logging.debug(f"Loaded {len(mats)} PFMs from {len(meme_dir)} motif files")
 
     # Extract the DNA sequences from the genome fasta for each peak
     peak_ids, seqs = extract_peak_seqs(fasta, peaks_bed)

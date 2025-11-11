@@ -1,9 +1,7 @@
 import os
 import re
 import json
-from sympy import dsolve
 import torch
-import joblib
 import pandas as pd
 import scanpy as sc
 import logging
@@ -21,11 +19,6 @@ from tqdm import tqdm
 import pybedtools
 import argparse
 import pickle
-import shutil, tempfile
-from functools import partial
-from pybedtools import helpers as pbt_helpers
-import pyarrow as pa
-from pyarrow import dataset as ds, compute as pc, parquet as pq, table as pat
 
 import sys
 sys.path.append(Path(__file__).resolve().parent.parent.parent)
@@ -728,7 +721,7 @@ def filter_and_qc(adata_RNA: AnnData, adata_ATAC: AnnData) -> Tuple[AnnData, Ann
     logging.info(f"[START] RNA shape={adata_RNA.shape}, ATAC shape={adata_ATAC.shape}")
     
     common_barcodes = adata_RNA.obs_names.isin(adata_ATAC.obs_names)
-    assert len(common_barcodes) > 10, \
+    assert common_barcodes.sum() > 10, \
         f"No common barcodes. \n  - RNA: {adata_RNA.obs_names[:2]}\n  - ATAC: {adata_ATAC.obs_names[:2]}"
     
     # Synchronize barcodes
@@ -1274,6 +1267,7 @@ def make_chrom_gene_tss_df(gene_tss_file, chrom_id, genome_dir):
 
 def merge_tf_tg_data_with_pkn(
     df: pd.DataFrame, 
+    gc: GeneCanonicalizer,
     string_csv_file: Union[str, Path], 
     trrust_csv_file: Union[str, Path], 
     kegg_csv_file: Union[str, Path],
@@ -2061,7 +2055,7 @@ if __name__ == "__main__":
     
     # Genome files
     genome_fasta_file = GENOME_DIR / (ORGANISM_CODE + ".fa.gz")
-    chrom_sizes_file = GENOME_DIR / (ORGANISM_CODE + f"{ORGANISM_CODE}.chrom.sizes")
+    chrom_sizes_file = GENOME_DIR / f"{ORGANISM_CODE}.chrom.sizes"
     
     if not os.path.isdir(GENOME_DIR):
         os.makedirs(GENOME_DIR)
@@ -2120,7 +2114,7 @@ if __name__ == "__main__":
     
     logging.info(f"FORCE_RECALCULATE: {FORCE_RECALCULATE}")
     
-    PROCESS_SAMPLE_DATA = False
+    PROCESS_SAMPLE_DATA = True
     logging.info(f"PROCESS_SAMPLE_DATA: {PROCESS_SAMPLE_DATA}")
     PROCESS_CHROMOSOME_SPECIFIC_DATA = True
     logging.info(f"PROCESS_CHROMOSOME_SPECIFIC_DATA: {PROCESS_CHROMOSOME_SPECIFIC_DATA}")
@@ -2307,6 +2301,7 @@ if __name__ == "__main__":
                 tf_tg_df = pd.read_parquet(tf_tg_combo_attr_file, engine="pyarrow")
                 tf_tg_labeled_with_pkn, tf_tg_unlabeled = merge_tf_tg_data_with_pkn(
                     tf_tg_df, 
+                    gc,
                     string_csv_file, 
                     trrust_csv_file, 
                     kegg_csv_file
@@ -2344,7 +2339,7 @@ if __name__ == "__main__":
         logging.info(f"Aggregating pseudobulk datasets")
         dataset_processed_data_dir = RAW_DATA / DATASET_NAME
         total_TG_pseudobulk_global, pseudobulk_chrom_dict = \
-            aggregate_pseudobulk_datasets(SAMPLE_NAMES, dataset_processed_data_dir, chrom_list, gc, force_recalculate=True)
+            aggregate_pseudobulk_datasets(SAMPLE_NAMES, dataset_processed_data_dir, chrom_list, gc, force_recalculate=FORCE_RECALCULATE)
             
         global_tf_tensor_path   = SAMPLE_DATA_CACHE_DIR / "tf_tensor_all.pt"
         global_tf_ids_path      = SAMPLE_DATA_CACHE_DIR / "tf_ids.pt"
@@ -2460,18 +2455,6 @@ if __name__ == "__main__":
                 # --- Calculate Peak-to-TG Distance Scores ---
             genes_near_peaks = total_peak_gene_dist_df[total_peak_gene_dist_df["peak_id"].astype(str).isin(chrom_peak_ids)].copy()
                 
-            # genes_near_peaks = calculate_peak_to_tg_distance_score(
-            #     peak_bed_file=chrom_peak_bed_file,
-            #     tss_bed_file=tss_bed_file,
-            #     peak_gene_dist_file=peak_to_tss_dist_path,
-            #     mesc_atac_peak_loc_df=total_peaks_df,  # peak locations DataFrame
-            #     gene_tss_df=gene_tss_df,
-            #     max_peak_distance= MAX_PEAK_DISTANCE,
-            #     distance_factor_scale= DISTANCE_SCALE_FACTOR,
-            #     force_recalculate=FORCE_RECALCULATE,
-            #     filter_to_nearest_gene=FILTER_TO_NEAREST_GENE,
-            #     promoter_bp=PROMOTER_BP
-            # )
             genes_near_peaks["target_id"] = gc.canonicalize_series(genes_near_peaks["target_id"])
             genes_near_peaks.to_parquet(peak_to_tss_dist_path, engine="pyarrow", compression="snappy")
             logging.info(f"  - Saved peak-to-TG distance scores to {peak_to_tss_dist_path}")
@@ -2498,20 +2481,7 @@ if __name__ == "__main__":
                 
                 sliding_window_df.to_parquet(chrom_sliding_window_file, engine="pyarrow", compression="snappy")
 
-                # peaks_df = pybedtools.BedTool(peak_bed_file)
-
-                # logging.info("Running sliding window scan")
-                # run_sliding_window_scan(
-                #     tf_name_list=tfs,
-                #     tf_info_file=str(TF_FILE),
-                #     motif_dir=str(MOTIF_DIR),
-                #     genome_fasta=str(genome_fasta_file),
-                #     peak_bed_file=str(chrom_peak_bed_file),
-                #     output_file=chrom_sliding_window_file,
-                #     num_cpu=num_cpu
-                # )
                 logging.info(f"  - Wrote sliding window scores to {chrom_sliding_window_file}")
-                # sliding_window_df = pd.read_parquet(chrom_sliding_window_file, engine="pyarrow")
             else:
                 logging.info("Loading existing sliding window scores")
                 sliding_window_df = pd.read_parquet(chrom_sliding_window_file, engine="pyarrow")
