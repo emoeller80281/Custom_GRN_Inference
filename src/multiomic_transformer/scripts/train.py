@@ -527,7 +527,7 @@ class Trainer:
 
 
         os.makedirs(path, exist_ok=True)
-        out_path = os.path.join(path, "checkpoint.pt")
+        out_path = os.path.join(path, f"checkpoint_{epoch}.pt")
         torch.save(ckpt, out_path)
         logging.info(f"\tTraining checkpoint saved to {out_path}")
 
