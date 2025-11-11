@@ -3,6 +3,7 @@ import argparse
 import logging
 import os
 import glob
+import math
 import re
 import sys
 from pathlib import Path
@@ -47,6 +48,7 @@ _global_tf_df: Union[None, pd.DataFrame] = None
 _global_bg_freq: Union[None, pd.Series] = None
 _global_plus: Union[None, np.ndarray] = None
 _global_minus: Union[None, np.ndarray] = None
+_global_lengths: Union[None, np.ndarray] = None
 
 SLIDING_SCHEMA = pa.schema([
     pa.field("TF", pa.string()),
@@ -103,41 +105,47 @@ def coalesce_sliding_window_scores_pyarrow(input_dir: str, out_parquet: str, pat
 
     writer.close()
 
-def process_motif_file_and_save(motif_idx, tf_df, bg, score_mats, names, tmp_dir, peak_ids):
+def process_motif_file_and_save(motif_idx, tf_df, bg, score_mats, names,
+                                tmp_dir, peak_ids, alpha=1e-4):
     pwm = np.array(score_mats[motif_idx])
-    scores = score_all_peaks(_global_plus, _global_minus, pwm)
+    motif_name = names[motif_idx]
 
-    if len(scores) != len(peak_ids):
-        logging.error(f"Length mismatch for motif {names[motif_idx]}: "
-                      f"{len(scores)} scores vs {len(peak_ids)} peaks")
+    # 1) motif-specific threshold
+    t_m = estimate_motif_threshold(pwm, bg, alpha=alpha)
+
+    # 2) count hits per peak
+    hits = count_hits_per_peak(_global_plus, _global_minus, _global_lengths, pwm, t_m)
+
+    if len(hits) != len(peak_ids):
+        logging.error(f"Length mismatch for motif {motif_name}: "
+                      f"{len(hits)} hits vs {len(peak_ids)} peaks")
         return False
 
-    motif_name = names[motif_idx]
+    # 3) compute binding potential
+    L = _global_plus.shape[1]
+    wsize = pwm.shape[0]
+    n_windows = np.maximum(0, 2 * (_global_lengths - wsize + 1))
+    scores = binding_potential_from_hits(hits, n_windows, alpha).astype("float32", copy=False)
+
     mask = tf_df["Motif_ID"] == motif_name
     tf_names = tf_df.loc[mask, "TF_Name"].values
 
     if len(tf_names) == 0:
         logging.warning(f"No TFs found for motif {motif_name} (motif_idx={motif_idx})")
 
-    # Write one shard per (TF, motif) to avoid overwrites
-    pid = np.asarray(peak_ids, dtype="U")  # ensure consistent string dtype
-    sc  = scores.astype("float32", copy=False)
+    pid = np.asarray(peak_ids, dtype="U")
 
     for tf in tf_names:
         shard = pd.DataFrame({
-            "TF": tf,                       # broadcasted scalar okay; Arrow will expand
+            "TF": tf,
             "peak_id": pid,
-            "sliding_window_score": sc,
+            "sliding_window_score": scores,
         })
-        # Cast via Arrow to enforce schema
         table = pa.Table.from_pandas(shard, preserve_index=False).cast(SLIDING_SCHEMA, safe=False)
-
-        # unique file name
-        fn = os.path.join(tmp_dir, f"{tf}__{motif_name}.parquet")
+        fn = os.path.join(tmp_dir, f"{tf}_{motif_name}.parquet")
         pq.write_table(table, fn, compression="snappy")
 
     return True
-
 
 def share_numpy_array(arr):
     shm = mp.Array('b', arr.tobytes(), lock=False)
@@ -147,37 +155,122 @@ def share_numpy_array(arr):
 
 def _init_worker(tf_df, bg_freq,
                  plus_shm, plus_shape, plus_dtype,
-                 minus_shm, minus_shape, minus_dtype):
+                 minus_shm, minus_shape, minus_dtype,
+                 lengths):
     """Reconstruct shared arrays inside each worker."""
-    global _global_tf_df, _global_bg_freq, _global_plus, _global_minus
+    global _global_tf_df, _global_bg_freq, _global_plus, _global_minus, _global_lengths
     _global_tf_df   = tf_df
     _global_bg_freq = bg_freq
     _global_plus  = np.frombuffer(plus_shm, dtype=plus_dtype).reshape(plus_shape)
     _global_minus = np.frombuffer(minus_shm, dtype=minus_dtype).reshape(minus_shape)
+    _global_lengths = lengths
+
+def estimate_motif_threshold(pwm_values, bg_freq, alpha=1e-4, num_samples=200000):
+    w = pwm_values.shape[0]
+
+    if isinstance(bg_freq, (list, tuple, np.ndarray)):
+        p = np.array(bg_freq, dtype=np.float64)
+    else:  # dict/Series
+        p = np.array([bg_freq["A"], bg_freq["C"], bg_freq["G"], bg_freq["T"]], dtype=np.float64)
+
+    p = p / p.sum()
+
+    # sample background windows: idx[sample, pos] in {0..3}
+    idx = np.random.choice(4, size=(num_samples, w), p=p)
+
+    # broadcast rows = position indices
+    rows = np.arange(w)[None, :]                # (1, w)
+    s = pwm_values[rows, idx].sum(axis=1)       # (num_samples,)
+
+    t = np.quantile(s, 1.0 - alpha)
+    return float(t)
+
+def _log_binom_coeff(n, k):
+    return math.lgamma(n + 1) - math.lgamma(k + 1) - math.lgamma(n - k + 1)
+
+def binom_sf(k, n, p):
+    """
+    Survival function: P[X >= k] for X~Bin(n,p).
+    Uses stable iterative summation from k upwards.
+    """
+    if k <= 0:
+        return 1.0
+    if k > n:
+        return 0.0
+    if p <= 0.0:
+        return 1.0 if k <= 0 else 0.0
+    if p >= 1.0:
+        return 1.0 if k <= n else 0.0
+
+    log_p = math.log(p)
+    log_q = math.log(1.0 - p)
+
+    # start at k
+    log_pmf = _log_binom_coeff(n, k) + k * log_p + (n - k) * log_q
+    pmf = math.exp(log_pmf)
+    tail = pmf
+
+    # iteratively go to k+1, k+2, ..., n using ratio of successive terms
+    for i in range(k + 1, n + 1):
+        # ratio = ((n-i+1)/i) * (p/(1-p))
+        ratio = ((n - i + 1) / i) * (p / (1.0 - p))
+        pmf *= ratio
+        tail += pmf
+        if pmf < 1e-16 * tail:
+            break
+
+    return min(1.0, max(0.0, tail))
+
+def num_windows(L, wsize):
+    if wsize > L:
+        return 0
+    return 2 * (L - wsize + 1)  # plus & minus
+
+def binding_potential_from_hits(hits, n_windows, alpha):
+    """
+    hits: int or array of ints
+    n_windows: scalar or array, same shape as hits
+    alpha: per-window FPR used for threshold
+    Returns -log10(p) binding potential.
+    """
+    hits = np.asarray(hits, dtype=np.int64)
+    n_windows = np.asarray(n_windows, dtype=np.int64)
+    out = np.zeros_like(hits, dtype=np.float64)
+
+    it = np.nditer([hits, n_windows, out], op_flags=[['readonly'], ['readonly'], ['writeonly']])
+    for h, n, o in it:
+        if n <= 0:
+            o[...] = 0.0
+        else:
+            p = binom_sf(int(h), int(n), alpha)
+            if p <= 0.0:
+                p = 1e-300
+            o[...] = -math.log10(p)
+    return out
 
 @njit(parallel=True)
-def score_all_peaks(seqs_plus, seqs_minus, pwm_values):
-    
-    n_peaks, L = seqs_plus.shape
+def count_hits_per_peak(seqs_plus, seqs_minus, lengths, pwm_values, threshold):
+    n_peaks, Lmax = seqs_plus.shape
     wsize = pwm_values.shape[0]
-    if wsize > L:
-        return np.zeros(n_peaks, dtype=np.float64)
-    
-    out = np.zeros(n_peaks, dtype=np.float64)
+    out = np.zeros(n_peaks, dtype=np.int64)
 
     for i in prange(n_peaks):
-        total = 0.0
+        L = lengths[i]
+        if wsize > L:
+            out[i] = 0
+            continue
+        hits = 0
         for strand in (seqs_plus[i], seqs_minus[i]):
-            # slide the window
-            for j in range(L - wsize + 1):
+            for j in range(L - wsize + 1):  # use per-peak length
                 s = 0.0
                 for k in range(wsize):
                     idx = strand[j + k]
-                    # skip ambiguous bases (idx < 0 or >=4)
                     if 0 <= idx < 4:
                         s += pwm_values[k, idx]
-                total += s
-        out[i] = total
+                if s >= threshold:
+                    hits += 1
+        out[i] = hits
+
     return out
 
 def get_background_freq(species):
@@ -246,7 +339,6 @@ def build_first_order_bg(fasta, peaks_bed, sample=200000):
             if n>=sample: break
         if n>=sample: break
     trans = counts / counts.sum(axis=1, keepdims=True)
-    # convert to zero-order for MOODS needs: stationary distribution π s.t. πP=π
     vals, vecs = np.linalg.eig(trans.T)
     i = np.argmin(np.abs(vals-1))
     pi = np.real(vecs[:, i]); pi = np.clip(pi, 1e-9, None); pi /= pi.sum()
@@ -394,6 +486,7 @@ def associate_tf_with_motif_pwm(
 
     # Extract the DNA sequences from the genome fasta for each peak
     peak_ids, seqs = extract_peak_seqs(fasta, peaks_bed)
+    lengths = np.array([len(s) for s in seqs], dtype=np.int32)
     logging.debug(f"Number of peaks: {len(peak_ids)}")
 
     # Encode sequences into numeric format
@@ -430,15 +523,16 @@ def associate_tf_with_motif_pwm(
     logging.debug(f"TFs in tf_info_file: {tf_info_df['TF_Name'].nunique()}")
 
     tf_df = tf_info_df[tf_info_df["TF_Name"].isin(tf_name_list)]
-
-    def is_valid_parquet(path):
-        return os.path.isfile(path) and os.path.getsize(path) > 0
+    
+    def has_shard_for_tf_motif(tmp_dir, tf, motif_name):
+        fname = f"{tf}_{motif_name}.parquet"
+        return os.path.isfile(os.path.join(tmp_dir, fname))
 
     # Filter motif files for motifs where NOT all associated TF files are cached
     filtered_indices = []
     for i, name in enumerate(names):
         tf_list = tf_df.loc[tf_df["Motif_ID"] == name, "TF_Name"].tolist()
-        missing = [tf for tf in tf_list if not is_valid_parquet(os.path.join(tmp_dir, f"{tf}.parquet"))]
+        missing = [tf for tf in tf_list if not has_shard_for_tf_motif(tmp_dir, tf, name)]
         if missing:
             filtered_indices.append(i)
             logging.debug(f"Motif {name}: {len(missing)} TFs missing parquet files → rescoring")
@@ -497,7 +591,7 @@ def associate_tf_with_motif_pwm(
                 initializer=_init_worker,
                 initargs=(tf_df, background_freq,
                           plus_shm, plus_shape, plus_dtype,
-                          minus_shm, minus_shape, minus_dtype)
+                          minus_shm, minus_shape, minus_dtype, lengths)
             ) as executor:
                 futures = {
                     executor.submit(process_motif_file_and_save, i, tf_df, background_freq, mats, names, tmp_dir, peak_ids): names[i]
@@ -516,7 +610,7 @@ def associate_tf_with_motif_pwm(
             # Call initializer to populate module-level globals for this process
             _init_worker(tf_df, background_freq,
                          plus_shm, plus_shape, plus_dtype,
-                         minus_shm, minus_shape, minus_dtype)
+                         minus_shm, minus_shape, minus_dtype, lengths)
 
             with ThreadPoolExecutor(max_workers=inner_workers) as executor:
                 futures = {
@@ -533,7 +627,7 @@ def associate_tf_with_motif_pwm(
             minus_shm, minus_shape, minus_dtype= share_numpy_array(seqs_minus)
             _init_worker(tf_df, background_freq,
                          plus_shm, plus_shape, plus_dtype,
-                         minus_shm, minus_shape, minus_dtype)
+                         minus_shm, minus_shape, minus_dtype, lengths)
 
             for i in tqdm(filtered_indices, desc="Scoring motifs", total=len(filtered_indices)):
                 process_motif_file_and_save(i, tf_df, background_freq, mats, names, tmp_dir, peak_ids)

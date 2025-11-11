@@ -134,19 +134,21 @@ class TFtoTGShortcut(nn.Module):
         self.topk = topk  # keep only top-k TFs per TG if not None
         self.dropout_p = dropout_p
 
-    def forward(self, tg_emb, tf_id_emb, tf_expr, motif_mask=None):
+    def forward(self, tg_emb, tf_id_emb, tf_expr, motif_mask=None, mask_threshold=0.0):
         """
         tg_emb     : [n_tgs, d_model]   TG embeddings
         tf_id_emb    : [n_tfs, d_model]   TF embeddings
         tf_expr    : [batch_size, n_tfs]   TF expression values
-        motif_mask : [n_tgs, n_tfs] (0/1) prior: TF motif present in TG-linked peaks
+        motif_mask : [n_tgs, n_tfs] Max TF-TG peak binding for peaks near TGs
+        mask_threshold  : Masks TF-TG scores if the score is below this threshold
         """
         # Dot product similarity between TF and TG embeddings
         sim = torch.matmul(tg_emb, tf_id_emb.T) / math.sqrt(tf_id_emb.size(1))  # [G,T]
 
         # Apply motif mask if provided (zero's out TFs with no peaks near the TG)
         if self.use_motif_mask and motif_mask is not None:
-            sim = sim.masked_fill(motif_mask == 0, -1e4)
+            allowed = motif_mask >= mask_threshold
+            sim = sim.masked_fill(~allowed, -1e4)
         
         sim = sim.clamp_(-50, 50)
 
@@ -209,6 +211,7 @@ class MultiomicTransformer(nn.Module):
                  use_bias=True,
                  use_shortcut=True, 
                  use_motif_mask=False, 
+                 motif_mask_threshold=0.0,
                  lambda_l1=1e-4, 
                  lambda_l2=0.0,
                  topk=None,
@@ -223,6 +226,7 @@ class MultiomicTransformer(nn.Module):
         self.dropout = dropout
         self.use_bias = use_bias
         self.use_motif_mask = use_motif_mask
+        self.motif_mask_threshold = motif_mask_threshold
         self.use_shortcut = use_shortcut
         self.bias_scale = bias_scale
         self.use_gradient_checkpointing = use_gradient_checkpointing
@@ -436,7 +440,9 @@ class MultiomicTransformer(nn.Module):
         attn = None
         if self.use_shortcut:
             # Calculate the direct TF-TG attention (similarity of TF and TG embeddings * )
-            tf_tg_shortcut_output, attn = self.shortcut_layer(tg_emb, tf_id_emb, tf_expr, motif_mask=motif_mask)
+            tf_tg_shortcut_output, attn = self.shortcut_layer(
+                tg_emb, tf_id_emb, tf_expr, motif_mask=motif_mask, mask_threshold=self.motif_mask_threshold
+                )
             
             # Add the output from the direct TF-TG expression layer to the predicted TG expression from attention
             tg_pred = tg_pred + tf_tg_shortcut_output

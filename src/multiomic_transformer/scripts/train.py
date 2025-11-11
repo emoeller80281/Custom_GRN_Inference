@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import sys
+import time
 import warnings
 from pathlib import Path
 
@@ -18,6 +19,7 @@ import pandas as pd
 import seaborn as sns
 import torch
 import torch.distributed as dist
+from typing import Union
 import torch.nn as nn
 import torch.nn.functional as F
 from scipy.stats import pearsonr, spearmanr
@@ -82,7 +84,7 @@ def setup_logging(rank: int):
         force=True
     )
 
-def load_run_parameters_from_dir(run_dir: Path) -> dict:
+def load_run_params_from_json(run_dir: Path) -> dict:
     """
     Load run_parameters.json from an existing training directory, if present.
     Returns {} if not found.
@@ -537,7 +539,9 @@ class Trainer:
         history = []  # store per-epoch logs
         
         try:
+            total_train_start_time = time.time()
             for epoch in range(start_epoch, max_epochs):
+                epoch_start_time = time.time()
                 if self._should_stop():
                     raise KeyboardInterrupt()
                 
@@ -548,6 +552,9 @@ class Trainer:
                  avg_val_mse_unscaled, 
                  r2_s, 
                  r2_u) = self._run_epoch(epoch)
+                epoch_end_time = time.time()
+                
+                epoch_dur_sec = epoch_end_time - epoch_start_time
                 
                 if self._should_stop():
                     raise KeyboardInterrupt()
@@ -560,7 +567,8 @@ class Trainer:
                         f"Val MSE: {avg_val_mse_unscaled:.4f} | "
                         f"R2 (Unscaled): {r2_u:.3f} | "
                         f"R2 (Scaled): {r2_s:.3f} | "
-                        f"LR: {lr:.2e}"
+                        f"LR: {lr:.2e} | "
+                        f"Time: {epoch_dur_sec:.0f}s" 
                     )
 
                     history.append({
@@ -571,6 +579,7 @@ class Trainer:
                         "R2_u": r2_u,
                         "R2_s": r2_s,
                         "LR": lr,
+                        "Time": round(epoch_dur_sec,0)
                     })
                                     
                 # Checkpoint + CSV log
@@ -612,11 +621,20 @@ class Trainer:
                     if self.gpu_id == 0:
                         logging.info("All ranks stopping training.")
                     break
-
+            
+            total_train_end_time = time.time()
+            
+            total_training_time_min = total_train_end_time - total_train_start_time
+            
             # Final save if not early stopped
             if self.gpu_id == 0 and patience_counter < self.patience:
                 self._write_log_csv(history, path)
                 logging.info("Training loop exited normally.")
+                
+                # Convert elapsed_seconds into hours, minutes, and seconds
+                hours, remainder = divmod(total_training_time_min, 3600)  # 3600 seconds in an hour
+                minutes, seconds = divmod(remainder, 60)         # 60 seconds in a minute
+                logging.info(f"Total Training Time: {int(hours):02d}:{int(minutes):02d}:{seconds:05.2f}")
 
         except KeyboardInterrupt:
             # graceful Ctrl+C
@@ -632,62 +650,50 @@ class Trainer:
             raise
         
     def _write_log_csv(self, history, path):
-        fieldnames = ["Epoch", "Train Total Loss", "Train MSE", "Val MSE", "R2_u", "R2_s", "LR"]
+        fieldnames = ["Epoch", "Train Total Loss", "Train MSE", "Val MSE", "R2_u", "R2_s", "LR", "Time"]
         log_path = os.path.join(path, "training_log.csv")
         with open(log_path, "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerows(history)
 
-def load_checkpoint(ckpt_path: str, trainer: Trainer, device: torch.device) -> int:
-    """
-    Load model/optimizer/scheduler/scalers from a checkpoint file.
-    Returns the epoch index to resume from (next epoch after the one in ckpt).
-    """
-    logging.info(f"Loading checkpoint from {ckpt_path}")
-    ckpt = torch.load(ckpt_path, map_location=device)
+def load_checkpoint(checkpoint_path, trainer, device):
+    ckpt = torch.load(checkpoint_path, map_location=device)
 
-    # model weights
-    if hasattr(trainer.model, "module"):
-        trainer.model.module.load_state_dict(ckpt["model_state_dict"])
+    model = trainer.model
+    state_dict = ckpt["model_state_dict"]
+
+    # If model is wrapped in DDP, load into .module
+    if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+        model.module.load_state_dict(state_dict)
     else:
-        trainer.model.load_state_dict(ckpt["model_state_dict"])
+        model.load_state_dict(state_dict)
 
-    # optimizer
-    if "optimizer_state_dict" in ckpt and trainer.optimizer is not None:
+    # Optimizer / scaler if present
+    if "optimizer_state_dict" in ckpt and hasattr(trainer, "optimizer"):
         trainer.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
 
-    # scheduler
-    if "scheduler_state_dict" in ckpt and trainer.scheduler is not None:
-        trainer.scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+    if "scaler_state_dict" in ckpt and hasattr(trainer, "scaler"):
+        try:
+            trainer.scaler.load_state_dict(ckpt["scaler_state_dict"])
+        except Exception:
+            # If scaler config changed, you can safely re-init; no hard fail
+            pass
 
-    # scalers (if present)
-    tf_mean = ckpt.get("tf_scaler_mean", None)
-    tf_std  = ckpt.get("tf_scaler_std", None)
-    if tf_mean is not None and tf_std is not None:
-        trainer.tf_scaler = SimpleScaler(tf_mean.to(device), tf_std.to(device))
-
-    tg_mean = ckpt.get("tg_scaler_mean", None)
-    tg_std  = ckpt.get("tg_scaler_std", None)
-    if tg_mean is not None and tg_std is not None:
-        trainer.tg_scaler = SimpleScaler(tg_mean.to(device), tg_std.to(device))
-
-    start_epoch = ckpt.get("epoch", -1) + 1
-    if start_epoch < 0:
-        start_epoch = 0
-
-    logging.info(f"Resuming training from epoch {start_epoch}")
+    # Next epoch index (we usually store the last finished epoch)
+    start_epoch = ckpt.get("epoch", 0) + 1
     return start_epoch
 
-def load_train_objs():
-    # Load the dataset
+
+
+def load_train_objs(run_cfg):
+    # Dataset does not depend on d_model etc., but we keep it here
     dataset = MultiChromosomeDataset(
         data_dir=SAMPLE_DATA_CACHE_DIR,
-        chrom_ids=CHROM_IDS,                  # list of chromosomes
+        chrom_ids=CHROM_IDS,
         tf_vocab_path=os.path.join(COMMON_DATA, "tf_vocab.json"),
         tg_vocab_path=os.path.join(COMMON_DATA, "tg_vocab.json"),
-        max_cached=2,                         # small LRU of per-chrom datasets
-        # optional global subsampling knobs – applied consistently to every chrom:
+        max_cached=2,
         max_tfs=SUBSAMPLE_MAX_TFS,
         max_tgs=SUBSAMPLE_MAX_TGS,
         max_windows_per_chrom=SUBSAMPLE_MAX_WINDOWS_PER_CHROM,
@@ -695,30 +701,34 @@ def load_train_objs():
         subset_seed=SUBSAMPLE_SEED,
     )
 
-    # model vocab sizes must match the dataset’s global sub-vocab
     tf_vocab_size = len(dataset.tf_name2id_sub)
     tg_vocab_size = len(dataset.tg_name2id_sub)
 
-    # Initiallize the model
     model = MultiomicTransformer(
-        d_model=D_MODEL,
-        num_heads=NUM_HEADS,
-        num_layers=NUM_LAYERS,
-        d_ff=D_FF,
-        dropout=DROPOUT,
+        d_model=run_cfg["d_model"],
+        num_heads=run_cfg["num_heads"],
+        num_layers=run_cfg["num_layers"],
+        d_ff=run_cfg["d_ff"],
+        dropout=run_cfg["dropout"],
         tf_vocab_size=tf_vocab_size,
         tg_vocab_size=tg_vocab_size,
         bias_scale=ATTN_BIAS_SCALE,
-        use_bias=USE_DISTANCE_BIAS,
-        use_shortcut=USE_SHORTCUT,
-        use_motif_mask=USE_MOTIF_MASK,
-        lambda_l1=SHORTCUT_L1,
-        lambda_l2=SHORTCUT_L2,
-        topk=SHORTCUT_TOPK,
-        shortcut_dropout=SHORTCUT_DROPOUT,
-        use_gradient_checkpointing=USE_GRAD_CHECKPOINTING
+        use_bias=run_cfg["use_dist_bias"],
+        use_shortcut=run_cfg["use_shortcut"],
+        use_motif_mask=run_cfg["use_motif_mask"],
+        motif_mask_threshold=run_cfg["motif_mask_threshold"]
+        lambda_l1=run_cfg["shortcut_l1"],
+        lambda_l2=run_cfg["shortcut_l2"],
+        topk=run_cfg["shortcut_topk"],
+        shortcut_dropout=run_cfg["shortcut_dropout"],
+        use_gradient_checkpointing=run_cfg["use_grad_ckpt"],
     )
-    optimizer = torch.optim.Adam(model.parameters(), lr=INITIAL_LEARNING_RATE)
+
+    optimizer = torch.optim.Adam(
+        model.parameters(),
+        lr=run_cfg["lr"],
+    )
+
     return dataset, model, optimizer
 
 def prepare_dataloader(dataset, batch_size, world_size=1, rank=0,
@@ -904,6 +914,7 @@ def write_run_parameters(dataset, out_dir):
     logging.info(f"TF-TG Shortcut?:     {USE_SHORTCUT}")
     logging.info(f"Dist bias?:          {USE_DISTANCE_BIAS}")
     logging.info(f"Motif Mask?:         {USE_MOTIF_MASK}")
+    logging.info(f"Mask Thresh:         {MOTIF_MASK_THRESH}")
     logging.info(f"Shortcut L1:         {SHORTCUT_L1}")
     logging.info(f"Shortcut L2:         {SHORTCUT_L2}")
     logging.info(f"Shortcut Dropout:    {SHORTCUT_DROPOUT}")
@@ -911,29 +922,29 @@ def write_run_parameters(dataset, out_dir):
     logging.info("================================================")
     
     run_params = {
-        "Genes": len(dataset.tg_ids),
-        "Windows": dataset.num_windows,
-        "TFs": len(dataset.tf_ids),
-        "Metacells": len(dataset.metacell_names),
-        "Epochs": TOTAL_EPOCHS,
-        "Batch Size": BATCH_SIZE,
-        "Grad Accum Steps": GRAD_ACCUM_STEPS,
-        "Use Grad Accum": USE_GRAD_ACCUMULATION,
-        "Use Grad Chkpt": USE_GRAD_CHECKPOINTING,
+        "epochs": TOTAL_EPOCHS,
+        "batch_size": BATCH_SIZE,
+        "grad_accum_steps": GRAD_ACCUM_STEPS,
+        "use_grad_accum": USE_GRAD_ACCUMULATION,
+        "use_grad_ckpt": USE_GRAD_CHECKPOINTING,
         "d_model": D_MODEL,
-        "corr_loss_weight": CORR_LOSS_WEIGHT,
-        "Attention Heads": NUM_HEADS,
-        "Model Layers": NUM_LAYERS,
-        "d_feedforward": D_FF,
-        "Dropout": DROPOUT,
-        "tf_tg_shortcut": USE_SHORTCUT,
-        "Distance Bias":USE_DISTANCE_BIAS,
-        "Distance Bias Scale": ATTN_BIAS_SCALE,
-        "Motif Mask": USE_MOTIF_MASK,
-        "Shortcut L1": SHORTCUT_L1,
-        "Shortcut L2": SHORTCUT_L2,
-        "Shortcut Dropout": SHORTCUT_DROPOUT,
-        "Shortcut Top K": SHORTCUT_TOPK
+        "num_heads": NUM_HEADS,
+        "num_layers": NUM_LAYERS,
+        "d_ff": D_FF,
+        "dropout": DROPOUT,
+        "use_shortcut": USE_SHORTCUT,
+        "use_dist_bias": USE_DISTANCE_BIAS,
+        "use_motif_mask": USE_MOTIF_MASK,
+        "motif_mask_threshold": MOTIF_MASK_THRESH,
+        "shortcut_l1": SHORTCUT_L1,
+        "shortcut_l2": SHORTCUT_L2,
+        "shortcut_dropout": SHORTCUT_DROPOUT,
+        "shortcut_topk": SHORTCUT_TOPK,
+        "lr": INITIAL_LEARNING_RATE,
+        "genes": len(dataset.tg_ids),
+        "windows": dataset.num_windows,
+        "tfs": len(dataset.tf_ids),
+        "metacells": len(dataset.metacell_names),
     }
 
     path = os.path.join(out_dir, "run_parameters.json")
@@ -951,7 +962,7 @@ def get_mean_tf_tg_attention_ddp(model,
                                  dataloader,
                                  num_tfs: int,
                                  num_tgs: int,
-                                 device: str | torch.device):
+                                 device: Union[str, torch.device]):
     """
     Compute global mean TF–TG attention over a (possibly DDP) dataloader.
 
@@ -1143,146 +1154,161 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
     ddp_setup(rank, world_size)
     setup_logging(rank)
     
-    # optional: path to an existing checkpoint
-    # optional: path to an existing checkpoint
     resume_ckpt = RESUME_CHECKPOINT_PATH
-
+    
     try:
         if resume_ckpt and os.path.isfile(resume_ckpt):
             resume_ckpt = Path(resume_ckpt)
             training_output_dir = resume_ckpt.parent
             logging.info(f"\n =========== RESUMING FROM {resume_ckpt} ===========")
 
-            # ---- load and apply stored run parameters ----
-            run_params = load_run_parameters_from_dir(training_output_dir)
+            # Load previous run parameters (if present)
+            prev_params = load_run_params_from_json(training_output_dir)
 
-            # Make sure all ranks use the same overrides
-            # (All ranks read the same JSON from shared FS.)
+            def g(key, default):
+                return prev_params.get(key, default) if prev_params else default
 
-            global TOTAL_EPOCHS, BATCH_SIZE, GRAD_ACCUM_STEPS
-            global USE_GRAD_ACCUMULATION, USE_GRAD_CHECKPOINTING
-            global D_MODEL, NUM_HEADS, NUM_LAYERS, D_FF, DROPOUT
-            global USE_SHORTCUT, USE_DISTANCE_BIAS, ATTN_BIAS_SCALE
-            global USE_MOTIF_MASK, SHORTCUT_L1, SHORTCUT_L2
-            global SHORTCUT_DROPOUT, SHORTCUT_TOPK, CORR_LOSS_WEIGHT
-
-            # Core training knobs
-            TOTAL_EPOCHS          = int(run_params.get("Epochs", TOTAL_EPOCHS))
-            BATCH_SIZE            = int(run_params.get("Batch Size", BATCH_SIZE))
-            GRAD_ACCUM_STEPS      = int(run_params.get("Grad Accum Steps", GRAD_ACCUM_STEPS))
-            USE_GRAD_ACCUMULATION = bool(run_params.get("Use Grad Accum", USE_GRAD_ACCUMULATION))
-            USE_GRAD_CHECKPOINTING= bool(run_params.get("Use Grad Chkpt", USE_GRAD_CHECKPOINTING))
-
-            # Architecture: must match checkpoint to load successfully
-            D_MODEL        = int(run_params.get("d_model", D_MODEL))
-            NUM_HEADS      = int(run_params.get("Attention Heads", NUM_HEADS))
-            NUM_LAYERS     = int(run_params.get("Model Layers", NUM_LAYERS))
-            D_FF           = int(run_params.get("d_feedforward", D_FF))
-            DROPOUT        = float(run_params.get("Dropout", DROPOUT))
-
-            # Shortcut & bias config
-            USE_SHORTCUT       = bool(run_params.get("tf_tg_shortcut", USE_SHORTCUT))
-            USE_DISTANCE_BIAS  = bool(run_params.get("Distance Bias", USE_DISTANCE_BIAS))
-            ATTN_BIAS_SCALE    = float(run_params.get("Distance Bias Scale", ATTN_BIAS_SCALE))
-            USE_MOTIF_MASK     = bool(run_params.get("Motif Mask", USE_MOTIF_MASK))
-            SHORTCUT_L1        = float(run_params.get("Shortcut L1", SHORTCUT_L1))
-            SHORTCUT_L2        = float(run_params.get("Shortcut L2", SHORTCUT_L2))
-            SHORTCUT_DROPOUT   = float(run_params.get("Shortcut Dropout", SHORTCUT_DROPOUT))
-            SHORTCUT_TOPK      = run_params.get("Shortcut Top K", SHORTCUT_TOPK)
-            CORR_LOSS_WEIGHT   = float(run_params.get("corr_loss_weight", CORR_LOSS_WEIGHT))
-
-            logging.info("Resumed run hyperparameters have been loaded from run_parameters.json")
+            run_cfg = {
+                "epochs":               g("epochs", TOTAL_EPOCHS),
+                "batch_size":           g("batch_size", BATCH_SIZE),
+                "grad_accum_steps":     g("grad_accum_steps", GRAD_ACCUM_STEPS),
+                "d_model":              g("d_model", D_MODEL),
+                "num_layers":           g("num_layers", NUM_LAYERS),
+                "num_heads":            g("num_heads", NUM_HEADS),
+                "d_ff":                 g("d_ff", D_FF),
+                "dropout":              g("dropout", DROPOUT),
+                "use_grad_ckpt":        g("use_grad_ckpt", USE_GRAD_CHECKPOINTING),
+                "use_shortcut":         g("use_shortcut", USE_SHORTCUT),
+                "use_dist_bias":        g("use_dist_bias", USE_DISTANCE_BIAS),
+                "use_motif_mask":       g("use_motif_mask", USE_MOTIF_MASK),
+                "motif_mask_threshold": g("motif_mask_threshold", MOTIF_MASK_THRESH),
+                "shortcut_l1":          g("shortcut_l1", SHORTCUT_L1),
+                "shortcut_l2":          g("shortcut_l2", SHORTCUT_L2),
+                "shortcut_topk":        g("shortcut_topk", SHORTCUT_TOPK),
+                "shortcut_dropout":     g("shortcut_dropout", SHORTCUT_DROPOUT),
+                "lr":                   g("lr", INITIAL_LEARNING_RATE),
+            }
 
         else:
+            # New experiment
             training_file_iter_format = "model_training_{:03d}"
             training_output_dir = unique_path(OUTPUT_DIR / CHROM_ID, training_file_iter_format)
             logging.info(f"\n =========== EXPERIMENT {training_output_dir.name.upper()} ===========")
 
+            run_cfg = {
+                "epochs":               TOTAL_EPOCHS,
+                "batch_size":           BATCH_SIZE,
+                "grad_accum_steps":     GRAD_ACCUM_STEPS,
+                "d_model":              D_MODEL,
+                "num_layers":           NUM_LAYERS,
+                "num_heads":            NUM_HEADS,
+                "d_ff":                 D_FF,
+                "dropout":              DROPOUT,
+                "use_grad_ckpt":        USE_GRAD_CHECKPOINTING,
+                "use_shortcut":         USE_SHORTCUT,
+                "use_dist_bias":        USE_DISTANCE_BIAS,
+                "use_motif_mask":       USE_MOTIF_MASK,
+                "motif_mask_threshold": MOTIF_MASK_THRESH,
+                "shortcut_l1":          SHORTCUT_L1,
+                "shortcut_l2":          SHORTCUT_L2,
+                "shortcut_topk":        SHORTCUT_TOPK,
+                "shortcut_dropout":     SHORTCUT_DROPOUT,
+                "lr":                   INITIAL_LEARNING_RATE,
+            }
+
         os.makedirs(training_output_dir, exist_ok=True)
 
-            
-        dataset, model, optimizer = load_train_objs()
+        dataset, model, optimizer = load_train_objs(run_cfg)
 
-        if rank == 0:
+        if rank == 0 and not (resume_ckpt and os.path.isfile(resume_ckpt)):
             write_experiment_settings_and_objects(training_output_dir, dataset)
             logging.info("Wrote experiment settings and objects to training output directory")
+
+        if rank == 0:
             logging.info("Preparing dataloader")
 
-        train_loader, val_loader, test_loader = prepare_dataloader(dataset, batch_size, world_size, rank)
-        
+        train_loader, val_loader, test_loader = prepare_dataloader(
+            dataset,
+            batch_size=run_cfg["batch_size"],
+            world_size=world_size,
+            rank=rank,
+        )
+
         if rank == 0:
             logging.info("Creating Trainer")
-        
-        loss_fn = nn.MSELoss()    
-        
-        trainer = Trainer(
-            model, 
-            train_loader, 
-            val_loader, 
-            loss_fn, 
-            optimizer, 
-            gpu_id=rank, 
-            save_every=save_every, 
-            patience=PATIENCE,
-            grad_accum_steps=GRAD_ACCUM_STEPS,
-            use_grad_accumulation=USE_GRAD_ACCUMULATION,
-            )
-        
-        T = len(dataset.tf_name2id_sub)
-        G = len(dataset.tg_name2id_sub)
 
-        # pick rank device
+        loss_fn = nn.MSELoss()
+        trainer = Trainer(
+            model,
+            train_loader,
+            val_loader,
+            loss_fn,
+            optimizer,
+            gpu_id=rank,
+            save_every=SAVE_EVERY_N_EPOCHS,
+            patience=PATIENCE,
+            grad_accum_steps=run_cfg["grad_accum_steps"],
+            use_grad_accumulation=USE_GRAD_ACCUMULATION,
+        )
+
         rank_device = torch.device(f"cuda:{rank}" if torch.cuda.is_available() else "cpu")
 
-        if torch.distributed.is_initialized():
-            # Option A (recommended): exact global stats via all-reduce
-            tf_scaler, tg_scaler = fit_simple_scalers(
-                train_loader, T_expected=T, G_expected=G,
-                device_for_reduce=rank_device, use_ddp_reduce=True
-            )
-        else:
-            # single process
-            tf_scaler, tg_scaler = fit_simple_scalers(
-                train_loader, T_expected=T, G_expected=G,
-                device_for_reduce=rank_device, use_ddp_reduce=False
-            )
-
-        # keep scalers on GPU to match tensors you feed into model
-        tf_scaler = SimpleScaler(tf_scaler.mean.to(rank_device), tf_scaler.std.to(rank_device))
-        tg_scaler = SimpleScaler(tg_scaler.mean.to(rank_device), tg_scaler.std.to(rank_device))
-
-        trainer.tf_scaler = tf_scaler
-        trainer.tg_scaler = tg_scaler
-        
-        # Start from epoch 0 or from the checkpoint epoch if reloading
-        start_epoch = 0
-        if resume_ckpt and resume_ckpt.is_file():
+        # ---- Resume or new scalers ----
+        if resume_ckpt and os.path.isfile(resume_ckpt):
             start_epoch = load_checkpoint(str(resume_ckpt), trainer, rank_device)
-        
+            logging.info(f"Resuming training from epoch {start_epoch}")
+        else:
+            T = len(dataset.tf_name2id_sub)
+            G = len(dataset.tg_name2id_sub)
+            use_ddp_reduce = torch.distributed.is_initialized()
+
+            tf_s, tg_s = fit_simple_scalers(
+                train_loader,
+                T_expected=T,
+                G_expected=G,
+                device_for_reduce=rank_device,
+                use_ddp_reduce=use_ddp_reduce,
+            )
+            trainer.tf_scaler = SimpleScaler(tf_s.mean.to(rank_device), tf_s.std.to(rank_device))
+            trainer.tg_scaler = SimpleScaler(tg_s.mean.to(rank_device), tg_s.std.to(rank_device))
+            start_epoch = 0
+
         if rank == 0:
             logging.info("\n ----- TRAINING STARTED -----")
-            
-        trainer.train(max_epochs=TOTAL_EPOCHS, path=training_output_dir, start_epoch=start_epoch)
 
-        # unwrap for eval on each rank
-        model_for_eval = getattr(trainer.model, "module", trainer.model)
-        model_for_eval.to(rank_device)
+        trainer.train(
+            max_epochs=TOTAL_EPOCHS,
+            path=training_output_dir,
+            start_epoch=start_epoch,
+        )
 
-        # ----- Rank-0: save embeddings & checkpoint -----
+        # ---------- Post-training: unwrap, save, etc. ----------
+        model_for_eval = getattr(trainer.model, "module", trainer.model).to(rank_device)
+
         if rank == 0:
             model_for_eval.eval()
+            # embeddings
             save_tf_tg_embeddings_from_model(
                 model_for_eval,
                 out_dir=training_output_dir,
                 vocab_dir=training_output_dir,
             )
-            torch.save({
-                "model_state_dict": model_for_eval.state_dict(),
-                "tf_scaler_mean": tf_scaler.mean,
-                "tf_scaler_std": tf_scaler.std,
-                "tg_scaler_mean": tg_scaler.mean,
-                "tg_scaler_std": tg_scaler.std,
-            }, os.path.join(training_output_dir, "trained_model.pt"))
+            # final checkpoint
+            torch.save(
+                {
+                    "epoch": TOTAL_EPOCHS - 1,
+                    "model_state_dict": model_for_eval.state_dict(),
+                    "optimizer_state_dict": trainer.optimizer.state_dict(),
+                    "scheduler_state_dict": trainer.scheduler.state_dict(),
+                    "best_val_loss": trainer.best_val_loss,
+                    "no_improve_count": trainer.no_improve_count,
+                    "tf_scaler_mean": trainer.tf_scaler.mean,
+                    "tf_scaler_std": trainer.tf_scaler.std,
+                    "tg_scaler_mean": trainer.tg_scaler.mean,
+                    "tg_scaler_std": trainer.tg_scaler.std,
+                },
+                training_output_dir / "trained_model.pt",
+            )
             logging.info("Saved final trained model")
 
         # ----- EWC fisher (rank 0 only) -----
@@ -1345,8 +1371,8 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
             # Training figures
             log_path = os.path.join(training_output_dir, "training_log.csv")
 
-        if rank == 0:
-            logging.info("\nIterations complete")
+            if rank == 0:
+                logging.info("\nIterations complete")
     
     finally:
         if dist.is_initialized():

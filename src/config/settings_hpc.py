@@ -55,19 +55,19 @@ FILTER_TO_NEAREST_GENE = True           # Associate peaks to the nearest gene
 PROMOTER_BP = None #10_000
 
 # ----- MODEL TRAINING PARAMETERS -----
-TOTAL_EPOCHS=100
-BATCH_SIZE=8
+TOTAL_EPOCHS=200
+BATCH_SIZE=16
 PATIENCE=10
 CORR_LOSS_WEIGHT=0.1            
 
-D_MODEL = 256
+D_MODEL = 196
 NUM_HEADS = 4
-NUM_LAYERS = 4
+NUM_LAYERS = 3
 D_FF = D_MODEL * 4
 DROPOUT = 0.2
 
-SAVE_EVERY_N_EPOCHS=1           # Chooses how many epochs to run before saving a checkpoint
-RESUME_CHECKPOINT_PATH="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC_no_scale_linear/chr19/model_training_035/checkpoint.pt"
+SAVE_EVERY_N_EPOCHS=5           # Chooses how many epochs to run before saving a checkpoint
+RESUME_CHECKPOINT_PATH=None
 
 GRAD_ACCUM_STEPS=2
 USE_GRAD_ACCUMULATION=True
@@ -86,7 +86,8 @@ MIN_LR=1e-5                     # Wont drop the learning rate below this, preven
 # TF to TG shortcut parameters
 USE_DISTANCE_BIAS = True
 USE_SHORTCUT = True
-USE_MOTIF_MASK = False
+USE_MOTIF_MASK = True
+MOTIF_MASK_THRESH = 0.5
 SHORTCUT_L1 = 0
 SHORTCUT_L2 = 0 #1e-3
 SHORTCUT_TOPK = None
@@ -109,6 +110,8 @@ FINETUNE_LR = 1e-4       # smaller LR for refinement
 EWC_LAMBDA = 10.0
 
 # ----- GAT CLASSIFIER MODEL -----
+PRETRAINED_EMB_DIR = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC_no_scale_linear/chr19/model_training_035/"
+
 # Model
 HIDDEN_DIM = 384
 GAT_HEADS = 6
@@ -168,8 +171,6 @@ FINE_TUNING_DIR = OUTPUT_DIR / FINE_TUNING_TRAINED_MODEL
 
 INFERRED_NETWORK_OUTPUT_DIR = ROOT_DIR / "output" / "transformer_testing_output" / "chrom_inferred_grn_orti_chipatlas_rn117_unique"
 
-# GAT Classifier model
-PRETRAINED_EMB_DIR = OUTPUT_DIR / "MULTI" / FINE_TUNING_TRAINED_MODEL
 
 
 
