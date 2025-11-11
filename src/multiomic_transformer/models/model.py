@@ -124,43 +124,76 @@ class CrossAttention(nn.Module):
         return out
 
 class TFtoTGShortcut(nn.Module):
-    def __init__(self, d_model, use_motif_mask=False, lambda_l1=1e-4, lambda_l2=0.0,
-                 topk=None, dropout_p=0.2):
+    def __init__(
+        self,
+        d_model,
+        use_motif_mask: bool = False,
+        lambda_l1: float = 1e-4,
+        lambda_l2: float = 0.0,
+        topk: int | None = None,
+        dropout_p: float = 0.2,
+        motif_mask_threshold: float | None = None,  # in -log10(p)
+        motif_prior_scale: float = 0.0,             # >0 to use soft prior
+    ):
         super().__init__()
-        self.scale = nn.Parameter(torch.tensor(0.1))  # learnable scaling
+        self.scale = nn.Parameter(torch.tensor(0.1))
         self.use_motif_mask = use_motif_mask
         self.lambda_l1 = lambda_l1
         self.lambda_l2 = lambda_l2
-        self.topk = topk  # keep only top-k TFs per TG if not None
+        self.topk = topk
         self.dropout_p = dropout_p
 
-    def forward(self, tg_emb, tf_id_emb, tf_expr, motif_mask=None, mask_threshold=0.0):
-        """
-        tg_emb     : [n_tgs, d_model]   TG embeddings
-        tf_id_emb    : [n_tfs, d_model]   TF embeddings
-        tf_expr    : [batch_size, n_tfs]   TF expression values
-        motif_mask : [n_tgs, n_tfs] Max TF-TG peak binding for peaks near TGs
-        mask_threshold  : Masks TF-TG scores if the score is below this threshold
-        """
-        # Dot product similarity between TF and TG embeddings
-        sim = torch.matmul(tg_emb, tf_id_emb.T) / math.sqrt(tf_id_emb.size(1))  # [G,T]
+        self.motif_mask_threshold = motif_mask_threshold
+        self.motif_prior_scale = motif_prior_scale
 
-        # Apply motif mask if provided (zero's out TFs with no peaks near the TG)
+        # big negative for masking
+        self.register_buffer("big_neg", torch.tensor(-1e4, dtype=torch.float32))
+
+    def forward(self, tg_emb, tf_id_emb, tf_expr, motif_mask=None):
+        """
+        tg_emb      : [G, d_model]
+        tf_id_emb   : [T, d_model]
+        tf_expr     : [B, T]
+        motif_mask  : [G, T] aggregated TF–TG motif scores in -log10(p)
+                      (e.g. max or sum over peaks near each TG)
+        """
+        device = tg_emb.device
+        tf_id_emb = tf_id_emb.to(device)
+        tf_expr = tf_expr.to(device)
+
+        # [G, T] similarity between TG & TF embeddings
+        sim = torch.matmul(tg_emb, tf_id_emb.T) / math.sqrt(tf_id_emb.size(1))
+
         if self.use_motif_mask and motif_mask is not None:
-            allowed = motif_mask >= mask_threshold
-            sim = sim.masked_fill(~allowed, -1e4)
-        
+            motif_mask = motif_mask.to(device)
+
+            # 1) Hard structural mask: require sufficient motif evidence
+            if self.motif_mask_threshold is not None:
+                allowed = motif_mask >= self.motif_mask_threshold  # bool [G, T]
+                # disallow edges with weak/no motif support
+                sim = sim.masked_fill(~allowed, self.big_neg.item())
+            else:
+                allowed = None
+
+            # 2) Optional soft prior: add scaled motif scores on allowed edges
+            if self.motif_prior_scale > 0.0:
+                prior = motif_mask
+                if allowed is not None:
+                    prior = torch.where(allowed, prior, torch.zeros_like(prior))
+                sim = sim + self.motif_prior_scale * prior
+
+        # numerics
         sim = sim.clamp_(-50, 50)
 
-        # Softmax attention between each TF and TG
-        attn = torch.softmax(sim, dim=-1)  # [G,T]        
+        # attention over TFs for each TG
+        attn = torch.softmax(sim, dim=-1)          # [G, T]
         attn = torch.nan_to_num(attn, nan=0.0)
-        
-        # handle all-masked rows: if a row sums to 0, leave it zero (no TF contribution)
+
+        # handle all-masked rows (all big_neg -> all zeros after softmax)
         row_sums = attn.sum(dim=-1, keepdim=True)
         attn = torch.where(row_sums > 0, attn / row_sums, attn)
 
-        # Optional Top-K masking, only consider the top K values
+        # optional top-k sparsification
         if self.topk is not None:
             topk_vals, topk_idx = torch.topk(attn, self.topk, dim=-1)
             mask = torch.zeros_like(attn)
@@ -168,18 +201,13 @@ class TFtoTGShortcut(nn.Module):
             attn = attn * mask
             attn = attn / (attn.sum(dim=-1, keepdim=True) + 1e-8)
 
-        # Weighted TF to TG contribution, multiply TF expression by TF-TG identity similarity attention weights
+        # [B, G]: mix TF expression for each TG
         tf_scalar = tf_expr @ attn.T
-
-        # Apply dropout
         tf_scalar = F.dropout(tf_scalar, p=self.dropout_p, training=self.training)
 
-        # Save attention as a class attribute (in case its needed later)
-        self.attn = attn
+        self.attn = attn  # for regularization / inspection
 
-        # Scale the effect of the TF-TG direct attention by a learnable weight
         output = self.scale * tf_scalar
-        
         return output, attn
 
     def regularization(self):
@@ -188,7 +216,6 @@ class TFtoTGShortcut(nn.Module):
         l1 = self.lambda_l1 * self.attn.abs().sum()
         l2 = self.lambda_l2 * (self.attn ** 2).sum()
         return l1 + l2
-
 
 class AttentionPooling(nn.Module):
     def __init__(self, d_model):
@@ -212,6 +239,7 @@ class MultiomicTransformer(nn.Module):
                  use_shortcut=True, 
                  use_motif_mask=False, 
                  motif_mask_threshold=0.0,
+                 motif_prior_scale=0.0,
                  lambda_l1=1e-4, 
                  lambda_l2=0.0,
                  topk=None,
@@ -226,7 +254,6 @@ class MultiomicTransformer(nn.Module):
         self.dropout = dropout
         self.use_bias = use_bias
         self.use_motif_mask = use_motif_mask
-        self.motif_mask_threshold = motif_mask_threshold
         self.use_shortcut = use_shortcut
         self.bias_scale = bias_scale
         self.use_gradient_checkpointing = use_gradient_checkpointing
@@ -330,7 +357,16 @@ class MultiomicTransformer(nn.Module):
         # Adds TF->TG weights at the end to directly modify the final TG expression predictions
         # Optional TF→TG shortcut that adapts to any TF/TG set
         if self.use_shortcut:
-            self.shortcut_layer = TFtoTGShortcut(d_model, use_motif_mask, lambda_l1, lambda_l2, topk, shortcut_dropout)
+            self.shortcut_layer = TFtoTGShortcut(
+                d_model, 
+                use_motif_mask, 
+                lambda_l1, 
+                lambda_l2, 
+                topk, 
+                shortcut_dropout,
+                motif_mask_threshold,
+                motif_prior_scale
+                )
                     
     def forward(self, atac_windows, tf_expr, tf_ids, tg_ids, bias=None, motif_mask=None):
         """
@@ -441,7 +477,7 @@ class MultiomicTransformer(nn.Module):
         if self.use_shortcut:
             # Calculate the direct TF-TG attention (similarity of TF and TG embeddings * )
             tf_tg_shortcut_output, attn = self.shortcut_layer(
-                tg_emb, tf_id_emb, tf_expr, motif_mask=motif_mask, mask_threshold=self.motif_mask_threshold
+                tg_emb, tf_id_emb, tf_expr, motif_mask=motif_mask
                 )
             
             # Add the output from the direct TF-TG expression layer to the predicted TG expression from attention

@@ -716,7 +716,8 @@ def load_train_objs(run_cfg):
         use_bias=run_cfg["use_dist_bias"],
         use_shortcut=run_cfg["use_shortcut"],
         use_motif_mask=run_cfg["use_motif_mask"],
-        motif_mask_threshold=run_cfg["motif_mask_threshold"]
+        motif_mask_threshold=run_cfg["motif_mask_threshold"],
+        motif_prior_scale=run_cfg["motif_prior_scale"],
         lambda_l1=run_cfg["shortcut_l1"],
         lambda_l2=run_cfg["shortcut_l2"],
         topk=run_cfg["shortcut_topk"],
@@ -915,6 +916,7 @@ def write_run_parameters(dataset, out_dir):
     logging.info(f"Dist bias?:          {USE_DISTANCE_BIAS}")
     logging.info(f"Motif Mask?:         {USE_MOTIF_MASK}")
     logging.info(f"Mask Thresh:         {MOTIF_MASK_THRESH}")
+    logging.info(f"Mask Soft Scale:     {MOTIF_PRIOR_SCALE}")
     logging.info(f"Shortcut L1:         {SHORTCUT_L1}")
     logging.info(f"Shortcut L2:         {SHORTCUT_L2}")
     logging.info(f"Shortcut Dropout:    {SHORTCUT_DROPOUT}")
@@ -936,6 +938,7 @@ def write_run_parameters(dataset, out_dir):
         "use_dist_bias": USE_DISTANCE_BIAS,
         "use_motif_mask": USE_MOTIF_MASK,
         "motif_mask_threshold": MOTIF_MASK_THRESH,
+        "motif_prior_scale": MOTIF_PRIOR_SCALE,
         "shortcut_l1": SHORTCUT_L1,
         "shortcut_l2": SHORTCUT_L2,
         "shortcut_dropout": SHORTCUT_DROPOUT,
@@ -1182,6 +1185,7 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
                 "use_dist_bias":        g("use_dist_bias", USE_DISTANCE_BIAS),
                 "use_motif_mask":       g("use_motif_mask", USE_MOTIF_MASK),
                 "motif_mask_threshold": g("motif_mask_threshold", MOTIF_MASK_THRESH),
+                "motif_prior_scale":    g("motif_prior_scale", MOTIF_PRIOR_SCALE),
                 "shortcut_l1":          g("shortcut_l1", SHORTCUT_L1),
                 "shortcut_l2":          g("shortcut_l2", SHORTCUT_L2),
                 "shortcut_topk":        g("shortcut_topk", SHORTCUT_TOPK),
@@ -1209,6 +1213,7 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
                 "use_dist_bias":        USE_DISTANCE_BIAS,
                 "use_motif_mask":       USE_MOTIF_MASK,
                 "motif_mask_threshold": MOTIF_MASK_THRESH,
+                "motif_prior_scale":    MOTIF_PRIOR_SCALE,
                 "shortcut_l1":          SHORTCUT_L1,
                 "shortcut_l2":          SHORTCUT_L2,
                 "shortcut_topk":        SHORTCUT_TOPK,
@@ -1301,7 +1306,6 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
                     "optimizer_state_dict": trainer.optimizer.state_dict(),
                     "scheduler_state_dict": trainer.scheduler.state_dict(),
                     "best_val_loss": trainer.best_val_loss,
-                    "no_improve_count": trainer.no_improve_count,
                     "tf_scaler_mean": trainer.tf_scaler.mean,
                     "tf_scaler_std": trainer.tf_scaler.std,
                     "tg_scaler_mean": trainer.tg_scaler.mean,
