@@ -795,6 +795,7 @@ def create_tf_tg_combination_files(
     genes: Iterable[str],
     tf_list_file: Union[str, Path],
     dataset_dir: Union[str, Path],
+    sample_name: Union[str, Path],
     *,
     tf_name_col: Optional[str] = "TF_Name",  # if None, will auto-detect
 ) -> Tuple[List[str], List[str], pd.DataFrame]:
@@ -837,6 +838,8 @@ def create_tf_tg_combination_files(
         Cartesian product of `tfs × tgs`, columns ['TF','TG'].
     """
     dataset_dir = Path(dataset_dir)
+    sample_dir = Path(dataset_dir, sample_name)
+    
     out_dir = dataset_dir / "tf_tg_combos"
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -2119,46 +2122,45 @@ if __name__ == "__main__":
     PROCESS_CHROMOSOME_SPECIFIC_DATA = True
     logging.info(f"PROCESS_CHROMOSOME_SPECIFIC_DATA: {PROCESS_CHROMOSOME_SPECIFIC_DATA}")
     
-    def _per_sample_worker(sample_name: str) -> dict:
-        try:
-            sample_input_dir = RAW_DATA / DATASET_NAME / sample_name
-            out_dir = SAMPLE_PROCESSED_DATA_DIR / sample_name
-            out_dir.mkdir(parents=True, exist_ok=True)
-            SAMPLE_DATA_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-            
-            process_or_load_rna_atac_data(
-                sample_input_dir,
-                force_recalculate=FORCE_RECALCULATE,
-                raw_10x_rna_data_dir=RAW_10X_RNA_DATA_DIR / sample_name,
-                raw_atac_peak_file=RAW_ATAC_PEAK_MATRIX_FILE,
-                sample_name=sample_name,
-                neighbors_k=NEIGHBORS_K,
-                pca_components=PCA_COMPONENTS,
-                hops=HOPS,
-                self_weight=SELF_WEIGHT,
-                load=False
-            )
-            return {"sample": sample_name, "ok": True}
-        
-        except Exception as e:
-            tb = traceback.format_exc()
-            logging.error(f"[{sample_name}] failed: {e}\n{tb}")
-            return {"sample": sample_name, "ok": False, "error": str(e)}
-    
-    # Pre-process samples
-    results = []
-    with ProcessPoolExecutor(max_workers=num_cpu, mp_context=None) as ex:
-        futs = {ex.submit(_per_sample_worker, s): s for s in SAMPLE_NAMES}
-        for fut in as_completed(futs):
-            res = fut.result()
-            results.append(res)
-            if res["ok"]:
-                print(f"{res['sample']} done")
-            else:
-                print(f"{res['sample']} failed: {res.get('error','')}")
-    
     # ----- SAMPLE-SPECIFIC PREPROCESSING -----     
     if PROCESS_SAMPLE_DATA == True:
+        def _per_sample_worker(sample_name: str) -> dict:
+            try:
+                sample_input_dir = RAW_DATA / DATASET_NAME / sample_name
+                out_dir = SAMPLE_PROCESSED_DATA_DIR / sample_name
+                out_dir.mkdir(parents=True, exist_ok=True)
+                SAMPLE_DATA_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+                
+                process_or_load_rna_atac_data(
+                    sample_input_dir,
+                    force_recalculate=FORCE_RECALCULATE,
+                    raw_10x_rna_data_dir=RAW_10X_RNA_DATA_DIR / sample_name,
+                    raw_atac_peak_file=RAW_ATAC_PEAK_MATRIX_FILE,
+                    sample_name=sample_name,
+                    neighbors_k=NEIGHBORS_K,
+                    pca_components=PCA_COMPONENTS,
+                    hops=HOPS,
+                    self_weight=SELF_WEIGHT,
+                    load=False
+                )
+                return {"sample": sample_name, "ok": True}
+            
+            except Exception as e:
+                tb = traceback.format_exc()
+                logging.error(f"[{sample_name}] failed: {e}\n{tb}")
+                return {"sample": sample_name, "ok": False, "error": str(e)}
+        
+        # Pre-process samples
+        results = []
+        with ProcessPoolExecutor(max_workers=num_cpu, mp_context=None) as ex:
+            futs = {ex.submit(_per_sample_worker, s): s for s in SAMPLE_NAMES}
+            for fut in as_completed(futs):
+                res = fut.result()
+                results.append(res)
+                if res["ok"]:
+                    print(f"{res['sample']} done")
+                else:
+                    print(f"{res['sample']} failed: {res.get('error','')}")
             
         # Sample-specific preprocessing
         for sample_name in SAMPLE_NAMES:
@@ -2212,7 +2214,7 @@ if __name__ == "__main__":
             logging.info(f"  - Number of peaks: {processed_atac_df.shape[0]}: {peaks[:3]}")
 
             
-            tfs, tgs, tf_tg_df = create_tf_tg_combination_files(genes, TF_FILE, SAMPLE_PROCESSED_DATA_DIR)
+            tfs, tgs, tf_tg_df = create_tf_tg_combination_files(genes, TF_FILE, SAMPLE_PROCESSED_DATA_DIR, sample_name)
             
             tfs = sorted(set(gc.canonicalize_series(pd.Series(tfs)).tolist()))
             tgs = sorted(set(gc.canonicalize_series(pd.Series(tgs)).tolist()))

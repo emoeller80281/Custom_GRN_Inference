@@ -15,7 +15,7 @@ CHROM_ID_LIST = chrom_list
 CHROM_ID = "chr19"
 CHROM_IDS = chr_nums
 # , "E7.75_rep1", "E8.0_rep2", "E8.5_rep2", "E8.75_rep2", "E7.5_rep2", "E8.0_rep1", "E8.5_rep1"
-SAMPLE_NAMES = ["E8.75_rep1"]#["E7.5_rep1", "E7.5_rep2", "E7.75_rep1", "E8.0_rep2", "E8.5_rep2", "E8.75_rep2", "E8.0_rep1", "E8.5_rep1"]
+SAMPLE_NAMES = ["E7.5_rep1", "E7.5_rep2", "E7.75_rep1", "E8.0_rep2", "E8.5_rep2", "E8.75_rep2", "E8.0_rep1", "E8.5_rep1"]
 FINE_TUNING_DATASETS = ["E7.5_rep1"]
 
 # Paths to the raw scRNA-seq and scATAC-seq data
@@ -87,9 +87,9 @@ MIN_LR=1e-5                     # Wont drop the learning rate below this, preven
 USE_DISTANCE_BIAS = True
 USE_SHORTCUT = True
 USE_MOTIF_MASK = True
-MOTIF_MASK_THRESH = 3           # Only allow TF-TG edges with p <= 1e-MOTIF_MASK_THRESH
-MOTIF_PRIOR_SCALE = 0.2         # Allows adding scaled motif scores on edges that are not filtered
-SHORTCUT_L1 = 0
+MOTIF_MASK_THRESH = 0.5         # Only allow TF-TG edges with p <= -log10(MOTIF_MASK_THRESH)
+MOTIF_PRIOR_SCALE = 2           # Allows adding scaled motif scores on edges that are not filtered
+SHORTCUT_L1 = 1e-5              # Encourages sparsity between TF-TG edges in the TFtoTG shortcut
 SHORTCUT_L2 = 0 #1e-3
 SHORTCUT_TOPK = None
 SHORTCUT_DROPOUT = 0 #0.1

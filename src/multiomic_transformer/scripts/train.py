@@ -5,6 +5,7 @@ import os
 import sys
 import time
 import warnings
+import pickle
 from pathlib import Path
 
 import sys
@@ -494,6 +495,21 @@ class Trainer:
 
     def _save_checkpoint(self, epoch: int, path: str):
         # Only rank 0 writes to disk
+        """
+        Saves the model, optimizer, and scheduler states to a checkpoint file.
+
+        Only rank 0 writes to disk.
+
+        Args:
+            epoch (int): The current epoch number.
+            path (str): The path to save the checkpoint file to.
+
+        Notes:
+            If the model is a DDP model, we save the wrapped model's state dict.
+            If the model is not a DDP model, we save the model's state dict directly.
+            If the optimizer or scheduler is not None, we save their state dicts to the checkpoint file.
+            If the tf_scaler or tg_scaler is not None, we save their mean and std to the checkpoint file.
+        """
         if self.gpu_id != 0:
             return
 
@@ -1085,7 +1101,7 @@ def _mapping_to_ordered_list(name2id: dict):
     # convert {name: id} → [names] in id order
     return [k for k, _ in sorted(name2id.items(), key=lambda kv: kv[1])]
 
-def write_experiment_settings_and_objects(training_output_dir: Path, dataset):
+def write_experiment_settings_and_objects(training_output_dir: Path, dataset, test_loader):
     """
     Works for both MultiChromosomeDataset and single-chrom MultiomicTransformerDataset.
     Writes tf/tg vocab mappings and run parameters. Skips scaler unless present.
@@ -1112,6 +1128,9 @@ def write_experiment_settings_and_objects(training_output_dir: Path, dataset):
         json.dump(tf_names_ordered, f)
     with open(os.path.join(training_output_dir, "tg_names_ordered.json"), "w") as f:
         json.dump(tg_names_ordered, f)
+    
+    # Persist test loader
+    torch.save(test_loader, os.path.join(training_output_dir, "test_loader.pt"))
 
     # Your existing run-parameter writer is fine to call here if it doesn’t assume single-chrom only
     write_run_parameters(dataset, training_output_dir)
@@ -1225,10 +1244,6 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
 
         dataset, model, optimizer = load_train_objs(run_cfg)
 
-        if rank == 0 and not (resume_ckpt and os.path.isfile(resume_ckpt)):
-            write_experiment_settings_and_objects(training_output_dir, dataset)
-            logging.info("Wrote experiment settings and objects to training output directory")
-
         if rank == 0:
             logging.info("Preparing dataloader")
 
@@ -1238,6 +1253,10 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
             world_size=world_size,
             rank=rank,
         )
+        
+        if rank == 0 and not (resume_ckpt and os.path.isfile(resume_ckpt)):
+            write_experiment_settings_and_objects(training_output_dir, dataset, test_loader)
+            logging.info("Wrote experiment settings and objects to training output directory")
 
         if rank == 0:
             logging.info("Creating Trainer")
