@@ -5,6 +5,7 @@ from torch_geometric.nn import GCNConv, GATConv, GINEConv
 from torch_geometric.data import Data
 from torch_geometric.utils import negative_sampling
 import torch.utils.checkpoint as cp
+from typing import Optional
 import numpy as np
 import math
 
@@ -130,9 +131,9 @@ class TFtoTGShortcut(nn.Module):
         use_motif_mask: bool = False,
         lambda_l1: float = 1e-4,
         lambda_l2: float = 0.0,
-        topk: int | None = None,
+        topk: Optional[int] = None,
         dropout_p: float = 0.2,
-        motif_mask_threshold: float | None = None,  # in -log10(p)
+        motif_mask_threshold: Optional[float] = None,  # in -log10(p)
         motif_prior_scale: float = 0.0,             # >0 to use soft prior
     ):
         super().__init__()
