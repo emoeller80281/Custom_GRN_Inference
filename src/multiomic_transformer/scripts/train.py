@@ -913,6 +913,7 @@ def write_run_parameters(dataset, out_dir):
     logging.info(f"Genes:               {len(dataset.tg_ids)}")
     logging.info(f"Windows (RE):        {dataset.num_windows}")
     logging.info(f"TFs:                 {len(dataset.tf_ids)}")
+    logging.info(f"Model Size:          {D_MODEL}")
     logging.info(f"Metacells:           {len(dataset.metacell_names)}")
     logging.info(f"Epochs:              {TOTAL_EPOCHS}")
     logging.info(f"Batch Size:          {BATCH_SIZE}")

@@ -56,11 +56,11 @@ PROMOTER_BP = None #10_000
 
 # ----- MODEL TRAINING PARAMETERS -----
 TOTAL_EPOCHS=200
-BATCH_SIZE=16
+BATCH_SIZE=32
 PATIENCE=10
 CORR_LOSS_WEIGHT=0.1            
 
-D_MODEL = 256
+D_MODEL = 128
 NUM_HEADS = 4
 NUM_LAYERS = 3
 D_FF = D_MODEL * 4
@@ -86,10 +86,10 @@ MIN_LR=1e-5                     # Wont drop the learning rate below this, preven
 # TF to TG shortcut parameters
 USE_DISTANCE_BIAS = True
 USE_SHORTCUT = True
-USE_MOTIF_MASK = True
-MOTIF_MASK_THRESH = 0.5         # Only allow TF-TG edges with p <= -log10(MOTIF_MASK_THRESH)
-MOTIF_PRIOR_SCALE = 2           # Allows adding scaled motif scores on edges that are not filtered
-SHORTCUT_L1 = 1e-5              # Encourages sparsity between TF-TG edges in the TFtoTG shortcut
+USE_MOTIF_MASK = False
+MOTIF_MASK_THRESH = 0.0         # Only allow TF-TG edges with p <= -log10(MOTIF_MASK_THRESH)
+MOTIF_PRIOR_SCALE = 0.0         # Allows adding scaled motif scores on edges that are not filtered
+SHORTCUT_L1 = 0                 # Encourages sparsity between TF-TG edges in the TFtoTG shortcut
 SHORTCUT_L2 = 0 #1e-3
 SHORTCUT_TOPK = None
 SHORTCUT_DROPOUT = 0 #0.1
@@ -101,7 +101,7 @@ ATTN_BIAS_SCALE = 1.0
 SUBSAMPLE_MAX_TFS = None # 150
 SUBSAMPLE_MAX_TGS = None # 2000
 SUBSAMPLE_MAX_WINDOWS_PER_CHROM = None #8000
-SUBSAMPLE_MAX_CELLS=10000
+SUBSAMPLE_MAX_CELLS=8000
 SUBSAMPLE_SEED = 42
 
 # ----- FINE TUNING ON SINGLE-CELL DATA -----
