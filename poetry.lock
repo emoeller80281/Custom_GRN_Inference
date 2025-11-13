@@ -3303,6 +3303,25 @@ python-dateutil = ">=2.7"
 dev = ["meson-python (>=0.13.1,<0.17.0)", "pybind11 (>=2.13.2,!=2.13.3)", "setuptools (>=64)", "setuptools_scm (>=7)"]
 
 [[package]]
+name = "matplotlib-venn"
+version = "1.1.2"
+description = "Functions for plotting area-proportional two- and three-way Venn diagrams in matplotlib."
+optional = false
+python-versions = "*"
+groups = ["main"]
+files = [
+    {file = "matplotlib-venn-1.1.2.tar.gz", hash = "sha256:6f2b07a03e9bb5a62de2f32f965216739e175176f9d654dd19e7af2c22ec36e3"},
+]
+
+[package.dependencies]
+matplotlib = "*"
+numpy = "*"
+scipy = "*"
+
+[package.extras]
+shapely = ["shapely"]
+
+[[package]]
 name = "mccabe"
 version = "0.7.0"
 description = "McCabe checker, plugin for flake8"
@@ -7163,6 +7182,24 @@ tbb = ["tbb (>=2019.0)"]
 test = ["pytest"]
 
 [[package]]
+name = "upsetplot"
+version = "0.9.0"
+description = "Draw Lex et al.'s UpSet plots with Pandas and Matplotlib"
+optional = false
+python-versions = "*"
+groups = ["main"]
+files = [
+    {file = "UpSetPlot-0.9.0.tar.gz", hash = "sha256:95b76ac38c624c9dfb1eca1de1a37e30e07e83678b1c57839c943184247b8592"},
+]
+
+[package.dependencies]
+matplotlib = ">=2.0"
+pandas = ">=0.23"
+
+[package.extras]
+testing = ["pytest (>=2.7)", "pytest-cov (<2.6)"]
+
+[[package]]
 name = "url-normalize"
 version = "2.2.1"
 description = "URL normalization for Python"
@@ -7800,4 +7837,4 @@ testing = ["coverage[toml]", "zope.event", "zope.testing"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.9,<4.0"
-content-hash = "66dbd3ee0611a6298ef1d6f17452fd0798e66b157e2bef5a0ee2eac1cb5566a7"
+content-hash = "1da8adb52bc3cfba90a5e04070a07a746fe53b03ef548efeb1c0ab12d234fd8a"

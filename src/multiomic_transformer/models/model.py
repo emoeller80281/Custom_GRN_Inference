@@ -111,7 +111,7 @@ class CrossAttention(nn.Module):
     def __init__(self, d_model, num_heads, dropout):
         super().__init__()
         self.attn = MultiHeadAttention(d_model, num_heads)
-        self.norm = nn.LayerNorm(d_model, eps=1e-5)
+        self.norm = nn.LayerNorm(d_model, eps=1e-6)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, query, key_value, mask=None, attn_bias=None):
@@ -119,8 +119,7 @@ class CrossAttention(nn.Module):
         # key_value: [batch_size, len_key_val, d_model]
         attn_out = self.attn(query, key_value, key_value, mask, attn_bias=attn_bias)
         attn_out = torch.nan_to_num(attn_out, nan=0.0, posinf=1e4, neginf=-1e4)
-        res = query + self.dropout(attn_out)
-        res = res.clamp_(-1e4, 1e4)
+        res = query + 0.1 * self.dropout(attn_out)
         out = self.norm(res)
         return out
 
@@ -137,7 +136,7 @@ class TFtoTGShortcut(nn.Module):
         motif_prior_scale: float = 0.0,             # >0 to use soft prior
     ):
         super().__init__()
-        self.scale = nn.Parameter(torch.tensor(0.1))
+        self.scale = nn.Parameter(torch.tensor(0.01, dtype=torch.float32))
         self.use_motif_mask = use_motif_mask
         self.lambda_l1 = lambda_l1
         self.lambda_l2 = lambda_l2

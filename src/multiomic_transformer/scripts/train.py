@@ -446,7 +446,7 @@ class Trainer:
             if ((iteration + 1) % self.grad_accum_steps == 0
                 or (iteration + 1) == len(self.train_data)):
                 self.scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=10.0)
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
                 self.optimizer.zero_grad(set_to_none=True)

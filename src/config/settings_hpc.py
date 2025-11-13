@@ -46,10 +46,10 @@ SELF_WEIGHT = 1.0       # How much to weight the cells own gene expression. High
 
 # Data Preprocessing and Caching
 VALIDATION_DATASETS = ["E8.75_rep1"]
-FORCE_RECALCULATE = False                # Recomputes genomic windows, peak-TG distance, and re-runs sliding window TF-peak scan
+FORCE_RECALCULATE = True                # Recomputes genomic windows, peak-TG distance, and re-runs sliding window TF-peak scan
 WINDOW_SIZE = 1_000                     # Aggregates peaks within WINDOW_SIZE bp genomic tiles
-DISTANCE_SCALE_FACTOR = 5_000           # Weights the peak-gene TSS distance score. Lower numbers = faster dropoff
-MAX_PEAK_DISTANCE = 20_000              # Masks out peaks further than this distance from the gene TSS
+DISTANCE_SCALE_FACTOR = 20_000           # Weights the peak-gene TSS distance score. Lower numbers = faster dropoff
+MAX_PEAK_DISTANCE = 100_000              # Masks out peaks further than this distance from the gene TSS
 DIST_BIAS_MODE = "logsumexp"            # Method for calcuting window -> gene TSS distance. Options: "max" | "sum" | "mean" | "logsumexp"
 FILTER_TO_NEAREST_GENE = True           # Associate peaks to the nearest gene
 PROMOTER_BP = None #10_000
@@ -58,13 +58,13 @@ PROMOTER_BP = None #10_000
 TOTAL_EPOCHS=200
 BATCH_SIZE=32
 PATIENCE=10
-CORR_LOSS_WEIGHT=0.1            
+CORR_LOSS_WEIGHT=1.0            
 
-D_MODEL = 128
-NUM_HEADS = 4
+D_MODEL = 256
+NUM_HEADS = 8
 NUM_LAYERS = 3
 D_FF = D_MODEL * 4
-DROPOUT = 0.2
+DROPOUT = 0.15
 
 SAVE_EVERY_N_EPOCHS=5           # Chooses how many epochs to run before saving a checkpoint
 RESUME_CHECKPOINT_PATH=None
@@ -75,7 +75,7 @@ USE_GRAD_CHECKPOINTING=True
 
 # Training scheduler settings
 MODE="min"                      # min = improvement means a lower number; max = improvement means a higher number
-INITIAL_LEARNING_RATE = 3e-4    # Initial learning rate for the model
+INITIAL_LEARNING_RATE = 5e-4    # Initial learning rate for the model
 SCHEDULER_FACTOR=0.5            # How much to reduce the learning rate on a plateau
 SCHEDULER_PATIENCE=3            # How long to wait with no improvement without dropping the learning rate
 THRESHOLD=1e-3                  # Defines how much better the next epoch has to be to count as being "better"
@@ -86,13 +86,13 @@ MIN_LR=1e-5                     # Wont drop the learning rate below this, preven
 # TF to TG shortcut parameters
 USE_DISTANCE_BIAS = True
 USE_SHORTCUT = True
-USE_MOTIF_MASK = False
+USE_MOTIF_MASK = True
 MOTIF_MASK_THRESH = 0.0         # Only allow TF-TG edges with p <= -log10(MOTIF_MASK_THRESH)
-MOTIF_PRIOR_SCALE = 0.0         # Allows adding scaled motif scores on edges that are not filtered
-SHORTCUT_L1 = 0                 # Encourages sparsity between TF-TG edges in the TFtoTG shortcut
+MOTIF_PRIOR_SCALE = 1.0         # Allows adding scaled motif scores on edges that are not filtered
+SHORTCUT_L1 = 1e-2                 # Encourages sparsity between TF-TG edges in the TFtoTG shortcut
 SHORTCUT_L2 = 0 #1e-3
-SHORTCUT_TOPK = None
-SHORTCUT_DROPOUT = 0 #0.1
+SHORTCUT_TOPK = 30
+SHORTCUT_DROPOUT = 0.2 #0.1
 
 # peak-TG distance bias
 ATTN_BIAS_SCALE = 1.0 
@@ -101,7 +101,7 @@ ATTN_BIAS_SCALE = 1.0
 SUBSAMPLE_MAX_TFS = None # 150
 SUBSAMPLE_MAX_TGS = None # 2000
 SUBSAMPLE_MAX_WINDOWS_PER_CHROM = None #8000
-SUBSAMPLE_MAX_CELLS=8000
+SUBSAMPLE_MAX_CELLS=15000
 SUBSAMPLE_SEED = 42
 
 # ----- FINE TUNING ON SINGLE-CELL DATA -----

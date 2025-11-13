@@ -62,6 +62,8 @@ data/genome_data/reference_genome/**
 data/ground_truth_files/**
 !data/ground_truth_files/.gitkeep
 
+data/processed_for_modeling/
+
 data/prior_knowledge_network_data/**
 !data/prior_knowledge_network_data/.gitkeep
 
