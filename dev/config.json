@@ -1,0 +1,13 @@
+{
+    "data_dir": "./data",
+    "output_dir": "./results",
+    "split_strategy": "edge",
+    "cv_strategy": "leave_one_out",
+    "model_type": "hgb",
+    "do_hyperparam_search": true,
+    "use_calibration": true,
+    "test_size": 0.2,
+    "val_size": 0.2,
+    "downsample_ratio": 20,
+    "random_state": 42
+}
