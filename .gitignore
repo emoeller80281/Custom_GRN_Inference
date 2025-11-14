@@ -52,6 +52,7 @@ data/databases/motif_information/hg38/**
 !data/databases/motif_information/hg38/pwms_all_motifs/
 # !data/databases/motif_information/hg38/pwms_all_motifs/**
 
+clean_classifier_data
 
 data/genome_data/genome_annotation/**
 !data/genome_data/genome_annotation/.gitkeep

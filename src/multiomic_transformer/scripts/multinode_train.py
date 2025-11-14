@@ -53,14 +53,14 @@ def _signal_handler(signum, frame):
 signal.signal(signal.SIGINT, _signal_handler)
 signal.signal(signal.SIGTERM, _signal_handler)
 
-def ddp_setup(rank: int, world_size: int):
+def ddp_setup(rank: int, world_size: int, local_rank: int):
     """
     Args:
-        rank: Unique identifier of each process
-        world_size: Total number of processes
+        rank: Global identifier for this process (RANK)
+        world_size: Total number of processes across all nodes
+        local_rank: GPU index for this process on the current node
     """
     
-    local_rank = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(local_rank)
     
     torch.backends.cuda.enable_flash_sdp(True)
@@ -84,6 +84,20 @@ def setup_logging(rank: int):
         handlers=[handler],
         force=True
     )
+
+def load_run_params_from_json(run_dir: Path) -> dict:
+    """
+    Load run_parameters.json from an existing training directory, if present.
+    Returns {} if not found.
+    """
+    param_path = run_dir / "run_parameters.json"
+    if not param_path.is_file():
+        logging.warning(f"No run_parameters.json found in {run_dir}, using current config.")
+        return {}
+    with open(param_path, "r") as f:
+        params = json.load(f)
+    logging.info(f"Loaded run parameters from {param_path}")
+    return params
 
 def save_tf_tg_embeddings_from_model(model, out_dir, vocab_dir):
     model = getattr(model, "module", model)  # unwrap DDP if needed
@@ -117,22 +131,6 @@ def save_tf_tg_embeddings_from_model(model, out_dir, vocab_dir):
         os.path.join(out_dir, "tf_tg_vocab_id2name.pt")
     )
     
-
-def load_run_params_from_json(run_dir: Path) -> dict:
-    """
-    Load run_parameters.json from an existing training directory, if present.
-    Returns {} if not found.
-    """
-    param_path = run_dir / "run_parameters.json"
-    if not param_path.is_file():
-        logging.warning(f"No run_parameters.json found in {run_dir}, using current config.")
-        return {}
-    with open(param_path, "r") as f:
-        params = json.load(f)
-    logging.info(f"Loaded run parameters from {param_path}")
-    return params
-
-    
 class Trainer:
     def __init__(
         self,
@@ -142,6 +140,7 @@ class Trainer:
         loss_fn: nn.Module,
         optimizer: torch.optim.Optimizer,
         gpu_id: int,
+        global_rank: int,
         save_every: int,
         patience: int = 20,
         min_delta: float = 1e-3,
@@ -150,6 +149,8 @@ class Trainer:
 
     ) -> None:
         self.gpu_id = gpu_id
+        self.global_rank = global_rank
+        self.is_main = (global_rank == 0)
         self.model = model.to(gpu_id)
         self.train_data = train_data
         self.val_data = val_data
@@ -187,7 +188,7 @@ class Trainer:
         return self.stop_requested or STOP_REQUESTED
     
     def _save_trained_model(self, path: str):
-        if self.gpu_id != 0:
+        if not self.is_main:
             return
 
         if hasattr(self.model, "module"):
@@ -213,7 +214,7 @@ class Trainer:
 
     def _handle_abort(self, epoch, path, history, reason: str):
         # Only rank 0 writes, but all ranks should sync.
-        if self.gpu_id == 0:
+        if self.is_main:
             logging.info(f"{reason}: saving checkpoint and logs before exit.")
             last_epoch = max(0, epoch)
             self._save_checkpoint(last_epoch, path)
@@ -314,6 +315,7 @@ class Trainer:
         # Safety: if something went numerically wrong, skip the step
         if not torch.isfinite(total_loss):
             return (torch.tensor(0.0, device=self.gpu_id),
+                    torch.tensor(0.0, device=self.gpu_id),
                     torch.tensor(0.0, device=self.gpu_id),
                     torch.tensor(0.0, device=self.gpu_id),
                     torch.tensor(0.0, device=self.gpu_id))
@@ -492,7 +494,7 @@ class Trainer:
             
             # ----- sparse progress logging -----
             if (
-                self.gpu_id == 0
+                self.is_main
                 and len(self.train_data) > 0
                 and next_mark_idx < len(progress_marks)
             ):
@@ -599,7 +601,7 @@ class Trainer:
                 if self._should_stop():
                     raise KeyboardInterrupt()
 
-                if self.gpu_id == 0:
+                if self.is_main:
                     lr = self.optimizer.param_groups[0]['lr']
                     logging.info(
                         f"Epoch {epoch+1} | Train Total Loss: {avg_train_loss:.4f} | "
@@ -624,7 +626,7 @@ class Trainer:
                                     
                 # Checkpoint + CSV log
                 if epoch % self.save_every == 0:
-                    if self.gpu_id == 0:
+                    if self.is_main:
                         self._save_checkpoint(epoch, path)
                         self._write_log_csv(history, path)
                     if dist.is_available() and dist.is_initialized():
@@ -634,7 +636,7 @@ class Trainer:
                 stop_tensor = torch.tensor(0, device=self.gpu_id)
 
                 # --- Early stopping check (only rank 0 sets flag) ---
-                if self.gpu_id == 0:
+                if self.is_main:
                     if (avg_val_mse_unscaled < best_val_loss - self.min_delta) or (r2_s > best_r2 + self.min_delta):
                         # If either val_loss improved OR r2_s improved, reset patience
                         best_val_loss = avg_val_mse_unscaled
@@ -658,7 +660,7 @@ class Trainer:
 
                 # --- All ranks see the same value now ---
                 if stop_tensor.item() == 1:
-                    if self.gpu_id == 0:
+                    if self.is_main:
                         logging.info("All ranks stopping training.")
                     break
             
@@ -667,7 +669,7 @@ class Trainer:
             total_training_time_min = total_train_end_time - total_train_start_time
             
             # Final save if not early stopped
-            if self.gpu_id == 0 and patience_counter < self.patience:
+            if self.is_main and patience_counter < self.patience:
                 self._write_log_csv(history, path)
                 logging.info("Training loop exited normally.")
                 
@@ -698,47 +700,57 @@ class Trainer:
             writer.writerows(history)
 
 def load_checkpoint(checkpoint_path, trainer, device):
-    ckpt = torch.load(checkpoint_path, map_location=device)
+    rank = int(os.environ.get("RANK", -1))
+
+    # Load checkpoint on rank 0 only
+    if rank == 0:
+        logging.info(f"[RANK {rank}] Starting torch.load('{checkpoint_path}')")
+        ckpt = torch.load(checkpoint_path, map_location=device)
+        logging.info(f"[RANK {rank}] Finished torch.load")
+    else:
+        ckpt = None
+
+    # Broadcast checkpoint object
+    if dist.is_available() and dist.is_initialized():
+        ckpt_list = [ckpt]
+        dist.broadcast_object_list(ckpt_list, src=0)
+        ckpt = ckpt_list[0]
 
     model = trainer.model
     state_dict = ckpt["model_state_dict"]
 
+    # ---- Load model state ----
     if isinstance(model, torch.nn.parallel.DistributedDataParallel):
         model.module.load_state_dict(state_dict)
     else:
         model.load_state_dict(state_dict)
 
+    # ---- Load optimizer state and move tensors to device ----
     if "optimizer_state_dict" in ckpt and hasattr(trainer, "optimizer"):
         trainer.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
 
-    if "scheduler_state_dict" in ckpt and hasattr(trainer, "scheduler"):
-        trainer.scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+        # Move optimizer state tensors to the correct device
+        for state in trainer.optimizer.state.values():
+            for k, v in state.items():
+                if torch.is_tensor(v):
+                    state[k] = v.to(device)
 
-    # --- Rebuild TF/TG scalers if present ---
-    if "tf_scaler_mean" in ckpt and "tf_scaler_std" in ckpt:
-        trainer.tf_scaler = SimpleScaler(
-            ckpt["tf_scaler_mean"].to(device),
-            ckpt["tf_scaler_std"].to(device),
-        )
-
-    if "tg_scaler_mean" in ckpt and "tg_scaler_std" in ckpt:
-        trainer.tg_scaler = SimpleScaler(
-            ckpt["tg_scaler_mean"].to(device),
-            ckpt["tg_scaler_std"].to(device),
-        )
-
-    # AMP scaler if you use it
+    # ---- Load AMP scaler (stays on CPU except its unscale tensor) ----
     if "scaler_state_dict" in ckpt and hasattr(trainer, "scaler"):
         try:
             trainer.scaler.load_state_dict(ckpt["scaler_state_dict"])
+
+            # Fix unscale tensor device mismatch
+            st = trainer.scaler._scale
+            if torch.is_tensor(st):
+                trainer.scaler._scale = st.to(device)
         except Exception:
             pass
+    
+    model.to(device)
 
     start_epoch = ckpt.get("epoch", 0) + 1
     return start_epoch
-
-
-
 
 def load_train_objs(run_cfg):
     # Dataset does not depend on d_model etc., but we keep it here
@@ -1175,13 +1187,19 @@ def write_experiment_settings_and_objects(training_output_dir: Path, dataset, te
     write_run_parameters(dataset, training_output_dir)
     logging.info("Wrote experiment settings and objects to training output directory")
     
-
-def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_size: int):
+def main(rank: int, local_rank: int, world_size: int, save_every: int, total_epochs: int, batch_size: int):
     
     # Early check to make sure the model dimension can be split evenly among the number of heads
     assert D_MODEL % NUM_HEADS == 0, f"{D_MODEL} not divisible by {NUM_HEADS}"
     
-    ddp_setup(rank, world_size)
+    ddp_setup(rank, world_size, local_rank)
+    
+    print(
+        f"[HOST {os.environ.get('HOSTNAME','?')}] "
+        f"RANK={rank}, LOCAL_RANK={local_rank}, WORLD_SIZE={world_size}",
+        flush=True,
+    )
+    
     setup_logging(rank)
     
     resume_ckpt = RESUME_CHECKPOINT_PATH
@@ -1276,14 +1294,15 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
             val_loader,
             loss_fn,
             optimizer,
-            gpu_id=rank,
+            gpu_id=local_rank,
+            global_rank=rank,
             save_every=SAVE_EVERY_N_EPOCHS,
             patience=PATIENCE,
             grad_accum_steps=run_cfg["grad_accum_steps"],
             use_grad_accumulation=USE_GRAD_ACCUMULATION,
         )
 
-        rank_device = torch.device(f"cuda:{rank}" if torch.cuda.is_available() else "cpu")
+        rank_device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
 
         # ---- Resume or new scalers ----
         if resume_ckpt and os.path.isfile(resume_ckpt):
@@ -1413,9 +1432,15 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
             dist.destroy_process_group()
     
 if __name__ == "__main__":
-    
-    main(rank=int(os.environ["LOCAL_RANK"]),
-        world_size=int(os.environ["WORLD_SIZE"]),
+    global_rank = int(os.environ["RANK"])
+    local_rank = int(os.environ["LOCAL_RANK"])
+    world_size = int(os.environ["WORLD_SIZE"])
+
+    main(
+        rank=global_rank,
+        local_rank=local_rank,
+        world_size=world_size,
         save_every=SAVE_EVERY_N_EPOCHS,
         total_epochs=TOTAL_EPOCHS,
-        batch_size=BATCH_SIZE)
+        batch_size=BATCH_SIZE,
+    )
