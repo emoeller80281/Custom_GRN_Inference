@@ -692,11 +692,18 @@ class Trainer:
             raise
         
     def _write_log_csv(self, history, path):
-        fieldnames = ["Epoch", "Train Total Loss", "Train MSE", "Val MSE", "R2_u", "R2_s", "LR", "Time"]
+        fieldnames = ["Epoch", "Train Total Loss", "Train MSE",
+                    "Val MSE", "R2_u", "R2_s", "LR", "Time"]
         log_path = os.path.join(path, "training_log.csv")
-        with open(log_path, "w", newline="") as f:
+
+        file_exists = os.path.isfile(log_path)
+
+        # append if file already exists, otherwise create new
+        mode = "a" if file_exists else "w"
+        with open(log_path, mode, newline="") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
+            if not file_exists:
+                writer.writeheader()
             writer.writerows(history)
 
 def load_checkpoint(checkpoint_path, trainer, device):
