@@ -626,7 +626,7 @@ class Trainer:
                 if epoch % self.save_every == 0:
                     if self.gpu_id == 0:
                         self._save_checkpoint(epoch, path)
-                        self._write_log_csv(history, path)
+                        self._write_log_csv(history[-1], path)
                     if dist.is_available() and dist.is_initialized():
                         dist.barrier()
 
@@ -668,7 +668,7 @@ class Trainer:
             
             # Final save if not early stopped
             if self.gpu_id == 0 and patience_counter < self.patience:
-                self._write_log_csv(history, path)
+                self._write_log_csv(history[-1], path)
                 logging.info("Training loop exited normally.")
                 
                 # Convert elapsed_seconds into hours, minutes, and seconds

@@ -963,7 +963,7 @@ def prepare_dataloader(dataset, batch_size, world_size=1, rank=0,
     )
     return train_loader, val_loader, test_loader
 
-def write_run_parameters(dataset, out_dir):
+def write_run_parameters(dataset, out_dir, world_size):
 
     logging.info("\n===== MultiomicTransformerDataset Loaded =====")
     logging.info(f"Chromosome:          {CHROM_IDS}")
@@ -976,9 +976,9 @@ def write_run_parameters(dataset, out_dir):
     logging.info(f"Batch Size:          {BATCH_SIZE}")
     logging.info(f"Grad Accum Steps:    {GRAD_ACCUM_STEPS}")   
     if USE_GRAD_ACCUMULATION:
-        logging.info(f"Effctve Batch Size:  {BATCH_SIZE * GRAD_ACCUM_STEPS}")   
+        logging.info(f"Effctve Batch Size:  {BATCH_SIZE * GRAD_ACCUM_STEPS * world_size}")   
     else:
-        logging.info(f"Effctve Batch Size:  {BATCH_SIZE}")   
+        logging.info(f"Effctve Batch Size:  {BATCH_SIZE * world_size}")   
     logging.info(f"Use Grad Accum?:     {USE_GRAD_ACCUMULATION}")   
     logging.info(f"Use Grad Chkpt?:     {USE_GRAD_CHECKPOINTING}") 
     logging.info(f"Model Dimension:     {D_MODEL}")
@@ -1191,7 +1191,7 @@ def write_experiment_settings_and_objects(training_output_dir: Path, dataset, te
     torch.save(test_loader, os.path.join(training_output_dir, "test_loader.pt"))
 
     # Your existing run-parameter writer is fine to call here if it doesn’t assume single-chrom only
-    write_run_parameters(dataset, training_output_dir)
+    write_run_parameters(dataset, training_output_dir, world_size)
     logging.info("Wrote experiment settings and objects to training output directory")
     
 def main(rank: int, local_rank: int, world_size: int, save_every: int, total_epochs: int, batch_size: int):
