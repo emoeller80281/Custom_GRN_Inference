@@ -690,55 +690,72 @@ class Trainer:
             raise
         
     def _write_log_csv(self, history, path):
-        fieldnames = ["Epoch", "Train Total Loss", "Train MSE", "Val MSE", "R2_u", "R2_s", "LR", "Time"]
+        fieldnames = ["Epoch", "Train Total Loss", "Train MSE",
+                    "Val MSE", "R2_u", "R2_s", "LR", "Time"]
         log_path = os.path.join(path, "training_log.csv")
-        with open(log_path, "w", newline="") as f:
+
+        file_exists = os.path.isfile(log_path)
+
+        # append if file already exists, otherwise create new
+        mode = "a" if file_exists else "w"
+        with open(log_path, mode, newline="") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
+            if not file_exists:
+                writer.writeheader()
             writer.writerows(history)
 
 def load_checkpoint(checkpoint_path, trainer, device):
-    ckpt = torch.load(checkpoint_path, map_location=device)
+    rank = int(os.environ.get("RANK", -1))
+
+    # Load checkpoint on rank 0 only
+    if rank == 0:
+        logging.info(f"[RANK {rank}] Starting torch.load('{checkpoint_path}')")
+        ckpt = torch.load(checkpoint_path, map_location=device)
+        logging.info(f"[RANK {rank}] Finished torch.load")
+    else:
+        ckpt = None
+
+    # Broadcast checkpoint object
+    if dist.is_available() and dist.is_initialized():
+        ckpt_list = [ckpt]
+        dist.broadcast_object_list(ckpt_list, src=0)
+        ckpt = ckpt_list[0]
 
     model = trainer.model
     state_dict = ckpt["model_state_dict"]
 
+    # ---- Load model state ----
     if isinstance(model, torch.nn.parallel.DistributedDataParallel):
         model.module.load_state_dict(state_dict)
     else:
         model.load_state_dict(state_dict)
 
+    # ---- Load optimizer state and move tensors to device ----
     if "optimizer_state_dict" in ckpt and hasattr(trainer, "optimizer"):
         trainer.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
 
-    if "scheduler_state_dict" in ckpt and hasattr(trainer, "scheduler"):
-        trainer.scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+        # Move optimizer state tensors to the correct device
+        for state in trainer.optimizer.state.values():
+            for k, v in state.items():
+                if torch.is_tensor(v):
+                    state[k] = v.to(device)
 
-    # --- Rebuild TF/TG scalers if present ---
-    if "tf_scaler_mean" in ckpt and "tf_scaler_std" in ckpt:
-        trainer.tf_scaler = SimpleScaler(
-            ckpt["tf_scaler_mean"].to(device),
-            ckpt["tf_scaler_std"].to(device),
-        )
-
-    if "tg_scaler_mean" in ckpt and "tg_scaler_std" in ckpt:
-        trainer.tg_scaler = SimpleScaler(
-            ckpt["tg_scaler_mean"].to(device),
-            ckpt["tg_scaler_std"].to(device),
-        )
-
-    # AMP scaler if you use it
+    # ---- Load AMP scaler (stays on CPU except its unscale tensor) ----
     if "scaler_state_dict" in ckpt and hasattr(trainer, "scaler"):
         try:
             trainer.scaler.load_state_dict(ckpt["scaler_state_dict"])
+
+            # Fix unscale tensor device mismatch
+            st = trainer.scaler._scale
+            if torch.is_tensor(st):
+                trainer.scaler._scale = st.to(device)
         except Exception:
             pass
+    
+    model.to(device)
 
     start_epoch = ckpt.get("epoch", 0) + 1
     return start_epoch
-
-
-
 
 def load_train_objs(run_cfg):
     # Dataset does not depend on d_model etc., but we keep it here
