@@ -324,8 +324,8 @@ class Trainer:
     def _validate(self):
         self.model.eval()
 
-        total_loss_scaled = 0.0
-        total_loss_unscaled = 0.0
+        total_loss_scaled_t = torch.zeros(1, device=self.gpu_id)
+        total_loss_unscaled_t = torch.zeros(1, device=self.gpu_id)
         n_batches = 0
 
         # global accumulators (scaled space)
@@ -376,7 +376,7 @@ class Trainer:
 
                 # --- MSE in scaled space (status quo) ---
                 loss_s = F.mse_loss(preds_s, targets_s)
-                total_loss_scaled += float(loss_s.item())
+                total_loss_scaled_t += loss_s.detach()
                 n_batches += 1
 
                 # accumulate for scaled R²
@@ -399,7 +399,7 @@ class Trainer:
                 preds_u   = torch.nan_to_num(preds_u.float(),   nan=0.0, posinf=1e6, neginf=-1e6)
 
                 loss_u = F.mse_loss(preds_u, targets_u)
-                total_loss_unscaled += float(loss_u.item())
+                total_loss_unscaled_t += loss_u.detach()
                 
                 y_u = targets_u.reshape(-1)
                 p_u = preds_u.reshape(-1)
@@ -408,13 +408,23 @@ class Trainer:
                 sumy2_u += torch.sum(y_u ** 2)
                 n_u     += y_u.numel()
 
-        if n_batches == 0 or n_s.item() == 0:
-            return 0.0, 0.0, 0.0, 0.0
+        # Create tensor copies for reduction
+        n_batches_t = torch.tensor(n_batches, device=self.gpu_id, dtype=torch.long)
 
-        # DDP all-reduce
+        # DDP all-reduce: ensure every rank participates (including those with zero local batches)
         if dist.is_available() and dist.is_initialized():
-            for t in (sse_s, sumy_s, sumy2_s, n_s, sse_u, sumy_u, sumy2_u, n_u):
+            for t in (sse_s, sumy_s, sumy2_s, n_s, sse_u, sumy_u, sumy2_u, n_u, 
+                      total_loss_scaled_t, total_loss_unscaled_t):
                 dist.all_reduce(t, op=dist.ReduceOp.SUM)
+            # reduce the integer batch count too
+            dist.all_reduce(n_batches_t, op=dist.ReduceOp.SUM)
+
+        # Use global counts (if DDP reduced) or local if not initialized
+        global_n_batches = int(n_batches_t.item()) if dist.is_available() and dist.is_initialized() else int(n_batches)
+
+        if global_n_batches == 0 or n_s.item() == 0:
+            # No validation data globally
+            return 0.0, 0.0, 0.0, 0.0
 
         eps = 1e-12
 
@@ -428,8 +438,8 @@ class Trainer:
         sst_u  = sumy2_u - n_u * (ybar_u ** 2)
         r2_u   = torch.where(sst_u <= eps, torch.zeros_like(sst_u), 1.0 - sse_u / torch.clamp(sst_u, min=eps))
 
-        avg_loss_scaled = total_loss_scaled / max(1, n_batches)
-        avg_loss_unscaled = total_loss_unscaled / max(1, n_batches)
+        avg_loss_scaled = float(total_loss_scaled_t.item()) / max(1, global_n_batches)
+        avg_loss_unscaled = float(total_loss_unscaled_t.item()) / max(1, global_n_batches)
 
 
         # Return both: (scaled MSE, scaled R2, unscaled R2)
@@ -695,14 +705,18 @@ class Trainer:
         log_path = os.path.join(path, "training_log.csv")
 
         file_exists = os.path.isfile(log_path)
-
-        # append if file already exists, otherwise create new
         mode = "a" if file_exists else "w"
+
         with open(log_path, mode, newline="") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             if not file_exists:
                 writer.writeheader()
-            writer.writerows(history)
+
+            # --- allow a single dict OR a list of dicts ---
+            if isinstance(history, dict):
+                writer.writerow(history)          # single epoch
+            else:
+                writer.writerows(history)         # list of epochs
 
 def load_checkpoint(checkpoint_path, trainer, device):
     rank = int(os.environ.get("RANK", -1))

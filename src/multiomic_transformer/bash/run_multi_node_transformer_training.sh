@@ -31,15 +31,20 @@ export BLIS_NUM_THREADS=$THREADS
 export KMP_AFFINITY=granularity=fine,compact,1,0
 
 # --- NCCL / networking overrides ---
-# Pick the NIC that has 10.90.29.* (eno1 from your tests)
-export IFACE=eno1
+# Dynamically find the interface with 10.90.29.* network
+export IFACE=$(ip -o -4 addr show | grep "10.90.29." | awk '{print $2}')
 
-# Tell NCCL & GLOO to use this NIC
-export NCCL_SOCKET_IFNAME="$IFACE"
-export GLOO_SOCKET_IFNAME="$IFACE"   # sometimes helps c10d too
+if [ -z "$IFACE" ]; then
+    echo "[ERROR] Could not find interface with 10.90.29.* network on $(hostname)"
+    ip -o -4 addr show  # Show all interfaces for debugging
+    exit 1
+fi
 
 echo "[INFO] Using IFACE=$IFACE on host $(hostname)"
 ip -o -4 addr show "$IFACE"
+
+export NCCL_SOCKET_IFNAME="$IFACE"
+export GLOO_SOCKET_IFNAME="$IFACE"
 
 # (keep InfiniBand disabled if IB isn’t properly configured)
 export NCCL_IB_DISABLE=1

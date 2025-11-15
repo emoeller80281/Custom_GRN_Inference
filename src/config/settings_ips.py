@@ -4,19 +4,19 @@ import itertools
 
 ROOT_DIR = Path(__file__).resolve().parent.parent.parent
 
-chr_nums = [f"chr{i}" for i in range(1, 20)]
+chr_nums = [f"chr{i}" for i in range(1, 21)]
 chrom_list = chr_nums #+ ["chrX", "chrY"]
 
 # ----- SAMPLE INFORMATION -----
 # Sample information
-ORGANISM_CODE = "mm10"
-DATASET_NAME = "mESC_no_scale_linear"
+ORGANISM_CODE = "hg38"
+DATASET_NAME = "ipsc"
 CHROM_ID_LIST = chrom_list
 CHROM_ID = "chr19"
 CHROM_IDS = chr_nums
 # , "E7.75_rep1", "E8.0_rep2", "E8.5_rep2", "E8.75_rep2", "E7.5_rep2", "E8.0_rep1", "E8.5_rep1"
-SAMPLE_NAMES = ["E7.5_rep1", "E7.5_rep2", "E7.75_rep1", "E8.0_rep2", "E8.5_rep2", "E8.75_rep2", "E8.0_rep1", "E8.5_rep1"]
-FINE_TUNING_DATASETS = ["E7.5_rep1"]
+SAMPLE_NAMES = ["iPSC_sample"]
+FINE_TUNING_DATASETS = []
 
 # Paths to the raw scRNA-seq and scATAC-seq data
 RAW_SINGLE_CELL_DATA = Path("/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/SINGLE_CELL_DATASETS")
@@ -64,7 +64,7 @@ D_MODEL = 192
 NUM_HEADS = 8
 NUM_LAYERS = 3
 D_FF = D_MODEL * 4
-DROPOUT = 0.10
+DROPOUT = 0.20
 
 SAVE_EVERY_N_EPOCHS=5           # Chooses how many epochs to run before saving a checkpoint
 RESUME_CHECKPOINT_PATH=None#"/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC_no_scale_linear/chr19/model_training_049/checkpoint_120.pt"
@@ -87,21 +87,21 @@ MIN_LR=1e-5                     # Wont drop the learning rate below this, preven
 USE_DISTANCE_BIAS = True
 USE_SHORTCUT = True
 USE_MOTIF_MASK = True
-MOTIF_MASK_THRESH = None         # Only allow TF-TG edges with p <= -log10(MOTIF_MASK_THRESH)
-MOTIF_PRIOR_SCALE = 0.3         # Allows adding scaled motif scores on edges that are not filtered
-SHORTCUT_L1 = 2e-5                 # Encourages sparsity between TF-TG edges in the TFtoTG shortcut
-SHORTCUT_L2 = 1e-5
+MOTIF_MASK_THRESH = 0.0         # Only allow TF-TG edges with p <= -log10(MOTIF_MASK_THRESH)
+MOTIF_PRIOR_SCALE = 0.0         # Allows adding scaled motif scores on edges that are not filtered
+SHORTCUT_L1 = 0                 # Encourages sparsity between TF-TG edges in the TFtoTG shortcut
+SHORTCUT_L2 = 0 #1e-3
 SHORTCUT_TOPK = None
-SHORTCUT_DROPOUT = 0.10
+SHORTCUT_DROPOUT = 0.0 #0.1
 
 # peak-TG distance bias
 ATTN_BIAS_SCALE = 1.0 
 
 # Sampling (optional)
-SUBSAMPLE_MAX_TFS = None# 150
-SUBSAMPLE_MAX_TGS = None#1000
-SUBSAMPLE_MAX_WINDOWS_PER_CHROM = None#8000
-SUBSAMPLE_MAX_CELLS= 10_000
+SUBSAMPLE_MAX_TFS = None # 150
+SUBSAMPLE_MAX_TGS = None
+SUBSAMPLE_MAX_WINDOWS_PER_CHROM = None #8000
+SUBSAMPLE_MAX_CELLS= 5000
 SUBSAMPLE_SEED = 42
 
 # ----- FINE TUNING ON SINGLE-CELL DATA -----

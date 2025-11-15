@@ -2242,6 +2242,7 @@ if __name__ == "__main__":
                     mesc_atac_peak_loc_df=peak_locs_df,
                     gene_tss_df=gene_tss_df,
                     max_peak_distance = MAX_PEAK_DISTANCE,
+                    filter_to_nearest_gene = FILTER_TO_NEAREST_GENE,
                     distance_factor_scale = DISTANCE_SCALE_FACTOR,
                     force_recalculate=FORCE_RECALCULATE
                 )
