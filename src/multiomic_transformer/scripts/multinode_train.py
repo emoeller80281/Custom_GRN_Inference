@@ -255,8 +255,9 @@ class Trainer:
         
         with autocast(device_type="cuda"):
             mask_arg = motif_mask if USE_MOTIF_MASK else None
-            preds, _ = self.model(
-                atac_wins, tf_tensor, tf_ids=tf_ids, tg_ids=tg_ids, bias=bias, motif_mask=mask_arg
+            preds, attn, shortcut_contrib, edge_logits = self.model(
+                atac_wins, tf_tensor, tf_ids=tf_ids, tg_ids=tg_ids, bias=bias, motif_mask=mask_arg,
+                return_edge_logits=True, return_shortcut_contrib=False
             )
 
         # ---- loss & penalty in fp32 for stability ----
@@ -265,6 +266,44 @@ class Trainer:
 
         # Mean MSE in scaled space
         mse_loss = self.loss_fn(preds32, targets32)
+        
+        # Initialize edge loss with explicit dtype matching autocast context
+        edge_loss = torch.tensor(0.0, device=self.gpu_id, dtype=torch.float32)
+
+        if (self.edge_labels is not None) and (edge_logits is not None):
+            # tf_ids / tg_ids may be shape [n_tfs], [n_tgs] or [B, n_tfs], [B, n_tgs]
+            if tf_ids.dim() == 2:
+                tf_ids_b = tf_ids[0]
+            else:
+                tf_ids_b = tf_ids
+            if tg_ids.dim() == 2:
+                tg_ids_b = tg_ids[0]
+            else:
+                tg_ids_b = tg_ids
+
+            # Slice global labels/prior to this batch's TF/TG subset
+            # edge_labels_global: [G, T]
+            edge_labels_batch = self.edge_labels.index_select(0, tg_ids_b).index_select(1, tf_ids_b)
+            edge_dist_batch   = self.edge_dist_score.index_select(0, tg_ids_b).index_select(1, tf_ids_b)
+
+            # Optionally: use distance as extra feature for the edge head
+            # (if you wired edge_extra_features into model.forward / compute_edge_logits)
+            # extra = edge_dist_batch.unsqueeze(-1)  # [G_b, T_b, 1]
+
+            # Compute BCE with logits, using a pos_weight to handle strong imbalance
+            preds_logits = edge_logits.float()
+            labels_float = edge_labels_batch.float()
+
+            pos_frac = labels_float.mean().clamp(min=1e-6)
+            neg_frac = 1.0 - pos_frac
+            pos_weight = (neg_frac / pos_frac).detach()
+
+            bce = F.binary_cross_entropy_with_logits(
+                preds_logits,
+                labels_float,
+                pos_weight=pos_weight,
+            )
+            edge_loss = self.edge_loss_weight * bce
         
         # ----- Unscaled MSE for logging (no grad) -----
         if getattr(self, "tg_scaler", None) is not None:
@@ -363,13 +402,13 @@ class Trainer:
                     targets_s = self.tg_scaler.transform(targets, tg_ids)
                 else:
                     targets_s = targets
-
                 mask_arg = motif_mask if USE_MOTIF_MASK else None
 
-                preds, _ = self.model(
+                preds, _, _, _ = self.model(
                     atac_wins, tf_tensor,
                     tf_ids=tf_ids, tg_ids=tg_ids,
                     bias=bias, motif_mask=mask_arg,
+                    return_edge_logits=True, return_shortcut_contrib=False,
                 )
 
                 # numeric safety before metrics
@@ -806,6 +845,12 @@ def load_train_objs(run_cfg):
         topk=run_cfg["shortcut_topk"],
         shortcut_dropout=run_cfg["shortcut_dropout"],
         use_gradient_checkpointing=run_cfg["use_grad_ckpt"],
+        use_edge_head=True,
+        edge_extra_dim=0,
+        edge_hidden_dim=128,
+        use_edge_head=True,
+        edge_extra_dim=0,
+        edge_hidden_dim=128,
     )
 
     optimizer = torch.optim.Adam(
@@ -1286,6 +1331,38 @@ def main(rank: int, local_rank: int, world_size: int, save_every: int, total_epo
         os.makedirs(training_output_dir, exist_ok=True)
 
         dataset, model, optimizer = load_train_objs(run_cfg)
+        
+        # After dataset/model are created and you know these:
+        tf_name2id = dataset.tf_name2id_sub
+        tg_name2id = dataset.tg_name2id_sub
+
+        T = len(tf_name2id)
+        G = len(tg_name2id)
+
+        # Initialize edge matrices on CPU first (then broadcast to all ranks)
+        edge_labels = torch.zeros(G, T, dtype=torch.float32)
+        edge_dist_score = torch.zeros(G, T, dtype=torch.float32)
+
+        # Only rank 0 loads the parquet file
+        if rank == 0:
+            # Load your aggregated TF–TG ChIP data
+            agg = pd.read_parquet(
+                "data/training_data_cache/mESC_no_scale_linear/chip_tf_tg_agg.parquet"
+            )
+
+            for _, row in agg.iterrows():
+                g_idx = int(row["tg_id"])
+                t_idx = int(row["tf_id"])
+                if g_idx < G and t_idx < T:
+                    edge_labels[g_idx, t_idx] = float(row["label"])
+                    edge_dist_score[g_idx, t_idx] = float(row["dist_score"])
+        
+        # Broadcast from rank 0 to all ranks so all ranks have the data
+        edge_labels = edge_labels.to(rank)
+        edge_dist_score = edge_dist_score.to(rank)
+        if dist.is_available() and dist.is_initialized():
+            dist.broadcast(edge_labels, src=0)
+            dist.broadcast(edge_dist_score, src=0)
 
         if rank == 0:
             logging.info("Preparing dataloader")
@@ -1317,6 +1394,9 @@ def main(rank: int, local_rank: int, world_size: int, save_every: int, total_epo
             patience=PATIENCE,
             grad_accum_steps=run_cfg["grad_accum_steps"],
             use_grad_accumulation=USE_GRAD_ACCUMULATION,
+            edge_labels=edge_labels,
+            edge_dist_score=edge_dist_score,
+            edge_loss_weight=0.1,
         )
 
         rank_device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")

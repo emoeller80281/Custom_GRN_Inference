@@ -361,6 +361,7 @@ class Trainer:
             return (torch.tensor(0.0, device=self.gpu_id),
                     torch.tensor(0.0, device=self.gpu_id),
                     torch.tensor(0.0, device=self.gpu_id),
+                    torch.tensor(0.0, device=self.gpu_id),
                     torch.tensor(0.0, device=self.gpu_id))
 
         # For logging: return components
