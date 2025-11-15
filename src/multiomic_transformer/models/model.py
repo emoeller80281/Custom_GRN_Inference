@@ -231,20 +231,65 @@ class AttentionPooling(nn.Module):
         pooled = torch.sum(weights * x, dim=1)                   # [batch_size, d_model]
         return pooled, weights
 
+class EdgePredictionHead(nn.Module):
+    """
+    Predict TF–TG edge logits from TF/TG embeddings and optional priors.
+
+    Given:
+      tf_id_emb: [T, d_model]
+      tg_emb:    [G, d_model]
+      extra:     [G, T, k]  (e.g. distance/motif features, optional)
+
+    Returns:
+      edge_logits: [G, T]
+    """
+    def __init__(self, d_model, extra_dim: int = 0, hidden_dim: int = 128):
+        super().__init__()
+        in_dim = 2 * d_model + extra_dim
+        self.mlp = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1),
+        )
+
+    def forward(self, tf_id_emb, tg_emb, extra: Optional[torch.Tensor] = None):
+        G, d = tg_emb.shape
+        T, d2 = tf_id_emb.shape
+        assert d == d2, "TF and TG embeddings must share d_model"
+
+        # Broadcast TF/TG embeddings to [G, T, d]
+        tg_expanded = tg_emb.unsqueeze(1).expand(G, T, d)
+        tf_expanded = tf_id_emb.unsqueeze(0).expand(G, T, d)
+
+        x = torch.cat([tg_expanded, tf_expanded], dim=-1)  # [G, T, 2d]
+
+        if extra is not None:
+            # extra expected as [G, T, k]
+            assert extra.shape[:2] == (G, T), \
+                f"extra shape {extra.shape} must start with (G,T)=({G},{T})"
+            x = torch.cat([x, extra], dim=-1)               # [G, T, 2d+k]
+
+        logits = self.mlp(x).squeeze(-1)                    # [G, T]
+        return logits
+
+
 class MultiomicTransformer(nn.Module):
     def __init__(self, d_model, num_heads, num_layers, d_ff, dropout,
-                 tf_vocab_size, tg_vocab_size, 
-                 bias_scale=2.0,
-                 use_bias=True,
-                 use_shortcut=True, 
-                 use_motif_mask=False, 
-                 motif_mask_threshold=0.0,
-                 motif_prior_scale=0.0,
-                 lambda_l1=1e-4, 
-                 lambda_l2=0.0,
-                 topk=None,
-                 shortcut_dropout=0.2,
-                 use_gradient_checkpointing: bool = False,
+                tf_vocab_size, tg_vocab_size, 
+                bias_scale=2.0,
+                use_bias=True,
+                use_shortcut=True, 
+                use_motif_mask=False, 
+                motif_mask_threshold=0.0,
+                motif_prior_scale=0.0,
+                lambda_l1=1e-4, 
+                lambda_l2=0.0,
+                topk=None,
+                shortcut_dropout=0.2,
+                use_gradient_checkpointing: bool = False,
+                use_edge_head: bool = False,
+                edge_extra_dim: int = 0,
+                edge_hidden_dim: int = 128,
                  ):
         super().__init__()
         
@@ -257,6 +302,7 @@ class MultiomicTransformer(nn.Module):
         self.use_shortcut = use_shortcut
         self.bias_scale = bias_scale
         self.use_gradient_checkpointing = use_gradient_checkpointing
+        self.use_edge_head = use_edge_head
 
         # TF and TG embedding tables - generates identities for TFs and TGs
         self.tf_identity_emb = nn.Embedding(tf_vocab_size, d_model)
@@ -367,8 +413,27 @@ class MultiomicTransformer(nn.Module):
                 motif_mask_threshold,
                 motif_prior_scale
                 )
+            
+        if self.use_edge_head:
+            self.edge_head = EdgePredictionHead(
+                d_model,
+                extra_dim=edge_extra_dim,
+                hidden_dim=edge_hidden_dim,
+            )
                     
-    def forward(self, atac_windows, tf_expr, tf_ids, tg_ids, bias=None, motif_mask=None):
+    def forward(
+        self,
+        atac_windows,
+        tf_expr,
+        tf_ids,
+        tg_ids,
+        bias=None,
+        motif_mask=None,
+        return_shortcut_attn: bool = False,
+        return_shortcut_contrib: bool = False,
+        return_edge_logits: bool = False, 
+        edge_extra_features: Optional[torch.Tensor] = None,
+    ):
         """
         atac_windows : [batch_size, n_window, 1]
         tf_expr      : [batch_size, n_tfs]
@@ -474,6 +539,7 @@ class MultiomicTransformer(nn.Module):
         
         # ----- Optional TF→TG shortcut without fixed matrix -----
         attn = None
+        shortcut_contrib = None
         if self.use_shortcut:
             # Calculate the direct TF-TG attention (similarity of TF and TG embeddings * )
             tf_tg_shortcut_output, attn = self.shortcut_layer(
@@ -485,7 +551,19 @@ class MultiomicTransformer(nn.Module):
             
             # Store the last attention output
             self.last_attn = attn
+            
+            if return_shortcut_contrib:
+                # contribution of TF t to TG g in each sample
+                # tf_expr: [B, T], attn: [G, T]  ->  contrib: [B, G, T]
+                shortcut_contrib = (
+                    tf_expr.unsqueeze(1) * attn.unsqueeze(0)
+                )
+        if return_shortcut_attn or return_shortcut_contrib:
+            return tg_pred, attn, shortcut_contrib        
         
+        if return_edge_logits and self.use_edge_head:
+            edge_logits = self.compute_edge_logits(tf_ids, tg_ids, edge_extra_features)
+            return tg_pred, attn, shortcut_contrib, edge_logits
 
         return tg_pred, attn
     
@@ -516,3 +594,32 @@ class MultiomicTransformer(nn.Module):
             return cp.checkpoint(fn, *args, use_reentrant=False)
         else:
             return module(*args)
+    
+    def compute_edge_logits(
+        self,
+        tf_ids: torch.LongTensor,
+        tg_ids: torch.LongTensor,
+        extra_edge_features: Optional[torch.Tensor] = None,
+    ):
+        """
+        Compute TF–TG edge logits using the learned identity embeddings.
+
+        tf_ids: LongTensor [T]
+        tg_ids: LongTensor [G]
+        extra_edge_features: optional [G, T, k] tensor of priors
+                             (e.g. distance score, motif score, ChIP score)
+
+        Returns:
+            edge_logits: [G, T]
+        """
+        assert self.use_edge_head, "Edge head not enabled (use_edge_head=False)."
+
+        device = self.tf_identity_emb.weight.device
+        tf_ids = tf_ids.to(device)
+        tg_ids = tg_ids.to(device)
+
+        tf_id_emb = self.tf_identity_emb(tf_ids)      # [T, d_model]
+        tg_emb    = self.tg_identity_emb(tg_ids)      # [G, d_model]
+
+        edge_logits = self.edge_head(tf_id_emb, tg_emb, extra_edge_features)
+        return edge_logits
