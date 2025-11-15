@@ -429,9 +429,8 @@ class MultiomicTransformer(nn.Module):
         tg_ids,
         bias=None,
         motif_mask=None,
-        return_shortcut_attn: bool = False,
         return_shortcut_contrib: bool = False,
-        return_edge_logits: bool = False, 
+        return_edge_logits: bool = False,
         edge_extra_features: Optional[torch.Tensor] = None,
     ):
         """
@@ -540,6 +539,7 @@ class MultiomicTransformer(nn.Module):
         # ----- Optional TF→TG shortcut without fixed matrix -----
         attn = None
         shortcut_contrib = None
+        edge_logits = None
         if self.use_shortcut:
             # Calculate the direct TF-TG attention (similarity of TF and TG embeddings * )
             tf_tg_shortcut_output, attn = self.shortcut_layer(
@@ -556,16 +556,14 @@ class MultiomicTransformer(nn.Module):
                 # contribution of TF t to TG g in each sample
                 # tf_expr: [B, T], attn: [G, T]  ->  contrib: [B, G, T]
                 shortcut_contrib = (
-                    tf_expr.unsqueeze(1) * attn.unsqueeze(0)
-                )
-        if return_shortcut_attn or return_shortcut_contrib:
-            return tg_pred, attn, shortcut_contrib        
+                    tf_expr.unsqueeze(1) * attn.unsqueeze(0) * self.shortcut_layer.scale
+                )  
         
         if return_edge_logits and self.use_edge_head:
             edge_logits = self.compute_edge_logits(tf_ids, tg_ids, edge_extra_features)
             return tg_pred, attn, shortcut_contrib, edge_logits
 
-        return tg_pred, attn
+        return tg_pred, attn, shortcut_contrib, edge_logits
     
     def _encode_with_checkpointing(self, win_emb):
         """
@@ -615,6 +613,8 @@ class MultiomicTransformer(nn.Module):
         assert self.use_edge_head, "Edge head not enabled (use_edge_head=False)."
 
         device = self.tf_identity_emb.weight.device
+        if extra_edge_features is not None:
+            extra_edge_features = extra_edge_features.to(device)
         tf_ids = tf_ids.to(device)
         tg_ids = tg_ids.to(device)
 
