@@ -65,7 +65,7 @@ NUM_HEADS = 4
 NUM_LAYERS = 3
 D_FF = D_MODEL * 4
 DROPOUT = 0.10
-EDGE_LOSS_WEIGHT=0.5
+EDGE_LOSS_WEIGHT=0.05
 
 SAVE_EVERY_N_EPOCHS=5           # Chooses how many epochs to run before saving a checkpoint
 RESUME_CHECKPOINT_PATH=None#"/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC_no_scale_linear/chr19/model_training_049/checkpoint_120.pt"

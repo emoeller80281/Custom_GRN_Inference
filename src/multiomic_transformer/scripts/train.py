@@ -7,6 +7,7 @@ import time
 import warnings
 import pickle
 from pathlib import Path
+from sklearn.metrics import roc_auc_score, average_precision_score
 
 import sys
 sys.path.append(Path(__file__).resolve().parent.parent.parent)
@@ -86,15 +87,21 @@ def setup_logging(rank: int):
         force=True
     )
 
-def save_tf_tg_embeddings_from_model(model, out_dir, vocab_dir):
+def save_tf_tg_embeddings_from_model(model, out_dir, vocab_dir, epoch=None):
     model = getattr(model, "module", model)  # unwrap DDP if needed
+    
+    # Save embeddings 
+    if epoch is not None:
+        emb_save_path = os.path.join(out_dir, f"tf_tg_embeddings_{epoch}.pt")
+    else:
+        emb_save_path = os.path.join(out_dir, f"tf_tg_embeddings_final.pt")
     torch.save(
         {
             "tf_emb":     model.tf_identity_emb.weight.detach().cpu(),   # [T, D]
             "tg_query_emb":     model.tg_query_emb.weight.detach().cpu(),   # [G, D]
             "tg_emb": model.tg_identity_emb.weight.detach().cpu()
         },
-        os.path.join(out_dir, "tf_tg_embeddings.pt")
+        emb_save_path
     )
 
     # Prefer the copies we already wrote into the training_output_dir
@@ -117,6 +124,150 @@ def save_tf_tg_embeddings_from_model(model, out_dir, vocab_dir):
         {"tf_id2name": tf_id2name, "tg_id2name": tg_id2name},
         os.path.join(out_dir, "tf_tg_vocab_id2name.pt")
     )
+
+
+def _balance_pos_neg(df, label_col="is_gt", pos_to_neg_ratio=1.0, random_state=0):
+    """Return a dataframe with a controlled positive:negative ratio."""
+    rng = np.random.default_rng(random_state)
+
+    pos_df = df[df[label_col] == True]
+    neg_df = df[df[label_col] == False]
+
+    n_pos = len(pos_df)
+    n_neg_desired = int(n_pos * pos_to_neg_ratio)
+
+    if n_pos == 0:
+        # No positives -> AUROC undefined.
+        return None
+
+    n_neg_desired = min(n_neg_desired, len(neg_df))
+    neg_idx = rng.choice(neg_df.index.to_numpy(), size=n_neg_desired, replace=False)
+    neg_sample = neg_df.loc[neg_idx]
+
+    balanced = pd.concat([pos_df, neg_sample], axis=0)
+    balanced = balanced.sample(frac=1.0, random_state=random_state).reset_index(drop=True)
+    return balanced
+
+
+def _build_all_pairs_df(scores_matrix, tf_names, tg_names, gt_set,
+                        restrict_tf_idx=None, score_name="score"):
+    """
+    scores_matrix: [T, G] numpy array
+    restrict_tf_idx: optional list/array of TF indices (rows) to keep
+    gt_set: set of (tf_name, tg_name) that are positives
+    """
+    T, G = scores_matrix.shape
+
+    if restrict_tf_idx is None:
+        tf_idx = np.arange(T)
+    else:
+        tf_idx = np.asarray(restrict_tf_idx, dtype=int)
+
+    tf_grid, tg_grid = np.meshgrid(tf_idx, np.arange(G), indexing="ij")
+    tf_flat = tf_grid.ravel()
+    tg_flat = tg_grid.ravel()
+
+    vals = scores_matrix[tf_flat, tg_flat]
+    tfs = np.array(tf_names, dtype=object)[tf_flat]
+    tgs = np.array(tg_names, dtype=object)[tg_flat]
+
+    df = pd.DataFrame({
+        "tf": tfs,
+        "tg": tgs,
+        score_name: vals,
+    })
+    df["is_gt"] = list(map(gt_set.__contains__, zip(df["tf"], df["tg"])))
+    return df
+
+
+def compute_balanced_chip_auroc(
+    tf_emb: torch.Tensor,
+    tg_emb: torch.Tensor,
+    tf_names,
+    tg_names,
+    chip_path: str,
+    pos_to_neg_ratio: float = 1.0,
+    restrict_to_chip_tfs: bool = True,
+) -> float:
+    """
+    Compute *balanced* AUROC for TF–TG cosine similarity vs ORTI ChIP ground truth.
+
+    Args
+    ----
+    tf_emb, tg_emb : torch.Tensor
+        TF / TG embedding matrices of shape [T, D] and [G, D].
+    tf_names, tg_names : list[str]
+        Names aligned with rows of tf_emb / tg_emb.
+    chip_path : str
+        Path to ORTI_ground_truth_TF_TG.csv (or similar).
+    pos_to_neg_ratio : float
+        Number of negatives per positive when balancing (1.0 => 1:1).
+    restrict_to_chip_tfs : bool
+        If True, only evaluate TFs that appear in the ChIP file.
+
+    Returns
+    -------
+    float
+        Balanced AUROC (0.5 ~ random, 1.0 ~ perfect). NaN if not computable.
+    """
+    # ---- 1. Cosine similarity matrix [T, G] ----
+    tf_norm = F.normalize(tf_emb, p=2, dim=1)
+    tg_norm = F.normalize(tg_emb, p=2, dim=1)
+    sim = (tf_norm @ tg_norm.T).cpu().numpy()   # [T, G]
+
+    # ---- 2. Load and filter ChIP ground truth ----
+    chip = pd.read_csv(chip_path)
+    chip = chip.rename(columns={"TF": "tf", "TG": "tg"})
+    chip["tf"] = chip["tf"].astype(str)
+    chip["tg"] = chip["tg"].astype(str)
+
+    tf_index = {g: i for i, g in enumerate(tf_names)}
+    tg_index = {g: i for i, g in enumerate(tg_names)}
+
+    chip["tf_in"] = chip["tf"].isin(tf_index)
+    chip["tg_in"] = chip["tg"].isin(tg_index)
+    chip_valid = chip[chip["tf_in"] & chip["tg_in"]].copy()
+
+    if len(chip_valid) == 0:
+        return float("nan")
+
+    gt_set = set(zip(chip_valid["tf"], chip_valid["tg"]))
+
+    # Optionally restrict to TFs that appear in ChIP
+    restrict_idx = None
+    if restrict_to_chip_tfs:
+        chip_tf_set = set(chip_valid["tf"].unique())
+        restrict_idx = [tf_index[t] for t in chip_tf_set if t in tf_index]
+
+    # ---- 3. Build all TF–TG pairs and balance pos/neg ----
+    cos_df = _build_all_pairs_df(
+        sim,
+        tf_names=tf_names,
+        tg_names=tg_names,
+        gt_set=gt_set,
+        restrict_tf_idx=restrict_idx,
+        score_name="score",
+    )
+
+    # Balance positives and negatives
+    cos_bal = _balance_pos_neg(cos_df, label_col="is_gt",
+                               pos_to_neg_ratio=pos_to_neg_ratio,
+                               random_state=0)
+    if cos_bal is None:
+        return float("nan")
+
+    scores = cos_bal["score"].values
+    labels = cos_bal["is_gt"].values.astype(int)
+
+    # ---- 4. AUROC ----
+    try:
+        auroc_bal = roc_auc_score(labels, scores)
+    except ValueError:
+        # happens if labels are all one class after balancing
+        auroc_bal = float("nan")
+
+    return float(auroc_bal)
+
     
 
 def load_run_params_from_json(run_dir: Path) -> dict:
@@ -149,7 +300,9 @@ class Trainer:
         grad_accum_steps: int = 1,
         use_grad_accumulation: bool = False,
         edge_labels=None, 
-        edge_loss_weight=0.1
+        edge_loss_weight=0.1,
+        tf_names=None,
+        tg_names=None,
 
     ) -> None:
         self.gpu_id = gpu_id
@@ -166,6 +319,8 @@ class Trainer:
         self.edge_labels = edge_labels
         self.edge_loss_weight = edge_loss_weight
         self.edge_pos_weight = None
+        self.tf_names = tf_names
+        self.tg_names = tg_names
         if self.edge_labels is not None:
             with torch.no_grad():
                 pos_frac = float(self.edge_labels.float().mean().item())
@@ -709,6 +864,7 @@ class Trainer:
             model_for_save,
             out_dir=path,
             vocab_dir=path,   # or training_output_dir if your vocabs live elsewhere
+            epoch=epoch
         )
 
         out_path = os.path.join(path, f"checkpoint_{epoch}.pt")
@@ -744,6 +900,33 @@ class Trainer:
                 
                 if self._should_stop():
                     raise KeyboardInterrupt()
+                
+                if self.gpu_id == 0 and (epoch + 1) % 1 == 0:  # or every N epochs
+                    # unwrap DDP if needed
+                    model_core = (
+                        self.model.module
+                        if isinstance(self.model, torch.nn.parallel.DistributedDataParallel)
+                        else self.model
+                    )
+
+                    # grab identity embeddings (or whichever TF/TG embeddings you want to evaluate)
+                    tf_emb = model_core.tf_identity_emb.weight.detach().cpu()
+                    tg_emb = model_core.tg_identity_emb.weight.detach().cpu()
+
+                    # you’ll need these lists somewhere in your Trainer (from your dataset / vocab)
+                    auroc_bal = compute_balanced_chip_auroc(
+                        tf_emb=tf_emb,
+                        tg_emb=tg_emb,
+                        tf_names=self.tf_names,    # e.g. dataset.tf_name2id_sub.keys() in the right order
+                        tg_names=self.tg_names,    # same idea
+                        chip_path="data/ground_truth_files/new_chip_atlas_tf_peak_tg_dist.csv",
+                        pos_to_neg_ratio=1.0,
+                        restrict_to_chip_tfs=True,
+                    )
+                    
+
+                    logging.info(f"Balanced AUROC (ChIP TFs, cosine) @ epoch {epoch+1}: {auroc_bal:.4f}")
+
 
                 if self.gpu_id == 0:
                     lr = self.optimizer.param_groups[0]['lr']
@@ -768,6 +951,7 @@ class Trainer:
                         "Train Edge Loss": avg_train_edge_loss,
                         "LR": lr,
                         "Time": round(epoch_dur_sec, 0),
+                        "AUROC": auroc_bal
                     }
                     history.append(epoch_log)
 
@@ -839,8 +1023,11 @@ class Trainer:
             raise
         
     def _write_log_csv(self, history, path):
-        fieldnames = ["Epoch", "Train Total Loss", "Train MSE",
-                    "Val MSE", "R2_u", "R2_s", "Train Edge Loss", "LR", "Time"]
+        if isinstance(history, dict):
+            fieldnames = history.keys()
+        else:
+            fieldnames = ["Epoch", "Train Total Loss", "Train MSE",
+                    "Val MSE", "R2_u", "R2_s", "Train Edge Loss", "LR", "Time", "AUROC"]
         log_path = os.path.join(path, "training_log.csv")
 
         file_exists = os.path.isfile(log_path)
@@ -1439,7 +1626,7 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
         if rank == 0:
             # Load your aggregated TF–TG ChIP data
             agg = pd.read_parquet(
-                "data/training_data_cache/mESC_no_scale_linear/nearest_tf_tg_agg.parquet"
+                "data/training_data_cache/mESC_no_scale_linear/combined_tf_tg_agg.parquet"
             )
 
             for _, row in agg.iterrows():
@@ -1485,6 +1672,8 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
             use_grad_accumulation=USE_GRAD_ACCUMULATION,
             edge_labels=edge_labels,
             edge_loss_weight=EDGE_LOSS_WEIGHT,
+            tf_names=list(dataset.tf_names_sub),
+            tg_names=list(dataset.tg_names_sub),
         )
 
         rank_device = torch.device(f"cuda:{rank}" if torch.cuda.is_available() else "cpu")
