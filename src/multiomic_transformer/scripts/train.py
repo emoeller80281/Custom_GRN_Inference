@@ -43,6 +43,7 @@ from multiomic_transformer.utils import ewc_utils, plotting
 warnings.filterwarnings("ignore", message="No device id is provided via `init_process_group`")
 
 STOP_REQUESTED = False
+EDGE_POS_WEIGHT_CLAMP = 1e3
 
 def _signal_handler(signum, frame):
     # Mark that we should shut down gracefully.
@@ -166,6 +167,17 @@ class Trainer:
         self.edge_labels = edge_labels
         self.edge_dist_score = edge_dist_score
         self.edge_loss_weight = edge_loss_weight
+        self.edge_pos_weight = None
+        if self.edge_labels is not None:
+            with torch.no_grad():
+                pos_frac = float(self.edge_labels.float().mean().item())
+                pos_frac = max(pos_frac, 1e-6)
+                neg_frac = max(1.0 - pos_frac, 1e-6)
+                raw_weight = neg_frac / pos_frac
+                clamped_weight = min(raw_weight, EDGE_POS_WEIGHT_CLAMP)
+                self.edge_pos_weight = torch.tensor(
+                    clamped_weight, dtype=torch.float32, device=self.gpu_id
+                )
     
         # Loss warmup
         self.corr_sq_warmup_epochs = 3 
@@ -259,28 +271,16 @@ class Trainer:
             if not torch.isfinite(t).all():
                 bad = (~torch.isfinite(t)).nonzero(as_tuple=False)[:5]
                 raise RuntimeError(f"{name} has non-finite values; examples idx={bad}")
-        
-        edge_extra = edge_dist_batch.unsqueeze(-1) 
-        
-        with autocast(device_type="cuda"):
-            mask_arg = motif_mask if USE_MOTIF_MASK else None
-            preds, attn, shortcut_contrib, edge_logits = self.model(
-                atac_wins, tf_tensor, tf_ids=tf_ids, tg_ids=tg_ids, bias=bias, motif_mask=mask_arg,
-                return_edge_logits=True, return_shortcut_contrib=False, edge_extra_features=edge_extra
-            )
 
-        # ---- loss & penalty in fp32 for stability ----
-        preds32   = torch.nan_to_num(preds.float(),   nan=0.0, posinf=1e6, neginf=-1e6)
-        targets32 = torch.nan_to_num(targets.float(), nan=0.0, posinf=1e6, neginf=-1e6)
+        # ------------------------------------------------------------------
+        # Prepare edge priors (distance) and labels for this batch
+        # ------------------------------------------------------------------
+        edge_extra = None           # default: no extra features
+        edge_labels_batch = None    # we’ll fill this only if edge_labels is set
+        edge_dist_batch   = None
 
-        # Mean MSE in scaled space
-        mse_loss = self.loss_fn(preds32, targets32)
-        
-        # Initialize edge loss with explicit dtype matching autocast context
-        edge_loss = torch.tensor(0.0, device=self.gpu_id, dtype=torch.float32)
-
-        if (self.edge_labels is not None) and (edge_logits is not None):
-            # tf_ids / tg_ids may be shape [n_tfs], [n_tgs] or [B, n_tfs], [B, n_tgs]
+        if (self.edge_labels is not None) and (self.edge_dist_score is not None):
+            # tf_ids / tg_ids may be [T], [G] or [B, T], [B, G]; we use first row if batched
             if tf_ids.dim() == 2:
                 tf_ids_b = tf_ids[0]
             else:
@@ -290,18 +290,52 @@ class Trainer:
             else:
                 tg_ids_b = tg_ids
 
-            # Slice global labels/prior to this batch's TF/TG subset
+            # Slice global labels / distances to this batch’s TF/TG subset
             # edge_labels_global: [G, T]
             edge_labels_batch = self.edge_labels.index_select(0, tg_ids_b).index_select(1, tf_ids_b)
             edge_dist_batch   = self.edge_dist_score.index_select(0, tg_ids_b).index_select(1, tf_ids_b)
 
-            # Compute BCE with logits, using a pos_weight to handle strong imbalance
+            # Use distance as extra feature for the edge head: [G_b, T_b, 1]
+            edge_extra = edge_dist_batch.to(self.gpu_id).unsqueeze(-1)
+
+        # ------------------------------------------------------------------
+        # Forward pass
+        # ------------------------------------------------------------------
+        with autocast(device_type="cuda"):
+            mask_arg = motif_mask if USE_MOTIF_MASK else None
+            preds, attn, shortcut_contrib, edge_logits = self.model(
+                atac_wins,
+                tf_tensor,
+                tf_ids=tf_ids,
+                tg_ids=tg_ids,
+                bias=bias,
+                motif_mask=mask_arg,
+                return_edge_logits=True,
+                return_shortcut_contrib=False,
+                edge_extra_features=edge_extra,   # <--- now defined (or None)
+            )
+
+        # ---- loss & penalty in fp32 for stability ----
+        preds32   = torch.nan_to_num(preds.float(),   nan=0.0, posinf=1e6, neginf=-1e6)
+        targets32 = torch.nan_to_num(targets.float(), nan=0.0, posinf=1e6, neginf=-1e6)
+
+        mse_loss = self.loss_fn(preds32, targets32)
+
+        # Initialize edge loss
+        edge_loss = torch.tensor(0.0, device=self.gpu_id, dtype=torch.float32)
+
+        if (edge_labels_batch is not None) and (edge_logits is not None):
             preds_logits = edge_logits.float()
             labels_float = edge_labels_batch.float()
 
-            pos_frac = labels_float.mean().clamp(min=1e-6)
-            neg_frac = 1.0 - pos_frac
-            pos_weight = (neg_frac / pos_frac).detach()
+            if self.edge_pos_weight is not None:
+                pos_weight = self.edge_pos_weight.to(
+                    preds_logits.device, dtype=preds_logits.dtype
+                )
+            else:
+                pos_frac = labels_float.mean().clamp(min=1e-6)
+                neg_frac = 1.0 - pos_frac
+                pos_weight = (neg_frac / pos_frac).detach().clamp_max(EDGE_POS_WEIGHT_CLAMP)
 
             bce = F.binary_cross_entropy_with_logits(
                 preds_logits,
@@ -360,17 +394,20 @@ class Trainer:
 
         edge_loss_warm = edge_anneal * edge_loss   # edge_loss already includes self.edge_loss_weight
 
+        # ----- Shortcut regularization (controls TF–TG shortcut norms) -----
+        shortcut_reg = torch.tensor(0.0, device=self.gpu_id, dtype=torch.float32)
+        if getattr(self.model, "use_shortcut", False) and hasattr(self.model, "shortcut_layer"):
+            # regularization() should already be a scalar with grad
+            reg_val = self.model.shortcut_layer.regularization()
+            # Make sure it's on the right device / dtype
+            shortcut_reg = reg_val.to(dtype=torch.float32, device=self.gpu_id) * SHORTCUT_REG_WEIGHT
+
         # ---------- Total loss ----------
-        total_loss = mse_loss + r2_penalty + edge_loss_warm
+        total_loss = mse_loss + r2_penalty + edge_loss_warm + shortcut_reg
 
         # Safety: if something went numerically wrong, skip the step
         if not torch.isfinite(total_loss):
-            return (torch.tensor(0.0, device=self.gpu_id),
-                    torch.tensor(0.0, device=self.gpu_id),
-                    torch.tensor(0.0, device=self.gpu_id),
-                    torch.tensor(0.0, device=self.gpu_id),
-                    torch.tensor(0.0, device=self.gpu_id),
-                    torch.tensor(0.0, device=self.gpu_id))
+            return None, None, None, None, None
 
         # For logging: return components
         return total_loss, mse_loss.detach(), mse_loss_unscaled, mean_r2.detach(), r2_penalty.detach(), edge_loss.detach()
@@ -417,12 +454,28 @@ class Trainer:
                     targets_s = targets
 
                 mask_arg = motif_mask if USE_MOTIF_MASK else None
+                
+                edge_extra = None
+                if (self.edge_dist_score is not None):
+                    # tf_ids / tg_ids may be [T], [G] or [B,T], [B,G]
+                    if tf_ids.dim() == 2:
+                        tf_ids_b = tf_ids[0]
+                    else:
+                        tf_ids_b = tf_ids
+                    if tg_ids.dim() == 2:
+                        tg_ids_b = tg_ids[0]
+                    else:
+                        tg_ids_b = tg_ids
+
+                    edge_dist_batch = self.edge_dist_score.index_select(0, tg_ids_b).index_select(1, tf_ids_b)
+                    edge_extra = edge_dist_batch.to(self.gpu_id).unsqueeze(-1)
 
                 preds, _, _, _ = self.model(
                     atac_wins, tf_tensor,
                     tf_ids=tf_ids, tg_ids=tg_ids,
                     bias=bias, motif_mask=mask_arg,
                     return_edge_logits=True, return_shortcut_contrib=False,
+                    edge_extra_features=edge_extra,
                 )
 
                 # numeric safety before metrics
@@ -502,6 +555,8 @@ class Trainer:
 
     
     def _run_epoch(self, epoch):
+        self.model.train()
+        
         sampler = getattr(self.train_data, "sampler", None)
         if isinstance(sampler, DistributedSampler):
             sampler.set_epoch(epoch)
@@ -509,39 +564,43 @@ class Trainer:
         bs = getattr(self.train_data, "batch_sampler", None)
         if hasattr(bs, "set_epoch"):
             bs.set_epoch(epoch)
-            
-        total_loss_sum = 0.0
-        total_mse_scaled_sum = 0.0
+
+        total_loss_sum         = 0.0
+        total_mse_scaled_sum   = 0.0
         total_mse_unscaled_sum = 0.0
-        total_edge_loss = 0.0
-        n_batches = 0
-        self.epoch = epoch
-        
+        total_edge_loss        = 0.0
+        n_batches              = 0
+        self.epoch             = epoch
+
         self.optimizer.zero_grad(set_to_none=True)
         progress_marks = [25, 50, 75]
-        next_mark_idx = 0
-        
+        next_mark_idx  = 0
+
         for iteration, batch in enumerate(self.train_data):
             if self._should_stop():
                 raise KeyboardInterrupt()
 
             out = self._run_batch(batch)
-            if out[0] is None:
+
+            # ---- Skip batches that were flagged as bad/NaN ----
+            if out is None:
                 self.optimizer.zero_grad(set_to_none=True)
                 continue
 
             (total_loss_val,
-             mse_scaled,
-             mse_unscaled,
-             mean_corr,
-             corr_weight,
-             edge_loss_val) = out
-            
-            total_edge_loss += edge_loss_val.item()
+            mse_scaled,
+            mse_unscaled,
+            mean_corr,
+            corr_weight,
+            edge_loss_val) = out
 
+            total_edge_loss += float(edge_loss_val)
+
+            # Sanity: this should still be connected to the graph
             if not total_loss_val.requires_grad:
                 raise RuntimeError("Bug: total_loss_val has no grad_fn")
 
+            # ---- Grad accumulation with AMP ----
             loss_for_backprop = total_loss_val / self.grad_accum_steps
             self.scaler.scale(loss_for_backprop).backward()
 
@@ -553,12 +612,12 @@ class Trainer:
                 self.scaler.update()
                 self.optimizer.zero_grad(set_to_none=True)
 
-            total_loss_sum          += float(total_loss_val.detach())
-            total_mse_scaled_sum    += float(mse_scaled)
-            total_mse_unscaled_sum  += float(mse_unscaled)
+            # ---- Logging sums (detach for safety) ----
+            total_loss_sum         += float(total_loss_val.detach())
+            total_mse_scaled_sum   += float(mse_scaled)
+            total_mse_unscaled_sum += float(mse_unscaled)
             n_batches += 1
-            
-            
+
             # ----- sparse progress logging -----
             if (
                 self.gpu_id == 0
@@ -566,21 +625,14 @@ class Trainer:
                 and next_mark_idx < len(progress_marks)
             ):
                 pct = int(100 * (iteration + 1) / len(self.train_data))
-                # log when we *cross* the next mark
                 if pct >= progress_marks[next_mark_idx]:
-                    logging.info(
-                        f"    [{progress_marks[next_mark_idx]}%] Iter {iteration}"
-                    )
+                    logging.info(f"    [{progress_marks[next_mark_idx]}%] Iter {iteration}")
                     next_mark_idx += 1
-                            # f"MSE + pearson r2 penalty: {total_loss_val:.4f} | "
-                            # f"MSE Loss: {mse_loss_scaled:.4f} | "
-                            # f"pearson r2 penalty: {corr_weight:.4f} | "
-                            # f"Mean pearson r2: {mean_corr:.2f}"     
 
-        avg_train_loss          = total_loss_sum / max(1, n_batches)
-        avg_train_mse_scaled    = total_mse_scaled_sum / max(1, n_batches)
-        avg_train_mse_unscaled  = total_mse_unscaled_sum / max(1, n_batches)
-        avg_train_edge_loss     = total_edge_loss / max(1, n_batches)
+        avg_train_loss         = total_loss_sum        / max(1, n_batches)
+        avg_train_mse_scaled   = total_mse_scaled_sum / max(1, n_batches)
+        avg_train_mse_unscaled = total_mse_unscaled_sum / max(1, n_batches)
+        avg_train_edge_loss    = total_edge_loss      / max(1, n_batches)
 
         avg_val_mse_scaled, avg_val_mse_unscaled, r2_s, r2_u = self._validate()
         self.scheduler.step(avg_val_mse_unscaled)
@@ -874,7 +926,7 @@ def load_train_objs(run_cfg):
         shortcut_dropout=run_cfg["shortcut_dropout"],
         use_gradient_checkpointing=run_cfg["use_grad_ckpt"],
         use_edge_head=True,
-        edge_extra_dim=0,
+        edge_extra_dim=1,
         edge_hidden_dim=128,
     )
 
@@ -1366,7 +1418,7 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
         if rank == 0:
             # Load your aggregated TF–TG ChIP data
             agg = pd.read_parquet(
-                "data/training_data_cache/mESC_no_scale_linear/chip_tf_tg_agg.parquet"
+                "data/training_data_cache/mESC_no_scale_linear/nearest_chip_tf_tg_agg.parquet"
             )
 
             for _, row in agg.iterrows():

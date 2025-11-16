@@ -260,26 +260,16 @@ class Trainer:
             if not torch.isfinite(t).all():
                 bad = (~torch.isfinite(t)).nonzero(as_tuple=False)[:5]
                 raise RuntimeError(f"{name} has non-finite values; examples idx={bad}")
-        
-        with autocast(device_type="cuda"):
-            mask_arg = motif_mask if USE_MOTIF_MASK else None
-            preds, attn, shortcut_contrib, edge_logits = self.model(
-                atac_wins, tf_tensor, tf_ids=tf_ids, tg_ids=tg_ids, bias=bias, motif_mask=mask_arg,
-                return_edge_logits=True, return_shortcut_contrib=False
-            )
 
-        # ---- loss & penalty in fp32 for stability ----
-        preds32   = torch.nan_to_num(preds.float(),   nan=0.0, posinf=1e6, neginf=-1e6)
-        targets32 = torch.nan_to_num(targets.float(), nan=0.0, posinf=1e6, neginf=-1e6)
+        # ------------------------------------------------------------------
+        # Prepare edge priors (distance) and labels for this batch
+        # ------------------------------------------------------------------
+        edge_extra = None           # default: no extra features
+        edge_labels_batch = None    # we’ll fill this only if edge_labels is set
+        edge_dist_batch   = None
 
-        # Mean MSE in scaled space
-        mse_loss = self.loss_fn(preds32, targets32)
-        
-        # Initialize edge loss with explicit dtype matching autocast context
-        edge_loss = torch.tensor(0.0, device=self.gpu_id, dtype=torch.float32)
-
-        if (self.edge_labels is not None) and (edge_logits is not None):
-            # tf_ids / tg_ids may be shape [n_tfs], [n_tgs] or [B, n_tfs], [B, n_tgs]
+        if (self.edge_labels is not None) and (self.edge_dist_score is not None):
+            # tf_ids / tg_ids may be [T], [G] or [B, T], [B, G]; we use first row if batched
             if tf_ids.dim() == 2:
                 tf_ids_b = tf_ids[0]
             else:
@@ -289,16 +279,41 @@ class Trainer:
             else:
                 tg_ids_b = tg_ids
 
-            # Slice global labels/prior to this batch's TF/TG subset
+            # Slice global labels / distances to this batch’s TF/TG subset
             # edge_labels_global: [G, T]
             edge_labels_batch = self.edge_labels.index_select(0, tg_ids_b).index_select(1, tf_ids_b)
             edge_dist_batch   = self.edge_dist_score.index_select(0, tg_ids_b).index_select(1, tf_ids_b)
 
-            # Optionally: use distance as extra feature for the edge head
-            # (if you wired edge_extra_features into model.forward / compute_edge_logits)
-            # extra = edge_dist_batch.unsqueeze(-1)  # [G_b, T_b, 1]
+            # Use distance as extra feature for the edge head: [G_b, T_b, 1]
+            edge_extra = edge_dist_batch.to(self.gpu_id).unsqueeze(-1)
 
-            # Compute BCE with logits, using a pos_weight to handle strong imbalance
+        # ------------------------------------------------------------------
+        # Forward pass
+        # ------------------------------------------------------------------
+        with autocast(device_type="cuda"):
+            mask_arg = motif_mask if USE_MOTIF_MASK else None
+            preds, attn, shortcut_contrib, edge_logits = self.model(
+                atac_wins,
+                tf_tensor,
+                tf_ids=tf_ids,
+                tg_ids=tg_ids,
+                bias=bias,
+                motif_mask=mask_arg,
+                return_edge_logits=True,
+                return_shortcut_contrib=False,
+                edge_extra_features=edge_extra,   # <--- now defined (or None)
+            )
+
+        # ---- loss & penalty in fp32 for stability ----
+        preds32   = torch.nan_to_num(preds.float(),   nan=0.0, posinf=1e6, neginf=-1e6)
+        targets32 = torch.nan_to_num(targets.float(), nan=0.0, posinf=1e6, neginf=-1e6)
+
+        mse_loss = self.loss_fn(preds32, targets32)
+
+        # Initialize edge loss
+        edge_loss = torch.tensor(0.0, device=self.gpu_id, dtype=torch.float32)
+
+        if (edge_labels_batch is not None) and (edge_logits is not None):
             preds_logits = edge_logits.float()
             labels_float = edge_labels_batch.float()
 
@@ -356,7 +371,7 @@ class Trainer:
         corr_anneal = float(min(1.0, (cur_epoch + 1) / corr_warm))
 
         r2_penalty = (CORR_LOSS_WEIGHT * corr_anneal) * (1.0 - mean_r2)  # ~[0, 2*lambda]
-
+        
         # ---------- Edge loss warmup ----------
         edge_warm = max(1, getattr(self, "edge_loss_warmup_epochs", 5))  # e.g. 5 epochs
         edge_anneal = float(min(1.0, (cur_epoch + 1) / edge_warm))
@@ -368,12 +383,11 @@ class Trainer:
 
         # Safety: if something went numerically wrong, skip the step
         if not torch.isfinite(total_loss):
-            return (torch.tensor(0.0, device=self.gpu_id),
-                    torch.tensor(0.0, device=self.gpu_id),
-                    torch.tensor(0.0, device=self.gpu_id),
-                    torch.tensor(0.0, device=self.gpu_id),
-                    torch.tensor(0.0, device=self.gpu_id),
-                    torch.tensor(0.0, device=self.gpu_id))
+            return None, None, None, None, None
+
+        # For logging: return components
+        return total_loss, mse_loss.detach(), mse_loss_unscaled, mean_r2.detach(), r2_penalty.detach(), edge_loss.detach()
+
 
         # For logging: return components
         return total_loss, mse_loss.detach(), mse_loss_unscaled, mean_r2.detach(), r2_penalty.detach(), edge_loss.detach()
@@ -511,35 +525,37 @@ class Trainer:
         bs = getattr(self.train_data, "batch_sampler", None)
         if hasattr(bs, "set_epoch"):
             bs.set_epoch(epoch)
-            
-        total_loss_sum = 0.0
-        total_mse_scaled_sum = 0.0
+
+        total_loss_sum         = 0.0
+        total_mse_scaled_sum   = 0.0
         total_mse_unscaled_sum = 0.0
-        total_edge_loss = 0.0
-        n_batches = 0
-        self.epoch = epoch
-        
+        total_edge_loss        = 0.0
+        n_batches              = 0
+        self.epoch             = epoch
+
         self.optimizer.zero_grad(set_to_none=True)
         progress_marks = [25, 50, 75]
-        next_mark_idx = 0
-        
+        next_mark_idx  = 0
+
         for iteration, batch in enumerate(self.train_data):
             if self._should_stop():
                 raise KeyboardInterrupt()
 
             out = self._run_batch(batch)
-            if out[0] is None:
+
+            # ---- Skip batches that were flagged as bad/NaN ----
+            if out is None:
                 self.optimizer.zero_grad(set_to_none=True)
                 continue
 
             (total_loss_val,
-             mse_scaled,
-             mse_unscaled,
-             mean_corr,
-             corr_weight,
-             edge_loss_val) = out
-            
-            total_edge_loss += edge_loss_val.item()
+            mse_scaled,
+            mse_unscaled,
+            mean_corr,
+            corr_weight,
+            edge_loss_val) = out
+
+            total_edge_loss += float(edge_loss_val)
 
             if not total_loss_val.requires_grad:
                 raise RuntimeError("Bug: total_loss_val has no grad_fn")
@@ -875,7 +891,7 @@ def load_train_objs(run_cfg):
         shortcut_dropout=run_cfg["shortcut_dropout"],
         use_gradient_checkpointing=run_cfg["use_grad_ckpt"],
         use_edge_head=True,
-        edge_extra_dim=0,
+        edge_extra_dim=1,
         edge_hidden_dim=128,
     )
 

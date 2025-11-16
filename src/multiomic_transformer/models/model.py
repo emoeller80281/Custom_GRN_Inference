@@ -161,8 +161,12 @@ class TFtoTGShortcut(nn.Module):
         tf_id_emb = tf_id_emb.to(device)
         tf_expr = tf_expr.to(device)
 
-        # [G, T] similarity between TG & TF embeddings
-        sim = torch.matmul(tg_emb, tf_id_emb.T) / math.sqrt(tf_id_emb.size(1))
+        # L2-normalize along the embedding dimension
+        tg_norm = F.normalize(tg_emb, dim=-1)  # same shape as tg_emb
+        tf_norm = F.normalize(tf_id_emb, dim=-1)
+
+        sim = torch.matmul(tg_norm, tf_norm.transpose(-1, -2))  # now roughly in [-1,1]
+        sim = sim * self.scale
 
         if self.use_motif_mask and motif_mask is not None:
             motif_mask = motif_mask.to(device)
@@ -181,9 +185,6 @@ class TFtoTGShortcut(nn.Module):
                 if allowed is not None:
                     prior = torch.where(allowed, prior, torch.zeros_like(prior))
                 sim = sim + self.motif_prior_scale * prior
-
-        # numerics
-        sim = sim.clamp_(-50, 50)
 
         # attention over TFs for each TG
         attn = torch.softmax(sim, dim=-1)          # [G, T]
@@ -232,19 +233,9 @@ class AttentionPooling(nn.Module):
         return pooled, weights
 
 class EdgePredictionHead(nn.Module):
-    """
-    Predict TF–TG edge logits from TF/TG embeddings and optional priors.
-
-    Given:
-      tf_id_emb: [T, d_model]
-      tg_emb:    [G, d_model]
-      extra:     [G, T, k]  (e.g. distance/motif features, optional)
-
-    Returns:
-      edge_logits: [G, T]
-    """
     def __init__(self, d_model, extra_dim: int = 0, hidden_dim: int = 128):
         super().__init__()
+        self.extra_dim = extra_dim
         in_dim = 2 * d_model + extra_dim
         self.mlp = nn.Sequential(
             nn.Linear(in_dim, hidden_dim),
@@ -263,14 +254,18 @@ class EdgePredictionHead(nn.Module):
 
         x = torch.cat([tg_expanded, tf_expanded], dim=-1)  # [G, T, 2d]
 
+        # If we configured extra_dim>0 but none was given, fill with zeros
+        if extra is None and self.extra_dim > 0:
+            extra = tg_emb.new_zeros((G, T, self.extra_dim))
+
         if extra is not None:
-            # extra expected as [G, T, k]
             assert extra.shape[:2] == (G, T), \
                 f"extra shape {extra.shape} must start with (G,T)=({G},{T})"
-            x = torch.cat([x, extra], dim=-1)               # [G, T, 2d+k]
+            x = torch.cat([x, extra], dim=-1)  # [G, T, 2d + k]
 
-        logits = self.mlp(x).squeeze(-1)                    # [G, T]
+        logits = self.mlp(x).squeeze(-1)      # [G, T]
         return logits
+
 
 
 class MultiomicTransformer(nn.Module):
@@ -314,8 +309,8 @@ class MultiomicTransformer(nn.Module):
         
         # TF dense layer - Projects the TF RNA-seq expression data to [n_tfs x d_model]
         self.tf_expr_dense_input_layer = nn.Sequential(
-            nn.Linear(1, d_ff, bias=False),        # Projects each TF independently
-            nn.ReLU(),
+            nn.Linear(1, d_ff),        # Projects each TF independently
+            nn.SiLU(),
             nn.Dropout(dropout),
             nn.Linear(d_ff, d_model, bias=False),
             nn.LayerNorm(d_model)
@@ -323,8 +318,8 @@ class MultiomicTransformer(nn.Module):
         
         # ATAC dense layer - Projects the ATAC window accessibility to [n_windows x d_model]
         self.atac_acc_dense_input_layer = nn.Sequential(
-            nn.Linear(1, d_ff, bias=False), 
-            nn.ReLU(),
+            nn.Linear(1, d_ff), 
+            nn.SiLU(),
             nn.Dropout(dropout),
             nn.Linear(d_ff, d_model, bias=False),
             nn.LayerNorm(d_model)
@@ -511,15 +506,20 @@ class MultiomicTransformer(nn.Module):
             tg_cross = self._maybe_checkpoint(self.cross_tg_to_atac, tg_base, win_emb)
         else:
             tg_cross = self.cross_tg_to_atac(tg_base, win_emb, attn_bias=attn_bias)
+            
+        # tg_cross: [B, G, d_model]
+        n_tgs = tg_cross.size(1)
+        scale = 1.0 / math.sqrt(max(1, n_tgs))  # avoid div-by-zero just in case
         
         # Expand the TF-ATAC cross attention output for each TG
-        tf_atac_cross_attn_output = tf_atac_cross_attn_output.unsqueeze(1).expand(-1, tg_cross.size(1), -1) # [batch_size,n_tgs,d_model]
-        
+        tf_atac_cross_attn_output = tf_atac_cross_attn_output.unsqueeze(1).expand(
+            -1, n_tgs, -1
+        ) * scale  # [B, G, d_model] 
+               
         # For each TG, sum the outputs from the TG-ATAC cross attention 
         # with the fused TF-ATAC and ATAC-TF cross attn output
         tg_cross_attn_repr = tg_cross + tf_atac_cross_attn_output                                                      # [batch_size,n_tgs,d_model]
         
-
         # ----- TG identity to Cross-attention output dot product -----
         # Create TG identity embeddings
         tg_emb = self.tg_identity_emb(tg_ids)                   # [n_tgs,d_model]
@@ -561,7 +561,12 @@ class MultiomicTransformer(nn.Module):
         
         if return_edge_logits and self.use_edge_head:
             edge_logits = self.compute_edge_logits(tf_ids, tg_ids, edge_extra_features)
-            return tg_pred, attn, shortcut_contrib, edge_logits
+
+        # Backwards compatibility: many utility scripts expect (preds, attn)
+        # when they don't need shortcut contributions or edge logits. Only
+        # return the full 4-tuple when explicitly requested.
+        if (not return_shortcut_contrib) and (not return_edge_logits):
+            return tg_pred, attn
 
         return tg_pred, attn, shortcut_contrib, edge_logits
     
