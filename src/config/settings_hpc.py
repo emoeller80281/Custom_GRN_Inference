@@ -55,21 +55,22 @@ FILTER_TO_NEAREST_GENE = True           # Associate peaks to the nearest gene
 PROMOTER_BP = None #10_000
 
 # ----- MODEL TRAINING PARAMETERS -----
-TOTAL_EPOCHS=60
-BATCH_SIZE=16
+TOTAL_EPOCHS=100
+BATCH_SIZE=64
 PATIENCE=10
 CORR_LOSS_WEIGHT=1.0            
 
-D_MODEL = 192
+D_MODEL = 256
 NUM_HEADS = 8
 NUM_LAYERS = 3
 D_FF = D_MODEL * 4
 DROPOUT = 0.10
+EDGE_LOSS_WEIGHT=1.0
 
 SAVE_EVERY_N_EPOCHS=5           # Chooses how many epochs to run before saving a checkpoint
 RESUME_CHECKPOINT_PATH=None#"/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC_no_scale_linear/chr19/model_training_049/checkpoint_120.pt"
 
-GRAD_ACCUM_STEPS=2
+GRAD_ACCUM_STEPS=1
 USE_GRAD_ACCUMULATION=True
 USE_GRAD_CHECKPOINTING=True
 
@@ -88,7 +89,7 @@ USE_DISTANCE_BIAS = True
 USE_SHORTCUT = True
 USE_MOTIF_MASK = True
 MOTIF_MASK_THRESH = 0.0         # Only allow TF-TG edges with p <= -log10(MOTIF_MASK_THRESH)
-MOTIF_PRIOR_SCALE = 0.2         # Allows adding scaled motif scores on edges that are not filtered
+MOTIF_PRIOR_SCALE = 0.1         # Allows adding scaled motif scores on edges that are not filtered
 SHORTCUT_L1 = 2e-5                 # Encourages sparsity between TF-TG edges in the TFtoTG shortcut
 SHORTCUT_L2 = 1e-3 #1e-3
 SHORTCUT_TOPK = None
@@ -99,9 +100,9 @@ ATTN_BIAS_SCALE = 1.0
 
 # Sampling (optional)
 SUBSAMPLE_MAX_TFS = None # 150
-SUBSAMPLE_MAX_TGS = 2000 #None
-SUBSAMPLE_MAX_WINDOWS_PER_CHROM = 1000
-SUBSAMPLE_MAX_CELLS= 10000
+SUBSAMPLE_MAX_TGS = 10000 #None
+SUBSAMPLE_MAX_WINDOWS_PER_CHROM = None# 1000
+SUBSAMPLE_MAX_CELLS= 15000
 SUBSAMPLE_SEED = 42
 
 # ----- FINE TUNING ON SINGLE-CELL DATA -----
