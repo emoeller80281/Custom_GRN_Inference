@@ -681,7 +681,7 @@ class Trainer:
                         f"Val MSE: {avg_val_mse_unscaled:.4f} | "
                         f"R2 (Unscaled): {r2_u:.3f} | "
                         f"R2 (Scaled): {r2_s:.3f} | "
-                        f"Train Edge Loss (x1k): {avg_train_edge_loss*1000:.4f} | "
+                        f"Train Edge Loss: {avg_train_edge_loss:.4f} | "
                         f"LR: {lr:.2e} | "
                         f"Time: {epoch_dur_sec:.0f}s" 
                     )
@@ -771,14 +771,18 @@ class Trainer:
         log_path = os.path.join(path, "training_log.csv")
 
         file_exists = os.path.isfile(log_path)
-
-        # append if file already exists, otherwise create new
         mode = "a" if file_exists else "w"
+
         with open(log_path, mode, newline="") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             if not file_exists:
                 writer.writeheader()
-            writer.writerows(history)
+
+            # --- allow a single dict OR a list of dicts ---
+            if isinstance(history, dict):
+                writer.writerow(history)          # single epoch
+            else:
+                writer.writerows(history)         # list of epochs
 
 def load_checkpoint(checkpoint_path, trainer, device):
     rank = int(os.environ.get("RANK", -1))

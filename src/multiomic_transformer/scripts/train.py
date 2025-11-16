@@ -260,11 +260,13 @@ class Trainer:
                 bad = (~torch.isfinite(t)).nonzero(as_tuple=False)[:5]
                 raise RuntimeError(f"{name} has non-finite values; examples idx={bad}")
         
+        edge_extra = edge_dist_batch.unsqueeze(-1) 
+        
         with autocast(device_type="cuda"):
             mask_arg = motif_mask if USE_MOTIF_MASK else None
             preds, attn, shortcut_contrib, edge_logits = self.model(
                 atac_wins, tf_tensor, tf_ids=tf_ids, tg_ids=tg_ids, bias=bias, motif_mask=mask_arg,
-                return_edge_logits=True, return_shortcut_contrib=False
+                return_edge_logits=True, return_shortcut_contrib=False, edge_extra_features=edge_extra
             )
 
         # ---- loss & penalty in fp32 for stability ----
@@ -292,10 +294,6 @@ class Trainer:
             # edge_labels_global: [G, T]
             edge_labels_batch = self.edge_labels.index_select(0, tg_ids_b).index_select(1, tf_ids_b)
             edge_dist_batch   = self.edge_dist_score.index_select(0, tg_ids_b).index_select(1, tf_ids_b)
-
-            # Optionally: use distance as extra feature for the edge head
-            # (if you wired edge_extra_features into model.forward / compute_edge_logits)
-            # extra = edge_dist_batch.unsqueeze(-1)  # [G_b, T_b, 1]
 
             # Compute BCE with logits, using a pos_weight to handle strong imbalance
             preds_logits = edge_logits.float()
@@ -681,7 +679,7 @@ class Trainer:
                         f"Val MSE: {avg_val_mse_unscaled:.4f} | "
                         f"R2 (Unscaled): {r2_u:.3f} | "
                         f"R2 (Scaled): {r2_s:.3f} | "
-                        f"Train Edge Loss (x1k): {avg_train_edge_loss*1000:.4f} | "
+                        f"Train Edge Loss: {avg_train_edge_loss:.4f} | "
                         f"LR: {lr:.2e} | "
                         f"Time: {epoch_dur_sec:.0f}s" 
                     )
