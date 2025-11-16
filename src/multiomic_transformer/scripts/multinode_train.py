@@ -147,7 +147,6 @@ class Trainer:
         grad_accum_steps: int = 1,
         use_grad_accumulation: bool = False,
         edge_labels=None, 
-        edge_dist_score=None, 
         edge_loss_weight=0.1
 
     ) -> None:
@@ -165,7 +164,6 @@ class Trainer:
         self.grad_accum_steps = max(1, grad_accum_steps)
         self.use_grad_accumulation = use_grad_accumulation
         self.edge_labels = edge_labels
-        self.edge_dist_score = edge_dist_score
         self.edge_loss_weight = edge_loss_weight
         
         # Loss warmup
@@ -262,14 +260,13 @@ class Trainer:
                 raise RuntimeError(f"{name} has non-finite values; examples idx={bad}")
 
         # ------------------------------------------------------------------
-        # Prepare edge priors (distance) and labels for this batch
+        # Edge priors, labels
         # ------------------------------------------------------------------
-        edge_extra = None           # default: no extra features
-        edge_labels_batch = None    # we’ll fill this only if edge_labels is set
-        edge_dist_batch   = None
+        edge_extra = None
+        edge_labels_batch = None
 
-        if (self.edge_labels is not None) and (self.edge_dist_score is not None):
-            # tf_ids / tg_ids may be [T], [G] or [B, T], [B, G]; we use first row if batched
+        if self.edge_labels is not None:
+            # Handle [B, T]/[B, G] vs [T]/[G]
             if tf_ids.dim() == 2:
                 tf_ids_b = tf_ids[0]
             else:
@@ -279,13 +276,8 @@ class Trainer:
             else:
                 tg_ids_b = tg_ids
 
-            # Slice global labels / distances to this batch’s TF/TG subset
-            # edge_labels_global: [G, T]
+            # Slice from global [G, T] matrices
             edge_labels_batch = self.edge_labels.index_select(0, tg_ids_b).index_select(1, tf_ids_b)
-            edge_dist_batch   = self.edge_dist_score.index_select(0, tg_ids_b).index_select(1, tf_ids_b)
-
-            # Use distance as extra feature for the edge head: [G_b, T_b, 1]
-            edge_extra = edge_dist_batch.to(self.gpu_id).unsqueeze(-1)
 
         # ------------------------------------------------------------------
         # Forward pass
@@ -891,7 +883,7 @@ def load_train_objs(run_cfg):
         shortcut_dropout=run_cfg["shortcut_dropout"],
         use_gradient_checkpointing=run_cfg["use_grad_ckpt"],
         use_edge_head=True,
-        edge_extra_dim=1,
+        edge_extra_dim=0,
         edge_hidden_dim=128,
     )
 
@@ -1384,7 +1376,6 @@ def main(rank: int, local_rank: int, world_size: int, save_every: int, total_epo
 
         # Initialize edge matrices on CPU first (then broadcast to all ranks)
         edge_labels = torch.zeros(G, T, dtype=torch.float32)
-        edge_dist_score = torch.zeros(G, T, dtype=torch.float32)
 
         # Only rank 0 loads the parquet file
         if rank == 0:
@@ -1398,17 +1389,14 @@ def main(rank: int, local_rank: int, world_size: int, save_every: int, total_epo
                 t_idx = int(row["tf_id"])
                 if g_idx < G and t_idx < T:
                     edge_labels[g_idx, t_idx] = float(row["label"])
-                    edge_dist_score[g_idx, t_idx] = float(row["dist_score"])
         
         # Broadcast from rank 0 to all ranks so all ranks have the data
         rank_device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
 
         edge_labels = edge_labels.to(rank_device)
-        edge_dist_score = edge_dist_score.to(rank_device)
         
         if dist.is_available() and dist.is_initialized():
             dist.broadcast(edge_labels, src=0)
-            dist.broadcast(edge_dist_score, src=0)
 
         if rank == 0:
             logging.info("Preparing dataloader")
@@ -1441,7 +1429,6 @@ def main(rank: int, local_rank: int, world_size: int, save_every: int, total_epo
             grad_accum_steps=run_cfg["grad_accum_steps"],
             use_grad_accumulation=USE_GRAD_ACCUMULATION,
             edge_labels=edge_labels,
-            edge_dist_score=edge_dist_score,
             edge_loss_weight=EDGE_LOSS_WEIGHT,
         )
 

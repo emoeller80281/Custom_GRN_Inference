@@ -266,7 +266,52 @@ class EdgePredictionHead(nn.Module):
         logits = self.mlp(x).squeeze(-1)      # [G, T]
         return logits
 
+class CosineEdgeHead(nn.Module):
+    """
+    Edge logits are a temperature-scaled cosine similarity between
+    TF/TG embeddings plus an optional linear term for priors (e.g. distance).
+    """
+    def __init__(self, d_model: int, extra_dim: int = 0, temperature: float = 1.0):
+        super().__init__()
+        self.extra_dim = extra_dim
+        # Learnable scale (1 / temperature)
+        self.logit_scale = nn.Parameter(torch.tensor(1.0 / temperature))
+        # Optional linear projection for extra features: [G, T, k] → scalar bias
+        if extra_dim > 0:
+            self.extra_proj = nn.Linear(extra_dim, 1)
+        else:
+            self.extra_proj = None
 
+    def forward(
+        self,
+        tf_id_emb: torch.Tensor,  # [T, d]
+        tg_emb: torch.Tensor,     # [G, d]
+        extra: Optional[torch.Tensor] = None  # [G, T, k]
+    ):
+        G, d = tg_emb.shape
+        T, d2 = tf_id_emb.shape
+        assert d == d2, "TF and TG embeddings must share d_model"
+
+        # L2-normalize embeddings along the last dim
+        tf_norm = F.normalize(tf_id_emb, dim=-1)  # [T, d]
+        tg_norm = F.normalize(tg_emb,    dim=-1)  # [G, d]
+
+        # Cosine similarity matrix: [G, T]
+        # (tg_norm @ tf_norm^T)
+        cos_sim = torch.matmul(tg_norm, tf_norm.transpose(0, 1))  # [G, T]
+
+        # Temperature-scaled cosine
+        logits = cos_sim * self.logit_scale  # [G, T]
+
+        # Optional extra prior term
+        if extra is not None:
+            assert self.extra_proj is not None, "extra_dim>0 expected extra_proj"
+            assert extra.shape[:2] == (G, T), f"extra shape {extra.shape} must start with (G,T)=({G},{T})"
+            # Project extra features to a scalar bias per (G,T)
+            extra_bias = self.extra_proj(extra).squeeze(-1)  # [G, T]
+            logits = logits + extra_bias
+
+        return logits
 
 class MultiomicTransformer(nn.Module):
     def __init__(self, d_model, num_heads, num_layers, d_ff, dropout,
@@ -410,10 +455,16 @@ class MultiomicTransformer(nn.Module):
                 )
             
         if self.use_edge_head:
-            self.edge_head = EdgePredictionHead(
-                d_model,
+            # self.edge_head = EdgePredictionHead(
+            #     d_model,
+            #     extra_dim=edge_extra_dim,
+            #     hidden_dim=edge_hidden_dim,
+            # )
+            
+            self.edge_head = CosineEdgeHead(
+                d_model=d_model,
                 extra_dim=edge_extra_dim,
-                hidden_dim=edge_hidden_dim,
+                temperature=1.0,  # tune if needed
             )
                     
     def forward(

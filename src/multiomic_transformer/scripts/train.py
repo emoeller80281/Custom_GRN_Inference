@@ -149,7 +149,6 @@ class Trainer:
         grad_accum_steps: int = 1,
         use_grad_accumulation: bool = False,
         edge_labels=None, 
-        edge_dist_score=None, 
         edge_loss_weight=0.1
 
     ) -> None:
@@ -165,7 +164,6 @@ class Trainer:
         self.grad_accum_steps = max(1, grad_accum_steps)
         self.use_grad_accumulation = use_grad_accumulation
         self.edge_labels = edge_labels
-        self.edge_dist_score = edge_dist_score
         self.edge_loss_weight = edge_loss_weight
         self.edge_pos_weight = None
         if self.edge_labels is not None:
@@ -261,7 +259,7 @@ class Trainer:
             
         tf_tensor  = torch.nan_to_num(tf_tensor,  nan=0.0, posinf=1e6, neginf=-1e6)
         atac_wins  = torch.nan_to_num(atac_wins,  nan=0.0, posinf=1e6, neginf=-1e6)
-        bias       = torch.nan_to_num(bias,       nan=0.0, posinf=5.0, neginf=-5.0)
+        bias       = torch.nan_to_num(bias,       nan=0.0, posinf=5.0,  neginf=-5.0)
         motif_mask = torch.nan_to_num(motif_mask, nan=0.0)
 
         for name, t in {
@@ -273,14 +271,17 @@ class Trainer:
                 raise RuntimeError(f"{name} has non-finite values; examples idx={bad}")
 
         # ------------------------------------------------------------------
-        # Prepare edge priors (distance) and labels for this batch
+        # Edge priors, labels, cosine contrastive defaults
         # ------------------------------------------------------------------
-        edge_extra = None           # default: no extra features
-        edge_labels_batch = None    # we’ll fill this only if edge_labels is set
-        edge_dist_batch   = None
+        edge_extra        = None
+        edge_labels_batch = None
 
-        if (self.edge_labels is not None) and (self.edge_dist_score is not None):
-            # tf_ids / tg_ids may be [T], [G] or [B, T], [B, G]; we use first row if batched
+        # default: no cosine contrastive contribution (still a tensor on GPU)
+        cos_contrastive = torch.tensor(0.0, device=self.gpu_id, dtype=torch.float32)
+        cos_weight      = 0.1  # tune as you like
+
+        if self.edge_labels is not None:
+            # Handle [B, T]/[B, G] vs [T]/[G]
             if tf_ids.dim() == 2:
                 tf_ids_b = tf_ids[0]
             else:
@@ -290,13 +291,39 @@ class Trainer:
             else:
                 tg_ids_b = tg_ids
 
-            # Slice global labels / distances to this batch’s TF/TG subset
-            # edge_labels_global: [G, T]
+            # Slice from global [G, T] matrices
             edge_labels_batch = self.edge_labels.index_select(0, tg_ids_b).index_select(1, tf_ids_b)
-            edge_dist_batch   = self.edge_dist_score.index_select(0, tg_ids_b).index_select(1, tf_ids_b)
 
-            # Use distance as extra feature for the edge head: [G_b, T_b, 1]
-            edge_extra = edge_dist_batch.to(self.gpu_id).unsqueeze(-1)
+            # ----- Cosine contrastive loss on identity embeddings -----
+            base_model = (
+                self.model.module
+                if isinstance(self.model, torch.nn.parallel.DistributedDataParallel)
+                else self.model
+            )
+            tf_id_emb_batch = base_model.tf_identity_emb(tf_ids_b)   # [T_b, d]
+            tg_emb_batch    = base_model.tg_identity_emb(tg_ids_b)   # [G_b, d]
+
+            tf_norm = F.normalize(tf_id_emb_batch, dim=-1)           # [T_b, d]
+            tg_norm = F.normalize(tg_emb_batch,    dim=-1)           # [G_b, d]
+
+            cos_sim = torch.matmul(tg_norm, tf_norm.transpose(0, 1)) # [G_b, T_b]
+
+            labels_float = edge_labels_batch.float()
+            pos_mask = labels_float > 0.5
+            neg_mask = ~pos_mask
+
+            if pos_mask.any():
+                pos_loss = (1.0 - cos_sim[pos_mask]).mean()
+            else:
+                pos_loss = torch.tensor(0.0, device=self.gpu_id)
+
+            margin = 0.0
+            if neg_mask.any():
+                neg_loss = F.relu(cos_sim[neg_mask] - margin).mean()
+            else:
+                neg_loss = torch.tensor(0.0, device=self.gpu_id)
+
+            cos_contrastive = pos_loss + neg_loss
 
         # ------------------------------------------------------------------
         # Forward pass
@@ -312,16 +339,14 @@ class Trainer:
                 motif_mask=mask_arg,
                 return_edge_logits=True,
                 return_shortcut_contrib=False,
-                edge_extra_features=edge_extra,   # <--- now defined (or None)
+                edge_extra_features=edge_extra,
             )
 
-        # ---- loss & penalty in fp32 for stability ----
         preds32   = torch.nan_to_num(preds.float(),   nan=0.0, posinf=1e6, neginf=-1e6)
         targets32 = torch.nan_to_num(targets.float(), nan=0.0, posinf=1e6, neginf=-1e6)
+        mse_loss  = self.loss_fn(preds32, targets32)
 
-        mse_loss = self.loss_fn(preds32, targets32)
-
-        # Initialize edge loss
+        # ----- Edge BCE loss (always a tensor) -----
         edge_loss = torch.tensor(0.0, device=self.gpu_id, dtype=torch.float32)
 
         if (edge_labels_batch is not None) and (edge_logits is not None):
@@ -333,8 +358,8 @@ class Trainer:
                     preds_logits.device, dtype=preds_logits.dtype
                 )
             else:
-                pos_frac = labels_float.mean().clamp(min=1e-6)
-                neg_frac = 1.0 - pos_frac
+                pos_frac  = labels_float.mean().clamp(min=1e-6)
+                neg_frac  = 1.0 - pos_frac
                 pos_weight = (neg_frac / pos_frac).detach().clamp_max(EDGE_POS_WEIGHT_CLAMP)
 
             bce = F.binary_cross_entropy_with_logits(
@@ -343,7 +368,7 @@ class Trainer:
                 pos_weight=pos_weight,
             )
             edge_loss = self.edge_loss_weight * bce
-        
+
         # ----- Unscaled MSE for logging (no grad) -----
         if getattr(self, "tg_scaler", None) is not None:
             with torch.no_grad():
@@ -357,22 +382,20 @@ class Trainer:
         else:
             mse_loss_unscaled = mse_loss.detach()
 
-        # ---------- Correlation penalty via per-gene Pearson r^2 ----------
-        # shapes: [B, G]
+        # ---------- Correlation penalty ----------
         x = preds32
         y = targets32
         x = x - x.mean(dim=0, keepdim=True)
         y = y - y.mean(dim=0, keepdim=True)
 
         eps = 1e-8
-        x_ss = (x * x).sum(dim=0)     # per gene
-        y_ss = (y * y).sum(dim=0)     # per gene
+        x_ss = (x * x).sum(dim=0)
+        y_ss = (y * y).sum(dim=0)
         denom = (x_ss * y_ss).clamp_min(eps).sqrt()
-        # valid genes need variance in both preds and targets
         valid = (x_ss > eps) & (y_ss > eps)
 
         corr = torch.zeros_like(denom)
-        corr[valid] = (x[ :, valid] * y[ :, valid]).sum(dim=0) / denom[valid]
+        corr[valid] = (x[:, valid] * y[:, valid]).sum(dim=0) / denom[valid]
         corr = corr.clamp_(-1.0, 1.0)
         r2_g = corr * corr
 
@@ -381,36 +404,50 @@ class Trainer:
         else:
             mean_r2 = torch.tensor(0.0, device=preds32.device, dtype=preds32.dtype)
 
-        # ---------- Correlation penalty warmup ----------
-        corr_warm = max(1, getattr(self, "corr_sq_warmup_epochs", 3))
-        cur_epoch = getattr(self, "epoch", 0)  # set by your loop before calling _run_batch
+        # --- r2 warmup ---
+        corr_warm   = max(1, getattr(self, "corr_sq_warmup_epochs", 3))
+        cur_epoch   = getattr(self, "epoch", 0)
         corr_anneal = float(min(1.0, (cur_epoch + 1) / corr_warm))
+        r2_penalty  = (CORR_LOSS_WEIGHT * corr_anneal) * (1.0 - mean_r2)
 
-        r2_penalty = (CORR_LOSS_WEIGHT * corr_anneal) * (1.0 - mean_r2)  # ~[0, 2*lambda]
-
-        # ---------- Edge loss warmup ----------
-        edge_warm = max(1, getattr(self, "edge_loss_warmup_epochs", 5))  # e.g. 5 epochs
+        # --- edge loss warmup ---
+        edge_warm   = max(1, getattr(self, "edge_loss_warmup_epochs", 5))
         edge_anneal = float(min(1.0, (cur_epoch + 1) / edge_warm))
+        edge_loss_warm = edge_anneal * edge_loss
 
-        edge_loss_warm = edge_anneal * edge_loss   # edge_loss already includes self.edge_loss_weight
-
-        # ----- Shortcut regularization (controls TF–TG shortcut norms) -----
+        # --- shortcut regularization ---
         shortcut_reg = torch.tensor(0.0, device=self.gpu_id, dtype=torch.float32)
         if getattr(self.model, "use_shortcut", False) and hasattr(self.model, "shortcut_layer"):
-            # regularization() should already be a scalar with grad
             reg_val = self.model.shortcut_layer.regularization()
-            # Make sure it's on the right device / dtype
             shortcut_reg = reg_val.to(dtype=torch.float32, device=self.gpu_id) * SHORTCUT_REG_WEIGHT
 
         # ---------- Total loss ----------
-        total_loss = mse_loss + r2_penalty + edge_loss_warm + shortcut_reg
+        total_loss = (
+            mse_loss
+            + r2_penalty
+            + edge_loss_warm
+            + cos_weight * cos_contrastive
+            + shortcut_reg
+        )
 
-        # Safety: if something went numerically wrong, skip the step
+        # Safety: if something went numerically wrong, skip the step entirely.
+        # Returning None ensures the caller can drop the batch without trying
+        # to log detached scalars that don't exist.
         if not torch.isfinite(total_loss):
-            return None, None, None, None, None
+            logging.warning("Non-finite loss encountered; skipping batch.")
+            return None
 
-        # For logging: return components
-        return total_loss, mse_loss.detach(), mse_loss_unscaled, mean_r2.detach(), r2_penalty.detach(), edge_loss.detach()
+        # For logging: note we detach scalars we only log
+        return (
+            total_loss,
+            mse_loss.detach(),
+            mse_loss_unscaled,
+            mean_r2.detach(),
+            r2_penalty.detach(),
+            edge_loss.detach(),
+        )
+
+
 
     def _validate(self):
         self.model.eval()
@@ -455,27 +492,12 @@ class Trainer:
 
                 mask_arg = motif_mask if USE_MOTIF_MASK else None
                 
-                edge_extra = None
-                if (self.edge_dist_score is not None):
-                    # tf_ids / tg_ids may be [T], [G] or [B,T], [B,G]
-                    if tf_ids.dim() == 2:
-                        tf_ids_b = tf_ids[0]
-                    else:
-                        tf_ids_b = tf_ids
-                    if tg_ids.dim() == 2:
-                        tg_ids_b = tg_ids[0]
-                    else:
-                        tg_ids_b = tg_ids
-
-                    edge_dist_batch = self.edge_dist_score.index_select(0, tg_ids_b).index_select(1, tf_ids_b)
-                    edge_extra = edge_dist_batch.to(self.gpu_id).unsqueeze(-1)
-
                 preds, _, _, _ = self.model(
                     atac_wins, tf_tensor,
                     tf_ids=tf_ids, tg_ids=tg_ids,
                     bias=bias, motif_mask=mask_arg,
                     return_edge_logits=True, return_shortcut_contrib=False,
-                    edge_extra_features=edge_extra,
+                    edge_extra_features=None,
                 )
 
                 # numeric safety before metrics
@@ -926,7 +948,7 @@ def load_train_objs(run_cfg):
         shortcut_dropout=run_cfg["shortcut_dropout"],
         use_gradient_checkpointing=run_cfg["use_grad_ckpt"],
         use_edge_head=True,
-        edge_extra_dim=1,
+        edge_extra_dim=0,
         edge_hidden_dim=128,
     )
 
@@ -1412,13 +1434,12 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
 
         # Initialize edge matrices on CPU first (then broadcast to all ranks)
         edge_labels = torch.zeros(G, T, dtype=torch.float32)
-        edge_dist_score = torch.zeros(G, T, dtype=torch.float32)
 
         # Only rank 0 loads the parquet file
         if rank == 0:
             # Load your aggregated TF–TG ChIP data
             agg = pd.read_parquet(
-                "data/training_data_cache/mESC_no_scale_linear/nearest_chip_tf_tg_agg.parquet"
+                "data/training_data_cache/mESC_no_scale_linear/nearest_tf_tg_agg.parquet"
             )
 
             for _, row in agg.iterrows():
@@ -1426,15 +1447,12 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
                 t_idx = int(row["tf_id"])
                 if g_idx < G and t_idx < T:
                     edge_labels[g_idx, t_idx] = float(row["label"])
-                    edge_dist_score[g_idx, t_idx] = float(row["dist_score"])
         
         # Broadcast from rank 0 to all ranks so all ranks have the data
         edge_labels = edge_labels.to(rank)
-        edge_dist_score = edge_dist_score.to(rank)
         
         if dist.is_available() and dist.is_initialized():
             dist.broadcast(edge_labels, src=0)
-            dist.broadcast(edge_dist_score, src=0)
 
         if rank == 0:
             logging.info("Preparing dataloader")
@@ -1466,7 +1484,6 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
             grad_accum_steps=run_cfg["grad_accum_steps"],
             use_grad_accumulation=USE_GRAD_ACCUMULATION,
             edge_labels=edge_labels,
-            edge_dist_score=edge_dist_score,
             edge_loss_weight=EDGE_LOSS_WEIGHT,
         )
 
