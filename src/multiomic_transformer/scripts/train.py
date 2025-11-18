@@ -217,7 +217,7 @@ def compute_balanced_chip_auroc(
 
     # ---- 2. Load and filter ChIP ground truth ----
     chip = pd.read_csv(chip_path)
-    chip = chip.rename(columns={"TF": "tf", "TG": "tg"})
+    chip = chip.rename(columns={"Gene1": "tf", "Gene2": "tg"})
     chip["tf"] = chip["tf"].astype(str)
     chip["tg"] = chip["tg"].astype(str)
 
@@ -301,6 +301,7 @@ class Trainer:
         use_grad_accumulation: bool = False,
         edge_labels=None, 
         edge_loss_weight=0.1,
+        cos_weight=1.0,
         tf_names=None,
         tg_names=None,
 
@@ -318,6 +319,7 @@ class Trainer:
         self.use_grad_accumulation = use_grad_accumulation
         self.edge_labels = edge_labels
         self.edge_loss_weight = edge_loss_weight
+        self.cos_weight = cos_weight
         self.edge_pos_weight = None
         self.tf_names = tf_names
         self.tg_names = tg_names
@@ -433,7 +435,6 @@ class Trainer:
 
         # default: no cosine contrastive contribution (still a tensor on GPU)
         cos_contrastive = torch.tensor(0.0, device=self.gpu_id, dtype=torch.float32)
-        cos_weight      = 0.1  # tune as you like
 
         if self.edge_labels is not None:
             # Handle [B, T]/[B, G] vs [T]/[G]
@@ -479,6 +480,7 @@ class Trainer:
                 neg_loss = torch.tensor(0.0, device=self.gpu_id)
 
             cos_contrastive = pos_loss + neg_loss
+            cos_contrastive *= self.cos_weight
 
         # ------------------------------------------------------------------
         # Forward pass
@@ -581,7 +583,7 @@ class Trainer:
             mse_loss
             + r2_penalty
             + edge_loss_warm
-            + cos_weight * cos_contrastive
+            + cos_contrastive
             + shortcut_reg
         )
 
@@ -919,7 +921,7 @@ class Trainer:
                         tg_emb=tg_emb,
                         tf_names=self.tf_names,    # e.g. dataset.tf_name2id_sub.keys() in the right order
                         tg_names=self.tg_names,    # same idea
-                        chip_path="data/ground_truth_files/new_chip_atlas_tf_peak_tg_dist.csv",
+                        chip_path="data/ground_truth_files/mESC_beeline_ChIP-seq.csv",
                         pos_to_neg_ratio=1.0,
                         restrict_to_chip_tfs=True,
                     )
@@ -966,14 +968,15 @@ class Trainer:
 
                 # Checkpoint + CSV log
                 stop_tensor = torch.tensor(0, device=self.gpu_id)
-
+                best_auroc = float('-inf')
                 # --- Early stopping check (only rank 0 sets flag) ---
                 if self.gpu_id == 0:
                     if epoch > 5: # wait a few epochs before checking
-                        if (avg_val_mse_unscaled < best_val_loss - self.min_delta) or (r2_s > best_r2 + self.min_delta):
+                        if (avg_val_mse_unscaled < best_val_loss - self.min_delta) or (r2_s > best_r2 + self.min_delta) or (auroc_bal > best_auroc + self.min_delta):
                             # If either val_loss improved OR r2_s improved, reset patience
                             best_val_loss = avg_val_mse_unscaled
                             best_r2 = max(best_r2, r2_s)
+                            best_auroc = max(best_auroc, auroc_bal)
                             patience_counter = 0
                         else:
                             # No improvement
@@ -1657,6 +1660,9 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
 
         if rank == 0:
             logging.info("Creating Trainer")
+            
+        tf_names = _mapping_to_ordered_list(dataset.tf_name2id_sub)
+        tg_names = _mapping_to_ordered_list(dataset.tg_name2id_sub)
 
         loss_fn = nn.MSELoss()
         trainer = Trainer(
@@ -1672,8 +1678,9 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
             use_grad_accumulation=USE_GRAD_ACCUMULATION,
             edge_labels=edge_labels,
             edge_loss_weight=EDGE_LOSS_WEIGHT,
-            tf_names=list(dataset.tf_names_sub),
-            tg_names=list(dataset.tg_names_sub),
+            cos_weight=COS_WEIGHT,
+            tf_names=tf_names,
+            tg_names=tg_names,
         )
 
         rank_device = torch.device(f"cuda:{rank}" if torch.cuda.is_available() else "cpu")
