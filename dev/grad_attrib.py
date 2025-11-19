@@ -91,11 +91,12 @@ grad_count = torch.zeros_like(grad_sum)
 
 model.to(device).eval()
 
-max_batches = 50
+max_batches = None
 
 for b_idx, batch in enumerate(tqdm(test_loader, desc="Gradient attributions", unit="batches", total=max_batches)):
-    if b_idx >= max_batches:
-        break
+    if (max_batches is not None) and (b_idx >= max_batches):
+        if b_idx >= max_batches:
+            break
 
     atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids, motif_mask = batch
     atac_wins  = atac_wins.to(device)

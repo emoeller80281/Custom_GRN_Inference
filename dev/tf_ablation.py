@@ -91,12 +91,13 @@ effect_count = torch.zeros_like(effect_sum)
 
 model.to(device).eval()
 
-max_batches = 50  # or set to e.g. 50 for a quick approximate matrix
+max_batches = None  # or set to e.g. 50 for a quick approximate matrix
 
 with torch.no_grad():
     for b_idx, batch in enumerate(tqdm(test_loader, desc="TF knockout (full model)", unit="batches", total=max_batches)):
         if (max_batches is not None) and (b_idx >= max_batches):
-            break
+            if b_idx >= max_batches:
+                break
 
         atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids, motif_mask = batch
         atac_wins  = atac_wins.to(device)
