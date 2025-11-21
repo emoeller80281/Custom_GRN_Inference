@@ -878,6 +878,7 @@ class Trainer:
     def train(self, max_epochs: int, path: str, start_epoch: int = 0):
         best_val_loss = float("inf")
         best_r2 = float(0)
+        best_auroc = float('-inf')
         patience_counter = 0
         history = []  # store per-epoch logs
         
@@ -968,24 +969,30 @@ class Trainer:
 
                 # Checkpoint + CSV log
                 stop_tensor = torch.tensor(0, device=self.gpu_id)
-                best_auroc = float('-inf')
+                
                 # --- Early stopping check (only rank 0 sets flag) ---
                 if self.gpu_id == 0:
                     if epoch > 5: # wait a few epochs before checking
-                        if (avg_val_mse_unscaled < best_val_loss - self.min_delta) or (r2_s > best_r2 + self.min_delta) or (auroc_bal > best_auroc + self.min_delta):
-                            # If either val_loss improved OR r2_s improved, reset patience
+                        improved = False
+
+                        if avg_val_mse_unscaled < best_val_loss - self.min_delta:
                             best_val_loss = avg_val_mse_unscaled
-                            best_r2 = max(best_r2, r2_s)
-                            best_auroc = max(best_auroc, auroc_bal)
+                            improved = True
+                        if r2_s > best_r2 + self.min_delta:
+                            best_r2 = r2_s
+                            improved = True
+                        if auroc_bal > best_auroc + self.min_delta:
+                            best_auroc = auroc_bal
+                            improved = True
+
+                        if improved:
                             patience_counter = 0
                         else:
-                            # No improvement
                             patience_counter += 1
-
                             if patience_counter >= self.patience:
-                                logging.info("Early stopping triggered.")
+                                logging.info("Early stopping triggered (no improvement).")
                                 self._save_checkpoint(epoch, path)
-                                stop_tensor.fill_(1)  # <-- mark stop
+                                stop_tensor.fill_(1)
 
                             else:
                                 logging.info(f"    Loss did not improve {patience_counter}/{self.patience}")

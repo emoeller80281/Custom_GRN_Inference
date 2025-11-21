@@ -91,24 +91,39 @@ def nanaware_per_gene_stats(y_true, y_pred, eps=1e-8):
     return {"r2": r2, "pearson": pearson, "mae": mae, "rmse": rmse, "n_obs": n_obs}
 
 def load_model(selected_experiment_dir, checkpoint_file, device):
+    params_path = selected_experiment_dir / "run_parameters.json"
+    with open(params_path, "r") as f:
+        params = json.load(f)
+
+    # Pull out architecture hyperparameters
+    d_model   = params.get("d_model")
+    num_heads = params.get("num_heads")
+    num_layers = params.get("num_layers")
+    d_ff      = params.get("d_ff")
+    dropout   = params.get("dropout", 0.0)
+    use_shortcut   = params.get("use_shortcut", False)
+    use_dist_bias  = params.get("use_dist_bias", False)
+    use_motif_mask = params.get("use_motif_mask", False)
+
+    
     # 1) Load test loader and checkpoint
     test_loader = torch.load(selected_experiment_dir / "test_loader.pt", weights_only=False)
 
     ckpt_path = os.path.join(selected_experiment_dir, checkpoint_file)
     state = torch.load(ckpt_path, map_location="cpu")
-
+    
     # 2) Recreate model EXACTLY as in training
     model = MultiomicTransformer(
-        d_model=D_MODEL,
-        num_heads=NUM_HEADS,
-        num_layers=NUM_LAYERS,
-        d_ff=D_FF,
-        dropout=DROPOUT,
+        d_model=d_model,
+        num_heads=num_heads,
+        num_layers=num_layers,
+        d_ff=d_ff,
+        dropout=dropout,
         tf_vocab_size=len(state["tf_scaler_mean"]),
         tg_vocab_size=len(state["tg_scaler_mean"]),
-        use_bias=USE_DISTANCE_BIAS,
-        use_shortcut=USE_SHORTCUT,
-        use_motif_mask=USE_MOTIF_MASK,
+        use_bias=use_dist_bias,
+        use_shortcut=use_shortcut,
+        use_motif_mask=use_motif_mask,
         use_edge_head=True,
         edge_extra_dim=0,
         edge_hidden_dim=128,
@@ -794,7 +809,7 @@ def plot_all_results_auroc_boxplot(df):
     
     return fig
 
-def plot_all_results_auroc_boxplot(df):
+def plot_all_results_auprc_boxplot(df):
     # 1. Order methods by mean AUPRC (highest → lowest)
     method_order = (
         df.groupby("name")["auprc"]
@@ -1128,8 +1143,12 @@ if __name__ == "__main__":
             [["gt_name", "name", "auroc", "auprc"]]
         )
         
+        # Generate the ranking of mean AUROC and AUPRC values for all methods across all ground truths
         all_auroc_boxplots = plot_all_results_auroc_boxplot(per_gt_rank)
+        all_auprc_boxplots = plot_all_results_auprc_boxplot(per_gt_rank)
+        
         all_auroc_boxplots.savefig(selected_experiment_dir / "all_results_auroc_boxplot.png", dpi=300)
+        all_auprc_boxplots.savefig(selected_experiment_dir / "all_results_auprc_boxplot.png", dpi=300)
         
         per_gt_rank.to_csv(selected_experiment_dir / "per_gt_method_aucs.csv", index=False)
     else:
