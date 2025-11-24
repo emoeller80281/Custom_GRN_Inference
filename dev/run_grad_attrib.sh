@@ -5,7 +5,7 @@
 #SBATCH --time=12:00:00
 #SBATCH -p dense
 #SBATCH -N 1
-#SBATCH --gres=gpu:v100:1
+#SBATCH --gres=gpu:a100:1
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 8
 #SBATCH --mem=64G
@@ -30,6 +30,7 @@ export KMP_AFFINITY=granularity=fine,compact,1,0
 SELECTED_EXPERIMENT_DIR="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC_no_scale_linear/no_classifier_head_256"
 
 poetry run python ./dev/grad_attrib.py \
-    --selected_experiment_dir "$SELECTED_EXPERIMENT_DIR"
+    --selected_experiment_dir "$SELECTED_EXPERIMENT_DIR" \
+    --chunk_size 512
 
 echo "finished successfully!"

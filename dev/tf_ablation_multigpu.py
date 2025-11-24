@@ -13,7 +13,8 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 import argparse
 
-from torch.amp import autocast  # NEW: for optional AMP inference
+import torch.distributed as dist
+from torch.amp import autocast
 
 import sys
 PROJECT_DIR = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
@@ -29,6 +30,24 @@ logging.basicConfig(level=logging.INFO, format='%(message)s')
 from multiomic_transformer.models.model import MultiomicTransformer
 from multiomic_transformer.datasets.dataset import MultiChromosomeDataset, SimpleScaler, fit_simple_scalers
 
+def setup_distributed():
+    """Initialize distributed env if launched with torchrun; otherwise run in single-process mode."""
+    if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
+        rank = int(os.environ["RANK"])
+        world_size = int(os.environ["WORLD_SIZE"])
+        local_rank = int(os.environ.get("LOCAL_RANK", rank))
+        distributed = True
+    else:
+        rank = 0
+        world_size = 1
+        local_rank = 0
+        distributed = False
+
+    if distributed:
+        torch.cuda.set_device(local_rank)
+        dist.init_process_group(backend="nccl", init_method="env://")
+    return rank, world_size, local_rank, distributed
+
 argparser = argparse.ArgumentParser(description="Compute gradient-based TF->TG attributions")
 argparser.add_argument("--selected_experiment_dir", type=str, required=True,
                        help="Name of the experiment directory (under experiments/mESC_no_scale_linear/)")
@@ -38,8 +57,13 @@ args = argparser.parse_args()
 
 SELECTED_EXPERIMENT_DIR = Path(args.selected_experiment_dir)
 
-GROUND_TRUTH_DIR = os.path.join(PROJECT_DIR, "data/ground_truth_files")
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+rank, world_size, local_rank, distributed = setup_distributed()
+
+if torch.cuda.is_available():
+    device = torch.device(f"cuda:{local_rank}")
+else:
+    device = torch.device("cpu")
+
 use_amp = (device.type == "cuda" and not args.disable_amp)
 
 # 1) Load test loader and checkpoint
@@ -89,15 +113,21 @@ effect_count = torch.zeros_like(effect_sum)
 
 model.to(device).eval()
 
-max_batches = None  # or set to e.g. 50 for a quick approximate matrix
+max_batches = None  # still allowed
+
+iterator = test_loader
+if rank == 0:
+    iterator = tqdm(test_loader, desc="TF knockout (full model, optimized)", unit="batches", total=max_batches)
 
 with torch.no_grad():
-    for b_idx, batch in enumerate(
-        tqdm(test_loader, desc="TF knockout (full model, optimized)", unit="batches", total=max_batches)
-    ):
+    for b_idx, batch in enumerate(iterator):
         if (max_batches is not None) and (b_idx >= max_batches):
             break
 
+        # Only process batches assigned to this rank
+        if b_idx % world_size != rank:
+            continue
+        
         atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids, motif_mask = batch
         atac_wins  = atac_wins.to(device, non_blocking=True)
         tf_tensor  = tf_tensor.to(device, non_blocking=True)   # unscaled
@@ -236,12 +266,41 @@ with torch.no_grad():
             tf_scaled_work[:, t_pos, :] = tf_scaled_base_3d[:, t_pos, :]
 
 # Final average TF→TG knockout effect (expression units)
-tf_tg_effect = effect_sum / (effect_count + 1e-12)
-tf_tg_effect_np = tf_tg_effect.cpu().numpy()
+# Convert this rank's accumulators to numpy
+effect_sum_np = effect_sum.numpy()
+effect_count_np = effect_count.numpy()
 
-print("TF–TG full-model knockout effect matrix shape:", tf_tg_effect_np.shape)
-np.save(SELECTED_EXPERIMENT_DIR / "tf_tg_fullmodel_knockout.npy", tf_tg_effect_np)
-np.save(
-    SELECTED_EXPERIMENT_DIR / "tf_tg_fullmodel_knockout_count.npy",
-    effect_count.cpu().numpy()
-)
+# Save per-rank partial results
+rank_effect_path  = SELECTED_EXPERIMENT_DIR / f"tf_tg_fullmodel_knockout_rank{rank}.npy"
+rank_count_path   = SELECTED_EXPERIMENT_DIR / f"tf_tg_fullmodel_knockout_count_rank{rank}.npy"
+
+np.save(rank_effect_path, effect_sum_np)
+np.save(rank_count_path, effect_count_np)
+
+if distributed:
+    dist.barrier()  # make sure all ranks finished writing
+
+# Only rank 0 merges everything
+if rank == 0:
+    total_effect_sum = effect_sum_np.copy()
+    total_effect_count = effect_count_np.copy()
+
+    for r in range(1, world_size):
+        es = np.load(SELECTED_EXPERIMENT_DIR / f"tf_tg_fullmodel_knockout_rank{r}.npy")
+        ec = np.load(SELECTED_EXPERIMENT_DIR / f"tf_tg_fullmodel_knockout_count_rank{r}.npy")
+        total_effect_sum   += es
+        total_effect_count += ec
+
+    tf_tg_effect = total_effect_sum / (total_effect_count + 1e-12)
+    tf_tg_effect_np = tf_tg_effect
+
+    print("TF–TG full-model knockout effect matrix shape:", tf_tg_effect_np.shape)
+    np.save(SELECTED_EXPERIMENT_DIR / "tf_tg_fullmodel_knockout.npy", tf_tg_effect_np)
+    np.save(
+        SELECTED_EXPERIMENT_DIR / "tf_tg_fullmodel_knockout_count.npy",
+        total_effect_count
+    )
+
+# Clean up distributed if needed
+if distributed:
+    dist.destroy_process_group()
