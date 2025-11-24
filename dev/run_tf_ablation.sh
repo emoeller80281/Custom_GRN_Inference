@@ -33,7 +33,7 @@ export KMP_AFFINITY=granularity=fine,compact,1,0
 # ------------------------------------------------------------
 # Run classifier for this chromosome
 # ------------------------------------------------------------
-SELECTED_EXPERIMENT_DIR=/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC_no_scale_linear/no_classifier_head
+SELECTED_EXPERIMENT_DIR=/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC_no_scale_linear/no_classifier_head_256
 
 poetry run python ./dev/tf_ablation.py \
     --selected_experiment_dir "$SELECTED_EXPERIMENT_DIR"
