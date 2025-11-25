@@ -1,8 +1,9 @@
 import os
 import json
 import numpy as np
+import pandas as pd
 import torch
-from typing import Optional, Union
+from typing import Optional, Union, Sequence
 from torch.utils.data import Dataset, Sampler
 from pathlib import Path
 import logging
@@ -282,6 +283,7 @@ class MultiChromosomeDataset(Dataset):
         max_windows_per_chrom: Optional[int] = None,
         max_cells: Optional[int] = None,
         subset_seed: int = 42,
+        allowed_samples: Optional[Sequence[str]] = None,
     ):
         super().__init__()
         self.data_dir = Path(data_dir)
@@ -296,7 +298,10 @@ class MultiChromosomeDataset(Dataset):
         self.max_windows_per_chrom = max_windows_per_chrom
         self.max_cells = max_cells
         self.subset_seed = subset_seed
-        
+        self.allowed_samples = (
+            set(str(s) for s in allowed_samples) if allowed_samples is not None else None
+        )
+
         self._tf_name2id_full = self._load_vocab_dict(tf_vocab_path)
         self._tg_name2id_full = self._load_vocab_dict(tg_vocab_path)
 
@@ -328,14 +333,13 @@ class MultiChromosomeDataset(Dataset):
                         f"!= num_cells {full_num_cells}; sample-based filtering may be misaligned."
                     )
 
-                # interpret sample tag as prefix before first '.' (e.g. "E7.5_REP1")
-                keep = []
-                for i, name in enumerate(all_names):
-                    tag = str(name).split(".")[0]
-                    if tag in self.allowed_samples:
-                        keep.append(i)
+                # vectorized parsing and filtering
+                names = pd.Series(all_names, dtype=str)
+                sample_tags = names.str.rsplit(".", n=1).str[0]
+                mask = sample_tags.isin(self.allowed_samples)
+                keep = np.flatnonzero(mask)
 
-                if not keep:
+                if len(keep) == 0:
                     raise ValueError(
                         f"No metacells matched allowed_samples={sorted(self.allowed_samples)} "
                         f"in metacell_names.json."
@@ -677,7 +681,6 @@ class MultiomicTransformerDataset(Dataset):
         max_tfs: Optional[int] = None,
         max_tgs: Optional[int] = None,
         max_windows: Optional[int] = None,
-        allowed_samples: Optional[list[str]] = None,
         subset_seed: int = 42,
     ):
         self.data_dir = Path(data_dir)
@@ -686,7 +689,6 @@ class MultiomicTransformerDataset(Dataset):
         self._max_tfs = max_tfs
         self._max_tgs = max_tgs
         self._max_windows = max_windows
-        self.allowed_samples = set(allowed_samples) if allowed_samples else None
         self._subset_rng = np.random.RandomState(subset_seed)
 
         chrom_dir = self.data_dir / chrom_id

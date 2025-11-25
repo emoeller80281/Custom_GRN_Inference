@@ -45,7 +45,6 @@ from multiomic_transformer.scripts import gradient_attribution, tf_knockout
 warnings.filterwarnings("ignore", message="No device id is provided via `init_process_group`")
 
 STOP_REQUESTED = False
-EDGE_POS_WEIGHT_CLAMP = 1e3
 
 def _signal_handler(signum, frame):
     # Mark that we should shut down gracefully.
@@ -87,6 +86,20 @@ def setup_logging(rank: int):
         handlers=[handler],
         force=True
     )
+    
+def load_run_params_from_json(run_dir: Path) -> dict:
+    """
+    Load run_parameters.json from an existing training directory, if present.
+    Returns {} if not found.
+    """
+    param_path = run_dir / "run_parameters.json"
+    if not param_path.is_file():
+        logging.warning(f"No run_parameters.json found in {run_dir}, using current config.")
+        return {}
+    with open(param_path, "r") as f:
+        params = json.load(f)
+    logging.info(f"Loaded run parameters from {param_path}")
+    return params
 
 def save_tf_tg_embeddings_from_model(model, out_dir, vocab_dir, epoch=None):
     model = getattr(model, "module", model)  # unwrap DDP if needed
@@ -181,95 +194,6 @@ def _build_all_pairs_df(scores_matrix, tf_names, tg_names, gt_set,
     return df
 
 
-def compute_balanced_chip_auroc(
-    tf_emb: torch.Tensor,
-    tg_emb: torch.Tensor,
-    tf_names,
-    tg_names,
-    chip_path: str,
-    pos_to_neg_ratio: float = 1.0,
-    restrict_to_chip_tfs: bool = True,
-) -> float:
-    """
-    Compute *balanced* AUROC for TF–TG cosine similarity vs ORTI ChIP ground truth.
-
-    Args
-    ----
-    tf_emb, tg_emb : torch.Tensor
-        TF / TG embedding matrices of shape [T, D] and [G, D].
-    tf_names, tg_names : list[str]
-        Names aligned with rows of tf_emb / tg_emb.
-    chip_path : str
-        Path to ORTI_ground_truth_TF_TG.csv (or similar).
-    pos_to_neg_ratio : float
-        Number of negatives per positive when balancing (1.0 => 1:1).
-    restrict_to_chip_tfs : bool
-        If True, only evaluate TFs that appear in the ChIP file.
-
-    Returns
-    -------
-    float
-        Balanced AUROC (0.5 ~ random, 1.0 ~ perfect). NaN if not computable.
-    """
-    # ---- 1. Cosine similarity matrix [T, G] ----
-    tf_norm = F.normalize(tf_emb, p=2, dim=1)
-    tg_norm = F.normalize(tg_emb, p=2, dim=1)
-    sim = (tf_norm @ tg_norm.T).cpu().numpy()   # [T, G]
-
-    # ---- 2. Load and filter ChIP ground truth ----
-    chip = pd.read_csv(chip_path)
-    chip = chip.rename(columns={"Gene1": "tf", "Gene2": "tg"})
-    chip["tf"] = chip["tf"].astype(str)
-    chip["tg"] = chip["tg"].astype(str)
-
-    tf_index = {g: i for i, g in enumerate(tf_names)}
-    tg_index = {g: i for i, g in enumerate(tg_names)}
-
-    chip["tf_in"] = chip["tf"].isin(tf_index)
-    chip["tg_in"] = chip["tg"].isin(tg_index)
-    chip_valid = chip[chip["tf_in"] & chip["tg_in"]].copy()
-
-    if len(chip_valid) == 0:
-        return float("nan")
-
-    gt_set = set(zip(chip_valid["tf"], chip_valid["tg"]))
-
-    # Optionally restrict to TFs that appear in ChIP
-    restrict_idx = None
-    if restrict_to_chip_tfs:
-        chip_tf_set = set(chip_valid["tf"].unique())
-        restrict_idx = [tf_index[t] for t in chip_tf_set if t in tf_index]
-
-    # ---- 3. Build all TF–TG pairs and balance pos/neg ----
-    cos_df = _build_all_pairs_df(
-        sim,
-        tf_names=tf_names,
-        tg_names=tg_names,
-        gt_set=gt_set,
-        restrict_tf_idx=restrict_idx,
-        score_name="score",
-    )
-
-    # Balance positives and negatives
-    cos_bal = _balance_pos_neg(cos_df, label_col="is_gt",
-                               pos_to_neg_ratio=pos_to_neg_ratio,
-                               random_state=0)
-    if cos_bal is None:
-        return float("nan")
-
-    scores = cos_bal["score"].values
-    labels = cos_bal["is_gt"].values.astype(int)
-
-    # ---- 4. AUROC ----
-    try:
-        auroc_bal = roc_auc_score(labels, scores)
-    except ValueError:
-        # happens if labels are all one class after balancing
-        auroc_bal = float("nan")
-
-    return float(auroc_bal)
-
-    
 
 def load_run_params_from_json(run_dir: Path) -> dict:
     """
@@ -300,11 +224,6 @@ class Trainer:
         min_delta: float = 1e-3,
         grad_accum_steps: int = 1,
         use_grad_accumulation: bool = False,
-        edge_labels=None, 
-        edge_loss_weight=0.1,
-        cos_weight=1.0,
-        tf_names=None,
-        tg_names=None,
 
     ) -> None:
         self.gpu_id = gpu_id
@@ -318,27 +237,10 @@ class Trainer:
         self.stop_requested = False
         self.grad_accum_steps = max(1, grad_accum_steps)
         self.use_grad_accumulation = use_grad_accumulation
-        self.edge_labels = edge_labels
-        self.edge_loss_weight = edge_loss_weight
-        self.cos_weight = cos_weight
-        self.edge_pos_weight = None
-        self.tf_names = tf_names
-        self.tg_names = tg_names
-        if self.edge_labels is not None:
-            with torch.no_grad():
-                pos_frac = float(self.edge_labels.float().mean().item())
-                pos_frac = max(pos_frac, 1e-6)
-                neg_frac = max(1.0 - pos_frac, 1e-6)
-                raw_weight = neg_frac / pos_frac
-                clamped_weight = min(raw_weight, EDGE_POS_WEIGHT_CLAMP)
-                self.edge_pos_weight = torch.tensor(
-                    clamped_weight, dtype=torch.float32, device=self.gpu_id
-                )
     
         # Loss warmup
         self.corr_sq_warmup_epochs = 3 
-        self.edge_loss_warmup_epochs = 5
-        
+                
         self.scaler = GradScaler(init_scale=1024, growth_factor=1.5, backoff_factor=0.5, growth_interval=200)
 
         # Learning rate scheduler
@@ -429,103 +331,22 @@ class Trainer:
                 raise RuntimeError(f"{name} has non-finite values; examples idx={bad}")
 
         # ------------------------------------------------------------------
-        # Edge priors, labels, cosine contrastive defaults
-        # ------------------------------------------------------------------
-        edge_extra        = None
-        edge_labels_batch = None
-
-        # default: no cosine contrastive contribution (still a tensor on GPU)
-        cos_contrastive = torch.tensor(0.0, device=self.gpu_id, dtype=torch.float32)
-
-        if self.edge_labels is not None:
-            # Handle [B, T]/[B, G] vs [T]/[G]
-            if tf_ids.dim() == 2:
-                tf_ids_b = tf_ids[0]
-            else:
-                tf_ids_b = tf_ids
-            if tg_ids.dim() == 2:
-                tg_ids_b = tg_ids[0]
-            else:
-                tg_ids_b = tg_ids
-
-            # Slice from global [G, T] matrices
-            edge_labels_batch = self.edge_labels.index_select(0, tg_ids_b).index_select(1, tf_ids_b)
-
-            # ----- Cosine contrastive loss on identity embeddings -----
-            base_model = (
-                self.model.module
-                if isinstance(self.model, torch.nn.parallel.DistributedDataParallel)
-                else self.model
-            )
-            tf_id_emb_batch = base_model.tf_identity_emb(tf_ids_b)   # [T_b, d]
-            tg_emb_batch    = base_model.tg_identity_emb(tg_ids_b)   # [G_b, d]
-
-            tf_norm = F.normalize(tf_id_emb_batch, dim=-1)           # [T_b, d]
-            tg_norm = F.normalize(tg_emb_batch,    dim=-1)           # [G_b, d]
-
-            cos_sim = torch.matmul(tg_norm, tf_norm.transpose(0, 1)) # [G_b, T_b]
-
-            labels_float = edge_labels_batch.float()
-            pos_mask = labels_float > 0.5
-            neg_mask = ~pos_mask
-
-            if pos_mask.any():
-                pos_loss = (1.0 - cos_sim[pos_mask]).mean()
-            else:
-                pos_loss = torch.tensor(0.0, device=self.gpu_id)
-
-            margin = 0.0
-            if neg_mask.any():
-                neg_loss = F.relu(cos_sim[neg_mask] - margin).mean()
-            else:
-                neg_loss = torch.tensor(0.0, device=self.gpu_id)
-
-            cos_contrastive = pos_loss + neg_loss
-            cos_contrastive *= self.cos_weight
-
-        # ------------------------------------------------------------------
         # Forward pass
         # ------------------------------------------------------------------
         with autocast(device_type="cuda"):
             mask_arg = motif_mask if USE_MOTIF_MASK else None
-            preds, attn, shortcut_contrib, edge_logits = self.model(
+            preds, attn, shortcut_contrib, _ = self.model(
                 atac_wins,
                 tf_tensor,
                 tf_ids=tf_ids,
                 tg_ids=tg_ids,
                 bias=bias,
                 motif_mask=mask_arg,
-                return_edge_logits=True,
-                return_shortcut_contrib=False,
-                edge_extra_features=edge_extra,
             )
 
         preds32   = torch.nan_to_num(preds.float(),   nan=0.0, posinf=1e6, neginf=-1e6)
         targets32 = torch.nan_to_num(targets.float(), nan=0.0, posinf=1e6, neginf=-1e6)
         mse_loss  = self.loss_fn(preds32, targets32)
-
-        # ----- Edge BCE loss (always a tensor) -----
-        edge_loss = torch.tensor(0.0, device=self.gpu_id, dtype=torch.float32)
-
-        if (edge_labels_batch is not None) and (edge_logits is not None):
-            preds_logits = edge_logits.float()
-            labels_float = edge_labels_batch.float()
-
-            if self.edge_pos_weight is not None:
-                pos_weight = self.edge_pos_weight.to(
-                    preds_logits.device, dtype=preds_logits.dtype
-                )
-            else:
-                pos_frac  = labels_float.mean().clamp(min=1e-6)
-                neg_frac  = 1.0 - pos_frac
-                pos_weight = (neg_frac / pos_frac).detach().clamp_max(EDGE_POS_WEIGHT_CLAMP)
-
-            bce = F.binary_cross_entropy_with_logits(
-                preds_logits,
-                labels_float,
-                pos_weight=pos_weight,
-            )
-            edge_loss = self.edge_loss_weight * bce
 
         # ----- Unscaled MSE for logging (no grad) -----
         if getattr(self, "tg_scaler", None) is not None:
@@ -568,11 +389,6 @@ class Trainer:
         corr_anneal = float(min(1.0, (cur_epoch + 1) / corr_warm))
         r2_penalty  = (CORR_LOSS_WEIGHT * corr_anneal) * (1.0 - mean_r2)
 
-        # --- edge loss warmup ---
-        edge_warm   = max(1, getattr(self, "edge_loss_warmup_epochs", 5))
-        edge_anneal = float(min(1.0, (cur_epoch + 1) / edge_warm))
-        edge_loss_warm = edge_anneal * edge_loss
-
         # --- shortcut regularization ---
         shortcut_reg = torch.tensor(0.0, device=self.gpu_id, dtype=torch.float32)
         if getattr(self.model, "use_shortcut", False) and hasattr(self.model, "shortcut_layer"):
@@ -583,8 +399,6 @@ class Trainer:
         total_loss = (
             mse_loss
             + r2_penalty
-            + edge_loss_warm
-            + cos_contrastive
             + shortcut_reg
         )
 
@@ -602,7 +416,6 @@ class Trainer:
             mse_loss_unscaled,
             mean_r2.detach(),
             r2_penalty.detach(),
-            edge_loss.detach(),
         )
 
 
@@ -654,8 +467,7 @@ class Trainer:
                     atac_wins, tf_tensor,
                     tf_ids=tf_ids, tg_ids=tg_ids,
                     bias=bias, motif_mask=mask_arg,
-                    return_edge_logits=True, return_shortcut_contrib=False,
-                    edge_extra_features=None,
+                    return_shortcut_contrib=False
                 )
 
                 # numeric safety before metrics
@@ -748,7 +560,6 @@ class Trainer:
         total_loss_sum         = 0.0
         total_mse_scaled_sum   = 0.0
         total_mse_unscaled_sum = 0.0
-        total_edge_loss        = 0.0
         n_batches              = 0
         self.epoch             = epoch
 
@@ -771,10 +582,7 @@ class Trainer:
             mse_scaled,
             mse_unscaled,
             mean_corr,
-            corr_weight,
-            edge_loss_val) = out
-
-            total_edge_loss += float(edge_loss_val)
+            corr_weight) = out
 
             # Sanity: this should still be connected to the graph
             if not total_loss_val.requires_grad:
@@ -812,7 +620,6 @@ class Trainer:
         avg_train_loss         = total_loss_sum        / max(1, n_batches)
         avg_train_mse_scaled   = total_mse_scaled_sum / max(1, n_batches)
         avg_train_mse_unscaled = total_mse_unscaled_sum / max(1, n_batches)
-        avg_train_edge_loss    = total_edge_loss      / max(1, n_batches)
 
         avg_val_mse_scaled, avg_val_mse_unscaled, r2_s, r2_u = self._validate()
         self.scheduler.step(avg_val_mse_unscaled)
@@ -823,7 +630,6 @@ class Trainer:
             avg_train_mse_unscaled,
             avg_val_mse_scaled,
             avg_val_mse_unscaled,
-            avg_train_edge_loss,
             r2_s,
             r2_u,
         )
@@ -895,7 +701,6 @@ class Trainer:
                  avg_train_mse_unscaled, 
                  avg_val_mse_scaled, 
                  avg_val_mse_unscaled, 
-                 avg_train_edge_loss,
                  r2_s, 
                  r2_u) = self._run_epoch(epoch)
                 epoch_end_time = time.time()
@@ -905,28 +710,6 @@ class Trainer:
                 if self._should_stop():
                     raise KeyboardInterrupt()
                 
-                if self.gpu_id == 0 and (epoch + 1) % 1 == 0:  # or every N epochs
-                    # unwrap DDP if needed
-                    model_core = (
-                        self.model.module
-                        if isinstance(self.model, torch.nn.parallel.DistributedDataParallel)
-                        else self.model
-                    )
-
-                    # grab identity embeddings (or whichever TF/TG embeddings you want to evaluate)
-                    tf_emb = model_core.tf_identity_emb.weight.detach().cpu()
-                    tg_emb = model_core.tg_identity_emb.weight.detach().cpu()
-
-                    # you’ll need these lists somewhere in your Trainer (from your dataset / vocab)
-                    auroc_bal = compute_balanced_chip_auroc(
-                        tf_emb=tf_emb,
-                        tg_emb=tg_emb,
-                        tf_names=self.tf_names,    # e.g. dataset.tf_name2id_sub.keys() in the right order
-                        tg_names=self.tg_names,    # same idea
-                        chip_path="data/ground_truth_files/mESC_beeline_ChIP-seq.csv",
-                        pos_to_neg_ratio=1.0,
-                        restrict_to_chip_tfs=True,
-                    )
 
                 if self.gpu_id == 0:
                     lr = self.optimizer.param_groups[0]['lr']
@@ -936,7 +719,6 @@ class Trainer:
                         f"Val MSE: {avg_val_mse_unscaled:.4f} | "
                         f"R2 (Unscaled): {r2_u:.3f} | "
                         f"R2 (Scaled): {r2_s:.3f} | "
-                        f"Train Edge Loss: {avg_train_edge_loss:.4f} | "
                         f"LR: {lr:.2e} | "
                         f"Time: {epoch_dur_sec:.0f}s" 
                     )
@@ -948,7 +730,6 @@ class Trainer:
                         "Val MSE": avg_val_mse_unscaled,
                         "R2_u": r2_u,
                         "R2_s": r2_s,
-                        "Train Edge Loss": avg_train_edge_loss,
                         "LR": lr,
                         "Time": round(epoch_dur_sec, 0)
                     }
@@ -976,9 +757,6 @@ class Trainer:
                             improved = True
                         if r2_s > best_r2 + self.min_delta:
                             best_r2 = r2_s
-                            improved = True
-                        if auroc_bal > best_auroc + self.min_delta:
-                            best_auroc = auroc_bal
                             improved = True
 
                         if improved:
@@ -1033,7 +811,7 @@ class Trainer:
             fieldnames = history.keys()
         else:
             fieldnames = ["Epoch", "Train Total Loss", "Train MSE",
-                    "Val MSE", "R2_u", "R2_s", "Train Edge Loss", "LR", "Time"]
+                    "Val MSE", "R2_u", "R2_s", "LR", "Time"]
         log_path = os.path.join(path, "training_log.csv")
 
         file_exists = os.path.isfile(log_path)
@@ -1116,7 +894,7 @@ def load_train_objs(run_cfg):
         max_windows_per_chrom=SUBSAMPLE_MAX_WINDOWS_PER_CHROM,
         max_cells=SUBSAMPLE_MAX_CELLS,
         subset_seed=SUBSAMPLE_SEED,
-        allowed_samples=["E7.5_REP1"]
+        allowed_samples=ALLOWED_SAMPLES
     )
 
     tf_vocab_size = len(dataset.tf_name2id_sub)
@@ -1140,10 +918,7 @@ def load_train_objs(run_cfg):
         lambda_l2=run_cfg["shortcut_l2"],
         topk=run_cfg["shortcut_topk"],
         shortcut_dropout=run_cfg["shortcut_dropout"],
-        use_gradient_checkpointing=run_cfg["use_grad_ckpt"],
-        use_edge_head=True,
-        edge_extra_dim=0,
-        edge_hidden_dim=128,
+        use_gradient_checkpointing=run_cfg["use_grad_ckpt"]
     )
 
     optimizer = torch.optim.Adam(
@@ -1626,28 +1401,6 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
         T = len(tf_name2id)
         G = len(tg_name2id)
 
-        # Initialize edge matrices on CPU first (then broadcast to all ranks)
-        edge_labels = torch.zeros(G, T, dtype=torch.float32)
-
-        # Only rank 0 loads the parquet file
-        if rank == 0:
-            # Load your aggregated TF–TG ChIP data
-            agg = pd.read_parquet(
-                "data/training_data_cache/mESC_no_scale_linear/combined_tf_tg_agg.parquet"
-            )
-
-            for _, row in agg.iterrows():
-                g_idx = int(row["tg_id"])
-                t_idx = int(row["tf_id"])
-                if g_idx < G and t_idx < T:
-                    edge_labels[g_idx, t_idx] = float(row["label"])
-        
-        # Broadcast from rank 0 to all ranks so all ranks have the data
-        edge_labels = edge_labels.to(rank)
-        
-        if dist.is_available() and dist.is_initialized():
-            dist.broadcast(edge_labels, src=0)
-
         if rank == 0:
             logging.info("Preparing dataloader")
 
@@ -1680,11 +1433,6 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
             patience=PATIENCE,
             grad_accum_steps=run_cfg["grad_accum_steps"],
             use_grad_accumulation=USE_GRAD_ACCUMULATION,
-            edge_labels=edge_labels,
-            edge_loss_weight=EDGE_LOSS_WEIGHT,
-            cos_weight=COS_WEIGHT,
-            tf_names=tf_names,
-            tg_names=tg_names,
         )
 
         rank_device = torch.device(f"cuda:{rank}" if torch.cuda.is_available() else "cpu")

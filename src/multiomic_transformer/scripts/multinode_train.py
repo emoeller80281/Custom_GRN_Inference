@@ -39,6 +39,7 @@ from multiomic_transformer.datasets.dataset import (
 from multiomic_transformer.models.model import MultiomicTransformer
 from multiomic_transformer.utils.files import unique_path
 from multiomic_transformer.utils import ewc_utils, plotting
+from multiomic_transformer.scripts import gradient_attribution, tf_knockout
 
 warnings.filterwarnings("ignore", message="No device id is provided via `init_process_group`")
 
@@ -99,15 +100,21 @@ def load_run_params_from_json(run_dir: Path) -> dict:
     logging.info(f"Loaded run parameters from {param_path}")
     return params
 
-def save_tf_tg_embeddings_from_model(model, out_dir, vocab_dir):
+def save_tf_tg_embeddings_from_model(model, out_dir, vocab_dir, epoch=None):
     model = getattr(model, "module", model)  # unwrap DDP if needed
+    
+    # Save embeddings 
+    if epoch is not None:
+        emb_save_path = os.path.join(out_dir, f"tf_tg_embeddings_{epoch}.pt")
+    else:
+        emb_save_path = os.path.join(out_dir, f"tf_tg_embeddings_final.pt")
     torch.save(
         {
             "tf_emb":     model.tf_identity_emb.weight.detach().cpu(),   # [T, D]
             "tg_query_emb":     model.tg_query_emb.weight.detach().cpu(),   # [G, D]
             "tg_emb": model.tg_identity_emb.weight.detach().cpu()
         },
-        os.path.join(out_dir, "tf_tg_embeddings.pt")
+        emb_save_path
     )
 
     # Prefer the copies we already wrote into the training_output_dir
@@ -130,6 +137,58 @@ def save_tf_tg_embeddings_from_model(model, out_dir, vocab_dir):
         {"tf_id2name": tf_id2name, "tg_id2name": tg_id2name},
         os.path.join(out_dir, "tf_tg_vocab_id2name.pt")
     )
+
+def _balance_pos_neg(df, label_col="is_gt", pos_to_neg_ratio=1.0, random_state=0):
+    """Return a dataframe with a controlled positive:negative ratio."""
+    rng = np.random.default_rng(random_state)
+
+    pos_df = df[df[label_col] == True]
+    neg_df = df[df[label_col] == False]
+
+    n_pos = len(pos_df)
+    n_neg_desired = int(n_pos * pos_to_neg_ratio)
+
+    if n_pos == 0:
+        # No positives -> AUROC undefined.
+        return None
+
+    n_neg_desired = min(n_neg_desired, len(neg_df))
+    neg_idx = rng.choice(neg_df.index.to_numpy(), size=n_neg_desired, replace=False)
+    neg_sample = neg_df.loc[neg_idx]
+
+    balanced = pd.concat([pos_df, neg_sample], axis=0)
+    balanced = balanced.sample(frac=1.0, random_state=random_state).reset_index(drop=True)
+    return balanced
+
+def _build_all_pairs_df(scores_matrix, tf_names, tg_names, gt_set,
+                        restrict_tf_idx=None, score_name="score"):
+    """
+    scores_matrix: [T, G] numpy array
+    restrict_tf_idx: optional list/array of TF indices (rows) to keep
+    gt_set: set of (tf_name, tg_name) that are positives
+    """
+    T, G = scores_matrix.shape
+
+    if restrict_tf_idx is None:
+        tf_idx = np.arange(T)
+    else:
+        tf_idx = np.asarray(restrict_tf_idx, dtype=int)
+
+    tf_grid, tg_grid = np.meshgrid(tf_idx, np.arange(G), indexing="ij")
+    tf_flat = tf_grid.ravel()
+    tg_flat = tg_grid.ravel()
+
+    vals = scores_matrix[tf_flat, tg_flat]
+    tfs = np.array(tf_names, dtype=object)[tf_flat]
+    tgs = np.array(tg_names, dtype=object)[tg_flat]
+
+    df = pd.DataFrame({
+        "tf": tfs,
+        "tg": tgs,
+        score_name: vals,
+    })
+    df["is_gt"] = list(map(gt_set.__contains__, zip(df["tf"], df["tg"])))
+    return df
     
 class Trainer:
     def __init__(
@@ -146,8 +205,6 @@ class Trainer:
         min_delta: float = 1e-3,
         grad_accum_steps: int = 1,
         use_grad_accumulation: bool = False,
-        edge_labels=None, 
-        edge_loss_weight=0.1
 
     ) -> None:
         self.gpu_id = gpu_id
@@ -163,12 +220,8 @@ class Trainer:
         self.stop_requested = False
         self.grad_accum_steps = max(1, grad_accum_steps)
         self.use_grad_accumulation = use_grad_accumulation
-        self.edge_labels = edge_labels
-        self.edge_loss_weight = edge_loss_weight
-        
         # Loss warmup
         self.corr_sq_warmup_epochs = 3 
-        self.edge_loss_warmup_epochs = 5
         
         self.scaler = GradScaler(init_scale=1024, growth_factor=1.5, backoff_factor=0.5, growth_interval=200)
 
@@ -260,65 +313,24 @@ class Trainer:
                 raise RuntimeError(f"{name} has non-finite values; examples idx={bad}")
 
         # ------------------------------------------------------------------
-        # Edge priors, labels
-        # ------------------------------------------------------------------
-        edge_extra = None
-        edge_labels_batch = None
-
-        if self.edge_labels is not None:
-            # Handle [B, T]/[B, G] vs [T]/[G]
-            if tf_ids.dim() == 2:
-                tf_ids_b = tf_ids[0]
-            else:
-                tf_ids_b = tf_ids
-            if tg_ids.dim() == 2:
-                tg_ids_b = tg_ids[0]
-            else:
-                tg_ids_b = tg_ids
-
-            # Slice from global [G, T] matrices
-            edge_labels_batch = self.edge_labels.index_select(0, tg_ids_b).index_select(1, tf_ids_b)
-
-        # ------------------------------------------------------------------
         # Forward pass
         # ------------------------------------------------------------------
         with autocast(device_type="cuda"):
             mask_arg = motif_mask if USE_MOTIF_MASK else None
-            preds, attn, shortcut_contrib, edge_logits = self.model(
+            preds, attn, shortcut_contrib, _ = self.model(
                 atac_wins,
                 tf_tensor,
                 tf_ids=tf_ids,
                 tg_ids=tg_ids,
                 bias=bias,
                 motif_mask=mask_arg,
-                return_edge_logits=True,
                 return_shortcut_contrib=False,
-                edge_extra_features=edge_extra,   # <--- now defined (or None)
             )
 
         # ---- loss & penalty in fp32 for stability ----
         preds32   = torch.nan_to_num(preds.float(),   nan=0.0, posinf=1e6, neginf=-1e6)
         targets32 = torch.nan_to_num(targets.float(), nan=0.0, posinf=1e6, neginf=-1e6)
-
         mse_loss = self.loss_fn(preds32, targets32)
-
-        # Initialize edge loss
-        edge_loss = torch.tensor(0.0, device=self.gpu_id, dtype=torch.float32)
-
-        if (edge_labels_batch is not None) and (edge_logits is not None):
-            preds_logits = edge_logits.float()
-            labels_float = edge_labels_batch.float()
-
-            pos_frac = labels_float.mean().clamp(min=1e-6)
-            neg_frac = 1.0 - pos_frac
-            pos_weight = (neg_frac / pos_frac).detach()
-
-            bce = F.binary_cross_entropy_with_logits(
-                preds_logits,
-                labels_float,
-                pos_weight=pos_weight,
-            )
-            edge_loss = self.edge_loss_weight * bce
         
         # ----- Unscaled MSE for logging (no grad) -----
         if getattr(self, "tg_scaler", None) is not None:
@@ -357,33 +369,41 @@ class Trainer:
         else:
             mean_r2 = torch.tensor(0.0, device=preds32.device, dtype=preds32.dtype)
 
-        # ---------- Correlation penalty warmup ----------
-        corr_warm = max(1, getattr(self, "corr_sq_warmup_epochs", 3))
-        cur_epoch = getattr(self, "epoch", 0)  # set by your loop before calling _run_batch
+        # --- r2 warmup ---
+        corr_warm   = max(1, getattr(self, "corr_sq_warmup_epochs", 3))
+        cur_epoch   = getattr(self, "epoch", 0)
         corr_anneal = float(min(1.0, (cur_epoch + 1) / corr_warm))
+        r2_penalty  = (CORR_LOSS_WEIGHT * corr_anneal) * (1.0 - mean_r2)
 
-        r2_penalty = (CORR_LOSS_WEIGHT * corr_anneal) * (1.0 - mean_r2)  # ~[0, 2*lambda]
-        
-        # ---------- Edge loss warmup ----------
-        edge_warm = max(1, getattr(self, "edge_loss_warmup_epochs", 5))  # e.g. 5 epochs
-        edge_anneal = float(min(1.0, (cur_epoch + 1) / edge_warm))
-
-        edge_loss_warm = edge_anneal * edge_loss   # edge_loss already includes self.edge_loss_weight
+        # --- shortcut regularization ---
+        shortcut_reg = torch.tensor(0.0, device=self.gpu_id, dtype=torch.float32)
+        if getattr(self.model, "use_shortcut", False) and hasattr(self.model, "shortcut_layer"):
+            reg_val = self.model.shortcut_layer.regularization()
+            shortcut_reg = reg_val.to(dtype=torch.float32, device=self.gpu_id) * SHORTCUT_REG_WEIGHT
 
         # ---------- Total loss ----------
-        total_loss = mse_loss + r2_penalty + edge_loss_warm
+        total_loss = (
+            mse_loss
+            + r2_penalty
+            + shortcut_reg
+        )
 
-        # Safety: if something went numerically wrong, skip the step
+        # Safety: if something went numerically wrong, skip the step entirely.
+        # Returning None ensures the caller can drop the batch without trying
+        # to log detached scalars that don't exist.
         if not torch.isfinite(total_loss):
-            return None, None, None, None, None
+            logging.warning("Non-finite loss encountered; skipping batch.")
+            return None
 
-        # For logging: return components
-        return total_loss, mse_loss.detach(), mse_loss_unscaled, mean_r2.detach(), r2_penalty.detach(), edge_loss.detach()
-
-
-        # For logging: return components
-        return total_loss, mse_loss.detach(), mse_loss_unscaled, mean_r2.detach(), r2_penalty.detach(), edge_loss.detach()
-
+        # For logging: note we detach scalars we only log
+        return (
+            total_loss,
+            mse_loss.detach(),
+            mse_loss_unscaled,
+            mean_r2.detach(),
+            r2_penalty.detach(),
+        )
+        
     def _validate(self):
         self.model.eval()
 
@@ -430,7 +450,7 @@ class Trainer:
                     atac_wins, tf_tensor,
                     tf_ids=tf_ids, tg_ids=tg_ids,
                     bias=bias, motif_mask=mask_arg,
-                    return_edge_logits=True, return_shortcut_contrib=False,
+                    return_shortcut_contrib=False,
                 )
 
                 # numeric safety before metrics
@@ -521,7 +541,6 @@ class Trainer:
         total_loss_sum         = 0.0
         total_mse_scaled_sum   = 0.0
         total_mse_unscaled_sum = 0.0
-        total_edge_loss        = 0.0
         n_batches              = 0
         self.epoch             = epoch
 
@@ -544,10 +563,7 @@ class Trainer:
             mse_scaled,
             mse_unscaled,
             mean_corr,
-            corr_weight,
-            edge_loss_val) = out
-
-            total_edge_loss += float(edge_loss_val)
+            corr_weight) = out
 
             if not total_loss_val.requires_grad:
                 raise RuntimeError("Bug: total_loss_val has no grad_fn")
@@ -590,7 +606,6 @@ class Trainer:
         avg_train_loss          = total_loss_sum / max(1, n_batches)
         avg_train_mse_scaled    = total_mse_scaled_sum / max(1, n_batches)
         avg_train_mse_unscaled  = total_mse_unscaled_sum / max(1, n_batches)
-        avg_train_edge_loss     = total_edge_loss / max(1, n_batches)
 
         avg_val_mse_scaled, avg_val_mse_unscaled, r2_s, r2_u = self._validate()
         self.scheduler.step(avg_val_mse_unscaled)
@@ -601,7 +616,6 @@ class Trainer:
             avg_train_mse_unscaled,
             avg_val_mse_scaled,
             avg_val_mse_unscaled,
-            avg_train_edge_loss,
             r2_s,
             r2_u,
         )
@@ -671,7 +685,6 @@ class Trainer:
                  avg_train_mse_unscaled, 
                  avg_val_mse_scaled, 
                  avg_val_mse_unscaled, 
-                 avg_train_edge_loss,
                  r2_s, 
                  r2_u) = self._run_epoch(epoch)
                 epoch_end_time = time.time()
@@ -689,7 +702,6 @@ class Trainer:
                         f"Val MSE: {avg_val_mse_unscaled:.4f} | "
                         f"R2 (Unscaled): {r2_u:.3f} | "
                         f"R2 (Scaled): {r2_s:.3f} | "
-                        f"Train Edge Loss: {avg_train_edge_loss:.4f} | "
                         f"LR: {lr:.2e} | "
                         f"Time: {epoch_dur_sec:.0f}s" 
                     )
@@ -701,7 +713,6 @@ class Trainer:
                         "Val MSE": avg_val_mse_unscaled,
                         "R2_u": r2_u,
                         "R2_s": r2_s,
-                        "Train Edge Loss": avg_train_edge_loss,
                         "LR": lr,
                         "Time": round(epoch_dur_sec, 0),
                     }
@@ -721,22 +732,27 @@ class Trainer:
 
                 # --- Early stopping check (only rank 0 sets flag) ---
                 if self.is_main:
-                    if (avg_val_mse_unscaled < best_val_loss - self.min_delta) or (r2_s > best_r2 + self.min_delta):
-                        # If either val_loss improved OR r2_s improved, reset patience
-                        best_val_loss = avg_val_mse_unscaled
-                        best_r2 = max(best_r2, r2_s)
-                        patience_counter = 0
-                    else:
-                        # No improvement
-                        patience_counter += 1
+                    if epoch > 5: # wait a few epochs before checking
+                        improved = False
 
-                        if patience_counter >= self.patience:
-                            logging.info("Early stopping triggered.")
-                            self._save_checkpoint(epoch, path)
-                            stop_tensor.fill_(1)  # <-- mark stop
+                        if avg_val_mse_unscaled < best_val_loss - self.min_delta:
+                            best_val_loss = avg_val_mse_unscaled
+                            improved = True
+                        if r2_s > best_r2 + self.min_delta:
+                            best_r2 = r2_s
+                            improved = True
 
+                        if improved:
+                            patience_counter = 0
                         else:
-                            logging.info(f"    Loss did not improve {patience_counter}/{self.patience}")
+                            patience_counter += 1
+                            if patience_counter >= self.patience:
+                                logging.info("Early stopping triggered (no improvement).")
+                                self._save_checkpoint(epoch, path)
+                                stop_tensor.fill_(1)
+
+                            else:
+                                logging.info(f"    Loss did not improve {patience_counter}/{self.patience}")
 
                 # --- Broadcast stop flag from rank 0 to all ranks ---
                 dist.broadcast(stop_tensor, src=0)
@@ -775,7 +791,7 @@ class Trainer:
         
     def _write_log_csv(self, history, path):
         fieldnames = ["Epoch", "Train Total Loss", "Train MSE",
-                    "Val MSE", "R2_u", "R2_s", "Train Edge Loss", "LR", "Time"]
+                    "Val MSE", "R2_u", "R2_s", "LR", "Time"]
         log_path = os.path.join(path, "training_log.csv")
 
         file_exists = os.path.isfile(log_path)
@@ -858,6 +874,7 @@ def load_train_objs(run_cfg):
         max_windows_per_chrom=SUBSAMPLE_MAX_WINDOWS_PER_CHROM,
         max_cells=SUBSAMPLE_MAX_CELLS,
         subset_seed=SUBSAMPLE_SEED,
+        allowed_samples=ALLOWED_SAMPLES
     )
 
     tf_vocab_size = len(dataset.tf_name2id_sub)
@@ -881,10 +898,7 @@ def load_train_objs(run_cfg):
         lambda_l2=run_cfg["shortcut_l2"],
         topk=run_cfg["shortcut_topk"],
         shortcut_dropout=run_cfg["shortcut_dropout"],
-        use_gradient_checkpointing=run_cfg["use_grad_ckpt"],
-        use_edge_head=True,
-        edge_extra_dim=0,
-        edge_hidden_dim=128,
+        use_gradient_checkpointing=run_cfg["use_grad_ckpt"]
     )
 
     optimizer = torch.optim.Adam(
@@ -1055,6 +1069,8 @@ def prepare_dataloader(dataset, batch_size, world_size=1, rank=0,
 def write_run_parameters(dataset, out_dir, world_size):
 
     logging.info("\n===== MultiomicTransformerDataset Loaded =====")
+    if ALLOWED_SAMPLES is not None:
+        logging.info(f"Samples:             {ALLOWED_SAMPLES}")
     logging.info(f"Chromosome:          {CHROM_IDS}")
     logging.info(f"Genes:               {len(dataset.tg_ids)}")
     logging.info(f"Windows (RE):        {dataset.num_windows}")
@@ -1088,6 +1104,7 @@ def write_run_parameters(dataset, out_dir, world_size):
     logging.info("================================================")
     
     run_params = {
+        "allowed_samples": ALLOWED_SAMPLES,
         "epochs": TOTAL_EPOCHS,
         "batch_size": BATCH_SIZE,
         "grad_accum_steps": GRAD_ACCUM_STEPS,
@@ -1314,6 +1331,7 @@ def main(rank: int, local_rank: int, world_size: int, save_every: int, total_epo
                 return prev_params.get(key, default) if prev_params else default
 
             run_cfg = {
+                "allowed_samples":      g("allowed_samples", ALLOWED_SAMPLES),
                 "epochs":               g("epochs", TOTAL_EPOCHS),
                 "batch_size":           g("batch_size", BATCH_SIZE),
                 "grad_accum_steps":     g("grad_accum_steps", GRAD_ACCUM_STEPS),
@@ -1342,6 +1360,7 @@ def main(rank: int, local_rank: int, world_size: int, save_every: int, total_epo
             logging.info(f"\n=========== EXPERIMENT {training_output_dir.name.upper()} ===========")
 
             run_cfg = {
+                "allowed_samples":      ALLOWED_SAMPLES,
                 "epochs":               TOTAL_EPOCHS,
                 "batch_size":           BATCH_SIZE,
                 "grad_accum_steps":     GRAD_ACCUM_STEPS,
@@ -1374,30 +1393,6 @@ def main(rank: int, local_rank: int, world_size: int, save_every: int, total_epo
         T = len(tf_name2id)
         G = len(tg_name2id)
 
-        # Initialize edge matrices on CPU first (then broadcast to all ranks)
-        edge_labels = torch.zeros(G, T, dtype=torch.float32)
-
-        # Only rank 0 loads the parquet file
-        if rank == 0:
-            # Load your aggregated TF–TG ChIP data
-            agg = pd.read_parquet(
-                "data/training_data_cache/mESC_no_scale_linear/chip_tf_tg_agg.parquet"
-            )
-
-            for _, row in agg.iterrows():
-                g_idx = int(row["tg_id"])
-                t_idx = int(row["tf_id"])
-                if g_idx < G and t_idx < T:
-                    edge_labels[g_idx, t_idx] = float(row["label"])
-        
-        # Broadcast from rank 0 to all ranks so all ranks have the data
-        rank_device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
-
-        edge_labels = edge_labels.to(rank_device)
-        
-        if dist.is_available() and dist.is_initialized():
-            dist.broadcast(edge_labels, src=0)
-
         if rank == 0:
             logging.info("Preparing dataloader")
 
@@ -1428,8 +1423,6 @@ def main(rank: int, local_rank: int, world_size: int, save_every: int, total_epo
             patience=PATIENCE,
             grad_accum_steps=run_cfg["grad_accum_steps"],
             use_grad_accumulation=USE_GRAD_ACCUMULATION,
-            edge_labels=edge_labels,
-            edge_loss_weight=EDGE_LOSS_WEIGHT,
         )
 
         rank_device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
@@ -1553,6 +1546,51 @@ def main(rank: int, local_rank: int, world_size: int, save_every: int, total_epo
 
             if rank == 0:
                 logging.info("\nIterations complete")
+                            
+        state = {
+            "epoch": TOTAL_EPOCHS - 1,
+            "model_state_dict": model_for_eval.state_dict(),
+            "optimizer_state_dict": trainer.optimizer.state_dict(),
+            "scheduler_state_dict": trainer.scheduler.state_dict(),
+            "best_val_loss": trainer.best_val_loss,
+            "tf_scaler_mean": trainer.tf_scaler.mean,
+            "tf_scaler_std": trainer.tf_scaler.std,
+            "tg_scaler_mean": trainer.tg_scaler.mean,
+            "tg_scaler_std": trainer.tg_scaler.std,
+        }
+                
+        # ----- Compute Gradient Attribution and TF Knockout -----
+        gradient_attribution.run_gradient_attribution(
+            training_output_dir,
+            model_for_eval,
+            test_loader,
+            tg_scaler=trainer.tg_scaler,
+            tf_scaler=trainer.tf_scaler,
+            state=state,
+            device=rank_device,
+            use_amp=True,
+            rank=rank,
+            world_size=world_size,
+            distributed=torch.distributed.is_initialized(),
+            max_batches=None,
+            use_dataloader=True,
+        )
+        
+        tf_knockout.run_tf_knockout(
+            training_output_dir,
+            model_for_eval,
+            test_loader,
+            tg_scaler=trainer.tg_scaler,
+            tf_scaler=trainer.tf_scaler,
+            state=state,
+            device=rank_device,
+            use_amp=True,
+            rank=rank,
+            world_size=world_size,
+            distributed=torch.distributed.is_initialized(),
+            max_batches=None,
+            use_dataloader=True,
+        )
     
     finally:
         if dist.is_initialized():
