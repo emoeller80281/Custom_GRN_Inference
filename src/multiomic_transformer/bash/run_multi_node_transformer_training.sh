@@ -3,10 +3,10 @@
 #SBATCH --output=LOGS/transformer_logs/03_training/%x_%j.log
 #SBATCH --error=LOGS/transformer_logs/03_training/%x_%j.err
 #SBATCH --time=36:00:00
-#SBATCH -p gpu
-#SBATCH -N 3
-#SBATCH --gres=gpu:p100:2
-#SBATCH --ntasks-per-node=2
+#SBATCH -p dense
+#SBATCH -N 2
+#SBATCH --gres=gpu:v100:4
+#SBATCH --ntasks-per-node=1
 #SBATCH -c 16
 #SBATCH --mem=128G
 
@@ -93,8 +93,8 @@ MASTER_NODE=${NODES[0]}
 echo "[NET] Nodes in this job: ${NODES[*]}"
 echo "[NET] MASTER_NODE=${MASTER_NODE}, IFACE=${IFACE:-<unset>}"
 
-NPROC_PER_NODE=$(echo $SLURM_NTASKS_PER_NODE | awk -F',' '{print $1}')
-echo "[INFO] Using nproc_per_node=$NPROC_PER_NODE based on --ntasks-per-node"
+NPROC_PER_NODE=${SLURM_GPUS_ON_NODE:-$(nvidia-smi -L | wc -l)}
+echo "[INFO] Using nproc_per_node=$NPROC_PER_NODE based on GPUs per node"
 
 # Launch torchrun on ALL nodes / tasks via srun
 srun bash -c "torchrun \

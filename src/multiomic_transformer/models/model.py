@@ -232,87 +232,6 @@ class AttentionPooling(nn.Module):
         pooled = torch.sum(weights * x, dim=1)                   # [batch_size, d_model]
         return pooled, weights
 
-class EdgePredictionHead(nn.Module):
-    def __init__(self, d_model, extra_dim: int = 0, hidden_dim: int = 128):
-        super().__init__()
-        self.extra_dim = extra_dim
-        in_dim = 2 * d_model + extra_dim
-        self.mlp = nn.Sequential(
-            nn.Linear(in_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, 1),
-        )
-
-    def forward(self, tf_id_emb, tg_emb, extra: Optional[torch.Tensor] = None):
-        G, d = tg_emb.shape
-        T, d2 = tf_id_emb.shape
-        assert d == d2, "TF and TG embeddings must share d_model"
-
-        # Broadcast TF/TG embeddings to [G, T, d]
-        tg_expanded = tg_emb.unsqueeze(1).expand(G, T, d)
-        tf_expanded = tf_id_emb.unsqueeze(0).expand(G, T, d)
-
-        x = torch.cat([tg_expanded, tf_expanded], dim=-1)  # [G, T, 2d]
-
-        # If we configured extra_dim>0 but none was given, fill with zeros
-        if extra is None and self.extra_dim > 0:
-            extra = tg_emb.new_zeros((G, T, self.extra_dim))
-
-        if extra is not None:
-            assert extra.shape[:2] == (G, T), \
-                f"extra shape {extra.shape} must start with (G,T)=({G},{T})"
-            x = torch.cat([x, extra], dim=-1)  # [G, T, 2d + k]
-
-        logits = self.mlp(x).squeeze(-1)      # [G, T]
-        return logits
-
-class CosineEdgeHead(nn.Module):
-    """
-    Edge logits are a temperature-scaled cosine similarity between
-    TF/TG embeddings plus an optional linear term for priors (e.g. distance).
-    """
-    def __init__(self, d_model: int, extra_dim: int = 0, temperature: float = 1.0):
-        super().__init__()
-        self.extra_dim = extra_dim
-        # Learnable scale (1 / temperature)
-        self.logit_scale = nn.Parameter(torch.tensor(1.0 / temperature))
-        # Optional linear projection for extra features: [G, T, k] → scalar bias
-        if extra_dim > 0:
-            self.extra_proj = nn.Linear(extra_dim, 1)
-        else:
-            self.extra_proj = None
-
-    def forward(
-        self,
-        tf_id_emb: torch.Tensor,  # [T, d]
-        tg_emb: torch.Tensor,     # [G, d]
-        extra: Optional[torch.Tensor] = None  # [G, T, k]
-    ):
-        G, d = tg_emb.shape
-        T, d2 = tf_id_emb.shape
-        assert d == d2, "TF and TG embeddings must share d_model"
-
-        # L2-normalize embeddings along the last dim
-        tf_norm = F.normalize(tf_id_emb, dim=-1)  # [T, d]
-        tg_norm = F.normalize(tg_emb,    dim=-1)  # [G, d]
-
-        # Cosine similarity matrix: [G, T]
-        # (tg_norm @ tf_norm^T)
-        cos_sim = torch.matmul(tg_norm, tf_norm.transpose(0, 1))  # [G, T]
-
-        # Temperature-scaled cosine
-        logits = cos_sim * self.logit_scale  # [G, T]
-
-        # Optional extra prior term
-        if extra is not None:
-            assert self.extra_proj is not None, "extra_dim>0 expected extra_proj"
-            assert extra.shape[:2] == (G, T), f"extra shape {extra.shape} must start with (G,T)=({G},{T})"
-            # Project extra features to a scalar bias per (G,T)
-            extra_bias = self.extra_proj(extra).squeeze(-1)  # [G, T]
-            logits = logits + extra_bias
-
-        return logits
-
 class MultiomicTransformer(nn.Module):
     def __init__(self, d_model, num_heads, num_layers, d_ff, dropout,
                 tf_vocab_size, tg_vocab_size, 
@@ -327,10 +246,7 @@ class MultiomicTransformer(nn.Module):
                 topk=None,
                 shortcut_dropout=0.2,
                 use_gradient_checkpointing: bool = False,
-                use_edge_head: bool = False,
-                edge_extra_dim: int = 0,
-                edge_hidden_dim: int = 128,
-                 ):
+                ):
         super().__init__()
         
         self.d_model = d_model
@@ -342,7 +258,6 @@ class MultiomicTransformer(nn.Module):
         self.use_shortcut = use_shortcut
         self.bias_scale = bias_scale
         self.use_gradient_checkpointing = use_gradient_checkpointing
-        self.use_edge_head = use_edge_head
 
         # TF and TG embedding tables - generates identities for TFs and TGs
         self.tf_identity_emb = nn.Embedding(tf_vocab_size, d_model)
@@ -453,19 +368,6 @@ class MultiomicTransformer(nn.Module):
                 motif_mask_threshold,
                 motif_prior_scale
                 )
-            
-        if self.use_edge_head:
-            # self.edge_head = EdgePredictionHead(
-            #     d_model,
-            #     extra_dim=edge_extra_dim,
-            #     hidden_dim=edge_hidden_dim,
-            # )
-            
-            self.edge_head = CosineEdgeHead(
-                d_model=d_model,
-                extra_dim=edge_extra_dim,
-                temperature=1.0,  # tune if needed
-            )
                     
     def forward(
         self,
@@ -476,8 +378,6 @@ class MultiomicTransformer(nn.Module):
         bias=None,
         motif_mask=None,
         return_shortcut_contrib: bool = False,
-        return_edge_logits: bool = False,
-        edge_extra_features: Optional[torch.Tensor] = None,
     ):
         """
         atac_windows : [batch_size, n_window, 1]
@@ -590,7 +490,6 @@ class MultiomicTransformer(nn.Module):
         # ----- Optional TF→TG shortcut without fixed matrix -----
         attn = None
         shortcut_contrib = None
-        edge_logits = None
         if self.use_shortcut:
             # Calculate the direct TF-TG attention (similarity of TF and TG embeddings * )
             tf_tg_shortcut_output, attn = self.shortcut_layer(
@@ -609,17 +508,11 @@ class MultiomicTransformer(nn.Module):
                 shortcut_contrib = (
                     tf_expr.unsqueeze(1) * attn.unsqueeze(0) * self.shortcut_layer.scale
                 )  
-        
-        if return_edge_logits and self.use_edge_head:
-            edge_logits = self.compute_edge_logits(tf_ids, tg_ids, edge_extra_features)
 
-        # Backwards compatibility: many utility scripts expect (preds, attn)
-        # when they don't need shortcut contributions or edge logits. Only
-        # return the full 4-tuple when explicitly requested.
-        if (not return_shortcut_contrib) and (not return_edge_logits):
-            return tg_pred, attn
+        if not return_shortcut_contrib:
+            return tg_pred, attn, None
 
-        return tg_pred, attn, shortcut_contrib, edge_logits
+        return tg_pred, attn, shortcut_contrib
     
     def _encode_with_checkpointing(self, win_emb):
         """
@@ -648,34 +541,3 @@ class MultiomicTransformer(nn.Module):
             return cp.checkpoint(fn, *args, use_reentrant=False)
         else:
             return module(*args)
-    
-    def compute_edge_logits(
-        self,
-        tf_ids: torch.LongTensor,
-        tg_ids: torch.LongTensor,
-        extra_edge_features: Optional[torch.Tensor] = None,
-    ):
-        """
-        Compute TF–TG edge logits using the learned identity embeddings.
-
-        tf_ids: LongTensor [T]
-        tg_ids: LongTensor [G]
-        extra_edge_features: optional [G, T, k] tensor of priors
-                             (e.g. distance score, motif score, ChIP score)
-
-        Returns:
-            edge_logits: [G, T]
-        """
-        assert self.use_edge_head, "Edge head not enabled (use_edge_head=False)."
-
-        device = self.tf_identity_emb.weight.device
-        if extra_edge_features is not None:
-            extra_edge_features = extra_edge_features.to(device)
-        tf_ids = tf_ids.to(device)
-        tg_ids = tg_ids.to(device)
-
-        tf_id_emb = self.tf_identity_emb(tf_ids)      # [T, d_model]
-        tg_emb    = self.tg_identity_emb(tg_ids)      # [G, d_model]
-
-        edge_logits = self.edge_head(tf_id_emb, tg_emb, extra_edge_features)
-        return edge_logits
