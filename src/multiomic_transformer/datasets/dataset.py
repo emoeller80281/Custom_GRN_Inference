@@ -304,18 +304,58 @@ class MultiChromosomeDataset(Dataset):
         # We can read it once from data_dir (global tf tensor) to avoid loading each chromosome.
         if not fine_tuner:
             tf_global = torch.load(self.data_dir / "tf_tensor_all.pt", map_location="cpu")
-            self._num_cells = int(tf_global.shape[1])
-            
-            # Subset the number of metacells to self.max_cells
+            full_num_cells = int(tf_global.shape[1])
+
+            # Start with all cell indices
+            base_idx = np.arange(full_num_cells)
+
+            # --- Optional: restrict by sample tag from metacell_names.json ---
             self._cell_idx = None
+            if self.allowed_samples:
+                metacell_path = self.data_dir / "metacell_names.json"
+                try:
+                    with open(metacell_path) as f:
+                        all_names = json.load(f)
+                except FileNotFoundError:
+                    raise FileNotFoundError(
+                        f"allowed_samples was provided, but metacell_names.json is missing at {metacell_path}"
+                    )
+
+                if not isinstance(all_names, list) or len(all_names) != full_num_cells:
+                    logging.warning(
+                        f"metacell_names.json length "
+                        f"{len(all_names) if isinstance(all_names, list) else 'N/A'} "
+                        f"!= num_cells {full_num_cells}; sample-based filtering may be misaligned."
+                    )
+
+                # interpret sample tag as prefix before first '.' (e.g. "E7.5_REP1")
+                keep = []
+                for i, name in enumerate(all_names):
+                    tag = str(name).split(".")[0]
+                    if tag in self.allowed_samples:
+                        keep.append(i)
+
+                if not keep:
+                    raise ValueError(
+                        f"No metacells matched allowed_samples={sorted(self.allowed_samples)} "
+                        f"in metacell_names.json."
+                    )
+
+                base_idx = np.array(sorted(keep), dtype=int)
+
+            # --- Optional: downsample to max_cells ---
+            self._num_cells = int(base_idx.size)
             if self.max_cells is not None and self._num_cells > self.max_cells:
                 rng = np.random.RandomState(self.subset_seed or 42)
-                self._cell_idx = np.sort(rng.choice(self._num_cells, size=self.max_cells, replace=False))
-                self._num_cells = int(self._cell_idx.size)
-        else:
-            # Fine-tune single-cell mode: number of cells can vary per chromosome.
-            # We'll open a tiny handle per chrom to read shape; still keep it light.
-            self._num_cells = None
+                chosen_local = np.sort(
+                    rng.choice(self._num_cells, size=self.max_cells, replace=False)
+                )
+                base_idx = base_idx[chosen_local]
+                self._num_cells = int(base_idx.size)
+
+            # global indices into C dimension of tf/tg/atac tensors
+            self._cell_idx = base_idx
+
 
         # offsets tell us where each chromosome's indices start in the concatenated space
         self._offsets = []
@@ -637,6 +677,7 @@ class MultiomicTransformerDataset(Dataset):
         max_tfs: Optional[int] = None,
         max_tgs: Optional[int] = None,
         max_windows: Optional[int] = None,
+        allowed_samples: Optional[list[str]] = None,
         subset_seed: int = 42,
     ):
         self.data_dir = Path(data_dir)
@@ -645,6 +686,7 @@ class MultiomicTransformerDataset(Dataset):
         self._max_tfs = max_tfs
         self._max_tgs = max_tgs
         self._max_windows = max_windows
+        self.allowed_samples = set(allowed_samples) if allowed_samples else None
         self._subset_rng = np.random.RandomState(subset_seed)
 
         chrom_dir = self.data_dir / chrom_id

@@ -606,7 +606,7 @@ def plot_all_method_auroc_auprc(method_dict, gt_name, target_method="MultiomicTr
         # Compute and plot metrics
         res = compute_curves(df, score_col="Score", name=name, balance=True)
 
-        if res == None:
+        if res is None:
             print(f"Skipping {name} on {gt_name} (no usable positives/negatives)")
             continue
 
@@ -618,7 +618,7 @@ def plot_all_method_auroc_auprc(method_dict, gt_name, target_method="MultiomicTr
             }),
             score_col="Score",
             name=f"{name} (Randomized Scores)",
-            balance = False # Already balanced
+            balance=False  # Already balanced
         )
         rand_results.append(rand_res)
         
@@ -653,7 +653,7 @@ def plot_all_method_auroc_auprc(method_dict, gt_name, target_method="MultiomicTr
     # Build color/alpha map per method
     # -----------------------------
     base_colors = ["tab:blue", "tab:orange", "tab:green", "tab:red", "tab:purple",
-                "tab:brown", "tab:pink", "tab:gray", "tab:olive", "tab:cyan"]
+                   "tab:brown", "tab:pink", "tab:gray", "tab:olive", "tab:cyan"]
 
     # All base method names (no "(Randomized Scores)" suffix)
     base_method_names = {res["name"] for res in results}
@@ -707,7 +707,6 @@ def plot_all_method_auroc_auprc(method_dict, gt_name, target_method="MultiomicTr
     ax[0].set_title("AUROC", fontsize=title_fontsize)
     ax[0].set_xlim(0, 1)
     ax[0].set_ylim(0, 1)
-    # control tick label font size
     ax[0].tick_params(axis="both", labelsize=tick_fontsize)
 
     leg = ax[0].legend(
@@ -785,19 +784,58 @@ def plot_all_results_auroc_boxplot(df):
 
     fig, ax = plt.subplots(figsize=(10, 6))
 
+    # Baseline random line
     ax.axhline(y=0.5, color="#2D2D2D", linestyle='--', linewidth=1)
-    bp = ax.boxplot(data, labels=method_order, patch_artist=True, showfliers=False)
 
-    # 3. Color boxes: light blue for your method, grey for others
+    # --- Boxplot (existing styling) ---
+    bp = ax.boxplot(
+        data,
+        labels=method_order,
+        patch_artist=True,
+        showfliers=False
+    )
+
+    # Color boxes: light blue for your methods, grey for others
     for box, method in zip(bp["boxes"], method_order):
         if method in feature_list:
             box.set_facecolor(my_color)
         else:
             box.set_facecolor(other_color)
 
-    # (Optional) also color medians/whiskers consistently
-    for median, method in zip(bp["medians"], method_order):
+    # Medians in black
+    for median in bp["medians"]:
         median.set_color("black")
+
+    # --- NEW: overlay jittered points for each method ---
+    for i, method in enumerate(method_order, start=1):
+        y = df.loc[df["name"] == method, "auroc"].values
+        if len(y) == 0:
+            continue
+
+        # Small horizontal jitter around the box center (position i)
+        x = np.random.normal(loc=i, scale=0.06, size=len(y))
+
+        # Match point color to box color
+        point_color = my_color if method in feature_list else other_color
+
+        ax.scatter(
+            x, y,
+            color=point_color,
+            alpha=0.7,
+            s=18,
+            edgecolor="k",
+            linewidth=0.3,
+            zorder=3,
+        )
+        
+        mean_val = y.mean()
+        ax.scatter(
+            i, mean_val,
+            color="white",
+            edgecolor="k",
+            s=30,
+            zorder=4,
+        )
 
     ax.set_xlabel("Method")
     ax.set_ylabel("AUROC across ground truths")
@@ -832,19 +870,58 @@ def plot_all_results_auprc_boxplot(df):
 
     fig, ax = plt.subplots(figsize=(10, 6))
 
+    # Baseline line (same style as before)
     ax.axhline(y=0.5, color="#2D2D2D", linestyle='--', linewidth=1)
-    bp = ax.boxplot(data, labels=method_order, patch_artist=True, showfliers=False)
 
-    # 3. Color boxes: light blue for your method, grey for others
+    # --- Boxplot (existing styling) ---
+    bp = ax.boxplot(
+        data,
+        labels=method_order,
+        patch_artist=True,
+        showfliers=False
+    )
+
+    # Color boxes: light blue for your methods, grey for others
     for box, method in zip(bp["boxes"], method_order):
         if method in feature_list:
             box.set_facecolor(my_color)
         else:
             box.set_facecolor(other_color)
 
-    # (Optional) also color medians/whiskers consistently
-    for median, method in zip(bp["medians"], method_order):
+    # Medians in black
+    for median in bp["medians"]:
         median.set_color("black")
+
+    # --- overlay jittered points for each method ---
+    for i, method in enumerate(method_order, start=1):
+        y = df.loc[df["name"] == method, "auprc"].values
+        if len(y) == 0:
+            continue
+
+        # Small horizontal jitter around the box center (position i)
+        x = np.random.normal(loc=i, scale=0.06, size=len(y))
+
+        # Match point color to box color
+        point_color = my_color if method in feature_list else other_color
+
+        ax.scatter(
+            x, y,
+            color=point_color,
+            alpha=0.7,
+            s=18,
+            edgecolor="k",
+            linewidth=0.3,
+            zorder=3,
+        )
+        
+        mean_val = y.mean()
+        ax.scatter(
+            i, mean_val,
+            color="white",
+            edgecolor="k",
+            s=30,
+            zorder=4,
+        )
 
     ax.set_xlabel("Method")
     ax.set_ylabel("AUPRC across ground truths")
@@ -855,6 +932,133 @@ def plot_all_results_auprc_boxplot(df):
     plt.tight_layout()
     
     return fig
+
+def plot_method_curve_variability(df_results, out_dir):
+    """
+    For each method in df_results, plot all ROC and PR curves across
+    ground truths and samples to visualize variability.
+
+    Parameters
+    ----------
+    df_results : pd.DataFrame
+        Must have columns:
+        - 'name'   : method name
+        - 'gt_name': ground truth identifier
+        - 'sample' : sample identifier (or 'FEATURES_ONLY' for feature-only runs)
+        - 'fpr', 'tpr', 'prec', 'rec' : arrays (ndarray/list)
+    out_dir : Path or str
+        Directory to save per-method figures.
+    feature_list : list of str, optional
+        If provided, you can choose to skip or style features differently.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Unique methods (including features unless you filter)
+    method_names = sorted(df_results["name"].unique())
+
+    for method in method_names:
+
+        df_m = df_results[df_results["name"] == method].copy()
+        if df_m.empty:
+            continue
+
+        # Build a label per curve: GT / sample
+        labels = df_m.apply(
+            lambda row: f"{row['gt_name']} / {row['sample']}", axis=1
+        )
+
+        # Figure + axes
+        fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(10, 4))
+
+        title_fontsize = 14
+        axes_fontsize = 12
+        tick_fontsize = 10
+
+        # Color cycle (reusable)
+        color_cycle = plt.rcParams["axes.prop_cycle"].by_key().get("color", ["tab:blue"])
+        n_colors = len(color_cycle)
+
+        # ================= ROC panel =================
+        for (idx, row), label in zip(df_m.iterrows(), labels):
+            fpr = row["fpr"]
+            tpr = row["tpr"]
+            if fpr is None or tpr is None:
+                continue
+
+            # choose a color deterministically based on label
+            c_idx = hash(label) % n_colors
+            color = color_cycle[c_idx]
+
+            ax[0].plot(
+                fpr, tpr,
+                lw=1.5,
+                alpha=0.4,
+                color=color,
+                label=label,
+            )
+
+        ax[0].plot([0, 1], [0, 1], "k--", lw=1)
+        ax[0].set_xlabel("False Positive Rate", fontsize=axes_fontsize)
+        ax[0].set_ylabel("True Positive Rate", fontsize=axes_fontsize)
+        ax[0].set_title(f"ROC curves: {method}", fontsize=title_fontsize)
+        ax[0].set_xlim(0, 1)
+        ax[0].set_ylim(0, 1)
+        ax[0].tick_params(axis="both", labelsize=tick_fontsize)
+
+        # Optional: slim legend (may be large if many curves)
+        # You can comment this out if too cluttered
+        ax[0].legend(
+            loc="upper center",
+            bbox_to_anchor=(0.5, -0.18),
+            frameon=False,
+            fontsize=8,
+            ncol=2,
+        )
+
+        # ================= PR panel =================
+        for (idx, row), label in zip(df_m.iterrows(), labels):
+            rec = row["rec"]
+            prec = row["prec"]
+            if rec is None or prec is None:
+                continue
+
+            c_idx = hash(label) % n_colors
+            color = color_cycle[c_idx]
+
+            ax[1].plot(
+                rec, prec,
+                lw=1.5,
+                alpha=0.4,
+                color=color,
+                label=label,
+            )
+
+        ax[1].set_xlabel("Recall", fontsize=axes_fontsize)
+        ax[1].set_ylabel("Precision", fontsize=axes_fontsize)
+        ax[1].set_title(f"PR curves: {method}", fontsize=title_fontsize)
+        ax[1].set_xlim(0, 1)
+        ax[1].set_ylim(0, 1)
+        ax[1].tick_params(axis="both", labelsize=tick_fontsize)
+
+        ax[1].legend(
+            loc="upper center",
+            bbox_to_anchor=(0.5, -0.18),
+            frameon=False,
+            fontsize=8,
+            ncol=2,
+        )
+
+        plt.tight_layout()
+
+        method_safe = (
+            method.replace(" ", "_")
+                  .replace("/", "_")
+                  .replace("+", "plus")
+                  .lower()
+        )
+        out_path = os.path.join(out_dir, f"{method_safe}_curve_variability.png")
+        fig.savefig(out_path, dpi=300)
+        plt.close(fig)
 
 def tfwise_rank_normalize(df, score_col, new_col):
     """
@@ -998,11 +1202,45 @@ def load_tf_knockout_scores(selected_experiment_dir, tf_names, tg_names):
     
     return tf_ko_df
 
+def load_and_standardize_method(name: str, info: dict) -> pd.DataFrame:
+    """
+    Load a GRN CSV and rename tf_col/target_col/score_col -> Source/Target/Score.
+    Extra columns are preserved.
+    """
+    if info["path"].suffix == ".tsv":
+        sep = "\t"
+    elif info["path"].suffix == ".csv":
+        sep = ","
+    
+    df = pd.read_csv(info["path"], sep=sep, header=0, index_col=None)
+
+    tf_col     = info["tf_col"]
+    target_col = info["target_col"]
+    score_col  = info["score_col"]
+
+    rename_map = {
+        tf_col: "Source",
+        target_col: "Target",
+        score_col: "Score",
+    }
+
+    missing = [c for c in rename_map if c not in df.columns]
+    if missing:
+        raise ValueError(f"[{name}] Missing expected columns: {missing}. Got: {list(df.columns)}")
+
+    df = df.rename(columns=rename_map)
+
+    df = df[["Source", "Target", "Score"]]
+    df["Source"] = df["Source"].astype(str).str.upper()
+    df["Target"] = df["Target"].astype(str).str.upper()
+
+    return df
+
 if __name__ == "__main__":
     ground_truth_file_dict = {
         "ChIP-Atlas": GROUND_TRUTH_DIR / "chip_atlas_tf_peak_tg_dist.csv",
         "RN111_RN112": GROUND_TRUTH_DIR / "filtered_RN111_and_RN112_mESC_E7.5_rep1.tsv",
-        "ORTI": GROUND_TRUTH_DIR / "ORTI_ground_truth_TF_TG.csv",
+        # "ORTI": GROUND_TRUTH_DIR / "ORTI_ground_truth_TF_TG.csv",
         "RN111": GROUND_TRUTH_DIR / "RN111.tsv",
         "RN112": GROUND_TRUTH_DIR / "RN112.tsv",
         "RN114": GROUND_TRUTH_DIR / "RN114.tsv",
@@ -1012,144 +1250,200 @@ if __name__ == "__main__":
 
     feature_to_plot = "Gradient Attribution"
 
-    selected_experiment_dir = Path(PROJECT_DIR) / "experiments" / "mESC_no_scale_linear" / "no_classifier_head"
-    checkpoint_file = "trained_model.pt"
+    experiments = ["no_classifier_head_192", "no_classifier_head_256", "no_classifier_head_256_180_epoch"]
+    
+    for experiment_dir in experiments:
+        selected_experiment_dir = Path(PROJECT_DIR) / "experiments" / "mESC_no_scale_linear" / experiment_dir
+        checkpoint_file = "trained_model.pt"
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model, test_loader, tg_scaler, tf_scaler = load_model(selected_experiment_dir, checkpoint_file, device)
-    model.eval()
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model, test_loader, tg_scaler, tf_scaler = load_model(selected_experiment_dir, checkpoint_file, device)
+        model.eval()
 
-    # Vocab
-    tf_names, tg_names = load_vocab(selected_experiment_dir)
+        # Vocab
+        tf_names, tg_names = load_vocab(selected_experiment_dir)
 
-    # ---------- LOAD FEATURES ONCE ----------
-    print("Loading feature files (once)")
-    base_feature_dict = {
-        "TF-TG Embedding Similarity": load_tf_tg_embedding_similarity(selected_experiment_dir, tf_names, tg_names),
-        "Shortcut attention":         load_shortcut_attention(tf_names, tg_names, model, device, motif_mask=None),
-        "TF Knockout":               load_tf_knockout_scores(selected_experiment_dir, tf_names, tg_names),
-        "Gradient Attribution":       load_gradient_attribution_matrix(selected_experiment_dir, tf_names, tg_names),
-    }
+        # ---------- LOAD FEATURES ONCE ----------
+        print("Loading feature files")
+        base_feature_dict = {
+            "TF Knockout":               load_tf_knockout_scores(selected_experiment_dir, tf_names, tg_names),
+            "Gradient Attribution":       load_gradient_attribution_matrix(selected_experiment_dir, tf_names, tg_names),
+        }
 
-    # ---------- LOAD METHOD GRNs ONCE ----------
-    DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.GRN_BENCHMARKING.MOELLER")
+        # ---------- LOAD METHOD GRNs ONCE ----------
+        DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.GRN_BENCHMARKING.MOELLER/testing_bear_grn/INFERRED.GRNS")
 
-    cell_oracle_path  = DIR / "STATISTICAL_ANALYSIS/INPUT/E7.5_rep1/CellOracle/filtered_L2_E7.5_rep1_out_E7.5_rep1_final_GRN.csv"
-    directnet_path    = DIR / "STATISTICAL_ANALYSIS/INPUT/E7.5_rep1/DIRECTNET/E7.5_rep1_all_cells_Network_links.csv"
-    figr_path         = DIR / "STATISTICAL_ANALYSIS/INPUT/E7.5_rep1/FigR/E7.5_rep1_all_cells_filtered_network.csv"
-    granie_path       = DIR / "STATISTICAL_ANALYSIS/INPUT/E7.5_rep1/GRaNIE/GRN_connections_filtered_sorted_scE7.5_rep1_all_cells_selected_uniq.csv"
-    linger_path       = DIR / "STATISTICAL_ANALYSIS/INPUT/E7.5_rep1/LINGER/cell_type_TF_gene.csv"
-    pando_path        = DIR / "STATISTICAL_ANALYSIS/INPUT/E7.5_rep1/Pando/E7.5_rep1_all_cells_raw_network.csv"
-    scenic_plus_path  = DIR / "STATISTICAL_ANALYSIS/INPUT/E7.5_rep1/SCENIC+/scenic_plus_inferred_grn_mESC_filtered_L2_E7.5_rep1.csv"
-    tripod_path       = DIR / "STATISTICAL_ANALYSIS/INPUT/E7.5_rep1/TRIPOD/gene_TF_highest_abs_coef.csv"
+        samples = ["E7.5_rep1", "E7.5_rep2", "E8.5_rep1", "E8.5_rep2"]
 
-    base_method_dict = {
-        "Cell Oracle": pd.read_csv(cell_oracle_path, header=0, index_col=0),
-        "FigR":        pd.read_csv(figr_path,        header=0, index_col=0),
-        "Linger":      pd.read_csv(linger_path,      header=0, index_col=0),
-        "GRaNIE":      pd.read_csv(granie_path,      header=0, index_col=0),
-        "Pando":       pd.read_csv(pando_path,       header=0, index_col=0),
-        "SCENIC+":     pd.read_csv(scenic_plus_path, header=0, index_col=0),
-        "Tripod":      pd.read_csv(tripod_path,      header=0, index_col=0),
-    }
-
-    all_method_results = []
-    for i, (gt_name, ground_truth_file) in enumerate(ground_truth_file_dict.items(), start=1):
-        print(f"\n\nEvaluating Features Against {gt_name} ({i}/{len(ground_truth_file_dict)})")
-
-        gt_analysis_dir = selected_experiment_dir / f"{gt_name}_analysis"
-        os.makedirs(gt_analysis_dir, exist_ok=True)
-
-        # --- Ground truth & sets ---
-        ground_truth_df = load_ground_truth(ground_truth_file)
-
-        chip_valid = ground_truth_df[
-            ground_truth_df["Source"].isin(tf_names)
-            & ground_truth_df["Target"].isin(tg_names)
-        ]
-        gt_edges = set(zip(chip_valid["Source"], chip_valid["Target"]))
-        gt_tfs   = set(chip_valid["Source"])
-        gt_tgs   = set(chip_valid["Target"])
-
-        # --- Make fresh copies for this GT ---
-        feature_dict = {name: df.copy() for name, df in base_feature_dict.items()}
-        method_dict  = {name: df.copy() for name, df in base_method_dict.items()}
-
-        # --- Filter + label features ---
-        print("  - Filtering feature dataframes to ground truth and creating label column")
-        for name, df in feature_dict.items():
-            filtered = filter_df_to_gene_set(df, gt_tfs, gt_tgs)
-            feature_dict[name] = label_edges(filtered, gt_edges)
-
-        all_feature_fig = all_feature_auroc_auprc(feature_dict)
-        all_feature_fig.savefig(gt_analysis_dir / f"all_feature_{gt_name}_auroc_auprc.png", dpi=300)
-
-        # --- Filter + label methods ---
-        print("  - Filtering inference method dataframes to ground truth and creating label column")
-        for name, df in method_dict.items():
-            filtered = filter_df_to_gene_set(df, gt_tfs, gt_tgs)
-            method_dict[name] = label_edges(filtered, gt_edges)
-
-        # --- Plot with each feature substituted in ---
-        print("  - Plotting all method auroc and auprc")
-        for feature_name, feature_df in feature_dict.items():
-            selected_method_dict = method_dict.copy()
-            selected_method_dict[feature_name] = feature_df
-
-            print(f"    - Using {feature_name}")
-            fig, res_list = plot_all_method_auroc_auprc(selected_method_dict, gt_name, target_method=feature_name)
+        sample_method_dict = {}
+        for sample_name in samples:
             
-            for r in res_list:
-                r["gt_name"] = gt_name
-            
-            # collect results across GTs
-            all_method_results.extend(res_list)
+            cell_oracle_path  = DIR / f"{sample_name}/CellOracle/filtered_L2_{sample_name}_out_E7.5_rep1_final_GRN.csv"
+            directnet_path    = DIR / f"{sample_name}/DIRECTNET/{sample_name}_all_cells_Network_links.csv"
+            figr_path         = DIR / f"{sample_name}/FigR/{sample_name}_all_cells_filtered_network.csv"
+            granie_path       = DIR / f"{sample_name}/GRaNIE/GRN_connections_filtered_sorted_sc{sample_name}_all_cells_selected_uniq.csv"
+            linger_path       = DIR / f"{sample_name}/LINGER/filtered_L2_{sample_name}.csv"
+            pando_path        = DIR / f"{sample_name}/Pando/{sample_name}_all_cells_raw_network.csv"
+            scenic_plus_path  = DIR / f"{sample_name}/SCENIC+/scenic_plus_inferred_grn_mESC_filtered_L2_{sample_name}.tsv"
+            tripod_path       = DIR / f"{sample_name}/TRIPOD/gene_TF_highest_abs_coef.csv"
 
-            feature_name_safe = feature_name.replace(" ", "_").lower()
-            fig.savefig(
-                gt_analysis_dir / f"all_method_{gt_name}_{feature_name_safe}_auroc_auprc.png",
+            method_info = {
+                "CellOracle": {"path": cell_oracle_path, "tf_col": "source",    "target_col": "target",    "score_col": "coef_mean"},
+                "SCENIC+":    {"path": scenic_plus_path, "tf_col": "Source",    "target_col": "Target",    "score_col": "Score"},
+                "Pando":      {"path": pando_path,       "tf_col": "tf",        "target_col": "target",    "score_col": "estimate"},
+                "LINGER":     {"path": linger_path,      "tf_col": "Source",    "target_col": "Target",    "score_col": "Score"},
+                "FigR":       {"path": figr_path,        "tf_col": "Motif",     "target_col": "DORC",      "score_col": "Score"},
+                "TRIPOD":     {"path": tripod_path,      "tf_col": "TF",        "target_col": "gene",      "score_col": "abs_coef"},
+                "GRaNIE":     {"path": granie_path,      "tf_col": "TF.name",   "target_col": "gene.name", "score_col": "TF_gene.r"},
+            }
+            
+            standardized_method_dict = {}
+
+            for method_name, info in method_info.items():
+                df_std = load_and_standardize_method(method_name, info)
+                standardized_method_dict[method_name] = df_std
+            
+            sample_method_dict[sample_name] = standardized_method_dict  
+
+        # ----- RUN ANALYSIS ON ALL METHODS FOR ALL GROUND TRUTHS -----
+        feature_names = list(base_feature_dict.keys())  # e.g. ["TF Knockout", "Gradient Attribution", ...]
+
+        all_method_results = []
+
+        for i, (gt_name, ground_truth_file) in enumerate(ground_truth_file_dict.items(), start=1):
+            print(f"\n\nEvaluating Features and Methods Against {gt_name} ({i}/{len(ground_truth_file_dict)})")
+
+            gt_analysis_dir = selected_experiment_dir / f"{gt_name}_analysis"
+            os.makedirs(gt_analysis_dir, exist_ok=True)
+
+            # --- Ground truth & sets ---
+            ground_truth_df = load_ground_truth(ground_truth_file)
+
+            chip_valid = ground_truth_df[
+                ground_truth_df["Source"].isin(tf_names)
+                & ground_truth_df["Target"].isin(tg_names)
+            ]
+            gt_edges = set(zip(chip_valid["Source"], chip_valid["Target"]))
+            gt_tfs   = set(chip_valid["Source"])
+            gt_tgs   = set(chip_valid["Target"])
+
+            # =========================================================
+            # 1) FEATURES: filter + label ONCE per GT
+            # =========================================================
+            print("  - Filtering feature dataframes to ground truth and creating label column (once per GT)")
+            feature_dict = {}
+            for name, df in base_feature_dict.items():
+                filtered = filter_df_to_gene_set(df.copy(), gt_tfs, gt_tgs)
+                feature_dict[name] = label_edges(filtered, gt_edges)
+
+            # (a) Plot ALL features vs this GT (your existing function)
+            feat_fig = all_feature_auroc_auprc(feature_dict)
+            feat_fig.savefig(gt_analysis_dir / f"all_feature_{gt_name}_auroc_auprc.png", dpi=300)
+
+            # (b) Record feature metrics ONCE per GT
+            for name, df in feature_dict.items():
+                res = compute_curves(df, score_col="Score", name=name, balance=True)
+                if res is None:
+                    continue
+                res["gt_name"] = gt_name
+                res["sample"] = "FEATURES_ONLY"
+                all_method_results.append(res)
+
+            # =========================================================
+            # 2) METHODS: per sample, re-use same feature_dict for plotting only
+            # =========================================================
+            for sample_name, method_dict_base in sample_method_dict.items():
+                print(f"  - Evaluating methods for sample {sample_name}")
+
+                sample_analysis_dir = gt_analysis_dir / sample_name
+                os.makedirs(sample_analysis_dir, exist_ok=True)
+
+                # Filter + label methods for this GT and sample
+                print("    - Filtering inference method dataframes to ground truth and creating label column")
+                method_dict = {}
+                for name, df in method_dict_base.items():
+                    filtered = filter_df_to_gene_set(df.copy(), gt_tfs, gt_tgs)
+                    method_dict[name] = label_edges(filtered, gt_edges)
+
+                # Combine methods + features for plotting
+                combined_dict = {**method_dict, **feature_dict}
+
+                print("    - Plotting all method AUROC and AUPRC with model features included")
+                
+                for feature_name in feature_dict.keys():
+                    fig, res_list = plot_all_method_auroc_auprc(
+                        combined_dict,
+                        gt_name,
+                        target_method=feature_name
+                    )
+
+                    for r in res_list:
+                        if r["name"] in feature_names:
+                            continue
+                        r["gt_name"] = gt_name
+                        r["sample"] = sample_name
+                        all_method_results.append(r)
+
+                    feature_name_safe = feature_name.replace(" ", "_").lower()
+                    
+                    fig.savefig(
+                        sample_analysis_dir / f"all_method_{feature_name_safe}_{gt_name}_{sample_name}_auroc_auprc.png",
+                        dpi=300,
+                    )
+
+            print("  Done with", gt_name)
+
+        
+        if all_method_results:
+            df_results = pd.DataFrame(all_method_results)
+            # df_results now has:
+            #  - one row per (feature, gt_name) from FEATURES_ONLY
+            #  - one row per (method, gt_name, sample) from each sample
+
+            method_rank_auroc = (
+                df_results.groupby("name")
+                .agg(
+                    mean_auroc=("auroc", "mean"),
+                    std_auroc=("auroc", "std"),
+                    mean_auprc=("auprc", "mean"),
+                    std_auprc=("auprc", "std"),
+                    n_gt=("gt_name", "nunique"),
+                )
+                .sort_values("mean_auroc", ascending=False)
+            )
+
+            print("\n=== Method ranking by mean AUROC across all ground truths and samples ===")
+            print(method_rank_auroc)
+
+            method_rank_auroc.to_csv(
+                selected_experiment_dir / "method_ranking_by_auroc_pooled.csv"
+            )
+
+            per_gt_rank = (
+                df_results
+                .sort_values(["gt_name", "auroc"], ascending=[True, False])
+                [["gt_name", "sample", "name", "auroc", "auprc"]]
+            )
+
+            all_auroc_boxplots = plot_all_results_auroc_boxplot(per_gt_rank)
+            all_auprc_boxplots = plot_all_results_auprc_boxplot(per_gt_rank)
+
+            all_auroc_boxplots.savefig(
+                selected_experiment_dir / "all_results_auroc_boxplot_pooled.png",
                 dpi=300,
             )
-
-        print("  Done")
-    
-    if all_method_results:
-        df_results = pd.DataFrame(all_method_results)
-        # we should have columns: name, auroc, auprc, gt_name, fpr, tpr, prec, rec
-
-        # Mean AUROC per method across GTs
-        method_rank_auroc = (
-            df_results.groupby("name")
-            .agg(
-                mean_auroc=("auroc", "mean"),
-                std_auroc=("auroc", "std"),
-                mean_auprc=("auprc", "mean"),
-                std_auprc=("auprc", "std"),
-                n_gt=("gt_name", "nunique"),
+            all_auprc_boxplots.savefig(
+                selected_experiment_dir / "all_results_auprc_boxplot_pooled.png",
+                dpi=300,
             )
-            .sort_values("mean_auroc", ascending=False)
-        )
+            
+            curve_out_dir = selected_experiment_dir / "curve_variability_plots"
+            plot_method_curve_variability(df_results, curve_out_dir)
 
-        print("\n=== Method ranking by mean AUROC across ground truths ===")
-        print(method_rank_auroc)
+            per_gt_rank.to_csv(
+                selected_experiment_dir / "per_gt_method_aucs_pooled.csv",
+                index=False,
+            )
+        else:
+            print("No method results collected — check filtering/labeling.")
 
-        # Save to CSV if you like
-        method_rank_auroc.to_csv(selected_experiment_dir / "method_ranking_by_auroc.csv")
-
-        # Example 2: you could also look at per-GT rankings:
-        per_gt_rank = (
-            df_results
-            .sort_values(["gt_name", "auroc"], ascending=[True, False])
-            [["gt_name", "name", "auroc", "auprc"]]
-        )
-        
-        # Generate the ranking of mean AUROC and AUPRC values for all methods across all ground truths
-        all_auroc_boxplots = plot_all_results_auroc_boxplot(per_gt_rank)
-        all_auprc_boxplots = plot_all_results_auprc_boxplot(per_gt_rank)
-        
-        all_auroc_boxplots.savefig(selected_experiment_dir / "all_results_auroc_boxplot.png", dpi=300)
-        all_auprc_boxplots.savefig(selected_experiment_dir / "all_results_auprc_boxplot.png", dpi=300)
-        
-        per_gt_rank.to_csv(selected_experiment_dir / "per_gt_method_aucs.csv", index=False)
-    else:
-        print("No method results collected — check filtering/labeling.")

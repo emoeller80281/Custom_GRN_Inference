@@ -40,6 +40,7 @@ from multiomic_transformer.datasets.dataset import (
 from multiomic_transformer.models.model import MultiomicTransformer
 from multiomic_transformer.utils.files import unique_path
 from multiomic_transformer.utils import ewc_utils, plotting
+from multiomic_transformer.scripts import gradient_attribution, tf_knockout
 
 warnings.filterwarnings("ignore", message="No device id is provided via `init_process_group`")
 
@@ -926,10 +927,6 @@ class Trainer:
                         pos_to_neg_ratio=1.0,
                         restrict_to_chip_tfs=True,
                     )
-                    
-
-                    logging.info(f"Balanced AUROC (ChIP TFs, cosine) @ epoch {epoch+1}: {auroc_bal:.4f}")
-
 
                 if self.gpu_id == 0:
                     lr = self.optimizer.param_groups[0]['lr']
@@ -953,8 +950,7 @@ class Trainer:
                         "R2_s": r2_s,
                         "Train Edge Loss": avg_train_edge_loss,
                         "LR": lr,
-                        "Time": round(epoch_dur_sec, 0),
-                        "AUROC": auroc_bal
+                        "Time": round(epoch_dur_sec, 0)
                     }
                     history.append(epoch_log)
 
@@ -1037,7 +1033,7 @@ class Trainer:
             fieldnames = history.keys()
         else:
             fieldnames = ["Epoch", "Train Total Loss", "Train MSE",
-                    "Val MSE", "R2_u", "R2_s", "Train Edge Loss", "LR", "Time", "AUROC"]
+                    "Val MSE", "R2_u", "R2_s", "Train Edge Loss", "LR", "Time"]
         log_path = os.path.join(path, "training_log.csv")
 
         file_exists = os.path.isfile(log_path)
@@ -1120,6 +1116,7 @@ def load_train_objs(run_cfg):
         max_windows_per_chrom=SUBSAMPLE_MAX_WINDOWS_PER_CHROM,
         max_cells=SUBSAMPLE_MAX_CELLS,
         subset_seed=SUBSAMPLE_SEED,
+        allowed_samples=["E7.5_REP1"]
     )
 
     tf_vocab_size = len(dataset.tf_name2id_sub)
@@ -1811,6 +1808,51 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
 
             if rank == 0:
                 logging.info("\nIterations complete")
+                
+        state = {
+            "epoch": TOTAL_EPOCHS - 1,
+            "model_state_dict": model_for_eval.state_dict(),
+            "optimizer_state_dict": trainer.optimizer.state_dict(),
+            "scheduler_state_dict": trainer.scheduler.state_dict(),
+            "best_val_loss": trainer.best_val_loss,
+            "tf_scaler_mean": trainer.tf_scaler.mean,
+            "tf_scaler_std": trainer.tf_scaler.std,
+            "tg_scaler_mean": trainer.tg_scaler.mean,
+            "tg_scaler_std": trainer.tg_scaler.std,
+        }
+                
+        # ----- Compute Gradient Attribution and TF Knockout -----
+        gradient_attribution.run_gradient_attribution(
+            training_output_dir,
+            model_for_eval,
+            test_loader,
+            tg_scaler=trainer.tg_scaler,
+            tf_scaler=trainer.tf_scaler,
+            state=state,
+            device=rank_device,
+            use_amp=True,
+            rank=rank,
+            world_size=world_size,
+            distributed=torch.distributed.is_initialized(),
+            max_batches=None,
+            use_dataloader=True,
+        )
+        
+        tf_knockout.run_tf_knockout(
+            training_output_dir,
+            model_for_eval,
+            test_loader,
+            tg_scaler=trainer.tg_scaler,
+            tf_scaler=trainer.tf_scaler,
+            state=state,
+            device=rank_device,
+            use_amp=True,
+            rank=rank,
+            world_size=world_size,
+            distributed=torch.distributed.is_initialized(),
+            max_batches=None,
+            use_dataloader=True,
+        )
     
     finally:
         if dist.is_initialized():

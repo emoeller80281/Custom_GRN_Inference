@@ -1,5 +1,5 @@
 #!/bin/bash -l
-#SBATCH --job-name=tf_ablation
+#SBATCH --job-name=tf_ablation_multigpu
 #SBATCH --output=LOGS/transformer_logs/04_testing/%x_%A_%a.log
 #SBATCH --error=LOGS/transformer_logs/04_testing/%x_%A_%a.err
 #SBATCH --time=12:00:00
@@ -33,7 +33,7 @@ export KMP_AFFINITY=granularity=fine,compact,1,0
 # ------------------------------------------------------------
 # Run classifier for this chromosome
 # ------------------------------------------------------------
-SELECTED_EXPERIMENT_DIR=/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC_no_scale_linear/no_classifier_head_256
+SELECTED_EXPERIMENT_DIR=/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC_no_scale_linear/no_classifier_head_256_180_epoch
 
 torchrun --standalone --nnodes=1 --nproc_per_node=3 ./dev/tf_ablation_multigpu.py \
     --selected_experiment_dir "$SELECTED_EXPERIMENT_DIR"
