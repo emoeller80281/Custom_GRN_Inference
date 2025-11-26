@@ -50,7 +50,7 @@ def compute_fisher_diag(model, loader, device, n_batches=50, loss_fn="mse"):
 
         model.zero_grad(set_to_none=True)
 
-        preds, _ = model(atac_wins, tf_norm, tf_ids=tf_ids, tg_ids=tg_ids, bias=bias)
+        preds, _, _, _ = model(atac_wins, tf_norm, tf_ids=tf_ids, tg_ids=tg_ids, bias=bias)
         
         if loss_fn == "mse":
             loss = F.mse_loss(preds, tg_true)

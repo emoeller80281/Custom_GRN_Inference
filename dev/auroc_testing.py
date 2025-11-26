@@ -19,6 +19,7 @@ from tqdm import tqdm
 from sklearn.metrics import r2_score
 import logging
 import matplotlib.pyplot as plt
+import seaborn as sns
 
 import sys
 PROJECT_DIR = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
@@ -124,15 +125,18 @@ def load_model(selected_experiment_dir, checkpoint_file, device):
         use_bias=use_dist_bias,
         use_shortcut=use_shortcut,
         use_motif_mask=use_motif_mask,
-        use_edge_head=True,
-        edge_extra_dim=0,
-        edge_hidden_dim=128,
     )
 
     if isinstance(state, dict) and "model_state_dict" in state:
-        model.load_state_dict(state["model_state_dict"])
+        missing, unexpected = model.load_state_dict(
+            state["model_state_dict"], strict=False
+        )
+        print("Missing keys:", missing)
+        print("Unexpected keys:", unexpected)
     else:
-        model.load_state_dict(state)
+        missing, unexpected = model.load_state_dict(state, strict=False)
+        print("Missing keys:", missing)
+        print("Unexpected keys:", unexpected)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device).eval()
@@ -994,7 +998,6 @@ def plot_method_curve_variability(df_results, out_dir):
                 lw=1.5,
                 alpha=0.4,
                 color=color,
-                label=label,
             )
 
         ax[0].plot([0, 1], [0, 1], "k--", lw=1)
@@ -1005,18 +1008,8 @@ def plot_method_curve_variability(df_results, out_dir):
         ax[0].set_ylim(0, 1)
         ax[0].tick_params(axis="both", labelsize=tick_fontsize)
 
-        # Optional: slim legend (may be large if many curves)
-        # You can comment this out if too cluttered
-        ax[0].legend(
-            loc="upper center",
-            bbox_to_anchor=(0.5, -0.18),
-            frameon=False,
-            fontsize=8,
-            ncol=2,
-        )
-
         # ================= PR panel =================
-        for (idx, row), label in zip(df_m.iterrows(), labels):
+        for (idx, row), label in zip(df_m.iterrows()):
             rec = row["rec"]
             prec = row["prec"]
             if rec is None or prec is None:
@@ -1040,14 +1033,6 @@ def plot_method_curve_variability(df_results, out_dir):
         ax[1].set_ylim(0, 1)
         ax[1].tick_params(axis="both", labelsize=tick_fontsize)
 
-        ax[1].legend(
-            loc="upper center",
-            bbox_to_anchor=(0.5, -0.18),
-            frameon=False,
-            fontsize=8,
-            ncol=2,
-        )
-
         plt.tight_layout()
 
         method_safe = (
@@ -1059,6 +1044,61 @@ def plot_method_curve_variability(df_results, out_dir):
         out_path = os.path.join(out_dir, f"{method_safe}_curve_variability.png")
         fig.savefig(out_path, dpi=300)
         plt.close(fig)
+
+def plot_method_gt_heatmap(df_pooled: pd.DataFrame, metric: str = "auroc") -> plt.Figure:
+    """
+    Plot a heatmap of METHOD (rows) x GROUND TRUTH (cols) for AUROC or AUPRC.
+
+    Rows are sorted by the mean metric across all ground truth datasets.
+    """
+    metric = metric.lower()
+    if metric not in ("auroc", "auprc"):
+        raise ValueError(f"metric must be 'auroc' or 'auprc', got {metric}")
+
+    metric_col = metric  # 'auroc' or 'auprc'
+
+    # 1) Order methods by mean metric across all GTs (descending)
+    method_order = (
+        df_pooled.groupby("name")[metric_col]
+        .mean()
+        .sort_values(ascending=False)
+        .index
+        .tolist()
+    )
+
+    # 2) Pivot to METHOD x GT matrix
+    heat_df = (
+        df_pooled
+        .pivot_table(index="name", columns="gt_name", values=metric_col)
+        .loc[method_order]  # apply sorted method order
+    )
+
+    # 3) Plot heatmap
+    fig, ax = plt.subplots(
+        figsize=(
+            1.2 * max(len(heat_df.columns), 3),
+            0.4 * max(len(heat_df.index), 3),
+        )
+    )
+    sns.heatmap(
+        heat_df,
+        annot=True,
+        fmt=".3f",
+        cmap="viridis",
+        vmin=0.3,
+        vmax=0.7,
+        cbar_kws={"label": metric.upper()},
+        ax=ax,
+    )
+
+    ax.set_xlabel("Ground truth dataset")
+    ax.set_ylabel("Method")
+    ax.set_title(
+        f"{metric.upper()} per method × ground truth\n"
+        f"(methods sorted by mean {metric.upper()} across GTs)"
+    )
+    fig.tight_layout()
+    return fig
 
 def tfwise_rank_normalize(df, score_col, new_col):
     """
@@ -1239,7 +1279,7 @@ def load_and_standardize_method(name: str, info: dict) -> pd.DataFrame:
 if __name__ == "__main__":
     ground_truth_file_dict = {
         "ChIP-Atlas": GROUND_TRUTH_DIR / "chip_atlas_tf_peak_tg_dist.csv",
-        "RN111_RN112": GROUND_TRUTH_DIR / "filtered_RN111_and_RN112_mESC_E7.5_rep1.tsv",
+        # "RN111_RN112": GROUND_TRUTH_DIR / "filtered_RN111_and_RN112_mESC_E7.5_rep1.tsv",
         # "ORTI": GROUND_TRUTH_DIR / "ORTI_ground_truth_TF_TG.csv",
         "RN111": GROUND_TRUTH_DIR / "RN111.tsv",
         "RN112": GROUND_TRUTH_DIR / "RN112.tsv",
@@ -1276,6 +1316,7 @@ if __name__ == "__main__":
         samples = ["E7.5_rep1", "E7.5_rep2", "E8.5_rep1", "E8.5_rep2"]
 
         sample_method_dict = {}
+        
         for sample_name in samples:
             
             cell_oracle_path  = DIR / f"{sample_name}/CellOracle/filtered_L2_{sample_name}_out_E7.5_rep1_final_GRN.csv"
@@ -1349,59 +1390,156 @@ if __name__ == "__main__":
                 res["sample"] = "FEATURES_ONLY"
                 all_method_results.append(res)
 
-            # =========================================================
-            # 2) METHODS: per sample, re-use same feature_dict for plotting only
-            # =========================================================
-            for sample_name, method_dict_base in sample_method_dict.items():
-                print(f"  - Evaluating methods for sample {sample_name}")
+            # # =========================================================
+            # # 2) METHODS: per sample, re-use same feature_dict for plotting only
+            # # =========================================================
+            # for sample_name, method_dict_base in sample_method_dict.items():
+            #     print(f"  - Evaluating methods for sample {sample_name}")
 
-                sample_analysis_dir = gt_analysis_dir / sample_name
-                os.makedirs(sample_analysis_dir, exist_ok=True)
+            #     sample_analysis_dir = gt_analysis_dir / sample_name
+            #     os.makedirs(sample_analysis_dir, exist_ok=True)
 
-                # Filter + label methods for this GT and sample
-                print("    - Filtering inference method dataframes to ground truth and creating label column")
-                method_dict = {}
-                for name, df in method_dict_base.items():
-                    filtered = filter_df_to_gene_set(df.copy(), gt_tfs, gt_tgs)
-                    method_dict[name] = label_edges(filtered, gt_edges)
+            #     # Filter + label methods for this GT and sample
+            #     print("    - Filtering inference method dataframes to ground truth and creating label column")
+            #     method_dict = {}
+            #     for name, df in method_dict_base.items():
+            #         filtered = filter_df_to_gene_set(df.copy(), gt_tfs, gt_tgs)
+            #         method_dict[name] = label_edges(filtered, gt_edges)
 
-                # Combine methods + features for plotting
-                combined_dict = {**method_dict, **feature_dict}
+            #     # Combine methods + features for plotting
+            #     combined_dict = {**method_dict, **feature_dict}
 
-                print("    - Plotting all method AUROC and AUPRC with model features included")
+            #     print("    - Plotting all method AUROC and AUPRC with model features included")
                 
-                for feature_name in feature_dict.keys():
-                    fig, res_list = plot_all_method_auroc_auprc(
-                        combined_dict,
-                        gt_name,
-                        target_method=feature_name
-                    )
+            #     for feature_name in feature_dict.keys():
+            #         fig, res_list = plot_all_method_auroc_auprc(
+            #             combined_dict,
+            #             gt_name,
+            #             target_method=feature_name
+            #         )
 
-                    for r in res_list:
-                        if r["name"] in feature_names:
-                            continue
-                        r["gt_name"] = gt_name
-                        r["sample"] = sample_name
-                        all_method_results.append(r)
+            #         for r in res_list:
+            #             if r["name"] in feature_names:
+            #                 continue
+            #             r["gt_name"] = gt_name
+            #             r["sample"] = sample_name
+            #             all_method_results.append(r)
 
-                    feature_name_safe = feature_name.replace(" ", "_").lower()
+            #         feature_name_safe = feature_name.replace(" ", "_").lower()
                     
-                    fig.savefig(
-                        sample_analysis_dir / f"all_method_{feature_name_safe}_{gt_name}_{sample_name}_auroc_auprc.png",
-                        dpi=300,
-                    )
+            #         fig.savefig(
+            #             sample_analysis_dir / f"all_method_{feature_name_safe}_{gt_name}_{sample_name}_auroc_auprc.png",
+            #             dpi=300,
+            #         )
+            # =========================================================
+            # 2) METHODS: pool networks across samples for each method
+            #     -> mean edge score across samples
+            # =========================================================
+            print("  - Pooling methods across samples using mean edge score")
+
+            pooled_method_dict = {}
+
+            # assume all samples have the same method names
+            method_names = list(next(iter(sample_method_dict.values())).keys())
+
+            for method_name in method_names:
+                dfs = []
+                for sample_name, method_dict_base in sample_method_dict.items():
+                    df_sample = method_dict_base[method_name]
+
+                    # filter to GT gene set for THIS ground truth
+                    df_filtered = filter_df_to_gene_set(df_sample.copy(), gt_tfs, gt_tgs)
+                    dfs.append(df_filtered)
+
+                if not dfs:
+                    continue
+
+                # concatenate all samples for this method
+                df_concat = pd.concat(dfs, ignore_index=True)
+
+                # mean edge score across samples for each (Source, Target)
+                df_mean = (
+                    df_concat
+                    .groupby(["Source", "Target"], as_index=False)["Score"]
+                    .mean()
+                )
+
+                # add GT label column
+                pooled_method_dict[method_name] = label_edges(df_mean, gt_edges)
+
+            # Combine pooled methods + features for plotting
+            combined_dict = {**pooled_method_dict, **feature_dict}
+
+            print("    - Plotting pooled-method AUROC and AUPRC with model features included")
+
+            for feature_name in feature_dict.keys():
+                fig, res_list = plot_all_method_auroc_auprc(
+                    combined_dict,
+                    gt_name,
+                    target_method=feature_name,
+                )
+
+                # record metrics: one row per (method, GT), sample="POOLED"
+                for r in res_list:
+                    if r["name"] in feature_names:
+                        # skip feature rows; those are already added above
+                        continue
+                    r["gt_name"] = gt_name
+                    r["sample"] = "POOLED"
+                    all_method_results.append(r)
+
+                feature_name_safe = feature_name.replace(" ", "_").lower()
+                fig.savefig(
+                    gt_analysis_dir
+                    / f"all_method_pooled_{feature_name_safe}_{gt_name}_auroc_auprc.png",
+                    dpi=300,
+                )
+
 
             print("  Done with", gt_name)
 
-        
         if all_method_results:
             df_results = pd.DataFrame(all_method_results)
-            # df_results now has:
-            #  - one row per (feature, gt_name) from FEATURES_ONLY
-            #  - one row per (method, gt_name, sample) from each sample
+            # df_results has:
+            #   - one row per (feature, gt_name) from FEATURES_ONLY
+            #   - one row per (method, gt_name, sample) from each sample
 
+            # ------------------------------------------------------------
+            # 1) Pool across samples: one row per (gt_name, name)
+            #    AUROC/AUPRC = mean across samples
+            # ------------------------------------------------------------
+            df_pooled = (
+                df_results
+                .groupby(["gt_name", "name"], as_index=False)
+                .agg(
+                    auroc=("auroc", "mean"),
+                    auprc=("auprc", "mean"),
+                )
+            )
+
+            # Optional: keep a 'sample' column so existing plotting
+            # functions expecting it keep working
+            df_pooled["sample"] = "POOLED"
+            
+            auroc_heat_fig = plot_method_gt_heatmap(df_pooled, metric="auroc")
+            auroc_heat_fig.savefig(
+                selected_experiment_dir / "method_gt_auroc_heatmap_pooled.png",
+                dpi=300,
+            )
+            plt.close(auroc_heat_fig)
+
+            auprc_heat_fig = plot_method_gt_heatmap(df_pooled, metric="auprc")
+            auprc_heat_fig.savefig(
+                selected_experiment_dir / "method_gt_auprc_heatmap_pooled.png",
+                dpi=300,
+            )
+            plt.close(auprc_heat_fig)
+
+            # ------------------------------------------------------------
+            # 2) Method ranking on pooled AUROCs only
+            # ------------------------------------------------------------
             method_rank_auroc = (
-                df_results.groupby("name")
+                df_pooled.groupby("name")
                 .agg(
                     mean_auroc=("auroc", "mean"),
                     std_auroc=("auroc", "std"),
@@ -1412,19 +1550,23 @@ if __name__ == "__main__":
                 .sort_values("mean_auroc", ascending=False)
             )
 
-            print("\n=== Method ranking by mean AUROC across all ground truths and samples ===")
+            print("\n=== Method ranking by mean AUROC across all ground truths (POOLED samples) ===")
             print(method_rank_auroc)
 
             method_rank_auroc.to_csv(
                 selected_experiment_dir / "method_ranking_by_auroc_pooled.csv"
             )
 
+            # ------------------------------------------------------------
+            # 3) Per-GT table for boxplots (still one row per (gt_name, method))
+            # ------------------------------------------------------------
             per_gt_rank = (
-                df_results
+                df_pooled
                 .sort_values(["gt_name", "auroc"], ascending=[True, False])
                 [["gt_name", "sample", "name", "auroc", "auprc"]]
             )
 
+            # Boxplots now reflect pooled AUROC/AUPRC per method & GT
             all_auroc_boxplots = plot_all_results_auroc_boxplot(per_gt_rank)
             all_auprc_boxplots = plot_all_results_auprc_boxplot(per_gt_rank)
 
@@ -1436,14 +1578,71 @@ if __name__ == "__main__":
                 selected_experiment_dir / "all_results_auprc_boxplot_pooled.png",
                 dpi=300,
             )
-            
-            curve_out_dir = selected_experiment_dir / "curve_variability_plots"
-            plot_method_curve_variability(df_results, curve_out_dir)
 
+            # curve_out_dir = selected_experiment_dir / "curve_variability_plots"
+            # # If this function expects per-sample rows, you probably want to
+            # # pass df_pooled here as well so it's also using pooled metrics:
+            # plot_method_curve_variability(df_results, curve_out_dir)
+
+            # Save pooled per-GT metrics instead of per-sample metrics
             per_gt_rank.to_csv(
                 selected_experiment_dir / "per_gt_method_aucs_pooled.csv",
                 index=False,
             )
         else:
             print("No method results collected — check filtering/labeling.")
+
+        
+        # if all_method_results:
+        #     df_results = pd.DataFrame(all_method_results)
+        #     # df_results now has:
+        #     #  - one row per (feature, gt_name) from FEATURES_ONLY
+        #     #  - one row per (method, gt_name, sample) from each sample
+
+        #     method_rank_auroc = (
+        #         df_results.groupby("name", "sample")
+        #         .agg(
+        #             mean_auroc=("auroc", "mean"),
+        #             std_auroc=("auroc", "std"),
+        #             mean_auprc=("auprc", "mean"),
+        #             std_auprc=("auprc", "std"),
+        #             n_gt=("gt_name", "nunique"),
+        #         )
+        #         .sort_values("mean_auroc", ascending=False)
+        #     )
+
+        #     print("\n=== Method ranking by mean AUROC across all ground truths and samples ===")
+        #     print(method_rank_auroc)
+
+        #     method_rank_auroc.to_csv(
+        #         selected_experiment_dir / "method_ranking_by_auroc_pooled.csv"
+        #     )
+
+        #     per_gt_rank = (
+        #         df_results
+        #         .sort_values(["gt_name", "auroc"], ascending=[True, False])
+        #         [["gt_name", "sample", "name", "auroc", "auprc"]]
+        #     )
+
+        #     all_auroc_boxplots = plot_all_results_auroc_boxplot(per_gt_rank)
+        #     all_auprc_boxplots = plot_all_results_auprc_boxplot(per_gt_rank)
+
+        #     all_auroc_boxplots.savefig(
+        #         selected_experiment_dir / "all_results_auroc_boxplot_pooled.png",
+        #         dpi=300,
+        #     )
+        #     all_auprc_boxplots.savefig(
+        #         selected_experiment_dir / "all_results_auprc_boxplot_pooled.png",
+        #         dpi=300,
+        #     )
+            
+        #     curve_out_dir = selected_experiment_dir / "curve_variability_plots"
+        #     plot_method_curve_variability(df_results, curve_out_dir)
+
+        #     per_gt_rank.to_csv(
+        #         selected_experiment_dir / "per_gt_method_aucs_pooled.csv",
+        #         index=False,
+        #     )
+        # else:
+        #     print("No method results collected — check filtering/labeling.")
 

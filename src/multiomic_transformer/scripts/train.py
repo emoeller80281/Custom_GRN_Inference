@@ -256,7 +256,6 @@ class Trainer:
         )
         
         # Early stopping
-        self.best_val_loss = float("inf")
         self.patience = patience
         self.min_delta = min_delta
         self.patience_counter = 0
@@ -335,7 +334,7 @@ class Trainer:
         # ------------------------------------------------------------------
         with autocast(device_type="cuda"):
             mask_arg = motif_mask if USE_MOTIF_MASK else None
-            preds, attn, shortcut_contrib = self.model(
+            preds, attn, shortcut_contrib, _ = self.model(
                 atac_wins,
                 tf_tensor,
                 tf_ids=tf_ids,
@@ -463,7 +462,7 @@ class Trainer:
 
                 mask_arg = motif_mask if USE_MOTIF_MASK else None
                 
-                preds, _, _ = self.model(
+                preds, _, _, _ = self.model(
                     atac_wins, tf_tensor,
                     tf_ids=tf_ids, tg_ids=tg_ids,
                     bias=bias, motif_mask=mask_arg,
@@ -684,8 +683,7 @@ class Trainer:
         
     def train(self, max_epochs: int, path: str, start_epoch: int = 0):
         best_val_loss = float("inf")
-        best_r2 = float(0)
-        best_auroc = float('-inf')
+        best_r2 = float('-inf')
         patience_counter = 0
         history = []  # store per-epoch logs
         
