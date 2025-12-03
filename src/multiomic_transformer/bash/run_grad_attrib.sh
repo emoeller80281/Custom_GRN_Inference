@@ -28,7 +28,7 @@ export BLIS_NUM_THREADS=8
 export KMP_AFFINITY=granularity=fine,compact,1,0
 
 EXPERIMENT_DIR=/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC_no_scale_linear
-SELECTED_EXPERIMENT_DIR=$EXPERIMENT_DIR/model_training_192_1k_metacells
+SELECTED_EXPERIMENT_DIR=$EXPERIMENT_DIR/model_training_192_10k_metacells
 
 MODEL_FILE=checkpoint_195.pt
 

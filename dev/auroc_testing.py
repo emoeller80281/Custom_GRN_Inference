@@ -1,6 +1,5 @@
 # transformer_testing.py
-from ast import arg
-import os, sys, json
+import os, sys, json, re
 import joblib
 import csv
 import numpy as np
@@ -135,21 +134,21 @@ def load_model(selected_experiment_dir, checkpoint_file, device):
             state["model_state_dict"], strict=False
         )
         if len(missing) > 0:
-            print("Missing keys:", missing)
+            logging.info("Missing keys:", missing)
         if len(unexpected) > 0:
-            print("Unexpected keys:", unexpected)
+            logging.info("Unexpected keys:", unexpected)
     elif isinstance(state, dict) and "model_state_dict" not in state:
         missing, unexpected = model.load_state_dict(state, strict=False)
         if len(missing) > 0:
-            print("Missing keys:", missing)
+            logging.info("Missing keys:", missing)
         if len(unexpected) > 0:
-            print("Unexpected keys:", unexpected)
+            logging.info("Unexpected keys:", unexpected)
     else:
         missing, unexpected = model.load_state_dict(state, strict=False)
         if len(missing) > 0:
-            print("Missing keys:", missing)
+            logging.info("Missing keys:", missing)
         if len(unexpected) > 0:
-            print("Unexpected keys:", unexpected)
+            logging.info("Unexpected keys:", unexpected)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device).eval()
@@ -175,7 +174,7 @@ def balance_pos_neg(df, label_col="is_gt", random_state=0):
     n_pos = len(pos_df)
     n_neg = len(neg_df)
     if n_pos == 0 or n_neg == 0:
-        print("No positives or negatives, skipping balance")
+        logging.info("No positives or negatives, skipping balance")
         return df
 
     if n_neg < n_pos:
@@ -204,7 +203,7 @@ def compute_curves(df, score_col, label_col="is_gt", balance=True, name=""):
         df = balance_pos_neg(df, label_col=label_col, random_state=0)
         
     if len(df) == 0 or df[label_col].nunique() < 2:
-        print(f"Skipping {name}: need at least one positive and one negative, got {df[label_col].value_counts().to_dict()}")
+        logging.info(f"Skipping {name}: need at least one positive and one negative, got {df[label_col].value_counts().to_dict()}")
         return None
     
     y = df[label_col].astype(int).values
@@ -486,7 +485,7 @@ def plot_chiptf_metric_auroc_by_quantile_from_scores(
     score_col : str
         Name of the column in df containing the scores for the method.
     metric_name : str
-        Name to use in printouts and plot titles.
+        Name to use in logging.infoouts and plot titles.
     quantile_step : float
         Step size for quantiles (e.g. 0.02).
     cmap_name : str
@@ -549,7 +548,7 @@ def plot_chiptf_metric_auroc_by_quantile_from_scores(
     best_idx = np.nanargmax(auc_scores)
     best_auc = float(auc_scores[best_idx])
     best_q   = float(qs_used[best_idx])
-    print(f"\t- {metric_name} Best AUROC {best_auc:.4f} above quantile {best_q:.3f}")
+    logging.info(f"\t- {metric_name} Best AUROC {best_auc:.4f} above quantile {best_q:.3f}")
 
     # diagonal baseline
     ax_roc.plot([0, 1], [0, 1], "k--", lw=1, alpha=0.5)
@@ -624,7 +623,7 @@ def plot_all_method_auroc_auprc(method_dict, gt_name, target_method="MultiomicTr
         res = compute_curves(df, score_col="Score", name=name, balance=True)
 
         if res is None:
-            print(f"Skipping {name} on {gt_name} (no usable positives/negatives)")
+            logging.info(f"Skipping {name} on {gt_name} (no usable positives/negatives)")
             continue
 
         results.append(res)
@@ -641,7 +640,7 @@ def plot_all_method_auroc_auprc(method_dict, gt_name, target_method="MultiomicTr
         
     # If nothing usable, bail out gracefully
     if not results or not rand_results:
-        print(f"No valid methods for {gt_name}")
+        logging.info(f"No valid methods for {gt_name}")
         fig, ax = plt.subplots()
         return fig, results
 
@@ -656,7 +655,7 @@ def plot_all_method_auroc_auprc(method_dict, gt_name, target_method="MultiomicTr
     paired = list(zip(results, rand_results))
 
     if not paired:
-        print(f"No valid methods for {gt_name}")
+        logging.info(f"No valid methods for {gt_name}")
         fig, ax = plt.subplots()
         return fig, results  # results will be empty
 
@@ -807,7 +806,7 @@ def plot_all_results_auroc_boxplot(df):
     # --- Boxplot (existing styling) ---
     bp = ax.boxplot(
         data,
-        labels=method_order,
+        tick_labels=method_order,
         patch_artist=True,
         showfliers=False
     )
@@ -893,7 +892,7 @@ def plot_all_results_auprc_boxplot(df):
     # --- Boxplot (existing styling) ---
     bp = ax.boxplot(
         data,
-        labels=method_order,
+        tick_labels=method_order,
         patch_artist=True,
         showfliers=False
     )
@@ -1353,6 +1352,23 @@ def compute_per_tf_metrics(
 
     return pd.DataFrame.from_records(records)
 
+def get_last_checkpoint(exp_dir: Path) -> str | None:
+    """
+    Find the checkpoint_<N>.pt file with the largest N in exp_dir.
+    Returns the filename (not full path), or None if no checkpoints are found.
+    """
+    ckpt_files = list(exp_dir.glob("checkpoint_*.pt"))
+    if not ckpt_files:
+        return None
+
+    def extract_step(path: Path) -> int:
+        m = re.search(r"checkpoint_(\d+)\.pt$", path.name)
+        return int(m.group(1)) if m else -1
+
+    last_ckpt = max(ckpt_files, key=extract_step)
+    logging.info(f"Selected last checkpoint: {last_ckpt.name} from {exp_dir}")
+    return last_ckpt.name
+
 if __name__ == "__main__":
     
     def parse_args():
@@ -1388,6 +1404,15 @@ if __name__ == "__main__":
     for experiment_dir in experiments:
         selected_experiment_dir = Path(PROJECT_DIR) / "experiments" / "mESC_no_scale_linear" / experiment_dir
         checkpoint_file = "trained_model.pt"
+        
+        if not Path(selected_experiment_dir / checkpoint_file).is_file():
+            logging.warning(f"Trained model file {checkpoint_file} in {selected_experiment_dir} does not exist. Trying last checkpoint.")
+            last_checkpoint = get_last_checkpoint(selected_experiment_dir)
+            if last_checkpoint is None:
+                raise ValueError(f"Could not find last checkpoint in {selected_experiment_dir}")
+            else:
+                logging.info(f"Selected last checkpoint: {last_checkpoint}")
+                checkpoint_file = last_checkpoint
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         model, test_loader, tg_scaler, tf_scaler = load_model(selected_experiment_dir, checkpoint_file, device)
@@ -1397,7 +1422,7 @@ if __name__ == "__main__":
         tf_names, tg_names = load_vocab(selected_experiment_dir)
 
         # ---------- LOAD FEATURES ONCE ----------
-        print("Loading feature files")
+        logging.info("Loading feature files")
         base_feature_dict = {
             "TF Knockout":               load_tf_knockout_scores(selected_experiment_dir, tf_names, tg_names),
             "Gradient Attribution":       load_gradient_attribution_matrix(selected_experiment_dir, tf_names, tg_names),
@@ -1445,7 +1470,7 @@ if __name__ == "__main__":
         all_method_results = []
 
         for i, (gt_name, ground_truth_file) in enumerate(ground_truth_file_dict.items(), start=1):
-            print(f"\n\nEvaluating Features and Methods Against {gt_name} ({i}/{len(ground_truth_file_dict)})")
+            logging.info(f"\n\nEvaluating Features and Methods Against {gt_name} ({i}/{len(ground_truth_file_dict)})")
 
             gt_analysis_dir = selected_experiment_dir / f"{gt_name}_analysis"
             os.makedirs(gt_analysis_dir, exist_ok=True)
@@ -1464,7 +1489,7 @@ if __name__ == "__main__":
             # =========================================================
             # 1) FEATURES: filter + label ONCE per GT
             # =========================================================
-            print("  - Filtering feature dataframes to ground truth and creating label column (once per GT)")
+            logging.info("  - Filtering feature dataframes to ground truth and creating label column (once per GT)")
             feature_dict = {}
             for name, df in base_feature_dict.items():
                 filtered = filter_df_to_gene_set(df.copy(), gt_tfs, gt_tgs)
@@ -1483,7 +1508,7 @@ if __name__ == "__main__":
                 res["sample"] = "FEATURES_ONLY"
                 all_method_results.append(res)
 
-            print("  - Pooling methods across samples using mean edge score")
+            logging.info("  - Pooling methods across samples using mean edge score")
 
             pooled_method_dict = {}
 
@@ -1541,7 +1566,7 @@ if __name__ == "__main__":
             # Combine pooled methods + features for plotting
             combined_dict = {**pooled_method_dict, **feature_dict}
 
-            print("    - Plotting pooled-method AUROC and AUPRC with model features included")
+            logging.info("    - Plotting pooled-method AUROC and AUPRC with model features included")
 
             for feature_name in feature_dict.keys():
                 fig, res_list = plot_all_method_auroc_auprc(
@@ -1567,7 +1592,7 @@ if __name__ == "__main__":
                 )
 
 
-            print("  Done with", gt_name)
+            logging.info("  Done with", gt_name)
 
         if all_method_results:
             df_results = pd.DataFrame(all_method_results)
@@ -1621,8 +1646,8 @@ if __name__ == "__main__":
                 .sort_values("mean_auroc", ascending=False)
             )
 
-            print("\n=== Method ranking by mean AUROC across all ground truths (POOLED samples) ===")
-            print(method_rank_auroc)
+            logging.info("\n=== Method ranking by mean AUROC across all ground truths (POOLED samples) ===")
+            logging.info(method_rank_auroc)
 
             method_rank_auroc.to_csv(
                 selected_experiment_dir / "method_ranking_by_auroc_pooled.csv"
@@ -1666,13 +1691,13 @@ if __name__ == "__main__":
                     selected_experiment_dir / "per_tf_auroc_auprc_pooled.csv",
                     index=False,
                 )
-                print(
+                logging.info(
                     "Saved per-TF AUROC/AUPRC metrics to",
                     selected_experiment_dir / "per_tf_auroc_auprc_pooled.csv",
                 )
             else:
-                print("No per-TF metrics computed (likely too few edges per TF).")
+                logging.info("No per-TF metrics computed (likely too few edges per TF).")
 
             
         else:
-            print("No method results collected — check filtering/labeling.")
+            logging.info("No method results collected — check filtering/labeling.")
