@@ -55,8 +55,8 @@ FILTER_TO_NEAREST_GENE = True           # Associate peaks to the nearest gene
 PROMOTER_BP = None #10_000
 
 # ----- MODEL TRAINING PARAMETERS -----
-TOTAL_EPOCHS=200
-BATCH_SIZE=128
+TOTAL_EPOCHS=2_000
+BATCH_SIZE=48
 PATIENCE=15
 CORR_LOSS_WEIGHT=1.0    
 ALLOWED_SAMPLES=None #["E7.5_REP1"]        
@@ -88,8 +88,8 @@ MIN_LR=1e-5                     # Wont drop the learning rate below this, preven
 
 # TF to TG shortcut parameters
 USE_DISTANCE_BIAS = True
-USE_SHORTCUT = True
-USE_MOTIF_MASK = True
+USE_SHORTCUT = False
+USE_MOTIF_MASK = False
 MOTIF_MASK_THRESH = 0.0         # Only allow TF-TG edges with p <= -log10(MOTIF_MASK_THRESH)
 MOTIF_PRIOR_SCALE = 0.0         # Allows adding scaled motif scores on edges that are not filtered
 SHORTCUT_L1 = 0                 # Encourages sparsity between TF-TG edges in the TFtoTG shortcut
@@ -105,7 +105,7 @@ ATTN_BIAS_SCALE = 1.0
 SUBSAMPLE_MAX_TFS = None #400 # 150
 SUBSAMPLE_MAX_TGS = None #2000 #None
 SUBSAMPLE_MAX_WINDOWS_PER_CHROM = None #1000
-SUBSAMPLE_MAX_CELLS= 10_000
+SUBSAMPLE_MAX_CELLS= 5_000
 SUBSAMPLE_SEED = 42
 
 # ----- FINE TUNING ON SINGLE-CELL DATA -----
