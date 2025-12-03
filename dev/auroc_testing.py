@@ -1592,7 +1592,7 @@ if __name__ == "__main__":
                 )
 
 
-            logging.info("  Done with", gt_name)
+            logging.info(f"  Done with {gt_name}")
 
         if all_method_results:
             df_results = pd.DataFrame(all_method_results)

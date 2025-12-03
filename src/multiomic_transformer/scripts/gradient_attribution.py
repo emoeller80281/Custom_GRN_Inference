@@ -65,7 +65,6 @@ def load_model(selected_experiment_dir, checkpoint_file, device):
     use_dist_bias  = params.get("use_dist_bias", False)
     use_motif_mask = params.get("use_motif_mask", False)
 
-    
     # 1) Load test loader and checkpoint
     test_loader = torch.load(selected_experiment_dir / "test_loader.pt", weights_only=False)
 

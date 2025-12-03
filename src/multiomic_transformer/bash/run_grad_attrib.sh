@@ -32,7 +32,7 @@ SELECTED_EXPERIMENT_DIR=$EXPERIMENT_DIR/model_training_192_10k_metacells
 
 MODEL_FILE=checkpoint_195.pt
 
-torchrun --standalone --nnodes=1 --nproc_per_node=4 ./src/multiomic_transformer/scripts/gradient_attribution.py \
+torchrun --standalone --nnodes=1 --nproc_per_node=4 ./src/multiomic_transformer/scripts/gradient_attribution_attn_only.py \
     --selected_experiment_dir "$SELECTED_EXPERIMENT_DIR" \
     --model_file "$MODEL_FILE" \
     --use_amp

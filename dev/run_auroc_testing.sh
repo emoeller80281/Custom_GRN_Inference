@@ -15,8 +15,8 @@ cd "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
 source .venv/bin/activate
 
 SELECTED_EXPERIMENT_DIR=(
-    "model_training_192_1k_metacells"
-    "model_training_192_5k_metacells"
+    # "model_training_192_1k_metacells"
+    # "model_training_192_5k_metacells"
     "model_training_192_10k_metacells"
     )
 
