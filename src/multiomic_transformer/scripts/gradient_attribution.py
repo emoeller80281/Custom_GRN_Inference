@@ -28,7 +28,6 @@ from multiomic_transformer.models.model import MultiomicTransformer
 from multiomic_transformer.datasets.dataset import MultiChromosomeDataset, SimpleScaler, fit_simple_scalers
 
 def setup_distributed():
-    """Initialize distributed env if launched with torchrun; otherwise run in single-process mode."""
     if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
         rank = int(os.environ["RANK"])
         world_size = int(os.environ["WORLD_SIZE"])
@@ -41,9 +40,15 @@ def setup_distributed():
         distributed = False
 
     if distributed:
+        device = torch.device("cuda", local_rank)
         torch.cuda.set_device(local_rank)
-        dist.init_process_group(backend="nccl", init_method="env://")
+        dist.init_process_group(
+            backend="nccl",
+            init_method="env://",
+            device_id=device,
+        )
     return rank, world_size, local_rank, distributed
+
 
 def load_model(selected_experiment_dir, checkpoint_file, device):
     params_path = selected_experiment_dir / "run_parameters.json"
@@ -118,11 +123,13 @@ def run_gradient_attribution(
     distributed,
     max_batches=None,
     use_dataloader=False,
+    local_rank=0,
 ):
 
     T_total = len(state["tf_scaler_mean"])
     G_total = len(state["tg_scaler_mean"])
 
+    # Start a running sum of gradients
     grad_sum = torch.zeros(T_total, G_total, device=device, dtype=torch.float32)
     grad_count = torch.zeros_like(grad_sum)
 
@@ -132,6 +139,7 @@ def run_gradient_attribution(
     if rank == 0:
         iterator = tqdm(test_loader, desc="Gradient attributions", unit="batches", total=max_batches)
 
+    # Iterate through each batch of metacells
     for b_idx, batch in enumerate(iterator):
         if max_batches is not None and b_idx >= max_batches:
             break
@@ -180,17 +188,13 @@ def run_gradient_attribution(
         else:
             tf_ids_flat = tf_ids.reshape(-1)
 
-        # ---------------------------------------------------------------------
-        # OPTIMIZED: Compute gradients more efficiently
-        # Compute gradient for each TG output separately
-        # ---------------------------------------------------------------------
-        
+        # Compute gradient for each TG output separately        
         for j in range(G_eval):
             # Create gradient output for this specific TG
             grad_output_j = torch.zeros_like(preds_u)
             grad_output_j[:, j] = 1.0
             
-            # CRITICAL: Only retain graph until the last TG
+            # Only retain graph until the last TG
             # This prevents memory accumulation
             retain = (j < G_eval - 1)
             
@@ -214,14 +218,14 @@ def run_gradient_attribution(
             else:
                 raise RuntimeError(f"Unexpected grads shape: {grads.shape}")
             
-            # Flatten [B, T_eval] → [B*T_eval]
+            # Flatten the TF IDs across batches
             grad_flat = grad_abs.reshape(-1)
             tf_ids_flat_dev = tf_ids_flat
             
             # Global TG id
             tg_global = int(tg_ids[j].item())
             
-            # Accumulate on CPU (more memory efficient)
+            # Accumulate the gradients on CPU (more memory efficient)
             col_grad = grad_sum[:, tg_global]
             col_count = grad_count[:, tg_global]
             
@@ -234,7 +238,7 @@ def run_gradient_attribution(
             torch.cuda.empty_cache()
             
     if distributed:
-        dist.barrier()
+        dist.barrier(device_ids=[local_rank])
         dist.all_reduce(grad_sum, op=dist.ReduceOp.SUM)
         dist.all_reduce(grad_count, op=dist.ReduceOp.SUM)
 
@@ -253,6 +257,8 @@ if __name__ == "__main__":
                         help="Path to experiment directory")
     argparser.add_argument("--max_batches", default=None, type=int,
                 help="Maximum number of batches to process (for debugging, defualts to all)")
+    argparser.add_argument("--model_file", default="trained_model.pt", type=str,
+            help="File for model checkpoint (default: trained_model.pt)")
     argparser.add_argument("--use_amp", action="store_true",
                         help="Enable mixed-precision inference (defaults to enabled on CUDA)")
     args = argparser.parse_args()
@@ -277,7 +283,7 @@ if __name__ == "__main__":
 
     model, test_loader, tg_scaler, tf_scaler, state = load_model(
         selected_experiment_dir=selected_experiment_dir,
-        checkpoint_file="trained_model.pt",
+        checkpoint_file=args.model_file,
         device=device
     )
 
@@ -295,4 +301,9 @@ if __name__ == "__main__":
         distributed=distributed,
         max_batches=args.max_batches,
         use_dataloader=False,
+        local_rank=local_rank
     )
+
+    if distributed:
+        dist.barrier(device_ids=[local_rank])
+        dist.destroy_process_group()

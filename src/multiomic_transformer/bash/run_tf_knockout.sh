@@ -1,7 +1,7 @@
 #!/bin/bash -l
-#SBATCH --job-name=tf_ablation_multigpu
-#SBATCH --output=LOGS/transformer_logs/04_testing/%x_%A_%a.log
-#SBATCH --error=LOGS/transformer_logs/04_testing/%x_%A_%a.err
+#SBATCH --job-name=tf_knockout
+#SBATCH --output=LOGS/transformer_logs/04_testing/%x_%j.log
+#SBATCH --error=LOGS/transformer_logs/04_testing/%x_%j.err
 #SBATCH --time=12:00:00
 #SBATCH -p dense
 #SBATCH -N 1
@@ -33,10 +33,15 @@ export KMP_AFFINITY=granularity=fine,compact,1,0
 # ------------------------------------------------------------
 # Run classifier for this chromosome
 # ------------------------------------------------------------
-SELECTED_EXPERIMENT_DIR=/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC_no_scale_linear/model_training_E7.5_rep1
+EXPERIMENT_DIR=/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC_no_scale_linear
+SELECTED_EXPERIMENT_DIR=$EXPERIMENT_DIR/model_training_192_1k_metacells
+
+MODEL_FILE=checkpoint_195.pt
 
 torchrun --standalone --nnodes=1 --nproc_per_node=4 ./src/multiomic_transformer/scripts/tf_knockout.py \
     --selected_experiment_dir "$SELECTED_EXPERIMENT_DIR" \
+    --model_file "$MODEL_FILE" \
     --use_amp
+    
 
 echo "finished successfully!"

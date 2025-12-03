@@ -223,6 +223,8 @@ class Trainer:
         # Loss warmup
         self.corr_sq_warmup_epochs = 3 
         
+        self.best_val_loss = float("-inf")
+        
         self.scaler = GradScaler(init_scale=1024, growth_factor=1.5, backoff_factor=0.5, growth_interval=200)
 
         # Learning rate scheduler
@@ -667,7 +669,6 @@ class Trainer:
 
         
     def train(self, max_epochs: int, path: str, start_epoch: int = 0):
-        best_val_loss = float("inf")
         best_r2 = float("-inf")
         patience_counter = 0
         history = []  # store per-epoch logs
@@ -734,8 +735,8 @@ class Trainer:
                     if epoch > 5: # wait a few epochs before checking
                         improved = False
 
-                        if avg_val_mse_unscaled < best_val_loss - self.min_delta:
-                            best_val_loss = avg_val_mse_unscaled
+                        if avg_val_mse_unscaled < self.best_val_loss - self.min_delta:
+                            self.best_val_loss = avg_val_mse_unscaled
                             improved = True
                         if r2_s > best_r2 + self.min_delta:
                             best_r2 = r2_s
@@ -760,7 +761,7 @@ class Trainer:
                 if stop_tensor.item() == 1:
                     if self.is_main:
                         logging.info("All ranks stopping training.")
-                    raise KeyboardInterrupt()
+                    break
             
             total_train_end_time = time.time()
             

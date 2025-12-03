@@ -55,11 +55,11 @@ FILTER_TO_NEAREST_GENE = True           # Associate peaks to the nearest gene
 PROMOTER_BP = None #10_000
 
 # ----- MODEL TRAINING PARAMETERS -----
-TOTAL_EPOCHS=250
-BATCH_SIZE=16
+TOTAL_EPOCHS=200
+BATCH_SIZE=128
 PATIENCE=15
 CORR_LOSS_WEIGHT=1.0    
-ALLOWED_SAMPLES=["E7.5_REP1"]        
+ALLOWED_SAMPLES=None #["E7.5_REP1"]        
 
 D_MODEL = 192
 NUM_HEADS = 4
@@ -72,7 +72,7 @@ COS_WEIGHT=0.0                  # Weight for cosine contrastive loss contributio
 SAVE_EVERY_N_EPOCHS=5           # Chooses how many epochs to run before saving a checkpoint
 RESUME_CHECKPOINT_PATH=None     #"/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC_no_scale_linear/chr19/model_training_049/checkpoint_120.pt"
 
-GRAD_ACCUM_STEPS=2
+GRAD_ACCUM_STEPS=1
 USE_GRAD_ACCUMULATION=True
 USE_GRAD_CHECKPOINTING=True
 

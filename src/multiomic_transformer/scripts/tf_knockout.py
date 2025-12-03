@@ -1,6 +1,8 @@
 from collections import defaultdict
 # transformer_testing.py
+import dis
 import os, sys, json
+from threading import local
 import joblib
 import numpy as np
 import pandas as pd
@@ -31,7 +33,6 @@ from multiomic_transformer.models.model import MultiomicTransformer
 from multiomic_transformer.datasets.dataset import MultiChromosomeDataset, SimpleScaler, fit_simple_scalers
 
 def setup_distributed():
-    """Initialize distributed env if launched with torchrun; otherwise run in single-process mode."""
     if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
         rank = int(os.environ["RANK"])
         world_size = int(os.environ["WORLD_SIZE"])
@@ -44,8 +45,13 @@ def setup_distributed():
         distributed = False
 
     if distributed:
+        device = torch.device("cuda", local_rank)
         torch.cuda.set_device(local_rank)
-        dist.init_process_group(backend="nccl", init_method="env://")
+        dist.init_process_group(
+            backend="nccl",
+            init_method="env://",
+            device_id=device,
+        )
     return rank, world_size, local_rank, distributed
 
 def load_model(selected_experiment_dir, checkpoint_file, device):
@@ -120,6 +126,7 @@ def run_tf_knockout(
     distributed,
     max_batches=None,
     use_dataloader=False,
+    local_rank=0,
     ):
 
     T_total = len(state["tf_scaler_mean"])   # total TF vocab size
@@ -294,7 +301,7 @@ def run_tf_knockout(
     np.save(rank_count_path, effect_count_np)
 
     if distributed:
-        dist.barrier()  # make sure all ranks finished writing
+        dist.barrier(device_ids=[local_rank])  # make sure all ranks finished writing
 
     # Only rank 0 merges everything
     if rank == 0:
@@ -324,8 +331,10 @@ if __name__ == "__main__":
                         help="Name of the experiment directory (under experiments/mESC_no_scale_linear/)")
     argparser.add_argument("--use_amp", action="store_true",
                         help="Enable mixed-precision inference (defaults to enabled on CUDA)")
+    argparser.add_argument("--model_file", default="trained_model.pt", type=str,
+                        help="File for model checkpoint (default: trained_model.pt)")
     argparser.add_argument("--max_batches", default=None, type=int,
-                    help="Maximum number of batches to process (for debugging, defualts to all)")
+                        help="Maximum number of batches to process (for debugging, defualts to all)")
     args = argparser.parse_args()
 
     selected_experiment_dir = Path(args.selected_experiment_dir)
@@ -348,7 +357,7 @@ if __name__ == "__main__":
     
     model, test_loader, tg_scaler, tf_scaler, state = load_model(
         selected_experiment_dir=selected_experiment_dir,
-        checkpoint_file="trained_model.pt",
+        checkpoint_file=args.model_file,
         device=device
     )
     
@@ -365,5 +374,10 @@ if __name__ == "__main__":
         world_size=world_size, 
         distributed=distributed,
         max_batches=args.max_batches,
-        use_dataloader=False
+        use_dataloader=False,
+        local_rank=local_rank,
         )
+
+    if distributed:
+        dist.barrier(device_ids=[local_rank])
+        dist.destroy_process_group()

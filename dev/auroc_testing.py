@@ -1,10 +1,10 @@
 # transformer_testing.py
+from ast import arg
 import os, sys, json
 import joblib
 import csv
 import numpy as np
 import pandas as pd
-import gseapy as gp
 import torch
 import torch.nn.functional as F
 import random
@@ -13,7 +13,6 @@ from itertools import cycle
 from pathlib import Path
 from sklearn.metrics import roc_auc_score, average_precision_score, precision_recall_curve, roc_curve
 from scipy.stats import rankdata
-from matplotlib.ticker import FuncFormatter, MultipleLocator
 from re import sub
 from tqdm import tqdm
 from sklearn.metrics import r2_score
@@ -21,7 +20,11 @@ import logging
 import matplotlib.pyplot as plt
 import seaborn as sns
 
+import argparse
+
 import sys
+
+from grn_inference.create_homer_peak_file import parse_args
 PROJECT_DIR = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
 SRC_DIR = str(Path(PROJECT_DIR) / "src")
 if SRC_DIR not in sys.path:
@@ -131,12 +134,22 @@ def load_model(selected_experiment_dir, checkpoint_file, device):
         missing, unexpected = model.load_state_dict(
             state["model_state_dict"], strict=False
         )
-        print("Missing keys:", missing)
-        print("Unexpected keys:", unexpected)
+        if len(missing) > 0:
+            print("Missing keys:", missing)
+        if len(unexpected) > 0:
+            print("Unexpected keys:", unexpected)
+    elif isinstance(state, dict) and "model_state_dict" not in state:
+        missing, unexpected = model.load_state_dict(state, strict=False)
+        if len(missing) > 0:
+            print("Missing keys:", missing)
+        if len(unexpected) > 0:
+            print("Unexpected keys:", unexpected)
     else:
         missing, unexpected = model.load_state_dict(state, strict=False)
-        print("Missing keys:", missing)
-        print("Unexpected keys:", unexpected)
+        if len(missing) > 0:
+            print("Missing keys:", missing)
+        if len(unexpected) > 0:
+            print("Unexpected keys:", unexpected)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device).eval()
@@ -1276,7 +1289,85 @@ def load_and_standardize_method(name: str, info: dict) -> pd.DataFrame:
 
     return df
 
+def compute_per_tf_metrics(
+    df,
+    score_col: str = "Score",
+    label_col: str = "is_gt",
+    tf_col: str = "Source",
+    min_edges: int = 10,
+    min_pos: int = 1,
+    balance: bool = True,
+) -> pd.DataFrame:
+    """
+    Compute per-TF AUROC and AUPRC.
+
+    For each TF, we treat its outgoing edges (TF -> all TGs) as a local
+    binary classification problem and compute AUROC/AUPRC for that TF.
+
+    Returns a DataFrame with one row per TF:
+        ['tf', 'auroc', 'auprc', 'n_edges', 'n_pos', 'n_neg']
+    """
+    df = df.dropna(subset=[score_col]).copy()
+
+    records = []
+    for tf, sub in df.groupby(tf_col):
+        n_edges = len(sub)
+        n_pos = int(sub[label_col].sum())
+        n_neg = n_edges - n_pos
+
+        # basic filters to avoid degenerate metrics
+        if n_edges < min_edges:
+            continue
+        if n_pos < min_pos or n_neg == 0:
+            continue
+
+        if balance:
+            sub_bal = balance_pos_neg(sub, label_col=label_col, random_state=0)
+        else:
+            sub_bal = sub
+
+        y = sub_bal[label_col].astype(int).values
+        s = sub_bal[score_col].values
+
+        # need both classes present *after* balancing
+        if len(np.unique(y)) < 2:
+            continue
+
+        try:
+            auroc = roc_auc_score(y, s)
+            auprc = average_precision_score(y, s)
+        except ValueError:
+            # safety net if something degenerate sneaks through
+            continue
+
+        records.append(
+            {
+                "tf": tf,
+                "auroc": float(auroc),
+                "auprc": float(auprc),
+                "n_edges": int(n_edges),
+                "n_pos": int(n_pos),
+                "n_neg": int(n_neg),
+            }
+        )
+
+    return pd.DataFrame.from_records(records)
+
 if __name__ == "__main__":
+    
+    def parse_args():
+        parser = argparse.ArgumentParser()
+        
+        parser.add_argument(
+            "--experiment_dir_list",
+            required=True,
+            nargs="+",
+            help="Path to experiment directory"
+        )
+        return parser.parse_args()
+        
+    args = parse_args()
+    
     ground_truth_file_dict = {
         "ChIP-Atlas": GROUND_TRUTH_DIR / "chip_atlas_tf_peak_tg_dist.csv",
         # "RN111_RN112": GROUND_TRUTH_DIR / "filtered_RN111_and_RN112_mESC_E7.5_rep1.tsv",
@@ -1290,8 +1381,10 @@ if __name__ == "__main__":
 
     feature_to_plot = "Gradient Attribution"
 
-    experiments = ["no_classifier_head_192", "no_classifier_head_256", "no_classifier_head_256_180_epoch"]
-    
+    # experiments = ["no_classifier_head_192", "no_classifier_head_256", "no_classifier_head_256_180_epoch"]
+    # experiments = ["model_training_131_20k_metacells"]
+    experiments = args.experiment_dir_list
+    per_tf_all_results = []
     for experiment_dir in experiments:
         selected_experiment_dir = Path(PROJECT_DIR) / "experiments" / "mESC_no_scale_linear" / experiment_dir
         checkpoint_file = "trained_model.pt"
@@ -1390,51 +1483,6 @@ if __name__ == "__main__":
                 res["sample"] = "FEATURES_ONLY"
                 all_method_results.append(res)
 
-            # # =========================================================
-            # # 2) METHODS: per sample, re-use same feature_dict for plotting only
-            # # =========================================================
-            # for sample_name, method_dict_base in sample_method_dict.items():
-            #     print(f"  - Evaluating methods for sample {sample_name}")
-
-            #     sample_analysis_dir = gt_analysis_dir / sample_name
-            #     os.makedirs(sample_analysis_dir, exist_ok=True)
-
-            #     # Filter + label methods for this GT and sample
-            #     print("    - Filtering inference method dataframes to ground truth and creating label column")
-            #     method_dict = {}
-            #     for name, df in method_dict_base.items():
-            #         filtered = filter_df_to_gene_set(df.copy(), gt_tfs, gt_tgs)
-            #         method_dict[name] = label_edges(filtered, gt_edges)
-
-            #     # Combine methods + features for plotting
-            #     combined_dict = {**method_dict, **feature_dict}
-
-            #     print("    - Plotting all method AUROC and AUPRC with model features included")
-                
-            #     for feature_name in feature_dict.keys():
-            #         fig, res_list = plot_all_method_auroc_auprc(
-            #             combined_dict,
-            #             gt_name,
-            #             target_method=feature_name
-            #         )
-
-            #         for r in res_list:
-            #             if r["name"] in feature_names:
-            #                 continue
-            #             r["gt_name"] = gt_name
-            #             r["sample"] = sample_name
-            #             all_method_results.append(r)
-
-            #         feature_name_safe = feature_name.replace(" ", "_").lower()
-                    
-            #         fig.savefig(
-            #             sample_analysis_dir / f"all_method_{feature_name_safe}_{gt_name}_{sample_name}_auroc_auprc.png",
-            #             dpi=300,
-            #         )
-            # =========================================================
-            # 2) METHODS: pool networks across samples for each method
-            #     -> mean edge score across samples
-            # =========================================================
             print("  - Pooling methods across samples using mean edge score")
 
             pooled_method_dict = {}
@@ -1466,6 +1514,29 @@ if __name__ == "__main__":
 
                 # add GT label column
                 pooled_method_dict[method_name] = label_edges(df_mean, gt_edges)
+                
+            # --------------------------------------------------------
+            # Per-TF metrics for pooled methods (per GT, per method)
+            # --------------------------------------------------------
+            for method_name, df_labeled in pooled_method_dict.items():
+                per_tf_df = compute_per_tf_metrics(
+                    df_labeled,
+                    score_col="Score",
+                    label_col="is_gt",
+                    tf_col="Source",
+                    min_edges=10,
+                    min_pos=1,
+                    balance=True,
+                )
+                if per_tf_df.empty:
+                    continue
+
+                per_tf_df["method"] = method_name
+                per_tf_df["gt_name"] = gt_name
+                per_tf_df["experiment"] = experiment_dir
+
+                per_tf_all_results.append(per_tf_df)
+
 
             # Combine pooled methods + features for plotting
             combined_dict = {**pooled_method_dict, **feature_dict}
@@ -1579,70 +1650,29 @@ if __name__ == "__main__":
                 dpi=300,
             )
 
-            # curve_out_dir = selected_experiment_dir / "curve_variability_plots"
-            # # If this function expects per-sample rows, you probably want to
-            # # pass df_pooled here as well so it's also using pooled metrics:
-            # plot_method_curve_variability(df_results, curve_out_dir)
-
             # Save pooled per-GT metrics instead of per-sample metrics
             per_gt_rank.to_csv(
                 selected_experiment_dir / "per_gt_method_aucs_pooled.csv",
                 index=False,
             )
+                    # existing `if all_method_results:` block ...
+
+            # ------------------------------------------------------------
+            # 4) Save per-TF metrics across all methods & ground truths
+            # ------------------------------------------------------------
+            if per_tf_all_results:
+                per_tf_metrics = pd.concat(per_tf_all_results, ignore_index=True)
+                per_tf_metrics.to_csv(
+                    selected_experiment_dir / "per_tf_auroc_auprc_pooled.csv",
+                    index=False,
+                )
+                print(
+                    "Saved per-TF AUROC/AUPRC metrics to",
+                    selected_experiment_dir / "per_tf_auroc_auprc_pooled.csv",
+                )
+            else:
+                print("No per-TF metrics computed (likely too few edges per TF).")
+
+            
         else:
             print("No method results collected — check filtering/labeling.")
-
-        
-        # if all_method_results:
-        #     df_results = pd.DataFrame(all_method_results)
-        #     # df_results now has:
-        #     #  - one row per (feature, gt_name) from FEATURES_ONLY
-        #     #  - one row per (method, gt_name, sample) from each sample
-
-        #     method_rank_auroc = (
-        #         df_results.groupby("name", "sample")
-        #         .agg(
-        #             mean_auroc=("auroc", "mean"),
-        #             std_auroc=("auroc", "std"),
-        #             mean_auprc=("auprc", "mean"),
-        #             std_auprc=("auprc", "std"),
-        #             n_gt=("gt_name", "nunique"),
-        #         )
-        #         .sort_values("mean_auroc", ascending=False)
-        #     )
-
-        #     print("\n=== Method ranking by mean AUROC across all ground truths and samples ===")
-        #     print(method_rank_auroc)
-
-        #     method_rank_auroc.to_csv(
-        #         selected_experiment_dir / "method_ranking_by_auroc_pooled.csv"
-        #     )
-
-        #     per_gt_rank = (
-        #         df_results
-        #         .sort_values(["gt_name", "auroc"], ascending=[True, False])
-        #         [["gt_name", "sample", "name", "auroc", "auprc"]]
-        #     )
-
-        #     all_auroc_boxplots = plot_all_results_auroc_boxplot(per_gt_rank)
-        #     all_auprc_boxplots = plot_all_results_auprc_boxplot(per_gt_rank)
-
-        #     all_auroc_boxplots.savefig(
-        #         selected_experiment_dir / "all_results_auroc_boxplot_pooled.png",
-        #         dpi=300,
-        #     )
-        #     all_auprc_boxplots.savefig(
-        #         selected_experiment_dir / "all_results_auprc_boxplot_pooled.png",
-        #         dpi=300,
-        #     )
-            
-        #     curve_out_dir = selected_experiment_dir / "curve_variability_plots"
-        #     plot_method_curve_variability(df_results, curve_out_dir)
-
-        #     per_gt_rank.to_csv(
-        #         selected_experiment_dir / "per_gt_method_aucs_pooled.csv",
-        #         index=False,
-        #     )
-        # else:
-        #     print("No method results collected — check filtering/labeling.")
-

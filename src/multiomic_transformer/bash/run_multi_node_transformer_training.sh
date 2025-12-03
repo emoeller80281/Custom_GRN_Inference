@@ -5,7 +5,7 @@
 #SBATCH --time=36:00:00
 #SBATCH -p dense
 #SBATCH -N 2
-#SBATCH --gres=gpu:v100:4
+#SBATCH --gres=gpu:a100:4
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 16
 #SBATCH --mem=128G
@@ -66,9 +66,7 @@ mkdir -p "$LOGDIR"
 JOB=transformer_training
 ID=${SLURM_JOB_ID:-$PPID}
 TS=$(date +%Y%m%d_%H%M%S)
-OUT="$LOGDIR/${JOB}_${ID}.${TS}.log"
-ERR="${OUT%.log}.err"
-GPULOG="$LOGDIR/gpu_usage_${JOB}_${ID}.${TS}.csv"
+GPULOG="$LOGDIR/gpu_usage_${ID}.csv"
 
 # ---------- GPU sampler (runs only on the batch node) ----------
 trap 'pkill -P $$ || true' EXIT
