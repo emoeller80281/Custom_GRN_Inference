@@ -1,5 +1,17 @@
-#!/bin/bash
+#!/bin/bash -l
+#SBATCH --job-name=submit_ga_and_tf_ko
+#SBATCH --output=LOGS/transformer_logs/04_testing/%x_%j.log
+#SBATCH --error=LOGS/transformer_logs/04_testing/%x_%j.err
+#SBATCH --time=12:00:00
+#SBATCH -p compute
+#SBATCH -N 1
+#SBATCH --ntasks-per-node=1
+#SBATCH -c 1
+#SBATCH --mem=8G
+
 set -euo pipefail
+
+cd "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
 
 # ------------------------------------------------------------
 # Define experiment directory
@@ -21,3 +33,16 @@ echo "Submitted TF knockout job: $JOB1"
 # ------------------------------------------------------------
 JOB2=$(sbatch --export="$COMMON_EXPORT" -J grad_attrib src/multiomic_transformer/bash/run_attn_template.sh grad_attrib | awk '{print $4}')
 echo "Submitted gradient attribution job: $JOB2"
+
+# ------------------------------------------------------------
+# Wait for both jobs to finish
+# ------------------------------------------------------------
+wait $JOB1 $JOB2
+
+# ------------------------------------------------------------
+# Compare Grad Attrib and TF knockout results against other methods
+# ------------------------------------------------------------
+JOB3=$(sbatch --export="$COMMON_EXPORT" -J auroc_testing dev/run_auroc_testing.sh)
+echo "Submitted auroc testing job: $JOB3"
+
+echo "All jobs finished successfully!"
