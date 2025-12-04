@@ -122,7 +122,6 @@ def run_gradient_attribution(
     distributed,
     max_batches=None,
     use_dataloader=False,
-    local_rank=0,
 ):
 
     T_total = len(state["tf_scaler_mean"])
@@ -237,7 +236,7 @@ def run_gradient_attribution(
             torch.cuda.empty_cache()
             
     if distributed:
-        dist.barrier(device_ids=[local_rank])
+        dist.barrier()
         dist.all_reduce(grad_sum, op=dist.ReduceOp.SUM)
         dist.all_reduce(grad_count, op=dist.ReduceOp.SUM)
 
@@ -300,9 +299,8 @@ if __name__ == "__main__":
         distributed=distributed,
         max_batches=args.max_batches,
         use_dataloader=False,
-        local_rank=local_rank
     )
 
     if distributed:
-        dist.barrier(device_ids=[local_rank])
+        dist.barrier()
         dist.destroy_process_group()

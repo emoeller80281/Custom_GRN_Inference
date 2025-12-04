@@ -126,7 +126,6 @@ def run_tf_knockout(
     distributed,
     max_batches=None,
     use_dataloader=False,
-    local_rank=0,
     ):
 
     T_total = len(state["tf_scaler_mean"])   # total TF vocab size
@@ -301,7 +300,7 @@ def run_tf_knockout(
     np.save(rank_count_path, effect_count_np)
 
     if distributed:
-        dist.barrier(device_ids=[local_rank])  # make sure all ranks finished writing
+        dist.barrier()  # make sure all ranks finished writing
 
     # Only rank 0 merges everything
     if rank == 0:
@@ -375,9 +374,8 @@ if __name__ == "__main__":
         distributed=distributed,
         max_batches=args.max_batches,
         use_dataloader=False,
-        local_rank=local_rank,
         )
 
     if distributed:
-        dist.barrier(device_ids=[local_rank])
+        dist.barrier()
         dist.destroy_process_group()

@@ -17,7 +17,8 @@ source .venv/bin/activate
 SELECTED_EXPERIMENT_DIR=(
     # "model_training_192_1k_metacells"
     # "model_training_192_5k_metacells"
-    "model_training_192_10k_metacells"
+    # "model_training_192_10k_metacells"
+    "model_training_192_50k_metacells"
     )
 
 poetry run python ./dev/auroc_testing.py \
