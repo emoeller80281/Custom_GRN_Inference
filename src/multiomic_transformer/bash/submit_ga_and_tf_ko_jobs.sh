@@ -17,8 +17,8 @@ cd "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
 # Define experiment directory
 # ------------------------------------------------------------
 EXPERIMENT_DIR=/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC_no_scale_linear
-SELECTED_EXPERIMENT_DIR=$EXPERIMENT_DIR/model_training_192_10k_metacells
-MODEL_FILE=checkpoint_195.pt
+SELECTED_EXPERIMENT_DIR=$EXPERIMENT_DIR/model_training_192_5k_metacells_long
+MODEL_FILE=trained_model.pt
 
 COMMON_EXPORT="ALL,EXPERIMENT_DIR=$EXPERIMENT_DIR,SELECTED_EXPERIMENT_DIR=$SELECTED_EXPERIMENT_DIR,MODEL_FILE=$MODEL_FILE"
 
@@ -37,12 +37,10 @@ echo "Submitted gradient attribution job: $JOB2"
 # ------------------------------------------------------------
 # Wait for both jobs to finish
 # ------------------------------------------------------------
-wait $JOB1 $JOB2
-
-# ------------------------------------------------------------
-# Compare Grad Attrib and TF knockout results against other methods
-# ------------------------------------------------------------
-JOB3=$(sbatch --export="$COMMON_EXPORT" -J auroc_testing dev/run_auroc_testing.sh)
-echo "Submitted auroc testing job: $JOB3"
+JOB3=$(sbatch \
+  --dependency=afterok:${JOB1}:${JOB2} \
+  --export="$COMMON_EXPORT" \
+  -J auroc_testing \
+  dev/run_auroc_testing.sh | awk '{print $4}')
 
 echo "All jobs finished successfully!"
