@@ -12,9 +12,6 @@
 
 set -euo pipefail
 
-# ------------------------------------------------------------
-# Arg 1: which script to run
-# ------------------------------------------------------------
 if [[ $# -lt 1 ]]; then
   echo "Usage: $0 <mode>"
   echo "  mode = tf_knockout | grad_attrib"
@@ -38,14 +35,24 @@ case "$MODE" in
 esac
 
 # ------------------------------------------------------------
-# Environment setup
+# Shared experiment paths (come from env, or use defaults)
 # ------------------------------------------------------------
+EXPERIMENT_DIR=${EXPERIMENT_DIR:-/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC_no_scale_linear}
+SELECTED_EXPERIMENT_DIR=${SELECTED_EXPERIMENT_DIR:-$EXPERIMENT_DIR/model_training_192_10k_metacells}
+MODEL_FILE=${MODEL_FILE:-checkpoint_195.pt}
+
 echo "Mode: $MODE"
 echo "Python script: $PY_SCRIPT"
+echo "EXPERIMENT_DIR: $EXPERIMENT_DIR"
+echo "SELECTED_EXPERIMENT_DIR: $SELECTED_EXPERIMENT_DIR"
+echo "MODEL_FILE: $MODEL_FILE"
 echo "Host: $(hostname)"
 echo "CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-unset}"
 echo "SLURM_JOB_ID: ${SLURM_JOB_ID:-unset}"
 
+# ------------------------------------------------------------
+# Environment setup
+# ------------------------------------------------------------
 cd /gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER
 source .venv/bin/activate
 
@@ -56,10 +63,6 @@ export OPENBLAS_NUM_THREADS=8
 export NUMEXPR_NUM_THREADS=8
 export BLIS_NUM_THREADS=8
 export KMP_AFFINITY=granularity=fine,compact,1,0
-
-EXPERIMENT_DIR=/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC_no_scale_linear
-SELECTED_EXPERIMENT_DIR=$EXPERIMENT_DIR/model_training_192_10k_metacells
-MODEL_FILE=checkpoint_195.pt
 
 # ------------------------------------------------------------
 # Run the selected Python script
