@@ -113,7 +113,7 @@ def load_model(selected_experiment_dir, checkpoint_file, device):
     return model, test_loader, tg_scaler, tf_scaler, state
 
 def run_tf_knockout(
-    selected_experiment_dir, 
+    selected_experiment_dir: Path, 
     model, 
     test_loader, 
     tg_scaler,
@@ -322,6 +322,15 @@ def run_tf_knockout(
             selected_experiment_dir / "tf_tg_fullmodel_knockout_count.npy",
             total_effect_count
         )
+        
+        for r in range(world_size):
+            rank_effect_path  = selected_experiment_dir / f"tf_tg_fullmodel_knockout_rank{r}.npy"
+            rank_count_path   = selected_experiment_dir / f"tf_tg_fullmodel_knockout_count_rank{r}.npy"
+
+            if rank_effect_path.exists():
+                rank_effect_path.unlink()
+            if rank_count_path.exists():
+                rank_count_path.unlink()
 
 
 if __name__ == "__main__":
