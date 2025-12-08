@@ -210,9 +210,9 @@ def run_gradient_attribution(
             
             # Aggregate over TF feature dimensions
             if grads.dim() == 3:
-                grad_abs = grads.abs().sum(dim=-1)
+                grad_abs = grads.sum(dim=-1)
             elif grads.dim() == 2:
-                grad_abs = grads.abs()
+                grad_abs = grads
             else:
                 raise RuntimeError(f"Unexpected grads shape: {grads.shape}")
             

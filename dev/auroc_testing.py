@@ -18,12 +18,12 @@ from sklearn.metrics import r2_score
 import logging
 import matplotlib.pyplot as plt
 import seaborn as sns
+from typing import Optional
 
 import argparse
 
 import sys
 
-from grn_inference.create_homer_peak_file import parse_args
 PROJECT_DIR = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
 SRC_DIR = str(Path(PROJECT_DIR) / "src")
 if SRC_DIR not in sys.path:
@@ -134,21 +134,21 @@ def load_model(selected_experiment_dir, checkpoint_file, device):
             state["model_state_dict"], strict=False
         )
         if len(missing) > 0:
-            logging.info("Missing keys:", missing)
+            logging.info(f"Missing keys: {missing}")
         if len(unexpected) > 0:
-            logging.info("Unexpected keys:", unexpected)
+            logging.info(f"Unexpected keys: {unexpected}")
     elif isinstance(state, dict) and "model_state_dict" not in state:
         missing, unexpected = model.load_state_dict(state, strict=False)
         if len(missing) > 0:
-            logging.info("Missing keys:", missing)
+            logging.info(f"Missing keys: {missing}")
         if len(unexpected) > 0:
-            logging.info("Unexpected keys:", unexpected)
+            logging.info(f"Unexpected keys: {unexpected}")
     else:
         missing, unexpected = model.load_state_dict(state, strict=False)
         if len(missing) > 0:
-            logging.info("Missing keys:", missing)
+            logging.info(f"Missing keys: {missing}")
         if len(unexpected) > 0:
-            logging.info("Unexpected keys:", unexpected)
+            logging.info(f"Unexpected keys: {unexpected}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device).eval()
@@ -262,19 +262,6 @@ def filter_df_to_gene_set(df, gt_tfs, gt_tgs):
     df = df.copy()
     mask = df["Source"].isin(gt_tfs) & df["Target"].isin(gt_tgs)
     df = df[mask].reset_index(drop=True)
-    return df
-
-def standardize_method_df(df, tf_col, target_col, score_col):
-    df = df[[tf_col, target_col, score_col]].copy()
-    df.columns = ["Source", "Target", "Score"]
-    df["Score"] = df["Score"].abs()
-    df["Source"] = df["Source"].astype(str).str.upper()
-    df["Target"] = df["Target"].astype(str).str.upper()
-    # aggregate duplicate Source–Target pairs
-    df = (
-        df.groupby(["Source", "Target"], as_index=False)["Score"]
-          .max()
-    )
     return df
 
 def _compute_roc_auc(y_true, scores):
@@ -608,7 +595,7 @@ def plot_chiptf_metric_auroc_by_quantile_from_scores(
 
     return fig_roc, fig_auc, fig_best, best_auc, best_q
 
-def plot_all_method_auroc_auprc(method_dict, gt_name, target_method="MultiomicTransformer"):
+def plot_all_method_auroc_auprc(method_dict, gt_name, target_method="MultiomicTransformer", label_col="is_gt"):
     results = []
     rand_results = []
 
@@ -620,7 +607,7 @@ def plot_all_method_auroc_auprc(method_dict, gt_name, target_method="MultiomicTr
             df["Score"] = df["Score"].abs()
         
         # Compute and plot metrics
-        res = compute_curves(df, score_col="Score", name=name, balance=True)
+        res = compute_curves(df, score_col="Score", name=name, balance=True, label_col=label_col)
 
         if res is None:
             logging.info(f"Skipping {name} on {gt_name} (no usable positives/negatives)")
@@ -633,6 +620,7 @@ def plot_all_method_auroc_auprc(method_dict, gt_name, target_method="MultiomicTr
                 "Score": create_random_distribution(df["Score"])
             }),
             score_col="Score",
+            label_col=label_col,
             name=f"{name} (Randomized Scores)",
             balance=False  # Already balanced
         )
@@ -777,7 +765,7 @@ def plot_all_method_auroc_auprc(method_dict, gt_name, target_method="MultiomicTr
     
     return fig, results
 
-def plot_all_results_auroc_boxplot(df):
+def plot_all_results_auroc_boxplot(df, per_tf=False):
     # 1. Order methods by mean AUROC (highest → lowest)
     method_order = (
         df.groupby("name")["auroc"]
@@ -855,15 +843,19 @@ def plot_all_results_auroc_boxplot(df):
 
     ax.set_xlabel("Method")
     ax.set_ylabel("AUROC across ground truths")
-    ax.set_title("AUROC distribution per method")
-    ax.set_ylim((0.2, 0.8))
+    if per_tf == True:
+        ax.set_title("per-TF AUROC Scores per method")
+        ax.set_ylim((0.0, 1.0))
+    else:
+        ax.set_title("AUROC Scores per method")
+        ax.set_ylim((0.2, 0.8))
 
     plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
     plt.tight_layout()
     
     return fig
 
-def plot_all_results_auprc_boxplot(df):
+def plot_all_results_auprc_boxplot(df, per_tf=False):
     # 1. Order methods by mean AUPRC (highest → lowest)
     method_order = (
         df.groupby("name")["auprc"]
@@ -941,8 +933,12 @@ def plot_all_results_auprc_boxplot(df):
 
     ax.set_xlabel("Method")
     ax.set_ylabel("AUPRC across ground truths")
-    ax.set_title("AUPRC distribution per method")
-    ax.set_ylim((0.2, 0.8))
+    if per_tf == True:
+        ax.set_title("per-TF AUPRC Scores per method")
+        ax.set_ylim((0.0, 1.0))
+    else:
+        ax.set_title("AUPRC Scores per method")
+        ax.set_ylim((0.2, 0.8))
 
     plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
     plt.tight_layout()
@@ -1057,7 +1053,7 @@ def plot_method_curve_variability(df_results, out_dir):
         fig.savefig(out_path, dpi=300)
         plt.close(fig)
 
-def plot_method_gt_heatmap(df_pooled: pd.DataFrame, metric: str = "auroc") -> plt.Figure:
+def plot_method_gt_heatmap(df_pooled: pd.DataFrame, metric: str = "auroc", per_tf: bool = False) -> plt.Figure:
     """
     Plot a heatmap of METHOD (rows) x GROUND TRUTH (cols) for AUROC or AUPRC.
 
@@ -1085,13 +1081,17 @@ def plot_method_gt_heatmap(df_pooled: pd.DataFrame, metric: str = "auroc") -> pl
         .loc[method_order]  # apply sorted method order
     )
 
-    # 3) Plot heatmap
+    # 3) Plot heatmap with better sizing
+    n_methods = len(heat_df.index)
+    n_gts = len(heat_df.columns)
+    
     fig, ax = plt.subplots(
         figsize=(
-            1.2 * max(len(heat_df.columns), 3),
-            0.4 * max(len(heat_df.index), 3),
+            max(n_gts * 1.2, 4),      # Width: 1.5 inches per GT, min 6
+            max(n_methods * 0.4, 3),  # Height: 0.5 inches per method, min 4
         )
     )
+    
     sns.heatmap(
         heat_df,
         annot=True,
@@ -1103,12 +1103,27 @@ def plot_method_gt_heatmap(df_pooled: pd.DataFrame, metric: str = "auroc") -> pl
         ax=ax,
     )
 
-    ax.set_xlabel("Ground truth dataset")
-    ax.set_ylabel("Method")
-    ax.set_title(
-        f"{metric.upper()} per method × ground truth\n"
-        f"(methods sorted by mean {metric.upper()} across GTs)"
-    )
+    ax.set_xlabel("Ground truth dataset", fontsize=11)
+    ax.set_ylabel("Method", fontsize=11)
+    if per_tf == True:
+        ax.set_title(
+            f"Average per-TF {metric.upper()} score × ground truth\n"
+            f"(methods sorted by mean {metric.upper()} across GTs)",
+            fontsize=12,
+            pad=10,
+        )
+    else:
+        ax.set_title(
+            f"Average pooled {metric.upper()} score × ground truth\n"
+            f"(methods sorted by mean {metric.upper()} across GTs)",
+            fontsize=12,
+            pad=10,
+        )
+    
+    # Improve tick label readability
+    plt.xticks(rotation=45, ha='right')
+    plt.yticks(rotation=0)
+    
     fig.tight_layout()
     return fig
 
@@ -1352,7 +1367,7 @@ def compute_per_tf_metrics(
 
     return pd.DataFrame.from_records(records)
 
-def get_last_checkpoint(exp_dir: Path) -> str | None:
+def get_last_checkpoint(exp_dir: Path) -> Optional[str]:
     """
     Find the checkpoint_<N>.pt file with the largest N in exp_dir.
     Returns the filename (not full path), or None if no checkpoints are found.
@@ -1543,7 +1558,9 @@ if __name__ == "__main__":
             # --------------------------------------------------------
             # Per-TF metrics for pooled methods (per GT, per method)
             # --------------------------------------------------------
-            for method_name, df_labeled in pooled_method_dict.items():
+            combined_for_per_tf = {**pooled_method_dict, **feature_dict}
+            
+            for method_name, df_labeled in combined_for_per_tf.items():
                 per_tf_df = compute_per_tf_metrics(
                     df_labeled,
                     score_col="Score",
@@ -1591,7 +1608,6 @@ if __name__ == "__main__":
                     dpi=300,
                 )
 
-
             logging.info(f"  Done with {gt_name}")
 
         if all_method_results:
@@ -1603,7 +1619,7 @@ if __name__ == "__main__":
             # ------------------------------------------------------------
             # 1) Pool across samples: one row per (gt_name, name)
             #    AUROC/AUPRC = mean across samples
-            # ------------------------------------------------------------
+            # ------------------------------------------------------------            
             df_pooled = (
                 df_results
                 .groupby(["gt_name", "name"], as_index=False)
@@ -1617,14 +1633,14 @@ if __name__ == "__main__":
             # functions expecting it keep working
             df_pooled["sample"] = "POOLED"
             
-            auroc_heat_fig = plot_method_gt_heatmap(df_pooled, metric="auroc")
+            auroc_heat_fig = plot_method_gt_heatmap(df_results, metric="auroc")
             auroc_heat_fig.savefig(
                 selected_experiment_dir / "method_gt_auroc_heatmap_pooled.png",
                 dpi=300,
             )
             plt.close(auroc_heat_fig)
 
-            auprc_heat_fig = plot_method_gt_heatmap(df_pooled, metric="auprc")
+            auprc_heat_fig = plot_method_gt_heatmap(df_results, metric="auprc")
             auprc_heat_fig.savefig(
                 selected_experiment_dir / "method_gt_auprc_heatmap_pooled.png",
                 dpi=300,
@@ -1632,9 +1648,9 @@ if __name__ == "__main__":
             plt.close(auprc_heat_fig)
 
             # ------------------------------------------------------------
-            # 2) Method ranking on pooled AUROCs only
+            # 2) Method ranking on pooled AUROCs
             # ------------------------------------------------------------
-            method_rank_auroc = (
+            method_rank_pooled = (
                 df_pooled.groupby("name")
                 .agg(
                     mean_auroc=("auroc", "mean"),
@@ -1646,10 +1662,10 @@ if __name__ == "__main__":
                 .sort_values("mean_auroc", ascending=False)
             )
 
-            logging.info("\n=== Method ranking by mean AUROC across all ground truths (POOLED samples) ===")
-            logging.info(method_rank_auroc)
+            logging.info("\n=== Method ranking by POOLED AUROC (all TFs together) ===")
+            logging.info(method_rank_pooled)
 
-            method_rank_auroc.to_csv(
+            method_rank_pooled.to_csv(
                 selected_experiment_dir / "method_ranking_by_auroc_pooled.csv"
             )
 
@@ -1662,7 +1678,7 @@ if __name__ == "__main__":
                 [["gt_name", "sample", "name", "auroc", "auprc"]]
             )
 
-            # Boxplots now reflect pooled AUROC/AUPRC per method & GT
+            # Boxplots reflect pooled AUROC/AUPRC per method & GT
             all_auroc_boxplots = plot_all_results_auroc_boxplot(per_gt_rank)
             all_auprc_boxplots = plot_all_results_auprc_boxplot(per_gt_rank)
 
@@ -1674,29 +1690,128 @@ if __name__ == "__main__":
                 selected_experiment_dir / "all_results_auprc_boxplot_pooled.png",
                 dpi=300,
             )
+            plt.close(all_auroc_boxplots)
+            plt.close(all_auprc_boxplots)
 
-            # Save pooled per-GT metrics instead of per-sample metrics
-            per_gt_rank.to_csv(
-                selected_experiment_dir / "per_gt_method_aucs_pooled.csv",
-                index=False,
-            )
-                    # existing `if all_method_results:` block ...
 
             # ------------------------------------------------------------
-            # 4) Save per-TF metrics across all methods & ground truths
+            # 4) Per-TF metrics, ranking, and boxplots
             # ------------------------------------------------------------
             if per_tf_all_results:
+                # Concatenate all per-TF results ONCE
                 per_tf_metrics = pd.concat(per_tf_all_results, ignore_index=True)
+                
+                # Save detailed per-TF metrics (one row per TF per method per GT)
                 per_tf_metrics.to_csv(
-                    selected_experiment_dir / "per_tf_auroc_auprc_pooled.csv",
+                    selected_experiment_dir / "per_tf_auroc_auprc_detailed.csv",
                     index=False,
                 )
                 logging.info(
-                    f"Saved per-TF AUROC/AUPRC metrics to {selected_experiment_dir / 'per_tf_auroc_auprc_pooled.csv'}"
+                    f"Saved detailed per-TF metrics ({len(per_tf_metrics)} rows)"
                 )
+                
+                # 4a) Create per-TF method ranking
+                # Average across TFs within each (method, GT)
+                method_gt_avg = (
+                    per_tf_metrics
+                    .groupby(['method', 'gt_name'], as_index=False)
+                    .agg(
+                        auroc=('auroc', 'mean'),
+                        auprc=('auprc', 'mean'),
+                        n_tfs=('tf', 'nunique'),
+                    )
+                )
+                
+                # Then average across GTs for each method
+                method_rank_per_tf = (
+                    method_gt_avg
+                    .groupby('method')
+                    .agg(
+                        mean_auroc=('auroc', 'mean'),
+                        std_auroc=('auroc', 'std'),
+                        mean_auprc=('auprc', 'mean'),
+                        std_auprc=('auprc', 'std'),
+                        n_gt=('gt_name', 'nunique'),
+                    )
+                    .sort_values('mean_auroc', ascending=False)
+                )
+                
+                logging.info("\n=== Method ranking by PER-TF AUROC (averaged across TFs) ===")
+                logging.info(method_rank_per_tf)
+                
+                method_rank_per_tf.to_csv(
+                    selected_experiment_dir / "method_ranking_by_per_tf_auroc.csv"
+                )
+                
+                # 4b) Create per-TF boxplots
+                # Format data for boxplot functions: need ['name', 'auroc', 'auprc']
+                # Use RAW per-TF metrics, not the aggregated ranking
+                per_tf_for_plot = per_tf_metrics[['method', 'auroc', 'auprc']].copy()
+                per_tf_for_plot = per_tf_for_plot.rename(columns={'method': 'name'})
+                
+                logging.info("Creating per-TF AUROC and AUPRC boxplots...")
+                
+                per_tf_auroc_boxplot = plot_all_results_auroc_boxplot(per_tf_for_plot, per_tf=True)
+                per_tf_auprc_boxplot = plot_all_results_auprc_boxplot(per_tf_for_plot, per_tf=True)
+                
+                per_tf_auroc_boxplot.savefig(
+                    selected_experiment_dir / "all_results_auroc_boxplot_per_tf.png",
+                    dpi=300,
+                )
+                per_tf_auprc_boxplot.savefig(
+                    selected_experiment_dir / "all_results_auprc_boxplot_per_tf.png",
+                    dpi=300,
+                )
+                plt.close(per_tf_auroc_boxplot)
+                plt.close(per_tf_auprc_boxplot)
+                    
+                # Save pooled per-GT metrics
+                per_gt_rank.to_csv(
+                    selected_experiment_dir / "per_gt_method_aucs_pooled.csv",
+                    index=False,
+                )
+                
+                # 4a) Create per-TF method ranking
+                method_gt_avg = (
+                    per_tf_metrics
+                    .groupby(['method', 'gt_name'], as_index=False)
+                    .agg(
+                        auroc=('auroc', 'mean'),
+                        auprc=('auprc', 'mean'),
+                        n_tfs=('tf', 'nunique'),
+                    )
+                )
+
+                # For heatmap input, rename 'method' -> 'name'
+                method_gt_avg_for_heatmap = method_gt_avg.rename(columns={'method': 'name'})
+
+                # Per-TF AUROC heatmap
+                auroc_heat_fig = plot_method_gt_heatmap(
+                    method_gt_avg_for_heatmap,
+                    metric="auroc",
+                    per_tf=True,
+                )
+                auroc_heat_fig.savefig(
+                    selected_experiment_dir / "per_tf_auroc_heatmap.png",
+                    dpi=300,
+                )
+                plt.close(auroc_heat_fig)
+
+                # Per-TF AUPRC heatmap
+                auprc_heat_fig = plot_method_gt_heatmap(
+                    method_gt_avg_for_heatmap,
+                    metric="auprc",
+                    per_tf=True,
+                )
+                auprc_heat_fig.savefig(
+                    selected_experiment_dir / "per_tf_auprc_heatmap.png",
+                    dpi=300,
+                )
+                plt.close(auprc_heat_fig)
+                
+                logging.info("Per-TF analysis complete.")
             else:
                 logging.info("No per-TF metrics computed (likely too few edges per TF).")
-
             
         else:
             logging.info("No method results collected — check filtering/labeling.")
