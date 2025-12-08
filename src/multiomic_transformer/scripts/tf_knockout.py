@@ -2,6 +2,7 @@ from collections import defaultdict
 # transformer_testing.py
 import dis
 import os, sys, json
+import time
 from threading import local
 import joblib
 import numpy as np
@@ -132,8 +133,8 @@ def run_tf_knockout(
     G_total = len(state["tg_scaler_mean"])   # total TG vocab size
 
     # Accumulators for TF knockout effect (CPU)
-    effect_sum   = torch.zeros(T_total, G_total, dtype=torch.float64)
-    effect_count = torch.zeros_like(effect_sum)
+    effect_sum   = torch.zeros(T_total, G_total, device=device, dtype=torch.float64)
+    effect_count = torch.zeros_like(effect_sum, device=device)
 
     model.to(device).eval()
 
@@ -277,62 +278,28 @@ def run_tf_knockout(
                 # delta = baseline - knockout (positive: TF supports expression)
                 delta = preds_base_u - preds_ko_u          # [B, G_eval]
                 delta_mean = delta.mean(dim=0)             # [G_eval]
-
-                tf_global = int(tf_ids_cpu[t_pos].item())
-                effect_sum[tf_global, tg_ids_cpu]   += delta_mean.cpu().to(torch.float64)
-                effect_count[tf_global, tg_ids_cpu] += 1
+                                
+                tf_global = int(tf_ids[t_pos].item())
+                effect_sum[tf_global, tg_ids_cpu] += delta_mean
+                effect_count[tf_global, tg_ids] += 1
 
                 # ----------------------------------
                 # 5c) Restore baseline slice *without* cloning
                 # ----------------------------------
                 tf_scaled_work[:, t_pos, :] = tf_scaled_base_3d[:, t_pos, :]
 
-    # Final average TF→TG knockout effect (expression units)
-    # Convert this rank's accumulators to numpy
-    effect_sum_np = effect_sum.numpy()
-    effect_count_np = effect_count.numpy()
-
-    # Save per-rank partial results
-    rank_effect_path  = selected_experiment_dir / f"tf_tg_fullmodel_knockout_rank{rank}.npy"
-    rank_count_path   = selected_experiment_dir / f"tf_tg_fullmodel_knockout_count_rank{rank}.npy"
-
-    np.save(rank_effect_path, effect_sum_np)
-    np.save(rank_count_path, effect_count_np)
 
     if distributed:
-        dist.barrier()  # make sure all ranks finished writing
+        dist.all_reduce(effect_sum,   op=dist.ReduceOp.SUM)
+        dist.all_reduce(effect_count, op=dist.ReduceOp.SUM)
 
-    # Only rank 0 merges everything
     if rank == 0:
-        total_effect_sum = effect_sum_np.copy()
-        total_effect_count = effect_count_np.copy()
-
-        for r in range(1, world_size):
-            es = np.load(selected_experiment_dir / f"tf_tg_fullmodel_knockout_rank{r}.npy")
-            ec = np.load(selected_experiment_dir / f"tf_tg_fullmodel_knockout_count_rank{r}.npy")
-            total_effect_sum   += es
-            total_effect_count += ec
-
-        tf_tg_effect = total_effect_sum / (total_effect_count + 1e-12)
-        tf_tg_effect_np = tf_tg_effect
-
-        print("TF–TG full-model knockout effect matrix shape:", tf_tg_effect_np.shape)
+        tf_tg_effect_np = (effect_sum / (effect_count + 1e-12)).cpu().numpy()
         np.save(selected_experiment_dir / "tf_tg_fullmodel_knockout.npy", tf_tg_effect_np)
-        np.save(
-            selected_experiment_dir / "tf_tg_fullmodel_knockout_count.npy",
-            total_effect_count
-        )
+        np.save(selected_experiment_dir / "tf_tg_fullmodel_knockout_count.npy",
+                effect_count.cpu().numpy())
+        logging.info("Finished TF Knockout calculation!")
         
-        for r in range(world_size):
-            rank_effect_path  = selected_experiment_dir / f"tf_tg_fullmodel_knockout_rank{r}.npy"
-            rank_count_path   = selected_experiment_dir / f"tf_tg_fullmodel_knockout_count_rank{r}.npy"
-
-            if rank_effect_path.exists():
-                rank_effect_path.unlink()
-            if rank_count_path.exists():
-                rank_count_path.unlink()
-
-
 if __name__ == "__main__":
     argparser = argparse.ArgumentParser(description="Compute gradient-based TF->TG attributions")
     argparser.add_argument("--selected_experiment_dir", type=str, required=True,

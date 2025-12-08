@@ -1692,8 +1692,7 @@ if __name__ == "__main__":
                     index=False,
                 )
                 logging.info(
-                    "Saved per-TF AUROC/AUPRC metrics to",
-                    selected_experiment_dir / "per_tf_auroc_auprc_pooled.csv",
+                    f"Saved per-TF AUROC/AUPRC metrics to {selected_experiment_dir / 'per_tf_auroc_auprc_pooled.csv'}"
                 )
             else:
                 logging.info("No per-TF metrics computed (likely too few edges per TF).")
