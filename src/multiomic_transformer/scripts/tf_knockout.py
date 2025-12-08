@@ -218,10 +218,6 @@ def run_tf_knockout(
             )  # [B, G_eval]
             B, G_eval = preds_base_u.shape
 
-            # CPU IDs once per batch
-            tf_ids_cpu = tf_ids.detach().cpu().long()
-            tg_ids_cpu = tg_ids.detach().cpu().long()
-
             # --------- 4) Prepare a working scaled TF tensor (cloned ONCE) ---------
             # We will modify one TF position at a time, run the model, then restore.
             tf_scaled_work = tf_scaled_base_3d.clone()  # [B, T_eval, F_dim]
@@ -280,7 +276,7 @@ def run_tf_knockout(
                 delta_mean = delta.mean(dim=0)             # [G_eval]
                                 
                 tf_global = int(tf_ids[t_pos].item())
-                effect_sum[tf_global, tg_ids_cpu] += delta_mean
+                effect_sum[tf_global, tg_ids] += delta_mean
                 effect_count[tf_global, tg_ids] += 1
 
                 # ----------------------------------
