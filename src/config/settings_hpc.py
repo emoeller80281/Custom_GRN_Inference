@@ -4,6 +4,10 @@ import itertools
 
 ROOT_DIR = Path(__file__).resolve().parent.parent.parent
 
+# HARDCODED PATHS -- CHANGE
+PROJECT_DATA_DIR = Path("/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER")
+PROJECT_RESULT_DIR = Path("/gpfs/Labs/Uzun/RESULTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER")
+
 chr_nums = [f"chr{i}" for i in range(1, 20)]
 chrom_list = chr_nums #+ ["chrX", "chrY"]
 
@@ -139,33 +143,33 @@ PRECISION_AT_K = (10, 20, 50, 100, 200, 500)
 RUN_OPTUNA = False
 
 # ----- PATH SETUP -----
-# Fixed Paths
-DATA_DIR = ROOT_DIR / "data"
-GENOME_DIR = DATA_DIR / "genome_data" / "reference_genome" / ORGANISM_CODE
+# Paths for specific data
+DATABASE_DIR = ROOT_DIR / "data"
+GENOME_DIR = DATABASE_DIR / "genome_data" / "reference_genome" / ORGANISM_CODE
 CHROM_SIZES_FILE = GENOME_DIR / f"{ORGANISM_CODE}.chrom.sizes"
-GTF_FILE_DIR = DATA_DIR / "genome_data" / "genome_annotation" / ORGANISM_CODE
-NCBI_FILE_DIR = DATA_DIR / "genome_data" / "genome_annotation" / ORGANISM_CODE 
-GENE_TSS_FILE = DATA_DIR / "genome_data" / "genome_annotation" / ORGANISM_CODE / "gene_tss.bed"
-TF_FILE = DATA_DIR / "databases" / "motif_information" / ORGANISM_CODE / "TF_Information_all_motifs.txt"
-JASPAR_PFM_DIR = DATA_DIR / "databases" / "motif_information" / "JASPAR" / "pfm_files"
-MOTIF_DIR = DATA_DIR / "databases" / "motif_information" / ORGANISM_CODE / "pwms_all_motifs"
+GTF_FILE_DIR = DATABASE_DIR / "genome_data" / "genome_annotation" / ORGANISM_CODE
+NCBI_FILE_DIR = DATABASE_DIR / "genome_data" / "genome_annotation" / ORGANISM_CODE 
+GENE_TSS_FILE = DATABASE_DIR / "genome_data" / "genome_annotation" / ORGANISM_CODE / "gene_tss.bed"
+TF_FILE = DATABASE_DIR / "databases" / "motif_information" / ORGANISM_CODE / "TF_Information_all_motifs.txt"
+JASPAR_PFM_DIR = DATABASE_DIR / "databases" / "motif_information" / "JASPAR" / "pfm_files"
+MOTIF_DIR = DATABASE_DIR / "databases" / "motif_information" / ORGANISM_CODE / "pwms_all_motifs"
 
-CHIP_GROUND_TRUTH = DATA_DIR / "ground_truth_files" / "mESC_beeline_ChIP-seq.csv"
+CHIP_GROUND_TRUTH = DATABASE_DIR / "ground_truth_files" / "mESC_beeline_ChIP-seq.csv"
 CHIP_GROUND_TRUTH_SEP = ","
 
-PROCESSED_DATA = DATA_DIR / "processed"
-TRAINING_DATA_CACHE = DATA_DIR / "training_data_cache"
-RAW_DATA = DATA_DIR / "raw"
-PKN_DIR = DATA_DIR / "prior_knowledge_network_data" / ORGANISM_CODE
+PROCESSED_DATA = DATABASE_DIR / "processed"
+TRAINING_DATA_CACHE = DATABASE_DIR / "training_data_cache"
+RAW_DATA = DATABASE_DIR / "raw"
+PKN_DIR = DATABASE_DIR / "prior_knowledge_network_data" / ORGANISM_CODE
 
 # PKN files
-STRING_DIR = DATA_DIR / "prior_knowledge_network_data" / ORGANISM_CODE / "STRING" 
-TRRUST_DIR = DATA_DIR / "prior_knowledge_network_data" / ORGANISM_CODE / "TRRUST" 
-KEGG_DIR = DATA_DIR / "prior_knowledge_network_data" / ORGANISM_CODE / "KEGG" 
+STRING_DIR = DATABASE_DIR / "prior_knowledge_network_data" / ORGANISM_CODE / "STRING" 
+TRRUST_DIR = DATABASE_DIR / "prior_knowledge_network_data" / ORGANISM_CODE / "TRRUST" 
+KEGG_DIR = DATABASE_DIR / "prior_knowledge_network_data" / ORGANISM_CODE / "KEGG" 
 
 COMMON_DATA = TRAINING_DATA_CACHE / "common"
 
-EXPERIMENT_DIR = ROOT_DIR / "experiments"
+EXPERIMENT_DIR = PROJECT_DATA_DIR / "experiments"
 OUTPUT_DIR = EXPERIMENT_DIR / DATASET_NAME
 
 # Sample-specific paths

@@ -506,36 +506,54 @@ def run_gradient_attribution(
     if rank == 0:
         eps = 1e-12
 
-        # Per-TG R² on unscaled expression:
-        # R²_g = 1 - SSE_g / SST_g, with SST_g = sum((y - mean_y)^2)
-        # and SST_g = sum(y^2) - (sum(y)^2 / N)
+        # ------- Per-TG R² on unscaled expression -------
         var_term = tg_sum2 - (tg_sum * tg_sum) / (tg_n + eps)   # SST_g
-        tg_r2 = 1.0 - (tg_sse / (var_term + eps))
+        tg_r2_raw = 1.0 - (tg_sse / (var_term + eps))
 
-        # Optional: clamp negative R² to 0 (don't *negatively* weight anything)
-        tg_r2 = torch.clamp(tg_r2, min=0.0)
+        # R² can be negative; for weighting we often clip, but for filtering
+        # we want the raw values:
+        tg_r2 = tg_r2_raw.clone()
 
-        # Normalize weights to [0, 1] to keep scales reasonable
-        w = tg_r2 / (tg_r2.max() + eps)     # shape [G_total]
+        # ------------- Apply min_tg_r2 filter -------------
+        if min_tg_r2 is not None:
+            keep_mask = tg_r2 >= min_tg_r2
+        else:
+            keep_mask = torch.ones_like(tg_r2, dtype=torch.bool)
+
+        kept_indices = torch.nonzero(keep_mask, as_tuple=True)[0]
+        logging.info(
+            f"Keeping {kept_indices.numel()} / {tg_r2.numel()} TGs "
+            f"(min_tg_r2={min_tg_r2})"
+        )
 
         # Original (unweighted) attributions
-        grad_attr = grad_sum / (grad_count + 1e-12)
+        grad_attr_full = grad_sum / (grad_count + 1e-12)
 
-        # --- NEW: weight each TG column by its prediction quality ---
-        grad_attr = grad_attr * w.unsqueeze(0)  # broadcast over TF axis
+        # Keep only the good TG columns
+        grad_attr = grad_attr_full[:, keep_mask]         # [T_total, G_kept]
+        tg_r2_kept = tg_r2[keep_mask]                    # [G_kept]
 
         grad_attr_np = grad_attr.detach().cpu().numpy()
-        tg_r2_np = tg_r2.detach().cpu().numpy()
+        tg_r2_np     = tg_r2_kept.detach().cpu().numpy()
+        kept_idx_np  = kept_indices.detach().cpu().numpy()
 
-        print("Gradient attribution matrix shape:", grad_attr_np.shape)
-        out_path = selected_experiment_dir / f"tf_tg_grad_attribution_{method}_weighted.npy"
+        logging.info("Gradient attribution matrix shape (after filter): "
+                     f"{grad_attr_np.shape}")
+
+        out_path = selected_experiment_dir / f"tf_tg_grad_attribution_{method}_r2min{min_tg_r2:.2f}.npy"
         np.save(out_path, grad_attr_np)
-        logging.info(f"Saved *weighted* gradient attribution matrix to {out_path}")
+        logging.info(f"Saved filtered gradient attribution matrix to {out_path}")
 
-        # Also save the per-TG R² vector for inspection
-        r2_path = selected_experiment_dir / "tg_r2_unscaled.npy"
+        # Save per-TG R² for the *kept* genes
+        r2_path = selected_experiment_dir / f"tg_r2_unscaled_r2min{min_tg_r2:.2f}.npy"
         np.save(r2_path, tg_r2_np)
-        logging.info(f"Saved per-TG R² to {r2_path}")
+        logging.info(f"Saved per-TG R² (kept only) to {r2_path}")
+
+        # Save the original TG indices so you can map back to full tg_vocab
+        idx_path = selected_experiment_dir / f"tg_indices_r2min{min_tg_r2:.2f}.npy"
+        np.save(idx_path, kept_idx_np)
+        logging.info(f"Saved kept TG indices to {idx_path}")
+
 
 
 
@@ -597,6 +615,12 @@ if __name__ == "__main__":
         default=1.0,
         help="Fraction of TGs per batch to compute attributions for (0 < f <= 1).",
     )
+    argparser.add_argument(
+        "--min_tg_r2",
+        type=float,
+        default=0.5,
+        help="Minimum per-TG R²; TGs below this will be dropped from the GA matrix.",
+    )
 
     args = argparser.parse_args()
 
@@ -640,7 +664,7 @@ if __name__ == "__main__":
         max_batches=args.max_batches,
         use_dataloader=False,
         tg_sampling_fraction=args.tg_sampling_fraction,
-        min_tg_r2=0.5,
+        min_tg_r2=args.min_tg_r2,
     )
 
     if distributed:

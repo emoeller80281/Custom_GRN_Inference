@@ -10,6 +10,7 @@ reference_networks/
 .venv/
 poster_results/
 checkpoint.pt
+.pybiomart
 dev/notebooks/sliding_window_calculation_method_testing_cache
 *.png
 *.csv
