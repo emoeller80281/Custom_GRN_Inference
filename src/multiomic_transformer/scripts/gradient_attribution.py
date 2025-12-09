@@ -9,7 +9,6 @@ from pathlib import Path
 from sklearn.metrics import roc_auc_score, average_precision_score
 from matplotlib.ticker import FuncFormatter, MultipleLocator
 import logging
-from typing import Optional
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import argparse
@@ -126,8 +125,6 @@ def run_gradient_attribution(
     ig_steps: int = 8,
     max_batches: int = None,
     use_dataloader: bool = False,
-    tg_sampling_fraction: float = 1.0,
-    min_tg_r2: Optional[float] = None,
 ):
 
     assert method in {"saliency", "smoothgrad", "ig"}, f"Unknown method: {method}"
@@ -137,25 +134,17 @@ def run_gradient_attribution(
 
     grad_sum = torch.zeros(T_total, G_total, device=device, dtype=torch.float32)
     grad_count = torch.zeros_like(grad_sum)
-    
-    tg_sse  = torch.zeros(G_total, device=device, dtype=torch.float32)  # sum of squared errors
-    tg_sum  = torch.zeros(G_total, device=device, dtype=torch.float32)  # sum of y
-    tg_sum2 = torch.zeros(G_total, device=device, dtype=torch.float32)  # sum of y^2
-    tg_n    = torch.zeros(G_total, device=device, dtype=torch.float32)  # count
 
     model.to(device).eval()
 
+    iterator = test_loader
     if rank == 0:
-        num_batches = len(test_loader)
-        effective_total = min(max_batches or num_batches, num_batches)
         iterator = tqdm(
             test_loader,
             desc=f"Gradient attributions ({method})",
             unit="batches",
-            total=effective_total,
+            total=max_batches,
         )
-    else:
-        iterator = test_loader
 
     for b_idx, batch in enumerate(iterator):
         if max_batches is not None and b_idx >= max_batches:
@@ -168,7 +157,6 @@ def run_gradient_attribution(
         atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids, motif_mask = batch
         atac_wins = atac_wins.to(device)
         tf_tensor = tf_tensor.to(device)
-        targets = targets.to(device)
         bias = bias.to(device)
         tf_ids = tf_ids.to(device)
         tg_ids = tg_ids.to(device)
@@ -215,41 +203,6 @@ def run_gradient_attribution(
             )
 
         _, G_eval = preds_u_base.shape
-        
-        if tg_sampling_fraction >= 1.0:
-            tg_indices = range(G_eval)
-        else:
-            # number of TGs to sample this batch
-            k = max(1, int(G_eval * tg_sampling_fraction))
-            # random subset of local TG indices
-            perm = torch.randperm(G_eval, device=device)[:k]
-            tg_indices = perm.tolist()
-        
-        # ---------- Accumulate per-TG prediction quality stats ----------
-        if tg_scaler is not None:
-            targets_u = tg_scaler.inverse_transform(targets, tg_ids)
-        else:
-            targets_u = targets
-
-        # residuals on unscaled expression
-        residual = targets_u - preds_u_base          # [B, G_eval]
-        residual2 = residual.pow(2)                  # [B, G_eval]
-
-        # Flatten over batch & TG position
-        residual2_flat = residual2.reshape(-1)
-        y_flat = targets_u.reshape(-1)
-
-        if tg_ids.dim() == 1:  # [G_eval]
-            tg_ids_flat = tg_ids.view(1, G_eval).expand(B, G_eval).reshape(-1)
-        else:                  # [B, G_eval]
-            tg_ids_flat = tg_ids.reshape(-1)
-
-        # SSE, sum(y), sum(y^2), N for each global TG
-        tg_sse.index_add_(0, tg_ids_flat, residual2_flat)
-        tg_sum.index_add_(0, tg_ids_flat, y_flat)
-        tg_sum2.index_add_(0, tg_ids_flat, y_flat * y_flat)
-        tg_n.index_add_(0, tg_ids_flat, torch.ones_like(y_flat))
-        # ----------------------------------------------------------------------
 
         # ---------- METHOD 1: plain saliency (grad * input) ----------
         if method == "saliency":
@@ -283,7 +236,7 @@ def run_gradient_attribution(
                     preds_u.float(), nan=0.0, posinf=1e6, neginf=-1e6
                 )
 
-            for j in tg_indices:
+            for j in range(G_eval):
                 grad_output_j = torch.zeros_like(preds_u)
                 grad_output_j[:, j] = 1.0
 
@@ -326,7 +279,7 @@ def run_gradient_attribution(
         elif method == "smoothgrad":
             S = max(smoothgrad_samples, 1)
 
-            for j in tg_indices:
+            for j in range(G_eval):
                 grad_accum = torch.zeros_like(tf_tensor, dtype=torch.float32)
 
                 for s in range(S):
@@ -408,7 +361,7 @@ def run_gradient_attribution(
             baseline = torch.zeros_like(tf_tensor)
             diff = tf_tensor - baseline
 
-            for j in tg_indices:
+            for j in range(G_eval):
                 ig_accum = torch.zeros_like(tf_tensor, dtype=torch.float32)
 
                 for m in range(1, M + 1):
@@ -488,73 +441,23 @@ def run_gradient_attribution(
             tg_ids,
             motif_mask,
         )
-        # if device.type == "cuda":
-        #     torch.cuda.empty_cache()
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
 
     # distributed reduction
     if distributed:
         dist.barrier()
         dist.all_reduce(grad_sum, op=dist.ReduceOp.SUM)
         dist.all_reduce(grad_count, op=dist.ReduceOp.SUM)
-        
-        # --- reduce per-TG stats ---
-        dist.all_reduce(tg_sse,  op=dist.ReduceOp.SUM)
-        dist.all_reduce(tg_sum,  op=dist.ReduceOp.SUM)
-        dist.all_reduce(tg_sum2, op=dist.ReduceOp.SUM)
-        dist.all_reduce(tg_n,    op=dist.ReduceOp.SUM)
 
     if rank == 0:
-        eps = 1e-12
+        grad_attr = grad_sum / (grad_count + 1e-12)
+        grad_attr_np = grad_attr.cpu().numpy()
 
-        # ------- Per-TG R² on unscaled expression -------
-        var_term = tg_sum2 - (tg_sum * tg_sum) / (tg_n + eps)   # SST_g
-        tg_r2_raw = 1.0 - (tg_sse / (var_term + eps))
-
-        # R² can be negative; for weighting we often clip, but for filtering
-        # we want the raw values:
-        tg_r2 = tg_r2_raw.clone()
-
-        # ------------- Apply min_tg_r2 filter -------------
-        if min_tg_r2 is not None:
-            keep_mask = tg_r2 >= min_tg_r2
-        else:
-            keep_mask = torch.ones_like(tg_r2, dtype=torch.bool)
-
-        kept_indices = torch.nonzero(keep_mask, as_tuple=True)[0]
-        logging.info(
-            f"Keeping {kept_indices.numel()} / {tg_r2.numel()} TGs "
-            f"(min_tg_r2={min_tg_r2})"
-        )
-
-        # Original (unweighted) attributions
-        grad_attr_full = grad_sum / (grad_count + 1e-12)
-
-        # Keep only the good TG columns
-        grad_attr = grad_attr_full[:, keep_mask]         # [T_total, G_kept]
-        tg_r2_kept = tg_r2[keep_mask]                    # [G_kept]
-
-        grad_attr_np = grad_attr.detach().cpu().numpy()
-        tg_r2_np     = tg_r2_kept.detach().cpu().numpy()
-        kept_idx_np  = kept_indices.detach().cpu().numpy()
-
-        logging.info("Gradient attribution matrix shape (after filter): "
-                     f"{grad_attr_np.shape}")
-
-        out_path = selected_experiment_dir / f"tf_tg_grad_attribution_{method}_r2min{min_tg_r2:.2f}.npy"
+        print("Gradient attribution matrix shape:", grad_attr_np.shape)
+        out_path = selected_experiment_dir / f"tf_tg_grad_attribution_{method}.npy"
         np.save(out_path, grad_attr_np)
-        logging.info(f"Saved filtered gradient attribution matrix to {out_path}")
-
-        # Save per-TG R² for the *kept* genes
-        r2_path = selected_experiment_dir / f"tg_r2_unscaled_r2min{min_tg_r2:.2f}.npy"
-        np.save(r2_path, tg_r2_np)
-        logging.info(f"Saved per-TG R² (kept only) to {r2_path}")
-
-        # Save the original TG indices so you can map back to full tg_vocab
-        idx_path = selected_experiment_dir / f"tg_indices_r2min{min_tg_r2:.2f}.npy"
-        np.save(idx_path, kept_idx_np)
-        logging.info(f"Saved kept TG indices to {idx_path}")
-
-
+        logging.info(f"Saved gradient attribution matrix to {out_path}")
 
 
 if __name__ == "__main__":
@@ -609,18 +512,6 @@ if __name__ == "__main__":
         default=8,
         help="Number of steps for Integrated Gradients",
     )
-    argparser.add_argument(
-        "--tg_sampling_fraction",
-        type=float,
-        default=1.0,
-        help="Fraction of TGs per batch to compute attributions for (0 < f <= 1).",
-    )
-    argparser.add_argument(
-        "--min_tg_r2",
-        type=float,
-        default=0.5,
-        help="Minimum per-TG R²; TGs below this will be dropped from the GA matrix.",
-    )
 
     args = argparser.parse_args()
 
@@ -663,8 +554,6 @@ if __name__ == "__main__":
         ig_steps=args.ig_steps,
         max_batches=args.max_batches,
         use_dataloader=False,
-        tg_sampling_fraction=args.tg_sampling_fraction,
-        min_tg_r2=args.min_tg_r2,
     )
 
     if distributed:

@@ -17,6 +17,7 @@ from tqdm import tqdm
 from sklearn.metrics import r2_score
 import logging
 import matplotlib.pyplot as plt
+from matplotlib.ticker import MultipleLocator
 import seaborn as sns
 from typing import Optional
 
@@ -295,6 +296,36 @@ def _compute_roc_auc(y_true, scores):
     # trapezoidal AUC
     auc = np.trapezoid(tpr, fpr)  # or np.trapz(tpr, fpr) if needed
     return fpr, tpr, auc
+
+def plot_auroc_per_min_tg_r2(results_r2, min_r2_grid, baseline_macro, baseline_micro, experiment_dir):
+    fig, ax = plt.subplots(figsize=(9, 4))
+
+    ax.plot(results_r2["min_tg_r2"], results_r2["macro_auroc"], marker="o", label="macro")
+    ax.plot(results_r2["min_tg_r2"], results_r2["micro_auroc"], marker="o", label="micro")
+    ax.hlines(baseline_macro, min_r2_grid[0], min_r2_grid[-1],
+            color="grey", linestyle="dashed", label="baseline macro")
+    ax.hlines(baseline_micro, min_r2_grid[0], min_r2_grid[-1],
+            color="lightgrey", linestyle="dashed", label="baseline micro")
+
+    ax.set_title("Macro / Micro AUROC vs. min TG R²", fontsize=14)
+    ax.set_xlabel("Minimum TG R²", fontsize=11)
+    ax.set_ylabel("AUROC", fontsize=11)
+
+    # Major ticks every 0.2
+    ax.xaxis.set_major_locator(MultipleLocator(0.2))
+
+    # One minor tick between each major (every 0.1)
+    ax.xaxis.set_minor_locator(MultipleLocator(0.1))
+
+    ax.tick_params(axis="x", which="major", labelsize=11)
+    ax.tick_params(axis="y", which="major", labelsize=11)
+    ax.tick_params(axis="x", which="minor", length=4)  # just the small tick bars, no labels
+
+    ax.legend(bbox_to_anchor=(1.175, 0.5), loc="center", fontsize=11)
+    fig.tight_layout()
+    plt.savefig(Path(experiment_dir) / "threshold_GA_by_r2.svg")
+    plt.show()
+
 
 def plot_auroc_auprc(df, name, score_col, label_col="is_gt"):
     """_summary_
@@ -1303,6 +1334,308 @@ def load_and_standardize_method(name: str, info: dict) -> pd.DataFrame:
 
     return df
 
+def calculate_per_tg_r2(model, test_loader, tg_names, tg_scaler, tf_scaler, state, device, checkpoint_file):
+    G_total = len(state["tg_scaler_mean"])
+
+    model.to(device).eval()
+
+    G_total = tg_scaler.mean.shape[0]  # total number of genes
+
+    # ---- global per-gene accumulators (unscaled space) ----
+    sse_g   = torch.zeros(G_total, dtype=torch.float64)
+    sumy_g  = torch.zeros(G_total, dtype=torch.float64)
+    sumy2_g = torch.zeros(G_total, dtype=torch.float64)
+    cnt_g   = torch.zeros(G_total, dtype=torch.float64)
+
+    ### For overall R² and scatter:
+    all_preds_for_plot = []
+    all_tgts_for_plot  = []
+
+    with torch.no_grad():
+        total = len(test_loader)
+
+        for batch_idx, batch in enumerate(
+            tqdm(
+                test_loader,
+                desc="Evaluating on test set",
+                unit="batches",
+                total=total,
+                miniters=max(1, total // 10),
+            )
+        ):            
+            atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids, motif_mask = batch
+            atac_wins  = atac_wins.to(device)
+            tf_tensor  = tf_tensor.to(device)
+            targets    = targets.to(device)
+            bias       = bias.to(device)
+            tf_ids     = tf_ids.to(device)
+            tg_ids     = tg_ids.to(device)
+            motif_mask = motif_mask.to(device)
+
+            # scale / predict exactly like in validation
+            if tf_scaler is not None:
+                tf_tensor = tf_scaler.transform(tf_tensor, tf_ids)
+            if tg_scaler is not None:
+                targets_s = tg_scaler.transform(targets, tg_ids)
+            else:
+                targets_s = targets
+
+            preds_s, _, _, _ = model(
+                atac_wins, tf_tensor,
+                tf_ids=tf_ids, tg_ids=tg_ids,
+                bias=bias, motif_mask=motif_mask,
+                return_edge_logits=True, return_shortcut_contrib=False,
+                edge_extra_features=None,
+            )
+
+            preds_s   = torch.nan_to_num(preds_s.float(),   nan=0.0, posinf=1e6, neginf=-1e6)
+            targets_s = torch.nan_to_num(targets_s.float(), nan=0.0, posinf=1e6, neginf=-1e6)
+
+            # unscale + clamp
+            if tg_scaler is not None:
+                targets_u = tg_scaler.inverse_transform(targets_s, tg_ids)
+                preds_u   = tg_scaler.inverse_transform(preds_s,   tg_ids)
+            else:
+                targets_u, preds_u = targets_s, preds_s
+
+            targets_u = torch.nan_to_num(targets_u.float(), nan=0.0, posinf=1e6, neginf=-1e6)
+            preds_u   = torch.nan_to_num(preds_u.float(),   nan=0.0, posinf=1e6, neginf=-1e6)
+            preds_u   = preds_u.clamp_min(0.0)
+
+            # ---- store for overall R² / scatter ----
+            all_tgts_for_plot.append(targets_u.detach().cpu().numpy())
+            all_preds_for_plot.append(preds_u.detach().cpu().numpy())
+
+            # ---- per-gene accumulators (unscaled) ----
+            # shapes: [B, G_eval]
+            err2   = (targets_u - preds_u) ** 2
+            B      = targets_u.shape[0]
+
+            # reduce over batch
+            sse_batch   = err2.sum(dim=0)              # [G_eval]
+            sumy_batch  = targets_u.sum(dim=0)
+            sumy2_batch = (targets_u ** 2).sum(dim=0)
+            cnt_batch   = torch.full_like(sse_batch, B, dtype=torch.float64)
+
+            # move ids to CPU, accumulate into global vectors
+            ids_cpu = tg_ids.cpu()
+            sse_g.index_add_(0, ids_cpu, sse_batch.cpu().to(torch.float64))
+            sumy_g.index_add_(0, ids_cpu, sumy_batch.cpu().to(torch.float64))
+            sumy2_g.index_add_(0, ids_cpu, sumy2_batch.cpu().to(torch.float64))
+            cnt_g.index_add_(0, ids_cpu, cnt_batch.cpu().to(torch.float64))
+
+    # ============================
+    # 4) Per-gene R² (global)
+    # ============================
+    eps = 1e-12
+    mask = cnt_g > 0  # genes that appeared in the test set
+
+    mean_g = sumy_g[mask] / cnt_g[mask]
+    sst_g  = sumy2_g[mask] - cnt_g[mask] * (mean_g ** 2)
+
+    valid = sst_g > eps  # genes with non-trivial variance
+
+    r2_g = torch.full_like(sse_g, float("nan"), dtype=torch.float64)
+
+    idx_all  = mask.nonzero(as_tuple=True)[0]   # indices of genes with any data
+    idx_keep = idx_all[valid]                   # subset with non-zero variance
+
+    r2_g_values = 1.0 - (sse_g[idx_keep] / torch.clamp(sst_g[valid], min=eps))
+    r2_g[idx_keep] = r2_g_values
+
+    r2_g_cpu = r2_g.cpu().numpy()
+    
+    assert len(tg_names) == G_total
+
+    # counts per TG on CPU
+    cnt_cpu = cnt_g.cpu().numpy()
+
+    # Build a per-TG R² dataframe
+    per_tg_r2_df = pd.DataFrame({
+        "tg_idx": np.arange(G_total),
+        "tg": tg_names,
+        "r2": r2_g_cpu,
+        "n_samples": cnt_cpu,
+    })
+
+    # Keep only genes that actually appeared and had variance
+    per_tg_r2_valid = per_tg_r2_df[~np.isnan(per_tg_r2_df["r2"])].copy()
+
+    # Sort by R²
+    per_tg_r2_valid = per_tg_r2_valid.sort_values("r2", ascending=False)
+    
+    return per_tg_r2_valid
+
+def evaluate_min_tg_r2_filters(
+    base_edges_df,
+    ground_truth_df_dict,
+    tf_names,
+    tg_names,
+    min_r2_grid=None,
+    min_edges=10,
+    min_pos=1,
+):
+    """
+    base_edges_df: DataFrame with at least ['Source','Target','Score','tg_r2']
+    Returns
+    -------
+    results_df : DataFrame with per-threshold metrics
+    baseline_macro : float, macro AUROC with NO TG R² filtering
+    """
+
+    if min_r2_grid is None:
+        min_r2_grid = [-0.5, 0.0, 0.1, 0.2, 0.3, 0.4, 0.5]
+
+    total_edges_all = len(base_edges_df)
+    total_tgs_all   = base_edges_df["Target"].nunique()
+
+    results = []
+
+    # -------------------------------------------------------
+    # Helper: compute macro/micro AUROC for a given edge DF
+    # -------------------------------------------------------
+    def compute_macro_micro(edges_df):
+        method_dict_base = {"Gradient Attribution": edges_df}
+        per_tf_all_results = []
+
+        for gt_name, ground_truth_df in ground_truth_df_dict.items():
+            chip_valid = ground_truth_df[
+                ground_truth_df["Source"].isin(tf_names)
+                & ground_truth_df["Target"].isin(tg_names)
+            ]
+            gt_edges = set(zip(chip_valid["Source"], chip_valid["Target"]))
+            gt_tfs   = set(chip_valid["Source"])
+            gt_tgs   = set(chip_valid["Target"])
+
+            for method_name, method_df in method_dict_base.items():
+                filtered_df = filter_df_to_gene_set(
+                    method_df.copy(), gt_tfs, gt_tgs
+                )
+                labeled_df = label_edges(filtered_df, gt_edges)
+
+                per_tf_df = compute_per_tf_metrics(
+                    labeled_df,
+                    score_col="Score",
+                    label_col="is_gt",
+                    tf_col="Source",
+                    min_edges=min_edges,
+                    min_pos=min_pos,
+                    balance=True,
+                )
+
+                if per_tf_df.empty:
+                    # nothing for this GT
+                    continue
+
+                per_tf_df["method"]  = method_name
+                per_tf_df["gt_name"] = gt_name
+                per_tf_all_results.append(per_tf_df)
+
+        if not per_tf_all_results:
+            return np.nan, np.nan
+
+        per_tf_metrics = pd.concat(per_tf_all_results, ignore_index=True)
+        df = per_tf_metrics.query("method == 'Gradient Attribution'")
+
+        macro_auroc = df.groupby("tf")["auroc"].mean().mean()
+        micro_auroc = (
+            df.groupby("tf")
+              .apply(lambda g: g["auroc"].mean() * g["n_edges"].sum(), include_groups=False)
+              .sum() / df["n_edges"].sum()
+        )
+        return macro_auroc, micro_auroc
+
+    # ---------------------------
+    # 1) Baseline (no R² filter)
+    # ---------------------------
+    baseline_macro, baseline_micro = compute_macro_micro(base_edges_df)
+    print(
+        f"Baseline (no TG R² filter) macro/micro AUROC: "
+        f"{baseline_macro:.3f} / {baseline_micro:.3f}"
+    )
+
+    # ---------------------------
+    # 2) R²-threshold sweeps
+    # ---------------------------
+    for min_r2 in min_r2_grid:
+        print(f"\n=== Evaluating min_tg_r2 >= {min_r2:.2f} ===")
+
+        # Filter by TG R²
+        edges_filt = base_edges_df[base_edges_df["tg_r2"] >= min_r2].copy()
+        n_edges_filt = len(edges_filt)
+        n_tgs_filt   = edges_filt["Target"].nunique()
+
+        if n_edges_filt == 0:
+            print("  No edges left after filtering; skipping this threshold.")
+            continue
+
+        macro_auroc, micro_auroc = compute_macro_micro(edges_filt)
+        print(f"  Macro / micro AUROC: {macro_auroc:.3f} / {micro_auroc:.3f}")
+
+        results.append({
+            "min_tg_r2": min_r2,
+            "n_edges_kept": n_edges_filt,
+            "frac_edges_kept": n_edges_filt / total_edges_all,
+            "n_tgs_kept": n_tgs_filt,
+            "frac_tgs_kept": n_tgs_filt / total_tgs_all,
+            "macro_auroc": macro_auroc,
+            "micro_auroc": micro_auroc,
+        })
+
+    results_df = pd.DataFrame(results).sort_values("min_tg_r2")
+    return results_df, baseline_macro, baseline_micro
+
+def filter_grad_attrib_by_tg_r2(
+    grad_attrib_df: pd.DataFrame,
+    per_tg_r2_valid: pd.DataFrame,
+    r2_threshold: float = 0.5,
+) -> pd.DataFrame:
+    """
+    Keep only Gradient Attribution edges whose *target gene* has R² >= r2_threshold.
+    
+    grad_attrib_df: DataFrame with at least ['Source', 'Target', 'Score']
+    per_tg_r2_valid: DataFrame from calculate_per_tg_r2 with ['tg', 'r2', 'n_samples']
+    r2_threshold: minimum per-TG R² required to keep edges.
+    """
+
+    # Map TG -> R²
+    r2_map = per_tg_r2_valid[["tg", "r2"]].copy()
+
+    # Attach R² to each GA edge (left join on Target)
+    df = grad_attrib_df.merge(
+        r2_map,
+        how="left",
+        left_on="Target",
+        right_on="tg",
+    )
+
+    before_edges = len(df)
+    before_tgs   = df["Target"].nunique()
+
+    # Keep only edges whose TG has a defined R² and passes the threshold
+    mask = df["r2"].notna() & (df["r2"] >= r2_threshold)
+    df_filt = df.loc[mask].copy()
+
+    after_edges = len(df_filt)
+    after_tgs   = df_filt["Target"].nunique()
+
+    print(f"Filtering GA edges by TG R² ≥ {r2_threshold:.2f}")
+    print(f"  Edges kept: {after_edges} / {before_edges} "
+          f"({after_edges / max(1,before_edges):.3%})")
+    print(f"  TGs kept:   {after_tgs} / {before_tgs} "
+          f"({after_tgs / max(1,before_tgs):.3%})")
+
+    # Drop the duplicate 'tg' column; keep 'r2' so you can use it later if you like
+    df_filt.drop(columns=["tg"], inplace=True)
+
+    # Optional: reorder columns
+    df_filt = df_filt[["Source", "Target", "Score", "r2"] + 
+                      [c for c in df_filt.columns if c not in ("Source","Target","Score","r2")]]
+
+    return df_filt
+
+    
+
 def compute_per_tf_metrics(
     df,
     score_col: str = "Score",
@@ -1409,6 +1742,17 @@ if __name__ == "__main__":
         "RN115": GROUND_TRUTH_DIR / "RN115.tsv",
         "RN116": GROUND_TRUTH_DIR / "RN116.tsv",
     }
+    
+    ground_truth_df_dict = {}
+
+    # Loop through each ground truth dataset and load each file
+    for i, (gt_name, ground_truth_file) in enumerate(ground_truth_file_dict.items(), start=1):
+        print(f"Loading {gt_name} ({i}/{len(ground_truth_file_dict)})")
+
+        # --- Ground truth & sets ---
+        ground_truth_df = load_ground_truth(ground_truth_file)
+        
+        ground_truth_df_dict[gt_name] = ground_truth_df
 
     feature_to_plot = "Gradient Attribution"
 
@@ -1432,15 +1776,57 @@ if __name__ == "__main__":
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         model, test_loader, tg_scaler, tf_scaler, state = load_model(selected_experiment_dir, checkpoint_file, device)
         model.eval()
-
+        
         # Vocab
         tf_names, tg_names = load_vocab(selected_experiment_dir)
+        
+        per_tg_r2_valid = calculate_per_tg_r2(
+            model, test_loader, tg_names, tg_scaler, tf_scaler, state, device, checkpoint_file
+        )
+        
+        grad_attrib_df = load_gradient_attribution_matrix(selected_experiment_dir, tf_names, tg_names)
+
+        # Attach raw r2 to each GA edge
+        grad_attrib_with_r2 = (
+            grad_attrib_df
+            .merge(
+                per_tg_r2_valid[["tg", "r2"]],
+                how="left",
+                left_on="Target",
+                right_on="tg",
+            )
+            .drop(columns=["tg"])  # we already have Target
+            .rename(columns={"r2": "tg_r2"})
+        )
+
+        grad_attrib_with_r2 = grad_attrib_with_r2.dropna(subset=["tg_r2"])
+        
+        min_r2_grid = [-1.0, -0.5, 0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+
+        results_r2, baseline_macro, baseline_micro = evaluate_min_tg_r2_filters(
+            base_edges_df=grad_attrib_with_r2,
+            ground_truth_df_dict=ground_truth_df_dict,
+            tf_names=tf_names,
+            tg_names=tg_names,
+            min_r2_grid=min_r2_grid,
+            min_edges=10,
+            min_pos=1,
+        )
+        
+        plot_auroc_per_min_tg_r2(results_r2, min_r2_grid, baseline_macro, baseline_micro, experiment_dir)
+
+        # gradient_attrib_df has ['Source','Target','Score', ...]
+        grad_attrib_filtered = filter_grad_attrib_by_tg_r2(
+            grad_attrib_df,
+            per_tg_r2_valid,
+            r2_threshold=0.5,
+        )
 
         # ---------- LOAD FEATURES ONCE ----------
         logging.info("Loading feature files")
         base_feature_dict = {
             "TF Knockout":               load_tf_knockout_scores(selected_experiment_dir, tf_names, tg_names),
-            "Gradient Attribution":       load_gradient_attribution_matrix(selected_experiment_dir, tf_names, tg_names),
+            "Gradient Attribution":       grad_attrib_filtered,
         }
 
         # ---------- LOAD METHOD GRNs ONCE ----------
@@ -1483,15 +1869,12 @@ if __name__ == "__main__":
         feature_names = list(base_feature_dict.keys())  # e.g. ["TF Knockout", "Gradient Attribution", ...]
 
         all_method_results = []
-
-        for i, (gt_name, ground_truth_file) in enumerate(ground_truth_file_dict.items(), start=1):
-            logging.info(f"\n\nEvaluating Features and Methods Against {gt_name} ({i}/{len(ground_truth_file_dict)})")
+            
+        for i, (gt_name, ground_truth_df) in enumerate(ground_truth_df_dict.items(), start=1):
+            logging.info(f"\n\nEvaluating Features and Methods Against {gt_name} ({i}/{len(ground_truth_df_dict.keys())})")
 
             gt_analysis_dir = selected_experiment_dir / f"{gt_name}_analysis"
             os.makedirs(gt_analysis_dir, exist_ok=True)
-
-            # --- Ground truth & sets ---
-            ground_truth_df = load_ground_truth(ground_truth_file)
 
             chip_valid = ground_truth_df[
                 ground_truth_df["Source"].isin(tf_names)

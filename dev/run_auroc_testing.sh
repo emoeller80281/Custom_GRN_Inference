@@ -3,8 +3,9 @@
 #SBATCH --output=LOGS/transformer_logs/04_testing/%x_%j.log
 #SBATCH --error=LOGS/transformer_logs/04_testing/%x_%j.err
 #SBATCH --time=12:00:00
-#SBATCH -p compute
+#SBATCH -p gpu
 #SBATCH -N 1
+#SBATCH --gres=gpu:p100:1
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 4
 #SBATCH --mem=64G
@@ -15,7 +16,7 @@ cd "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
 source .venv/bin/activate
 
 EXPERIMENT_DIR=${EXPERIMENT_DIR:-/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC_no_scale_linear}
-SELECTED_EXPERIMENT_DIR=${SELECTED_EXPERIMENT_DIR:-$EXPERIMENT_DIR/model_training_192_5k_metacells}
+SELECTED_EXPERIMENT_DIR=${SELECTED_EXPERIMENT_DIR:-$EXPERIMENT_DIR/model_training_192_15k_metacells}
 
 
 echo ""
