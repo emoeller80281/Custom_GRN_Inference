@@ -16,12 +16,18 @@ cd "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
 source .venv/bin/activate
 
 EXPERIMENT_DIR=${EXPERIMENT_DIR:-/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC_no_scale_linear}
-SELECTED_EXPERIMENT_DIR=${SELECTED_EXPERIMENT_DIR:-$EXPERIMENT_DIR/model_training_192_15k_metacells}
+SELECTED_EXPERIMENT_DIR=${SELECTED_EXPERIMENT_DIR:-$EXPERIMENT_DIR/model_training_192_10k_metacells}
 
+EXPERIMENT_DIR_LIST=(
+    $EXPERIMENT_DIR/model_training_192_5k_metacells
+    $EXPERIMENT_DIR/model_training_192_10k_metacells
+    $EXPERIMENT_DIR/model_training_192_15k_metacells
+    $EXPERIMENT_DIR/model_training_192_50k_metacells
+)
 
 echo ""
 echo "Running auroc testing on experiment directory: $SELECTED_EXPERIMENT_DIR"
 poetry run python ./dev/auroc_testing.py \
-    --experiment_dir_list "${SELECTED_EXPERIMENT_DIR}"
+    --experiment_dir_list "${EXPERIMENT_DIR_LIST[@]}" \
 
 echo "finished"
