@@ -163,7 +163,7 @@ def load_model(selected_experiment_dir, checkpoint_file, device):
         std=torch.as_tensor(state["tf_scaler_std"],  device=device, dtype=torch.float32),
     )
 
-    return model, test_loader, tg_scaler, tf_scaler
+    return model, test_loader, tg_scaler, tf_scaler, state
 
 def balance_pos_neg(df, label_col="is_gt", random_state=0):
     rng = np.random.default_rng(random_state)
@@ -1430,7 +1430,7 @@ if __name__ == "__main__":
                 checkpoint_file = last_checkpoint
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        model, test_loader, tg_scaler, tf_scaler = load_model(selected_experiment_dir, checkpoint_file, device)
+        model, test_loader, tg_scaler, tf_scaler, state = load_model(selected_experiment_dir, checkpoint_file, device)
         model.eval()
 
         # Vocab

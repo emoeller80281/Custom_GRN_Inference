@@ -5,7 +5,7 @@
 #SBATCH --time=12:00:00
 #SBATCH -p dense
 #SBATCH -N 1
-#SBATCH --gres=gpu:v100:4
+#SBATCH --gres=gpu:a100:4
 #SBATCH --ntasks-per-node=4
 #SBATCH -c 8
 #SBATCH --mem=64G
@@ -39,6 +39,7 @@ torchrun --standalone --nnodes=1 --nproc_per_node=4 ./src/multiomic_transformer/
     --smoothgrad_samples 3 \
     --smoothgrad_noise_std 0.05 \
     --use_amp \
-    --max_batches 100
+    --max_batches 100 \
+    --tg_sampling_fraction 1.0
 
 echo "finished successfully!"
