@@ -14,7 +14,7 @@ chrom_list = chr_nums #+ ["chrX", "chrY"]
 # ----- SAMPLE INFORMATION -----
 # Sample information
 ORGANISM_CODE = "mm10"
-DATASET_NAME = "mESC_no_scale_linear"
+DATASET_NAME = "mESC_slower_dist_decay"
 CHROM_ID_LIST = chrom_list
 CHROM_ID = "chr19"
 CHROM_IDS = chr_nums
@@ -43,16 +43,16 @@ ADATA_ATAC_FILE = "adata_ATAC.h5ad"
 PSEUDOBULK_TG_FILE = "TG_pseudobulk.tsv"
 PSEUDOBULK_RE_FILE = "RE_pseudobulk.tsv"
 
-NEIGHBORS_K = 20        # Number of nearest neighpers per cell in the KNN graph
+NEIGHBORS_K = 10        # Number of nearest neighpers per cell in the KNN graph
 PCA_COMPONENTS = 25     # Number of PCs per modality, controls variation
-HOPS = 1                # Number of neighbors-of-neighbors to use (smooths across community)
-SELF_WEIGHT = 1.0       # How much to weight the cells own gene expression. Higher = les blending with neighbors
+HOPS = 0                # Number of neighbors-of-neighbors to use (smooths across community)
+SELF_WEIGHT = 1.0       # How much to weight the cells own gene expression. Higher = less blending with neighbors
 
 # Data Preprocessing and Caching
 VALIDATION_DATASETS = ["E8.75_rep1"]
-FORCE_RECALCULATE = True                # Recomputes genomic windows, peak-TG distance, and re-runs sliding window TF-peak scan
+FORCE_RECALCULATE = False                # Recomputes genomic windows, peak-TG distance, and re-runs sliding window TF-peak scan
 WINDOW_SIZE = 1_000                     # Aggregates peaks within WINDOW_SIZE bp genomic tiles
-DISTANCE_SCALE_FACTOR = 20_000           # Weights the peak-gene TSS distance score. Lower numbers = faster dropoff
+DISTANCE_SCALE_FACTOR = 40_000           # Weights the peak-gene TSS distance score. Lower numbers = faster dropoff
 MAX_PEAK_DISTANCE = 100_000              # Masks out peaks further than this distance from the gene TSS
 DIST_BIAS_MODE = "logsumexp"            # Method for calcuting window -> gene TSS distance. Options: "max" | "sum" | "mean" | "logsumexp"
 FILTER_TO_NEAREST_GENE = True           # Associate peaks to the nearest gene

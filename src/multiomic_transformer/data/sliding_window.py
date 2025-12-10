@@ -595,7 +595,7 @@ def associate_tf_with_motif_pwm(
                     executor.submit(process_motif_file_and_save, i, tf_df, background_freq, mats, names, tmp_dir, peak_ids): names[i]
                     for i in filtered_indices
                 }
-                min_update = max(1, int(0.02 * len(futures)))
+                min_update = max(1, len(futures) // 10)
                 for _ in tqdm(as_completed(futures), total=len(futures), desc="Scoring motifs", miniters=min_update):
                     _ = _.result()
 
@@ -615,7 +615,7 @@ def associate_tf_with_motif_pwm(
                     executor.submit(process_motif_file_and_save, i, tf_df, background_freq, mats, names, tmp_dir, peak_ids): names[i]
                     for i in filtered_indices
                 }
-                min_update = max(1, int(0.02 * len(futures)))
+                min_update = max(1, len(futures) // 10)
                 for _ in tqdm(as_completed(futures), total=len(futures), desc="Scoring motifs", miniters=min_update):
                     _ = _.result()
 
@@ -627,7 +627,8 @@ def associate_tf_with_motif_pwm(
                          plus_shm, plus_shape, plus_dtype,
                          minus_shm, minus_shape, minus_dtype, lengths)
 
-            for i in tqdm(filtered_indices, desc="Scoring motifs", total=len(filtered_indices)):
+            min_update = max(1, len(filtered_indices) // 10)
+            for i in tqdm(filtered_indices, desc="Scoring motifs", total=len(filtered_indices), miniters=min_update):
                 process_motif_file_and_save(i, tf_df, background_freq, mats, names, tmp_dir, peak_ids)
 
         logging.info("Finished scoring all motifs. Reading TF motif parquet files...")
@@ -681,8 +682,8 @@ def run_sliding_window_scan(
         tf_name_list=tf_name_list,
         num_cpu=inner_workers,          # used for inner pool sizing
         output_dir=str(output_dir),
-        inner_executor=inner_executor,  # NEW: safely select process/thread/serial
-        inner_workers=inner_workers,    # NEW: explicit inner worker count
+        inner_executor=inner_executor,
+        inner_workers=inner_workers,
     )
 
     # If the scorer wrote to a different file, atomically move into place

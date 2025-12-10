@@ -2117,7 +2117,7 @@ if __name__ == "__main__":
     
     logging.info(f"FORCE_RECALCULATE: {FORCE_RECALCULATE}")
     
-    PROCESS_SAMPLE_DATA = False
+    PROCESS_SAMPLE_DATA = True
     logging.info(f"PROCESS_SAMPLE_DATA: {PROCESS_SAMPLE_DATA}")
     PROCESS_CHROMOSOME_SPECIFIC_DATA = True
     logging.info(f"PROCESS_CHROMOSOME_SPECIFIC_DATA: {PROCESS_CHROMOSOME_SPECIFIC_DATA}")
@@ -2264,7 +2264,9 @@ if __name__ == "__main__":
                     genome_fasta=str(genome_fasta_file),
                     peak_bed_file=str(peak_bed_file),
                     output_file=sliding_window_score_file,
-                    num_cpu=num_cpu
+                    num_cpu=num_cpu,
+                    inner_executor="thread",
+                    inner_workers=4
                 )
 
             # ----- CALCULATE TF-TG REGULATORY POTENTIAL -----
