@@ -218,6 +218,17 @@ class Trainer:
         torch.save(ckpt, out_path)
         logging.info(f"Saved trained model to {out_path}")
 
+    def _handle_abort(self, epoch, path, history, reason: str):
+        # Only rank 0 writes, but all ranks should sync.
+        if self.is_main:
+            logging.info(f"{reason}: saving checkpoint and logs before exit.")
+            last_epoch = max(0, epoch)
+            self._save_checkpoint(last_epoch, path)
+            self._save_trained_model(path)
+
+        if dist.is_available() and dist.is_initialized():
+            dist.barrier()
+
     def _run_batch(self, batch):
         atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids, motif_mask = batch
         atac_wins = atac_wins.to(self.gpu_id)
@@ -584,7 +595,7 @@ class Trainer:
                 )
 
 
-    def train(self, max_epochs: int, path: str):
+    def train(self, max_epochs: int, path: str, start_epoch: int = 0):
         best_r2 = float("-inf")
         patience_counter = 0
         history = []
@@ -623,23 +634,23 @@ class Trainer:
                         f"Time: {epoch_dur_sec:.0f}s"
                     )
 
-                    history.append(
-                        {
-                            "Epoch": epoch + 1,
-                            "Train Total Loss": avg_train_loss,
-                            "Train MSE": avg_train_mse_unscaled,
-                            "Val MSE": avg_val_mse_unscaled,
-                            "R2_u": r2_u,
-                            "R2_s": r2_s,
-                            "LR": lr,
-                            "Time": round(epoch_dur_sec, 0),
-                        }
-                    )
+                    epoch_log = {
+                        "Epoch": epoch+1,
+                        "Train Total Loss": avg_train_loss,
+                        "Train MSE": avg_train_mse_unscaled,
+                        "Val MSE": avg_val_mse_unscaled,
+                        "R2_u": r2_u,
+                        "R2_s": r2_s,
+                        "LR": lr,
+                        "Time": round(epoch_dur_sec, 0),
+                    }
+                    history.append(epoch_log)
+                    
+                    self._write_log_csv(epoch_log, path)
 
                 if epoch % self.save_every == 0:
                     if self.is_main:
                         self._save_checkpoint(epoch, path)
-                        self._write_log_csv(history, path)
                     if dist.is_available() and dist.is_initialized():
                         dist.barrier()
 
@@ -661,7 +672,6 @@ class Trainer:
                         if patience_counter >= self.patience:
                             logging.info("Early stopping triggered (no improvement).")
                             self._save_checkpoint(epoch, path)
-                            self._write_log_csv(history, path)
                             stop_tensor.fill_(1)
                         else:
                             logging.info(f"    Loss did not improve {patience_counter}/{self.patience}")
@@ -683,11 +693,16 @@ class Trainer:
                 logging.info(f"Total Training Time: {int(hours):02d}:{int(minutes):02d}:{seconds:05.2f}")
 
         except KeyboardInterrupt:
-            epoch = locals().get("epoch", 0)
-            if self.is_main:
-                logging.info("Keyboard interrupt received; saving before exit.")
-                self._save_checkpoint(epoch, path)
-                self._save_trained_model(path)
+            # graceful Ctrl+C
+            epoch = locals().get("epoch", start_epoch)
+            self._handle_abort(epoch, path, history, "KeyboardInterrupt")
+            raise
+
+        except RuntimeError as e:
+            # catch CUDA OOM and save before dying
+            if "out of memory" in str(e).lower():
+                epoch = locals().get("epoch", start_epoch)
+                self._handle_abort(epoch, path, history, "CUDA OOM")
             raise
 
     def _write_log_csv(self, history, path):

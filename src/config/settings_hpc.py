@@ -20,7 +20,7 @@ CHROM_ID = "chr19"
 CHROM_IDS = chr_nums
 # , "E7.75_rep1", "E8.0_rep2", "E8.5_rep2", "E8.75_rep2", "E7.5_rep2", "E8.0_rep1", "E8.5_rep1"
 SAMPLE_NAMES = ["E7.5_rep1", "E7.5_rep2", "E7.75_rep1", "E8.0_rep2", "E8.5_rep2", "E8.75_rep2", "E8.0_rep1", "E8.5_rep1"]
-FINE_TUNING_DATASETS = ["E7.5_rep1", "E7.5_rep2"]
+FINE_TUNING_DATASETS = ["E7.5_rep1", "E7.5_rep2", "E7.75_rep1", "E8.0_rep2", "E8.5_rep2", "E8.75_rep2", "E8.0_rep1", "E8.5_rep1"]
 
 # Paths to the raw scRNA-seq and scATAC-seq data
 RAW_SINGLE_CELL_DATA = Path("/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/SINGLE_CELL_DATASETS")
@@ -109,13 +109,13 @@ ATTN_BIAS_SCALE = 0.0
 SUBSAMPLE_MAX_TFS = None #400 # 150
 SUBSAMPLE_MAX_TGS = None #2000 #None
 SUBSAMPLE_MAX_WINDOWS_PER_CHROM = None #1000
-SUBSAMPLE_MAX_CELLS = 10_000
+SUBSAMPLE_MAX_CELLS = 20_000
 SUBSAMPLE_SEED = 42
 
 # ----- FINE TUNING ON SINGLE-CELL DATA -----
 FINE_TUNING_TRAINED_MODEL = "model_training_192_10k_metacells_fine_tuning"
 FINETUNE_PATIENCE = 20
-FINETUNE_LR = 1e-4       # smaller LR for refinement
+FINETUNE_LR = 3.13e-05       # smaller LR for refinement
 EWC_LAMBDA = 10.0
 
 # Sample the max number of cells per sample
