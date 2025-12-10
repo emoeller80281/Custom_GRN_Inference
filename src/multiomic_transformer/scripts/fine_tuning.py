@@ -10,6 +10,7 @@ import time
 import warnings
 from pathlib import Path
 import shutil
+import signal
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -548,6 +549,12 @@ class Trainer:
         progress_marks = [25, 50, 75]
         next_mark_idx = 0
 
+        total_batches = None
+        if isinstance(self.train_data, dict):
+            total_batches = max(len(loader) for loader in self.train_data.values()) * len(self.train_data)
+        elif hasattr(self.train_data, "__len__"):
+            total_batches = len(self.train_data)
+
         for iteration, (batch, dataset_name) in enumerate(batch_iter):
             if self._should_stop():
                 raise KeyboardInterrupt()
@@ -565,8 +572,8 @@ class Trainer:
             loss_for_backprop = total_loss_val / self.grad_accum_steps
             self.scaler.scale(loss_for_backprop).backward()
 
-            if ((iteration + 1) % self.grad_accum_steps == 0) or (iteration + 1) == len(
-                self.train_data if not isinstance(self.train_data, dict) else next(iter(self.train_data.values()))
+            if ((iteration + 1) % self.grad_accum_steps == 0) or (
+                total_batches is not None and (iteration + 1) == total_batches
             ):
                 self.scaler.unscale_(self.optimizer)
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=10.0)
@@ -648,7 +655,7 @@ class Trainer:
 
         save_tf_tg_embeddings_from_model(model_for_save, out_dir=path, vocab_dir=path)
 
-        out_path = os.path.join(path, f"checkpoint_{epoch}.pt")
+        out_path = os.path.join(path, f"fine_tune_checkpoint_{epoch}.pt")
         torch.save(ckpt, out_path)
         logging.info(f"\tTraining checkpoint saved to {out_path}")
 
@@ -673,7 +680,6 @@ class Trainer:
                     [epoch, name, train_mse, val_metrics.get("val_mse_unscaled"), val_metrics.get("r2_s"), val_metrics.get("r2_u")]
                 )
 
-        logging.info(f"Per-dataset metrics logged for epoch {epoch}")
 
     def train(self, max_epochs: int, path: str):
         best_r2 = float("-inf")
@@ -805,34 +811,43 @@ class Trainer:
             
 
 def load_train_objs(run_cfg):
-    # --- Step 1: Load pseudobulk dataset (for Fisher / EWC) ---
-    pseudobulk_dataset = MultiomicTransformerDataset(
+    # --- Step 1: Load pseudobulk dataset (for Fisher / EWC) across all chromosomes ---
+    pseudobulk_dataset = MultiChromosomeDataset(
         data_dir=SAMPLE_DATA_CACHE_DIR,
-        chrom_id=CHROM_ID,
+        chrom_ids=CHROM_IDS,
         tf_vocab_path=os.path.join(COMMON_DATA, "tf_vocab.json"),
         tg_vocab_path=os.path.join(COMMON_DATA, "tg_vocab.json"),
+        max_cached=2,
+        max_tfs=SUBSAMPLE_MAX_TFS,
+        max_tgs=SUBSAMPLE_MAX_TGS,
+        max_windows_per_chrom=SUBSAMPLE_MAX_WINDOWS_PER_CHROM,
+        max_cells=SUBSAMPLE_MAX_CELLS,
+        subset_seed=SUBSAMPLE_SEED,
+        allowed_samples=ALLOWED_SAMPLES,
     )
 
-    # --- Step 2: Load all single-cell datasets for vocab union ---
+    # --- Step 2: Load all single-cell datasets across all chromosomes ---
     single_cell_datasets = [
-        MultiomicTransformerDataset(
+        MultiChromosomeDataset(
             data_dir=SAMPLE_DATA_CACHE_DIR,
-            chrom_id=CHROM_ID,
+            chrom_ids=CHROM_IDS,
             tf_vocab_path=os.path.join(COMMON_DATA, "tf_vocab.json"),
             tg_vocab_path=os.path.join(COMMON_DATA, "tg_vocab.json"),
             fine_tuner=True,
             sample_name=sn,
+            max_cached=2,
+            max_tfs=SUBSAMPLE_MAX_TFS,
+            max_tgs=SUBSAMPLE_MAX_TGS,
+            max_windows_per_chrom=SUBSAMPLE_MAX_WINDOWS_PER_CHROM,
+            max_cells=SUBSAMPLE_MAX_CELLS,
+            subset_seed=SUBSAMPLE_SEED,
         )
         for sn in FINE_TUNING_DATASETS
     ]
 
-    # --- Step 3: Build vocab sizes (use common vocab if provided) ---
-    tf_vocab_size = len(pseudobulk_dataset.tf_name2id) if pseudobulk_dataset.tf_name2id is not None else len(
-        pseudobulk_dataset.tf_ids
-    )
-    tg_vocab_size = len(pseudobulk_dataset.tg_name2id) if pseudobulk_dataset.tg_name2id is not None else len(
-        pseudobulk_dataset.tg_ids
-    )
+    # --- Step 3: Build vocab sizes (global across chromosomes) ---
+    tf_vocab_size = len(pseudobulk_dataset.tf_name2id_sub)
+    tg_vocab_size = len(pseudobulk_dataset.tg_name2id_sub)
 
     # --- Step 4: Initialize model ---
     model = MultiomicTransformer(
@@ -1042,7 +1057,7 @@ def prepare_dataloader(dataset, batch_size, world_size=1, rank=0,
 
 def write_run_parameters(dataset, out_dir, world_size, run_cfg):
     logging.info("\n===== Dataset Loaded for Fine-Tuning =====")
-    logging.info(f"Chromosome:          {CHROM_ID}")
+    logging.info(f"Chromosomes:         {CHROM_IDS}")
     logging.info(f"Genes:               {len(dataset.tg_ids)}")
     logging.info(f"Windows (RE):        {dataset.num_windows}")
     logging.info(f"TFs:                 {len(dataset.tf_ids)}")
@@ -1125,24 +1140,67 @@ def balanced_round_robin(loaders, seed=42):
         yield batch, name
 
 
-def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_size: int):
-    ddp_setup(rank, world_size)
+def main(rank: int, local_rank: int, world_size: int, save_every: int, total_epochs: int, batch_size: int):
+    assert D_MODEL % NUM_HEADS == 0, f"{D_MODEL} not divisible by {NUM_HEADS}"
+
+    ddp_setup(rank, world_size, local_rank)
     setup_logging(rank)
 
     try:
-        # --- Step 0: Load everything (pseudobulk, all single-cell, model, optimizer) ---
-        pseudobulk_dataset, single_cell_datasets, model, optimizer = load_train_objs()
-        device = f"cuda:{rank}"
-        model = model.to(device)
+        prev_params = load_run_params_from_json(FINE_TUNING_DIR)
 
-        # --- Step 1: Compute Fisher on pseudobulk dataset ---
+        def g(key, default):
+            return prev_params.get(key, default) if prev_params else default
+
+        run_cfg = {
+            "allowed_samples": g("allowed_samples", ALLOWED_SAMPLES),
+            "epochs": g("epochs", TOTAL_EPOCHS),
+            "batch_size": g("batch_size", BATCH_SIZE),
+            "grad_accum_steps": g("grad_accum_steps", GRAD_ACCUM_STEPS),
+            "d_model": g("d_model", D_MODEL),
+            "num_layers": g("num_layers", NUM_LAYERS),
+            "num_heads": g("num_heads", NUM_HEADS),
+            "d_ff": g("d_ff", D_FF),
+            "dropout": g("dropout", DROPOUT),
+            "use_grad_ckpt": g("use_grad_ckpt", USE_GRAD_CHECKPOINTING),
+            "use_shortcut": g("use_shortcut", USE_SHORTCUT),
+            "use_dist_bias": g("use_dist_bias", USE_DISTANCE_BIAS),
+            "use_motif_mask": g("use_motif_mask", USE_MOTIF_MASK),
+            "motif_mask_threshold": g("motif_mask_threshold", MOTIF_MASK_THRESH),
+            "motif_prior_scale": g("motif_prior_scale", MOTIF_PRIOR_SCALE),
+            "shortcut_l1": g("shortcut_l1", SHORTCUT_L1),
+            "shortcut_l2": g("shortcut_l2", SHORTCUT_L2),
+            "shortcut_topk": g("shortcut_topk", SHORTCUT_TOPK),
+            "shortcut_dropout": g("shortcut_dropout", SHORTCUT_DROPOUT),
+            "lr": FINETUNE_LR,
+        }
+
+        fine_tune_dir = FINE_TUNING_DIR / "fine_tuning"
+        os.makedirs(fine_tune_dir, exist_ok=True)
+
+        for vocab_name in ("tf_vocab.json", "tg_vocab.json"):
+            dest = fine_tune_dir / vocab_name
+            if dest.exists():
+                continue
+            for cand in (FINE_TUNING_DIR / vocab_name, COMMON_DATA / vocab_name):
+                if cand.is_file():
+                    shutil.copy(cand, dest)
+                    break
+
+        pseudobulk_dataset, single_cell_datasets, model, optimizer, tf_scaler_loaded, tg_scaler_loaded = load_train_objs(
+            run_cfg
+        )
+        rank_device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
+        model = model.to(rank_device)
+
         pseudobulk_loader, _, _ = prepare_dataloader(
             pseudobulk_dataset, batch_size, world_size, rank
         )
 
-        fisher_bundle_path = FINE_TUNING_DIR / "ewc_bundle.pt"
+        fisher_bundle_candidates = [FINE_TUNING_DIR / "ewc_bundle.pth", FINE_TUNING_DIR / "ewc_bundle.pt"]
+        fisher_bundle_path = next((p for p in fisher_bundle_candidates if p.exists()), fisher_bundle_candidates[0])
         if fisher_bundle_path.exists():
-            ref_params, fisher_diag = ewc_utils.load_ewc_bundle(fisher_bundle_path, device=device)
+            ref_params, fisher_diag = ewc_utils.load_ewc_bundle(fisher_bundle_path, device=rank_device)
             total_size = len(pseudobulk_dataset)
             if rank == 0:
                 logging.info(f"Loaded existing Fisher/EWC bundle: {fisher_bundle_path}")
@@ -1150,15 +1208,17 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
             if rank == 0:
                 logging.info("Computing Fisher matrix on pseudobulk dataset...")
             fisher_diag = ewc_utils.compute_fisher_diag(
-                model, pseudobulk_loader, device=device, n_batches=100
+                model, pseudobulk_loader, device=rank_device, n_batches=100
             )
-            ref_params = {n: p.detach().clone().to(device) for n, p in model.named_parameters()}
-            ewc_utils.save_ewc_bundle(fisher_bundle_path, model, fisher_diag)
+            ref_params = {n: p.detach().clone().to(rank_device) for n, p in model.named_parameters()}
             total_size = len(pseudobulk_dataset)
             if rank == 0:
+                ewc_utils.save_ewc_bundle(fisher_bundle_path, model, fisher_diag)
                 logging.info(f"Saved Fisher/EWC bundle to {fisher_bundle_path}")
 
-        # --- Step 2: Build round-robin loaders ---
+        fisher_diag = {k: v.to(rank_device) for k, v in fisher_diag.items()} if fisher_diag is not None else None
+        ref_params = {k: v.to(rank_device) for k, v in ref_params.items()} if ref_params is not None else None
+
         train_loaders = {
             sn: prepare_dataloader(ds, batch_size, world_size, rank)[0]
             for sn, ds in zip(FINE_TUNING_DATASETS, single_cell_datasets)
@@ -1167,40 +1227,89 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
             sn: prepare_dataloader(ds, batch_size, world_size, rank)[1]
             for sn, ds in zip(FINE_TUNING_DATASETS, single_cell_datasets)
         }
-        test_loaders = {
-            sn: prepare_dataloader(ds, batch_size, world_size, rank)[2]
-            for sn, ds in zip(FINE_TUNING_DATASETS, single_cell_datasets)
-        }
 
-        # --- Step 3: Train with round-robin sampler ---
+        if tf_scaler_loaded is not None and tg_scaler_loaded is not None:
+            tf_scaler = SimpleScaler(tf_scaler_loaded.mean.to(rank_device), tf_scaler_loaded.std.to(rank_device))
+            tg_scaler = SimpleScaler(tg_scaler_loaded.mean.to(rank_device), tg_scaler_loaded.std.to(rank_device))
+        else:
+            # Use GLOBAL TF/TG vocab sizes (match tf_name2id/tg_name2id mapping)
+            if getattr(pseudobulk_dataset, "tf_name2id", None) is not None:
+                T = len(pseudobulk_dataset.tf_name2id)
+            else:
+                # fallback: infer from max id
+                T = int(pseudobulk_dataset.tf_ids.max().item() + 1)
+
+            if getattr(pseudobulk_dataset, "tg_name2id", None) is not None:
+                G = len(pseudobulk_dataset.tg_name2id)
+            else:
+                G = int(pseudobulk_dataset.tg_ids.max().item() + 1)
+
+            combined_loader = itertools.chain.from_iterable(train_loaders.values())
+            use_ddp_reduce = torch.distributed.is_initialized()
+            tf_s, tg_s = fit_simple_scalers(
+                combined_loader,
+                T_expected=T,
+                G_expected=G,
+                device_for_reduce=rank_device,
+                use_ddp_reduce=use_ddp_reduce,
+            )
+            tf_scaler = SimpleScaler(tf_s.mean.to(rank_device), tf_s.std.to(rank_device))
+            tg_scaler = SimpleScaler(tg_s.mean.to(rank_device), tg_s.std.to(rank_device))
+
         trainer = Trainer(
-            model, train_loaders, val_loaders, nn.MSELoss(), optimizer,
-            gpu_id=rank, save_every=save_every, patience=FINETUNE_PATIENCE,
-            ref_params=ref_params, fisher_diag=fisher_diag, lambda_ewc=EWC_LAMBDA
+            model,
+            train_loaders,
+            val_loaders,
+            nn.MSELoss(),
+            optimizer,
+            gpu_id=local_rank,
+            global_rank=rank,
+            save_every=save_every,
+            patience=FINETUNE_PATIENCE,
+            grad_accum_steps=run_cfg["grad_accum_steps"],
+            use_grad_accumulation=USE_GRAD_ACCUMULATION,
+            ref_params=ref_params,
+            fisher_diag=fisher_diag,
+            lambda_ewc=EWC_LAMBDA,
         )
-        
+        trainer.tf_scaler = tf_scaler
+        trainer.tg_scaler = tg_scaler
+
         if rank == 0:
+            write_run_parameters(pseudobulk_dataset, fine_tune_dir, world_size, run_cfg)
+            logging.info("Wrote experiment settings and objects to fine-tuning directory")
             logging.info("----- ROUND-ROBIN TRAINING STARTED -----")
 
-        out_dir = FINE_TUNING_DIR / "fine_tuning"
-        os.makedirs(out_dir, exist_ok=True)
+        trainer.train(max_epochs=total_epochs, path=str(fine_tune_dir))
 
-        trainer.train(max_epochs=total_epochs, path=str(out_dir))
+        model_for_eval = getattr(trainer.model, "module", trainer.model).to(rank_device)
 
-        # --- Step 4: recompute Fisher on each dataset separately and merge ---
-        new_ref_params = {n: p.detach().clone().to(device) for n, p in model.named_parameters()}
+        if rank == 0:
+            torch.save(
+                {
+                    "epoch": total_epochs - 1,
+                    "model_state_dict": model_for_eval.state_dict(),
+                    "optimizer_state_dict": trainer.optimizer.state_dict(),
+                    "scheduler_state_dict": trainer.scheduler.state_dict(),
+                    "best_val_loss": trainer.best_val_loss,
+                    "tf_scaler_mean": trainer.tf_scaler.mean,
+                    "tf_scaler_std": trainer.tf_scaler.std,
+                    "tg_scaler_mean": trainer.tg_scaler.mean,
+                    "tg_scaler_std": trainer.tg_scaler.std,
+                },
+                fine_tune_dir / "trained_model.pt",
+            )
+            save_tf_tg_embeddings_from_model(model_for_eval, out_dir=fine_tune_dir, vocab_dir=fine_tune_dir)
+            logging.info("Saved final fine-tuned model and embeddings")
 
-        # total pseudobulk size for weighting
         len_all = sum(len(ds) for ds in single_cell_datasets)
-
-        # start from empty fisher
         new_fisher_accum = None
+        fisher_size_accum = 0
+        model_for_fisher = getattr(model_for_eval, "module", model_for_eval)
 
         for ds, name in zip(single_cell_datasets, FINE_TUNING_DATASETS):
-            train_loader, _, _ = prepare_dataloader(ds, batch_size, world_size, rank)
-            fisher_ds = ewc_utils.compute_fisher_diag(model, train_loader, device=device, n_batches=100)
-
-            # merge fisher: weighted by dataset size
+            train_loader_ds, _, _ = prepare_dataloader(ds, batch_size, world_size, rank)
+            fisher_ds = ewc_utils.compute_fisher_diag(model_for_fisher, train_loader_ds, device=rank_device, n_batches=100)
             fisher_size = len(ds)
             if new_fisher_accum is None:
                 new_fisher_accum = fisher_ds
@@ -1211,11 +1320,16 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
                 )
                 fisher_size_accum += fisher_size
 
-        # update fisher and reference params
-        fisher_diag = ewc_utils.merge_fishers(fisher_diag, new_fisher_accum, total_size, len_all)
-        ref_params = new_ref_params
+        if fisher_diag is None:
+            fisher_diag = new_fisher_accum
+        else:
+            fisher_diag = ewc_utils.merge_fishers(fisher_diag, new_fisher_accum, total_size, len_all)
+        ref_params = {n: p.detach().clone() for n, p in model_for_fisher.named_parameters()}
 
         if rank == 0:
+            ewc_bundle_out = fine_tune_dir / "ewc_bundle.pth"
+            ewc_utils.save_ewc_bundle(ewc_bundle_out, model_for_fisher, fisher_diag)
+            logging.info(f"Saved fine-tuned Fisher/EWC bundle to {ewc_bundle_out}")
             logging.info("\nFine-tuning complete on all datasets (round-robin).")
 
     finally:
@@ -1225,10 +1339,17 @@ def main(rank: int, world_size: int, save_every: int, total_epochs: int, batch_s
                 logging.info("\nDestroying process group")
             dist.destroy_process_group()
 
-    
+
 if __name__ == "__main__":
-    main(rank=int(os.environ["LOCAL_RANK"]),
-        world_size=int(os.environ["WORLD_SIZE"]),
-        save_every=5,
+    global_rank = int(os.environ["RANK"])
+    local_rank = int(os.environ["LOCAL_RANK"])
+    world_size = int(os.environ["WORLD_SIZE"])
+
+    main(
+        rank=global_rank,
+        local_rank=local_rank,
+        world_size=world_size,
+        save_every=SAVE_EVERY_N_EPOCHS,
         total_epochs=TOTAL_EPOCHS,
-        batch_size=BATCH_SIZE)
+        batch_size=BATCH_SIZE,
+    )

@@ -721,6 +721,7 @@ class MultiomicTransformerDataset(Dataset):
 
             required = [tf_tensor_file, tg_tensor_file, atac_tensor_file,
                         tf_ids_file, tg_ids_file, tf_names_file, tg_names_file]
+            
             for f in required:
                 if not f.exists():
                     raise FileNotFoundError(f"Required single-cell tensor missing: {f}")

@@ -1498,31 +1498,36 @@ def create_single_cell_tensors(
     tg_vocab: dict[str, int],
     tf_vocab: dict[str, int],
     chrom_id: str,
-    single_cell_dir: Path
+    single_cell_dir: Path,
 ):
-
     # Ensure gene_tss_df names are normalized
     gene_tss_df = gene_tss_df.copy()
     gene_tss_df["name"] = gene_tss_df["name"].astype(str).map(standardize_name)
-    
-    # --- set chromosome-specific TG list ---
+
+    # chromosome-specific TG list
     chrom_tg_names = set(gene_tss_df["name"].unique())
 
-    for sample_name in sample_names:        
+    for sample_name in sample_names:
         sample_processed_data_dir = dataset_processed_data_dir / sample_name
 
-        tg_sc_file = sample_processed_data_dir / "TG_singlecell.tsv"
-        re_sc_file = sample_processed_data_dir / "RE_singlecell.tsv"
+        tg_sc_file = sample_processed_data_dir / "scRNA_seq_processed.parquet"
+        re_sc_file = sample_processed_data_dir / "scATAC_seq_processed.parquet"
 
         if not (tg_sc_file.exists() and re_sc_file.exists()):
-            logging.debug(f"Skipping {sample_name}: missing TG/RE single-cell files")
+            logging.debug(f"[{sample_name}] Skipping: missing TG/RE single-cell files")
             continue
 
-        TG_sc = pd.read_csv(tg_sc_file, sep="\t", index_col=0)
-        TG_sc.index = TG_sc.index.astype(str).map(standardize_name)
-        RE_sc = pd.read_csv(re_sc_file, sep="\t", index_col=0)
+        logging.info(f"[{sample_name} | {chrom_id}] Building single-cell tensors")
 
-        # --- restrict TGs to chromosome + vocab ---
+        TG_sc = pd.read_parquet(tg_sc_file)
+        TG_sc.index = TG_sc.index.astype(str).map(standardize_name)
+        RE_sc = pd.read_parquet(re_sc_file)
+
+        # Output dir for this sample + chromosome
+        sample_sc_dir = single_cell_dir / sample_name
+        sample_sc_dir.mkdir(parents=True, exist_ok=True)
+
+        # --- TG tensor: restrict to this chromosome + vocab ---
         tg_rows = [g for g in TG_sc.index if g in chrom_tg_names]
         TG_sc_chr = TG_sc.loc[tg_rows]
 
@@ -1530,21 +1535,33 @@ def create_single_cell_tensors(
             TG_sc_chr.index.tolist(),
             tg_vocab,
             torch.tensor(TG_sc_chr.values, dtype=torch.float32),
-            label="TG"
+            label="TG",
         )
-        torch.save(tg_tensor_sc, single_cell_dir / f"{sample_name}_tg_tensor_singlecell_{chrom_id}.pt")
-        torch.save(torch.tensor(tg_ids, dtype=torch.long), single_cell_dir / f"{sample_name}_tg_ids_singlecell_{chrom_id}.pt")
-        atomic_json_dump(tg_names_kept, single_cell_dir / f"{sample_name}_tg_names_singlecell_{chrom_id}.json")
 
-        # --- restrict ATAC peaks to chromosome ---
+        torch.save(
+            tg_tensor_sc,
+            sample_sc_dir / f"{sample_name}_tg_tensor_singlecell_{chrom_id}.pt",
+        )
+        torch.save(
+            torch.tensor(tg_ids, dtype=torch.long),
+            sample_sc_dir / f"{sample_name}_tg_ids_singlecell_{chrom_id}.pt",
+        )
+        atomic_json_dump(
+            tg_names_kept,
+            sample_sc_dir / f"{sample_name}_tg_names_singlecell_{chrom_id}.json",
+        )
+
+        # --- ATAC tensor: restrict peaks to this chromosome ---
         re_rows = [p for p in RE_sc.index if p.startswith(f"{chrom_id}:")]
         RE_sc_chr = RE_sc.loc[re_rows]
 
         atac_tensor_sc = torch.tensor(RE_sc_chr.values, dtype=torch.float32)
-        torch.save(atac_tensor_sc, single_cell_dir / f"{sample_name}_atac_tensor_singlecell_{chrom_id}.pt")
+        torch.save(
+            atac_tensor_sc,
+            sample_sc_dir / f"{sample_name}_atac_tensor_singlecell_{chrom_id}.pt",
+        )
 
-        # --- TF tensor (subset of TGs) ---
-        tf_tensor_sc = None
+        # --- TF tensor: subset of TGs that are TFs in the global vocab ---
         tf_rows = [g for g in TG_sc.index if g in tf_vocab]
         if tf_rows:
             TF_sc = TG_sc.loc[tf_rows]
@@ -1552,21 +1569,26 @@ def create_single_cell_tensors(
                 TF_sc.index.tolist(),
                 tf_vocab,
                 torch.tensor(TF_sc.values, dtype=torch.float32),
-                label="TF"
+                label="TF",
             )
-            torch.save(tf_tensor_sc, single_cell_dir / f"{sample_name}_tf_tensor_singlecell_{chrom_id}.pt")
-            torch.save(torch.tensor(tf_ids, dtype=torch.long), single_cell_dir / f"{sample_name}_tf_ids_singlecell_{chrom_id}.pt")
-            atomic_json_dump(tf_names_kept, single_cell_dir / f"{sample_name}_tf_names_singlecell_{chrom_id}.json")
-        else:
-            logging.warning(f"No TFs from global vocab found in sample {sample_name}")
-            tf_tensor_sc, tf_ids = None, []
 
-        logging.info(
-            f"Saved single-cell tensors for {sample_name} | "
-            f"TGs={tg_tensor_sc.shape}, "
-            f"TFs={tf_tensor_sc.shape if tf_tensor_sc is not None else 'N/A'}, "
-            f"RE={atac_tensor_sc.shape}"
-        )
+            torch.save(
+                tf_tensor_sc,
+                sample_sc_dir / f"{sample_name}_tf_tensor_singlecell_{chrom_id}.pt",
+            )
+            torch.save(
+                torch.tensor(tf_ids, dtype=torch.long),
+                sample_sc_dir / f"{sample_name}_tf_ids_singlecell_{chrom_id}.pt",
+            )
+            atomic_json_dump(
+                tf_names_kept,
+                sample_sc_dir / f"{sample_name}_tf_names_singlecell_{chrom_id}.json",
+            )
+        else:
+            logging.warning(
+                f"[{sample_name} | {chrom_id}] No TF rows found in single-cell TG matrix"
+            )
+
 
 def aggregate_pseudobulk_datasets(
     sample_names: list[str],
@@ -2583,7 +2605,7 @@ if __name__ == "__main__":
             create_single_cell_tensors(
                 gene_tss_df=gene_tss_df, 
                 sample_names=FINE_TUNING_DATASETS, 
-                dataset_processed_data_dir=SAMPLE_PROCESSED_DATA_DIR, 
+                dataset_processed_data_dir=RAW_DATA / DATASET_NAME, 
                 tg_vocab=tg_vocab, 
                 tf_vocab=tf_vocab, 
                 chrom_id=chrom_id,
