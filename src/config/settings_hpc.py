@@ -118,29 +118,6 @@ FINETUNE_PATIENCE = 20
 FINETUNE_LR = 1e-4       # smaller LR for refinement
 EWC_LAMBDA = 10.0
 
-# ----- GAT CLASSIFIER MODEL -----
-PRETRAINED_EMB_DIR = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC_no_scale_linear/chr19/model_training_035/"
-
-# Model
-HIDDEN_DIM = 384
-GAT_HEADS = 6
-GAT_DROPOUT = 0.30
-EDGE_DROPOUT = 0.30
-
-# Phase 1 (DGI)
-DGI_EPOCHS = 80
-
-# Phase 2 (fine-tune)
-FINETUNE_EPOCHS = 80
-TEST_SIZE = 0.20
-LR_ENCODER = 1e-5       # Learning rate for the (partially) unfrozen encoder
-LR_HEAD = 1e-4          # Learning rate for the classifier head
-WEIGHT_DECAY = 1e-4
-L2SP_LAMBDA = 0      # Strength of L2-SP regularization
-
-# ChIP eval
-PRECISION_AT_K = (10, 20, 50, 100, 200, 500)
-RUN_OPTUNA = False
 
 # ----- PATH SETUP -----
 # Paths for specific data

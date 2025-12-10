@@ -304,6 +304,9 @@ class MultiChromosomeDataset(Dataset):
 
         self._tf_name2id_full = self._load_vocab_dict(tf_vocab_path)
         self._tg_name2id_full = self._load_vocab_dict(tg_vocab_path)
+        
+        # Small LRU cache of per-chrom datasets
+        self._cache: OrderedDict[str, MultiomicTransformerDataset] = OrderedDict()
 
         # In pseudobulk mode, num_cells is shared (tf_tensor_all is global).
         # We can read it once from data_dir (global tf tensor) to avoid loading each chromosome.
@@ -360,7 +363,6 @@ class MultiChromosomeDataset(Dataset):
             # global indices into C dimension of tf/tg/atac tensors
             self._cell_idx = base_idx
 
-
         # offsets tell us where each chromosome's indices start in the concatenated space
         self._offsets = []
         running = 0
@@ -381,9 +383,6 @@ class MultiChromosomeDataset(Dataset):
                 self._evict_if_needed()  # keep cache small
             self._length = running
 
-        # Small LRU cache of per-chrom datasets
-        self._cache: OrderedDict[str, MultiomicTransformerDataset] = OrderedDict()
-        
         # Build per-chrom name inventories (fast JSON reads, not big tensors)
         per_chrom_tf = {}
         per_chrom_tg = {}
