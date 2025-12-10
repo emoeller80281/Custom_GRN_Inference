@@ -305,6 +305,8 @@ class MultiChromosomeDataset(Dataset):
         self._tf_name2id_full = self._load_vocab_dict(tf_vocab_path)
         self._tg_name2id_full = self._load_vocab_dict(tg_vocab_path)
         
+        self._cell_idx: Optional[np.ndarray] = None
+        
         # Small LRU cache of per-chrom datasets
         self._cache: OrderedDict[str, MultiomicTransformerDataset] = OrderedDict()
 
@@ -318,7 +320,6 @@ class MultiChromosomeDataset(Dataset):
             base_idx = np.arange(full_num_cells)
 
             # --- Optional: restrict by sample tag from metacell_names.json ---
-            self._cell_idx = None
             if self.allowed_samples:
                 metacell_path = self.data_dir / "metacell_names.json"
                 try:
@@ -372,15 +373,17 @@ class MultiChromosomeDataset(Dataset):
                 running += self._num_cells
             self._length = running
         else:
-            # Fine-tuner: compute per-chrom lengths on demand
+            # Fine-tuner: compute per-chrom lengths consistent with max_cells
+            self._offsets = []
+            running = 0
             self._per_chrom_len = {}
             for chrom in self.chrom_ids:
-                ds = self._load_chrom(chrom)  # temporary open
-                n = len(ds)
+                ds = self._load_chrom_lazy(chrom)
+                n_raw = len(ds)
+                n = min(n_raw, self.max_cells) if self.max_cells else n_raw
                 self._per_chrom_len[chrom] = n
                 self._offsets.append(running)
                 running += n
-                self._evict_if_needed()  # keep cache small
             self._length = running
 
         # Build per-chrom name inventories (fast JSON reads, not big tensors)
@@ -459,16 +462,22 @@ class MultiChromosomeDataset(Dataset):
     def __len__(self):
         return self._length
 
-    def _locate(self, idx):
-        # Binary search over offsets to find chromosome and local idx
-        lo, hi = 0, len(self.chrom_ids)-1
+
+    def _locate(self, idx: int):
+        """
+        Map a global index into (chrom_id, local_index) using the
+        precomputed offsets. Works for both pseudobulk and fine-tune
+        modes as long as self._offsets / self._length are consistent.
+        """
+        if idx < 0 or idx >= self._length:
+            raise IndexError(idx)
+
+        lo, hi = 0, len(self.chrom_ids) - 1
         while lo <= hi:
             mid = (lo + hi) // 2
             start = self._offsets[mid]
-            if mid == len(self.chrom_ids)-1:
-                end = self._length
-            else:
-                end = self._offsets[mid+1]
+            end = self._offsets[mid + 1] if mid + 1 < len(self._offsets) else self._length
+
             if start <= idx < end:
                 chrom = self.chrom_ids[mid]
                 local = idx - start
@@ -477,6 +486,7 @@ class MultiChromosomeDataset(Dataset):
                 hi = mid - 1
             else:
                 lo = mid + 1
+
         raise IndexError(idx)
 
     def __getitem__(self, idx):
@@ -525,22 +535,34 @@ class MultiChromosomeDataset(Dataset):
             self._cache[chrom_id] = ds
             return ds
 
-        # miss -> create
+        # miss -> create a raw per-chrom dataset
         ds = self._load_chrom_lazy(chrom_id)
 
-        # Apply the global subsample and contiguous id mapping
+        if not self.fine_tuner:
+            cell_idx = self._cell_idx
+        else:
+            cell_idx = None
+            if self.max_cells is not None:
+                n_cells = int(ds.tf_tensor_all.shape[1])
+                if n_cells > self.max_cells:
+                    rng = np.random.RandomState(self.subset_seed or 42)
+                    chosen = np.sort(
+                        rng.choice(n_cells, size=self.max_cells, replace=False)
+                    )
+                    cell_idx = chosen
+                    
+        # Apply the global sub-vocab mapping + optional window/cell subsampling
         ds.apply_global_subsample(
             tf_name2id_sub=self.tf_name2id_sub,
             tg_name2id_sub=self.tg_name2id_sub,
             max_windows=self.max_windows_per_chrom,
             rng_seed=self.subset_seed,
-            cell_idx=self._cell_idx,
+            cell_idx=(self._cell_idx if not self.fine_tuner else cell_idx),
         )
-
         self._cache[chrom_id] = ds
         self._evict_if_needed()
         return ds
-    
+        
     def _peek_names_for_chrom(self, chrom_id: str):
         """
         Fast, lightweight peek: read only the TF/TG names JSON for a chromosome,
@@ -762,11 +784,13 @@ class MultiomicTransformerDataset(Dataset):
             self.num_cells   = self.tg_tensor_all.shape[1]
             self.num_windows = self.atac_window_tensor_all.shape[0]
             
+            self.metacell_names = [f"cell_{i}" for i in range(self.num_cells)]
+            
             # in fine-tune mode we skip pseudobulk dist_bias + motif_mask
             self.dist_bias_tensor = None
             self.motif_mask_tensor = None
 
-            logging.info(f"[Fine-tune mode] Loaded single-cell sample {sample_name}: "
+            logging.debug(f"[Fine-tune mode] Loaded single-cell sample {sample_name}: "
                          f"{self.num_cells} cells, "
                          f"{self.tf_tensor_all.shape[0]} TFs, "
                          f"{self.tg_tensor_all.shape[0]} TGs, "

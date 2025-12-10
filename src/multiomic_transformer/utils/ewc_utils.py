@@ -88,6 +88,11 @@ def ewc_penalty(model, fisher_diag, ref_params, lambda_ewc=100.0, include=None, 
     """
     include/exclude: sets of substrings; keep param if any include matches
     and no exclude matches. If include is None -> include all (except excluded).
+
+    This version is robust to changes in parameter shape between when the
+    EWC bundle was computed and the current model:
+    - If F_n or theta_star exist but do not match p.numel(), that parameter
+      is skipped instead of raising a RuntimeError.
     """
     # to be robust to 'module.' prefixes at runtime:
     name_map = {}
@@ -97,6 +102,9 @@ def ewc_penalty(model, fisher_diag, ref_params, lambda_ewc=100.0, include=None, 
 
     device = next(model.parameters()).device
     loss_ewc = torch.zeros((), device=device)
+
+    if lambda_ewc == 0.0 or fisher_diag is None or ref_params is None:
+        return loss_ewc
 
     for n, p in model.named_parameters():
         if not p.requires_grad:
@@ -113,9 +121,20 @@ def ewc_penalty(model, fisher_diag, ref_params, lambda_ewc=100.0, include=None, 
         if F_n is None or theta_star is None:
             continue
 
-        # safety: ensure tensors are on same device
+        # safety: ensure tensors are on same device + dtype
         F_n = F_n.to(device=device, dtype=p.dtype)
         theta_star = theta_star.to(device=device, dtype=p.dtype)
+
+        # If the stored Fisher / theta_star shapes don't match this param,
+        # skip this parameter rather than crashing.
+        if F_n.numel() != p.numel() or theta_star.numel() != p.numel():
+            # Optional: you could log debug info here if desired:
+            # logging.debug(f"[EWC] Skipping {key}: bundle shapes {F_n.shape}, {theta_star.shape}, param {tuple(p.shape)}")
+            continue
+
+        # Reshape to match the current parameter exactly
+        F_n = F_n.view_as(p)
+        theta_star = theta_star.view_as(p)
 
         loss_ewc = loss_ewc + 0.5 * lambda_ewc * (F_n * (p - theta_star)**2).sum()
 
@@ -139,5 +158,3 @@ def merge_fishers(old_fisher, new_fisher, old_size, new_size):
     for n in old_fisher:
         merged[n] = (old_fisher[n] * old_size + new_fisher[n] * new_size) / total
     return merged
-
-
