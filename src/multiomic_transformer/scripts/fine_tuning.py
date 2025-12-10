@@ -1,5 +1,6 @@
 import csv
 import glob
+import itertools
 import json
 import logging
 import os
@@ -167,7 +168,7 @@ class Trainer:
         self.corr_sq_warmup_epochs = 3
         self.stop_requested = False
 
-        self.log_train_breakdown_every = 5  # epochs
+        self.log_train_breakdown_every = 1  # epochs
 
         self.scaler = GradScaler(init_scale=1024, growth_factor=1.5, backoff_factor=0.5, growth_interval=200)
 
@@ -218,17 +219,6 @@ class Trainer:
         torch.save(ckpt, out_path)
         logging.info(f"Saved trained model to {out_path}")
 
-    def _handle_abort(self, epoch, path, history, reason: str):
-        # Only rank 0 writes, but all ranks should sync.
-        if self.is_main:
-            logging.info(f"{reason}: saving checkpoint and logs before exit.")
-            last_epoch = max(0, epoch)
-            self._save_checkpoint(last_epoch, path)
-            self._save_trained_model(path)
-
-        if dist.is_available() and dist.is_initialized():
-            dist.barrier()
-
     def _run_batch(self, batch):
         atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids, motif_mask = batch
         atac_wins = atac_wins.to(self.gpu_id)
@@ -263,7 +253,7 @@ class Trainer:
 
         model_for_reg = getattr(self.model, "module", self.model)
 
-        with autocast(device_type="cuda"):
+        with autocast(device_type="cuda", dtype=torch.bfloat16):
             mask_arg = motif_mask if USE_MOTIF_MASK else None
             preds, attn, shortcut_contrib, _ = self.model(
                 atac_wins,
@@ -365,72 +355,102 @@ class Trainer:
         sumy2_u = torch.zeros(1, device=self.gpu_id)
         n_u = torch.zeros(1, device=self.gpu_id)
 
+        per_dataset_stats = {}
+        for name in self.val_data.keys():
+            per_dataset_stats[name] = {
+                "sse_s": torch.zeros(1, device=self.gpu_id),
+                "sumy_s": torch.zeros(1, device=self.gpu_id),
+                "sumy2_s": torch.zeros(1, device=self.gpu_id),
+                "n_s": torch.zeros(1, device=self.gpu_id),
+                "sse_u": torch.zeros(1, device=self.gpu_id),
+                "sumy_u": torch.zeros(1, device=self.gpu_id),
+                "sumy2_u": torch.zeros(1, device=self.gpu_id),
+                "n_u": torch.zeros(1, device=self.gpu_id),
+                "loss_s": torch.zeros(1, device=self.gpu_id),
+                "loss_u": torch.zeros(1, device=self.gpu_id),
+                "batches": torch.zeros(1, device=self.gpu_id),
+            }
+
         with torch.no_grad():
-            for batch in self.val_data:
-                if self._should_stop():
-                    raise KeyboardInterrupt()
+            for name, loader in self.val_data.items():
+                for batch in loader:
+                    if self._should_stop():
+                        raise KeyboardInterrupt()
 
-                atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids, motif_mask = batch
+                    atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids, motif_mask = batch
 
-                atac_wins = atac_wins.to(self.gpu_id, non_blocking=True)
-                tf_tensor = tf_tensor.to(self.gpu_id, non_blocking=True)
-                targets = targets.to(self.gpu_id, non_blocking=True)
-                bias = bias.to(self.gpu_id, non_blocking=True)
-                tf_ids = tf_ids.to(self.gpu_id, non_blocking=True)
-                tg_ids = tg_ids.to(self.gpu_id, non_blocking=True)
-                motif_mask = motif_mask.to(self.gpu_id, non_blocking=True)
+                    atac_wins = atac_wins.to(self.gpu_id, non_blocking=True)
+                    tf_tensor = tf_tensor.to(self.gpu_id, non_blocking=True)
+                    targets = targets.to(self.gpu_id, non_blocking=True)
+                    bias = bias.to(self.gpu_id, non_blocking=True)
+                    tf_ids = tf_ids.to(self.gpu_id, non_blocking=True)
+                    tg_ids = tg_ids.to(self.gpu_id, non_blocking=True)
+                    motif_mask = motif_mask.to(self.gpu_id, non_blocking=True)
 
-                if getattr(self, "tf_scaler", None) is not None:
-                    tf_tensor = self.tf_scaler.transform(tf_tensor, tf_ids)
-                if getattr(self, "tg_scaler", None) is not None:
-                    targets_s = self.tg_scaler.transform(targets, tg_ids)
-                else:
-                    targets_s = targets
+                    if getattr(self, "tf_scaler", None) is not None:
+                        tf_tensor = self.tf_scaler.transform(tf_tensor, tf_ids)
+                    if getattr(self, "tg_scaler", None) is not None:
+                        targets_s = self.tg_scaler.transform(targets, tg_ids)
+                    else:
+                        targets_s = targets
 
-                mask_arg = motif_mask if USE_MOTIF_MASK else None
+                    mask_arg = motif_mask if USE_MOTIF_MASK else None
+                    with autocast(device_type="cuda", dtype=torch.bfloat16):
+                        preds, _, _, _ = self.model(
+                            atac_wins,
+                            tf_tensor,
+                            tf_ids=tf_ids,
+                            tg_ids=tg_ids,
+                            bias=bias,
+                            motif_mask=mask_arg,
+                            return_shortcut_contrib=False,
+                        )
 
-                preds, _, _, _ = self.model(
-                    atac_wins,
-                    tf_tensor,
-                    tf_ids=tf_ids,
-                    tg_ids=tg_ids,
-                    bias=bias,
-                    motif_mask=mask_arg,
-                    return_shortcut_contrib=False,
-                )
+                    preds_s = torch.nan_to_num(preds.float(), nan=0.0, posinf=1e6, neginf=-1e6)
+                    targets_s = torch.nan_to_num(targets_s.float(), nan=0.0, posinf=1e6, neginf=-1e6)
 
-                preds_s = torch.nan_to_num(preds.float(), nan=0.0, posinf=1e6, neginf=-1e6)
-                targets_s = torch.nan_to_num(targets_s.float(), nan=0.0, posinf=1e6, neginf=-1e6)
+                    loss_s = F.mse_loss(preds_s, targets_s)
+                    total_loss_scaled_t += loss_s.detach()
+                    per_dataset_stats[name]["loss_s"] += loss_s.detach()
+                    per_dataset_stats[name]["batches"] += 1
+                    n_batches += 1
 
-                loss_s = F.mse_loss(preds_s, targets_s)
-                total_loss_scaled_t += loss_s.detach()
-                n_batches += 1
+                    y_s = targets_s.reshape(-1)
+                    p_s = preds_s.reshape(-1)
+                    sse_s += torch.sum((y_s - p_s) ** 2)
+                    sumy_s += torch.sum(y_s)
+                    sumy2_s += torch.sum(y_s ** 2)
+                    n_s += y_s.numel()
 
-                y_s = targets_s.reshape(-1)
-                p_s = preds_s.reshape(-1)
-                sse_s += torch.sum((y_s - p_s) ** 2)
-                sumy_s += torch.sum(y_s)
-                sumy2_s += torch.sum(y_s ** 2)
-                n_s += y_s.numel()
+                    per_dataset_stats[name]["sse_s"] += torch.sum((y_s - p_s) ** 2)
+                    per_dataset_stats[name]["sumy_s"] += torch.sum(y_s)
+                    per_dataset_stats[name]["sumy2_s"] += torch.sum(y_s ** 2)
+                    per_dataset_stats[name]["n_s"] += y_s.numel()
 
-                if getattr(self, "tg_scaler", None) is not None:
-                    targets_u = self.tg_scaler.inverse_transform(targets_s, tg_ids)
-                    preds_u = self.tg_scaler.inverse_transform(preds_s, tg_ids)
-                else:
-                    targets_u, preds_u = targets_s, preds_s
+                    if getattr(self, "tg_scaler", None) is not None:
+                        targets_u = self.tg_scaler.inverse_transform(targets_s, tg_ids)
+                        preds_u = self.tg_scaler.inverse_transform(preds_s, tg_ids)
+                    else:
+                        targets_u, preds_u = targets_s, preds_s
 
-                targets_u = torch.nan_to_num(targets_u.float(), nan=0.0, posinf=1e6, neginf=-1e6)
-                preds_u = torch.nan_to_num(preds_u.float(), nan=0.0, posinf=1e6, neginf=-1e6)
+                    targets_u = torch.nan_to_num(targets_u.float(), nan=0.0, posinf=1e6, neginf=-1e6)
+                    preds_u = torch.nan_to_num(preds_u.float(), nan=0.0, posinf=1e6, neginf=-1e6)
 
-                loss_u = F.mse_loss(preds_u, targets_u)
-                total_loss_unscaled_t += loss_u.detach()
+                    loss_u = F.mse_loss(preds_u, targets_u)
+                    total_loss_unscaled_t += loss_u.detach()
+                    per_dataset_stats[name]["loss_u"] += loss_u.detach()
 
-                y_u = targets_u.reshape(-1)
-                p_u = preds_u.reshape(-1)
-                sse_u += torch.sum((y_u - p_u) ** 2)
-                sumy_u += torch.sum(y_u)
-                sumy2_u += torch.sum(y_u ** 2)
-                n_u += y_u.numel()
+                    y_u = targets_u.reshape(-1)
+                    p_u = preds_u.reshape(-1)
+                    sse_u += torch.sum((y_u - p_u) ** 2)
+                    sumy_u += torch.sum(y_u)
+                    sumy2_u += torch.sum(y_u ** 2)
+                    n_u += y_u.numel()
+
+                    per_dataset_stats[name]["sse_u"] += torch.sum((y_u - p_u) ** 2)
+                    per_dataset_stats[name]["sumy_u"] += torch.sum(y_u)
+                    per_dataset_stats[name]["sumy2_u"] += torch.sum(y_u ** 2)
+                    per_dataset_stats[name]["n_u"] += y_u.numel()
 
         n_batches_t = torch.tensor(n_batches, device=self.gpu_id, dtype=torch.long)
 
@@ -440,10 +460,14 @@ class Trainer:
                 dist.all_reduce(t, op=dist.ReduceOp.SUM)
             dist.all_reduce(n_batches_t, op=dist.ReduceOp.SUM)
 
+            for stats in per_dataset_stats.values():
+                for key in stats:
+                    dist.all_reduce(stats[key], op=dist.ReduceOp.SUM)
+
         global_n_batches = int(n_batches_t.item()) if dist.is_available() and dist.is_initialized() else int(n_batches)
 
         if global_n_batches == 0 or n_s.item() == 0:
-            return 0.0, 0.0, 0.0, 0.0
+            return 0.0, 0.0, 0.0, 0.0, {}
 
         eps = 1e-12
 
@@ -458,16 +482,63 @@ class Trainer:
         avg_loss_scaled = float(total_loss_scaled_t.item()) / max(1, global_n_batches)
         avg_loss_unscaled = float(total_loss_unscaled_t.item()) / max(1, global_n_batches)
 
-        return float(avg_loss_scaled), float(avg_loss_unscaled), float(r2_s.item()), float(r2_u.item())
+        per_dataset_metrics = {}
+        for name, stats in per_dataset_stats.items():
+            batches = max(1, int(stats["batches"].item()))
+            n_s_ds = stats["n_s"]
+            n_u_ds = stats["n_u"]
+
+            if n_s_ds.item() == 0:
+                per_dataset_metrics[name] = {
+                    "val_mse_scaled": 0.0,
+                    "val_mse_unscaled": 0.0,
+                    "r2_s": 0.0,
+                    "r2_u": 0.0,
+                }
+                continue
+
+            ybar_s_ds = stats["sumy_s"] / torch.clamp(n_s_ds, min=1.0)
+            sst_s_ds = stats["sumy2_s"] - n_s_ds * (ybar_s_ds ** 2)
+            r2_s_ds = torch.where(
+                sst_s_ds <= eps, torch.zeros_like(sst_s_ds), 1.0 - stats["sse_s"] / torch.clamp(sst_s_ds, min=eps)
+            )
+
+            ybar_u_ds = stats["sumy_u"] / torch.clamp(n_u_ds, min=1.0)
+            sst_u_ds = stats["sumy2_u"] - n_u_ds * (ybar_u_ds ** 2)
+            r2_u_ds = torch.where(
+                sst_u_ds <= eps, torch.zeros_like(sst_u_ds), 1.0 - stats["sse_u"] / torch.clamp(sst_u_ds, min=eps)
+            )
+
+            per_dataset_metrics[name] = {
+                "val_mse_scaled": float((stats["loss_s"] / batches).item()),
+                "val_mse_unscaled": float((stats["loss_u"] / batches).item()),
+                "r2_s": float(r2_s_ds.item()),
+                "r2_u": float(r2_u_ds.item()),
+            }
+
+        return float(avg_loss_scaled), float(avg_loss_unscaled), float(r2_s.item()), float(r2_u.item()), per_dataset_metrics
 
     def _run_epoch(self, epoch):
-        sampler = getattr(self.train_data, "sampler", None)
-        if hasattr(sampler, "set_epoch"):
-            sampler.set_epoch(epoch)
-        bs = getattr(self.train_data, "batch_sampler", None)
-        if hasattr(bs, "set_epoch"):
-            bs.set_epoch(epoch)
-        batch_iter = enumerate(self.train_data)
+        max_steps=300
+        if isinstance(self.train_data, dict):
+            for loader in self.train_data.values():
+                sampler = getattr(loader, "sampler", None)
+                if hasattr(sampler, "set_epoch"):
+                    sampler.set_epoch(epoch)
+                bs = getattr(loader, "batch_sampler", None)
+                if hasattr(bs, "set_epoch"):
+                    bs.set_epoch(epoch)
+            batch_iter = balanced_round_robin(self.train_data, max_steps=max_steps, seed=42)
+            per_dataset_losses = {name: [0.0, 0] for name in self.train_data}
+        else:
+            sampler = getattr(self.train_data, "sampler", None)
+            if hasattr(sampler, "set_epoch"):
+                sampler.set_epoch(epoch)
+            bs = getattr(self.train_data, "batch_sampler", None)
+            if hasattr(bs, "set_epoch"):
+                bs.set_epoch(epoch)
+            batch_iter = ((batch, None) for batch in self.train_data)
+            per_dataset_losses = None
 
         total_loss_sum = 0.0
         total_mse_scaled_sum = 0.0
@@ -476,12 +547,24 @@ class Trainer:
         self.epoch = epoch
 
         self.optimizer.zero_grad(set_to_none=True)
-        progress_marks = [25, 50, 75]
+
+        total_batches = None
+        if isinstance(self.train_data, dict):
+            total_batches = max(len(loader) for loader in self.train_data.values()) * len(self.train_data)
+        elif hasattr(self.train_data, "__len__"):
+            total_batches = len(self.train_data)
+            
+        total_batches = None
+        if isinstance(self.train_data, dict):
+            total_batches = max(len(loader) for loader in self.train_data.values()) * len(self.train_data)
+        elif hasattr(self.train_data, "__len__"):
+            total_batches = len(self.train_data)
+
+        # Progress markers in *fraction of the epoch*
+        progress_marks = [0.25, 0.50, 0.75]
         next_mark_idx = 0
-
-        total_batches = len(self.train_data) if hasattr(self.train_data, "__len__") else None
-
-        for iteration, batch in batch_iter:
+        
+        for iteration, (batch, dataset_name) in enumerate(batch_iter):
             if self._should_stop():
                 raise KeyboardInterrupt()
 
@@ -511,20 +594,24 @@ class Trainer:
             total_mse_scaled_sum += float(mse_scaled)
             total_mse_unscaled_sum += float(mse_unscaled)
             n_batches += 1
+            
+            # --- Progress logging based on total_batches ---
+            if self.is_main and total_batches is not None and next_mark_idx < len(progress_marks):
+                frac = (iteration + 1) / total_batches
+                if frac >= progress_marks[next_mark_idx]:
+                    pct = int(progress_marks[next_mark_idx] * 100)
+                    logging.info(f"    [{pct}%] Iter {iteration + 1}/{total_batches}")
+                    next_mark_idx += 1
 
-            if self.is_main and next_mark_idx < len(progress_marks):
-                ref_len = len(self.train_data) if hasattr(self.train_data, "__len__") else 0
-                if ref_len > 0:
-                    pct = int(100 * (iteration + 1) / ref_len)
-                    if pct >= progress_marks[next_mark_idx]:
-                        logging.info(f"    [{progress_marks[next_mark_idx]}%] Iter {iteration}")
-                        next_mark_idx += 1
+            if per_dataset_losses is not None and dataset_name is not None:
+                per_dataset_losses[dataset_name][0] += float(mse_unscaled)
+                per_dataset_losses[dataset_name][1] += 1
 
         avg_train_loss = total_loss_sum / max(1, n_batches)
         avg_train_mse_scaled = total_mse_scaled_sum / max(1, n_batches)
         avg_train_mse_unscaled = total_mse_unscaled_sum / max(1, n_batches)
 
-        avg_val_mse_scaled, avg_val_mse_unscaled, r2_s, r2_u = self._validate()
+        avg_val_mse_scaled, avg_val_mse_unscaled, r2_s, r2_u, per_dataset_val_metrics = self._validate()
         self.scheduler.step(avg_val_mse_unscaled)
 
         return (
@@ -535,7 +622,24 @@ class Trainer:
             avg_val_mse_unscaled,
             r2_s,
             r2_u,
+            per_dataset_losses,
+            per_dataset_val_metrics,
         )
+        
+    def _compute_fisher_drift(self):
+        if self.ref_params is None or self.fisher_diag is None:
+            return None
+        val = 0.0
+        with torch.no_grad():
+            for name, p in self.model.named_parameters():
+                if name not in self.ref_params or name not in self.fisher_diag:
+                    continue
+                ref_p = self.ref_params[name].to(p.device)
+                F = self.fisher_diag[name].to(p.device)
+                diff = (p - ref_p)
+                val += float((F * diff * diff).sum())
+        return val ** 0.5
+
 
     def _save_checkpoint(self, epoch: int, path: str):
         if not self.is_main:
@@ -595,7 +699,7 @@ class Trainer:
                 )
 
 
-    def train(self, max_epochs: int, path: str, start_epoch: int = 0):
+    def train(self, max_epochs: int, path: str):
         best_r2 = float("-inf")
         patience_counter = 0
         history = []
@@ -615,6 +719,8 @@ class Trainer:
                     avg_val_mse_unscaled,
                     r2_s,
                     r2_u,
+                    per_dataset_losses,
+                    per_dataset_val_metrics,
                 ) = self._run_epoch(epoch)
                 epoch_end_time = time.time()
                 epoch_dur_sec = epoch_end_time - epoch_start_time
@@ -623,6 +729,7 @@ class Trainer:
                     raise KeyboardInterrupt()
 
                 if self.is_main:
+                    drift = self._compute_fisher_drift()
                     lr = self.optimizer.param_groups[0]["lr"]
                     logging.info(
                         f"Epoch {epoch+1} | Train Total Loss: {avg_train_loss:.4f} | "
@@ -631,6 +738,7 @@ class Trainer:
                         f"R2 (Unscaled): {r2_u:.3f} | "
                         f"R2 (Scaled): {r2_s:.3f} | "
                         f"LR: {lr:.2e} | "
+                        f"Drift: {drift:.2e} | "
                         f"Time: {epoch_dur_sec:.0f}s"
                     )
 
@@ -642,10 +750,11 @@ class Trainer:
                         "R2_u": r2_u,
                         "R2_s": r2_s,
                         "LR": lr,
+                        "drift": drift,
                         "Time": round(epoch_dur_sec, 0),
                     }
                     history.append(epoch_log)
-                    
+
                     self._write_log_csv(epoch_log, path)
 
                 if epoch % self.save_every == 0:
@@ -653,6 +762,9 @@ class Trainer:
                         self._save_checkpoint(epoch, path)
                     if dist.is_available() and dist.is_initialized():
                         dist.barrier()
+
+                if epoch % self.log_train_breakdown_every == 0:
+                    self._log_train_breakdown(epoch, per_dataset_losses, per_dataset_val_metrics, path)
 
                 stop_tensor = torch.tensor(0, device=self.gpu_id)
 
@@ -693,16 +805,11 @@ class Trainer:
                 logging.info(f"Total Training Time: {int(hours):02d}:{int(minutes):02d}:{seconds:05.2f}")
 
         except KeyboardInterrupt:
-            # graceful Ctrl+C
-            epoch = locals().get("epoch", start_epoch)
-            self._handle_abort(epoch, path, history, "KeyboardInterrupt")
-            raise
-
-        except RuntimeError as e:
-            # catch CUDA OOM and save before dying
-            if "out of memory" in str(e).lower():
-                epoch = locals().get("epoch", start_epoch)
-                self._handle_abort(epoch, path, history, "CUDA OOM")
+            epoch = locals().get("epoch", 0)
+            if self.is_main:
+                logging.info("Keyboard interrupt received; saving before exit.")
+                self._save_checkpoint(epoch, path)
+                self._save_trained_model(path)
             raise
 
     def _write_log_csv(self, history, path):
@@ -739,25 +846,24 @@ def load_train_objs(run_cfg):
         allowed_samples=ALLOWED_SAMPLES,
     )
 
-    # # --- Step 2: Load single-cell dataset across all chromosomes (single sample) ---
-    # if len(FINE_TUNING_DATASETS) != 1:
-    #     raise ValueError("Round-robin removed: please provide exactly one entry in FINE_TUNING_DATASETS.")
-
-    sample_name = FINE_TUNING_DATASETS[0]
-    single_cell_dataset = MultiChromosomeDataset(
-        data_dir=SAMPLE_DATA_CACHE_DIR,
-        chrom_ids=CHROM_IDS,
-        tf_vocab_path=os.path.join(COMMON_DATA, "tf_vocab.json"),
-        tg_vocab_path=os.path.join(COMMON_DATA, "tg_vocab.json"),
-        fine_tuner=True,
-        sample_name=sample_name,
-        max_cached=2,
-        max_tfs=SUBSAMPLE_MAX_TFS,
-        max_tgs=SUBSAMPLE_MAX_TGS,
-        max_windows_per_chrom=SUBSAMPLE_MAX_WINDOWS_PER_CHROM,
-        max_cells=SUBSAMPLE_MAX_CELLS_FINETUNE,
-        subset_seed=SUBSAMPLE_SEED,
-    )
+    # --- Step 2: Load all single-cell datasets across all chromosomes ---
+    single_cell_datasets = [
+        MultiChromosomeDataset(
+            data_dir=SAMPLE_DATA_CACHE_DIR,
+            chrom_ids=CHROM_IDS,
+            tf_vocab_path=os.path.join(COMMON_DATA, "tf_vocab.json"),
+            tg_vocab_path=os.path.join(COMMON_DATA, "tg_vocab.json"),
+            fine_tuner=True,
+            sample_name=sn,
+            max_cached=2,
+            max_tfs=SUBSAMPLE_MAX_TFS,
+            max_tgs=SUBSAMPLE_MAX_TGS,
+            max_windows_per_chrom=SUBSAMPLE_MAX_WINDOWS_PER_CHROM,
+            max_cells=SUBSAMPLE_MAX_CELLS_FINETUNE,
+            subset_seed=SUBSAMPLE_SEED,
+        )
+        for sn in FINE_TUNING_DATASETS
+    ]
 
     # --- Step 3: Build vocab sizes (global across chromosomes) ---
     tf_vocab_size = len(pseudobulk_dataset.tf_name2id_sub)
@@ -805,6 +911,22 @@ def load_train_objs(run_cfg):
                 tg_scaler = SimpleScaler(tg_mean, tg_std)
         else:
             model.load_state_dict(state_dict, strict=False)
+    
+    # Freeze bottom layers  
+    N_FREEZE = 0  # you can make this a config setting
+
+    frozen, trainable = 0, 0
+    for name, param in model.named_parameters():
+        if name.startswith("encoder.layers.0") or name.startswith("encoder.layers.1"):
+            param.requires_grad = False
+            frozen += param.numel()
+        else:
+            trainable += param.numel()
+
+    logging.info(
+        f"Freezing bottom {N_FREEZE} encoder layers: "
+        f"{frozen:,} params frozen, {trainable:,} still trainable."
+    )
 
     # --- Step 6: Fine-tune optimizer ---
     optimizer = torch.optim.Adam(
@@ -812,9 +934,7 @@ def load_train_objs(run_cfg):
         lr=FINETUNE_LR,
     )
 
-    return pseudobulk_dataset, single_cell_dataset, model, optimizer, tf_scaler, tg_scaler
-
-
+    return pseudobulk_dataset, single_cell_datasets, model, optimizer, tf_scaler, tg_scaler
 
 
 def prepare_dataloader(dataset, batch_size, world_size=1, rank=0,
@@ -969,15 +1089,14 @@ def prepare_dataloader(dataset, batch_size, world_size=1, rank=0,
     return train_loader, val_loader, test_loader
 
 
-def write_run_parameters(dataset, out_dir, world_size, run_cfg):
+def write_run_parameters(dataset, out_dir, world_size, run_cfg):    
     logging.info("\n===== Dataset Loaded for Fine-Tuning =====")
-    logging.info(f"Samples:             {FINE_TUNING_DATASETS}")
     logging.info(f"Chromosomes:         {CHROM_IDS}")
     logging.info(f"Genes:               {len(dataset.tg_ids)}")
     logging.info(f"Windows (RE):        {dataset.num_windows}")
     logging.info(f"TFs:                 {len(dataset.tf_ids)}")
     if hasattr(dataset, "metacell_names"):
-        logging.info(f"Cells:           {len(dataset.metacell_names)}")
+        logging.info(f"Metacells:           {len(dataset.metacell_names)}")
     logging.info(f"Epochs:              {TOTAL_EPOCHS}")
     logging.info(f"Batch Size:          {BATCH_SIZE}")
     logging.info(f"GPUs:                {world_size}")
@@ -1001,7 +1120,7 @@ def write_run_parameters(dataset, out_dir, world_size, run_cfg):
     logging.info("================================================")
 
     run_params = {
-        "samples": FINE_TUNING_DATASETS,
+        "allowed_samples": ALLOWED_SAMPLES,
         "epochs": TOTAL_EPOCHS,
         "batch_size": BATCH_SIZE,
         "grad_accum_steps": GRAD_ACCUM_STEPS,
@@ -1033,6 +1152,25 @@ def write_run_parameters(dataset, out_dir, world_size, run_cfg):
         json.dump(run_params, f, indent=4)
     logging.info(f"Run parameters written to {path}")
     
+def balanced_round_robin(loaders, max_steps=None, seed=42):
+    max_len = max(len(loader) for loader in loaders.values())
+    keys = list(loaders.keys())
+    iters = {name: iter(loader) for name, loader in loaders.items()}
+
+    total = max_len * len(keys)
+    if max_steps is not None:
+        total = min(total, max_steps)
+
+    for i in range(total):
+        name = keys[i % len(keys)]
+        try:
+            batch = next(iters[name])
+        except StopIteration:
+            iters[name] = iter(loaders[name])
+            batch = next(iters[name])
+        yield batch, name
+
+
 def main(rank: int, local_rank: int, world_size: int, save_every: int, total_epochs: int, batch_size: int):
     assert D_MODEL % NUM_HEADS == 0, f"{D_MODEL} not divisible by {NUM_HEADS}"
 
@@ -1080,7 +1218,7 @@ def main(rank: int, local_rank: int, world_size: int, save_every: int, total_epo
                     shutil.copy(cand, dest)
                     break
 
-        pseudobulk_dataset, single_cell_dataset, model, optimizer, tf_scaler_loaded, tg_scaler_loaded = load_train_objs(
+        pseudobulk_dataset, single_cell_datasets, model, optimizer, tf_scaler_loaded, tg_scaler_loaded = load_train_objs(
             run_cfg
         )
         rank_device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
@@ -1112,9 +1250,14 @@ def main(rank: int, local_rank: int, world_size: int, save_every: int, total_epo
         fisher_diag = {k: v.to(rank_device) for k, v in fisher_diag.items()} if fisher_diag is not None else None
         ref_params = {k: v.to(rank_device) for k, v in ref_params.items()} if ref_params is not None else None
 
-        train_loader, val_loader, test_loader = prepare_dataloader(
-            single_cell_dataset, batch_size, world_size, rank
-        )
+        train_loaders = {
+            sn: prepare_dataloader(ds, batch_size, world_size, rank)[0]
+            for sn, ds in zip(FINE_TUNING_DATASETS, single_cell_datasets)
+        }
+        val_loaders = {
+            sn: prepare_dataloader(ds, batch_size, world_size, rank)[1]
+            for sn, ds in zip(FINE_TUNING_DATASETS, single_cell_datasets)
+        }
 
         if tf_scaler_loaded is not None and tg_scaler_loaded is not None:
             tf_scaler = SimpleScaler(tf_scaler_loaded.mean.to(rank_device), tf_scaler_loaded.std.to(rank_device))
@@ -1132,7 +1275,7 @@ def main(rank: int, local_rank: int, world_size: int, save_every: int, total_epo
             else:
                 G = int(pseudobulk_dataset.tg_ids.max().item() + 1)
 
-            combined_loader = train_loader
+            combined_loader = itertools.chain.from_iterable(train_loaders.values())
             use_ddp_reduce = torch.distributed.is_initialized()
             tf_s, tg_s = fit_simple_scalers(
                 combined_loader,
@@ -1146,8 +1289,8 @@ def main(rank: int, local_rank: int, world_size: int, save_every: int, total_epo
 
         trainer = Trainer(
             model,
-            train_loader,
-            val_loader,
+            train_loaders,
+            val_loaders,
             nn.MSELoss(),
             optimizer,
             gpu_id=local_rank,
@@ -1166,7 +1309,7 @@ def main(rank: int, local_rank: int, world_size: int, save_every: int, total_epo
         if rank == 0:
             write_run_parameters(pseudobulk_dataset, fine_tune_dir, world_size, run_cfg)
             logging.info("Wrote experiment settings and objects to fine-tuning directory")
-            logging.info("----- FINE-TUNING STARTED -----")
+            logging.info("----- ROUND-ROBIN TRAINING STARTED -----")
 
         trainer.train(max_epochs=total_epochs, path=str(fine_tune_dir))
 
@@ -1190,16 +1333,23 @@ def main(rank: int, local_rank: int, world_size: int, save_every: int, total_epo
             save_tf_tg_embeddings_from_model(model_for_eval, out_dir=fine_tune_dir, vocab_dir=fine_tune_dir)
             logging.info("Saved final fine-tuned model and embeddings")
 
-        len_all = len(single_cell_dataset)
+        len_all = sum(len(ds) for ds in single_cell_datasets)
         new_fisher_accum = None
         fisher_size_accum = 0
         model_for_fisher = getattr(model_for_eval, "module", model_for_eval)
 
-        train_loader_ds, _, _ = prepare_dataloader(single_cell_dataset, batch_size, world_size, rank)
-        fisher_ds = ewc_utils.compute_fisher_diag(model_for_fisher, train_loader_ds, device=rank_device, n_batches=100)
-        fisher_size = len(single_cell_dataset)
-        new_fisher_accum = fisher_ds
-        fisher_size_accum = fisher_size
+        for ds, name in zip(single_cell_datasets, FINE_TUNING_DATASETS):
+            train_loader_ds, _, _ = prepare_dataloader(ds, batch_size, world_size, rank)
+            fisher_ds = ewc_utils.compute_fisher_diag(model_for_fisher, train_loader_ds, device=rank_device, n_batches=100)
+            fisher_size = len(ds)
+            if new_fisher_accum is None:
+                new_fisher_accum = fisher_ds
+                fisher_size_accum = fisher_size
+            else:
+                new_fisher_accum = ewc_utils.merge_fishers(
+                    new_fisher_accum, fisher_ds, fisher_size_accum, fisher_size
+                )
+                fisher_size_accum += fisher_size
 
         if fisher_diag is None:
             fisher_diag = new_fisher_accum
@@ -1211,7 +1361,7 @@ def main(rank: int, local_rank: int, world_size: int, save_every: int, total_epo
             ewc_bundle_out = fine_tune_dir / "ewc_bundle.pth"
             ewc_utils.save_ewc_bundle(ewc_bundle_out, model_for_fisher, fisher_diag)
             logging.info(f"Saved fine-tuned Fisher/EWC bundle to {ewc_bundle_out}")
-            logging.info("\nFine-tuning complete.")
+            logging.info("\nFine-tuning complete on all datasets (round-robin).")
 
     finally:
         if dist.is_initialized():
