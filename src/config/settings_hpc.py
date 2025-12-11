@@ -31,6 +31,13 @@ RAW_GSE218576_DIR= ROOT_DIR / "data/raw/GSE218576"
 PROCESSED_GSE218576_DIR = ROOT_DIR / "data/processed/GSE218576"
 
 # ----- DATA PREPARATION -----
+# QC Filtering
+MIN_CELLS_PER_GENE = 200         # Minimum number of cells expressing each gene
+MIN_CELLS_PER_PEAK = 200         # Minimum number of cells expressing each peak
+
+FILTER_OUT_LOWEST_PCT_GENES = 0.1
+FILTER_OUT_LOWEST_PCT_PEAKS = 0.1
+
 # Pseudobulk and Data Preprocessing
 # Change these files to suit what you want the raw or processed files to look like.
 # Please respect the file extensions here
@@ -117,7 +124,7 @@ FINE_TUNING_TRAINED_MODEL = "model_training_192_10k_metacells_fine_tuning"
 FINETUNE_PATIENCE = 20
 FINETUNE_LR = 3e-05                 # smaller LR for refinement
 EWC_LAMBDA = 2.5e-4
-MAX_STEPS = 500                     # Maximum number of batches to process
+MAX_STEPS = None                     # Maximum number of batches to process
 FINETUNE_CORR_WEIGHT=0.2
 FINETUNE_EDGE_WEIGHT=0.0
 FINETUNE_SHORTCUT_REG_WEIGHT=0.0

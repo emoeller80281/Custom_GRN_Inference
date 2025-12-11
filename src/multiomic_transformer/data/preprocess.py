@@ -4,6 +4,7 @@ import json
 import torch
 import pandas as pd
 import scanpy as sc
+import math
 import logging
 from pathlib import Path
 import warnings
@@ -743,20 +744,21 @@ def filter_and_qc(adata_RNA: AnnData, adata_ATAC: AnnData) -> Tuple[AnnData, Ann
     adata_RNA = adata_RNA[adata_RNA.obs.pct_counts_mt < 5].copy()
     adata_RNA.var_names_make_unique()
     adata_RNA.var['gene_ids'] = adata_RNA.var.index
-        
-    sc.pp.filter_cells(adata_RNA, min_genes=200)
-    sc.pp.filter_genes(adata_RNA, min_cells=3)
-    sc.pp.filter_cells(adata_ATAC, min_genes=200)
-    sc.pp.filter_genes(adata_ATAC, min_cells=3)
+    num_cells = adata_RNA.n_obs
+    
+    sc.pp.filter_cells(adata_RNA, min_genes=MIN_CELLS_PER_GENE)
+    sc.pp.filter_genes(adata_RNA, min_cells=math.ceil(num_cells * FILTER_OUT_LOWEST_PCT_GENES))
+    sc.pp.filter_cells(adata_ATAC, min_genes=MIN_CELLS_PER_PEAK)
+    sc.pp.filter_genes(adata_ATAC, min_cells=math.ceil(num_cells * FILTER_OUT_LOWEST_PCT_PEAKS))
     
     # Preprocess RNA
-    sc.pp.normalize_total(adata_RNA, target_sum=1e4)
+    sc.pp.normalize_total(adata_RNA, target_sum=1e6)
     sc.pp.log1p(adata_RNA)
     sc.pp.highly_variable_genes(adata_RNA, min_mean=0.0125, max_mean=3, min_disp=0.5)
     adata_RNA.layers["log1p"] = adata_RNA.X.copy()
     sc.pp.scale(adata_RNA, max_value=10)
     adata_RNA = adata_RNA[:, adata_RNA.var.highly_variable]
-    sc.tl.pca(adata_RNA, n_comps=25, svd_solver="arpack")
+    sc.tl.pca(adata_RNA, n_comps=PCA_COMPONENTS, svd_solver="arpack")
 
     # Preprocess ATAC
     sc.pp.log1p(adata_ATAC)
@@ -764,7 +766,7 @@ def filter_and_qc(adata_RNA: AnnData, adata_ATAC: AnnData) -> Tuple[AnnData, Ann
     adata_ATAC.layers["log1p"] = adata_ATAC.X.copy()
     adata_ATAC = adata_ATAC[:, adata_ATAC.var.highly_variable]
     sc.pp.scale(adata_ATAC, max_value=10, zero_center=True)
-    sc.tl.pca(adata_ATAC, n_comps=25, svd_solver="arpack")
+    sc.tl.pca(adata_ATAC, n_comps=PCA_COMPONENTS, svd_solver="arpack")
     
     # After filtering to common barcodes
     common_barcodes = adata_RNA.obs_names.intersection(adata_ATAC.obs_names)
