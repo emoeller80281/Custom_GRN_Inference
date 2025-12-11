@@ -14,7 +14,7 @@ chrom_list = chr_nums #+ ["chrX", "chrY"]
 # ----- SAMPLE INFORMATION -----
 # Sample information
 ORGANISM_CODE = "mm10"
-DATASET_NAME = "mESC_small_neighborhood"
+DATASET_NAME = "mESC_no_scale_linear"
 CHROM_ID_LIST = chrom_list
 CHROM_ID = "chr19"
 CHROM_IDS = chr_nums
@@ -116,8 +116,10 @@ SUBSAMPLE_SEED = 42
 FINE_TUNING_TRAINED_MODEL = "model_training_192_10k_metacells_fine_tuning"
 FINETUNE_PATIENCE = 20
 FINETUNE_LR = 3e-05       # smaller LR for refinement
-EWC_LAMBDA = 1e-7
+EWC_LAMBDA = 5e-4
 MAX_STEPS = 500             # Maximum number of batches to process
+FINETUNE_CORR_WEIGHT=0.01
+FINETUNE_EDGE_WEIGHT=0.0
 
 # Sample the max number of cells per sample
 SUBSAMPLE_MAX_CELLS_FINETUNE = None
