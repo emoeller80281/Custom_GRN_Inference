@@ -679,3 +679,164 @@ class MultiomicTransformer(nn.Module):
 
         edge_logits = self.edge_head(tf_id_emb, tg_emb, extra_edge_features)
         return edge_logits
+
+    def encode_for_tg(
+        self,
+        atac_windows,
+        tf_expr,
+        tf_ids,
+        tg_ids,
+        bias=None,
+        motif_mask=None,
+    ):
+        """
+        Runs the full ATAC + TF encoder and returns a per-TG latent representation.
+
+        Returns:
+            tg_cross_attn_repr: [batch_size, n_tgs, d_model]
+        """
+        batch_size, n_window, _ = atac_windows.shape
+        device = atac_windows.device
+
+        atac_windows = torch.nan_to_num(
+            atac_windows, nan=0.0, posinf=1e6, neginf=-1e6
+        ).clamp_(-10.0, 10.0)
+        tf_expr = torch.nan_to_num(
+            tf_expr, nan=0.0, posinf=1e6, neginf=-1e6
+        ).clamp_(-10.0, 10.0)
+
+        # ----- ATAC encoding (same as forward) -----
+        win_emb = self.atac_acc_dense_input_layer(atac_windows)  # [B, W, d_model]
+        pos = torch.arange(n_window, device=device, dtype=torch.float32)
+        win_emb = win_emb + self.posenc(pos, bsz=batch_size).transpose(0, 1)
+
+        if self.use_gradient_checkpointing and self.training:
+            win_emb = self._encode_with_checkpointing(win_emb)
+        else:
+            win_emb = self.encoder(win_emb)  # [B, W, d_model]
+
+        # Guard vocab indices
+        assert tf_ids.dtype == torch.long and tg_ids.dtype == torch.long
+        assert tf_ids.min().item() >= 0 and tf_ids.max().item() < self.tf_identity_emb.num_embeddings, \
+            f"tf_ids out of range: max={tf_ids.max().item()}, vocab={self.tf_identity_emb.num_embeddings}"
+        assert tg_ids.min().item() >= 0 and tg_ids.max().item() < self.tg_query_emb.num_embeddings, \
+            f"tg_ids out of range: max={tg_ids.max().item()}, vocab={self.tg_query_emb.num_embeddings}"
+
+        # ----- TF embeddings -----
+        tf_id_emb = self.tf_identity_emb(tf_ids)  # [T, d_model]
+        tf_expr_emb = self.tf_expr_dense_input_layer(tf_expr.unsqueeze(-1))  # [B, T, d_model]
+        tf_emb = tf_expr_emb + tf_id_emb.unsqueeze(0)  # [B, T, d_model]
+
+        # ----- TF–ATAC and ATAC–TF cross attention -----
+        tf_cross = self._maybe_checkpoint(self.cross_tf_to_atac, tf_emb, win_emb)   # [B, T, d_model]
+        atac_cross = self._maybe_checkpoint(self.cross_atac_to_tf, win_emb, tf_emb) # [B, W, d_model]
+
+        tf_repr, _ = self.tf_to_atac_cross_attn_pool(tf_cross)      # [B, d_model]
+        atac_repr, _ = self.atac_to_tf_cross_attn_pool(atac_cross)  # [B, d_model]
+
+        tf_atac_cross_attn_output = self.pooled_cross_attn_dense_layer(
+            torch.cat([tf_repr, atac_repr], dim=-1)
+        )  # [B, d_model]
+
+        # ----- TG–ATAC cross attention -----
+        tg_base = self.tg_query_emb(tg_ids).unsqueeze(0).expand(batch_size, -1, -1)  # [B, G, d_model]
+
+        attn_bias = None
+        if self.use_bias and (bias is not None):
+            attn_bias = bias
+            if attn_bias.dim() == 3:
+                attn_bias = attn_bias.unsqueeze(1)  # [B, 1, G, W]
+            assert attn_bias.shape[0] == batch_size and attn_bias.shape[-2:] == (tg_base.size(1), win_emb.size(1)), \
+                f"Bias shape {attn_bias.shape} not compatible with (n_tgs={tg_base.size(1)}, n_window={win_emb.size(1)})"
+            if attn_bias.shape[1] == 1:
+                attn_bias = attn_bias.expand(
+                    batch_size, self.num_heads, tg_base.size(1), win_emb.size(1)
+                )
+            attn_bias = torch.nan_to_num(attn_bias, nan=0.0, posinf=1e4, neginf=-1e4)
+            attn_bias = (self.bias_scale * attn_bias).clamp_(-20.0, 20.0)
+
+        if self.use_gradient_checkpointing and self.training and attn_bias is not None:
+            def tg_attn_fn(tg_x, win_x, bias_x):
+                return self.cross_tg_to_atac(tg_x, win_x, attn_bias=bias_x)
+            tg_cross = cp.checkpoint(tg_attn_fn, tg_base, win_emb, attn_bias, use_reentrant=False)
+        elif self.use_gradient_checkpointing and self.training:
+            tg_cross = self._maybe_checkpoint(self.cross_tg_to_atac, tg_base, win_emb)
+        else:
+            tg_cross = self.cross_tg_to_atac(tg_base, win_emb, attn_bias=attn_bias)  # [B, G, d_model]
+
+        n_tgs = tg_cross.size(1)
+        scale = 1.0 / math.sqrt(max(1, n_tgs))
+
+        tf_atac_cross_attn_output = tf_atac_cross_attn_output.unsqueeze(1).expand(
+            -1, n_tgs, -1
+        ) * scale  # [B, G, d_model]
+
+        tg_cross_attn_repr = tg_cross + tf_atac_cross_attn_output  # [B, G, d_model]
+
+        return tg_cross_attn_repr
+
+
+class MultiomicTransformerWithHeads(nn.Module):
+    def __init__(self, base_model):
+        super().__init__()
+        self.base = base_model  # pretrained MultiomicTransformer
+        self.base.requires_grad_(False)
+
+        hidden_dim = base_model.d_model
+
+        # per-TG heads: [B, G, d_model] -> [B, G, 1] -> [B, G]
+        self.pres_head = nn.Linear(hidden_dim, 1)  # logits for presence
+        self.reg_head  = nn.Linear(hidden_dim, 1)  # continuous output
+
+    # ---- proxy backbone embeddings so old utilities still work ----
+    @property
+    def tf_identity_emb(self):
+        return self.base.tf_identity_emb
+
+    @property
+    def tg_identity_emb(self):
+        return self.base.tg_identity_emb
+
+    @property
+    def tg_query_emb(self):
+        return self.base.tg_query_emb
+
+    @property
+    def use_shortcut(self):
+        return self.base.use_shortcut
+
+    @property
+    def shortcut_layer(self):
+        return self.base.shortcut_layer
+
+    def forward(
+        self,
+        atac_wins,
+        tf_tensor,
+        tf_ids,
+        tg_ids,
+        bias=None,
+        motif_mask=None,
+        return_shortcut_contrib=False,
+    ):
+        # Per-TG latent from the frozen backbone
+        tg_repr = self.base.encode_for_tg(
+            atac_wins,
+            tf_tensor,
+            tf_ids=tf_ids,
+            tg_ids=tg_ids,
+            bias=bias,
+            motif_mask=motif_mask,
+        )  # [B, G, d_model]
+
+        # Heads operate on last dim
+        p_logits = self.pres_head(tg_repr).squeeze(-1)  # [B, G]
+        y_pred   = self.reg_head(tg_repr).squeeze(-1)   # [B, G]
+
+        # For now we don't propagate attn/shortcut/extras from base; you can
+        # extend this later if you want them for analysis.
+        attn = None
+        shortcut_contrib = None
+        extra = None
+
+        return p_logits, y_pred, attn, shortcut_contrib, extra

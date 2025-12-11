@@ -124,6 +124,10 @@ FINETUNE_SHORTCUT_REG_WEIGHT=0.0
 ZERO_EPS = 1e-6                     # Consider a value as zero if it is less than this
 ZERO_WEIGHT = 0.1                   # Down-weight zero values when calculating MSE
 
+PRESENCE_EPS = 0.0          # threshold for "non-zero" expression
+BCE_WEIGHT   = 1.0
+REG_WEIGHT   = 1.0
+
 # Sample the max number of cells per sample
 SUBSAMPLE_MAX_CELLS_FINETUNE = None
 
