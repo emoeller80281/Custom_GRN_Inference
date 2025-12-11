@@ -313,7 +313,7 @@ class Trainer:
         shortcut_reg = torch.tensor(0.0, device=self.gpu_id, dtype=torch.float32)
         if getattr(model_for_reg, "use_shortcut", False) and hasattr(model_for_reg, "shortcut_layer"):
             reg_val = model_for_reg.shortcut_layer.regularization()
-            shortcut_reg = reg_val.to(dtype=torch.float32, device=self.gpu_id) * SHORTCUT_REG_WEIGHT
+            shortcut_reg = reg_val.to(dtype=torch.float32, device=self.gpu_id) * FINETUNE_SHORTCUT_REG_WEIGHT
 
         loss_ewc = torch.tensor(0.0, device=self.gpu_id, dtype=torch.float32)
         if self.ref_params is not None and self.fisher_diag is not None:
@@ -597,6 +597,8 @@ class Trainer:
             total_loss_sum += float(total_loss_val.detach())
             total_mse_scaled_sum += float(mse_scaled)
             total_mse_unscaled_sum += float(mse_unscaled)
+            total_r2_penalty_sum  += float(corr_weight)
+            total_shortcut_loss_sum += float(shortcut_loss)
             total_ewc_loss_sum += float(loss_ewc)
             n_batches += 1
             

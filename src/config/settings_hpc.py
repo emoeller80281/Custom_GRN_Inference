@@ -120,6 +120,7 @@ EWC_LAMBDA = 5e-4
 MAX_STEPS = 500             # Maximum number of batches to process
 FINETUNE_CORR_WEIGHT=0.01
 FINETUNE_EDGE_WEIGHT=0.0
+FINETUNE_SHORTCUT_REG_WEIGHT=0.0
 
 # Sample the max number of cells per sample
 SUBSAMPLE_MAX_CELLS_FINETUNE = None
