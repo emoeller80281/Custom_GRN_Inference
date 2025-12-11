@@ -268,7 +268,16 @@ class Trainer:
 
         preds32 = torch.nan_to_num(preds.float(), nan=0.0, posinf=1e6, neginf=-1e6)
         targets32 = torch.nan_to_num(targets.float(), nan=0.0, posinf=1e6, neginf=-1e6)
-        mse_loss = self.loss_fn(preds32, targets32)
+        
+        # Calculate MSE, but don't weight zero's as heavily to account for sparsity
+        residual = preds32 - targets32
+
+        zero_mask = (targets32 == 0.0)
+        weights = torch.ones_like(targets32)
+
+        weights[zero_mask] = ZERO_WEIGHT
+
+        mse_loss = (weights * residual**2).sum() / weights.sum()
 
         # ----- Unscaled MSE for logging (no grad) -----
         if getattr(self, "tg_scaler", None) is not None:
@@ -336,7 +345,6 @@ class Trainer:
             mse_loss_unscaled,
             mean_r2.detach(),
             r2_penalty.detach(),
-            shortcut_reg.detach(),
             loss_ewc.detach(),
         )
 
@@ -545,7 +553,6 @@ class Trainer:
         total_mse_scaled_sum = 0.0
         total_r2_penalty_sum = 0.0
         total_mse_unscaled_sum = 0.0
-        total_shortcut_loss_sum = 0.0
         total_ewc_loss_sum = 0.0
         n_batches = 0
         self.epoch = epoch
@@ -577,7 +584,7 @@ class Trainer:
                 self.optimizer.zero_grad(set_to_none=True)
                 continue
 
-            (total_loss_val, mse_scaled, mse_unscaled, mean_corr, corr_weight, shortcut_loss, loss_ewc) = out
+            (total_loss_val, mse_scaled, mse_unscaled, mean_corr, corr_weight, loss_ewc) = out
 
             if not total_loss_val.requires_grad:
                 raise RuntimeError("Bug: total_loss_val has no grad_fn")
@@ -598,7 +605,6 @@ class Trainer:
             total_mse_scaled_sum += float(mse_scaled)
             total_mse_unscaled_sum += float(mse_unscaled)
             total_r2_penalty_sum  += float(corr_weight)
-            total_shortcut_loss_sum += float(shortcut_loss)
             total_ewc_loss_sum += float(loss_ewc)
             n_batches += 1
             
@@ -618,7 +624,6 @@ class Trainer:
         avg_train_r2_penalty_loss = total_r2_penalty_sum / max(1, n_batches)
         avg_train_mse_scaled = total_mse_scaled_sum / max(1, n_batches)
         avg_train_mse_unscaled = total_mse_unscaled_sum / max(1, n_batches)
-        avg_train_shortcut_loss = total_shortcut_loss_sum / max(1, n_batches)
         avg_train_ewc_loss = total_ewc_loss_sum / max(1, n_batches)
         
 
@@ -630,7 +635,6 @@ class Trainer:
             avg_train_r2_penalty_loss,
             avg_train_mse_scaled,
             avg_train_mse_unscaled,
-            avg_train_shortcut_loss,
             avg_train_ewc_loss,
             avg_val_mse_scaled,
             avg_val_mse_unscaled,
@@ -715,7 +719,6 @@ class Trainer:
                     avg_train_r2_penalty_loss,
                     avg_train_mse_scaled,
                     avg_train_mse_unscaled,
-                    avg_train_shortcut_loss,
                     avg_train_ewc_loss,
                     avg_val_mse_scaled,
                     avg_val_mse_unscaled,
@@ -733,10 +736,9 @@ class Trainer:
                 if self.is_main:
                     lr = self.optimizer.param_groups[0]["lr"]
                     logging.info(
-                        f"Epoch {epoch+1} | Train Total Loss: {avg_train_loss:.4f} | "
+                        f"Epoch {epoch+1} | "
                         f"Train MSE: {avg_train_mse_unscaled:.4f} | "
-                        f"Train R2 Penalty Loss: {avg_train_r2_penalty_loss:.4f} | "
-                        f"Train Shortcut Loss: {avg_train_shortcut_loss:.4f} | "
+                        f"Train R2 Loss: {avg_train_r2_penalty_loss:.4f} | "
                         f"Train EWC: {avg_train_ewc_loss:.4f} | "
                         f"Val MSE: {avg_val_mse_unscaled:.4f} | "
                         f"R2 (Unscaled): {r2_u:.3f} | "
@@ -747,10 +749,8 @@ class Trainer:
 
                     epoch_log = {
                         "Epoch": epoch+1,
-                        "Train Total Loss": avg_train_loss,
                         "Train MSE": avg_train_mse_unscaled,
-                        "Train R2 Penalty Loss": avg_train_r2_penalty_loss,
-                        "Train Shortcut Loss": avg_train_shortcut_loss,
+                        "Train R2 Loss": avg_train_r2_penalty_loss,
                         "Train EWC": avg_train_ewc_loss,
                         "Val MSE": avg_val_mse_unscaled,
                         "R2_u": r2_u,
@@ -818,7 +818,7 @@ class Trainer:
             raise
 
     def _write_log_csv(self, history, path):
-        fieldnames = ["Epoch", "Train Total Loss", "Train MSE", "Train R2 Penalty Loss", "Train Shortcut Loss", "Train EWC", "Val MSE", "R2_u", "R2_s", "LR", "Time"]
+        fieldnames = ["Epoch", "Train MSE", "Train R2 Loss", "Train EWC", "Val MSE", "R2_u", "R2_s", "LR", "Time"]
         log_path = os.path.join(path, "training_log.csv")
 
         file_exists = os.path.isfile(log_path)

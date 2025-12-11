@@ -74,7 +74,7 @@ EDGE_LOSS_WEIGHT=0.0            # Weight for edge loss contribution
 COS_WEIGHT=0.0                  # Weight for cosine contrastive loss contribution   
 
 SAVE_EVERY_N_EPOCHS=5           # Chooses how many epochs to run before saving a checkpoint
-RESUME_CHECKPOINT_PATH="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC_small_neighborhood/chr19/model_training_001/checkpoint_14.pt"
+RESUME_CHECKPOINT_PATH=None #"/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC_small_neighborhood/chr19/model_training_001/checkpoint_14.pt"
 
 GRAD_ACCUM_STEPS=1
 USE_GRAD_ACCUMULATION=True
@@ -115,12 +115,13 @@ SUBSAMPLE_SEED = 42
 # ----- FINE TUNING ON SINGLE-CELL DATA -----
 FINE_TUNING_TRAINED_MODEL = "model_training_192_10k_metacells_fine_tuning"
 FINETUNE_PATIENCE = 20
-FINETUNE_LR = 3e-05       # smaller LR for refinement
-EWC_LAMBDA = 5e-4
-MAX_STEPS = 500             # Maximum number of batches to process
-FINETUNE_CORR_WEIGHT=0.01
+FINETUNE_LR = 3e-05                 # smaller LR for refinement
+EWC_LAMBDA = 2.5e-4
+MAX_STEPS = 500                     # Maximum number of batches to process
+FINETUNE_CORR_WEIGHT=0.2
 FINETUNE_EDGE_WEIGHT=0.0
 FINETUNE_SHORTCUT_REG_WEIGHT=0.0
+ZERO_WEIGHT = 0.1                   # Down-weight zero values when calculating MSE
 
 # Sample the max number of cells per sample
 SUBSAMPLE_MAX_CELLS_FINETUNE = None
