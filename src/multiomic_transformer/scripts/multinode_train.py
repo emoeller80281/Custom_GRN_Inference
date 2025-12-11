@@ -855,6 +855,17 @@ def load_checkpoint(checkpoint_path, trainer, device):
                 trainer.scaler._scale = st.to(device)
         except Exception:
             pass
+        
+    if "tf_scaler_mean" in ckpt and "tf_scaler_std" in ckpt:
+        trainer.tf_scaler = SimpleScaler(
+            ckpt["tf_scaler_mean"].to(device),
+            ckpt["tf_scaler_std"].to(device),
+        )
+    if "tg_scaler_mean" in ckpt and "tg_scaler_std" in ckpt:
+        trainer.tg_scaler = SimpleScaler(
+            ckpt["tg_scaler_mean"].to(device),
+            ckpt["tg_scaler_std"].to(device),
+        )
     
     model.to(device)
 

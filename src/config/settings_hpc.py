@@ -14,7 +14,7 @@ chrom_list = chr_nums #+ ["chrX", "chrY"]
 # ----- SAMPLE INFORMATION -----
 # Sample information
 ORGANISM_CODE = "mm10"
-DATASET_NAME = "mESC_no_scale_linear"
+DATASET_NAME = "mESC_small_neighborhood"
 CHROM_ID_LIST = chrom_list
 CHROM_ID = "chr19"
 CHROM_IDS = chr_nums
