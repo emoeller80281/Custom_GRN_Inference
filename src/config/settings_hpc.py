@@ -66,7 +66,7 @@ CORR_LOSS_WEIGHT=1.0
 ALLOWED_SAMPLES=None #["E7.5_REP1"]        
 
 D_MODEL = 192
-NUM_HEADS = 8
+NUM_HEADS = 4
 NUM_LAYERS = 3
 D_FF = D_MODEL * 4
 DROPOUT = 0.10
@@ -74,7 +74,7 @@ EDGE_LOSS_WEIGHT=0.0            # Weight for edge loss contribution
 COS_WEIGHT=0.0                  # Weight for cosine contrastive loss contribution   
 
 SAVE_EVERY_N_EPOCHS=5           # Chooses how many epochs to run before saving a checkpoint
-RESUME_CHECKPOINT_PATH=None     # "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC_no_scale_linear/chr19/model_training_181/checkpoint_8.pt"
+RESUME_CHECKPOINT_PATH="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC_small_neighborhood/chr19/model_training_001/checkpoint_14.pt"
 
 GRAD_ACCUM_STEPS=1
 USE_GRAD_ACCUMULATION=True
@@ -88,7 +88,7 @@ SCHEDULER_PATIENCE=5            # How long to wait with no improvement without d
 THRESHOLD=1e-3                  # Defines how much better the next epoch has to be to count as being "better"
 THRESHOLD_MODE="rel"            # rel helps filter noise for datasets with different loss scales. new best = previous best * (1 - threshold) difference
 COOLDOWN=3                      # How many epochs to pause after a drop before testing for improvement, lets the training stabilize a bit
-MIN_LR=1e-5                     # Wont drop the learning rate below this, prevents learning from stalling due to tiny lr
+MIN_LR=5e-6                     # Wont drop the learning rate below this, prevents learning from stalling due to tiny lr
 
 # TF to TG shortcut parameters
 USE_DISTANCE_BIAS = True
@@ -116,7 +116,8 @@ SUBSAMPLE_SEED = 42
 FINE_TUNING_TRAINED_MODEL = "model_training_192_10k_metacells_fine_tuning"
 FINETUNE_PATIENCE = 20
 FINETUNE_LR = 3e-05       # smaller LR for refinement
-EWC_LAMBDA = 1e-4
+EWC_LAMBDA = 1e-7
+MAX_STEPS = 500             # Maximum number of batches to process
 
 # Sample the max number of cells per sample
 SUBSAMPLE_MAX_CELLS_FINETUNE = None

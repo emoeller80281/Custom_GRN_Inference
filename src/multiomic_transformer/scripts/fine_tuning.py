@@ -1,6 +1,7 @@
 import csv
 import glob
 import itertools
+import math
 import json
 import logging
 import os
@@ -519,7 +520,6 @@ class Trainer:
         return float(avg_loss_scaled), float(avg_loss_unscaled), float(r2_s.item()), float(r2_u.item()), per_dataset_metrics
 
     def _run_epoch(self, epoch):
-        max_steps=300
         if isinstance(self.train_data, dict):
             for loader in self.train_data.values():
                 sampler = getattr(loader, "sampler", None)
@@ -528,7 +528,7 @@ class Trainer:
                 bs = getattr(loader, "batch_sampler", None)
                 if hasattr(bs, "set_epoch"):
                     bs.set_epoch(epoch)
-            batch_iter = balanced_round_robin(self.train_data, max_steps=max_steps, seed=42)
+            batch_iter = balanced_round_robin(self.train_data, max_steps=MAX_STEPS, seed=42)
             per_dataset_losses = {name: [0.0, 0] for name in self.train_data}
         else:
             sampler = getattr(self.train_data, "sampler", None)
@@ -543,6 +543,7 @@ class Trainer:
         total_loss_sum = 0.0
         total_mse_scaled_sum = 0.0
         total_mse_unscaled_sum = 0.0
+        total_ewc_loss_sum = 0.0
         n_batches = 0
         self.epoch = epoch
 
@@ -593,6 +594,7 @@ class Trainer:
             total_loss_sum += float(total_loss_val.detach())
             total_mse_scaled_sum += float(mse_scaled)
             total_mse_unscaled_sum += float(mse_unscaled)
+            total_ewc_loss_sum += float(loss_ewc)
             n_batches += 1
             
             # --- Progress logging based on total_batches ---
@@ -610,6 +612,8 @@ class Trainer:
         avg_train_loss = total_loss_sum / max(1, n_batches)
         avg_train_mse_scaled = total_mse_scaled_sum / max(1, n_batches)
         avg_train_mse_unscaled = total_mse_unscaled_sum / max(1, n_batches)
+        avg_train_ewc_loss = total_ewc_loss_sum / max(1, n_batches)
+        
 
         avg_val_mse_scaled, avg_val_mse_unscaled, r2_s, r2_u, per_dataset_val_metrics = self._validate()
         self.scheduler.step(avg_val_mse_unscaled)
@@ -618,6 +622,7 @@ class Trainer:
             avg_train_loss,
             avg_train_mse_scaled,
             avg_train_mse_unscaled,
+            avg_train_ewc_loss,
             avg_val_mse_scaled,
             avg_val_mse_unscaled,
             r2_s,
@@ -625,21 +630,6 @@ class Trainer:
             per_dataset_losses,
             per_dataset_val_metrics,
         )
-        
-    def _compute_fisher_drift(self):
-        if self.ref_params is None or self.fisher_diag is None:
-            return None
-        val = 0.0
-        with torch.no_grad():
-            for name, p in self.model.named_parameters():
-                if name not in self.ref_params or name not in self.fisher_diag:
-                    continue
-                ref_p = self.ref_params[name].to(p.device)
-                F = self.fisher_diag[name].to(p.device)
-                diff = (p - ref_p)
-                val += float((F * diff * diff).sum())
-        return val ** 0.5
-
 
     def _save_checkpoint(self, epoch: int, path: str):
         if not self.is_main:
@@ -715,6 +705,7 @@ class Trainer:
                     avg_train_loss,
                     avg_train_mse_scaled,
                     avg_train_mse_unscaled,
+                    avg_train_ewc_loss,
                     avg_val_mse_scaled,
                     avg_val_mse_unscaled,
                     r2_s,
@@ -729,16 +720,15 @@ class Trainer:
                     raise KeyboardInterrupt()
 
                 if self.is_main:
-                    drift = self._compute_fisher_drift()
                     lr = self.optimizer.param_groups[0]["lr"]
                     logging.info(
                         f"Epoch {epoch+1} | Train Total Loss: {avg_train_loss:.4f} | "
                         f"Train MSE: {avg_train_mse_unscaled:.4f} | "
+                        f"Train EWC: {avg_train_ewc_loss:.4f} | "
                         f"Val MSE: {avg_val_mse_unscaled:.4f} | "
                         f"R2 (Unscaled): {r2_u:.3f} | "
                         f"R2 (Scaled): {r2_s:.3f} | "
                         f"LR: {lr:.2e} | "
-                        f"Drift: {drift:.2e} | "
                         f"Time: {epoch_dur_sec:.0f}s"
                     )
 
@@ -746,11 +736,11 @@ class Trainer:
                         "Epoch": epoch+1,
                         "Train Total Loss": avg_train_loss,
                         "Train MSE": avg_train_mse_unscaled,
+                        "Train EWC": avg_train_ewc_loss,
                         "Val MSE": avg_val_mse_unscaled,
                         "R2_u": r2_u,
                         "R2_s": r2_s,
                         "LR": lr,
-                        "drift": drift,
                         "Time": round(epoch_dur_sec, 0),
                     }
                     history.append(epoch_log)
@@ -813,7 +803,7 @@ class Trainer:
             raise
 
     def _write_log_csv(self, history, path):
-        fieldnames = ["Epoch", "Train Total Loss", "Train MSE", "Val MSE", "R2_u", "R2_s", "LR", "Time"]
+        fieldnames = ["Epoch", "Train Total Loss", "Train MSE", "Train EWC", "Val MSE", "R2_u", "R2_s", "LR", "Time"]
         log_path = os.path.join(path, "training_log.csv")
 
         file_exists = os.path.isfile(log_path)
@@ -911,22 +901,6 @@ def load_train_objs(run_cfg):
                 tg_scaler = SimpleScaler(tg_mean, tg_std)
         else:
             model.load_state_dict(state_dict, strict=False)
-    
-    # Freeze bottom layers  
-    N_FREEZE = 0  # you can make this a config setting
-
-    frozen, trainable = 0, 0
-    for name, param in model.named_parameters():
-        if name.startswith("encoder.layers.0") or name.startswith("encoder.layers.1"):
-            param.requires_grad = False
-            frozen += param.numel()
-        else:
-            trainable += param.numel()
-
-    logging.info(
-        f"Freezing bottom {N_FREEZE} encoder layers: "
-        f"{frozen:,} params frozen, {trainable:,} still trainable."
-    )
 
     # --- Step 6: Fine-tune optimizer ---
     optimizer = torch.optim.Adam(
@@ -1170,11 +1144,59 @@ def balanced_round_robin(loaders, max_steps=None, seed=42):
             batch = next(iters[name])
         yield batch, name
 
+def _mapping_to_ordered_list(name2id: dict):
+    # convert {name: id} → [names] in id order
+    return [k for k, _ in sorted(name2id.items(), key=lambda kv: kv[1])]
+
+def write_experiment_settings_and_objects(training_output_dir: Path, sample_name, dataset, test_loader, world_size: int, run_cfg):
+    """
+    Works for both MultiChromosomeDataset and single-chrom MultiomicTransformerDataset.
+    Writes tf/tg vocab mappings and run parameters. Skips scaler unless present.
+    """
+    sample_output_dir = training_output_dir / sample_name
+    os.makedirs(sample_output_dir, exist_ok=True)
+
+    # Pick the right mappings depending on dataset type
+    tf_map = getattr(dataset, "tf_name2id_sub", None)
+    tg_map = getattr(dataset, "tg_name2id_sub", None)
+
+    if tf_map is None or tg_map is None:
+        raise RuntimeError("Dataset is missing TF/TG name→id mappings.")
+
+    # Persist mappings (name→id)
+    with open(os.path.join(sample_output_dir, "tf_vocab.json"), "w") as f:
+        json.dump(tf_map, f)
+    with open(os.path.join(sample_output_dir, "tg_vocab.json"), "w") as f:
+        json.dump(tg_map, f)
+
+    # Also persist ordered name lists (useful for plotting/inspection)
+    tf_names_ordered = _mapping_to_ordered_list(tf_map)
+    tg_names_ordered = _mapping_to_ordered_list(tg_map)
+    with open(os.path.join(sample_output_dir, "tf_names_ordered.json"), "w") as f:
+        json.dump(tf_names_ordered, f)
+    with open(os.path.join(sample_output_dir, "tg_names_ordered.json"), "w") as f:
+        json.dump(tg_names_ordered, f)
+    
+    # Persist test loader
+    torch.save(test_loader, os.path.join(sample_output_dir, "test_loader.pt"))
+
+    # Your existing run-parameter writer is fine to call here if it doesn’t assume single-chrom only
+    write_run_parameters(dataset, sample_output_dir, world_size, run_cfg)
+    logging.info("Wrote experiment settings and objects to training output directory")
+
 
 def main(rank: int, local_rank: int, world_size: int, save_every: int, total_epochs: int, batch_size: int):
     assert D_MODEL % NUM_HEADS == 0, f"{D_MODEL} not divisible by {NUM_HEADS}"
 
     ddp_setup(rank, world_size, local_rank)
+    
+    print(
+        f"[HOST {os.environ.get('HOSTNAME','?')}] "
+        f"RANK={rank}, LOCAL_RANK={local_rank}, WORLD_SIZE={world_size}",
+        flush=True,
+    )
+    
+    
     setup_logging(rank)
 
     try:
@@ -1235,6 +1257,8 @@ def main(rank: int, local_rank: int, world_size: int, save_every: int, total_epo
             total_size = len(pseudobulk_dataset)
             if rank == 0:
                 logging.info(f"Loaded existing Fisher/EWC bundle: {fisher_bundle_path}")
+                print("Example ref_params keys:", list(ref_params.keys())[:5])
+                print("Example model keys:", [n for n, _ in list(model.named_parameters())[:5]])
         else:
             if rank == 0:
                 logging.info("Computing Fisher matrix on pseudobulk dataset...")
@@ -1258,6 +1282,16 @@ def main(rank: int, local_rank: int, world_size: int, save_every: int, total_epo
             sn: prepare_dataloader(ds, batch_size, world_size, rank)[1]
             for sn, ds in zip(FINE_TUNING_DATASETS, single_cell_datasets)
         }
+        test_loaders = {
+            sn: prepare_dataloader(ds, batch_size, world_size, rank)[2]
+            for sn, ds in zip(FINE_TUNING_DATASETS, single_cell_datasets)
+        }
+        
+        
+        # if rank == 0:
+        #     for sample_name, test_loader in test_loaders.items():
+        #         write_experiment_settings_and_objects(FINE_TUNING_DIR, sample_name, single_cell_datasets, test_loader, world_size, run_cfg)
+        #         logging.info("Wrote experiment settings and objects to training output directory")
 
         if tf_scaler_loaded is not None and tg_scaler_loaded is not None:
             tf_scaler = SimpleScaler(tf_scaler_loaded.mean.to(rank_device), tf_scaler_loaded.std.to(rank_device))
