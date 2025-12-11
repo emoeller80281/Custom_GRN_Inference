@@ -272,7 +272,7 @@ class Trainer:
         # Calculate MSE, but don't weight zero's as heavily to account for sparsity
         residual = preds32 - targets32
 
-        zero_mask = (targets32 == 0.0)
+        zero_mask = (targets32 <= ZERO_EPS)
         weights = torch.ones_like(targets32)
 
         weights[zero_mask] = ZERO_WEIGHT
@@ -444,9 +444,17 @@ class Trainer:
                         targets_u, preds_u = targets_s, preds_s
 
                     targets_u = torch.nan_to_num(targets_u.float(), nan=0.0, posinf=1e6, neginf=-1e6)
-                    preds_u = torch.nan_to_num(preds_u.float(), nan=0.0, posinf=1e6, neginf=-1e6)
+                    preds_u   = torch.nan_to_num(preds_u.float(),   nan=0.0, posinf=1e6, neginf=-1e6)
 
-                    loss_u = F.mse_loss(preds_u, targets_u)
+                    # ---- weighted MSE to reduce impact of zeros ----
+                    residual_u = preds_u - targets_u
+                    zero_mask  = (targets_u <= ZERO_EPS)  # treat exact zeros (or near-zero) as "dropout candidates"
+                    weights_u  = torch.ones_like(targets_u)
+                    weights_u[zero_mask] = ZERO_WEIGHT
+
+                    # batch-weighted MSE in unscaled space
+                    loss_u = (weights_u * residual_u**2).sum() / weights_u.sum()
+
                     total_loss_unscaled_t += loss_u.detach()
                     per_dataset_stats[name]["loss_u"] += loss_u.detach()
 

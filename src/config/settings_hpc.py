@@ -121,6 +121,7 @@ MAX_STEPS = 500                     # Maximum number of batches to process
 FINETUNE_CORR_WEIGHT=0.2
 FINETUNE_EDGE_WEIGHT=0.0
 FINETUNE_SHORTCUT_REG_WEIGHT=0.0
+ZERO_EPS = 1e-6                     # Consider a value as zero if it is less than this
 ZERO_WEIGHT = 0.1                   # Down-weight zero values when calculating MSE
 
 # Sample the max number of cells per sample
