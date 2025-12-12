@@ -35,6 +35,11 @@ PROCESSED_GSE218576_DIR = ROOT_DIR / "data/processed/GSE218576"
 MIN_CELLS_PER_GENE = 200         # Minimum number of cells expressing each gene
 MIN_CELLS_PER_PEAK = 200         # Minimum number of cells expressing each peak
 
+FILTER_TYPE = "count"              # Choose whether to filter cells by percent of cells expressing each gene or peak. Options are "pct" or "count"
+
+FILTER_OUT_LOWEST_COUNTS_GENES = 3
+FILTER_OUT_LOWEST_COUNTS_PEAKS = 3
+
 FILTER_OUT_LOWEST_PCT_GENES = 0.1
 FILTER_OUT_LOWEST_PCT_PEAKS = 0.1
 
@@ -67,7 +72,7 @@ PROMOTER_BP = None #10_000
 
 # ----- MODEL TRAINING PARAMETERS -----
 TOTAL_EPOCHS=250
-BATCH_SIZE=256
+BATCH_SIZE=16
 PATIENCE=10
 CORR_LOSS_WEIGHT=1.0    
 ALLOWED_SAMPLES=None #["E7.5_REP1"]        
@@ -121,7 +126,10 @@ SUBSAMPLE_SEED = 42
 
 # ----- FINE TUNING ON SINGLE-CELL DATA -----
 FINE_TUNING_TRAINED_MODEL = "model_training_192_10k_metacells_fine_tuning"
-FINETUNE_PATIENCE = 10
+FINETUNE_EPOCHS = 250
+FINETUNE_PATIENCE = 20
+FINETUNE_SCHEDULER_PATIENCE = 7
+
 FINETUNE_LR = 3e-04                 # smaller LR for refinement
 EWC_LAMBDA = 2.5e-4
 MAX_STEPS = 1000                     # Maximum number of batches to process

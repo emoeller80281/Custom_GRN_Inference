@@ -747,9 +747,16 @@ def filter_and_qc(adata_RNA: AnnData, adata_ATAC: AnnData) -> Tuple[AnnData, Ann
     num_cells = adata_RNA.n_obs
     
     sc.pp.filter_cells(adata_RNA, min_genes=MIN_CELLS_PER_GENE)
-    sc.pp.filter_genes(adata_RNA, min_cells=math.ceil(num_cells * FILTER_OUT_LOWEST_PCT_GENES))
     sc.pp.filter_cells(adata_ATAC, min_genes=MIN_CELLS_PER_PEAK)
-    sc.pp.filter_genes(adata_ATAC, min_cells=math.ceil(num_cells * FILTER_OUT_LOWEST_PCT_PEAKS))
+    
+    if FILTER_TYPE == "pct":
+        sc.pp.filter_genes(adata_RNA, min_cells=math.ceil(num_cells * FILTER_OUT_LOWEST_PCT_GENES))
+        sc.pp.filter_genes(adata_ATAC, min_cells=math.ceil(num_cells * FILTER_OUT_LOWEST_PCT_PEAKS))
+    elif FILTER_TYPE == "count":
+        sc.pp.filter_genes(adata_RNA, min_counts=FILTER_OUT_LOWEST_COUNTS_GENES)
+        sc.pp.filter_genes(adata_ATAC, min_counts=FILTER_OUT_LOWEST_COUNTS_PEAKS)
+    else:
+        raise ValueError(f"Unknown filter type: {FILTER_TYPE}")
     
     # Preprocess RNA
     sc.pp.normalize_total(adata_RNA, target_sum=1e6)

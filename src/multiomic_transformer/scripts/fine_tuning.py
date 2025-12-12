@@ -177,7 +177,7 @@ class Trainer:
             self.optimizer,
             mode=MODE,
             factor=SCHEDULER_FACTOR,
-            patience=SCHEDULER_PATIENCE,
+            patience=FINETUNE_SCHEDULER_PATIENCE,
             threshold=THRESHOLD,
             threshold_mode=THRESHOLD_MODE,
             cooldown=COOLDOWN,
@@ -1094,7 +1094,7 @@ def write_run_parameters(dataset, out_dir, world_size, run_cfg):
     logging.info(f"TFs:                 {len(dataset.tf_ids)}")
     if hasattr(dataset, "metacell_names"):
         logging.info(f"Metacells:           {len(dataset.metacell_names)}")
-    logging.info(f"Epochs:              {TOTAL_EPOCHS}")
+    logging.info(f"Epochs:              {FINETUNE_EPOCHS}")
     logging.info(f"Batch Size:          {BATCH_SIZE}")
     logging.info(f"GPUs:                {world_size}")
     logging.info(f"Grad Accum Steps:    {GRAD_ACCUM_STEPS}")
@@ -1118,7 +1118,7 @@ def write_run_parameters(dataset, out_dir, world_size, run_cfg):
 
     run_params = {
         "allowed_samples": ALLOWED_SAMPLES,
-        "epochs": TOTAL_EPOCHS,
+        "epochs": FINETUNE_EPOCHS,
         "batch_size": BATCH_SIZE,
         "grad_accum_steps": GRAD_ACCUM_STEPS,
         "use_grad_accum": USE_GRAD_ACCUMULATION,
@@ -1230,7 +1230,7 @@ def main(rank: int, local_rank: int, world_size: int, save_every: int, total_epo
 
         run_cfg = {
             "allowed_samples": g("allowed_samples", ALLOWED_SAMPLES),
-            "epochs": g("epochs", TOTAL_EPOCHS),
+            "epochs": g("epochs", FINETUNE_EPOCHS),
             "batch_size": g("batch_size", BATCH_SIZE),
             "grad_accum_steps": g("grad_accum_steps", GRAD_ACCUM_STEPS),
             "d_model": g("d_model", D_MODEL),
@@ -1438,6 +1438,6 @@ if __name__ == "__main__":
         local_rank=local_rank,
         world_size=world_size,
         save_every=SAVE_EVERY_N_EPOCHS,
-        total_epochs=TOTAL_EPOCHS,
+        total_epochs=FINETUNE_EPOCHS,
         batch_size=BATCH_SIZE,
     )
