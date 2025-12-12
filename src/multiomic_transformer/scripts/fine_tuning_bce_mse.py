@@ -189,7 +189,7 @@ class Trainer:
             min_lr=MIN_LR,
         )
 
-        self.best_val_loss = float("-inf")
+        self.best_val_loss = float("inf")
         self.patience = patience
         self.min_delta = min_delta
         self.patience_counter = 0
@@ -291,7 +291,19 @@ class Trainer:
         targets_u_for_mask = targets_raw.float()  # unscaled expression
         present = (targets_u_for_mask > PRESENCE_EPS).float()  # [B, G], 1 = detected, 0 = zero/dropout
 
-        bce_loss = F.binary_cross_entropy_with_logits(p_logits, present)
+        # BCE on presence with simple positive-class reweighting to counter
+        # heavy class imbalance (many zeros, few non-zeros)
+        with torch.no_grad():
+            pos = present.sum()
+            neg = present.numel() - pos
+            if pos > 0:
+                pos_weight = neg / pos
+            else:
+                pos_weight = torch.tensor(1.0, device=device)
+
+        bce_loss = F.binary_cross_entropy_with_logits(
+            p_logits, present, pos_weight=pos_weight
+        )
 
         # =====================================================
         # 2) Regression head: only on non-zero targets
@@ -414,42 +426,41 @@ class Trainer:
 
     def _validate(self):
         self.model.eval()
-
         device = self.gpu_id
 
-        total_loss_scaled_t = torch.zeros(1, device=device)     # regression MSE (scaled)
-        total_loss_unscaled_t = torch.zeros(1, device=device)   # regression MSE (unscaled)
-        n_batches = 0
+        # Regression MSE (scaled / unscaled) over non-zero entries only
+        total_loss_scaled_t   = torch.zeros(1, device=device)
+        total_loss_unscaled_t = torch.zeros(1, device=device)
+        # Presence BCE over all entries
+        total_bce_t           = torch.zeros(1, device=device)
+
+        n_batches = 0  # batches that actually had non-zero entries
 
         # Global accumulators for R² (scaled / unscaled), over non-zero entries only
-        sse_s = torch.zeros(1, device=device)
-        sumy_s = torch.zeros(1, device=device)
+        sse_s   = torch.zeros(1, device=device)
+        sumy_s  = torch.zeros(1, device=device)
         sumy2_s = torch.zeros(1, device=device)
-        n_s = torch.zeros(1, device=device)
+        n_s     = torch.zeros(1, device=device)
 
-        sse_u = torch.zeros(1, device=device)
-        sumy_u = torch.zeros(1, device=device)
+        sse_u   = torch.zeros(1, device=device)
+        sumy_u  = torch.zeros(1, device=device)
         sumy2_u = torch.zeros(1, device=device)
-        n_u = torch.zeros(1, device=device)
-
-        total_loss_scaled_t = torch.zeros(1, device=device)     # regression MSE (scaled)
-        total_loss_unscaled_t = torch.zeros(1, device=device)   # regression MSE (unscaled)
-        total_bce_t = torch.zeros(1, device=device)             # presence BCE
+        n_u     = torch.zeros(1, device=device)
 
         per_dataset_stats = {}
         for name in self.val_data.keys():
             per_dataset_stats[name] = {
-                "sse_s": torch.zeros(1, device=device),
+                "sse_s":  torch.zeros(1, device=device),
                 "sumy_s": torch.zeros(1, device=device),
                 "sumy2_s": torch.zeros(1, device=device),
-                "n_s": torch.zeros(1, device=device),
-                "sse_u": torch.zeros(1, device=device),
+                "n_s":   torch.zeros(1, device=device),
+                "sse_u":  torch.zeros(1, device=device),
                 "sumy_u": torch.zeros(1, device=device),
                 "sumy2_u": torch.zeros(1, device=device),
-                "n_u": torch.zeros(1, device=device),
-                "loss_s": torch.zeros(1, device=device),   # reg MSE (scaled)
-                "loss_u": torch.zeros(1, device=device),   # reg MSE (unscaled)
-                "bce":    torch.zeros(1, device=device),   # presence BCE
+                "n_u":   torch.zeros(1, device=device),
+                "loss_s": torch.zeros(1, device=device),  # reg MSE (scaled)
+                "loss_u": torch.zeros(1, device=device),  # reg MSE (unscaled)
+                "bce":    torch.zeros(1, device=device),  # presence BCE
                 "batches": torch.zeros(1, device=device),
             }
 
@@ -461,12 +472,12 @@ class Trainer:
 
                     atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids, motif_mask = batch
 
-                    atac_wins = atac_wins.to(device, non_blocking=True)
-                    tf_tensor = tf_tensor.to(device, non_blocking=True)
-                    targets   = targets.to(device,   non_blocking=True)  # UNscaled
-                    bias      = bias.to(device,      non_blocking=True)
-                    tf_ids    = tf_ids.to(device,    non_blocking=True)
-                    tg_ids    = tg_ids.to(device,    non_blocking=True)
+                    atac_wins  = atac_wins.to(device, non_blocking=True)
+                    tf_tensor  = tf_tensor.to(device, non_blocking=True)
+                    targets    = targets.to(device,   non_blocking=True)  # UNscaled
+                    bias       = bias.to(device,      non_blocking=True)
+                    tf_ids     = tf_ids.to(device,    non_blocking=True)
+                    tg_ids     = tg_ids.to(device,    non_blocking=True)
                     motif_mask = motif_mask.to(device, non_blocking=True)
 
                     # Keep raw targets for presence labels
@@ -493,44 +504,57 @@ class Trainer:
                             return_shortcut_contrib=False,
                         )
 
-                    preds_s = torch.nan_to_num(preds.float(),    nan=0.0, posinf=1e6, neginf=-1e6)
-                    targets_s = torch.nan_to_num(targets_s.float(), nan=0.0, posinf=1e6, neginf=-1e6)
+                    preds_s   = torch.nan_to_num(preds.float(),      nan=0.0, posinf=1e6, neginf=-1e6)
+                    targets_s = torch.nan_to_num(targets_s.float(),  nan=0.0, posinf=1e6, neginf=-1e6)
 
-                    # ----------- Presence BCE over all entries -----------
-                    present = (targets_raw > PRESENCE_EPS).float()   # [B, G]
-                    bce_loss = F.binary_cross_entropy_with_logits(p_logits, present)
+                    # ---------------- Presence BCE over all entries ----------------
+                    targets_u_for_mask = targets_raw.float()
+                    present = (targets_u_for_mask > PRESENCE_EPS).float()  # [B, G]
+
+                    # Positive-class reweighting (same as train)
+                    pos = present.sum()
+                    neg = present.numel() - pos
+                    if pos > 0:
+                        pos_weight = neg / pos
+                    else:
+                        pos_weight = torch.tensor(1.0, device=device)
+
+                    bce_loss = F.binary_cross_entropy_with_logits(
+                        p_logits, present, pos_weight=pos_weight
+                    )
                     total_bce_t += bce_loss.detach()
                     per_dataset_stats[name]["bce"] += bce_loss.detach()
 
-                    # ----------- restrict regression metrics to non-zero targets -----------
-                    present = (targets_raw > PRESENCE_EPS).float()   # [B, G]
+                    # ---------------- Regression metrics on non-zero targets only ----------------
                     nonzero_mask = present.bool()
 
                     if not nonzero_mask.any():
-                        # No expressed genes in this batch – skip for regression metrics
+                        # No expressed genes in this batch – skip regression metrics
                         continue
 
-                    # --- Regression MSE in scaled space ---
-                    loss_s = F.mse_loss(preds_s[nonzero_mask], targets_s[nonzero_mask])
+                    # --- Regression MSE in scaled space (non-zero only) ---
+                    y_s = targets_s[nonzero_mask]
+                    p_s = preds_s[nonzero_mask]
+
+                    loss_s = F.mse_loss(p_s, y_s)
                     total_loss_scaled_t += loss_s.detach()
                     per_dataset_stats[name]["loss_s"] += loss_s.detach()
                     per_dataset_stats[name]["batches"] += 1
                     n_batches += 1
 
-                    # --- Global R² (scaled), over non-zero entries ---
-                    y_s = targets_s[nonzero_mask].reshape(-1)
-                    p_s = preds_s[nonzero_mask].reshape(-1)
-                    sse_s += torch.sum((y_s - p_s) ** 2)
-                    sumy_s += torch.sum(y_s)
-                    sumy2_s += torch.sum(y_s ** 2)
-                    n_s += y_s.numel()
+                    y_s_flat = y_s.reshape(-1)
+                    p_s_flat = p_s.reshape(-1)
+                    sse_s   += torch.sum((y_s_flat - p_s_flat) ** 2)
+                    sumy_s  += torch.sum(y_s_flat)
+                    sumy2_s += torch.sum(y_s_flat ** 2)
+                    n_s     += y_s_flat.numel()
 
-                    per_dataset_stats[name]["sse_s"] += torch.sum((y_s - p_s) ** 2)
-                    per_dataset_stats[name]["sumy_s"] += torch.sum(y_s)
-                    per_dataset_stats[name]["sumy2_s"] += torch.sum(y_s ** 2)
-                    per_dataset_stats[name]["n_s"] += y_s.numel()
+                    per_dataset_stats[name]["sse_s"]   += torch.sum((y_s_flat - p_s_flat) ** 2)
+                    per_dataset_stats[name]["sumy_s"]  += torch.sum(y_s_flat)
+                    per_dataset_stats[name]["sumy2_s"] += torch.sum(y_s_flat ** 2)
+                    per_dataset_stats[name]["n_s"]     += y_s_flat.numel()
 
-                    # --- Unscaled predictions for metrics ---
+                    # --- Unscaled predictions for metrics (non-zero only) ---
                     if getattr(self, "tg_scaler", None) is not None:
                         targets_u = self.tg_scaler.inverse_transform(targets_s, tg_ids)
                         preds_u   = self.tg_scaler.inverse_transform(preds_s,   tg_ids)
@@ -540,33 +564,33 @@ class Trainer:
                     targets_u = torch.nan_to_num(targets_u.float(), nan=0.0, posinf=1e6, neginf=-1e6)
                     preds_u   = torch.nan_to_num(preds_u.float(),   nan=0.0, posinf=1e6, neginf=-1e6)
 
-                    # Regression MSE in unscaled space (non-zero entries only)
-                    loss_u = F.mse_loss(
-                        preds_u[nonzero_mask], targets_u[nonzero_mask]
-                    )
+                    y_u = targets_u[nonzero_mask]
+                    p_u = preds_u[nonzero_mask]
 
+                    loss_u = F.mse_loss(p_u, y_u)
                     total_loss_unscaled_t += loss_u.detach()
                     per_dataset_stats[name]["loss_u"] += loss_u.detach()
 
-                    y_u = targets_u[nonzero_mask].reshape(-1)
-                    p_u = preds_u[nonzero_mask].reshape(-1)
-                    sse_u += torch.sum((y_u - p_u) ** 2)
-                    sumy_u += torch.sum(y_u)
-                    sumy2_u += torch.sum(y_u ** 2)
-                    n_u += y_u.numel()
+                    y_u_flat = y_u.reshape(-1)
+                    p_u_flat = p_u.reshape(-1)
+                    sse_u   += torch.sum((y_u_flat - p_u_flat) ** 2)
+                    sumy_u  += torch.sum(y_u_flat)
+                    sumy2_u += torch.sum(y_u_flat ** 2)
+                    n_u     += y_u_flat.numel()
 
-                    per_dataset_stats[name]["sse_u"] += torch.sum((y_u - p_u) ** 2)
-                    per_dataset_stats[name]["sumy_u"] += torch.sum(y_u)
-                    per_dataset_stats[name]["sumy2_u"] += torch.sum(y_u ** 2)
-                    per_dataset_stats[name]["n_u"] += y_u.numel()
+                    per_dataset_stats[name]["sse_u"]   += torch.sum((y_u_flat - p_u_flat) ** 2)
+                    per_dataset_stats[name]["sumy_u"]  += torch.sum(y_u_flat)
+                    per_dataset_stats[name]["sumy2_u"] += torch.sum(y_u_flat ** 2)
+                    per_dataset_stats[name]["n_u"]     += y_u_flat.numel()
 
+        # ----- Distributed reduction -----
         n_batches_t = torch.tensor(n_batches, device=device, dtype=torch.long)
 
         if dist.is_available() and dist.is_initialized():
             for t in (sse_s, sumy_s, sumy2_s, n_s,
-                      sse_u, sumy_u, sumy2_u, n_u,
-                      total_loss_scaled_t, total_loss_unscaled_t,
-                      total_bce_t):
+                    sse_u, sumy_u, sumy2_u, n_u,
+                    total_loss_scaled_t, total_loss_unscaled_t,
+                    total_bce_t):
                 dist.all_reduce(t, op=dist.ReduceOp.SUM)
             dist.all_reduce(n_batches_t, op=dist.ReduceOp.SUM)
 
@@ -582,60 +606,60 @@ class Trainer:
 
         eps = 1e-12
 
-        # ----- Global R² (scaled) -----
+        # ----- Global R² (scaled, non-zero only) -----
         ybar_s = sumy_s / torch.clamp(n_s, min=1.0)
-        sst_s = sumy2_s - n_s * (ybar_s ** 2)
-        r2_s = torch.where(
+        sst_s  = sumy2_s - n_s * (ybar_s ** 2)
+        r2_s   = torch.where(
             sst_s <= eps, torch.zeros_like(sst_s), 1.0 - sse_s / torch.clamp(sst_s, min=eps)
         )
 
-        # ----- Global R² (unscaled) -----
+        # ----- Global R² (unscaled, non-zero only) -----
         ybar_u = sumy_u / torch.clamp(n_u, min=1.0)
-        sst_u = sumy2_u - n_u * (ybar_u ** 2)
-        r2_u = torch.where(
+        sst_u  = sumy2_u - n_u * (ybar_u ** 2)
+        r2_u   = torch.where(
             sst_u <= eps, torch.zeros_like(sst_u), 1.0 - sse_u / torch.clamp(sst_u, min=eps)
         )
 
-        avg_loss_scaled = float(total_loss_scaled_t.item()) / max(1, global_n_batches)
+        avg_loss_scaled   = float(total_loss_scaled_t.item())   / max(1, global_n_batches)
         avg_loss_unscaled = float(total_loss_unscaled_t.item()) / max(1, global_n_batches)
-        avg_bce = float(total_bce_t.item()) / max(1, global_n_batches)
+        avg_bce           = float(total_bce_t.item())           / max(1, global_n_batches)
 
         per_dataset_metrics = {}
         for name, stats in per_dataset_stats.items():
             batches = max(1, int(stats["batches"].item()))
-            n_s_ds = stats["n_s"]
-            n_u_ds = stats["n_u"]
+            n_s_ds  = stats["n_s"]
+            n_u_ds  = stats["n_u"]
 
             if n_s_ds.item() == 0:
                 per_dataset_metrics[name] = {
-                    "val_mse_scaled": 0.0,
+                    "val_mse_scaled":   0.0,
                     "val_mse_unscaled": 0.0,
-                    "r2_s": 0.0,
-                    "r2_u": 0.0,
+                    "r2_s":             0.0,
+                    "r2_u":             0.0,
                 }
                 continue
 
             ybar_s_ds = stats["sumy_s"] / torch.clamp(n_s_ds, min=1.0)
-            sst_s_ds = stats["sumy2_s"] - n_s_ds * (ybar_s_ds ** 2)
-            r2_s_ds = torch.where(
+            sst_s_ds  = stats["sumy2_s"] - n_s_ds * (ybar_s_ds ** 2)
+            r2_s_ds   = torch.where(
                 sst_s_ds <= eps,
                 torch.zeros_like(sst_s_ds),
                 1.0 - stats["sse_s"] / torch.clamp(sst_s_ds, min=eps),
             )
 
             ybar_u_ds = stats["sumy_u"] / torch.clamp(n_u_ds, min=1.0)
-            sst_u_ds = stats["sumy2_u"] - n_u_ds * (ybar_u_ds ** 2)
-            r2_u_ds = torch.where(
+            sst_u_ds  = stats["sumy2_u"] - n_u_ds * (ybar_u_ds ** 2)
+            r2_u_ds   = torch.where(
                 sst_u_ds <= eps,
                 torch.zeros_like(sst_u_ds),
                 1.0 - stats["sse_u"] / torch.clamp(sst_u_ds, min=eps),
             )
 
             per_dataset_metrics[name] = {
-                "val_mse_scaled": float((stats["loss_s"] / batches).item()),
+                "val_mse_scaled":   float((stats["loss_s"] / batches).item()),
                 "val_mse_unscaled": float((stats["loss_u"] / batches).item()),
-                "r2_s": float(r2_s_ds.item()),
-                "r2_u": float(r2_u_ds.item()),
+                "r2_s":             float(r2_s_ds.item()),
+                "r2_u":             float(r2_u_ds.item()),
             }
 
         return (
@@ -759,7 +783,9 @@ class Trainer:
         avg_train_ewc_loss = total_ewc_loss_sum / max(1, n_batches)
 
         avg_val_mse_scaled, avg_val_mse_unscaled, avg_val_bce, r2_s, r2_u, per_dataset_val_metrics = self._validate()
-        self.scheduler.step(avg_val_mse_unscaled)
+        
+        val_objective = REG_WEIGHT * avg_val_mse_unscaled + BCE_WEIGHT * avg_val_bce
+        self.scheduler.step(val_objective)
 
         return (
             avg_train_loss,
@@ -914,9 +940,14 @@ class Trainer:
 
                 if self.is_main:
                     improved = False
-                    if avg_val_mse_unscaled < self.best_val_loss - self.min_delta:
-                        self.best_val_loss = avg_val_mse_unscaled
+
+                    # same composite objective as scheduler
+                    val_objective = REG_WEIGHT * avg_val_mse_unscaled + BCE_WEIGHT * avg_val_bce
+                    if val_objective < self.best_val_loss - self.min_delta:
+                        self.best_val_loss = val_objective
                         improved = True
+
+                    # You can still keep an R²-based improvement criterion if you like
                     if r2_s > best_r2 + self.min_delta:
                         best_r2 = r2_s
                         improved = True

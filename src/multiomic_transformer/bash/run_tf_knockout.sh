@@ -33,8 +33,8 @@ export KMP_AFFINITY=granularity=fine,compact,1,0
 # ------------------------------------------------------------
 # Run classifier for this chromosome
 # ------------------------------------------------------------
-EXPERIMENT_DIR=/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC_no_scale_linear
-SELECTED_EXPERIMENT_DIR=$EXPERIMENT_DIR/model_training_192_10k_metacells_6_layers
+EXPERIMENT_DIR=/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC_small_neighborhood
+SELECTED_EXPERIMENT_DIR=$EXPERIMENT_DIR/chr19/model_training_001
 
 MODEL_FILE=trained_model.pt
 

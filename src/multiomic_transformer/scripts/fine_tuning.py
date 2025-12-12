@@ -184,7 +184,7 @@ class Trainer:
             min_lr=MIN_LR,
         )
 
-        self.best_val_loss = float("-inf")
+        self.best_val_loss = float("inf")
         self.patience = patience
         self.min_delta = min_delta
         self.patience_counter = 0

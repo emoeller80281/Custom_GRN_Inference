@@ -27,10 +27,10 @@ export NUMEXPR_NUM_THREADS=8
 export BLIS_NUM_THREADS=8
 export KMP_AFFINITY=granularity=fine,compact,1,0
 
-EXPERIMENT_DIR=/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC_no_scale_linear
-SELECTED_EXPERIMENT_DIR=$EXPERIMENT_DIR/model_training_192_5k_metacells
+EXPERIMENT_DIR=/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC_small_neighborhood
+SELECTED_EXPERIMENT_DIR=$EXPERIMENT_DIR/chr19/model_training_001
 
-MODEL_FILE=checkpoint_195.pt
+MODEL_FILE=trained_model.pt
 
 torchrun --standalone --nnodes=1 --nproc_per_node=4 ./src/multiomic_transformer/scripts/gradient_attribution.py \
     --selected_experiment_dir "$SELECTED_EXPERIMENT_DIR" \
@@ -38,8 +38,6 @@ torchrun --standalone --nnodes=1 --nproc_per_node=4 ./src/multiomic_transformer/
     --method smoothgrad \
     --smoothgrad_samples 1 \
     --smoothgrad_noise_std 0.00 \
-    --use_amp \
-    --tg_sampling_fraction 0.25 \
-    --min_tg_r2 0.5
+    --use_amp 
 
 echo "finished successfully!"

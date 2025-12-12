@@ -223,7 +223,7 @@ class Trainer:
         # Loss warmup
         self.corr_sq_warmup_epochs = 3 
         
-        self.best_val_loss = float("-inf")
+        self.best_val_loss = float("inf")
         
         self.scaler = GradScaler(init_scale=1024, growth_factor=1.5, backoff_factor=0.5, growth_interval=200)
 

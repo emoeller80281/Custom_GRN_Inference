@@ -290,10 +290,10 @@ def run_tf_knockout(
         dist.all_reduce(effect_count, op=dist.ReduceOp.SUM)
 
     if rank == 0:
-        tf_tg_effect_np = (effect_sum / (effect_count + 1e-12)).cpu().numpy()
+        tf_tg_effect_np = (effect_sum / (effect_count + 1e-12)).detach().cpu().numpy()
         np.save(selected_experiment_dir / "tf_tg_fullmodel_knockout.npy", tf_tg_effect_np)
         np.save(selected_experiment_dir / "tf_tg_fullmodel_knockout_count.npy",
-                effect_count.cpu().numpy())
+                effect_count.detach().cpu().numpy())
         logging.info("Finished TF Knockout calculation!")
         
 if __name__ == "__main__":

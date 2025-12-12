@@ -2323,23 +2323,23 @@ if __name__ == "__main__":
                 tf_tg_df = merge_tf_tg_attributes_with_combinations(
                     tf_tg_df, tf_tg_reg_pot, mean_norm_tf_expr, mean_norm_tg_expr, tf_tg_combo_attr_file, set(tfs))            
 
-            # ----- MERGE TF-TG DATA WITH PKN -----
-            if not os.path.isfile(gat_training_file):
-                logging.info("\nMerging TF-TG data with PKN")
-                logging.info("  - Loading TF-TG attributes with all combinations")
-                tf_tg_df = pd.read_parquet(tf_tg_combo_attr_file, engine="pyarrow")
-                tf_tg_labeled_with_pkn, tf_tg_unlabeled = merge_tf_tg_data_with_pkn(
-                    tf_tg_df, 
-                    gc,
-                    string_csv_file, 
-                    trrust_csv_file, 
-                    kegg_csv_file
-                )
-                logging.debug(f"  - Example of TF-TG data with PKN: {tf_tg_labeled_with_pkn.head()}")
+            # # ----- MERGE TF-TG DATA WITH PKN -----
+            # if not os.path.isfile(gat_training_file):
+            #     logging.info("\nMerging TF-TG data with PKN")
+            #     logging.info("  - Loading TF-TG attributes with all combinations")
+            #     tf_tg_df = pd.read_parquet(tf_tg_combo_attr_file, engine="pyarrow")
+            #     tf_tg_labeled_with_pkn, tf_tg_unlabeled = merge_tf_tg_data_with_pkn(
+            #         tf_tg_df, 
+            #         gc,
+            #         string_csv_file, 
+            #         trrust_csv_file, 
+            #         kegg_csv_file
+            #     )
+            #     logging.debug(f"  - Example of TF-TG data with PKN: {tf_tg_labeled_with_pkn.head()}")
 
-                logging.info("\nWriting Final TF-TG GAT training data to parquet")
-                tf_tg_labeled_with_pkn.to_parquet(gat_training_file, engine="pyarrow", compression="snappy")
-                logging.info(f"  - Wrote TF-TG features to {gat_training_file}")
+            #     logging.info("\nWriting Final TF-TG GAT training data to parquet")
+            #     tf_tg_labeled_with_pkn.to_parquet(gat_training_file, engine="pyarrow", compression="snappy")
+            #     logging.info(f"  - Wrote TF-TG features to {gat_training_file}")
         
     # ----- CHROMOSOME-SPECIFIC PREPROCESSING -----
     if PROCESS_CHROMOSOME_SPECIFIC_DATA:        

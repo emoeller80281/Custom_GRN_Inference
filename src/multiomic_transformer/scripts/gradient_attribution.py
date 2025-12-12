@@ -452,7 +452,7 @@ def run_gradient_attribution(
 
     if rank == 0:
         grad_attr = grad_sum / (grad_count + 1e-12)
-        grad_attr_np = grad_attr.cpu().numpy()
+        grad_attr_np = grad_attr.detach().cpu().numpy()
 
         print("Gradient attribution matrix shape:", grad_attr_np.shape)
         out_path = selected_experiment_dir / f"tf_tg_grad_attribution_{method}.npy"

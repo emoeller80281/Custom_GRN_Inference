@@ -52,7 +52,7 @@ PSEUDOBULK_RE_FILE = "RE_pseudobulk.tsv"
 
 NEIGHBORS_K = 20        # Number of nearest neighpers per cell in the KNN graph
 PCA_COMPONENTS = 25     # Number of PCs per modality, controls variation
-HOPS = 1                # Number of neighbors-of-neighbors to use (smooths across community)
+HOPS = 0                # Number of neighbors-of-neighbors to use (smooths across community)
 SELF_WEIGHT = 1.0       # How much to weight the cells own gene expression. Higher = less blending with neighbors
 
 # Data Preprocessing and Caching
@@ -66,8 +66,8 @@ FILTER_TO_NEAREST_GENE = True           # Associate peaks to the nearest gene
 PROMOTER_BP = None #10_000
 
 # ----- MODEL TRAINING PARAMETERS -----
-TOTAL_EPOCHS=500
-BATCH_SIZE=16
+TOTAL_EPOCHS=1000
+BATCH_SIZE=64
 PATIENCE=15
 CORR_LOSS_WEIGHT=1.0    
 ALLOWED_SAMPLES=None #["E7.5_REP1"]        
@@ -90,12 +90,12 @@ USE_GRAD_CHECKPOINTING=True
 # Training scheduler settings
 MODE="min"                      # min = improvement means a lower number; max = improvement means a higher number
 INITIAL_LEARNING_RATE = 2.50e-4    # Initial learning rate for the model
-SCHEDULER_FACTOR=0.5            # How much to reduce the learning rate on a plateau
+SCHEDULER_FACTOR=0.25            # How much to reduce the learning rate on a plateau
 SCHEDULER_PATIENCE=5            # How long to wait with no improvement without dropping the learning rate
 THRESHOLD=1e-3                  # Defines how much better the next epoch has to be to count as being "better"
 THRESHOLD_MODE="rel"            # rel helps filter noise for datasets with different loss scales. new best = previous best * (1 - threshold) difference
-COOLDOWN=3                      # How many epochs to pause after a drop before testing for improvement, lets the training stabilize a bit
-MIN_LR=5e-6                     # Wont drop the learning rate below this, prevents learning from stalling due to tiny lr
+COOLDOWN=4                      # How many epochs to pause after a drop before testing for improvement, lets the training stabilize a bit
+MIN_LR=2.5e-6                     # Wont drop the learning rate below this, prevents learning from stalling due to tiny lr
 
 # TF to TG shortcut parameters
 USE_DISTANCE_BIAS = True
@@ -121,11 +121,11 @@ SUBSAMPLE_SEED = 42
 
 # ----- FINE TUNING ON SINGLE-CELL DATA -----
 FINE_TUNING_TRAINED_MODEL = "model_training_192_10k_metacells_fine_tuning"
-FINETUNE_PATIENCE = 20
-FINETUNE_LR = 3e-05                 # smaller LR for refinement
+FINETUNE_PATIENCE = 25
+FINETUNE_LR = 3e-04                 # smaller LR for refinement
 EWC_LAMBDA = 2.5e-4
-MAX_STEPS = None                     # Maximum number of batches to process
-FINETUNE_CORR_WEIGHT=0.2
+MAX_STEPS = 2000                     # Maximum number of batches to process
+FINETUNE_CORR_WEIGHT=0.05
 FINETUNE_EDGE_WEIGHT=0.0
 FINETUNE_SHORTCUT_REG_WEIGHT=0.0
 ZERO_EPS = 1e-6                     # Consider a value as zero if it is less than this
