@@ -455,7 +455,7 @@ def run_gradient_attribution(
         grad_attr_np = grad_attr.detach().cpu().numpy()
 
         print("Gradient attribution matrix shape:", grad_attr_np.shape)
-        out_path = selected_experiment_dir / f"tf_tg_grad_attribution_{method}.npy"
+        out_path = selected_experiment_dir / f"tf_tg_grad_attribution.npy"
         np.save(out_path, grad_attr_np)
         logging.info(f"Saved gradient attribution matrix to {out_path}")
 

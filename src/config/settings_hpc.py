@@ -14,7 +14,7 @@ chrom_list = chr_nums #+ ["chrX", "chrY"]
 # ----- SAMPLE INFORMATION -----
 # Sample information
 ORGANISM_CODE = "mm10"
-DATASET_NAME = "mESC_no_scale_linear"
+DATASET_NAME = "mESC_filter_lowest_ten_pct"
 CHROM_ID_LIST = chrom_list
 CHROM_ID = "chr19"
 CHROM_IDS = chr_nums
@@ -50,7 +50,7 @@ ADATA_ATAC_FILE = "adata_ATAC.h5ad"
 PSEUDOBULK_TG_FILE = "TG_pseudobulk.tsv"
 PSEUDOBULK_RE_FILE = "RE_pseudobulk.tsv"
 
-NEIGHBORS_K = 20        # Number of nearest neighpers per cell in the KNN graph
+NEIGHBORS_K = 30        # Number of nearest neighpers per cell in the KNN graph
 PCA_COMPONENTS = 25     # Number of PCs per modality, controls variation
 HOPS = 0                # Number of neighbors-of-neighbors to use (smooths across community)
 SELF_WEIGHT = 1.0       # How much to weight the cells own gene expression. Higher = less blending with neighbors
@@ -66,9 +66,9 @@ FILTER_TO_NEAREST_GENE = True           # Associate peaks to the nearest gene
 PROMOTER_BP = None #10_000
 
 # ----- MODEL TRAINING PARAMETERS -----
-TOTAL_EPOCHS=1000
-BATCH_SIZE=64
-PATIENCE=15
+TOTAL_EPOCHS=250
+BATCH_SIZE=256
+PATIENCE=10
 CORR_LOSS_WEIGHT=1.0    
 ALLOWED_SAMPLES=None #["E7.5_REP1"]        
 
@@ -121,10 +121,10 @@ SUBSAMPLE_SEED = 42
 
 # ----- FINE TUNING ON SINGLE-CELL DATA -----
 FINE_TUNING_TRAINED_MODEL = "model_training_192_10k_metacells_fine_tuning"
-FINETUNE_PATIENCE = 25
+FINETUNE_PATIENCE = 10
 FINETUNE_LR = 3e-04                 # smaller LR for refinement
 EWC_LAMBDA = 2.5e-4
-MAX_STEPS = 2000                     # Maximum number of batches to process
+MAX_STEPS = 1000                     # Maximum number of batches to process
 FINETUNE_CORR_WEIGHT=0.05
 FINETUNE_EDGE_WEIGHT=0.0
 FINETUNE_SHORTCUT_REG_WEIGHT=0.0
