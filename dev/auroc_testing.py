@@ -1505,13 +1505,13 @@ def evaluate_min_tg_r2_filters(
         per_tf_all_results = []
 
         for gt_name, ground_truth_df in ground_truth_df_dict.items():
-            chip_valid = ground_truth_df[
-                ground_truth_df["Source"].isin(tf_names)
-                & ground_truth_df["Target"].isin(tg_names)
-            ]
-            gt_edges = set(zip(chip_valid["Source"], chip_valid["Target"]))
-            gt_tfs   = set(chip_valid["Source"])
-            gt_tgs   = set(chip_valid["Target"])
+            # chip_valid = ground_truth_df[
+            #     ground_truth_df["Source"].isin(tf_names)
+            #     & ground_truth_df["Target"].isin(tg_names)
+            # ]
+            gt_edges = set(zip(ground_truth_df["Source"], ground_truth_df["Target"]))
+            gt_tfs   = set(ground_truth_df["Source"])
+            gt_tgs   = set(ground_truth_df["Target"])
 
             for method_name, method_df in method_dict_base.items():
                 filtered_df = filter_df_to_gene_set(
@@ -1916,13 +1916,13 @@ if __name__ == "__main__":
             gt_analysis_dir = selected_experiment_dir / f"{gt_name}_analysis"
             os.makedirs(gt_analysis_dir, exist_ok=True)
 
-            chip_valid = ground_truth_df[
-                ground_truth_df["Source"].isin(tf_names)
-                & ground_truth_df["Target"].isin(tg_names)
-            ]
-            gt_edges = set(zip(chip_valid["Source"], chip_valid["Target"]))
-            gt_tfs   = set(chip_valid["Source"])
-            gt_tgs   = set(chip_valid["Target"])
+            # chip_valid = ground_truth_df[
+            #     ground_truth_df["Source"].isin(tf_names)
+            #     & ground_truth_df["Target"].isin(tg_names)
+            # ]
+            gt_edges = set(zip(ground_truth_df["Source"], ground_truth_df["Target"]))
+            gt_tfs   = set(ground_truth_df["Source"])
+            gt_tgs   = set(ground_truth_df["Target"])
 
             # =========================================================
             # 1) FEATURES: filter + label ONCE per GT

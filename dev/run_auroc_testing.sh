@@ -15,11 +15,16 @@ set -euo pipefail
 cd "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
 source .venv/bin/activate
 
-EXPERIMENT_DIR=${EXPERIMENT_DIR:-/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC_filter_lowest_ten_pct/chr19}
+EXPERIMENT_DIR=${EXPERIMENT_DIR:-/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments}
 # SELECTED_EXPERIMENT_DIR=${SELECTED_EXPERIMENT_DIR:-$EXPERIMENT_DIR/model_training_192_10k_metacells}
 
 EXPERIMENT_DIR_LIST=(
-    $EXPERIMENT_DIR/model_training_003
+    $EXPERIMENT_DIR/mESC_large_neighborhood/chr19/model_training_001
+    $EXPERIMENT_DIR/mESC_small_neighborhood/chr19/model_training_001
+    $EXPERIMENT_DIR/mESC_small_neighborhood_high_self_weight/chr19/model_training_001
+    $EXPERIMENT_DIR/mESC_max_dist_bias/chr19/model_training_002
+    $EXPERIMENT_DIR/mESC_slow_decay_max_dist/chr19/model_training_001
+    $EXPERIMENT_DIR/mESC_filter_lowest_ten_pct/chr19/model_training_003
 )
 
 echo ""
