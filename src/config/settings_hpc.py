@@ -131,13 +131,17 @@ FINETUNE_PATIENCE = 20
 FINETUNE_SCHEDULER_PATIENCE = 10
 
 FINETUNE_LR = 3e-04                 # smaller LR for refinement
-EWC_LAMBDA = 2.5e-4
+FINETUNE_BATCH_SIZE = 8
+FINETUNE_GRAD_ACCUM_STEPS = 4
+FINETUNE_USE_GRAD_ACCUMULATION = True
+FINETUNE_USE_GRAD_CHECKPOINTING = True
+EWC_LAMBDA = 1e-5                       # Reduced from 2.5e-4 to allow model to adapt to single-cell data
 MAX_STEPS = 1000                     # Maximum number of batches to process
-FINETUNE_CORR_WEIGHT=0.05
+FINETUNE_CORR_WEIGHT=0.2                # Increased from 0.05 to make R² penalty stronger
 FINETUNE_EDGE_WEIGHT=0.0
 FINETUNE_SHORTCUT_REG_WEIGHT=0.0
 ZERO_EPS = 1e-6                     # Consider a value as zero if it is less than this
-ZERO_WEIGHT = 0.1                   # Down-weight zero values when calculating MSE
+ZERO_WEIGHT = 0.5                   # Increased from 0.1 - don't ignore sparse data as heavily
 
 PRESENCE_EPS = 0.0          # threshold for "non-zero" expression
 BCE_WEIGHT   = 1.0

@@ -1231,14 +1231,14 @@ def main(rank: int, local_rank: int, world_size: int, save_every: int, total_epo
         run_cfg = {
             "allowed_samples": g("allowed_samples", ALLOWED_SAMPLES),
             "epochs": g("epochs", FINETUNE_EPOCHS),
-            "batch_size": g("batch_size", BATCH_SIZE),
-            "grad_accum_steps": g("grad_accum_steps", GRAD_ACCUM_STEPS),
+            "batch_size": g("batch_size", FINETUNE_BATCH_SIZE),
+            "grad_accum_steps": g("grad_accum_steps", FINETUNE_GRAD_ACCUM_STEPS),
             "d_model": g("d_model", D_MODEL),
             "num_layers": g("num_layers", NUM_LAYERS),
             "num_heads": g("num_heads", NUM_HEADS),
             "d_ff": g("d_ff", D_FF),
             "dropout": g("dropout", DROPOUT),
-            "use_grad_ckpt": g("use_grad_ckpt", USE_GRAD_CHECKPOINTING),
+            "use_grad_ckpt": g("use_grad_ckpt", FINETUNE_USE_GRAD_CHECKPOINTING),
             "use_shortcut": g("use_shortcut", USE_SHORTCUT),
             "use_dist_bias": g("use_dist_bias", USE_DISTANCE_BIAS),
             "use_motif_mask": g("use_motif_mask", USE_MOTIF_MASK),
@@ -1268,6 +1268,24 @@ def main(rank: int, local_rank: int, world_size: int, save_every: int, total_epo
         )
         rank_device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
         model = model.to(rank_device)
+        
+        # Vocab size validation
+        if rank == 0:
+            pretrain_tf_size = len(pseudobulk_dataset.tf_name2id_sub) if hasattr(pseudobulk_dataset, 'tf_name2id_sub') else len(pseudobulk_dataset.tf_ids)
+            pretrain_tg_size = len(pseudobulk_dataset.tg_name2id_sub) if hasattr(pseudobulk_dataset, 'tg_name2id_sub') else len(pseudobulk_dataset.tg_ids)
+            finetune_tf_size = len(single_cell_datasets[0].tf_name2id_sub) if hasattr(single_cell_datasets[0], 'tf_name2id_sub') else len(single_cell_datasets[0].tf_ids)
+            finetune_tg_size = len(single_cell_datasets[0].tg_name2id_sub) if hasattr(single_cell_datasets[0], 'tg_name2id_sub') else len(single_cell_datasets[0].tg_ids)
+            
+            logging.info(f"\n===== VOCAB SIZE VALIDATION =====")
+            logging.info(f"Pretrained (pseudobulk): TFs={pretrain_tf_size}, TGs={pretrain_tg_size}")
+            logging.info(f"Fine-tuning (single-cell): TFs={finetune_tf_size}, TGs={finetune_tg_size}")
+            
+            if pretrain_tg_size != finetune_tg_size:
+                logging.warning(f"\n⚠️  TG vocab size MISMATCH: {pretrain_tg_size} (pretrain) vs {finetune_tg_size} (finetune)")
+                logging.warning(f"Fisher matrix merging will skip mismatched embedding parameters.")
+            if pretrain_tf_size != finetune_tf_size:
+                logging.warning(f"\n⚠️  TF vocab size MISMATCH: {pretrain_tf_size} (pretrain) vs {finetune_tf_size} (finetune)")
+            logging.info(f"=================================\n")
 
         pseudobulk_loader, _, _ = prepare_dataloader(
             pseudobulk_dataset, batch_size, world_size, rank
@@ -1316,10 +1334,19 @@ def main(rank: int, local_rank: int, world_size: int, save_every: int, total_epo
         #         write_experiment_settings_and_objects(FINE_TUNING_DIR, sample_name, single_cell_datasets, test_loader, world_size, run_cfg)
         #         logging.info("Wrote experiment settings and objects to training output directory")
 
+        # CRITICAL: Use pretrained scalers to maintain distribution consistency
+        # Fine-tuning on single-cell data should use pseudobulk-derived statistics
         if tf_scaler_loaded is not None and tg_scaler_loaded is not None:
+            if rank == 0:
+                logging.info("Using PRETRAINED scalers (frozen) - maintaining pseudobulk normalization")
             tf_scaler = SimpleScaler(tf_scaler_loaded.mean.to(rank_device), tf_scaler_loaded.std.to(rank_device))
             tg_scaler = SimpleScaler(tg_scaler_loaded.mean.to(rank_device), tg_scaler_loaded.std.to(rank_device))
         else:
+            # Fallback: compute scalers on fine-tuning data (only if no pretrained scalers available)
+            if rank == 0:
+                logging.warning("⚠️  No pretrained scalers found - computing new scalers on fine-tuning data")
+                logging.warning("This may cause distribution mismatch with pretrained model!")
+            
             # Use GLOBAL TF/TG vocab sizes (match tf_name2id/tg_name2id mapping)
             if getattr(pseudobulk_dataset, "tf_name2id", None) is not None:
                 T = len(pseudobulk_dataset.tf_name2id)
@@ -1355,7 +1382,8 @@ def main(rank: int, local_rank: int, world_size: int, save_every: int, total_epo
             save_every=save_every,
             patience=FINETUNE_PATIENCE,
             grad_accum_steps=run_cfg["grad_accum_steps"],
-            use_grad_accumulation=USE_GRAD_ACCUMULATION,
+            use_grad_accumulation=run_cfg["use_grad_accumulation"],
+            use_grad_checkpointing=run_cfg["use_grad_checkpointing"],
             ref_params=ref_params,
             fisher_diag=fisher_diag,
             lambda_ewc=EWC_LAMBDA,

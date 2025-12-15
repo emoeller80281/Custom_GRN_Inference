@@ -143,6 +143,7 @@ def ewc_penalty(model, fisher_diag, ref_params, lambda_ewc=100.0, include=None, 
 def merge_fishers(old_fisher, new_fisher, old_size, new_size):
     """
     Merge two Fisher diagonals weighted by dataset sizes.
+    Handles shape mismatches by skipping incompatible parameters.
 
     Args:
         old_fisher (dict): parameter_name -> tensor of Fisher estimates (from previous data)
@@ -155,6 +156,33 @@ def merge_fishers(old_fisher, new_fisher, old_size, new_size):
     """
     merged = {}
     total = old_size + new_size
+    skipped = []
+    
     for n in old_fisher:
-        merged[n] = (old_fisher[n] * old_size + new_fisher[n] * new_size) / total
+        if n not in new_fisher:
+            # Parameter exists in old but not new - keep old value
+            merged[n] = old_fisher[n]
+            continue
+            
+        old_shape = old_fisher[n].shape
+        new_shape = new_fisher[n].shape
+        
+        if old_shape != new_shape:
+            # Shape mismatch (e.g., vocab size changed) - use new Fisher only
+            # This happens when fine-tuning uses different vocab than pretraining
+            merged[n] = new_fisher[n]
+            skipped.append(f"{n}: old={old_shape} vs new={new_shape}")
+        else:
+            # Shapes match - do weighted merge
+            merged[n] = (old_fisher[n] * old_size + new_fisher[n] * new_size) / total
+    
+    # Add any new parameters that weren't in old_fisher
+    for n in new_fisher:
+        if n not in merged:
+            merged[n] = new_fisher[n]
+    
+    if skipped:
+        import logging
+        logging.warning(f"Fisher merge: {len(skipped)} params had shape mismatch, using new Fisher only: {skipped[:3]}...")
+    
     return merged
