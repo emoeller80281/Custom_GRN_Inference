@@ -36,6 +36,7 @@ dev/notebooks/sliding_window_calculation_method_testing_cache
 *.npz
 *.out
 *.parquet
+.code-workspace
 
 # Keep the motif information
 data/databases/motif_information/**

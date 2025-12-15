@@ -14,7 +14,7 @@ chrom_list = chr_nums #+ ["chrX", "chrY"]
 # ----- SAMPLE INFORMATION -----
 # Sample information
 ORGANISM_CODE = "mm10"
-DATASET_NAME = "mESC_filter_lowest_ten_pct"
+DATASET_NAME = "mESC_slow_decay_max_dist"
 CHROM_ID_LIST = chrom_list
 CHROM_ID = "chr19"
 CHROM_IDS = chr_nums
@@ -128,7 +128,7 @@ SUBSAMPLE_SEED = 42
 FINE_TUNING_TRAINED_MODEL = "model_training_192_10k_metacells_fine_tuning"
 FINETUNE_EPOCHS = 250
 FINETUNE_PATIENCE = 20
-FINETUNE_SCHEDULER_PATIENCE = 7
+FINETUNE_SCHEDULER_PATIENCE = 10
 
 FINETUNE_LR = 3e-04                 # smaller LR for refinement
 EWC_LAMBDA = 2.5e-4
