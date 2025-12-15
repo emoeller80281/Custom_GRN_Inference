@@ -744,14 +744,15 @@ def filter_and_qc(adata_RNA: AnnData, adata_ATAC: AnnData) -> Tuple[AnnData, Ann
     adata_RNA = adata_RNA[adata_RNA.obs.pct_counts_mt < 5].copy()
     adata_RNA.var_names_make_unique()
     adata_RNA.var['gene_ids'] = adata_RNA.var.index
-    num_cells = adata_RNA.n_obs
+    num_cells_rna = adata_RNA.n_obs
+    num_cells_atac = adata_ATAC.n_obs
     
-    sc.pp.filter_cells(adata_RNA, min_genes=MIN_CELLS_PER_GENE)
-    sc.pp.filter_cells(adata_ATAC, min_genes=MIN_CELLS_PER_PEAK)
+    sc.pp.filter_cells(adata_RNA, min_genes=MIN_GENES_PER_CELL)
+    sc.pp.filter_cells(adata_ATAC, min_genes=MIN_PEAKS_PER_CELL)
     
     if FILTER_TYPE == "pct":
-        sc.pp.filter_genes(adata_RNA, min_cells=math.ceil(num_cells * FILTER_OUT_LOWEST_PCT_GENES))
-        sc.pp.filter_genes(adata_ATAC, min_cells=math.ceil(num_cells * FILTER_OUT_LOWEST_PCT_PEAKS))
+        sc.pp.filter_genes(adata_RNA, min_cells=math.ceil(num_cells_rna * FILTER_OUT_LOWEST_PCT_GENES))
+        sc.pp.filter_genes(adata_ATAC, min_cells=math.ceil(num_cells_atac * FILTER_OUT_LOWEST_PCT_PEAKS))
     elif FILTER_TYPE == "count":
         sc.pp.filter_genes(adata_RNA, min_counts=FILTER_OUT_LOWEST_COUNTS_GENES)
         sc.pp.filter_genes(adata_ATAC, min_counts=FILTER_OUT_LOWEST_COUNTS_PEAKS)

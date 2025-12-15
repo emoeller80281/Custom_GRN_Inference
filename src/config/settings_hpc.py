@@ -14,7 +14,7 @@ chrom_list = chr_nums #+ ["chrX", "chrY"]
 # ----- SAMPLE INFORMATION -----
 # Sample information
 ORGANISM_CODE = "mm10"
-DATASET_NAME = "mESC_slow_decay_max_dist"
+DATASET_NAME = "mESC_large_neighborhood_count_filter"
 CHROM_ID_LIST = chrom_list
 CHROM_ID = "chr19"
 CHROM_IDS = chr_nums
@@ -32,8 +32,8 @@ PROCESSED_GSE218576_DIR = ROOT_DIR / "data/processed/GSE218576"
 
 # ----- DATA PREPARATION -----
 # QC Filtering
-MIN_CELLS_PER_GENE = 200         # Minimum number of cells expressing each gene
-MIN_CELLS_PER_PEAK = 200         # Minimum number of cells expressing each peak
+MIN_GENES_PER_CELL = 200         # Minimum number of genes expressed per cell
+MIN_PEAKS_PER_CELL = 200         # Minimum number of peaks expressed per cell
 
 FILTER_TYPE = "count"              # Choose whether to filter cells by percent of cells expressing each gene or peak. Options are "pct" or "count"
 

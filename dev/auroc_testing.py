@@ -1080,8 +1080,9 @@ def plot_method_curve_variability(df_results, out_dir):
                   .replace("+", "plus")
                   .lower()
         )
-        out_path = os.path.join(out_dir, f"{method_safe}_curve_variability.png")
-        fig.savefig(out_path, dpi=300)
+        out_path = os.path.join(out_dir, f"{method_safe}_curve_variability.svg")
+        fig.savefig(out_path)
+        
         plt.close(fig)
 
 def plot_method_gt_heatmap(df_pooled: pd.DataFrame, metric: str = "auroc", per_tf: bool = False) -> plt.Figure:
@@ -1281,6 +1282,11 @@ def load_gradient_attribution_matrix(selected_experiment_dir, tf_names, tg_names
     gradient_attrib_df["Source"] = gradient_attrib_df["Source"].astype(str).str.upper()
     gradient_attrib_df["Target"] = gradient_attrib_df["Target"].astype(str).str.upper()
     
+    gradient_attrib_df["Score"] = (
+        (gradient_attrib_df["Score"] - gradient_attrib_df["Score"].min()) / 
+        (gradient_attrib_df["Score"].max() - gradient_attrib_df["Score"].min())
+    )
+        
     return gradient_attrib_df
 
 def load_tf_knockout_scores(selected_experiment_dir, tf_names, tg_names):
@@ -1789,10 +1795,9 @@ if __name__ == "__main__":
         
         # Vocab
         tf_names, tg_names = load_vocab(selected_experiment_dir)
-        
 
         grad_attrib_df = load_gradient_attribution_matrix(selected_experiment_dir, tf_names, tg_names)
-
+        
         auroc_by_tg_r2_threshold_file = selected_experiment_dir / "auroc_by_tg_r2_threshold.csv"
         if not auroc_by_tg_r2_threshold_file.is_file():
             per_tg_r2_valid = calculate_per_tg_r2(
@@ -1853,6 +1858,16 @@ if __name__ == "__main__":
             "TF Knockout":               load_tf_knockout_scores(selected_experiment_dir, tf_names, tg_names),
             "Gradient Attribution":       grad_attrib_filtered,
         }
+        
+        # Save pre-filtered full feature scores
+        prefiltered_edges_dir = selected_experiment_dir / "score_grns"
+        os.makedirs(prefiltered_edges_dir, exist_ok=True)
+        
+        for feature_name, df in base_feature_dict.items():
+            csv_path = prefiltered_edges_dir / f"{feature_name.replace(' ', '_')}.csv"
+            df_export = df[["Source", "Target", "Score"]].copy()
+            df_export.to_csv(csv_path, index=False)
+            logging.info(f"Saved pre-filtered {feature_name} edges to {csv_path}")
 
         # ---------- LOAD METHOD GRNs ONCE ----------
         DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.GRN_BENCHMARKING.MOELLER/testing_bear_grn/INFERRED.GRNS")
@@ -1920,7 +1935,8 @@ if __name__ == "__main__":
 
             # (a) Plot ALL features vs this GT (your existing function)
             feat_fig = all_feature_auroc_auprc(feature_dict)
-            feat_fig.savefig(gt_analysis_dir / f"all_feature_{gt_name}_auroc_auprc.png", dpi=300)
+            feat_fig.savefig(gt_analysis_dir / f"all_feature_{gt_name}_auroc_auprc.svg")
+            plt.close(feat_fig) 
 
             # (b) Record feature metrics ONCE per GT
             for name, df in feature_dict.items():
