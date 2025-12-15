@@ -14,7 +14,7 @@ chrom_list = chr_nums #+ ["chrX", "chrY"]
 # ----- SAMPLE INFORMATION -----
 # Sample information
 ORGANISM_CODE = "mm10"
-DATASET_NAME = "mESC_large_neighborhood_count_filter"
+DATASET_NAME = "mESC_large_neighborhood"
 CHROM_ID_LIST = chrom_list
 CHROM_ID = "chr19"
 CHROM_IDS = chr_nums
@@ -88,7 +88,7 @@ COS_WEIGHT=0.0                  # Weight for cosine contrastive loss contributio
 SAVE_EVERY_N_EPOCHS=5           # Chooses how many epochs to run before saving a checkpoint
 RESUME_CHECKPOINT_PATH=None #"/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC_small_neighborhood/chr19/model_training_001/checkpoint_14.pt"
 
-GRAD_ACCUM_STEPS=1
+GRAD_ACCUM_STEPS=2
 USE_GRAD_ACCUMULATION=True
 USE_GRAD_CHECKPOINTING=True
 

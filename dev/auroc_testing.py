@@ -1505,13 +1505,11 @@ def evaluate_min_tg_r2_filters(
         per_tf_all_results = []
 
         for gt_name, ground_truth_df in ground_truth_df_dict.items():
-            # chip_valid = ground_truth_df[
-            #     ground_truth_df["Source"].isin(tf_names)
-            #     & ground_truth_df["Target"].isin(tg_names)
-            # ]
-            gt_edges = set(zip(ground_truth_df["Source"], ground_truth_df["Target"]))
-            gt_tfs   = set(ground_truth_df["Source"])
-            gt_tgs   = set(ground_truth_df["Target"])
+            # Use the ground-truth TF/TG universe only (do not restrict to model vocab)
+            chip_valid = ground_truth_df
+            gt_edges = set(zip(chip_valid["Source"], chip_valid["Target"]))
+            gt_tfs   = set(chip_valid["Source"])
+            gt_tgs   = set(chip_valid["Target"])
 
             for method_name, method_df in method_dict_base.items():
                 filtered_df = filter_df_to_gene_set(
@@ -2036,6 +2034,11 @@ if __name__ == "__main__":
 
         if all_method_results:
             df_results = pd.DataFrame(all_method_results)
+            df_results.to_csv(
+                selected_experiment_dir / "auroc_auprc_results_detailed.csv",
+                index=False,
+            )
+            logging.info(f"Saved all method results ({len(df_results)} rows) to detailed CSV")
             # df_results has:
             #   - one row per (feature, gt_name) from FEATURES_ONLY
             #   - one row per (method, gt_name, sample) from each sample
