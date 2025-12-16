@@ -908,8 +908,20 @@ def load_train_objs(run_cfg):
     tg_scaler = None
 
     # --- Step 5: Load pretrained weights/scalers if available ---
-    pretrained_model = FINE_TUNING_DIR / "trained_model.pt"
-    if pretrained_model.exists():
+    # Behavior:
+    # - If FINE_TUNING_TRAINED_MODEL is None: warn and proceed to train a new model
+    # - If FINE_TUNING_TRAINED_MODEL is set but does not exist: exit with an error
+    # - If it exists: load pretrained weights/scalers
+    if FINE_TUNING_TRAINED_MODEL is None:
+        logging.warning("No pretrained pseudobulk model provided (FINE_TUNING_TRAINED_MODEL=None). Training from scratch.")
+    else:
+        pretrained_model = Path(FINE_TUNING_DIR) / "trained_model.pt"
+        if not pretrained_model.exists():
+            logging.error(
+                f"Pretrained pseudobulk model not found at '{pretrained_model}'. "
+                "Set FINE_TUNING_TRAINED_MODEL to a valid file or to None to train a new model."
+            )
+            raise FileNotFoundError(f"Missing pretrained model: {pretrained_model}")
         logging.info(f"Loading pretrained weights from {pretrained_model}")
         state_dict = torch.load(pretrained_model, map_location="cpu")
         if "model_state_dict" in state_dict:
@@ -1095,11 +1107,11 @@ def write_run_parameters(dataset, out_dir, world_size, run_cfg):
     if hasattr(dataset, "metacell_names"):
         logging.info(f"Metacells:           {len(dataset.metacell_names)}")
     logging.info(f"Epochs:              {FINETUNE_EPOCHS}")
-    logging.info(f"Batch Size:          {BATCH_SIZE}")
+    logging.info(f"Batch Size:          {FINETUNE_BATCH_SIZE}")
     logging.info(f"GPUs:                {world_size}")
-    logging.info(f"Grad Accum Steps:    {GRAD_ACCUM_STEPS}")
-    logging.info(f"Use Grad Accum?:     {USE_GRAD_ACCUMULATION}")
-    logging.info(f"Use Grad Chkpt?:     {USE_GRAD_CHECKPOINTING}")
+    logging.info(f"Grad Accum Steps:    {FINETUNE_GRAD_ACCUM_STEPS}")
+    logging.info(f"Use Grad Accum?:     {FINETUNE_USE_GRAD_ACCUMULATION}")
+    logging.info(f"Use Grad Chkpt?:     {FINETUNE_USE_GRAD_CHECKPOINTING}")
     logging.info(f"Model Dimension:     {run_cfg['d_model']}")
     logging.info(f"Attention Heads:     {run_cfg['num_heads']}")
     logging.info(f"Attention Layers:    {run_cfg['num_layers']}")
@@ -1119,10 +1131,10 @@ def write_run_parameters(dataset, out_dir, world_size, run_cfg):
     run_params = {
         "allowed_samples": ALLOWED_SAMPLES,
         "epochs": FINETUNE_EPOCHS,
-        "batch_size": BATCH_SIZE,
-        "grad_accum_steps": GRAD_ACCUM_STEPS,
-        "use_grad_accum": USE_GRAD_ACCUMULATION,
-        "use_grad_ckpt": USE_GRAD_CHECKPOINTING,
+        "batch_size": FINETUNE_BATCH_SIZE,
+        "grad_accum_steps": FINETUNE_GRAD_ACCUM_STEPS,
+        "use_grad_accum": FINETUNE_USE_GRAD_ACCUMULATION,
+        "use_grad_ckpt": FINETUNE_USE_GRAD_CHECKPOINTING,
         "d_model": run_cfg["d_model"],
         "num_heads": run_cfg["num_heads"],
         "num_layers": run_cfg["num_layers"],
@@ -1223,7 +1235,10 @@ def main(rank: int, local_rank: int, world_size: int, save_every: int, total_epo
     setup_logging(rank)
 
     try:
-        prev_params = load_run_params_from_json(FINE_TUNING_DIR)
+        fine_tune_dir = FINE_TUNING_DIR / "fine_tuning"
+        os.makedirs(fine_tune_dir, exist_ok=True)
+        
+        prev_params = load_run_params_from_json(fine_tune_dir)
 
         def g(key, default):
             return prev_params.get(key, default) if prev_params else default
@@ -1250,9 +1265,6 @@ def main(rank: int, local_rank: int, world_size: int, save_every: int, total_epo
             "shortcut_dropout": g("shortcut_dropout", SHORTCUT_DROPOUT),
             "lr": FINETUNE_LR,
         }
-
-        fine_tune_dir = FINE_TUNING_DIR / "fine_tuning"
-        os.makedirs(fine_tune_dir, exist_ok=True)
 
         for vocab_name in ("tf_vocab.json", "tg_vocab.json"):
             dest = fine_tune_dir / vocab_name
@@ -1382,8 +1394,7 @@ def main(rank: int, local_rank: int, world_size: int, save_every: int, total_epo
             save_every=save_every,
             patience=FINETUNE_PATIENCE,
             grad_accum_steps=run_cfg["grad_accum_steps"],
-            use_grad_accumulation=run_cfg["use_grad_accumulation"],
-            use_grad_checkpointing=run_cfg["use_grad_checkpointing"],
+            use_grad_accumulation=FINETUNE_USE_GRAD_ACCUMULATION,
             ref_params=ref_params,
             fisher_diag=fisher_diag,
             lambda_ewc=EWC_LAMBDA,
@@ -1467,5 +1478,5 @@ if __name__ == "__main__":
         world_size=world_size,
         save_every=SAVE_EVERY_N_EPOCHS,
         total_epochs=FINETUNE_EPOCHS,
-        batch_size=BATCH_SIZE,
+        batch_size=FINETUNE_BATCH_SIZE,
     )

@@ -3,9 +3,9 @@
 #SBATCH --output=LOGS/transformer_logs/04_fine_tuning/%x_%j.log
 #SBATCH --error=LOGS/transformer_logs/04_fine_tuning/%x_%j.err
 #SBATCH --time=36:00:00
-#SBATCH -p gpu
-#SBATCH -N 3
-#SBATCH --gres=gpu:p100:2
+#SBATCH -p dense
+#SBATCH -N 1
+#SBATCH --gres=gpu:a100:4
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 16
 #SBATCH --mem=128G

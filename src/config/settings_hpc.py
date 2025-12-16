@@ -14,7 +14,7 @@ chrom_list = chr_nums #+ ["chrX", "chrY"]
 # ----- SAMPLE INFORMATION -----
 # Sample information
 ORGANISM_CODE = "mm10"
-DATASET_NAME = "mESC_large_neighborhood"
+DATASET_NAME = "mESC_filter_lowest_ten_pct"
 CHROM_ID_LIST = chrom_list
 CHROM_ID = "chr19"
 CHROM_IDS = chr_nums
@@ -125,18 +125,18 @@ SUBSAMPLE_MAX_CELLS = 10_000
 SUBSAMPLE_SEED = 42
 
 # ----- FINE TUNING ON SINGLE-CELL DATA -----
-FINE_TUNING_TRAINED_MODEL = "model_training_192_10k_metacells_fine_tuning"
+FINE_TUNING_TRAINED_MODEL = "chr19/model_training_003"
 FINETUNE_EPOCHS = 250
 FINETUNE_PATIENCE = 20
 FINETUNE_SCHEDULER_PATIENCE = 10
 
 FINETUNE_LR = 3e-04                 # smaller LR for refinement
-FINETUNE_BATCH_SIZE = 8
-FINETUNE_GRAD_ACCUM_STEPS = 4
+FINETUNE_BATCH_SIZE = 320
+FINETUNE_GRAD_ACCUM_STEPS = 1
 FINETUNE_USE_GRAD_ACCUMULATION = True
 FINETUNE_USE_GRAD_CHECKPOINTING = True
 EWC_LAMBDA = 1e-5                       # Reduced from 2.5e-4 to allow model to adapt to single-cell data
-MAX_STEPS = 1000                     # Maximum number of batches to process
+MAX_STEPS = None                     # Maximum number of batches to process
 FINETUNE_CORR_WEIGHT=0.2                # Increased from 0.05 to make R² penalty stronger
 FINETUNE_EDGE_WEIGHT=0.0
 FINETUNE_SHORTCUT_REG_WEIGHT=0.0
