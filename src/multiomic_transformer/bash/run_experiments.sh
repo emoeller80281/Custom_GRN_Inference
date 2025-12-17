@@ -45,12 +45,12 @@ DEFAULT_PROMOTER_BP=""
 # PARAMETER_OVERRIDES format: "PARAM1=VALUE1;PARAM2=VALUE2;..."
 
 EXPERIMENTS=(
-    "test_new_pipeline|mESC_test_new_pipeline|MIN_GENES_PER_CELL=100;MIN_PEAKS_PER_CELL=100;HOPS=0;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.1;FILTER_OUT_LOWEST_PCT_PEAKS=0.1"
-    "no_filter_to_nearest_gene|mESC_no_filter_to_nearest_gene|FILTER_TO_NEAREST_GENE=false;HOPS=0"
-    "smaller_window_size|mESC_smaller_window_size|WINDOW_SIZE=500;HOPS=0"
+    # "test_new_pipeline|mESC_test_new_pipeline|MIN_GENES_PER_CELL=100;MIN_PEAKS_PER_CELL=100;HOPS=0;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.1;FILTER_OUT_LOWEST_PCT_PEAKS=0.1"
+    # "no_filter_to_nearest_gene|mESC_no_filter_to_nearest_gene|FILTER_TO_NEAREST_GENE=false;HOPS=0"
+    # "smaller_window_size|mESC_smaller_window_size|WINDOW_SIZE=500;HOPS=0"
     "larger_window_size|mESC_larger_window_size|WINDOW_SIZE=1500;HOPS=0"
-    "lower_max_peak_dist|mESC_lower_max_peak_dist|MAX_PEAK_DISTANCE=50000;HOPS=0"
-    "higher_max_peak_dist|mESC_higher_max_peak_dist|MAX_PEAK_DISTANCE=150000;HOPS=0"
+    # "lower_max_peak_dist|mESC_lower_max_peak_dist|MAX_PEAK_DISTANCE=50000;HOPS=0"
+    # "higher_max_peak_dist|mESC_higher_max_peak_dist|MAX_PEAK_DISTANCE=150000;HOPS=0"
 )
 
 # ==========================================
@@ -445,12 +445,12 @@ echo "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX "
 echo ""
 
 # ---------- Logging ----------
-LOGDIR="$PWD/LOGS/transformer_logs/03_training"
+LOGDIR="$PWD/LOGS/transformer_logs/experiments/gpu_usage"
 mkdir -p "$LOGDIR"
 JOB=transformer_training
 ID=${SLURM_JOB_ID:-$PPID}
 TS=$(date +%Y%m%d_%H%M%S)
-GPULOG="$LOGDIR/gpu_usage_${ID}.csv"
+GPULOG="$LOGDIR/gpu_usage_${ID}_${TASK_ID}.csv"
 
 # ---------- GPU sampler (runs only on the batch node) ----------
 trap 'pkill -P $$ || true' EXIT

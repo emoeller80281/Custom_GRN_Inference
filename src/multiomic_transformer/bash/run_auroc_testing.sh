@@ -9,7 +9,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 4
 #SBATCH --mem=64G
-#SBATCH --array=2
+#SBATCH --array=0
 
 set -euo pipefail
 
@@ -20,7 +20,8 @@ source .venv/bin/activate
 EXPERIMENT_DIR=${EXPERIMENT_DIR:-/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments}
 
 EXPERIMENT_LIST=(
-    "mESC_lower_peak_threshold|model_training_001|checkpoint_60.pt"
+    # "mESC_test_new_pipeline|model_training_001|trained_model.pt"
+    "mESC_lower_peak_threshold|model_training_001|trained_model.pt"
     # "mESC_no_filter_to_nearest_gene|model_training_001|trained_model.pt"
     # "mESC_smaller_window_size|model_training_001|trained_model.pt"
     # "mESC_larger_window_size|model_training_001|trained_model.pt"
@@ -34,12 +35,12 @@ EXPERIMENT_LIST=(
 # Get the current experiment based on SLURM_ARRAY_TASK_ID
 TASK_ID=${SLURM_ARRAY_TASK_ID:-0}
 
-if [ ${TASK_ID} -ge ${#PLOTTING_EXPERIMENT_LIST[@]} ]; then
-    echo "ERROR: SLURM_ARRAY_TASK_ID (${TASK_ID}) exceeds number of experiments (${#PLOTTING_EXPERIMENT_LIST[@]})"
+if [ ${TASK_ID} -ge ${#EXPERIMENT_LIST[@]} ]; then
+    echo "ERROR: SLURM_ARRAY_TASK_ID (${TASK_ID}) exceeds number of experiments (${#EXPERIMENT_LIST[@]})"
     exit 1
 fi
 
-EXPERIMENT_CONFIG="${PLOTTING_EXPERIMENT_LIST[$TASK_ID]}"
+EXPERIMENT_CONFIG="${EXPERIMENT_LIST[$TASK_ID]}"
 
 # Parse experiment configuration
 IFS='|' read -r EXPERIMENT_NAME TRAINING_NUM MODEL_FILE <<< "$EXPERIMENT_CONFIG"
@@ -53,6 +54,14 @@ echo "  TASK ID: ${TASK_ID}"
 echo "=========================================="
 echo ""
 
+echo "Plotting Training Figures"
+poetry run python ./src/multiomic_transformer/utils/plotting.py \
+    --experiment "$EXPERIMENT_NAME" \
+    --training_num "$TRAINING_NUM" \
+    --experiment_dir "$EXPERIMENT_DIR" \
+    --model_file "$MODEL_FILE"
+
+echo "Running AUROC Testing"
 poetry run python ./src/multiomic_transformer/utils/auroc_testing.py \
     --experiment "$EXPERIMENT_NAME" \
     --training_num "$TRAINING_NUM" \

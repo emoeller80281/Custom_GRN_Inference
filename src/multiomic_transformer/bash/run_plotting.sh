@@ -20,7 +20,8 @@ source .venv/bin/activate
 EXPERIMENT_DIR=${EXPERIMENT_DIR:-/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments}
 
 PLOTTING_EXPERIMENT_LIST=(
-    "mESC_lower_peak_threshold|model_training_001|checkpoint_60.pt"
+    "mESC_test_new_pipeline|model_training_001|trained_model.pt"
+    # "mESC_lower_peak_threshold|model_training_001|trained_model.pt"
     # "mESC_no_filter_to_nearest_gene|model_training_001|trained_model.pt"
     # "mESC_smaller_window_size|model_training_001|trained_model.pt"
     # "mESC_larger_window_size|model_training_001|trained_model.pt"

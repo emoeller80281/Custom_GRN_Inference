@@ -2335,6 +2335,32 @@ if __name__ == "__main__":
             sample_tf_name_file: Path =   SAMPLE_DATA_CACHE_DIR / "tf_names.json"
             tf_id_file: Path =            SAMPLE_DATA_CACHE_DIR / "tf_ids.pt"
             
+            # TF-TG combination files
+            tf_tg_combos_dir = SAMPLE_PROCESSED_DATA_DIR / "tf_tg_combos"
+            total_genes_file = tf_tg_combos_dir / "total_genes.csv"
+            tf_list_file = tf_tg_combos_dir / "tf_list.csv"
+            tg_list_file = tf_tg_combos_dir / "tg_list.csv"
+            tf_tg_combos_file = tf_tg_combos_dir / "tf_tg_combos.csv"
+            
+            # Check if all required output files exist for this sample
+            required_sample_files = [
+                processed_rna_file,
+                processed_atac_file,
+                peak_bed_file,
+                peak_to_gene_dist_file,
+                sliding_window_score_file,
+                tf_tg_reg_pot_file,
+                tf_tg_combo_attr_file,
+                total_genes_file,
+                tf_list_file,
+                tg_list_file,
+                tf_tg_combos_file,
+            ]
+            
+            if not FORCE_RECALCULATE and all(os.path.isfile(f) for f in required_sample_files):
+                logging.info(f"\n[{sample_name}] All required output files exist. Skipping sample-level preprocessing.")
+                continue
+            
             logging.info(f"\nOutput Directory: {SAMPLE_PROCESSED_DATA_DIR / sample_name}")
             os.makedirs(SAMPLE_PROCESSED_DATA_DIR / sample_name, exist_ok=True)
             os.makedirs(SAMPLE_DATA_CACHE_DIR, exist_ok=True)
@@ -2539,6 +2565,27 @@ if __name__ == "__main__":
             chrom_sliding_window_file: Path =   SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"sliding_window_{chrom_id}.parquet"
             chrom_peak_bed_file: Path =         SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"peak_tmp_{chrom_id}.bed"
             tss_bed_file: Path =                SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"tss_tmp_{chrom_id}.bed"
+
+            # Check if all required output files exist
+            required_files = [
+                global_tf_tensor_path,
+                global_tf_ids_path,
+                global_tf_names_path,
+                global_metacell_path,
+                atac_tensor_path,
+                tg_tensor_path,
+                sample_tg_name_file,
+                sample_window_map_file,
+                peak_to_tss_dist_path,
+                dist_bias_file,
+                tg_id_file,
+                manifest_file,
+                motif_mask_file,
+            ]
+            
+            if not FORCE_RECALCULATE and all(os.path.isfile(f) for f in required_files):
+                logging.info(f"  - All required output files exist for {chrom_id}. Skipping preprocessing.")
+                continue
 
             os.makedirs(COMMON_DATA, exist_ok=True)
             os.makedirs(SAMPLE_DATA_CACHE_DIR, exist_ok=True)
