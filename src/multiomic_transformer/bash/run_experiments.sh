@@ -9,11 +9,12 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 16
 #SBATCH --mem=256G
-#SBATCH --array=0
+#SBATCH --array=0%2
 
 set -euo pipefail
 
 cd /gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER
+module load bedtools
 source .venv/bin/activate
 
 # ==========================================

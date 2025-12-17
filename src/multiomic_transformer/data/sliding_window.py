@@ -454,7 +454,7 @@ def load_motifs(motif_paths, pseudocount=0.001, bg=None):
             score_mats.append(_orient_pwm_position_major(log_odds))
             names.append(motif_name.capitalize())
 
-    logging.info(f"Loaded {len(score_mats)} valid motifs, {malformed} malformed")
+    logging.debug(f"Loaded {len(score_mats)} valid motifs, {malformed} malformed")
     return score_mats, names
 
 def associate_tf_with_motif_pwm(
@@ -469,7 +469,7 @@ def associate_tf_with_motif_pwm(
     inner_executor: str = "auto",
     inner_workers: Optional[int] = None  # NEW: override worker count for inner parallelism
 ) -> str:
-    logging.info("\nPreparing for parallel motif scoring...")
+    logging.debug("\nPreparing for parallel motif scoring...")
 
     fasta = Fasta(fasta_path, as_raw=True, sequence_always_upper=True)
 
@@ -541,12 +541,12 @@ def associate_tf_with_motif_pwm(
         logging.warning("No cached TF motif parquet files found. Forcing rescoring of all motifs.")
         filtered_indices = list(range(len(names)))
 
-    logging.info(f"Filtered to {len(filtered_indices)} motifs needing scoring "
+    logging.debug(f"Filtered to {len(filtered_indices)} motifs needing scoring "
                  f"out of {len(names)} total motifs.")
 
     if len(filtered_indices) > 0:
         logging.debug(f"\t- Number of motif files found: {len(filtered_indices)} for {len(tf_name_list)} TFs")
-        logging.info(f"\nCalculating sliding window motif scores for each ATAC-seq peak")
+        logging.debug(f"\nCalculating sliding window motif scores for each ATAC-seq peak")
 
         # ---------- NEW: choose inner execution mode safely ----------
         in_worker = (mp.parent_process() is not None)
@@ -595,7 +595,7 @@ def associate_tf_with_motif_pwm(
                     executor.submit(process_motif_file_and_save, i, tf_df, background_freq, mats, names, tmp_dir, peak_ids): names[i]
                     for i in filtered_indices
                 }
-                min_update = max(1, len(futures) // 10)
+                min_update = max(1, len(futures) // 25)
                 for _ in tqdm(as_completed(futures), total=len(futures), desc="Scoring motifs", miniters=min_update):
                     _ = _.result()
 
@@ -615,7 +615,7 @@ def associate_tf_with_motif_pwm(
                     executor.submit(process_motif_file_and_save, i, tf_df, background_freq, mats, names, tmp_dir, peak_ids): names[i]
                     for i in filtered_indices
                 }
-                min_update = max(1, len(futures) // 10)
+                min_update = max(1, len(futures) // 25)
                 for _ in tqdm(as_completed(futures), total=len(futures), desc="Scoring motifs", miniters=min_update):
                     _ = _.result()
 
@@ -627,13 +627,13 @@ def associate_tf_with_motif_pwm(
                          plus_shm, plus_shape, plus_dtype,
                          minus_shm, minus_shape, minus_dtype, lengths)
 
-            min_update = max(1, len(filtered_indices) // 10)
-            for i in tqdm(filtered_indices, desc="Scoring motifs", total=len(filtered_indices), miniters=min_update):
+            min_update = max(1, len(filtered_indices) // 25)
+            for i in tqdm(filtered_indices, desc="\tScoring motifs", total=len(filtered_indices), miniters=min_update):
                 process_motif_file_and_save(i, tf_df, background_freq, mats, names, tmp_dir, peak_ids)
 
-        logging.info("Finished scoring all motifs. Reading TF motif parquet files...")
+        logging.debug("Finished scoring all motifs. Reading TF motif parquet files...")
     else:
-        logging.info("\nAll TFs have pre-existing parquet files in the tmp directory, reading cached parquet files...")
+        logging.debug("\nAll TFs have pre-existing parquet files in the tmp directory, reading cached parquet files...")
 
     os.makedirs(output_dir, exist_ok=True)
     valid_parquet_files = get_valid_parquet_files(tmp_dir)
@@ -647,7 +647,7 @@ def associate_tf_with_motif_pwm(
         out_parquet=out_parquet,
         pattern="*.parquet"
     )
-    logging.info(f"Wrote coalesced sliding window scores → {out_parquet}")
+    logging.debug(f"Wrote coalesced sliding window scores → {out_parquet}")
     return out_parquet
 
 def run_sliding_window_scan(
@@ -692,4 +692,4 @@ def run_sliding_window_scan(
         os.replace(final_parquet, tmp)
         os.replace(tmp, output_file)
 
-    logging.info(f"Wrote final TF–peak sliding window scores to {output_file}")
+    logging.debug(f"Wrote final TF–peak sliding window scores to {output_file}")

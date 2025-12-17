@@ -2585,7 +2585,7 @@ if __name__ == "__main__":
         
         logging.info(f"  - Number of chromosomes: {len(chrom_list)}: {chrom_list}")
         for chrom_id in chrom_list:
-            logging.info(f"\n----- Preparing MultiomicTransformer data for {DATASET_NAME} {chrom_id} -----")
+            logging.info(f"\n Preparing MultiomicTransformer Data for {DATASET_NAME} {chrom_id} -----")
             make_chrom_gene_tss_df(GENE_TSS_FILE, chrom_id, GENOME_DIR)
             
             SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR = SAMPLE_DATA_CACHE_DIR / chrom_id

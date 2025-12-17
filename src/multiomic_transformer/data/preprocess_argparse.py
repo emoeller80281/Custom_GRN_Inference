@@ -16,7 +16,6 @@ from scipy.special import softmax
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Tuple, Set, Optional, List, Iterable, Union, Dict
 from anndata import AnnData
-from tqdm import tqdm
 import pybedtools
 import argparse
 import pickle
@@ -464,7 +463,7 @@ def process_10x_to_parquet(raw_10x_rna_data_dir, raw_atac_peak_file, rna_outfile
             f"Expected 1 features.tsv.gz, found {features}. Make sure the files are gunziped for sc.read_10x_mtx."
 
         prefix = features[0].replace("features.tsv.gz", "")
-        logging.info(f"Detected File Prefix: {prefix}")
+        logging.debug(f"Detected File Prefix: {prefix}")
 
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", message="Only considering the two last:")
@@ -478,7 +477,7 @@ def process_10x_to_parquet(raw_10x_rna_data_dir, raw_atac_peak_file, rna_outfile
     
 
     def _get_adata_from_peakmatrix(peak_matrix_file, label, sample_name, dtype=np.uint16):
-        logging.info(f"[{sample_name}] Reading ATAC peaks (fast streaming)")
+        logging.info(f"  - [{sample_name}] Reading ATAC peaks")
 
         is_gz = str(peak_matrix_file).endswith(".gz")
         opener = gzip.open if is_gz else open
@@ -495,8 +494,8 @@ def process_10x_to_parquet(raw_10x_rna_data_dir, raw_atac_peak_file, rna_outfile
             keep_barcodes = [bc for bc in barcodes if bc in label_set]
             keep_idx = [i + 1 for i, bc in enumerate(barcodes) if bc in label_set]  # +1 because first col is peak id
 
-            logging.info(f"  - Total barcodes in file: {len(barcodes):,}")
-            logging.info(f"  - Matched barcodes: {len(keep_barcodes):,}")
+            logging.debug(f"  - Total barcodes in file: {len(barcodes):,}")
+            logging.debug(f"  - Matched barcodes: {len(keep_barcodes):,}")
 
             # --- build COO triplets ---
             rows = []
@@ -733,7 +732,7 @@ def process_or_load_rna_atac_data(
             return None, None, None, None
         
 
-    logging.info(f"\n----- Loading or Processing RNA and ATAC data for {sample_name} -----")
+    logging.info(f"\n[{sample_name}] Loading or Processing RNA and ATAC data")
     logging.info("Searching for processed RNA/ATAC parquet files:")
 
     # helpers
@@ -870,7 +869,7 @@ def process_or_load_rna_atac_data(
     # 1) Try processed parquet
     # =========================
     if not force_recalculate and processed_rna_file.is_file() and processed_atac_file.is_file():
-        logging.info(f"[{sample_name}] Pre-processed data files found, loading...")
+        logging.info(f"  - Pre-processed data files found! Loading...")
         processed_rna_df = pd.read_parquet(processed_rna_file, engine="pyarrow")
         processed_atac_df = pd.read_parquet(processed_atac_file, engine="pyarrow")
         
@@ -886,19 +885,19 @@ def process_or_load_rna_atac_data(
         ad_atac = _load_or_none(adata_atac_file, sc.read_h5ad)
 
         if ad_rna is None or ad_atac is None or force_recalculate:
-            logging.info("    - Filtered AnnData missing or ignored – will look for raw CSVs.")
+            logging.debug("  - Filtered AnnData missing or ignored – will look for raw CSVs.")
 
             # ===================
             # 3) Try raw CSV pair
             # ===================
             if not raw_rna_file.is_file() or not raw_atac_file.is_file():
-                logging.info("      - Raw parquet files missing – will try to create from 10x inputs.")
-                logging.info(raw_rna_file)
-                logging.info(raw_atac_file)
+                logging.debug("  - Raw parquet files missing – will try to create from 10x inputs.")
+                logging.debug(raw_rna_file)
+                logging.debug(raw_atac_file)
 
                 if raw_10x_rna_data_dir is None:
                     raise FileNotFoundError(
-                        "Neither processed parquet, filtered AnnData, raw CSVs, nor raw 10x inputs are available. "
+                        "Neither processed parquet, filtered AnnData, raw parquet files, nor raw 10x inputs are available. "
                         "Provide raw_10x_rna_data_dir and raw_atac_peak_file to proceed."
                     )
                 if not raw_10x_rna_data_dir.is_dir():
@@ -906,13 +905,13 @@ def process_or_load_rna_atac_data(
                 if raw_atac_peak_file is None or not raw_atac_peak_file.is_file():
                     raise FileNotFoundError(f"ATAC peak file not found: {raw_atac_peak_file}")
 
-                logging.info("Raw 10X RNA and ATAC inputs found, converting to CSVs...")
-                logging.info(f"  - raw_10x_rna_data_dir: {raw_10x_rna_data_dir}")
-                logging.info(f"  - raw_atac_peak_file:  {raw_atac_peak_file}")
+                logging.info(f"[{sample_name}] Raw 10X RNA and ATAC inputs found, converting to parquet files")
+                logging.debug(f"  - raw_10x_rna_data_dir: {raw_10x_rna_data_dir}")
+                logging.debug(f"  - raw_atac_peak_file:  {raw_atac_peak_file}")
                 process_10x_to_parquet(raw_10x_rna_data_dir, raw_atac_peak_file, raw_rna_file, raw_atac_file, sample_name)
 
             # Load raw data parquet files and convert to AnnData
-            logging.info("Reading raw data parquet files into AnnData")
+            logging.debug("Reading raw data parquet files into AnnData")
             rna_df = pd.read_parquet(raw_rna_file, engine="pyarrow")
             atac_df = pd.read_parquet(raw_atac_file, engine="pyarrow")
             
@@ -1042,7 +1041,7 @@ def filter_and_qc(adata_RNA: AnnData, adata_ATAC: AnnData) -> Tuple[AnnData, Ann
     adata_RNA = adata_RNA.copy()
     adata_ATAC = adata_ATAC.copy()
     
-    logging.info(f"[START] RNA shape={adata_RNA.shape}, ATAC shape={adata_ATAC.shape}")
+    logging.debug(f"[START] RNA shape={adata_RNA.shape}, ATAC shape={adata_ATAC.shape}")
     
     common_barcodes = adata_RNA.obs_names.isin(adata_ATAC.obs_names)
     assert common_barcodes.sum() > 10, \
@@ -1056,7 +1055,7 @@ def filter_and_qc(adata_RNA: AnnData, adata_ATAC: AnnData) -> Tuple[AnnData, Ann
     adata_RNA = adata_RNA[common_barcodes].copy()
     adata_ATAC = adata_ATAC[adata_ATAC.obs['barcode'].isin(adata_RNA.obs['barcode'])].copy()
     
-    logging.info(
+    logging.debug(
         f"[BARCODES] before sync RNA={n_before[0]}, ATAC={n_before[1]} → after sync RNA={adata_RNA.n_obs}, ATAC={adata_ATAC.n_obs}"
     )
     
@@ -1234,11 +1233,11 @@ def create_tf_tg_combination_files(
 
     tf_tg_df.to_csv(combo_file, index=False)
 
-    logging.info("\nCreating TF-TG combination files (updated)")
-    logging.info(f"  - Number of TFs: {len(tfs):,}")
-    logging.info(f"  - Number of TGs: {len(tgs):,}")
-    logging.info(f"  - TF-TG combinations: {len(tf_tg_df):,}")
-    logging.info(f"  - Files written under: {out_dir}")
+    logging.info("  - Creating TF-TG combination files")
+    logging.info(f"    - Number of TFs: {len(tfs):,}")
+    logging.info(f"    - Number of TGs: {len(tgs):,}")
+    logging.info(f"    - TF-TG combinations: {len(tf_tg_df):,}")
+    logging.info(f"    - Files written under: {out_dir}")
 
     return tfs, tgs, tf_tg_df
 
@@ -1402,7 +1401,7 @@ def calculate_tf_tg_regulatory_potential(
     tf_tg_reg_pot_file = Path(tf_tg_reg_pot_file)
     peak_to_gene_dist_file = Path(peak_to_gene_dist_file)
     
-    logging.info("Calculating TF–TG regulatory potential (per TF mode)")
+    logging.info(f"  - Calculating TF–TG regulatory potential: {len(tf_groups)} TFs | {num_cpu} CPUs")
     sliding_window_df = pd.read_parquet(sliding_window_score_file, engine="pyarrow")
     peak_to_gene_dist_df = pd.read_parquet(peak_to_gene_dist_file, engine="pyarrow")
 
@@ -1418,7 +1417,6 @@ def calculate_tf_tg_regulatory_potential(
     # Group the sliding window scores by TF
     tf_groups = {tf: df for tf, df in sliding_window_df.groupby("TF", sort=False)}
 
-    logging.info(f"Processing {len(tf_groups)} TFs using {num_cpu} CPUs")
     results = []
     
     with ProcessPoolExecutor(max_workers=num_cpu) as ex:
@@ -1426,7 +1424,7 @@ def calculate_tf_tg_regulatory_potential(
             ex.submit(_process_single_tf, tf, df, peak_to_gene_dist_df): tf
             for tf, df in tf_groups.items()
         }
-        for fut in tqdm(as_completed(futures), total=len(futures), desc="TF processing"):
+        for fut in as_completed(futures):
             tf = futures[fut]
             try:
                 results.append(fut.result())
@@ -1443,12 +1441,12 @@ def calculate_tf_tg_regulatory_potential(
     tf_tg_reg_pot["TF"] = tf_tg_reg_pot["TF"].apply(standardize_name)
     tf_tg_reg_pot["TG"] = tf_tg_reg_pot["TG"].apply(standardize_name)
     
-    logging.info("TF-TG regulatory potential")
-    logging.info(tf_tg_reg_pot.head())
+    logging.debug("TF-TG regulatory potential")
+    logging.debug(tf_tg_reg_pot.head())
 
     # --- Save ---
     tf_tg_reg_pot.to_parquet(tf_tg_reg_pot_file, engine="pyarrow", compression="snappy")
-    logging.info(f"Saved TF–TG regulatory potential: {tf_tg_reg_pot.shape}")
+    logging.debug(f"Saved TF–TG regulatory potential: {tf_tg_reg_pot.shape}")
     
     return tf_tg_reg_pot
 
@@ -1516,7 +1514,7 @@ def merge_tf_tg_attributes_with_combinations(
     """
     Merge TF-TG regulatory potential and expression means with all TF-TG combinations.
     """
-    logging.info("\n  - Merging TF-TG Regulatory Potential")
+    logging.debug("\n  - Merging TF-TG Regulatory Potential")
     tf_tg_df = pd.merge(
         tf_tg_df,
         tf_tg_reg_pot,
@@ -1525,9 +1523,9 @@ def merge_tf_tg_attributes_with_combinations(
     ).fillna(0)
     logging.debug(tf_tg_df.head())
 
-    logging.info(f"    - Number of unique TFs: {tf_tg_df['TF'].nunique()}")
+    logging.debug(f"    - Number of unique TFs: {tf_tg_df['TF'].nunique()}")
 
-    logging.info("\n  - Merging mean min-max normalized TF expression")
+    logging.debug("\n  - Merging mean min-max normalized TF expression")
     tf_tg_df = pd.merge(
         tf_tg_df,
         mean_norm_tf_expr,
@@ -1535,9 +1533,9 @@ def merge_tf_tg_attributes_with_combinations(
         on=["TF"]
     ).dropna(subset="mean_tf_expr")
     logging.debug(tf_tg_df.head())
-    logging.info(f"    - Number of unique TFs: {tf_tg_df['TF'].nunique()}")
+    logging.debug(f"    - Number of unique TFs: {tf_tg_df['TF'].nunique()}")
 
-    logging.info("\n- Merging mean min-max normalized TG expression")
+    logging.debug("\n- Merging mean min-max normalized TG expression")
 
     tf_tg_df = pd.merge(
         tf_tg_df,
@@ -1546,7 +1544,7 @@ def merge_tf_tg_attributes_with_combinations(
         on=["TG"]
     ).dropna(subset="mean_tg_expr")
     logging.debug(tf_tg_df.head())
-    logging.info(f"    - Number of unique TFs: {tf_tg_df['TF'].nunique()}")
+    logging.debug(f"    - Number of unique TFs: {tf_tg_df['TF'].nunique()}")
     
     tf_tg_df["expr_product"] = tf_tg_df["mean_tf_expr"] * tf_tg_df["mean_tg_expr"]
     tf_tg_df["log_reg_pot"] = np.log1p(tf_tg_df["reg_potential"])
@@ -1734,23 +1732,23 @@ def merge_tf_tg_data_with_pkn(
 
     try:
         sample_syms = list(pd.unique(df[["TF", "TG"]].values.ravel()))[:5]
-        logging.info(f"\tExample TF-TG data: {sample_syms}")
+        logging.debug(f"\tExample TF-TG data: {sample_syms}")
     except Exception:
         pass
 
     # ---------------- split ----------------
     logging.info("  - Splitting positives/negatives by PKN union")
     in_pkn_df, not_in_pkn_df = _split_by_pkn_union(df, pkn_union_u)
-    logging.info("  - Splitting results:")
-    logging.info(f"\t  Edges in TF-TG data: {df.shape[0]:,}")
-    logging.info(f"\t  Edges in PKN union (undirected): {len(pkn_union_u):,}")
-    logging.info(f"\t  Unique TFs in PKN: {in_pkn_df['TF'].nunique():,}")
-    logging.info(f"\t  Unique TGs in PKN: {in_pkn_df['TG'].nunique():,}")
-    logging.info(f"\t  Unique TFs not in PKN: {not_in_pkn_df['TF'].nunique():,}")
-    logging.info(f"\t  Unique TGs not in PKN: {not_in_pkn_df['TG'].nunique():,}")
-    logging.info(f"\t  Edges not in PKN: {not_in_pkn_df.shape[0]:,}")
+    logging.debug("  - Splitting results:")
+    logging.debug(f"\t  Edges in TF-TG data: {df.shape[0]:,}")
+    logging.debug(f"\t  Edges in PKN union (undirected): {len(pkn_union_u):,}")
+    logging.info(f"\t  TFs in PKN: {in_pkn_df['TF'].nunique():,}")
+    logging.info(f"\t  TGs in PKN: {in_pkn_df['TG'].nunique():,}")
+    logging.debug(f"\t  Unique TFs not in PKN: {not_in_pkn_df['TF'].nunique():,}")
+    logging.debug(f"\t  Unique TGs not in PKN: {not_in_pkn_df['TG'].nunique():,}")
+    logging.debug(f"\t  Edges not in PKN: {not_in_pkn_df.shape[0]:,}")
     logging.info(f"\t  Edges in PKN: {in_pkn_df.shape[0]:,}")
-    logging.info(f"\t  Fraction of TF-TG edges in PKN: {in_pkn_df.shape[0] / max(1, df.shape[0]):.2f}")
+    logging.debug(f"\t  Fraction of TF-TG edges in PKN: {in_pkn_df.shape[0] / max(1, df.shape[0]):.2f}")
 
     if in_pkn_df.empty:
         raise ValueError("No TF–TG positives in PKN union after normalization.")
@@ -1807,7 +1805,7 @@ def build_global_tg_vocab(gene_tss_file: Union[str, Path], vocab_file: Union[str
     # 2) Canonical symbol list (MUST match downstream normalization)
     gene_tss_df["name"] = gc.canonicalize_series(gene_tss_df["name"])
     names = sorted(set(gene_tss_df["name"]))  # unique + stable order
-    logging.info(f"Writing global TG vocab with {len(names)} genes")
+    logging.info(f"  - Writing global TG vocab with {len(names)} genes")
 
     # 3) Build fresh contiguous mapping
     vocab = {name: i for i, name in enumerate(names)}
@@ -1818,7 +1816,6 @@ def build_global_tg_vocab(gene_tss_file: Union[str, Path], vocab_file: Union[str
         json.dump(vocab, f)
     os.replace(tmp, vocab_file)
 
-    logging.info(f"Rebuilt TG vocab with {len(vocab)} genes (contiguous).")
     return vocab
 
 def create_single_cell_tensors(
@@ -1847,7 +1844,7 @@ def create_single_cell_tensors(
             logging.debug(f"[{sample_name}] Skipping: missing TG/RE single-cell files")
             continue
 
-        logging.info(f"[{sample_name} | {chrom_id}] Building single-cell tensors")
+        logging.debug(f"[{sample_name} | {chrom_id}] Building single-cell tensors")
 
         TG_sc = pd.read_parquet(tg_sc_file)
         TG_sc.index = TG_sc.index.astype(str).map(standardize_name)
@@ -1969,9 +1966,9 @@ def aggregate_pseudobulk_datasets(
     )
 
     if need_recalc:
-        logging.info("\nLoading processed pseudobulk datasets:")
-        logging.info(f"  - Sample names: {sample_names}")
-        logging.info(f"  - Looking for processed samples in {dataset_processed_data_dir}")
+        logging.info("  - Loading processed pseudobulk datasets:")
+        logging.info(f"   - Sample names: {sample_names}")
+        logging.info(f"   - Looking for processed samples in {dataset_processed_data_dir}")
 
         # ---- 1) Build per-sample TG pseudobulk (canonicalized) ----
         per_sample_TG: dict[str, pd.DataFrame] = {}
@@ -1987,9 +1984,9 @@ def aggregate_pseudobulk_datasets(
 
         # ---- 2) Build per-chromosome aggregates ----
         pseudobulk_chrom_dict: dict[str, dict] = {}
-
+        logging.info("  - Aggregating per-chromosome pseudobulk datasets:")
         for chrom_id in chroms:
-            logging.info(f"\n-- Aggregating data for {chrom_id} --")
+            logging.info(f"   - Aggregating data for {chrom_id}")
 
             TG_pseudobulk_samples = []
             RE_pseudobulk_samples = []
@@ -2019,8 +2016,7 @@ def aggregate_pseudobulk_datasets(
             gene_tss_chrom = gene_tss_chrom.drop_duplicates(subset=["name"], keep="first")
             genes_on_chrom = gene_tss_chrom["name"].tolist()
 
-            for sample_name in (pbar := tqdm(sample_names)):
-                pbar.set_description(f"Processing {sample_name}")
+            for sample_name in sample_names:
                 sample_processed_data_dir = dataset_processed_data_dir / sample_name
 
                 # RE pseudobulk: peaks x metacells
@@ -2072,7 +2068,7 @@ def aggregate_pseudobulk_datasets(
 
     else:
         # Load both from disk
-        logging.info("Found existing global and per-chrom pseudobulk; loading...")
+        logging.info("  - Found existing global and per-chrom pseudobulk; loading...")
         total_TG_pseudobulk_global = pd.read_parquet(
             total_tg_pseudobulk_path,
             engine="pyarrow",
@@ -2101,7 +2097,6 @@ def create_or_load_genomic_windows(
         return pd.DataFrame(columns=["chrom", "start", "end", "win_idx"])
 
     if not os.path.exists(genome_window_file) or force_recalculate:
-        logging.info("\nCreating genomic windows")
         genome_windows = pybedtools.bedtool.BedTool().window_maker(g=chrom_sizes_file, w=window_size)
         # Ensure consistent column names regardless of BedTool defaults
         chrom_windows = (
@@ -2110,9 +2105,9 @@ def create_or_load_genomic_windows(
             .saveas(genome_window_file)
             .to_dataframe(names=["chrom", "start", "end"])
         )
-        logging.info(f"  - Created {chrom_windows.shape[0]} windows")
+        logging.debug(f"  - Created {chrom_windows.shape[0]} windows")
     else:
-        logging.info("\nLoading existing genomic windows")
+        logging.debug("\nLoading existing genomic windows")
         chrom_windows = pybedtools.BedTool(genome_window_file).to_dataframe(names=["chrom", "start", "end"])
 
     chrom_windows = chrom_windows.reset_index(drop=True)
@@ -2468,7 +2463,7 @@ if __name__ == "__main__":
     trrust_csv_file = TRRUST_DIR / f"trrust_{ORGANISM_CODE}_pkn.csv"
     kegg_csv_file = KEGG_DIR / f"kegg_{ORGANISM_CODE}_pkn.csv"
     
-    logging.info(f"FORCE_RECALCULATE: {FORCE_RECALCULATE}")
+    logging.info(f"\nFORCE_RECALCULATE: {FORCE_RECALCULATE}")
     
     PROCESS_SAMPLE_DATA = True
     logging.info(f"PROCESS_SAMPLE_DATA: {PROCESS_SAMPLE_DATA}")
@@ -2562,9 +2557,9 @@ if __name__ == "__main__":
             genes = processed_rna_df.index.to_list()
             peaks = processed_atac_df.index.to_list()
             
-            logging.info("\nProcessed RNA and ATAC files loaded")
-            logging.info(f"  - Number of genes: {processed_rna_df.shape[0]}: {genes[:3]}")
-            logging.info(f"  - Number of peaks: {processed_atac_df.shape[0]}: {peaks[:3]}")
+            logging.info("  - Processed RNA and ATAC files loaded")
+            logging.info(f"    - Number of genes: {processed_rna_df.shape[0]}: {genes[:3]}")
+            logging.info(f"    - Number of peaks: {processed_atac_df.shape[0]}: {peaks[:3]}")
 
             
             tfs, tgs, tf_tg_df = create_tf_tg_combination_files(genes, TF_FILE, SAMPLE_PROCESSED_DATA_DIR, sample_name)
@@ -2587,7 +2582,7 @@ if __name__ == "__main__":
             if not os.path.isfile(peak_to_gene_dist_file) or FORCE_RECALCULATE:
                 # Download the gene TSS file from Ensembl if missing
 
-                logging.info("\nCalculating peak to TG distance score")
+                logging.info("  - Calculating peak to TG distance score")
                 peak_to_gene_dist_df = calculate_peak_to_tg_distance_score(
                     peak_bed_file=peak_bed_file,
                     tss_bed_file=GENE_TSS_FILE,
@@ -2600,8 +2595,8 @@ if __name__ == "__main__":
                     force_recalculate=FORCE_RECALCULATE
                 )
             
-                logging.info("\nPeak to gene distance")
-                logging.info("  - Number of peaks to gene distances: " + str(peak_to_gene_dist_df.shape[0]))
+                logging.debug("\nPeak to gene distance")
+                logging.debug("  - Number of peaks to gene distances: " + str(peak_to_gene_dist_df.shape[0]))
                 logging.debug("  - Example peak to gene distances: \n" + str(peak_to_gene_dist_df.head()))
             
             # ----- SLIDING WINDOW TF-PEAK SCORE -----
@@ -2609,7 +2604,7 @@ if __name__ == "__main__":
 
                 peaks_df = pybedtools.BedTool(peak_bed_file)
 
-                logging.info("\nRunning sliding window scan")
+                logging.info("  - Running sliding window scan")
                 run_sliding_window_scan(
                     tf_name_list=tfs,
                     tf_info_file=str(TF_FILE),
@@ -2630,25 +2625,25 @@ if __name__ == "__main__":
 
             # ----- MERGE TF-TG ATTRIBUTES WITH COMBINATIONS -----
             if not os.path.isfile(tf_tg_combo_attr_file):
-                logging.info("\nLoading TF-TG regulatory potential scores")
+                logging.info("  - Loading TF-TG regulatory potential scores")
                 tf_tg_reg_pot = pd.read_parquet(tf_tg_reg_pot_file, engine="pyarrow")
                 logging.debug("  - Example TF-TG regulatory potential: " + str(tf_tg_reg_pot.head()))
                 
                 tf_df = processed_rna_df[processed_rna_df.index.isin(tfs)]
                 logging.debug("\nTFs in RNA data")
                 logging.debug(tf_df.head())
-                logging.info(f"  - TFs in RNA data: {tf_df.shape[0]}")
+                logging.info(f"    - TFs in RNA data: {tf_df.shape[0]}")
                 
                 tg_df = processed_rna_df[processed_rna_df.index.isin(tgs)]
                 logging.debug("\nTGs in RNA data")
                 logging.debug(tg_df.head())
-                logging.info(f"  - TGs in RNA data: {tg_df.shape[0]}")
+                logging.info(f"    - TGs in RNA data: {tg_df.shape[0]}")
                 sliding_window_df = pd.read_parquet(sliding_window_score_file, engine="pyarrow")
                 logging.debug("  - Example sliding window scores: \n" + str(sliding_window_df.head()))
                 
                 mean_norm_tf_expr, mean_norm_tg_expr = compute_minmax_expr_mean(tf_df, tg_df)
                 
-                logging.info("\nMerging TF-TG attributes with all combinations")
+                logging.info("  - Merging TF-TG attributes with all combinations")
                 tf_tg_df = merge_tf_tg_attributes_with_combinations(
                     tf_tg_df, tf_tg_reg_pot, mean_norm_tf_expr, mean_norm_tg_expr, tf_tg_combo_attr_file, set(tfs))            
 
@@ -2735,8 +2730,9 @@ if __name__ == "__main__":
                     f"with {len(tf_names_kept)} TFs and {tf_tensor_all_aligned.shape[1]} metacells.")
         
         logging.info(f"  - Number of chromosomes: {len(chrom_list)}: {chrom_list}")
+        logging.info(f"  - Processing chromosomes for dataset: {DATASET_NAME}")
         for chrom_id in chrom_list:
-            logging.info(f"\n----- Preparing MultiomicTransformer data for {DATASET_NAME} {chrom_id} -----")
+            logging.info(f"  - Processing {chrom_id}")
             make_chrom_gene_tss_df(GENE_TSS_FILE, chrom_id, GENOME_DIR)
             
             SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR = SAMPLE_DATA_CACHE_DIR / chrom_id
@@ -2771,7 +2767,7 @@ if __name__ == "__main__":
                     genome_dir=GENOME_DIR
                 )
             else:
-                logging.info(f"Loading existing gene TSS file for {chrom_id}")
+                logging.debug(f"  - Loading existing gene TSS file for {chrom_id}")
                 gene_tss_df = pd.read_csv(os.path.join(GENOME_DIR, f"{chrom_id}_gene_tss.bed"), sep="\t", header=None, usecols=[0, 1, 2, 3])
                 gene_tss_df = gene_tss_df.rename(columns={0: "chrom", 1: "start", 2: "end", 3: "name"})
                 
@@ -2780,8 +2776,8 @@ if __name__ == "__main__":
             total_RE_pseudobulk_chr = pseudobulk_chrom_dict[chrom_id]["total_RE_pseudobulk_chr"]
             total_peaks_df = pseudobulk_chrom_dict[chrom_id]["total_peaks_df"]
                 
-            logging.info(f"  - {chrom_id}: TG pseudobulk shape={total_TG_pseudobulk_chr.shape}")
-            logging.info(f"  - TG Examples:{total_TG_pseudobulk_chr.index[:5].tolist()}")
+            logging.debug(f"      - {chrom_id}: TG pseudobulk shape={total_TG_pseudobulk_chr.shape}")
+            logging.debug(f"      - TG Examples:{total_TG_pseudobulk_chr.index[:5].tolist()}")
             
             vals = total_TG_pseudobulk_chr.values.astype("float32")
             if vals.shape[0] == 0:
@@ -2800,7 +2796,7 @@ if __name__ == "__main__":
             chrom_peak_ids = set(total_peaks_df["peak_id"].astype(str))
             
             # Create genome windows
-            logging.info(f"Creating genomic windows for {chrom_id}")
+            logging.debug(f"  - Creating genomic windows for {chrom_id}")
             genome_windows = create_or_load_genomic_windows(
                 window_size=WINDOW_SIZE,
                 chrom_id=chrom_id,
@@ -2815,7 +2811,7 @@ if __name__ == "__main__":
                 
             genes_near_peaks["target_id"] = gc.canonicalize_series(genes_near_peaks["target_id"])
             genes_near_peaks.to_parquet(peak_to_tss_dist_path, engine="pyarrow", compression="snappy")
-            logging.info(f"  - Saved peak-to-TG distance scores to {peak_to_tss_dist_path}")
+            logging.debug(f"  - Saved peak-to-TG distance scores to {peak_to_tss_dist_path}")
 
             
             # ----- SLIDING WINDOW TF-PEAK SCORE -----
@@ -2839,9 +2835,9 @@ if __name__ == "__main__":
                 
                 sliding_window_df.to_parquet(chrom_sliding_window_file, engine="pyarrow", compression="snappy")
 
-                logging.info(f"  - Wrote sliding window scores to {chrom_sliding_window_file}")
+                logging.debug(f"  - Wrote sliding window scores to {chrom_sliding_window_file}")
             else:
-                logging.info("Loading existing sliding window scores")
+                logging.debug("Loading existing sliding window scores")
                 sliding_window_df = pd.read_parquet(chrom_sliding_window_file, engine="pyarrow")
             
             total_peaks_df["peak_id"] = total_peaks_df["peak_id"].astype(str)
@@ -2875,7 +2871,7 @@ if __name__ == "__main__":
             
             # ----- Load common TF and TG vocab -----
             # Create a common TG vocabulary for the chromosome using the gene TSS
-            logging.info(f"Matching TFs and TGs to global gene vocabulary")
+            logging.debug(f"  - Matching TFs and TGs to global gene vocabulary")
             
             tg_names = [standardize_name(n) for n in total_TG_pseudobulk_chr.index.tolist()]
             
@@ -2897,7 +2893,7 @@ if __name__ == "__main__":
             
             torch.save(torch.tensor(tg_ids, dtype=torch.long), tg_id_file)
 
-            logging.info(f"\tMatched {len(tg_names_kept)} TGs to global vocab")
+            logging.debug(f"\t- Matched {len(tg_names_kept)} TGs to global vocab")
             
             # Build motif mask using merged info
             motif_mask = build_motif_mask(
@@ -2911,7 +2907,7 @@ if __name__ == "__main__":
             if not tg_ids: raise ValueError("No TGs matched the common vocab.")
             
             # Build distance bias [num_windows x num_tg_kept] aligned to kept TGs
-            logging.info(f"Building distance bias")
+            logging.debug(f"  - Building distance bias")
             dist_bias, new_window_map, kept_window_indices = build_distance_bias(
                 genes_near_peaks=genes_near_peaks,
                 window_map=window_map,
@@ -2944,7 +2940,7 @@ if __name__ == "__main__":
             )
             
             # ----- Writing Output Files -----
-            logging.info(f"Writing output files")
+            logging.debug(f"Writing output files")
             # Save the Window, TF, and TG expression tensors
             torch.save(atac_window_tensor_all, atac_tensor_path)
             torch.save(tg_tensor_all, tg_tensor_path)
@@ -2958,7 +2954,7 @@ if __name__ == "__main__":
 
             # Write the distance bias and metacell names for the sample
             torch.save(dist_bias, dist_bias_file)
-            logging.info(f"  - Saved distance bias tensor with shape {tuple(dist_bias.shape)} to {dist_bias_file}")
+            logging.debug(f"  - Saved distance bias tensor with shape {tuple(dist_bias.shape)} to {dist_bias_file}")
             
             torch.save(torch.from_numpy(motif_mask), motif_mask_file)
 
@@ -2990,5 +2986,5 @@ if __name__ == "__main__":
             with open(manifest_file, "w") as f:
                 json.dump(manifest, f, indent=2)
 
-            logging.info("Preprocessing complete. Wrote per-sample/per-chrom data for MultiomicTransformerDataset.")
+        logging.info("Preprocessing complete. Wrote per-sample/per-chrom data for MultiomicTransformerDataset.")
             
