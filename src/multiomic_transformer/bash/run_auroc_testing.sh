@@ -19,32 +19,44 @@ source .venv/bin/activate
 
 EXPERIMENT_DIR=${EXPERIMENT_DIR:-/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments}
 
-# EXPERIMENT_DIR_LIST=(
-#     $EXPERIMENT_DIR/mESC_no_scale_linear/model_training_192_10k_metacells
-#     $EXPERIMENT_DIR/mESC_large_neighborhood/chr19/model_training_001
-#     $EXPERIMENT_DIR/mESC_small_neighborhood/chr19/model_training_001
-#     $EXPERIMENT_DIR/mESC_small_neighborhood_high_self_weight/chr19/model_training_001
-#     $EXPERIMENT_DIR/mESC_max_dist_bias/chr19/model_training_002
-#     $EXPERIMENT_DIR/mESC_slow_decay_max_dist/chr19/model_training_001
-#     $EXPERIMENT_DIR/mESC_filter_lowest_ten_pct/chr19/model_training_003
-# )
-
-EXPERIMENT_DIR_LIST=(
-    $EXPERIMENT_DIR/mESC_lower_peak_threshold/chr19/model_training_001
-    $EXPERIMENT_DIR/mESC_no_filter_to_nearest_gene/chr19/model_training_001
-    $EXPERIMENT_DIR/mESC_smaller_window_size/chr19/model_training_001
-    $EXPERIMENT_DIR/mESC_larger_window_size/chr19/model_training_001
-    $EXPERIMENT_DIR/mESC_lower_max_peak_dist/chr19/model_training_001
-    $EXPERIMENT_DIR/mESC_higher_max_peak_dist/chr19/model_training_001
+EXPERIMENT_LIST=(
+    "mESC_lower_peak_threshold|model_training_001|checkpoint_60.pt"
+    # "mESC_no_filter_to_nearest_gene|model_training_001|trained_model.pt"
+    # "mESC_smaller_window_size|model_training_001|trained_model.pt"
+    # "mESC_larger_window_size|model_training_001|trained_model.pt"
+    # "mESC_lower_max_peak_dist|model_training_001|trained_model.pt"
+    # "mESC_higher_max_peak_dist|model_training_001|trained_model.pt"
 )
 
-# Select the experiment for this array task
-SELECTED_EXPERIMENT_DIR=${EXPERIMENT_DIR_LIST[$SLURM_ARRAY_TASK_ID]}
+# ==========================================
+#        EXPERIMENT SELECTION
+# ==========================================
+# Get the current experiment based on SLURM_ARRAY_TASK_ID
+TASK_ID=${SLURM_ARRAY_TASK_ID:-0}
 
-echo "Running auroc testing on experiment directory: $SELECTED_EXPERIMENT_DIR"
-echo "Array task ID: $SLURM_ARRAY_TASK_ID"
+if [ ${TASK_ID} -ge ${#PLOTTING_EXPERIMENT_LIST[@]} ]; then
+    echo "ERROR: SLURM_ARRAY_TASK_ID (${TASK_ID}) exceeds number of experiments (${#PLOTTING_EXPERIMENT_LIST[@]})"
+    exit 1
+fi
+
+EXPERIMENT_CONFIG="${PLOTTING_EXPERIMENT_LIST[$TASK_ID]}"
+
+# Parse experiment configuration
+IFS='|' read -r EXPERIMENT_NAME TRAINING_NUM MODEL_FILE <<< "$EXPERIMENT_CONFIG"
+
+echo ""
+echo "=========================================="
+echo "  EXPERIMENT: ${EXPERIMENT_NAME}"
+echo "  TRAINING_NUM: ${TRAINING_NUM}"
+echo "  MODEL_FILE ID: ${MODEL_FILE}"
+echo "  TASK ID: ${TASK_ID}"
+echo "=========================================="
+echo ""
 
 poetry run python ./src/multiomic_transformer/utils/auroc_testing.py \
-    --experiment_dir_list "$SELECTED_EXPERIMENT_DIR"
+    --experiment "$EXPERIMENT_NAME" \
+    --training_num "$TRAINING_NUM" \
+    --experiment_dir "$EXPERIMENT_DIR" \
+    --model_file "$MODEL_FILE"
 
 echo "finished"
