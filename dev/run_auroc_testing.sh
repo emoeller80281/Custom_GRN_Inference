@@ -9,7 +9,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 4
 #SBATCH --mem=64G
-#SBATCH --array=1
+#SBATCH --array=2
 
 set -euo pipefail
 
@@ -29,8 +29,9 @@ EXPERIMENT_DIR=${EXPERIMENT_DIR:-/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_
 # )
 
 EXPERIMENT_DIR_LIST=(
-    $EXPERIMENT_DIR/mESC_slower_dist_decay/chr19/model_training_001
-    $EXPERIMENT_DIR/mESC_large_neighborhood_count_filter/chr19/model_training_001
+    $EXPERIMENT_DIR/mESC_lower_peak_threshold/chr19/model_training_001
+    $EXPERIMENT_DIR/mESC_no_filter_to_nearest_gene/chr19/model_training_001
+    $EXPERIMENT_DIR/mESC_lower_max_peak_dist/chr19/model_training_001
 )
 
 # EXPERIMENT_DIR_LIST=(

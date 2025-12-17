@@ -20,6 +20,7 @@ from tqdm import tqdm
 import pybedtools
 import argparse
 import pickle
+from sklearn.decomposition import TruncatedSVD
 
 import sys
 sys.path.append(Path(__file__).resolve().parent.parent.parent)
@@ -153,7 +154,7 @@ def pseudo_bulk(
 
     return pseudo_bulk_rna_df, pseudo_bulk_atac_df
 
-def process_10x_to_csv(raw_10x_rna_data_dir, raw_atac_peak_file, rna_outfile_path, atac_outfile_path, sample_name):
+def process_10x_to_parquet(raw_10x_rna_data_dir, raw_atac_peak_file, rna_outfile_path, atac_outfile_path, sample_name):
     
     def _load_rna_adata(sample_raw_data_dir: str) -> sc.AnnData:
         # Look for features file
@@ -174,54 +175,75 @@ def process_10x_to_csv(raw_10x_rna_data_dir, raw_atac_peak_file, rna_outfile_pat
             )
         return adata
     
-    def _get_adata_from_peakmatrix(peak_matrix_file: Path, label: pd.DataFrame, sample_name: str) -> AnnData:
-        logging.info(f"[{sample_name}] Reading ATAC peaks")
-        # Read header only
-        all_cols = pd.read_csv(peak_matrix_file, sep="\t", nrows=10).columns[1:]
-        logging.info(f"  - First ATAC Barcode: {all_cols[0]}")
-        
-        # Identify barcodes shared between RNA and ATAC
-        matching_barcodes = set(label["barcode_use"]) & set(all_cols)
-        logging.info(f"  - Matched {len(matching_barcodes):,} barcodes with scRNA-seq file")
 
-        # Map from original index -> normalized barcode
-        col_map = {i: bc for i, bc in enumerate(all_cols)}
+    def _get_adata_from_peakmatrix(peak_matrix_file, label, sample_name, dtype=np.uint16):
+        logging.info(f"[{sample_name}] Reading ATAC peaks (fast streaming)")
 
-        # Always keep the first column (peak IDs)
-        keep_indices = [0] + [i for i, bc in col_map.items() if bc in matching_barcodes]
-        header = pd.read_csv(peak_matrix_file, sep="\t", nrows=0)
-        first_col = header.columns[0]
-        keep_cols = [first_col] + [c for c in header.columns[1:] if c in matching_barcodes]
-        compression = "gzip" if str(peak_matrix_file).endswith(".gz") else None
+        is_gz = str(peak_matrix_file).endswith(".gz")
+        opener = gzip.open if is_gz else open
 
-        # Read only those columns
-        logging.info("  - Reading data for matching barcodes")
-        peak_matrix = pd.read_csv(
-            peak_matrix_file,
-            sep="\t",
-            usecols=keep_cols,
-            index_col=0,
-            compression=compression,
-            low_memory=False
-        )
-        logging.info("\tDone reading filtered peak matrix")
+        label_set = set(label["barcode_use"].astype(str))
 
-        # Replace column names with normalized barcodes
-        new_cols = [col_map[i] for i in keep_indices[1:]]
-        peak_matrix.columns = new_cols
+        with opener(peak_matrix_file, "rt") as f:
+            # --- header ---
+            header = f.readline().rstrip("\n").split("\t")
+            first_col = header[0]
+            barcodes = header[1:]
 
-        # Construct AnnData
-        logging.info("  - Constructing AnnData for scATAC-seq data")
-        adata_ATAC = AnnData(X=sp.csr_matrix(peak_matrix.values.T))
-        adata_ATAC.obs_names = peak_matrix.columns
-        adata_ATAC.var_names = peak_matrix.index
-        adata_ATAC.obs["barcode"] = adata_ATAC.obs_names
-        adata_ATAC.obs["sample"] = sample_name
-        adata_ATAC.obs["label"] = label.set_index("barcode_use").loc[peak_matrix.columns, "label"].values
-        
-        logging.info("\tDone!")
+            # keep barcode columns in file order
+            keep_barcodes = [bc for bc in barcodes if bc in label_set]
+            keep_idx = [i + 1 for i, bc in enumerate(barcodes) if bc in label_set]  # +1 because first col is peak id
 
-        return adata_ATAC
+            logging.info(f"  - Total barcodes in file: {len(barcodes):,}")
+            logging.info(f"  - Matched barcodes: {len(keep_barcodes):,}")
+
+            # --- build COO triplets ---
+            rows = []
+            cols = []
+            data = []
+            var_names = []
+
+            peak_i = 0
+            for line in f:
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) <= 1:
+                    continue
+
+                var_names.append(parts[0])  # peak coord
+                # parse only kept columns; store nonzeros
+                for j, col_i in enumerate(keep_idx):
+                    v = parts[col_i]
+                    if v == "0" or v == "" or v is None:
+                        continue
+                    # int conversion (fast path)
+                    iv = int(v)
+                    if iv != 0:
+                        rows.append(j)          # cell index within keep_barcodes
+                        cols.append(peak_i)     # peak index
+                        data.append(iv)
+
+                peak_i += 1
+
+        if len(data) == 0:
+            raise ValueError("No nonzero entries found after filtering.")
+
+        rows = np.asarray(rows, dtype=np.int32)
+        cols = np.asarray(cols, dtype=np.int32)
+        data = np.asarray(data, dtype=dtype)
+
+        X = sp.coo_matrix(
+            (data, (rows, cols)),
+            shape=(len(keep_barcodes), len(var_names)),
+            dtype=dtype
+        ).tocsr()
+
+        adata = AnnData(X=X)
+        adata.obs_names = keep_barcodes
+        adata.var_names = var_names
+        adata.obs["barcode"] = adata.obs_names
+        adata.obs["sample"] = sample_name
+        adata.obs["label"] = label.set_index("barcode_use").loc[keep_barcodes, "label"].values
+        return adata
     
     # --- load raw data ---
     adata_RNA = _load_rna_adata(raw_10x_rna_data_dir)
@@ -284,6 +306,154 @@ def _configured_path(
 
     p = Path(raw)
     return p if p.is_absolute() else (sample_input_dir / p)
+
+_peak_re = re.compile(r"^(?P<chrom>[^:]+):(?P<start>\d+)-(?P<end>\d+)$")
+
+def _ensure_csr(X):
+    if sp.issparse(X):
+        return X.tocsr()
+    return sp.csr_matrix(X)
+
+def _parse_peaks_from_varnames(adata_atac: AnnData) -> None:
+    """
+    Ensure adata_atac.var has 'chrom', 'start', 'end', 'width' columns.
+    Expects var_names like 'chr1:123-456' if not already present.
+    """
+    v = adata_atac.var
+    if {"chrom", "start", "end"}.issubset(v.columns):
+        pass
+    else:
+        chrom = np.empty(adata_atac.n_vars, dtype=object)
+        start = np.full(adata_atac.n_vars, -1, dtype=np.int64)
+        end   = np.full(adata_atac.n_vars, -1, dtype=np.int64)
+
+        for i, name in enumerate(adata_atac.var_names):
+            m = _peak_re.match(str(name))
+            if m is None:
+                chrom[i] = None
+                continue
+            chrom[i] = m.group("chrom")
+            start[i] = int(m.group("start"))
+            end[i]   = int(m.group("end"))
+
+        v["chrom"] = chrom
+        v["start"] = start
+        v["end"]   = end
+
+    v["width"] = (v["end"].astype(np.int64) - v["start"].astype(np.int64))
+
+
+def _filter_standard_chroms(
+    adata_atac: AnnData,
+    keep_chrM: bool = False,
+    chrom_regex: str = r"^chr(\d+|X|Y)$",
+) -> AnnData:
+    _parse_peaks_from_varnames(adata_atac)
+    chrom = adata_atac.var["chrom"].astype(str)
+
+    keep = chrom.str.match(chrom_regex, na=False)
+    if keep_chrM:
+        keep |= (chrom == "chrM")
+
+    # Drop rows where parsing failed too
+    keep &= (adata_atac.var["start"].to_numpy() >= 0) & (adata_atac.var["end"].to_numpy() >= 0)
+
+    return adata_atac[:, keep].copy()
+
+
+def _filter_peak_widths(
+    adata_atac: AnnData,
+    min_width: int = 20,
+    max_width: int = 10_000,
+) -> AnnData:
+    _parse_peaks_from_varnames(adata_atac)
+    w = adata_atac.var["width"].to_numpy()
+    keep = (w >= min_width) & (w <= max_width)
+    return adata_atac[:, keep].copy()
+
+
+def _optional_blacklist_filter(
+    adata_atac: AnnData,
+    blacklist_bed: Optional[str] = None,
+) -> AnnData:
+    """
+    Remove peaks overlapping blacklist regions if a BED is provided.
+    Requires pyranges: pip install pyranges
+    """
+    if not blacklist_bed:
+        return adata_atac
+
+    try:
+        import pyranges as pr
+    except ImportError as e:
+        raise ImportError("Blacklist filtering requested but pyranges is not installed.") from e
+
+    _parse_peaks_from_varnames(adata_atac)
+    peaks = adata_atac.var[["chrom", "start", "end"]].copy()
+    peaks.columns = ["Chromosome", "Start", "End"]
+    peaks_pr = pr.PyRanges(peaks)
+
+    bl_pr = pr.read_bed(blacklist_bed)
+    # remove any overlapping peaks
+    overlaps = peaks_pr.overlap(bl_pr)
+    if len(overlaps) == 0:
+        return adata_atac
+
+    # Build a boolean mask of peaks that overlap
+    overlap_idx = set(overlaps.df.index.tolist())
+    keep = np.array([i not in overlap_idx for i in range(adata_atac.n_vars)], dtype=bool)
+
+    return adata_atac[:, keep].copy()
+
+
+def _tfidf_lsi(
+    adata_atac: AnnData,
+    n_components: int = 50,
+    drop_first: bool = True,
+    binarize: bool = True,
+    obsm_key: str = "X_lsi",
+) -> None:
+    """
+    Standard ATAC preprocessing: TF-IDF -> TruncatedSVD (LSI).
+    Stores embeddings in adata_atac.obsm[obsm_key].
+    """
+    X = _ensure_csr(adata_atac.X)
+
+    if binarize:
+        X = X.copy()
+        X.data[:] = 1.0
+
+    # Term Frequency: divide each row by its total
+    row_sums = np.asarray(X.sum(axis=1)).ravel()
+    row_sums[row_sums == 0] = 1.0
+    inv_row = 1.0 / row_sums
+    tf = sp.diags(inv_row) @ X
+
+    # IDF: log(1 + N / (1 + df))
+    df = np.asarray((X > 0).sum(axis=0)).ravel()
+    N = X.shape[0]
+    idf = np.log1p(N / (1.0 + df))
+    tfidf = tf @ sp.diags(idf)
+
+    svd = TruncatedSVD(n_components=n_components, random_state=0)
+    lsi = svd.fit_transform(tfidf)
+
+    if drop_first and lsi.shape[1] > 1:
+        lsi = lsi[:, 1:]
+
+    adata_atac.obsm[obsm_key] = lsi.astype(np.float32)
+    adata_atac.uns["lsi"] = {
+        "n_components": n_components,
+        "drop_first": drop_first,
+        "binarize": binarize,
+        "explained_variance_ratio": getattr(svd, "explained_variance_ratio_", None),
+    }
+
+
+def _quantile_clip_mask(x: np.ndarray, lo: float, hi: float) -> np.ndarray:
+    qlo, qhi = np.quantile(x, [lo, hi])
+    return (x >= qlo) & (x <= qhi)
+
 
 def process_or_load_rna_atac_data(
     sample_input_dir: Union[str, Path],
@@ -586,10 +756,10 @@ def process_or_load_rna_atac_data(
                 logging.info("Raw 10X RNA and ATAC inputs found, converting to CSVs...")
                 logging.info(f"  - raw_10x_rna_data_dir: {raw_10x_rna_data_dir}")
                 logging.info(f"  - raw_atac_peak_file:  {raw_atac_peak_file}")
-                process_10x_to_csv(raw_10x_rna_data_dir, raw_atac_peak_file, raw_rna_file, raw_atac_file, sample_name)
+                process_10x_to_parquet(raw_10x_rna_data_dir, raw_atac_peak_file, raw_rna_file, raw_atac_file, sample_name)
 
             # Load raw data parquet files and convert to AnnData
-            logging.info("Reading raw CSVs into AnnData")
+            logging.info("Reading raw data parquet files into AnnData")
             rna_df = pd.read_parquet(raw_rna_file, engine="pyarrow")
             atac_df = pd.read_parquet(raw_atac_file, engine="pyarrow")
             
@@ -715,73 +885,103 @@ def process_or_load_rna_atac_data(
     return processed_rna_df, processed_atac_df, TG_pseudobulk_df, RE_pseudobulk_df
 
 def filter_and_qc(adata_RNA: AnnData, adata_ATAC: AnnData) -> Tuple[AnnData, AnnData]:
-    
     adata_RNA = adata_RNA.copy()
     adata_ATAC = adata_ATAC.copy()
-    
-    logging.info(f"[START] RNA shape={adata_RNA.shape}, ATAC shape={adata_ATAC.shape}")
-    
-    common_barcodes = adata_RNA.obs_names.isin(adata_ATAC.obs_names)
-    assert common_barcodes.sum() > 10, \
-        f"No common barcodes. \n  - RNA: {adata_RNA.obs_names[:2]}\n  - ATAC: {adata_ATAC.obs_names[:2]}"
-    
-    # Synchronize barcodes
-    adata_RNA.obs['barcode'] = adata_RNA.obs_names
-    adata_ATAC.obs['barcode'] = adata_ATAC.obs_names
 
-    n_before = (adata_RNA.n_obs, adata_ATAC.n_obs)
-    adata_RNA = adata_RNA[common_barcodes].copy()
-    adata_ATAC = adata_ATAC[adata_ATAC.obs['barcode'].isin(adata_RNA.obs['barcode'])].copy()
-    
-    logging.info(
-        f"[BARCODES] before sync RNA={n_before[0]}, ATAC={n_before[1]} → after sync RNA={adata_RNA.n_obs}, ATAC={adata_ATAC.n_obs}"
+    logging.info(f"[START] RNA shape={adata_RNA.shape}, ATAC shape={adata_ATAC.shape}")
+
+    # --- Synchronize barcodes first ---
+    common = adata_RNA.obs_names.intersection(adata_ATAC.obs_names)
+    assert len(common) > 10, (
+        f"No common barcodes.\n  - RNA: {adata_RNA.obs_names[:2]}\n  - ATAC: {adata_ATAC.obs_names[:2]}"
     )
-    
-    # QC and filtering
-    
-    adata_RNA.var['mt'] = adata_RNA.var_names.str.startswith("MT-")
-    sc.pp.calculate_qc_metrics(adata_RNA, qc_vars=["mt"], inplace=True)
-    adata_RNA = adata_RNA[adata_RNA.obs.pct_counts_mt < 5].copy()
+    adata_RNA = adata_RNA[common].copy()
+    adata_ATAC = adata_ATAC[common].copy()
+    logging.info(f"[BARCODES] synced to n={len(common)}")
+
+    # -----------------------------
+    # RNA QC + preprocessing (keep your existing logic, minor ordering fixes)
+    # -----------------------------
     adata_RNA.var_names_make_unique()
-    adata_RNA.var['gene_ids'] = adata_RNA.var.index
-    num_cells_rna = adata_RNA.n_obs
-    num_cells_atac = adata_ATAC.n_obs
-    
+    adata_RNA.var["gene_ids"] = adata_RNA.var.index
+
+    adata_RNA.var["mt"] = adata_RNA.var_names.str.startswith("MT-")
+    sc.pp.calculate_qc_metrics(adata_RNA, qc_vars=["mt"], inplace=True)
+
+    # Example: mitochondrial filter
+    adata_RNA = adata_RNA[adata_RNA.obs.pct_counts_mt < 5].copy()
+
+    # Your existing thresholds (assumed defined globally)
     sc.pp.filter_cells(adata_RNA, min_genes=MIN_GENES_PER_CELL)
-    sc.pp.filter_cells(adata_ATAC, min_genes=MIN_PEAKS_PER_CELL)
-    
+
+    # Gene filtering (compute after cell filtering)
+    n_cells_rna = adata_RNA.n_obs
     if FILTER_TYPE == "pct":
-        sc.pp.filter_genes(adata_RNA, min_cells=math.ceil(num_cells_rna * FILTER_OUT_LOWEST_PCT_GENES))
-        sc.pp.filter_genes(adata_ATAC, min_cells=math.ceil(num_cells_atac * FILTER_OUT_LOWEST_PCT_PEAKS))
+        sc.pp.filter_genes(adata_RNA, min_cells=math.ceil(n_cells_rna * FILTER_OUT_LOWEST_PCT_GENES))
     elif FILTER_TYPE == "count":
         sc.pp.filter_genes(adata_RNA, min_counts=FILTER_OUT_LOWEST_COUNTS_GENES)
-        sc.pp.filter_genes(adata_ATAC, min_counts=FILTER_OUT_LOWEST_COUNTS_PEAKS)
     else:
         raise ValueError(f"Unknown filter type: {FILTER_TYPE}")
-    
-    # Preprocess RNA
+
     sc.pp.normalize_total(adata_RNA, target_sum=1e6)
     sc.pp.log1p(adata_RNA)
     sc.pp.highly_variable_genes(adata_RNA, min_mean=0.0125, max_mean=3, min_disp=0.5)
     adata_RNA.layers["log1p"] = adata_RNA.X.copy()
     sc.pp.scale(adata_RNA, max_value=10)
-    adata_RNA = adata_RNA[:, adata_RNA.var.highly_variable]
+    adata_RNA = adata_RNA[:, adata_RNA.var.highly_variable].copy()
     sc.tl.pca(adata_RNA, n_comps=PCA_COMPONENTS, svd_solver="arpack")
 
-    # Preprocess ATAC
-    sc.pp.log1p(adata_ATAC)
-    sc.pp.highly_variable_genes(adata_ATAC, min_mean=0.0125, max_mean=3, min_disp=0.5)
-    adata_ATAC.layers["log1p"] = adata_ATAC.X.copy()
-    adata_ATAC = adata_ATAC[:, adata_ATAC.var.highly_variable]
-    sc.pp.scale(adata_ATAC, max_value=10, zero_center=True)
-    sc.tl.pca(adata_ATAC, n_comps=PCA_COMPONENTS, svd_solver="arpack")
-    
-    # After filtering to common barcodes
-    common_barcodes = adata_RNA.obs_names.intersection(adata_ATAC.obs_names)
-    
-    adata_RNA = adata_RNA[common_barcodes].copy()
-    adata_ATAC = adata_ATAC[common_barcodes].copy()
-    
+    # -----------------------------
+    # ATAC QC + peak filtering (best practices)
+    # -----------------------------
+    # Make sure matrix is sparse CSR
+    adata_ATAC.X = _ensure_csr(adata_ATAC.X)
+
+    # Peak-level QC filters
+    adata_ATAC = _filter_standard_chroms(adata_ATAC, keep_chrM=False)
+    adata_ATAC = _filter_peak_widths(adata_ATAC, min_width=20, max_width=10_000)
+
+    # Optional: ENCODE blacklist filtering (if you have a BED path)
+    # adata_ATAC = _optional_blacklist_filter(adata_ATAC, blacklist_bed=BLACKLIST_BED)
+
+    # Cell-level QC metrics for ATAC
+    sc.pp.calculate_qc_metrics(adata_ATAC, inplace=True)  # gives total_counts and n_genes_by_counts (peaks detected)
+
+    # Basic hard filters (assumed defined globally)
+    # NOTE: scanpy calls features "genes" in these helpers; for ATAC they are peaks.
+    sc.pp.filter_cells(adata_ATAC, min_genes=MIN_PEAKS_PER_CELL)
+
+    # Robust outlier trimming on ATAC library size (fragments-in-peaks proxy)
+    # (prevents a few extreme cells from dominating)
+    x = np.log1p(adata_ATAC.obs["total_counts"].to_numpy())
+    keep_cells = _quantile_clip_mask(x, lo=0.01, hi=0.99)
+    adata_ATAC = adata_ATAC[keep_cells].copy()
+
+    # Peak prevalence filter (remove ultra-rare peaks)
+    n_cells_atac = adata_ATAC.n_obs
+    min_cells_peaks = max(15, math.ceil(n_cells_atac * 0.001))  # 0.1% of cells or 15, whichever larger
+    sc.pp.filter_genes(adata_ATAC, min_cells=min_cells_peaks)
+
+    # -----------------------------
+    # ATAC preprocessing: TF-IDF + LSI
+    # -----------------------------
+    _tfidf_lsi(
+        adata_ATAC,
+        n_components=PCA_COMPONENTS,
+        drop_first=True,
+        binarize=True,
+        obsm_key="X_lsi",
+    )
+
+    # -----------------------------
+    # Final sync (in case filtering removed different cells)
+    # -----------------------------
+    common2 = adata_RNA.obs_names.intersection(adata_ATAC.obs_names)
+    adata_RNA = adata_RNA[common2].copy()
+    adata_ATAC = adata_ATAC[common2].copy()
+
+    logging.info(f"[END] RNA shape={adata_RNA.shape}, ATAC shape={adata_ATAC.shape}")
+
     return adata_RNA, adata_ATAC
 
 def _canon(x: str) -> str:
