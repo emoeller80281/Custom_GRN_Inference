@@ -32,11 +32,312 @@ from multiomic_transformer.utils.downloads import *
 from multiomic_transformer.data.sliding_window import run_sliding_window_scan
 from multiomic_transformer.data.build_pkn import build_organism_pkns
 from multiomic_transformer.utils.gene_canonicalizer import GeneCanonicalizer
-from config.settings_hpc import *
 
 random.seed(1337)
 np.random.seed(1337)
 torch.manual_seed(1337)
+
+# ----- Argument Parser Setup -----
+def parse_preprocessing_args():
+    """
+    Parse command-line arguments for preprocessing configuration.
+    All global settings can be overridden via command-line arguments.
+    """
+    parser = argparse.ArgumentParser(
+        description="Preprocess single-cell multiomics data for MultiomicTransformer",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    
+    # ----- Required Arguments -----
+    parser.add_argument("--num_cpu", type=int, required=True,
+                        help="Number of CPU cores for parallel processing")
+    
+    # ----- Path Configuration -----
+    parser.add_argument("--root_dir", type=Path, default=None,
+                        help="Root directory of the project")
+    parser.add_argument("--project_data_dir", type=Path, default=None,
+                        help="Project data directory")
+    parser.add_argument("--project_result_dir", type=Path, default=None,
+                        help="Project results directory")
+    
+    # ----- Sample Information -----
+    parser.add_argument("--organism_code", type=str, default="mm10",
+                        choices=["mm10", "hg38"],
+                        help="Organism code (mm10 for mouse, hg38 for human)")
+    parser.add_argument("--dataset_name", type=str, default="mESC_default",
+                        help="Name of the dataset/experiment")
+    parser.add_argument("--chrom_id_list", type=str, nargs="+", default=None,
+                        help="List of chromosome IDs to process (e.g., chr1 chr2 chr3)")
+    parser.add_argument("--chrom_id", type=str, default="chr19",
+                        help="Single chromosome ID for processing")
+    parser.add_argument("--chrom_ids", type=str, nargs="+", default=None,
+                        help="List of chromosome IDs for multi-chromosome processing")
+    parser.add_argument("--sample_names", type=str, nargs="+", default=None,
+                        help="List of sample names to process")
+    parser.add_argument("--fine_tuning_datasets", type=str, nargs="+", default=None,
+                        help="List of datasets for fine-tuning")
+    
+    # ----- Raw Data Paths -----
+    parser.add_argument("--raw_single_cell_data", type=Path, default=None,
+                        help="Path to raw single-cell data directory")
+    parser.add_argument("--raw_10x_rna_data_dir", type=Path, default=None,
+                        help="Path to raw 10x RNA data directory")
+    parser.add_argument("--raw_atac_peak_matrix_file", type=Path, default=None,
+                        help="Path to raw ATAC peak matrix file")
+    parser.add_argument("--raw_gse218576_dir", type=Path, default=None,
+                        help="Path to raw GSE218576 data directory")
+    parser.add_argument("--processed_gse218576_dir", type=Path, default=None,
+                        help="Path to processed GSE218576 data directory")
+    
+    # ----- QC Filtering Parameters -----
+    parser.add_argument("--min_genes_per_cell", type=int, default=200,
+                        help="Minimum number of genes expressed per cell")
+    parser.add_argument("--min_peaks_per_cell", type=int, default=200,
+                        help="Minimum number of peaks expressed per cell")
+    parser.add_argument("--filter_type", type=str, default="count",
+                        choices=["count", "pct"],
+                        help="Filter type: 'count' or 'pct' (percentage)")
+    parser.add_argument("--filter_out_lowest_counts_genes", type=int, default=3,
+                        help="Filter out genes expressed in fewer than this many cells")
+    parser.add_argument("--filter_out_lowest_counts_peaks", type=int, default=3,
+                        help="Filter out peaks expressed in fewer than this many cells")
+    parser.add_argument("--filter_out_lowest_pct_genes", type=float, default=0.1,
+                        help="Filter out genes expressed in less than this percentage of cells")
+    parser.add_argument("--filter_out_lowest_pct_peaks", type=float, default=0.01,
+                        help="Filter out peaks expressed in less than this percentage of cells")
+    
+    # ----- File Naming Configuration -----
+    parser.add_argument("--processed_rna_filename", type=str, default="scRNA_seq_processed.parquet",
+                        help="Filename for processed RNA data")
+    parser.add_argument("--processed_atac_filename", type=str, default="scATAC_seq_processed.parquet",
+                        help="Filename for processed ATAC data")
+    parser.add_argument("--raw_rna_file", type=str, default="scRNA_seq_raw.parquet",
+                        help="Filename for raw RNA data")
+    parser.add_argument("--raw_atac_file", type=str, default="scATAC_seq_raw.parquet",
+                        help="Filename for raw ATAC data")
+    parser.add_argument("--adata_rna_file", type=str, default="adata_RNA.h5ad",
+                        help="Filename for RNA AnnData object")
+    parser.add_argument("--adata_atac_file", type=str, default="adata_ATAC.h5ad",
+                        help="Filename for ATAC AnnData object")
+    parser.add_argument("--pseudobulk_tg_file", type=str, default="TG_pseudobulk.tsv",
+                        help="Filename for target gene pseudobulk data")
+    parser.add_argument("--pseudobulk_re_file", type=str, default="RE_pseudobulk.tsv",
+                        help="Filename for regulatory element pseudobulk data")
+    
+    # ----- Pseudobulk and Preprocessing Parameters -----
+    parser.add_argument("--neighbors_k", type=int, default=20,
+                        help="Number of nearest neighbors per cell in KNN graph")
+    parser.add_argument("--pca_components", type=int, default=25,
+                        help="Number of PCA components per modality")
+    parser.add_argument("--hops", type=int, default=0,
+                        help="Number of diffusion hops for soft metacells")
+    parser.add_argument("--self_weight", type=float, default=1.0,
+                        help="Self-loop weight in neighborhood graph")
+    
+    # ----- Data Preprocessing and Caching -----
+    parser.add_argument("--validation_datasets", type=str, nargs="+", default=None,
+                        help="List of validation dataset names")
+    parser.add_argument("--force_recalculate", action="store_true",
+                        help="Force recalculation of all cached data")
+    parser.add_argument("--window_size", type=int, default=1000,
+                        help="Size of genomic windows in base pairs")
+    parser.add_argument("--distance_scale_factor", type=int, default=20000,
+                        help="Scale factor for peak-gene distance weighting")
+    parser.add_argument("--max_peak_distance", type=int, default=150000,
+                        help="Maximum distance from peak to gene TSS")
+    parser.add_argument("--dist_bias_mode", type=str, default="logsumexp",
+                        choices=["max", "sum", "mean", "logsumexp"],
+                        help="Method for calculating window-to-gene distance")
+    parser.add_argument("--filter_to_nearest_gene", action="store_true", default=False,
+                        help="Associate peaks only to nearest gene")
+    parser.add_argument("--promoter_bp", type=int, default=None,
+                        help="Promoter region size in base pairs (None for no promoter filtering)")
+    
+    # ----- Database and Reference Files -----
+    parser.add_argument("--database_dir", type=Path, default=None,
+                        help="Database directory path")
+    parser.add_argument("--genome_dir", type=Path, default=None,
+                        help="Genome data directory")
+    parser.add_argument("--chrom_sizes_file", type=Path, default=None,
+                        help="Chromosome sizes file path")
+    parser.add_argument("--gtf_file_dir", type=Path, default=None,
+                        help="GTF annotation file directory")
+    parser.add_argument("--ncbi_file_dir", type=Path, default=None,
+                        help="NCBI gene info directory")
+    parser.add_argument("--gene_tss_file", type=Path, default=None,
+                        help="Gene TSS BED file path")
+    parser.add_argument("--tf_file", type=Path, default=None,
+                        help="Transcription factor information file")
+    parser.add_argument("--jaspar_pfm_dir", type=Path, default=None,
+                        help="JASPAR PFM directory")
+    parser.add_argument("--motif_dir", type=Path, default=None,
+                        help="Motif PWM directory")
+    
+    # ----- Ground Truth and PKN Files -----
+    parser.add_argument("--chip_ground_truth", type=Path, default=None,
+                        help="ChIP-seq ground truth file path")
+    parser.add_argument("--chip_ground_truth_sep", type=str, default=",",
+                        help="ChIP-seq ground truth file separator")
+    
+    # ----- Output Directories -----
+    parser.add_argument("--processed_data", type=Path, default=None,
+                        help="Processed data output directory")
+    parser.add_argument("--training_data_cache", type=Path, default=None,
+                        help="Training data cache directory")
+    parser.add_argument("--raw_data", type=Path, default=None,
+                        help="Raw data directory")
+    parser.add_argument("--pkn_dir", type=Path, default=None,
+                        help="Prior knowledge network directory")
+    parser.add_argument("--string_dir", type=Path, default=None,
+                        help="STRING database directory")
+    parser.add_argument("--trrust_dir", type=Path, default=None,
+                        help="TRRUST database directory")
+    parser.add_argument("--kegg_dir", type=Path, default=None,
+                        help="KEGG database directory")
+    parser.add_argument("--experiment_dir", type=Path, default=None,
+                        help="Experiment output directory")
+    parser.add_argument("--output_dir", type=Path, default=None,
+                        help="Main output directory")
+    
+    return parser.parse_args()
+
+
+def setup_global_variables(args):
+    """
+    Convert argparse arguments to global variables.
+    This maintains backward compatibility with code that expects global variables.
+    """
+    global ROOT_DIR, PROJECT_DATA_DIR, PROJECT_RESULT_DIR
+    global ORGANISM_CODE, DATASET_NAME, CHROM_ID_LIST, CHROM_ID, CHROM_IDS
+    global SAMPLE_NAMES, FINE_TUNING_DATASETS
+    global RAW_SINGLE_CELL_DATA, RAW_10X_RNA_DATA_DIR, RAW_ATAC_PEAK_MATRIX_FILE
+    global RAW_GSE218576_DIR, PROCESSED_GSE218576_DIR
+    global MIN_GENES_PER_CELL, MIN_PEAKS_PER_CELL
+    global FILTER_TYPE, FILTER_OUT_LOWEST_COUNTS_GENES, FILTER_OUT_LOWEST_COUNTS_PEAKS
+    global FILTER_OUT_LOWEST_PCT_GENES, FILTER_OUT_LOWEST_PCT_PEAKS
+    global PROCESSED_RNA_FILENAME, PROCESSED_ATAC_FILENAME
+    global RAW_RNA_FILE, RAW_ATAC_FILE, ADATA_RNA_FILE, ADATA_ATAC_FILE
+    global PSEUDOBULK_TG_FILE, PSEUDOBULK_RE_FILE
+    global NEIGHBORS_K, PCA_COMPONENTS, HOPS, SELF_WEIGHT
+    global VALIDATION_DATASETS, FORCE_RECALCULATE, WINDOW_SIZE
+    global DISTANCE_SCALE_FACTOR, MAX_PEAK_DISTANCE, DIST_BIAS_MODE
+    global FILTER_TO_NEAREST_GENE, PROMOTER_BP
+    global DATABASE_DIR, GENOME_DIR, CHROM_SIZES_FILE, GTF_FILE_DIR, NCBI_FILE_DIR
+    global GENE_TSS_FILE, TF_FILE, JASPAR_PFM_DIR, MOTIF_DIR
+    global CHIP_GROUND_TRUTH, CHIP_GROUND_TRUTH_SEP
+    global PROCESSED_DATA, TRAINING_DATA_CACHE, RAW_DATA, PKN_DIR
+    global STRING_DIR, TRRUST_DIR, KEGG_DIR, EXPERIMENT_DIR, OUTPUT_DIR
+    global SAMPLE_PROCESSED_DATA_DIR, SAMPLE_DATA_CACHE_DIR, COMMON_DATA
+    
+    # Set ROOT_DIR from args or default to script's parent directory
+    ROOT_DIR = args.root_dir if args.root_dir else Path(__file__).resolve().parent.parent.parent
+    
+    # Set primary directories
+    PROJECT_DATA_DIR = args.project_data_dir if args.project_data_dir else ROOT_DIR / "data"
+    PROJECT_RESULT_DIR = args.project_result_dir if args.project_result_dir else ROOT_DIR / "results"
+    
+    # Sample information
+    ORGANISM_CODE = args.organism_code
+    DATASET_NAME = args.dataset_name
+    
+    # Handle chromosome lists
+    if args.chrom_id_list:
+        CHROM_ID_LIST = args.chrom_id_list
+    else:
+        # Default for mouse
+        chr_nums = [f"chr{i}" for i in range(1, 20)]
+        CHROM_ID_LIST = chr_nums
+    
+    CHROM_ID = args.chrom_id
+    CHROM_IDS = args.chrom_ids if args.chrom_ids else CHROM_ID_LIST
+    
+    # Sample names
+    if args.sample_names:
+        SAMPLE_NAMES = args.sample_names
+    else:
+        # Default samples
+        SAMPLE_NAMES = ["E7.5_rep1", "E7.5_rep2", "E7.75_rep1", "E8.0_rep2", 
+                        "E8.5_rep2", "E8.75_rep2", "E8.0_rep1", "E8.5_rep1"]
+    
+    FINE_TUNING_DATASETS = args.fine_tuning_datasets if args.fine_tuning_datasets else SAMPLE_NAMES
+    
+    # Raw data paths
+    RAW_SINGLE_CELL_DATA = args.raw_single_cell_data
+    RAW_10X_RNA_DATA_DIR = args.raw_10x_rna_data_dir
+    RAW_ATAC_PEAK_MATRIX_FILE = args.raw_atac_peak_matrix_file
+    RAW_GSE218576_DIR = args.raw_gse218576_dir if args.raw_gse218576_dir else ROOT_DIR / "data/raw/GSE218576"
+    PROCESSED_GSE218576_DIR = args.processed_gse218576_dir if args.processed_gse218576_dir else ROOT_DIR / "data/processed/GSE218576"
+    
+    # QC Filtering
+    MIN_GENES_PER_CELL = args.min_genes_per_cell
+    MIN_PEAKS_PER_CELL = args.min_peaks_per_cell
+    FILTER_TYPE = args.filter_type
+    FILTER_OUT_LOWEST_COUNTS_GENES = args.filter_out_lowest_counts_genes
+    FILTER_OUT_LOWEST_COUNTS_PEAKS = args.filter_out_lowest_counts_peaks
+    FILTER_OUT_LOWEST_PCT_GENES = args.filter_out_lowest_pct_genes
+    FILTER_OUT_LOWEST_PCT_PEAKS = args.filter_out_lowest_pct_peaks
+    
+    # File naming
+    PROCESSED_RNA_FILENAME = args.processed_rna_filename
+    PROCESSED_ATAC_FILENAME = args.processed_atac_filename
+    RAW_RNA_FILE = args.raw_rna_file
+    RAW_ATAC_FILE = args.raw_atac_file
+    ADATA_RNA_FILE = args.adata_rna_file
+    ADATA_ATAC_FILE = args.adata_atac_file
+    PSEUDOBULK_TG_FILE = args.pseudobulk_tg_file
+    PSEUDOBULK_RE_FILE = args.pseudobulk_re_file
+    
+    # Pseudobulk parameters
+    NEIGHBORS_K = args.neighbors_k
+    PCA_COMPONENTS = args.pca_components
+    HOPS = args.hops
+    SELF_WEIGHT = args.self_weight
+    
+    # Preprocessing parameters
+    VALIDATION_DATASETS = args.validation_datasets if args.validation_datasets else ["E8.75_rep1"]
+    FORCE_RECALCULATE = args.force_recalculate
+    WINDOW_SIZE = args.window_size
+    DISTANCE_SCALE_FACTOR = args.distance_scale_factor
+    MAX_PEAK_DISTANCE = args.max_peak_distance
+    DIST_BIAS_MODE = args.dist_bias_mode
+    FILTER_TO_NEAREST_GENE = args.filter_to_nearest_gene
+    PROMOTER_BP = args.promoter_bp
+    
+    # Database and reference directories
+    DATABASE_DIR = args.database_dir if args.database_dir else ROOT_DIR / "data"
+    GENOME_DIR = args.genome_dir if args.genome_dir else DATABASE_DIR / "genome_data" / "reference_genome" / ORGANISM_CODE
+    CHROM_SIZES_FILE = args.chrom_sizes_file if args.chrom_sizes_file else GENOME_DIR / f"{ORGANISM_CODE}.chrom.sizes"
+    GTF_FILE_DIR = args.gtf_file_dir if args.gtf_file_dir else DATABASE_DIR / "genome_data" / "genome_annotation" / ORGANISM_CODE
+    NCBI_FILE_DIR = args.ncbi_file_dir if args.ncbi_file_dir else DATABASE_DIR / "genome_data" / "genome_annotation" / ORGANISM_CODE
+    GENE_TSS_FILE = args.gene_tss_file if args.gene_tss_file else DATABASE_DIR / "genome_data" / "genome_annotation" / ORGANISM_CODE / "gene_tss.bed"
+    TF_FILE = args.tf_file if args.tf_file else DATABASE_DIR / "databases" / "motif_information" / ORGANISM_CODE / "TF_Information_all_motifs.txt"
+    JASPAR_PFM_DIR = args.jaspar_pfm_dir if args.jaspar_pfm_dir else DATABASE_DIR / "databases" / "motif_information" / "JASPAR" / "pfm_files"
+    MOTIF_DIR = args.motif_dir if args.motif_dir else DATABASE_DIR / "databases" / "motif_information" / ORGANISM_CODE / "pwms_all_motifs"
+    
+    # Ground truth
+    CHIP_GROUND_TRUTH = args.chip_ground_truth if args.chip_ground_truth else DATABASE_DIR / "ground_truth_files" / "mESC_beeline_ChIP-seq.csv"
+    CHIP_GROUND_TRUTH_SEP = args.chip_ground_truth_sep
+    
+    # Output directories
+    PROCESSED_DATA = args.processed_data if args.processed_data else DATABASE_DIR / "processed"
+    TRAINING_DATA_CACHE = args.training_data_cache if args.training_data_cache else DATABASE_DIR / "training_data_cache"
+    RAW_DATA = args.raw_data if args.raw_data else DATABASE_DIR / "raw"
+    PKN_DIR = args.pkn_dir if args.pkn_dir else DATABASE_DIR / "prior_knowledge_network_data" / ORGANISM_CODE
+    
+    # PKN subdirectories
+    STRING_DIR = args.string_dir if args.string_dir else DATABASE_DIR / "prior_knowledge_network_data" / ORGANISM_CODE / "STRING"
+    TRRUST_DIR = args.trrust_dir if args.trrust_dir else DATABASE_DIR / "prior_knowledge_network_data" / ORGANISM_CODE / "TRRUST"
+    KEGG_DIR = args.kegg_dir if args.kegg_dir else DATABASE_DIR / "prior_knowledge_network_data" / ORGANISM_CODE / "KEGG"
+    
+    # Experiment directories
+    EXPERIMENT_DIR = args.experiment_dir if args.experiment_dir else PROJECT_DATA_DIR / "experiments"
+    OUTPUT_DIR = args.output_dir if args.output_dir else EXPERIMENT_DIR / DATASET_NAME
+    
+    # Sample-specific paths
+    SAMPLE_PROCESSED_DATA_DIR = PROCESSED_DATA / DATASET_NAME
+    SAMPLE_DATA_CACHE_DIR = TRAINING_DATA_CACHE / DATASET_NAME
+    COMMON_DATA = SAMPLE_DATA_CACHE_DIR / "common"
+
 
 # ----- Data Loading and Processing -----
 def pseudo_bulk(
@@ -306,154 +607,6 @@ def _configured_path(
 
     p = Path(raw)
     return p if p.is_absolute() else (sample_input_dir / p)
-
-_peak_re = re.compile(r"^(?P<chrom>[^:]+):(?P<start>\d+)-(?P<end>\d+)$")
-
-def _ensure_csr(X):
-    if sp.issparse(X):
-        return X.tocsr()
-    return sp.csr_matrix(X)
-
-def _parse_peaks_from_varnames(adata_atac: AnnData) -> None:
-    """
-    Ensure adata_atac.var has 'chrom', 'start', 'end', 'width' columns.
-    Expects var_names like 'chr1:123-456' if not already present.
-    """
-    v = adata_atac.var
-    if {"chrom", "start", "end"}.issubset(v.columns):
-        pass
-    else:
-        chrom = np.empty(adata_atac.n_vars, dtype=object)
-        start = np.full(adata_atac.n_vars, -1, dtype=np.int64)
-        end   = np.full(adata_atac.n_vars, -1, dtype=np.int64)
-
-        for i, name in enumerate(adata_atac.var_names):
-            m = _peak_re.match(str(name))
-            if m is None:
-                chrom[i] = None
-                continue
-            chrom[i] = m.group("chrom")
-            start[i] = int(m.group("start"))
-            end[i]   = int(m.group("end"))
-
-        v["chrom"] = chrom
-        v["start"] = start
-        v["end"]   = end
-
-    v["width"] = (v["end"].astype(np.int64) - v["start"].astype(np.int64))
-
-
-def _filter_standard_chroms(
-    adata_atac: AnnData,
-    keep_chrM: bool = False,
-    chrom_regex: str = r"^chr(\d+|X|Y)$",
-) -> AnnData:
-    _parse_peaks_from_varnames(adata_atac)
-    chrom = adata_atac.var["chrom"].astype(str)
-
-    keep = chrom.str.match(chrom_regex, na=False)
-    if keep_chrM:
-        keep |= (chrom == "chrM")
-
-    # Drop rows where parsing failed too
-    keep &= (adata_atac.var["start"].to_numpy() >= 0) & (adata_atac.var["end"].to_numpy() >= 0)
-
-    return adata_atac[:, keep].copy()
-
-
-def _filter_peak_widths(
-    adata_atac: AnnData,
-    min_width: int = 20,
-    max_width: int = 10_000,
-) -> AnnData:
-    _parse_peaks_from_varnames(adata_atac)
-    w = adata_atac.var["width"].to_numpy()
-    keep = (w >= min_width) & (w <= max_width)
-    return adata_atac[:, keep].copy()
-
-
-def _optional_blacklist_filter(
-    adata_atac: AnnData,
-    blacklist_bed: Optional[str] = None,
-) -> AnnData:
-    """
-    Remove peaks overlapping blacklist regions if a BED is provided.
-    Requires pyranges: pip install pyranges
-    """
-    if not blacklist_bed:
-        return adata_atac
-
-    try:
-        import pyranges as pr
-    except ImportError as e:
-        raise ImportError("Blacklist filtering requested but pyranges is not installed.") from e
-
-    _parse_peaks_from_varnames(adata_atac)
-    peaks = adata_atac.var[["chrom", "start", "end"]].copy()
-    peaks.columns = ["Chromosome", "Start", "End"]
-    peaks_pr = pr.PyRanges(peaks)
-
-    bl_pr = pr.read_bed(blacklist_bed)
-    # remove any overlapping peaks
-    overlaps = peaks_pr.overlap(bl_pr)
-    if len(overlaps) == 0:
-        return adata_atac
-
-    # Build a boolean mask of peaks that overlap
-    overlap_idx = set(overlaps.df.index.tolist())
-    keep = np.array([i not in overlap_idx for i in range(adata_atac.n_vars)], dtype=bool)
-
-    return adata_atac[:, keep].copy()
-
-
-def _tfidf_lsi(
-    adata_atac: AnnData,
-    n_components: int = 50,
-    drop_first: bool = True,
-    binarize: bool = True,
-    obsm_key: str = "X_lsi",
-) -> None:
-    """
-    Standard ATAC preprocessing: TF-IDF -> TruncatedSVD (LSI).
-    Stores embeddings in adata_atac.obsm[obsm_key].
-    """
-    X = _ensure_csr(adata_atac.X)
-
-    if binarize:
-        X = X.copy()
-        X.data[:] = 1.0
-
-    # Term Frequency: divide each row by its total
-    row_sums = np.asarray(X.sum(axis=1)).ravel()
-    row_sums[row_sums == 0] = 1.0
-    inv_row = 1.0 / row_sums
-    tf = sp.diags(inv_row) @ X
-
-    # IDF: log(1 + N / (1 + df))
-    df = np.asarray((X > 0).sum(axis=0)).ravel()
-    N = X.shape[0]
-    idf = np.log1p(N / (1.0 + df))
-    tfidf = tf @ sp.diags(idf)
-
-    svd = TruncatedSVD(n_components=n_components, random_state=0)
-    lsi = svd.fit_transform(tfidf)
-
-    if drop_first and lsi.shape[1] > 1:
-        lsi = lsi[:, 1:]
-
-    adata_atac.obsm[obsm_key] = lsi.astype(np.float32)
-    adata_atac.uns["lsi"] = {
-        "n_components": n_components,
-        "drop_first": drop_first,
-        "binarize": binarize,
-        "explained_variance_ratio": getattr(svd, "explained_variance_ratio_", None),
-    }
-
-
-def _quantile_clip_mask(x: np.ndarray, lo: float, hi: float) -> np.ndarray:
-    qlo, qhi = np.quantile(x, [lo, hi])
-    return (x >= qlo) & (x <= qhi)
-
 
 def process_or_load_rna_atac_data(
     sample_input_dir: Union[str, Path],
@@ -960,8 +1113,6 @@ def _canon(x: str) -> str:
     s = re.sub(r"\.\d+$", "", s)
     return s.upper()
 
-
-# --- load existing lists (if any) and union ---
 def _read_list(path: Path, col: str) -> list[str]:
     if path.is_file():
         df = pd.read_csv(path)
@@ -1108,7 +1259,6 @@ def make_gene_tss_bed_file(gene_tss_file, genome_dir):
     bed_path = os.path.join(genome_dir, "gene_tss.bed")
     gene_tss_df.to_csv(bed_path, sep="\t", header=False, index=False)
     return gene_tss_df
-
 
 def build_peak_locs_from_index(
     peak_index: pd.Index,
@@ -1769,7 +1919,6 @@ def create_single_cell_tensors(
                 f"[{sample_name} | {chrom_id}] No TF rows found in single-cell TG matrix"
             )
 
-
 def aggregate_pseudobulk_datasets(
     sample_names: list[str],
     dataset_processed_data_dir: Path,
@@ -1932,7 +2081,6 @@ def aggregate_pseudobulk_datasets(
             pseudobulk_chrom_dict = pickle.load(f)
 
     return total_TG_pseudobulk_global, pseudobulk_chrom_dict
-
 
 def create_or_load_genomic_windows(
     window_size,
@@ -2246,10 +2394,13 @@ def build_distance_bias(
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    parser = argparse.ArgumentParser(description="Main preprocessing script.")
-    parser.add_argument("--num_cpu", required=True, help="Number of cores for parallel processing")
-    args = parser.parse_args()
-    num_cpu = int(args.num_cpu)
+    
+    # Parse command-line arguments
+    args = parse_preprocessing_args()
+    num_cpu = args.num_cpu
+    
+    # Setup global variables from parsed arguments
+    setup_global_variables(args)
     
     # ----- GLOBAL SETTINGS -----
     # TF and TG vocab files

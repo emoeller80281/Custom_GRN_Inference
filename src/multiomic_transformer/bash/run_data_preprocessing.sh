@@ -6,7 +6,7 @@
 #SBATCH -p memory
 #SBATCH -N 1
 #SBATCH --ntasks-per-node=1
-#SBATCH -c 8
+#SBATCH -c 24
 #SBATCH --mem=512G
 
 set -euo pipefail
@@ -14,4 +14,4 @@ set -euo pipefail
 module load bedtools
 source .venv/bin/activate
 
-poetry run python ./src/multiomic_transformer/data/preprocess.py --num_cpu 8
+poetry run python ./src/multiomic_transformer/data/preprocess.py --num_cpu 24

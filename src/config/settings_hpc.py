@@ -14,7 +14,7 @@ chrom_list = chr_nums #+ ["chrX", "chrY"]
 # ----- SAMPLE INFORMATION -----
 # Sample information
 ORGANISM_CODE = "mm10"
-DATASET_NAME = "mESC_larger_window_size"
+DATASET_NAME = "mESC_higher_max_peak_dist"
 CHROM_ID_LIST = chrom_list
 CHROM_ID = "chr19"
 CHROM_IDS = chr_nums
@@ -35,11 +35,13 @@ PROCESSED_GSE218576_DIR = ROOT_DIR / "data/processed/GSE218576"
 MIN_GENES_PER_CELL = 200         # Minimum number of genes expressed per cell
 MIN_PEAKS_PER_CELL = 200         # Minimum number of peaks expressed per cell
 
-FILTER_TYPE = "pct"              # Choose whether to filter cells by percent of cells expressing each gene or peak. Options are "pct" or "count"
+FILTER_TYPE = "count"              # Choose whether to filter cells by percent of cells expressing each gene or peak. Options are "pct" or "count"
 
 FILTER_OUT_LOWEST_COUNTS_GENES = 3
+FILTER_OUT_LOWEST_COUNTS_PEAKS = 3
 
 FILTER_OUT_LOWEST_PCT_GENES = 0.1
+FILTER_OUT_LOWEST_PCT_PEAKS = 0.01
 
 # Pseudobulk and Data Preprocessing
 # Change these files to suit what you want the raw or processed files to look like.
@@ -61,9 +63,9 @@ SELF_WEIGHT = 1.0       # How much to weight the cells own gene expression. High
 # Data Preprocessing and Caching
 VALIDATION_DATASETS = ["E8.75_rep1"]
 FORCE_RECALCULATE = False                # Recomputes genomic windows, peak-TG distance, and re-runs sliding window TF-peak scan
-WINDOW_SIZE = 1500                     # Aggregates peaks within WINDOW_SIZE bp genomic tiles
+WINDOW_SIZE = 1000                     # Aggregates peaks within WINDOW_SIZE bp genomic tiles
 DISTANCE_SCALE_FACTOR = 20_000           # Weights the peak-gene TSS distance score. Lower numbers = faster dropoff
-MAX_PEAK_DISTANCE = 100_000              # Masks out peaks further than this distance from the gene TSS
+MAX_PEAK_DISTANCE = 150_000              # Masks out peaks further than this distance from the gene TSS
 DIST_BIAS_MODE = "logsumexp"            # Method for calcuting window -> gene TSS distance. Options: "max" | "sum" | "mean" | "logsumexp"
 FILTER_TO_NEAREST_GENE = True           # Associate peaks to the nearest gene
 PROMOTER_BP = None #10_000
@@ -173,8 +175,6 @@ PKN_DIR = DATABASE_DIR / "prior_knowledge_network_data" / ORGANISM_CODE
 STRING_DIR = DATABASE_DIR / "prior_knowledge_network_data" / ORGANISM_CODE / "STRING" 
 TRRUST_DIR = DATABASE_DIR / "prior_knowledge_network_data" / ORGANISM_CODE / "TRRUST" 
 KEGG_DIR = DATABASE_DIR / "prior_knowledge_network_data" / ORGANISM_CODE / "KEGG" 
-
-
 
 EXPERIMENT_DIR = PROJECT_DATA_DIR / "experiments"
 OUTPUT_DIR = EXPERIMENT_DIR / DATASET_NAME
