@@ -44,7 +44,7 @@ SELECTED_EXPERIMENT_DIR=${EXPERIMENT_DIR_LIST[$SLURM_ARRAY_TASK_ID]}
 echo "Running auroc testing on experiment directory: $SELECTED_EXPERIMENT_DIR"
 echo "Array task ID: $SLURM_ARRAY_TASK_ID"
 
-poetry run python ./dev/auroc_testing.py \
+poetry run python ./src/multiomic_transformer/utils/auroc_testing.py \
     --experiment_dir_list "$SELECTED_EXPERIMENT_DIR"
 
 echo "finished"

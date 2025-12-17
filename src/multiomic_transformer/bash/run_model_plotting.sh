@@ -53,7 +53,7 @@ echo "  TASK ID: ${TASK_ID}"
 echo "=========================================="
 echo ""
 
-poetry run python ./dev/plotting.py \
+poetry run python ./src/multiomic_transformer/utils/plotting.py \
     --experiment "$EXPERIMENT_NAME" \
     --training_num "$TRAINING_NUM" \
     --experiment_dir "$EXPERIMENT_DIR" \
