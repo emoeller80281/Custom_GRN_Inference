@@ -32,12 +32,11 @@ EXPERIMENT_DIR=${EXPERIMENT_DIR:-/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_
 EXPERIMENT_DIR_LIST=(
     $EXPERIMENT_DIR/mESC_lower_peak_threshold/chr19/model_training_001
     $EXPERIMENT_DIR/mESC_no_filter_to_nearest_gene/chr19/model_training_001
+    $EXPERIMENT_DIR/mESC_smaller_window_size/chr19/model_training_001
+    $EXPERIMENT_DIR/mESC_larger_window_size/chr19/model_training_001
     $EXPERIMENT_DIR/mESC_lower_max_peak_dist/chr19/model_training_001
+    $EXPERIMENT_DIR/mESC_higher_max_peak_dist/chr19/model_training_001
 )
-
-# EXPERIMENT_DIR_LIST=(
-#     $EXPERIMENT_DIR/mESC_filter_lowest_ten_pct/chr19/model_training_003/fine_tuning
-# )
 
 # Select the experiment for this array task
 SELECTED_EXPERIMENT_DIR=${EXPERIMENT_DIR_LIST[$SLURM_ARRAY_TASK_ID]}
