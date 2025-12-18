@@ -9,7 +9,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 16
 #SBATCH --mem=256G
-#SBATCH --array=0%2
+#SBATCH --array=0-3%2
 
 set -euo pipefail
 
@@ -46,11 +46,12 @@ DEFAULT_PROMOTER_BP=""
 
 EXPERIMENTS=(
     # "test_new_pipeline|mESC_test_new_pipeline|MIN_GENES_PER_CELL=100;MIN_PEAKS_PER_CELL=100;HOPS=0;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.1;FILTER_OUT_LOWEST_PCT_PEAKS=0.1"
-    # "no_filter_to_nearest_gene|mESC_no_filter_to_nearest_gene|FILTER_TO_NEAREST_GENE=false;HOPS=0"
+    "no_filter_to_nearest_gene|mESC_no_filter_to_nearest_gene|FILTER_TO_NEAREST_GENE=false;HOPS=0"
     # "smaller_window_size|mESC_smaller_window_size|WINDOW_SIZE=500;HOPS=0"
-    "larger_window_size|mESC_larger_window_size|WINDOW_SIZE=1500;HOPS=0"
-    # "lower_max_peak_dist|mESC_lower_max_peak_dist|MAX_PEAK_DISTANCE=50000;HOPS=0"
-    # "higher_max_peak_dist|mESC_higher_max_peak_dist|MAX_PEAK_DISTANCE=150000;HOPS=0"
+    # "larger_window_size|mESC_larger_window_size|WINDOW_SIZE=1500;HOPS=0"
+    "lower_max_peak_dist|mESC_lower_max_peak_dist|MAX_PEAK_DISTANCE=50000;HOPS=0"
+    "higher_max_peak_dist|mESC_higher_max_peak_dist|MAX_PEAK_DISTANCE=150000;HOPS=0"
+    "slow_decay_filter_ten_pct|mESC_slow_decay_filter_ten_pct|MIN_GENES_PER_CELL=100;MIN_PEAKS_PER_CELL=100;HOPS=0;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.1;FILTER_OUT_LOWEST_PCT_PEAKS=0.1;DISTANCE_SCALE_FACTOR=40000"
 )
 
 # ==========================================

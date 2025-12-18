@@ -21,10 +21,10 @@ EXPERIMENT_DIR=${EXPERIMENT_DIR:-/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_
 
 EXPERIMENT_LIST=(
     # "mESC_test_new_pipeline|model_training_001|trained_model.pt"
-    "mESC_lower_peak_threshold|model_training_001|trained_model.pt"
+    # "mESC_lower_peak_threshold|model_training_001|trained_model.pt"
     # "mESC_no_filter_to_nearest_gene|model_training_001|trained_model.pt"
     # "mESC_smaller_window_size|model_training_001|trained_model.pt"
-    # "mESC_larger_window_size|model_training_001|trained_model.pt"
+    "mESC_larger_window_size|model_training_001|trained_model.pt"
     # "mESC_lower_max_peak_dist|model_training_001|trained_model.pt"
     # "mESC_higher_max_peak_dist|model_training_001|trained_model.pt"
 )

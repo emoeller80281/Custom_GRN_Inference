@@ -294,7 +294,7 @@ def _compute_roc_auc(y_true, scores):
     fpr = np.concatenate([[0.0], fpr])
 
     # trapezoidal AUC
-    auc = np.trapezoid(tpr, fpr)  # or np.trapz(tpr, fpr) if needed
+    auc = np.trapz(tpr, fpr)
     return fpr, tpr, auc
 
 def plot_auroc_per_min_tg_r2(results_r2, min_r2_grid, baseline_macro, baseline_micro, experiment_dir):
@@ -1799,12 +1799,67 @@ if __name__ == "__main__":
     tf_names, tg_names = load_vocab(EXPERIMENT_DIR)
     grad_attrib_df = load_gradient_attribution_matrix(EXPERIMENT_DIR, tf_names, tg_names)
     
+    auroc_by_tg_r2_threshold_file = EXPERIMENT_DIR / "auroc_by_tg_r2_threshold.csv"
+    if not auroc_by_tg_r2_threshold_file.is_file():
+        per_tg_r2_valid = calculate_per_tg_r2(
+            model, test_loader, tg_names, tg_scaler, tf_scaler, state, device, checkpoint_file
+        )
+    
+        # Attach raw r2 to each GA edge
+        grad_attrib_with_r2 = (
+            grad_attrib_df
+            .merge(
+                per_tg_r2_valid[["tg", "r2"]],
+                how="left",
+                left_on="Target",
+                right_on="tg",
+            )
+            .drop(columns=["tg"])  # we already have Target
+            .rename(columns={"r2": "tg_r2"})
+        )
+
+        grad_attrib_with_r2 = grad_attrib_with_r2.dropna(subset=["tg_r2"])
+        
+        min_r2_grid = [-1.0, -0.5, 0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+        
+        results_r2, baseline_macro, baseline_micro = evaluate_min_tg_r2_filters(
+            base_edges_df=grad_attrib_with_r2,
+            ground_truth_df_dict=ground_truth_df_dict,
+            tf_names=tf_names,
+            tg_names=tg_names,
+            min_r2_grid=min_r2_grid,
+            min_edges=10,
+            min_pos=1,
+        )
+        
+        results_r2.to_csv(EXPERIMENT_DIR / "auroc_by_tg_r2_threshold.csv")
+        
+        plot_auroc_per_min_tg_r2(results_r2, min_r2_grid, baseline_macro, baseline_micro, EXPERIMENT_DIR)
+    else:
+        logging.info(f"Skipping calculation of per-TG R² threshold file (exists): {auroc_by_tg_r2_threshold_file}")
+    
+    r2_threshold = args.r2_threshold
+    if r2_threshold is not None:
+        logging.info(f"Filtering Gradient Attribution edges by per-TG R² > {r2_threshold}")
+        per_tg_r2_valid = pd.read_csv(auroc_by_tg_r2_threshold_file)
+        
+        # gradient_attrib_df has ['Source','Target','Score', ...]
+        grad_attrib_filtered = filter_grad_attrib_by_tg_r2(
+            grad_attrib_df,
+            per_tg_r2_valid,
+            r2_threshold=r2_threshold,
+        )
+    else:
+        logging.info("Not filtering Gradient Attribution edges by per-TG R²")
+        grad_attrib_filtered = grad_attrib_df
+
     # ---------- LOAD FEATURES ONCE ----------
     logging.info("Loading feature files")
     base_feature_dict = {
         "TF Knockout":               load_tf_knockout_scores(EXPERIMENT_DIR, tf_names, tg_names),
-        "Gradient Attribution":       grad_attrib_df,
+        "Gradient Attribution":       grad_attrib_filtered,
     }
+    
     
     # Save pre-filtered full feature scores
     prefiltered_edges_dir = EXPERIMENT_DIR / "score_grns"

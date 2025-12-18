@@ -34,7 +34,9 @@ dev/notebooks/sliding_window_calculation_method_testing_cache
 *.bed
 *.pairs
 *.npz
+*.h5
 *.out
+*.xlsx
 *.parquet
 .code-workspace
 
