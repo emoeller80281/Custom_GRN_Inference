@@ -478,8 +478,8 @@ if __name__ == "__main__":
     if "chr19" in [p.name for p in Path(experiment_dir / experiment).iterdir()] and experiment != "mESC_no_scale_linear":
         EXPERIMENT_DIR = experiment_dir / experiment / "chr19" / training_num
         
-        exp_fig_dir = FIG_DIR / experiment
-        exp_fig_data_dir = FIG_DATA / experiment
+        exp_fig_dir = FIG_DIR / experiment / training_num
+        exp_fig_data_dir = FIG_DATA / experiment / training_num
     else:
         EXPERIMENT_DIR = experiment_dir / experiment / training_num
         

@@ -1776,8 +1776,8 @@ if __name__ == "__main__":
     FIG_DIR = Path("/gpfs/Labs/Uzun/RESULTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/FIGURES")
     FIG_DATA = Path("/gpfs/Labs/Uzun/RESULTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/FIGURE_DATA")
 
-    exp_fig_dir = FIG_DIR / experiment
-    exp_fig_data_dir = FIG_DATA / experiment
+    exp_fig_dir = FIG_DIR / experiment / training_num
+    exp_fig_data_dir = FIG_DATA / experiment / training_num
 
     if not os.path.exists(exp_fig_data_dir):
         os.makedirs(exp_fig_data_dir)
