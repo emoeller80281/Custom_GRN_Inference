@@ -1082,7 +1082,7 @@ def filter_and_qc(adata_RNA: AnnData, adata_ATAC: AnnData) -> Tuple[AnnData, Ann
         raise ValueError(f"Unknown filter type: {FILTER_TYPE}")
     
     # Preprocess RNA
-    sc.pp.normalize_total(adata_RNA, target_sum=1e6)
+    sc.pp.normalize_total(adata_RNA, target_sum=1e4)
     sc.pp.log1p(adata_RNA)
     sc.pp.highly_variable_genes(adata_RNA, min_mean=0.0125, max_mean=3, min_disp=0.5)
     adata_RNA.layers["log1p"] = adata_RNA.X.copy()
@@ -1633,6 +1633,30 @@ def create_single_cell_tensors(
     single_cell_dir: Path,
 ):
     # Ensure gene_tss_df names are normalized
+    """
+    Builds single-cell tensors for a given chromosome and dataset.
+
+    Parameters
+    ----------
+    gene_tss_df : pd.DataFrame
+        Gene TSS bed file with columns 'chrom', 'start', 'end', 'name'
+    sample_names : list[str]
+        List of sample names to process
+    dataset_processed_data_dir : Path
+        Directory containing preprocessed data for this dataset
+    tg_vocab : dict[str, int]
+        Global TG vocabulary
+    tf_vocab : dict[str, int]
+        Global TF vocabulary
+    chrom_id : str
+        Chromosome ID to process
+    single_cell_dir : Path
+        Directory to save single-cell tensors
+
+    Returns
+    -------
+    None
+    """
     gene_tss_df = gene_tss_df.copy()
     gene_tss_df["name"] = gene_tss_df["name"].astype(str).map(standardize_name)
 
@@ -2766,7 +2790,7 @@ if __name__ == "__main__":
             create_single_cell_tensors(
                 gene_tss_df=gene_tss_df, 
                 sample_names=FINE_TUNING_DATASETS, 
-                dataset_processed_data_dir=RAW_DATA / DATASET_NAME, 
+                dataset_processed_data_dir=PROCESSED_DATA / DATASET_NAME, 
                 tg_vocab=tg_vocab, 
                 tf_vocab=tf_vocab, 
                 chrom_id=chrom_id,

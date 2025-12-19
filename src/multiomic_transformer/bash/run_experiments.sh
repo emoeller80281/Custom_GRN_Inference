@@ -1,15 +1,15 @@
 #!/bin/bash
 #SBATCH --job-name=grn_experiments
-#SBATCH --output=LOGS/transformer_logs/experiments/%x_%A_%a.log
-#SBATCH --error=LOGS/transformer_logs/experiments/%x_%A_%a.err
+#SBATCH --output=LOGS/transformer_logs/experiments/%x_%A/%x_%A_%a.log
+#SBATCH --error=LOGS/transformer_logs/experiments/%x_%A/%x_%A_%a.err
 #SBATCH --time=36:00:00
 #SBATCH -p dense
 #SBATCH -N 2
 #SBATCH --gres=gpu:v100:4
 #SBATCH --ntasks-per-node=1
-#SBATCH -c 16
-#SBATCH --mem=256G
-#SBATCH --array=0%2
+#SBATCH -c 12
+#SBATCH --mem=128G
+#SBATCH --array=0
 
 set -euo pipefail
 
@@ -22,6 +22,7 @@ source .venv/bin/activate
 # ==========================================
 
 # Default/Initial Settings (baseline for all experiments)
+# Preprocessing parameters
 DEFAULT_MIN_GENES_PER_CELL=200
 DEFAULT_MIN_PEAKS_PER_CELL=200
 DEFAULT_FILTER_TYPE="count"
@@ -40,19 +41,63 @@ DEFAULT_DIST_BIAS_MODE="logsumexp"
 DEFAULT_FILTER_TO_NEAREST_GENE=true
 DEFAULT_PROMOTER_BP=""
 
+# Model training parameters
+DEFAULT_TOTAL_EPOCHS=250
+DEFAULT_BATCH_SIZE=16
+DEFAULT_PATIENCE=10
+DEFAULT_SAVE_EVERY_N_EPOCHS=5
+DEFAULT_CORR_LOSS_WEIGHT=1.0
+DEFAULT_EDGE_LOSS_WEIGHT=0.0
+DEFAULT_COS_WEIGHT=0.0
+DEFAULT_SHORTCUT_REG_WEIGHT=0.0
+DEFAULT_GRAD_ACCUM_STEPS=1
+DEFAULT_USE_GRAD_ACCUMULATION=true
+DEFAULT_USE_GRAD_CHECKPOINTING=true
+DEFAULT_MODE="min"
+DEFAULT_INITIAL_LEARNING_RATE=2.5e-4
+DEFAULT_SCHEDULER_FACTOR=0.25
+DEFAULT_SCHEDULER_PATIENCE=5
+DEFAULT_THRESHOLD=1e-3
+DEFAULT_THRESHOLD_MODE="rel"
+DEFAULT_COOLDOWN=4
+DEFAULT_MIN_LR=2.5e-6
+DEFAULT_D_MODEL=192
+DEFAULT_NUM_HEADS=4
+DEFAULT_NUM_LAYERS=3
+DEFAULT_D_FF=768
+DEFAULT_DROPOUT=0.10
+DEFAULT_USE_DISTANCE_BIAS=true
+DEFAULT_USE_SHORTCUT=true
+DEFAULT_USE_MOTIF_MASK=true
+DEFAULT_MOTIF_MASK_THRESH=0.0
+DEFAULT_MOTIF_PRIOR_SCALE=0.0
+DEFAULT_ATTN_BIAS_SCALE=0.0
+DEFAULT_SHORTCUT_L1=0.0
+DEFAULT_SHORTCUT_L2=0.0
+DEFAULT_SHORTCUT_TOPK=""
+DEFAULT_SHORTCUT_DROPOUT=0.0
+DEFAULT_SUBSAMPLE_MAX_TFS=""
+DEFAULT_SUBSAMPLE_MAX_TGS=""
+DEFAULT_SUBSAMPLE_MAX_WINDOWS_PER_CHROM=""
+DEFAULT_SUBSAMPLE_MAX_CELLS=10000
+DEFAULT_SUBSAMPLE_SEED=42
+DEFAULT_ALLOWED_SAMPLES=""
+DEFAULT_RESUME_CHECKPOINT_PATH=""
+
 # Define experiments as arrays
 # Format: "EXPERIMENT_NAME|DATASET_NAME|PARAMETER_OVERRIDES"
 # PARAMETER_OVERRIDES format: "PARAM1=VALUE1;PARAM2=VALUE2;..."
 
 EXPERIMENTS=(
-    # "test_new_pipeline|mESC_test_new_pipeline|MIN_GENES_PER_CELL=100;MIN_PEAKS_PER_CELL=100;HOPS=0;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.1;FILTER_OUT_LOWEST_PCT_PEAKS=0.1"
-    # "no_filter_to_nearest_gene|mESC_no_filter_to_nearest_gene|FILTER_TO_NEAREST_GENE=false;HOPS=0"
-    # "smaller_window_size|mESC_smaller_window_size|WINDOW_SIZE=500;HOPS=0"
-    # "larger_window_size|mESC_larger_window_size|WINDOW_SIZE=1500;HOPS=0"
-    # "lower_max_peak_dist|mESC_lower_max_peak_dist|MAX_PEAK_DISTANCE=50000;HOPS=0"
-    # "higher_max_peak_dist|mESC_higher_max_peak_dist|MAX_PEAK_DISTANCE=150000;HOPS=0"
+    "test_new_pipeline|mESC_test_new_pipeline|MIN_GENES_PER_CELL=100;MIN_PEAKS_PER_CELL=100;HOPS=0;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.1;FILTER_OUT_LOWEST_PCT_PEAKS=0.1"
+    "no_filter_to_nearest_gene|mESC_no_filter_to_nearest_gene|FILTER_TO_NEAREST_GENE=false;HOPS=0"
+    "smaller_window_size|mESC_smaller_window_size|WINDOW_SIZE=500;HOPS=0"
+    "larger_window_size|mESC_larger_window_size|WINDOW_SIZE=1500;HOPS=0"
+    "lower_max_peak_dist|mESC_lower_max_peak_dist|MAX_PEAK_DISTANCE=50000;HOPS=0"
+    "higher_max_peak_dist|mESC_higher_max_peak_dist|MAX_PEAK_DISTANCE=150000;HOPS=0"
     "slow_decay_filter_ten_pct|mESC_slow_decay_filter_ten_pct|MIN_GENES_PER_CELL=100;MIN_PEAKS_PER_CELL=100;HOPS=0;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.1;FILTER_OUT_LOWEST_PCT_PEAKS=0.1;DISTANCE_SCALE_FACTOR=40000"
 )
+
 
 # ==========================================
 #        EXPERIMENT SELECTION
@@ -84,6 +129,7 @@ echo ""
 # ==========================================
 
 # Initialize all parameters with defaults
+# Preprocessing parameters
 MIN_GENES_PER_CELL=${DEFAULT_MIN_GENES_PER_CELL}
 MIN_PEAKS_PER_CELL=${DEFAULT_MIN_PEAKS_PER_CELL}
 FILTER_TYPE=${DEFAULT_FILTER_TYPE}
@@ -102,6 +148,49 @@ DIST_BIAS_MODE=${DEFAULT_DIST_BIAS_MODE}
 FILTER_TO_NEAREST_GENE=${DEFAULT_FILTER_TO_NEAREST_GENE}
 PROMOTER_BP=${DEFAULT_PROMOTER_BP}
 
+# Model training parameters
+TOTAL_EPOCHS=${DEFAULT_TOTAL_EPOCHS}
+BATCH_SIZE=${DEFAULT_BATCH_SIZE}
+PATIENCE=${DEFAULT_PATIENCE}
+SAVE_EVERY_N_EPOCHS=${DEFAULT_SAVE_EVERY_N_EPOCHS}
+CORR_LOSS_WEIGHT=${DEFAULT_CORR_LOSS_WEIGHT}
+EDGE_LOSS_WEIGHT=${DEFAULT_EDGE_LOSS_WEIGHT}
+COS_WEIGHT=${DEFAULT_COS_WEIGHT}
+SHORTCUT_REG_WEIGHT=${DEFAULT_SHORTCUT_REG_WEIGHT}
+GRAD_ACCUM_STEPS=${DEFAULT_GRAD_ACCUM_STEPS}
+USE_GRAD_ACCUMULATION=${DEFAULT_USE_GRAD_ACCUMULATION}
+USE_GRAD_CHECKPOINTING=${DEFAULT_USE_GRAD_CHECKPOINTING}
+MODE=${DEFAULT_MODE}
+INITIAL_LEARNING_RATE=${DEFAULT_INITIAL_LEARNING_RATE}
+SCHEDULER_FACTOR=${DEFAULT_SCHEDULER_FACTOR}
+SCHEDULER_PATIENCE=${DEFAULT_SCHEDULER_PATIENCE}
+THRESHOLD=${DEFAULT_THRESHOLD}
+THRESHOLD_MODE=${DEFAULT_THRESHOLD_MODE}
+COOLDOWN=${DEFAULT_COOLDOWN}
+MIN_LR=${DEFAULT_MIN_LR}
+D_MODEL=${DEFAULT_D_MODEL}
+NUM_HEADS=${DEFAULT_NUM_HEADS}
+NUM_LAYERS=${DEFAULT_NUM_LAYERS}
+D_FF=${DEFAULT_D_FF}
+DROPOUT=${DEFAULT_DROPOUT}
+USE_DISTANCE_BIAS=${DEFAULT_USE_DISTANCE_BIAS}
+USE_SHORTCUT=${DEFAULT_USE_SHORTCUT}
+USE_MOTIF_MASK=${DEFAULT_USE_MOTIF_MASK}
+MOTIF_MASK_THRESH=${DEFAULT_MOTIF_MASK_THRESH}
+MOTIF_PRIOR_SCALE=${DEFAULT_MOTIF_PRIOR_SCALE}
+ATTN_BIAS_SCALE=${DEFAULT_ATTN_BIAS_SCALE}
+SHORTCUT_L1=${DEFAULT_SHORTCUT_L1}
+SHORTCUT_L2=${DEFAULT_SHORTCUT_L2}
+SHORTCUT_TOPK=${DEFAULT_SHORTCUT_TOPK}
+SHORTCUT_DROPOUT=${DEFAULT_SHORTCUT_DROPOUT}
+SUBSAMPLE_MAX_TFS=${DEFAULT_SUBSAMPLE_MAX_TFS}
+SUBSAMPLE_MAX_TGS=${DEFAULT_SUBSAMPLE_MAX_TGS}
+SUBSAMPLE_MAX_WINDOWS_PER_CHROM=${DEFAULT_SUBSAMPLE_MAX_WINDOWS_PER_CHROM}
+SUBSAMPLE_MAX_CELLS=${DEFAULT_SUBSAMPLE_MAX_CELLS}
+SUBSAMPLE_SEED=${DEFAULT_SUBSAMPLE_SEED}
+ALLOWED_SAMPLES=${DEFAULT_ALLOWED_SAMPLES}
+RESUME_CHECKPOINT_PATH=${DEFAULT_RESUME_CHECKPOINT_PATH}
+
 # Apply parameter overrides
 if [ -n "${PARAM_OVERRIDES}" ]; then
     echo "Applying parameter overrides:"
@@ -113,6 +202,7 @@ if [ -n "${PARAM_OVERRIDES}" ]; then
             
             # Apply the override by setting the variable dynamically
             case "$param_name" in
+                # Preprocessing parameters
                 MIN_GENES_PER_CELL) MIN_GENES_PER_CELL=$param_value ;;
                 MIN_PEAKS_PER_CELL) MIN_PEAKS_PER_CELL=$param_value ;;
                 FILTER_TYPE) FILTER_TYPE=$param_value ;;
@@ -130,6 +220,48 @@ if [ -n "${PARAM_OVERRIDES}" ]; then
                 DIST_BIAS_MODE) DIST_BIAS_MODE=$param_value ;;
                 FILTER_TO_NEAREST_GENE) FILTER_TO_NEAREST_GENE=$param_value ;;
                 PROMOTER_BP) PROMOTER_BP=$param_value ;;
+                # Model training parameters
+                TOTAL_EPOCHS) TOTAL_EPOCHS=$param_value ;;
+                BATCH_SIZE) BATCH_SIZE=$param_value ;;
+                PATIENCE) PATIENCE=$param_value ;;
+                SAVE_EVERY_N_EPOCHS) SAVE_EVERY_N_EPOCHS=$param_value ;;
+                CORR_LOSS_WEIGHT) CORR_LOSS_WEIGHT=$param_value ;;
+                EDGE_LOSS_WEIGHT) EDGE_LOSS_WEIGHT=$param_value ;;
+                COS_WEIGHT) COS_WEIGHT=$param_value ;;
+                SHORTCUT_REG_WEIGHT) SHORTCUT_REG_WEIGHT=$param_value ;;
+                GRAD_ACCUM_STEPS) GRAD_ACCUM_STEPS=$param_value ;;
+                USE_GRAD_ACCUMULATION) USE_GRAD_ACCUMULATION=$param_value ;;
+                USE_GRAD_CHECKPOINTING) USE_GRAD_CHECKPOINTING=$param_value ;;
+                MODE) MODE=$param_value ;;
+                INITIAL_LEARNING_RATE) INITIAL_LEARNING_RATE=$param_value ;;
+                SCHEDULER_FACTOR) SCHEDULER_FACTOR=$param_value ;;
+                SCHEDULER_PATIENCE) SCHEDULER_PATIENCE=$param_value ;;
+                THRESHOLD) THRESHOLD=$param_value ;;
+                THRESHOLD_MODE) THRESHOLD_MODE=$param_value ;;
+                COOLDOWN) COOLDOWN=$param_value ;;
+                MIN_LR) MIN_LR=$param_value ;;
+                D_MODEL) D_MODEL=$param_value ;;
+                NUM_HEADS) NUM_HEADS=$param_value ;;
+                NUM_LAYERS) NUM_LAYERS=$param_value ;;
+                D_FF) D_FF=$param_value ;;
+                DROPOUT) DROPOUT=$param_value ;;
+                USE_DISTANCE_BIAS) USE_DISTANCE_BIAS=$param_value ;;
+                USE_SHORTCUT) USE_SHORTCUT=$param_value ;;
+                USE_MOTIF_MASK) USE_MOTIF_MASK=$param_value ;;
+                MOTIF_MASK_THRESH) MOTIF_MASK_THRESH=$param_value ;;
+                MOTIF_PRIOR_SCALE) MOTIF_PRIOR_SCALE=$param_value ;;
+                ATTN_BIAS_SCALE) ATTN_BIAS_SCALE=$param_value ;;
+                SHORTCUT_L1) SHORTCUT_L1=$param_value ;;
+                SHORTCUT_L2) SHORTCUT_L2=$param_value ;;
+                SHORTCUT_TOPK) SHORTCUT_TOPK=$param_value ;;
+                SHORTCUT_DROPOUT) SHORTCUT_DROPOUT=$param_value ;;
+                SUBSAMPLE_MAX_TFS) SUBSAMPLE_MAX_TFS=$param_value ;;
+                SUBSAMPLE_MAX_TGS) SUBSAMPLE_MAX_TGS=$param_value ;;
+                SUBSAMPLE_MAX_WINDOWS_PER_CHROM) SUBSAMPLE_MAX_WINDOWS_PER_CHROM=$param_value ;;
+                SUBSAMPLE_MAX_CELLS) SUBSAMPLE_MAX_CELLS=$param_value ;;
+                SUBSAMPLE_SEED) SUBSAMPLE_SEED=$param_value ;;
+                ALLOWED_SAMPLES) ALLOWED_SAMPLES=$param_value ;;
+                RESUME_CHECKPOINT_PATH) RESUME_CHECKPOINT_PATH=$param_value ;;
                 *) echo "WARNING: Unknown parameter: $param_name" ;;
             esac
         fi
@@ -172,49 +304,6 @@ CHROM_IDS="chr1 chr2 chr3 chr4 chr5 chr6 chr7 chr8 chr9 chr10 chr11 chr12 chr13 
 
 # Force recalculate (set to true if you want to reprocess data)
 FORCE_RECALCULATE=false
-
-# Model Training Parameters (consistent across experiments)
-TOTAL_EPOCHS=250
-BATCH_SIZE=16
-PATIENCE=10
-SAVE_EVERY_N_EPOCHS=5
-CORR_LOSS_WEIGHT=1.0
-EDGE_LOSS_WEIGHT=0.0
-COS_WEIGHT=0.0
-SHORTCUT_REG_WEIGHT=0.0
-GRAD_ACCUM_STEPS=1
-USE_GRAD_ACCUMULATION=true
-USE_GRAD_CHECKPOINTING=true
-MODE="min"
-INITIAL_LEARNING_RATE=2.5e-4
-SCHEDULER_FACTOR=0.25
-SCHEDULER_PATIENCE=5
-THRESHOLD=1e-3
-THRESHOLD_MODE="rel"
-COOLDOWN=4
-MIN_LR=2.5e-6
-D_MODEL=192
-NUM_HEADS=4
-NUM_LAYERS=3
-D_FF=$((D_MODEL * 4))
-DROPOUT=0.10
-USE_DISTANCE_BIAS=true
-USE_SHORTCUT=true
-USE_MOTIF_MASK=true
-MOTIF_MASK_THRESH=0.0
-MOTIF_PRIOR_SCALE=0.0
-ATTN_BIAS_SCALE=0.0
-SHORTCUT_L1=0.0
-SHORTCUT_L2=0.0
-SHORTCUT_TOPK=""
-SHORTCUT_DROPOUT=0.0
-SUBSAMPLE_MAX_TFS=""
-SUBSAMPLE_MAX_TGS=""
-SUBSAMPLE_MAX_WINDOWS_PER_CHROM=""
-SUBSAMPLE_MAX_CELLS=10000
-SUBSAMPLE_SEED=42
-ALLOWED_SAMPLES=""
-RESUME_CHECKPOINT_PATH=""
 
 # ==========================================
 #        CPU DETECTION
@@ -312,186 +401,202 @@ echo ""
 # ==========================================
 #              MODEL TRAINING
 # ==========================================
-echo ""
-echo "=========================================="
-echo "         STARTING MODEL TRAINING"
-echo "=========================================="
-echo ""
 
-# Build training command
-TRAIN_CMD="src/multiomic_transformer/scripts/multinode_train_argparse.py \
-    --sample_data_cache_dir ${SAMPLE_DATA_CACHE_DIR} \
-    --common_data ${COMMON_DATA} \
-    --output_dir ${OUTPUT_DIR} \
-    --chrom_id ${CHROM_ID} \
-    --chrom_ids ${CHROM_IDS} \
-    --total_epochs ${TOTAL_EPOCHS} \
-    --batch_size ${BATCH_SIZE} \
-    --patience ${PATIENCE} \
-    --save_every_n_epochs ${SAVE_EVERY_N_EPOCHS} \
-    --corr_loss_weight ${CORR_LOSS_WEIGHT} \
-    --edge_loss_weight ${EDGE_LOSS_WEIGHT} \
-    --cos_weight ${COS_WEIGHT} \
-    --shortcut_reg_weight ${SHORTCUT_REG_WEIGHT} \
-    --grad_accum_steps ${GRAD_ACCUM_STEPS} \
-    --mode ${MODE} \
-    --initial_learning_rate ${INITIAL_LEARNING_RATE} \
-    --scheduler_factor ${SCHEDULER_FACTOR} \
-    --scheduler_patience ${SCHEDULER_PATIENCE} \
-    --threshold ${THRESHOLD} \
-    --threshold_mode ${THRESHOLD_MODE} \
-    --cooldown ${COOLDOWN} \
-    --min_lr ${MIN_LR} \
-    --d_model ${D_MODEL} \
-    --num_heads ${NUM_HEADS} \
-    --num_layers ${NUM_LAYERS} \
-    --d_ff ${D_FF} \
-    --dropout ${DROPOUT} \
-    --motif_mask_thresh ${MOTIF_MASK_THRESH} \
-    --motif_prior_scale ${MOTIF_PRIOR_SCALE} \
-    --attn_bias_scale ${ATTN_BIAS_SCALE} \
-    --shortcut_l1 ${SHORTCUT_L1} \
-    --shortcut_l2 ${SHORTCUT_L2} \
-    --shortcut_dropout ${SHORTCUT_DROPOUT} \
-    --subsample_max_cells ${SUBSAMPLE_MAX_CELLS} \
-    --subsample_seed ${SUBSAMPLE_SEED}"
+# Check if we're on a GPU-enabled partition before training
+if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" == "gpu" ]]; then    
+    echo ""
+    echo "=========================================="
+    echo "         STARTING MODEL TRAINING"
+    echo "=========================================="
+    echo ""
+    echo "[INFO] Detected compute partition, progressing with model training"
 
-# Add boolean flags
-if [ "${USE_GRAD_ACCUMULATION}" = "true" ]; then
-    TRAIN_CMD="${TRAIN_CMD} --use_grad_accumulation"
+    # Build training command
+    TRAIN_CMD="src/multiomic_transformer/scripts/multinode_train_argparse.py \
+        --sample_data_cache_dir ${SAMPLE_DATA_CACHE_DIR} \
+        --common_data ${COMMON_DATA} \
+        --output_dir ${OUTPUT_DIR} \
+        --chrom_id ${CHROM_ID} \
+        --chrom_ids ${CHROM_IDS} \
+        --total_epochs ${TOTAL_EPOCHS} \
+        --batch_size ${BATCH_SIZE} \
+        --patience ${PATIENCE} \
+        --save_every_n_epochs ${SAVE_EVERY_N_EPOCHS} \
+        --corr_loss_weight ${CORR_LOSS_WEIGHT} \
+        --edge_loss_weight ${EDGE_LOSS_WEIGHT} \
+        --cos_weight ${COS_WEIGHT} \
+        --shortcut_reg_weight ${SHORTCUT_REG_WEIGHT} \
+        --grad_accum_steps ${GRAD_ACCUM_STEPS} \
+        --mode ${MODE} \
+        --initial_learning_rate ${INITIAL_LEARNING_RATE} \
+        --scheduler_factor ${SCHEDULER_FACTOR} \
+        --scheduler_patience ${SCHEDULER_PATIENCE} \
+        --threshold ${THRESHOLD} \
+        --threshold_mode ${THRESHOLD_MODE} \
+        --cooldown ${COOLDOWN} \
+        --min_lr ${MIN_LR} \
+        --d_model ${D_MODEL} \
+        --num_heads ${NUM_HEADS} \
+        --num_layers ${NUM_LAYERS} \
+        --d_ff ${D_FF} \
+        --dropout ${DROPOUT} \
+        --motif_mask_thresh ${MOTIF_MASK_THRESH} \
+        --motif_prior_scale ${MOTIF_PRIOR_SCALE} \
+        --attn_bias_scale ${ATTN_BIAS_SCALE} \
+        --shortcut_l1 ${SHORTCUT_L1} \
+        --shortcut_l2 ${SHORTCUT_L2} \
+        --shortcut_dropout ${SHORTCUT_DROPOUT} \
+        --subsample_max_cells ${SUBSAMPLE_MAX_CELLS} \
+        --subsample_seed ${SUBSAMPLE_SEED} \
+        --use_torch_compile"
+
+    # Add boolean flags
+    if [ "${USE_GRAD_ACCUMULATION}" = "true" ]; then
+        TRAIN_CMD="${TRAIN_CMD} --use_grad_accumulation"
+    fi
+
+    if [ "${USE_GRAD_CHECKPOINTING}" = "true" ]; then
+        TRAIN_CMD="${TRAIN_CMD} --use_grad_checkpointing"
+    fi
+
+    if [ "${USE_DISTANCE_BIAS}" = "true" ]; then
+        TRAIN_CMD="${TRAIN_CMD} --use_distance_bias"
+    fi
+
+    if [ "${USE_SHORTCUT}" = "true" ]; then
+        TRAIN_CMD="${TRAIN_CMD} --use_shortcut"
+    fi
+
+    if [ "${USE_MOTIF_MASK}" = "true" ]; then
+        TRAIN_CMD="${TRAIN_CMD} --use_motif_mask"
+    fi
+
+    # Add optional integer/string parameters
+    if [ -n "${SHORTCUT_TOPK}" ]; then
+        TRAIN_CMD="${TRAIN_CMD} --shortcut_topk ${SHORTCUT_TOPK}"
+    fi
+
+    if [ -n "${SUBSAMPLE_MAX_TFS}" ]; then
+        TRAIN_CMD="${TRAIN_CMD} --subsample_max_tfs ${SUBSAMPLE_MAX_TFS}"
+    fi
+
+    if [ -n "${SUBSAMPLE_MAX_TGS}" ]; then
+        TRAIN_CMD="${TRAIN_CMD} --subsample_max_tgs ${SUBSAMPLE_MAX_TGS}"
+    fi
+
+    if [ -n "${SUBSAMPLE_MAX_WINDOWS_PER_CHROM}" ]; then
+        TRAIN_CMD="${TRAIN_CMD} --subsample_max_windows_per_chrom ${SUBSAMPLE_MAX_WINDOWS_PER_CHROM}"
+    fi
+
+    if [ -n "${ALLOWED_SAMPLES}" ]; then
+        TRAIN_CMD="${TRAIN_CMD} --allowed_samples ${ALLOWED_SAMPLES}"
+    fi
+
+    if [ -n "${RESUME_CHECKPOINT_PATH}" ]; then
+        TRAIN_CMD="${TRAIN_CMD} --resume_checkpoint_path ${RESUME_CHECKPOINT_PATH}"
+    fi
+
+    # --- Memory + math ---
+    export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,max_split_size_mb:32
+    export TORCH_ALLOW_TF32=1
+    export NVIDIA_TF32_OVERRIDE=1
+
+    # --- Threading: set to match SLURM CPUs per task ---
+    THREADS=${SLURM_CPUS_PER_TASK:-1}
+    export OMP_NUM_THREADS=$THREADS
+    export MKL_NUM_THREADS=$THREADS
+    export OPENBLAS_NUM_THREADS=$THREADS
+    export NUMEXPR_NUM_THREADS=$THREADS
+    export BLIS_NUM_THREADS=$THREADS
+    export KMP_AFFINITY=granularity=fine,compact,1,0
+
+    # --- NCCL / networking overrides ---
+    # Dynamically find the interface with 10.90.29.* network
+    export IFACE=$(ip -o -4 addr show | grep "10.90.29." | awk '{print $2}')
+
+    if [ -z "$IFACE" ]; then
+        echo "[ERROR] Could not find interface with 10.90.29.* network on $(hostname)"
+        ip -o -4 addr show  # Show all interfaces for debugging
+        exit 1
+    fi
+
+    echo "[INFO] Using IFACE=$IFACE on host $(hostname)"
+    ip -o -4 addr show "$IFACE"
+
+    export NCCL_SOCKET_IFNAME="$IFACE"
+    export GLOO_SOCKET_IFNAME="$IFACE"
+
+    # (keep InfiniBand disabled if IB isn’t properly configured)
+    export NCCL_IB_DISABLE=1
+
+    export TORCH_DISTRIBUTED_DEBUG=DETAIL
+
+    ##### Number of total processes
+    echo "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX "
+    echo "Nodelist        = " $SLURM_JOB_NODELIST
+    echo "Number of nodes = " $SLURM_JOB_NUM_NODES
+    echo "Ntasks per node = " $SLURM_NTASKS_PER_NODE
+    echo "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX "
+    echo ""
+
+    # ---------- Logging ----------
+    LOGDIR="$PWD/LOGS/transformer_logs/experiments/gpu_usage"
+    mkdir -p "$LOGDIR"
+    JOB=transformer_training
+    ARRAY_JOB_ID=${SLURM_ARRAY_JOB_ID:-${SLURM_JOB_ID:-$PPID}}
+    ARRAY_TASK_ID=${SLURM_ARRAY_TASK_ID:-0}
+    TS=$(date +%Y%m%d_%H%M%S)
+    GPULOG="$LOGDIR/gpu_usage_${ARRAY_JOB_ID}_${ARRAY_TASK_ID}.csv"
+
+    # ---------- GPU sampler (runs only on the batch node) ----------
+    trap 'pkill -P $$ || true' EXIT
+    nvidia-smi -L
+    nvidia-smi --query-gpu=timestamp,index,name,utilization.gpu,memory.used,memory.total \
+    --format=csv -l 30 > "$GPULOG" &
+
+    # ---------- torchrun multi-node launch ----------
+    # Pick the first node as rendezvous/master
+    MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
+    MASTER_PORT=29500
+    export MASTER_ADDR MASTER_PORT
+
+    echo "[INFO] MASTER_ADDR=${MASTER_ADDR}, MASTER_PORT=${MASTER_PORT}"
+
+    # ---------- Optional network diagnostics ----------
+    DEBUG_NET=${DEBUG_NET:-1}   # set to 0 to skip tests once things work
+
+    NODES=($(scontrol show hostnames "$SLURM_JOB_NODELIST"))
+    MASTER_NODE=${NODES[0]}
+
+    echo "[NET] Nodes in this job: ${NODES[*]}"
+    echo "[NET] MASTER_NODE=${MASTER_NODE}, IFACE=${IFACE:-<unset>}"
+
+    NPROC_PER_NODE=${SLURM_GPUS_ON_NODE:-$(nvidia-smi -L | wc -l)}
+    echo "[INFO] Using nproc_per_node=$NPROC_PER_NODE based on GPUs per node"
+
+    # Execute training with torchrun
+    srun bash -c "torchrun \
+        --nnodes=$SLURM_JOB_NUM_NODES \
+        --nproc_per_node=$NPROC_PER_NODE \
+        --node_rank=\$SLURM_NODEID \
+        --rdzv_id=$SLURM_JOB_ID \
+        --rdzv_backend=c10d \
+        --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
+        ${TRAIN_CMD}"
+
+    echo ""
+    echo "=========================================="
+    echo "  EXPERIMENT COMPLETED: ${EXPERIMENT_NAME}"
+    echo "  DATASET: ${DATASET_NAME}"
+    echo "=========================================="
+    echo ""
+else
+    echo ""
+    echo "=========================================="
+    echo "   SKIPPING MODEL TRAINING"
+    echo "=========================================="
+    echo ""
+    echo "[INFO] Running on ${SLURM_JOB_PARTITION:-unknown} partition (not 'dense'), skipping model training"
+    echo "[INFO] Submit another job on the 'dense' partition to run training"
 fi
 
-if [ "${USE_GRAD_CHECKPOINTING}" = "true" ]; then
-    TRAIN_CMD="${TRAIN_CMD} --use_grad_checkpointing"
-fi
-
-if [ "${USE_DISTANCE_BIAS}" = "true" ]; then
-    TRAIN_CMD="${TRAIN_CMD} --use_distance_bias"
-fi
-
-if [ "${USE_SHORTCUT}" = "true" ]; then
-    TRAIN_CMD="${TRAIN_CMD} --use_shortcut"
-fi
-
-if [ "${USE_MOTIF_MASK}" = "true" ]; then
-    TRAIN_CMD="${TRAIN_CMD} --use_motif_mask"
-fi
-
-# Add optional integer/string parameters
-if [ -n "${SHORTCUT_TOPK}" ]; then
-    TRAIN_CMD="${TRAIN_CMD} --shortcut_topk ${SHORTCUT_TOPK}"
-fi
-
-if [ -n "${SUBSAMPLE_MAX_TFS}" ]; then
-    TRAIN_CMD="${TRAIN_CMD} --subsample_max_tfs ${SUBSAMPLE_MAX_TFS}"
-fi
-
-if [ -n "${SUBSAMPLE_MAX_TGS}" ]; then
-    TRAIN_CMD="${TRAIN_CMD} --subsample_max_tgs ${SUBSAMPLE_MAX_TGS}"
-fi
-
-if [ -n "${SUBSAMPLE_MAX_WINDOWS_PER_CHROM}" ]; then
-    TRAIN_CMD="${TRAIN_CMD} --subsample_max_windows_per_chrom ${SUBSAMPLE_MAX_WINDOWS_PER_CHROM}"
-fi
-
-if [ -n "${ALLOWED_SAMPLES}" ]; then
-    TRAIN_CMD="${TRAIN_CMD} --allowed_samples ${ALLOWED_SAMPLES}"
-fi
-
-if [ -n "${RESUME_CHECKPOINT_PATH}" ]; then
-    TRAIN_CMD="${TRAIN_CMD} --resume_checkpoint_path ${RESUME_CHECKPOINT_PATH}"
-fi
-
-# --- Memory + math ---
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,max_split_size_mb:32
-export TORCH_ALLOW_TF32=1
-export NVIDIA_TF32_OVERRIDE=1
-
-# --- Threading: set to match SLURM CPUs per task ---
-THREADS=${SLURM_CPUS_PER_TASK:-1}
-export OMP_NUM_THREADS=$THREADS
-export MKL_NUM_THREADS=$THREADS
-export OPENBLAS_NUM_THREADS=$THREADS
-export NUMEXPR_NUM_THREADS=$THREADS
-export BLIS_NUM_THREADS=$THREADS
-export KMP_AFFINITY=granularity=fine,compact,1,0
-
-# --- NCCL / networking overrides ---
-# Dynamically find the interface with 10.90.29.* network
-export IFACE=$(ip -o -4 addr show | grep "10.90.29." | awk '{print $2}')
-
-if [ -z "$IFACE" ]; then
-    echo "[ERROR] Could not find interface with 10.90.29.* network on $(hostname)"
-    ip -o -4 addr show  # Show all interfaces for debugging
-    exit 1
-fi
-
-echo "[INFO] Using IFACE=$IFACE on host $(hostname)"
-ip -o -4 addr show "$IFACE"
-
-export NCCL_SOCKET_IFNAME="$IFACE"
-export GLOO_SOCKET_IFNAME="$IFACE"
-
-# (keep InfiniBand disabled if IB isn’t properly configured)
-export NCCL_IB_DISABLE=1
-
-export TORCH_DISTRIBUTED_DEBUG=DETAIL
-
-##### Number of total processes
-echo "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX "
-echo "Nodelist        = " $SLURM_JOB_NODELIST
-echo "Number of nodes = " $SLURM_JOB_NUM_NODES
-echo "Ntasks per node = " $SLURM_NTASKS_PER_NODE
-echo "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX "
-echo ""
-
-# ---------- Logging ----------
-LOGDIR="$PWD/LOGS/transformer_logs/experiments/gpu_usage"
-mkdir -p "$LOGDIR"
-JOB=transformer_training
-ID=${SLURM_JOB_ID:-$PPID}
-TS=$(date +%Y%m%d_%H%M%S)
-GPULOG="$LOGDIR/gpu_usage_${ID}_${TASK_ID}.csv"
-
-# ---------- GPU sampler (runs only on the batch node) ----------
-trap 'pkill -P $$ || true' EXIT
-nvidia-smi -L
-nvidia-smi --query-gpu=timestamp,index,name,utilization.gpu,memory.used,memory.total \
-  --format=csv -l 30 > "$GPULOG" &
-
-# ---------- torchrun multi-node launch ----------
-# Pick the first node as rendezvous/master
-MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
-MASTER_PORT=29500
-export MASTER_ADDR MASTER_PORT
-
-echo "[INFO] MASTER_ADDR=${MASTER_ADDR}, MASTER_PORT=${MASTER_PORT}"
-
-# ---------- Optional network diagnostics ----------
-DEBUG_NET=${DEBUG_NET:-1}   # set to 0 to skip tests once things work
-
-NODES=($(scontrol show hostnames "$SLURM_JOB_NODELIST"))
-MASTER_NODE=${NODES[0]}
-
-echo "[NET] Nodes in this job: ${NODES[*]}"
-echo "[NET] MASTER_NODE=${MASTER_NODE}, IFACE=${IFACE:-<unset>}"
-
-NPROC_PER_NODE=${SLURM_GPUS_ON_NODE:-$(nvidia-smi -L | wc -l)}
-echo "[INFO] Using nproc_per_node=$NPROC_PER_NODE based on GPUs per node"
-
-# Execute training with torchrun
-srun bash -c "torchrun \
-    --nnodes=$SLURM_JOB_NUM_NODES \
-    --nproc_per_node=$NPROC_PER_NODE \
-    --node_rank=\$SLURM_NODEID \
-    --rdzv_id=$SLURM_JOB_ID \
-    --rdzv_backend=c10d \
-    --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
-    ${TRAIN_CMD}"
-
-echo ""
-echo "=========================================="
-echo "  EXPERIMENT COMPLETED: ${EXPERIMENT_NAME}"
-echo "  DATASET: ${DATASET_NAME}"
-echo "=========================================="
-echo ""

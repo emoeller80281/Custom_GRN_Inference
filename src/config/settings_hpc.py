@@ -14,7 +14,7 @@ chrom_list = chr_nums #+ ["chrX", "chrY"]
 # ----- SAMPLE INFORMATION -----
 # Sample information
 ORGANISM_CODE = "mm10"
-DATASET_NAME = "mESC_lower_peak_threshold"
+DATASET_NAME = "mESC_test_norm_factor_smaller_window_size"
 CHROM_ID_LIST = chrom_list
 CHROM_ID = "chr19"
 CHROM_IDS = chr_nums
@@ -63,7 +63,7 @@ SELF_WEIGHT = 1.0       # How much to weight the cells own gene expression. High
 # Data Preprocessing and Caching
 VALIDATION_DATASETS = ["E8.75_rep1"]
 FORCE_RECALCULATE = False                # Recomputes genomic windows, peak-TG distance, and re-runs sliding window TF-peak scan
-WINDOW_SIZE = 1000                     # Aggregates peaks within WINDOW_SIZE bp genomic tiles
+WINDOW_SIZE = 500                     # Aggregates peaks within WINDOW_SIZE bp genomic tiles
 DISTANCE_SCALE_FACTOR = 20_000           # Weights the peak-gene TSS distance score. Lower numbers = faster dropoff
 MAX_PEAK_DISTANCE = 150_000              # Masks out peaks further than this distance from the gene TSS
 DIST_BIAS_MODE = "logsumexp"            # Method for calcuting window -> gene TSS distance. Options: "max" | "sum" | "mean" | "logsumexp"

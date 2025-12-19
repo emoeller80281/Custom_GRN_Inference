@@ -9,7 +9,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 4
 #SBATCH --mem=64G
-#SBATCH --array=1-10%6
+#SBATCH --array=0-1%6
 
 set -euo pipefail
 
@@ -20,29 +20,33 @@ source .venv/bin/activate
 EXPERIMENT_DIR=${EXPERIMENT_DIR:-/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments}
 
 EXPERIMENT_LIST=(
-    "mESC_no_scale_linear|model_training_128_10k_metacells|trained_model.pt"
-    "mESC_no_scale_linear|model_training_192_1k_metacells|trained_model.pt"
-    "mESC_no_scale_linear|model_training_192_5k_metacells|trained_model.pt"
-    "mESC_no_scale_linear|model_training_192_10k_metacells|trained_model.pt"
-    "mESC_no_scale_linear|model_training_192_10k_metacells_6_layers|trained_model.pt"
-    "mESC_no_scale_linear|model_training_192_10k_metacells_8_heads|trained_model.pt"
-    "mESC_no_scale_linear|model_training_192_15k_metacells|trained_model.pt"
-    "mESC_no_scale_linear|model_training_192_50k_metacells|trained_model.pt"
-    "mESC_no_scale_linear|model_training_256_15k_metacells|trained_model.pt"
-    "mESC_no_scale_linear|model_training_256_20k_metacells|trained_model.pt"
-    "mESC_no_scale_linear|model_training_320_10k_metacells|trained_model.pt"
-#   "mESC_large_neighborhood_count_filter|model_training_001|trained_model.pt"
-#   "mESC_large_neighborhood|model_training_001|trained_model.pt"
-#   "mESC_small_neighborhood|model_training_001|trained_model.pt"
-#   "mESC_small_neighborhood_high_self_weight|model_training_001|trained_model.pt"
-#   "mESC_slower_dist_decay|model_training_001|trained_model.pt"
-#   "mESC_max_dist_bias|model_training_002|trained_model.pt"
-#   "mESC_slow_decay_max_dist|model_training_001|trained_model.pt"
-#   "mESC_filter_lowest_ten_pct|model_training_003|trained_model.pt"
-#   "mESC_lower_peak_threshold|model_training_001|trained_model.pt"
-#   "mESC_smaller_window_size|model_training_001|trained_model.pt"
-#   "mESC_larger_window_size|model_training_001|trained_model.pt"
-#   "mESC_test_new_pipeline|model_training_001|trained_model.pt"
+    # "mESC_no_scale_linear|model_training_128_10k_metacells|trained_model.pt"
+    # "mESC_no_scale_linear|model_training_192_1k_metacells|trained_model.pt"
+    # "mESC_no_scale_linear|model_training_192_5k_metacells|trained_model.pt"
+    # "mESC_no_scale_linear|model_training_192_10k_metacells|trained_model.pt"
+    # "mESC_no_scale_linear|model_training_192_10k_metacells_6_layers|trained_model.pt"
+    # "mESC_no_scale_linear|model_training_192_10k_metacells_8_heads|trained_model.pt"
+    # "mESC_no_scale_linear|model_training_192_15k_metacells|trained_model.pt"
+    # "mESC_no_scale_linear|model_training_192_50k_metacells|trained_model.pt"
+    # "mESC_no_scale_linear|model_training_256_15k_metacells|trained_model.pt"
+    # "mESC_no_scale_linear|model_training_256_20k_metacells|trained_model.pt"
+    # "mESC_no_scale_linear|model_training_320_10k_metacells|trained_model.pt"
+    # "mESC_large_neighborhood_count_filter|model_training_001|trained_model.pt"
+    # "mESC_large_neighborhood|model_training_001|trained_model.pt"
+    # "mESC_small_neighborhood|model_training_001|trained_model.pt"
+    # "mESC_small_neighborhood_high_self_weight|model_training_001|trained_model.pt"
+    # "mESC_slower_dist_decay|model_training_001|trained_model.pt"
+    # "mESC_max_dist_bias|model_training_002|trained_model.pt"
+    # "mESC_slow_decay_max_dist|model_training_001|trained_model.pt"
+    # "mESC_filter_lowest_ten_pct|model_training_003|trained_model.pt"
+    # "mESC_lower_peak_threshold|model_training_001|trained_model.pt"
+    "mESC_no_filter_to_nearest_gene|model_training_001|trained_model.pt"
+    # "mESC_smaller_window_size|model_training_001|trained_model.pt"
+    # "mESC_larger_window_size|model_training_001|trained_model.pt"
+    "mESC_lower_max_peak_dist|model_training_001|trained_model.pt"
+    # "mESC_higher_max_peak_dist|model_training_001|trained_model.pt"
+    # "mESC_test_new_pipeline|model_training_001|trained_model.pt"
+    # "mESC_slow_decay_filter_ten_pct|model_training_001|trained_model.pt"
 )
 
 # ==========================================

@@ -19,6 +19,7 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 import torch
+from torch.profiler import profile, record_function, ProfilerActivity, schedule
 import torch.distributed as dist
 from typing import Union
 import torch.nn as nn
@@ -170,6 +171,18 @@ def parse_training_args():
     parser.add_argument("--resume_checkpoint_path", type=Path, default=None,
                         help="Path to checkpoint to resume from")
     
+    # ----- Model Compilation -----
+    parser.add_argument("--use_torch_compile", action="store_true",
+                        help="Use torch.compile() to optimize model (requires PyTorch 2.0+)")
+    
+    # ---- Profiling -----
+    parser.add_argument("--use_profiler", action="store_true",
+                    help="Enable TensorBoard profiler for performance analysis")
+    parser.add_argument("--profiler_start_step", type=int, default=5,
+                        help="Step to start profiling")
+    parser.add_argument("--profiler_active_steps", type=int, default=3,
+                        help="Number of steps to actively profile")
+    
     return parser.parse_args()
 
 
@@ -190,13 +203,17 @@ def setup_training_globals(args):
     global SHORTCUT_L1, SHORTCUT_L2, SHORTCUT_TOPK, SHORTCUT_DROPOUT
     global SUBSAMPLE_MAX_TFS, SUBSAMPLE_MAX_TGS, SUBSAMPLE_MAX_WINDOWS_PER_CHROM
     global SUBSAMPLE_MAX_CELLS, SUBSAMPLE_SEED, ALLOWED_SAMPLES
-    global RESUME_CHECKPOINT_PATH
+    global RESUME_CHECKPOINT_PATH, USE_TORCH_COMPILE
+    global USE_PROFILER, PROFILER_START_STEP, PROFILER_ACTIVE_STEPS
     
     # ----- Data Paths -----
     SAMPLE_DATA_CACHE_DIR = args.sample_data_cache_dir
     COMMON_DATA = args.common_data
     OUTPUT_DIR = args.output_dir
     CHROM_ID = args.chrom_id
+    USE_PROFILER = args.use_profiler
+    PROFILER_START_STEP = args.profiler_start_step
+    PROFILER_ACTIVE_STEPS = args.profiler_active_steps  
     
     # Handle chromosome list - default to a list if not provided
     if args.chrom_ids:
@@ -264,6 +281,9 @@ def setup_training_globals(args):
     
     # ----- Checkpoint Resumption -----
     RESUME_CHECKPOINT_PATH = args.resume_checkpoint_path
+    
+    # ----- Model Compilation -----
+    USE_TORCH_COMPILE = args.use_torch_compile
 
 
 def _signal_handler(signum, frame):
@@ -426,6 +446,8 @@ class Trainer:
         min_delta: float = 1e-3,
         grad_accum_steps: int = 1,
         use_grad_accumulation: bool = False,
+        use_profiler: bool = False,
+        profiler_dir: str = None,
 
     ) -> None:
         self.gpu_id = gpu_id
@@ -464,6 +486,10 @@ class Trainer:
         self.patience = patience
         self.min_delta = min_delta
         self.patience_counter = 0
+        
+        self.use_profiler = use_profiler
+        self.profiler_dir = profiler_dir
+        self.profiler = None
     
     def _should_stop(self):
         global STOP_REQUESTED
@@ -894,6 +920,28 @@ class Trainer:
         patience_counter = 0
         history = []  # store per-epoch logs
         
+        # Initialize profiler (only on rank 0 to avoid conflicts)
+        if self.use_profiler and self.is_main:
+            profiler_log_dir = os.path.join(self.profiler_dir or path, "profiler_logs")
+            os.makedirs(profiler_log_dir, exist_ok=True)
+            
+            self.profiler = profile(
+                activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+                schedule=schedule(
+                    wait=PROFILER_START_STEP,
+                    warmup=1,
+                    active=PROFILER_ACTIVE_STEPS,
+                    repeat=1
+                ),
+                on_trace_ready=torch.profiler.tensorboard_trace_handler(profiler_log_dir),
+                record_shapes=True,
+                profile_memory=True,
+                with_stack=True
+            )
+            self.profiler.start()
+            logging.info(f"TensorBoard profiler enabled. Logs: {profiler_log_dir}")
+        
+        
         try:
             total_train_start_time = time.time()
             for epoch in range(start_epoch, max_epochs):
@@ -1010,6 +1058,12 @@ class Trainer:
                 self._handle_abort(epoch, path, history, "CUDA OOM")
             raise
         
+        finally:
+            # Stop profiler
+            if self.profiler is not None:
+                self.profiler.stop()
+                logging.info("Profiler stopped")
+        
     def _write_log_csv(self, history, path):
         fieldnames = ["Epoch", "Train Total Loss", "Train MSE",
                     "Val MSE", "R2_u", "R2_s", "LR", "Time"]
@@ -1093,6 +1147,23 @@ def load_checkpoint(checkpoint_path, trainer, device):
     start_epoch = ckpt.get("epoch", 0) + 1
     return start_epoch
 
+def detect_gpu_type():
+    """
+    Detect GPU type and return compatibility information.
+    Returns: (gpu_name, compute_capability, is_a100_or_better)
+    """
+    if not torch.cuda.is_available():
+        return "CPU", 0.0, False
+    
+    gpu_name = torch.cuda.get_device_name(0)
+    compute_capability = torch.cuda.get_device_capability(0)
+    cc = float(f"{compute_capability[0]}.{compute_capability[1]}")
+    
+    # A100 and newer (8.0+), H100 (9.0), etc.
+    is_a100_or_better = cc >= 8.0
+    
+    return gpu_name, cc, is_a100_or_better
+
 def load_train_objs(run_cfg):
     # Dataset does not depend on d_model etc., but we keep it here
     dataset = MultiChromosomeDataset(
@@ -1132,7 +1203,25 @@ def load_train_objs(run_cfg):
         shortcut_dropout=run_cfg["shortcut_dropout"],
         use_gradient_checkpointing=run_cfg["use_grad_ckpt"]
     )
-
+    
+    # Compile model if requested (before DDP wrapping) - GPU-aware
+    if USE_TORCH_COMPILE:
+        gpu_name, cc, is_a100_or_better = detect_gpu_type()
+        logging.info(f"GPU: {gpu_name}, Compute Capability: {cc}")
+        
+        if is_a100_or_better:
+            try:
+                model = torch.compile(
+                    model,
+                    mode="max-autotune",  # Optimal for A100+
+                    fullgraph=False,
+                )
+                logging.info("Model compiled with max-autotune (A100+)")
+            except Exception as e:
+                logging.warning(f"torch.compile() failed: {e}. Continuing without compilation.")
+        else:
+            logging.info(f"Compute Capability {cc} detected - torch.compile not recommended. Skipping.")
+    
     optimizer = torch.optim.Adam(
         model.parameters(),
         lr=run_cfg["lr"],

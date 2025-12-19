@@ -14,4 +14,4 @@ set -euo pipefail
 module load bedtools
 source .venv/bin/activate
 
-poetry run python ./src/multiomic_transformer/data/preprocess.py --num_cpu 24
+poetry run python ./src/multiomic_transformer/data/preprocess_original.py --num_cpu 24
