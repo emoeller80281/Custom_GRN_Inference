@@ -1478,8 +1478,8 @@ def evaluate_min_tg_r2_filters(
     tf_names,
     tg_names,
     min_r2_grid=None,
-    min_edges=10,
-    min_pos=1,
+    min_edges=50,
+    min_pos=10,
 ):
     """
     base_edges_df: DataFrame with at least ['Source','Target','Score','tg_r2']
@@ -1524,7 +1524,7 @@ def evaluate_min_tg_r2_filters(
                     tf_col="Source",
                     min_edges=min_edges,
                     min_pos=min_pos,
-                    balance=True,
+                    balance_for_auprc=True,
                 )
 
                 if per_tf_df.empty:
@@ -1649,16 +1649,17 @@ def compute_per_tf_metrics(
     tf_col: str = "Source",
     min_edges: int = 10,
     min_pos: int = 1,
-    balance: bool = True,
+    balance_for_auprc: bool = True,   # renamed intent
+    random_state: int = 0,
 ) -> pd.DataFrame:
     """
     Compute per-TF AUROC and AUPRC.
 
-    For each TF, we treat its outgoing edges (TF -> all TGs) as a local
-    binary classification problem and compute AUROC/AUPRC for that TF.
+    - AUROC is computed on the ORIGINAL (unbalanced) outgoing edges per TF.
+    - AUPRC is computed on a BALANCED subsample per TF (if balance_for_auprc=True).
 
     Returns a DataFrame with one row per TF:
-        ['tf', 'auroc', 'auprc', 'n_edges', 'n_pos', 'n_neg']
+        ['tf', 'auroc', 'auprc', 'n_edges', 'n_pos', 'n_neg', 'n_edges_bal']
     """
     df = df.dropna(subset=[score_col]).copy()
 
@@ -1674,37 +1675,52 @@ def compute_per_tf_metrics(
         if n_pos < min_pos or n_neg == 0:
             continue
 
-        if balance:
-            sub_bal = balance_pos_neg(sub, label_col=label_col, random_state=0)
-        else:
-            sub_bal = sub
+        # ---------- AUROC on unbalanced ----------
+        y_full = sub[label_col].astype(int).values
+        s_full = sub[score_col].values
 
-        y = sub_bal[label_col].astype(int).values
-        s = sub_bal[score_col].values
-
-        # need both classes present *after* balancing
-        if len(np.unique(y)) < 2:
+        # need both classes present
+        if len(np.unique(y_full)) < 2:
             continue
 
         try:
-            auroc = roc_auc_score(y, s)
-            auprc = average_precision_score(y, s)
+            auroc = roc_auc_score(y_full, s_full)
         except ValueError:
-            # safety net if something degenerate sneaks through
             continue
+
+        # ---------- AUPRC on balanced (optional) ----------
+        if balance_for_auprc:
+            sub_pr = balance_pos_neg(sub, label_col=label_col, random_state=random_state)
+        else:
+            sub_pr = sub
+
+        y_pr = sub_pr[label_col].astype(int).values
+        s_pr = sub_pr[score_col].values
+
+        # need both classes present after balancing too
+        if len(np.unique(y_pr)) < 2:
+            # If balancing collapses a TF to one class, skip AUPRC (or set NaN)
+            auprc = np.nan
+        else:
+            try:
+                auprc = average_precision_score(y_pr, s_pr)
+            except ValueError:
+                auprc = np.nan
 
         records.append(
             {
                 "tf": tf,
                 "auroc": float(auroc),
-                "auprc": float(auprc),
+                "auprc": (float(auprc) if np.isfinite(auprc) else np.nan),
                 "n_edges": int(n_edges),
                 "n_pos": int(n_pos),
                 "n_neg": int(n_neg),
+                "n_edges_bal": int(len(sub_pr)),
             }
         )
 
     return pd.DataFrame.from_records(records)
+
 
 def get_last_checkpoint(exp_dir: Path) -> Optional[str]:
     """
@@ -1736,8 +1752,12 @@ if __name__ == "__main__":
 
     experiment = args.experiment
     training_num = args.training_num if args.training_num else "model_training_001"
+    experiment_dir = Path(args.experiment_dir)
 
-    EXPERIMENT_DIR = Path(args.experiment_dir) / experiment / "chr19" / training_num
+    if "chr19" in [p.name for p in Path(experiment_dir / experiment).iterdir()] and experiment != "mESC_no_scale_linear":
+        EXPERIMENT_DIR = experiment_dir / experiment / "chr19" / training_num
+    else:
+        EXPERIMENT_DIR = experiment_dir / experiment / training_num
 
     if EXPERIMENT_DIR is None:
         EXPERIMENT_DIR = Path(f"/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/{experiment}/chr19") / training_num
@@ -1838,7 +1858,7 @@ if __name__ == "__main__":
     else:
         logging.info(f"Skipping calculation of per-TG R² threshold file (exists): {auroc_by_tg_r2_threshold_file}")
     
-    r2_threshold = args.r2_threshold
+    r2_threshold = args.r2_threshold if hasattr(args, 'r2_threshold') else None
     if r2_threshold is not None:
         logging.info(f"Filtering Gradient Attribution edges by per-TG R² > {r2_threshold}")
         per_tg_r2_valid = pd.read_csv(auroc_by_tg_r2_threshold_file)
@@ -1992,9 +2012,9 @@ if __name__ == "__main__":
                 score_col="Score",
                 label_col="is_gt",
                 tf_col="Source",
-                min_edges=10,
-                min_pos=1,
-                balance=True,
+                min_edges=50,
+                min_pos=10,
+                balance_for_auprc=True,
             )
             if per_tf_df.empty:
                 continue

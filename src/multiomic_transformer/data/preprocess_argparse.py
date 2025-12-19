@@ -1400,8 +1400,7 @@ def calculate_tf_tg_regulatory_potential(
     sliding_window_score_file = Path(sliding_window_score_file)
     tf_tg_reg_pot_file = Path(tf_tg_reg_pot_file)
     peak_to_gene_dist_file = Path(peak_to_gene_dist_file)
-    
-    logging.info(f"  - Calculating TF–TG regulatory potential: {len(tf_groups)} TFs | {num_cpu} CPUs")
+
     sliding_window_df = pd.read_parquet(sliding_window_score_file, engine="pyarrow")
     peak_to_gene_dist_df = pd.read_parquet(peak_to_gene_dist_file, engine="pyarrow")
 
@@ -1416,6 +1415,8 @@ def calculate_tf_tg_regulatory_potential(
 
     # Group the sliding window scores by TF
     tf_groups = {tf: df for tf, df in sliding_window_df.groupby("TF", sort=False)}
+    
+    logging.info(f"  - Calculating TF–TG regulatory potential: {len(tf_groups)} TFs | {num_cpu} CPUs")
 
     results = []
     

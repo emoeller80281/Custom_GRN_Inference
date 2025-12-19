@@ -469,19 +469,24 @@ if __name__ == "__main__":
     args = arg_parser.parse_args()
 
     experiment = args.experiment
+    experiment_dir = Path(args.experiment_dir)
     training_num = args.training_num if args.training_num else "model_training_001"
-
-    EXPERIMENT_DIR = Path(args.experiment_dir) / experiment / "chr19" / training_num if args.experiment_dir else None
-
-    if EXPERIMENT_DIR is None:
-        EXPERIMENT_DIR = Path(f"/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/{experiment}/chr19") / training_num
-
-    logging.info(f"Selected experiment directory: {EXPERIMENT_DIR}")
+    
     FIG_DIR = Path("/gpfs/Labs/Uzun/RESULTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/FIGURES")
     FIG_DATA = Path("/gpfs/Labs/Uzun/RESULTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/FIGURE_DATA")
 
-    exp_fig_dir = FIG_DIR / experiment
-    exp_fig_data_dir = FIG_DATA / experiment
+    if "chr19" in [p.name for p in Path(experiment_dir / experiment).iterdir()] and experiment != "mESC_no_scale_linear":
+        EXPERIMENT_DIR = experiment_dir / experiment / "chr19" / training_num
+        
+        exp_fig_dir = FIG_DIR / experiment
+        exp_fig_data_dir = FIG_DATA / experiment
+    else:
+        EXPERIMENT_DIR = experiment_dir / experiment / training_num
+        
+        exp_fig_dir = FIG_DIR / experiment / training_num
+        exp_fig_data_dir = FIG_DATA / experiment / training_num
+
+    logging.info(f"Selected experiment directory: {EXPERIMENT_DIR}")
 
     if not os.path.exists(exp_fig_data_dir):
         os.makedirs(exp_fig_data_dir)
