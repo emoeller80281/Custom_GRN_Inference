@@ -9,7 +9,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 4
 #SBATCH --mem=64G
-#SBATCH --array=0%4
+#SBATCH --array=0-21%6
 
 set -euo pipefail
 
@@ -20,13 +20,48 @@ source .venv/bin/activate
 EXPERIMENT_DIR=${EXPERIMENT_DIR:-/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments}
 
 PLOTTING_EXPERIMENT_LIST=(
-    "mESC_test_new_pipeline|model_training_001|trained_model.pt"
-    # "mESC_lower_peak_threshold|model_training_001|trained_model.pt"
-    # "mESC_no_filter_to_nearest_gene|model_training_001|trained_model.pt"
-    # "mESC_smaller_window_size|model_training_001|trained_model.pt"
-    # "mESC_larger_window_size|model_training_001|trained_model.pt"
-    # "mESC_lower_max_peak_dist|model_training_001|trained_model.pt"
-    # "mESC_higher_max_peak_dist|model_training_001|trained_model.pt"
+    # "mESC_no_scale_linear|model_training_128_10k_metacells|trained_model.pt"
+    # "mESC_no_scale_linear|model_training_192_1k_metacells|trained_model.pt"
+    # "mESC_no_scale_linear|model_training_192_5k_metacells|trained_model.pt"
+    # "mESC_no_scale_linear|model_training_192_10k_metacells|trained_model.pt"
+    # "mESC_no_scale_linear|model_training_192_10k_metacells_6_layers|trained_model.pt"
+    # "mESC_no_scale_linear|model_training_192_10k_metacells_8_heads|trained_model.pt"
+    # "mESC_no_scale_linear|model_training_192_15k_metacells|trained_model.pt"
+    # "mESC_no_scale_linear|model_training_192_50k_metacells|trained_model.pt"
+    # "mESC_no_scale_linear|model_training_256_15k_metacells|trained_model.pt"
+    # "mESC_no_scale_linear|model_training_256_20k_metacells|trained_model.pt"
+    # "mESC_no_scale_linear|model_training_320_10k_metacells|trained_model.pt"
+    # "mESC_large_neighborhood_count_filter|model_training_001|trained_model.pt"
+    # "mESC_large_neighborhood|model_training_001|trained_model.pt"
+    # "mESC_small_neighborhood|model_training_001|trained_model.pt"
+    # "mESC_small_neighborhood_high_self_weight|model_training_001|trained_model.pt"
+    # "mESC_slower_dist_decay|model_training_001|trained_model.pt"
+    # "mESC_max_dist_bias|model_training_002|trained_model.pt"
+    # "mESC_slow_decay_max_dist|model_training_001|trained_model.pt"
+    # "mESC_filter_lowest_ten_pct|model_training_003|trained_model.pt"
+
+    "mESC_lower_peak_threshold|model_training_001|trained_model.pt"
+    "mESC_no_filter_to_nearest_gene|model_training_003|trained_model.pt"
+    "mESC_smaller_window_size|model_training_004|trained_model.pt"
+    "mESC_larger_window_size|model_training_002|trained_model.pt"
+    "mESC_lower_max_peak_dist|model_training_002|trained_model.pt"
+    "mESC_higher_max_peak_dist|model_training_002|trained_model.pt"
+    "mESC_test_new_pipeline|model_training_002|trained_model.pt"
+    "mESC_slow_decay_filter_ten_pct|model_training_001|trained_model.pt"
+    "mESC_fast_decay_large_window|model_training_001|trained_model.pt"
+    "mESC_slow_decay_small_window|model_training_001|trained_model.pt"
+    "mESC_fewer_pca_components|model_training_001|trained_model.pt"
+    "mESC_more_pca_components|model_training_001|trained_model.pt"
+    "mESC_one_hop_diffusion|model_training_001|trained_model.pt"
+    "mESC_two_hop_diffusion|model_training_001|trained_model.pt"
+    "mESC_one_hop_large_neighborhood|model_training_001|trained_model.pt"
+    "mESC_strict_genes_lenient_peaks|model_training_001|trained_model.pt"
+    "mESC_lenient_genes_strict_peaks|model_training_001|trained_model.pt"
+    "mESC_strict_filter_twenty_pct|model_training_001|trained_model.pt"
+    "mESC_promoter_2kb|model_training_001|trained_model.pt"
+    "mESC_promoter_5kb|model_training_001|trained_model.pt"
+    "mESC_very_short_range|model_training_001|trained_model.pt"
+    "mESC_long_range_enhancers|model_training_001|trained_model.pt"
 )
 
 # ==========================================

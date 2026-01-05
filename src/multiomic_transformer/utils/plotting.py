@@ -317,6 +317,7 @@ def plot_model_tg_predictions(device, model, test_loader, tg_scaler, tf_scaler):
     sumy_g  = torch.zeros(G_total, dtype=torch.float64)
     sumy2_g = torch.zeros(G_total, dtype=torch.float64)
     cnt_g   = torch.zeros(G_total, dtype=torch.float64)
+    sumpred_g = torch.zeros(G_total, dtype=torch.float64)
 
     ### For overall R² and scatter:
     all_preds_for_plot = []
@@ -362,6 +363,9 @@ def plot_model_tg_predictions(device, model, test_loader, tg_scaler, tf_scaler):
             targets_u = torch.nan_to_num(targets_u.float(), nan=0.0, posinf=1e6, neginf=-1e6)
             preds_u   = torch.nan_to_num(preds_u.float(),   nan=0.0, posinf=1e6, neginf=-1e6)
             preds_u   = preds_u.clamp_min(0.0)
+            
+            sumpred_batch = preds_u.sum(dim=0)
+
 
             # ---- store for overall R² / scatter ----
             all_tgts_for_plot.append(targets_u.detach().cpu().numpy())
@@ -384,6 +388,7 @@ def plot_model_tg_predictions(device, model, test_loader, tg_scaler, tf_scaler):
             sumy_g.index_add_(0, ids_cpu, sumy_batch.cpu().to(torch.float64))
             sumy2_g.index_add_(0, ids_cpu, sumy2_batch.cpu().to(torch.float64))
             cnt_g.index_add_(0, ids_cpu, cnt_batch.cpu().to(torch.float64))
+            sumpred_g.index_add_(0, ids_cpu, sumpred_batch.cpu().to(torch.float64))
 
     # ============================
     # 4) Per-gene R² (global)
@@ -417,6 +422,22 @@ def plot_model_tg_predictions(device, model, test_loader, tg_scaler, tf_scaler):
     valid = np.isfinite(preds_flat) & np.isfinite(tgts_flat)
     preds_clean = preds_flat[valid]
     tgts_clean  = tgts_flat[valid]
+    
+    mean_true_g = torch.full_like(sumy_g, float("nan"))
+    mean_pred_g = torch.full_like(sumpred_g, float("nan"))
+
+    mask = cnt_g > 0
+    mean_true_g[mask] = sumy_g[mask] / cnt_g[mask]
+    mean_pred_g[mask] = sumpred_g[mask] / cnt_g[mask]
+
+    mean_true = mean_true_g.cpu().numpy()
+    mean_pred = mean_pred_g.cpu().numpy()
+    
+    var_g = (sumy2_g[mask] / cnt_g[mask]) - (mean_true_g[mask] ** 2)
+    keep = var_g.cpu().numpy() > 1e-6
+
+    mean_true = mean_true[keep]
+    mean_pred = mean_pred[keep]
 
     # Overall R² across all points
     r2_overall = r2_score(tgts_clean, preds_clean)
@@ -427,9 +448,31 @@ def plot_model_tg_predictions(device, model, test_loader, tg_scaler, tf_scaler):
     logging.info(f"Overall R² (from all points): {r2_overall:.4f}")
     logging.info(f"N samples (valid points): {len(preds_clean):,}")
     logging.info(f"Median per-gene R²: {median_r2_gene:.4f}")
+    
+    # ---- per-gene mean expression plot ----
+    per_gene_mean_fig, ax = plt.subplots(figsize=(7, 7))
+    ax.scatter(mean_true, mean_pred, alpha=0.6, s=20)
 
-    # ---- scatter plot ----
-    fig, ax = plt.subplots(figsize=(8, 8))
+    lims = [
+        min(mean_true.min(), mean_pred.min()),
+        max(mean_true.max(), mean_pred.max()),
+    ]
+    ax.plot(lims, lims, "k--", lw=2)
+
+    r2_tg = r2_score(mean_true, mean_pred)
+
+    ax.set_xlabel("Mean actual TG expression")
+    ax.set_ylabel("Mean predicted TG expression")
+    ax.set_title(
+        "Gene-level agreement between predicted \nand observed target gene expression\n"
+        f"Mean $R^2$ = {r2_tg:.4f}"
+    )
+
+    ax.grid(alpha=0.3)
+    plt.tight_layout()
+
+    # ---- scatter plot of all points ----
+    all_point_fig, ax = plt.subplots(figsize=(8, 8))
     ax.scatter(tgts_clean, preds_clean, alpha=0.3, s=10, color='steelblue')
 
     lims = [
@@ -449,7 +492,7 @@ def plot_model_tg_predictions(device, model, test_loader, tg_scaler, tf_scaler):
     ax.grid(alpha=0.3)
     plt.tight_layout()
 
-    return fig, tgts_clean, preds_clean
+    return per_gene_mean_fig, all_point_fig, tgts_clean, preds_clean, mean_true, mean_pred
 
 def locate_last_checkpoint(experiment_dir):
     checkpoint_files = sorted(experiment_dir.glob("checkpoint_*.pt"))
@@ -549,7 +592,7 @@ if __name__ == "__main__":
     
     # Plot TG predictions
     logging.info("Plotting TG predictions...")
-    tg_pred_plot, tgts_clean, preds_clean = plot_model_tg_predictions(
+    per_gene_mean_fig, all_point_fig, tgts_clean, preds_clean, mean_true, mean_pred = plot_model_tg_predictions(
         device=DEVICE,
         model=model,
         test_loader=test_loader,
@@ -557,8 +600,11 @@ if __name__ == "__main__":
         tf_scaler=tf_scaler,
     )
     
-    tg_pred_plot.savefig(EXPERIMENT_DIR / "test_set_r2_distribution.svg")
-    tg_pred_plot.savefig(exp_fig_dir / "test_set_r2_distribution.svg")
+    per_gene_mean_fig.savefig(EXPERIMENT_DIR / "per_gene_mean_expression.png", dpi=200)
+    per_gene_mean_fig.savefig(exp_fig_dir / "per_gene_mean_expression.svg")
+    
+    all_point_fig.savefig(EXPERIMENT_DIR / "test_set_r2_distribution.png", dpi=200)
+    all_point_fig.savefig(exp_fig_dir / "test_set_r2_distribution.svg")
     
     # Save R2 prediction data
     logging.info("Saving R2 prediction data...")
@@ -567,9 +613,11 @@ if __name__ == "__main__":
         os.makedirs(r2_acc_dir, exist_ok=True)
     np.save(r2_acc_dir / "tgts_clean.npy", tgts_clean)
     np.save(r2_acc_dir / "preds_clean.npy", preds_clean)
-
-
     
+    # Saving per-gene mean expression data
+    np.save(r2_acc_dir / "mean_true.npy", mean_true)
+    np.save(r2_acc_dir / "mean_pred.npy", mean_pred)
+
     logging.info("All done!")
     
     
