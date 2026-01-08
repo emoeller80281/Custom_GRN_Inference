@@ -3,13 +3,12 @@
 #SBATCH --output=LOGS/transformer_logs/experiments/%x_%A/%x_%A_%a.log
 #SBATCH --error=LOGS/transformer_logs/experiments/%x_%A/%x_%A_%a.err
 #SBATCH --time=36:00:00
-#SBATCH -p dense
-#SBATCH -N 2
-#SBATCH --gres=gpu:v100:4
+#SBATCH -p compute
+#SBATCH -N 1
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 12
 #SBATCH --mem=128G
-#SBATCH --array=0-18%2
+#SBATCH --array=0-1%2
 
 set -euo pipefail
 
@@ -92,30 +91,43 @@ DEFAULT_RESUME_CHECKPOINT_PATH=""
 # "slow_decay_filter_ten_pct|mESC_slow_decay_filter_ten_pct|MIN_GENES_PER_CELL=100;MIN_PEAKS_PER_CELL=100;HOPS=0;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.1;FILTER_OUT_LOWEST_PCT_PEAKS=0.1;DISTANCE_SCALE_FACTOR=40000"
 
 EXPERIMENTS=(
-    "no_filter_to_nearest_gene|mESC_no_filter_to_nearest_gene|FILTER_TO_NEAREST_GENE=false;HOPS=0"
-    "smaller_window_size|mESC_smaller_window_size|WINDOW_SIZE=500;HOPS=0"
-    "larger_window_size|mESC_larger_window_size|WINDOW_SIZE=1500;HOPS=0"
-    "lower_max_peak_dist|mESC_lower_max_peak_dist|MAX_PEAK_DISTANCE=50000;HOPS=0"
-    "higher_max_peak_dist|mESC_higher_max_peak_dist|MAX_PEAK_DISTANCE=150000;HOPS=0"
-    "fast_decay_large_window|mESC_fast_decay_large_window|WINDOW_SIZE=1500;DISTANCE_SCALE_FACTOR=10000;HOPS=0"
-    "slow_decay_small_window|mESC_slow_decay_small_window|WINDOW_SIZE=500;DISTANCE_SCALE_FACTOR=40000;HOPS=0"
+    # "no_filter_to_nearest_gene|mESC_no_filter_to_nearest_gene|FILTER_TO_NEAREST_GENE=false;HOPS=0"
+    # "smaller_window_size|mESC_smaller_window_size|WINDOW_SIZE=500;HOPS=0"
+    # "larger_window_size|mESC_larger_window_size|WINDOW_SIZE=1500;HOPS=0"
+    # "lower_max_peak_dist|mESC_lower_max_peak_dist|MAX_PEAK_DISTANCE=50000;HOPS=0"
+    # "higher_max_peak_dist|mESC_higher_max_peak_dist|MAX_PEAK_DISTANCE=150000;HOPS=0"
+    # "fast_decay_large_window|mESC_fast_decay_large_window|WINDOW_SIZE=1500;DISTANCE_SCALE_FACTOR=10000;HOPS=0"
+    # "slow_decay_small_window|mESC_slow_decay_small_window|WINDOW_SIZE=500;DISTANCE_SCALE_FACTOR=40000;HOPS=0"
 
-    "fewer_pca_components|mESC_fewer_pca_components|PCA_COMPONENTS=15;HOPS=0"
-    "more_pca_components|mESC_more_pca_components|PCA_COMPONENTS=50;HOPS=0"
+    # "fewer_pca_components|mESC_fewer_pca_components|PCA_COMPONENTS=15;HOPS=0"
+    # "more_pca_components|mESC_more_pca_components|PCA_COMPONENTS=50;HOPS=0"
 
-    "one_hop_diffusion|mESC_one_hop_diffusion|HOPS=1;NEIGHBORS_K=20"
-    "two_hop_diffusion|mESC_two_hop_diffusion|HOPS=2;NEIGHBORS_K=20"
-    "one_hop_large_neighborhood|mESC_one_hop_large_neighborhood|HOPS=1;NEIGHBORS_K=30"
+    # "one_hop_diffusion|mESC_one_hop_diffusion|HOPS=1;NEIGHBORS_K=20"
+    # "two_hop_diffusion|mESC_two_hop_diffusion|HOPS=2;NEIGHBORS_K=20"
+    # "one_hop_large_neighborhood|mESC_one_hop_large_neighborhood|HOPS=1;NEIGHBORS_K=30"
 
-    "strict_genes_lenient_peaks|mESC_strict_genes_lenient_peaks|FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.2;FILTER_OUT_LOWEST_PCT_PEAKS=0.05;HOPS=0"
-    "lenient_genes_strict_peaks|mESC_lenient_genes_strict_peaks|FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.05;FILTER_OUT_LOWEST_PCT_PEAKS=0.2;HOPS=0"
-    "strict_filter_twenty_pct|mESC_strict_filter_twenty_pct|FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.2;FILTER_OUT_LOWEST_PCT_PEAKS=0.2;HOPS=0"
+    # "strict_genes_lenient_peaks|mESC_strict_genes_lenient_peaks|FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.2;FILTER_OUT_LOWEST_PCT_PEAKS=0.05;HOPS=0"
+    # "lenient_genes_strict_peaks|mESC_lenient_genes_strict_peaks|FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.05;FILTER_OUT_LOWEST_PCT_PEAKS=0.2;HOPS=0"
+    # "strict_filter_twenty_pct|mESC_strict_filter_twenty_pct|FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.2;FILTER_OUT_LOWEST_PCT_PEAKS=0.2;HOPS=0"
 
-    "promoter_2kb|mESC_promoter_2kb|PROMOTER_BP=2000;MAX_PEAK_DISTANCE=50000;HOPS=0"
-    "promoter_5kb|mESC_promoter_5kb|PROMOTER_BP=5000;MAX_PEAK_DISTANCE=50000;HOPS=0"
+    # "promoter_2kb|mESC_promoter_2kb|PROMOTER_BP=2000;MAX_PEAK_DISTANCE=50000;HOPS=0"
+    # "promoter_5kb|mESC_promoter_5kb|PROMOTER_BP=5000;MAX_PEAK_DISTANCE=50000;HOPS=0"
     
-    "very_short_range|mESC_very_short_range|MAX_PEAK_DISTANCE=25000;DISTANCE_SCALE_FACTOR=10000;HOPS=0"
-    "long_range_enhancers|mESC_long_range_enhancers|MAX_PEAK_DISTANCE=250000;DISTANCE_SCALE_FACTOR=50000;HOPS=0"
+    # "very_short_range|mESC_very_short_range|MAX_PEAK_DISTANCE=25000;DISTANCE_SCALE_FACTOR=10000;HOPS=0"
+    # "long_range_enhancers|mESC_long_range_enhancers|MAX_PEAK_DISTANCE=250000;DISTANCE_SCALE_FACTOR=50000;HOPS=0"
+
+    "slow_decay_long_range_two_hop|mESC_slow_decay_long_range_two_hop|DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;HOPS=2;NEIGHBORS_K=20"
+    # "slow_decay_long_range_zero_hops|mESC_slow_decay_long_range_zero_hops|DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;HOPS=0;NEIGHBORS_K=20"
+
+    # "promoter_only_10kb_two_hop|mESC_promoter_only_10kb_two_hop|PROMOTER_BP=10000;HOPS=2;NEIGHBORS_K=20"
+    # "promoter_only_5kb_two_hop|mESC_promoter_only_5kb_two_hop|PROMOTER_BP=5000;HOPS=2;NEIGHBORS_K=20"
+    # "promoter_only_2kb_two_hop|mESC_promoter_only_2kb_two_hop|PROMOTER_BP=2000;HOPS=2;NEIGHBORS_K=20"
+    
+    # "decay_30k_long_range_two_hop|mESC_decay_30k_long_range_two_hop|DISTANCE_SCALE_FACTOR=30000;MAX_PEAK_DISTANCE=150000;HOPS=2;NEIGHBORS_K=20"
+    "decay_50k_long_range_two_hop|mESC_decay_50k_long_range_two_hop|DISTANCE_SCALE_FACTOR=50000;MAX_PEAK_DISTANCE=150000;HOPS=2;NEIGHBORS_K=20"
+    # "decay_75k_long_range_two_hop|mESC_decay_75k_long_range_two_hop|DISTANCE_SCALE_FACTOR=75000;MAX_PEAK_DISTANCE=150000;HOPS=2;NEIGHBORS_K=20"
+
+
 )
 
 

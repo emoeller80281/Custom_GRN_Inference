@@ -396,6 +396,7 @@ def pseudo_bulk(
     # tiny placeholder X to satisfy AnnData; graph lives in .obsp
     joint = AnnData(X=sp.csr_matrix((rna.n_obs, 0)), obs=rna.obs.copy())
     joint.obsm["X_combined"] = combined_pca
+    
     sc.pp.neighbors(joint, n_neighbors=neighbors_k, use_rep="X_combined")
 
     # base connectivities (symmetric KNN graph; values ~[0,1])
@@ -2113,7 +2114,8 @@ def precompute_input_tensors(
             vals.append(1.0)
 
     if not rows:
-        raise ValueError("No peaks from window_map matched rows in total_RE_pseudobulk_chr.")
+        logging.warning("No peaks from window_map matched rows in total_RE_pseudobulk_chr. Returning None.")
+        return None, None, None
 
     W = sp.csr_matrix((vals, (rows, cols)), shape=(num_windows, num_peaks))
     atac_window = W @ total_RE_pseudobulk_chr.values  # [num_windows, num_cells]
@@ -2726,6 +2728,11 @@ if __name__ == "__main__":
                 window_map=window_map,
                 windows=genome_windows,   # now aligned with map
             )
+            
+            # Skip this chromosome if no peaks matched
+            if tg_tensor_all is None:
+                logging.warning(f"{chrom_id}: No peaks matched between window_map and total_RE_pseudobulk_chr; skipping this chromosome.")
+                continue
             
             # ----- Load common TF and TG vocab -----
             # Create a common TG vocabulary for the chromosome using the gene TSS
