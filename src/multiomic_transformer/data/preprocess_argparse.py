@@ -415,7 +415,8 @@ def pseudo_bulk(
 
     W = _row_norm(W)
 
-    # multi-hop diffusion: W <- W^h (staying row-stochastic)
+    # multi-hop diffusion: W <- W^h
+    
     if hops > 1:
         W_h = W
         for _ in range(1, int(hops)):
@@ -423,7 +424,8 @@ def pseudo_bulk(
             if renormalize_each_hop:
                 W_h = _row_norm(W_h)
         W = W_h
-    # one last normalization for safety (keeps rows summing to 1 exactly)
+        
+    # one last normalization to make sure rows sum to 1
     W = _row_norm(W)
 
     # --- apply smoothing per modality ---

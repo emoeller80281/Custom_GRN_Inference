@@ -3,12 +3,13 @@
 #SBATCH --output=LOGS/transformer_logs/experiments/%x_%A/%x_%A_%a.log
 #SBATCH --error=LOGS/transformer_logs/experiments/%x_%A/%x_%A_%a.err
 #SBATCH --time=36:00:00
-#SBATCH -p compute
-#SBATCH -N 1
+#SBATCH -p gpu
+#SBATCH -N 2
 #SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:p100:2
 #SBATCH -c 12
 #SBATCH --mem=128G
-#SBATCH --array=0-1%2
+#SBATCH --array=0%2
 
 set -euo pipefail
 
@@ -21,6 +22,9 @@ source .venv/bin/activate
 # ==========================================
 
 # Default/Initial Settings (baseline for all experiments)
+DEFAULT_CHROM_IDS="chr1 chr2 chr3 chr4 chr5 chr6 chr7 chr8 chr9 chr10 chr11 chr12 chr13 chr14 chr15 chr16 chr17 chr18 chr19"
+
+
 # Preprocessing parameters
 DEFAULT_MIN_GENES_PER_CELL=200
 DEFAULT_MIN_PEAKS_PER_CELL=200
@@ -116,7 +120,7 @@ EXPERIMENTS=(
     # "very_short_range|mESC_very_short_range|MAX_PEAK_DISTANCE=25000;DISTANCE_SCALE_FACTOR=10000;HOPS=0"
     # "long_range_enhancers|mESC_long_range_enhancers|MAX_PEAK_DISTANCE=250000;DISTANCE_SCALE_FACTOR=50000;HOPS=0"
 
-    "slow_decay_long_range_two_hop|mESC_slow_decay_long_range_two_hop|DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;HOPS=2;NEIGHBORS_K=20"
+    # "slow_decay_long_range_two_hop|mESC_slow_decay_long_range_two_hop|DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;HOPS=2;NEIGHBORS_K=20"
     # "slow_decay_long_range_zero_hops|mESC_slow_decay_long_range_zero_hops|DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;HOPS=0;NEIGHBORS_K=20"
 
     # "promoter_only_10kb_two_hop|mESC_promoter_only_10kb_two_hop|PROMOTER_BP=10000;HOPS=2;NEIGHBORS_K=20"
@@ -124,8 +128,12 @@ EXPERIMENTS=(
     # "promoter_only_2kb_two_hop|mESC_promoter_only_2kb_two_hop|PROMOTER_BP=2000;HOPS=2;NEIGHBORS_K=20"
     
     # "decay_30k_long_range_two_hop|mESC_decay_30k_long_range_two_hop|DISTANCE_SCALE_FACTOR=30000;MAX_PEAK_DISTANCE=150000;HOPS=2;NEIGHBORS_K=20"
-    "decay_50k_long_range_two_hop|mESC_decay_50k_long_range_two_hop|DISTANCE_SCALE_FACTOR=50000;MAX_PEAK_DISTANCE=150000;HOPS=2;NEIGHBORS_K=20"
+    # "decay_50k_long_range_two_hop|mESC_decay_50k_long_range_two_hop|DISTANCE_SCALE_FACTOR=50000;MAX_PEAK_DISTANCE=150000;HOPS=2;NEIGHBORS_K=20"
     # "decay_75k_long_range_two_hop|mESC_decay_75k_long_range_two_hop|DISTANCE_SCALE_FACTOR=75000;MAX_PEAK_DISTANCE=150000;HOPS=2;NEIGHBORS_K=20"
+
+    # Testing running training using only one chromosome. Do we get similar results? Might be better for testing
+    "slow_decay_long_range_two_hop|mESC_slow_decay_long_range_two_hop|DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;HOPS=2;NEIGHBORS_K=20;CHROM_IDS=chr1"
+
 
 
 )
@@ -161,6 +169,8 @@ echo ""
 # ==========================================
 
 # Initialize all parameters with defaults
+CHROM_IDS=($DEFAULT_CHROM_IDS)
+
 # Preprocessing parameters
 MIN_GENES_PER_CELL=${DEFAULT_MIN_GENES_PER_CELL}
 MIN_PEAKS_PER_CELL=${DEFAULT_MIN_PEAKS_PER_CELL}
@@ -234,6 +244,7 @@ if [ -n "${PARAM_OVERRIDES}" ]; then
             
             # Apply the override by setting the variable dynamically
             case "$param_name" in
+                CHROM_IDS) IFS=',' read -r -a CHROM_IDS <<< "$param_value" ;;
                 # Preprocessing parameters
                 MIN_GENES_PER_CELL) MIN_GENES_PER_CELL=$param_value ;;
                 MIN_PEAKS_PER_CELL) MIN_PEAKS_PER_CELL=$param_value ;;
@@ -332,7 +343,7 @@ VALIDATION_DATASETS="E8.75_rep1"
 
 # Chromosomes to process
 CHROM_ID="chr19"
-CHROM_IDS="chr1 chr2 chr3 chr4 chr5 chr6 chr7 chr8 chr9 chr10 chr11 chr12 chr13 chr14 chr15 chr16 chr17 chr18 chr19"
+# CHROM_IDS="chr1 chr2 chr3 chr4 chr5 chr6 chr7 chr8 chr9 chr10 chr11 chr12 chr13 chr14 chr15 chr16 chr17 chr18 chr19"
 
 # Force recalculate (set to true if you want to reprocess data)
 FORCE_RECALCULATE=false
