@@ -702,8 +702,8 @@ def process_or_load_rna_atac_data(
     processed_rna_file  = _configured_path(sample_input_dir, "PROCESSED_RNA_FILENAME",  "scRNA_seq_processed.parquet", sample_name)
     processed_atac_file = _configured_path(sample_input_dir, "PROCESSED_ATAC_FILENAME", "scATAC_seq_processed.parquet", sample_name)
 
-    raw_rna_file  = _configured_path(sample_input_dir, "RAW_RNA_FILENAME",  "scRNA_seq_raw.parquet", sample_name)
-    raw_atac_file = _configured_path(sample_input_dir, "RAW_ATAC_FILENAME", "scATAC_seq_raw.parquet", sample_name)
+    raw_rna_file  = _configured_path(sample_input_dir, "RAW_RNA_FILE",  "scRNA_seq_raw.parquet", sample_name)
+    raw_atac_file = _configured_path(sample_input_dir, "RAW_ATAC_FILE", "scATAC_seq_raw.parquet", sample_name)
 
     adata_rna_file  = _configured_path(sample_input_dir, "ADATA_RNA_FILENAME",  "adata_RNA.h5ad", sample_name)
     adata_atac_file = _configured_path(sample_input_dir, "ADATA_ATAC_FILENAME", "adata_ATAC.h5ad", sample_name)
@@ -755,26 +755,26 @@ def process_or_load_rna_atac_data(
     
     def _normalize_barcodes(index_like) -> pd.Index:
         """
-        Normalize 10x barcodes so RNA/ATAC match.
-        - Strip sample prefixes like 'S1:' or 'rna-' at start
-        - Strip modality tags at end: _RNA/_GEX/_ATAC, #GEX/#ATAC
-        - Strip trailing dash/dot + digits: -1, -2, .1, .2
-        - Uppercase to avoid case mismatches
+        Normalize cell barcodes so RNA/ATAC match.
+        For macrophage data with format like "AAACCGAAGTCACTCC-1_4":
+        - Strip the trailing buffer suffix (_1, _2, _3, _4) to get common barcode
         """
         ix = pd.Index(index_like).astype(str)
-
-        # strip leading sample prefixes "S1:", "RNA:", "rna-", etc.
-        ix = ix.str.replace(r'^[A-Za-z0-9]+[:\-]','', regex=True)  # keep if too aggressive, comment out
-
-        # strip modality tags at end
-        ix = ix.str.replace(r'(?:_RNA|_GEX|_ATAC|#GEX|#ATAC)$', '', regex=True, case=False)
-
-        # strip trailing -digits or .digits (10x suffix)
+        
+        # For barcodes with format "BARCODE-LANE_BUFFER", strip the _BUFFER suffix
+        # This allows barcodes from different buffers to match
+        ix = ix.str.replace(r'_\d+$', '', regex=True)
+        
+        # Also handle standard 10x suffixes if they exist
+        # Strip trailing -digits or .digits (10x suffix) like -1, -2, .1, .2
         ix = ix.str.replace(r'[-\.]\d+$', '', regex=True)
-
-        # unify case
+        
+        # Strip modality tags at end
+        ix = ix.str.replace(r'(?:_RNA|_GEX|_ATAC|#GEX|#ATAC)$', '', regex=True, case=False)
+        
+        # Unify case
         ix = ix.str.upper()
-
+        
         return ix
 
     def harmonize_and_intersect(ad_rna: AnnData, ad_atac: AnnData, *, verbose: bool=True):
@@ -783,9 +783,6 @@ def process_or_load_rna_atac_data(
 
         if verbose:
             print(f"[SYNC] RNA n={ad_rna.n_obs}, ATAC n={ad_atac.n_obs}")
-            print("[SYNC] Examples:")
-            print("  RNA:", list(rna_norm[:5]))
-            print("  ATAC:", list(atac_norm[:5]))
 
         # build maps from normalized→original to subset accurately
         r_map = pd.Series(ad_rna.obs_names, index=rna_norm, dtype="object")
@@ -888,20 +885,22 @@ def process_or_load_rna_atac_data(
         ad_atac = _load_or_none(adata_atac_file, sc.read_h5ad)
 
         if ad_rna is None or ad_atac is None or force_recalculate:
-            logging.debug("  - Filtered AnnData missing or ignored – will look for raw CSVs.")
+            logging.debug("  - Filtered AnnData missing or ignored – will look for raw files.")
 
             # ===================
-            # 3) Try raw CSV pair
+            # 3) Try raw files (parquet or CSV)
             # ===================
             if not raw_rna_file.is_file() or not raw_atac_file.is_file():
-                logging.debug("  - Raw parquet files missing – will try to create from 10x inputs.")
-                logging.debug(raw_rna_file)
-                logging.debug(raw_atac_file)
+                logging.debug("  - Raw data files missing – will try to create from 10x inputs.")
+                logging.debug(f"    Expected RNA file: {raw_rna_file}")
+                logging.debug(f"    Expected ATAC file: {raw_atac_file}")
 
                 if raw_10x_rna_data_dir is None:
                     raise FileNotFoundError(
-                        "Neither processed parquet, filtered AnnData, raw parquet files, nor raw 10x inputs are available. "
-                        "Provide raw_10x_rna_data_dir and raw_atac_peak_file to proceed."
+                        f"Neither processed files, filtered AnnData, nor raw data files are available.\n"
+                        f"Expected raw RNA file: {raw_rna_file}\n"
+                        f"Expected raw ATAC file: {raw_atac_file}\n"
+                        f"Or provide raw_10x_rna_data_dir and raw_atac_peak_file to create from 10x data."
                     )
                 if not raw_10x_rna_data_dir.is_dir():
                     raise FileNotFoundError(f"10x RNA directory not found: {raw_10x_rna_data_dir}")
@@ -914,14 +913,18 @@ def process_or_load_rna_atac_data(
                 process_10x_to_parquet(raw_10x_rna_data_dir, raw_atac_peak_file, raw_rna_file, raw_atac_file, sample_name)
 
             # Load raw data files (parquet or csv) and convert to AnnData
-            logging.debug("Reading raw data files into AnnData")
+            logging.info(f"[{sample_name}] Loading raw data files: {raw_rna_file.name}, {raw_atac_file.name}")
             if str(raw_rna_file).endswith('.csv'):
-                rna_df = pd.read_csv(raw_rna_file)
+                # CSV files are typically genes × cells, need to transpose to cells × genes
+                rna_df = pd.read_csv(raw_rna_file, index_col=0)
+                rna_df = rna_df.T  # Transpose to cells × genes
             else:
                 rna_df = pd.read_parquet(raw_rna_file, engine="pyarrow")
             
             if str(raw_atac_file).endswith('.csv'):
-                atac_df = pd.read_csv(raw_atac_file)
+                # CSV files are typically peaks × cells, need to transpose to cells × peaks  
+                atac_df = pd.read_csv(raw_atac_file, index_col=0)
+                atac_df = atac_df.T  # Transpose to cells × peaks
             else:
                 atac_df = pd.read_parquet(raw_atac_file, engine="pyarrow")
             
@@ -2343,7 +2346,7 @@ if __name__ == "__main__":
     if PROCESS_SAMPLE_DATA == True:
         def _per_sample_worker(sample_name: str) -> dict:
             try:
-                sample_input_dir = RAW_DATA / DATASET_NAME / sample_name
+                sample_input_dir = RAW_SINGLE_CELL_DATA if RAW_SINGLE_CELL_DATA else RAW_DATA / DATASET_NAME / sample_name
                 out_dir = SAMPLE_PROCESSED_DATA_DIR / sample_name
                 out_dir.mkdir(parents=True, exist_ok=True)
                 SAMPLE_DATA_CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -2351,7 +2354,7 @@ if __name__ == "__main__":
                 process_or_load_rna_atac_data(
                     sample_input_dir,
                     force_recalculate=FORCE_RECALCULATE,
-                    raw_10x_rna_data_dir=RAW_10X_RNA_DATA_DIR / sample_name,
+                    raw_10x_rna_data_dir=RAW_10X_RNA_DATA_DIR / sample_name if RAW_10X_RNA_DATA_DIR else None,
                     raw_atac_peak_file=RAW_ATAC_PEAK_MATRIX_FILE,
                     sample_name=sample_name,
                     neighbors_k=NEIGHBORS_K,
@@ -2381,7 +2384,7 @@ if __name__ == "__main__":
             
         # Sample-specific preprocessing
         for sample_name in SAMPLE_NAMES:
-            sample_input_dir = RAW_DATA / DATASET_NAME / sample_name
+            sample_input_dir = RAW_SINGLE_CELL_DATA if RAW_SINGLE_CELL_DATA else RAW_DATA / DATASET_NAME / sample_name
             
             # Input Files (raw or processed scRNA-seq and scATAC-seq data)
             processed_rna_file = sample_input_dir / "scRNA_seq_processed.parquet"
@@ -2430,12 +2433,12 @@ if __name__ == "__main__":
             os.makedirs(SAMPLE_PROCESSED_DATA_DIR / sample_name, exist_ok=True)
             os.makedirs(SAMPLE_DATA_CACHE_DIR, exist_ok=True)
             
-            sample_raw_10x_rna_data_dir = RAW_10X_RNA_DATA_DIR / sample_name
+            sample_raw_10x_rna_data_dir = RAW_10X_RNA_DATA_DIR / sample_name if RAW_10X_RNA_DATA_DIR else None
             
             processed_rna_df, processed_atac_df, pseudobulk_rna_df, pseudobulk_atac_df = process_or_load_rna_atac_data(
                 sample_input_dir,
                 force_recalculate=FORCE_RECALCULATE,
-                raw_10x_rna_data_dir=RAW_10X_RNA_DATA_DIR / sample_name,
+                raw_10x_rna_data_dir=sample_raw_10x_rna_data_dir,
                 raw_atac_peak_file=RAW_ATAC_PEAK_MATRIX_FILE,
                 sample_name=sample_name,
                 neighbors_k=NEIGHBORS_K,

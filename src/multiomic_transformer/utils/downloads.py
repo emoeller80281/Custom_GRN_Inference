@@ -165,18 +165,55 @@ def download_genome_fasta(organism_code: str, save_dir: Union[str, Path]) -> Pat
     if not _is_bgzf(gz_path):
         logging.info(f"{gz_path.name} is plain gzip; converting to BGZF (keeping .gz)…")
         tmp_bgzf = gz_path.with_suffix(gz_path.suffix + ".bgzf.tmp")
-        # Stream gunzip -> BGZF without intermediate .fa
-        with gzip.open(gz_path, "rb") as fin, pysam.BGZFile(str(tmp_bgzf), "wb") as bout, tqdm(
-            total=None, unit="B", unit_scale=True, unit_divisor=1024,
-            desc=f"transcode {gz_path.name} to BGZF", dynamic_ncols=True, mininterval=0.1
-        ) as pbar:
-            for chunk in iter(lambda: fin.read(1 << 20), b""):
-                if not chunk:
-                    break
-                bout.write(chunk)
-                pbar.update(len(chunk))
-        tmp_bgzf.replace(gz_path)
-        logging.info(f"  - Overwrote {gz_path.name} with BGZF content")
+        tmp_fa = gz_path.with_suffix("")  # uncompressed intermediate
+        
+        # Try using bgzip CLI (much faster, parallel) if available
+        try:
+            # Decompress to temp file
+            logging.info(f"  - Decompressing with gunzip...")
+            subprocess.run(["gunzip", "-c", str(gz_path)], 
+                          stdout=open(tmp_fa, "wb"), 
+                          check=True, 
+                          stderr=subprocess.DEVNULL)
+            
+            # Compress with bgzip (parallel, much faster)
+            logging.info(f"  - Compressing with bgzip...")
+            subprocess.run(["bgzip", "-f", "-@", "8", str(tmp_fa)], 
+                          check=True, 
+                          stderr=subprocess.DEVNULL)
+            
+            # bgzip creates .gz file, rename to our temp name then to final
+            (tmp_fa.parent / f"{tmp_fa.name}.gz").replace(tmp_bgzf)
+            tmp_bgzf.replace(gz_path)
+            logging.info(f"  - Converted to BGZF using bgzip")
+            
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            # Fall back to Python if bgzip not available
+            logging.info(f"  - bgzip not available, using slower Python conversion...")
+            if tmp_fa.exists():
+                tmp_fa.unlink()
+            
+            # Use larger chunks (4MB) for better performance
+            with gzip.open(gz_path, "rb") as fin, pysam.BGZFile(str(tmp_bgzf), "wb") as bout:
+                chunk_size = 1 << 22  # 4MB chunks
+                file_size = gz_path.stat().st_size
+                bytes_read = 0
+                last_log_pct = -1
+                
+                for chunk in iter(lambda: fin.read(chunk_size), b""):
+                    if not chunk:
+                        break
+                    bout.write(chunk)
+                    bytes_read += len(chunk)
+                    
+                    # Log progress every 10%
+                    pct = int((bytes_read / file_size) * 100)
+                    if pct >= last_log_pct + 10:
+                        logging.info(f"    {pct}% complete")
+                        last_log_pct = pct
+            
+            tmp_bgzf.replace(gz_path)
+            logging.info(f"  - Conversion complete")
     else:
         logging.info(f"  - {gz_path.name} is already BGZF; skipping transcode")
 
@@ -416,13 +453,16 @@ def download_ncbi_gene_info(organism_code: str, out_path: Optional[Union[str, Pa
     url = info["url"]
     filename = f"{info['species']}.gene_info.gz"
     
-    # Default to NCBI_FILE_DIR if available, otherwise current directory
-    try:
-        base = NCBI_FILE_DIR
-    except NameError:
-        base = Path(f"data/genome_data/genome_annotation/{organism_code}")
-    
-    dest = Path(out_path) if out_path is not None else (base / filename)
+    # Construct organism-specific path
+    if out_path is not None:
+        dest = Path(out_path)
+    else:
+        # Construct path relative to current working directory
+        base = Path("data/genome_data/genome_annotation") / organism_code
+        dest = base / filename
+        # Make it absolute
+        if not dest.is_absolute():
+            dest = Path.cwd() / dest
 
     if dest.exists():
         logging.info(f"Found existing gene_info: {dest}")
@@ -495,12 +535,13 @@ def download_ensembl_gtf(
     fn_gz = f"{species_name}.{assembly}.{release}.gtf.gz"
     url = f"https://ftp.ensembl.org/pub/release-{release}/gtf/{org}/{fn_gz}"
 
-    # Default to GTF_FILE_DIR if available
+    # Construct organism-specific path
     if out_dir is None:
-        try:
-            out_dir = GTF_FILE_DIR
-        except NameError:
-            out_dir = Path(f"data/genome_data/genome_annotation/{organism_code}")
+        # Construct path relative to current working directory
+        out_dir = Path("data/genome_data/genome_annotation") / organism_code
+        # Make it absolute
+        if not out_dir.is_absolute():
+            out_dir = Path.cwd() / out_dir
     else:
         out_dir = Path(out_dir)
     

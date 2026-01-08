@@ -6,7 +6,7 @@ import logging
 
 def format_peaks(peak_ids: Union[pd.Series, pd.Index]) -> pd.DataFrame:
     """
-    Splits peaks from `chrN:start-end` format into a DataFrame.
+    Splits peaks from `chrN:start-end` or `chrN-start-end` format into a DataFrame.
     
     Creates a dataframe with the following columns:
     1) "peak_id": peakN+1 where N is the index position of the peak
@@ -17,7 +17,7 @@ def format_peaks(peak_ids: Union[pd.Series, pd.Index]) -> pd.DataFrame:
     
     Args:
         peak_ids (pd.Series):
-            Series containing the peak locations in "chrN:start-end" format.
+            Series containing the peak locations in "chrN:start-end" or "chrN-start-end" format.
             
     Returns:
         peak_df (pd.DataFrame):
@@ -31,6 +31,7 @@ def format_peaks(peak_ids: Union[pd.Series, pd.Index]) -> pd.DataFrame:
     logging.info(f'  - Formatting {peak_ids.shape[0]} peaks')
 
     # Extract chromosome, start, and end from peak ID strings
+    # Try colon-separated format first (chr:start-end)
     try:
         chromosomes = peak_ids.str.extract(r'([^:]+):')[0]
         starts = peak_ids.str.extract(r':(\d+)-')[0]
@@ -38,8 +39,18 @@ def format_peaks(peak_ids: Union[pd.Series, pd.Index]) -> pd.DataFrame:
     except Exception as e:
         raise ValueError(f"Error parsing 'peak_id' values: {e}")
 
+    # If colon format didn't work, try dash-separated format (chr-start-end)
+    if chromosomes.isnull().any():
+        try:
+            # For format like "chr1-10112-10254"
+            chromosomes = peak_ids.str.extract(r'^([^-]+)')[0]
+            starts = peak_ids.str.extract(r'^[^-]+-(\d+)-')[0]
+            ends = peak_ids.str.extract(r'-(\d+)$')[0]
+        except Exception as e:
+            raise ValueError(f"Error parsing 'peak_id' values with dash format: {e}")
+
     if chromosomes.isnull().any() or starts.isnull().any() or ends.isnull().any():
-        raise ValueError("Malformed peak IDs. Expect format 'chr:start-end'.")
+        raise ValueError("Malformed peak IDs. Expect format 'chr:start-end' or 'chr-start-end'.")
 
     peak_df = pd.DataFrame({
         # "peak_id": [f"peak{i + 1}" for i in range(len(peak_ids))],
