@@ -913,10 +913,17 @@ def process_or_load_rna_atac_data(
                 logging.debug(f"  - raw_atac_peak_file:  {raw_atac_peak_file}")
                 process_10x_to_parquet(raw_10x_rna_data_dir, raw_atac_peak_file, raw_rna_file, raw_atac_file, sample_name)
 
-            # Load raw data parquet files and convert to AnnData
-            logging.debug("Reading raw data parquet files into AnnData")
-            rna_df = pd.read_parquet(raw_rna_file, engine="pyarrow")
-            atac_df = pd.read_parquet(raw_atac_file, engine="pyarrow")
+            # Load raw data files (parquet or csv) and convert to AnnData
+            logging.debug("Reading raw data files into AnnData")
+            if str(raw_rna_file).endswith('.csv'):
+                rna_df = pd.read_csv(raw_rna_file)
+            else:
+                rna_df = pd.read_parquet(raw_rna_file, engine="pyarrow")
+            
+            if str(raw_atac_file).endswith('.csv'):
+                atac_df = pd.read_csv(raw_atac_file)
+            else:
+                atac_df = pd.read_parquet(raw_atac_file, engine="pyarrow")
             
             def _norm_names(names):
                 out = []
@@ -1269,24 +1276,43 @@ def build_peak_locs_from_index(
     coerce_chr_prefix: bool = True,
 ) -> pd.DataFrame:
     """
-    Parse peak ids like 'chr1:100-200' (or '1:100-200' if coerce_chr_prefix)
+    Parse peak ids like 'chr1:100-200' or 'chr1-100-200' (or '1:100-200' / '1-100-200' if coerce_chr_prefix)
     into a clean DataFrame and filter to canonical chromosomes (1..n, X, Y).
+    
+    Supports two formats:
+    - 'chr1:100-200' (colon separator)
+    - 'chr1-100-200' (dash separator)
     """
     rows = []
     for pid in map(str, peak_index):
         try:
-            chrom_part, se = pid.split(":")
-            if coerce_chr_prefix and not chrom_part.startswith("chr"):
-                chrom = f"chr{chrom_part}"
+            # Try colon format first: 'chr1:100-200'
+            if ":" in pid:
+                chrom_part, se = pid.split(":", 1)
+                if coerce_chr_prefix and not chrom_part.startswith("chr"):
+                    chrom = f"chr{chrom_part}"
+                else:
+                    chrom = chrom_part
+                s, e = se.split("-", 1)
+                s, e = int(s), int(e)
+            # Otherwise try dash format: 'chr1-100-200'
             else:
-                chrom = chrom_part
-            s, e = se.split("-")
-            s, e = int(s), int(e)
+                parts = pid.split("-")
+                if len(parts) == 3:
+                    chrom_part, s, e = parts
+                    if coerce_chr_prefix and not chrom_part.startswith("chr"):
+                        chrom = f"chr{chrom_part}"
+                    else:
+                        chrom = chrom_part
+                    s, e = int(s), int(e)
+                else:
+                    raise ValueError(f"Expected 3 parts separated by '-', got {len(parts)}")
+            
             if s > e:
                 s, e = e, s
             rows.append((chrom, s, e, pid))
-        except Exception:
-            logging.warning(f"Skipping malformed peak ID: {pid}")
+        except Exception as ex:
+            logging.warning(f"Skipping malformed peak ID '{pid}': {ex}")
             continue
 
     df = pd.DataFrame(rows, columns=["chrom", "start", "end", "peak_id"]).drop_duplicates()
@@ -2268,18 +2294,28 @@ if __name__ == "__main__":
             save_file=GENE_TSS_FILE,
             gene_dataset_name=ensemble_dataset_name,
         )
-        
-    download_ncbi_gene_info_mouse()
-    download_ensembl_gtf_mouse(release=115, assembly="GRCm39", decompress=False)
+    
+    # Download organism-specific NCBI gene info and Ensembl GTF
+    download_ncbi_gene_info(organism_code=ORGANISM_CODE)
+    
+    # Download GTF with organism-appropriate defaults
+    if ORGANISM_CODE == "mm10":
+        download_ensembl_gtf(organism_code=ORGANISM_CODE, release=115, assembly="GRCm39", decompress=False)
+    elif ORGANISM_CODE == "hg38":
+        download_ensembl_gtf(organism_code=ORGANISM_CODE, release=113, assembly="GRCh38", decompress=False)
     
     if ORGANISM_CODE == "mm10":
         species_taxid = "10090"
+        species_file_name = "Mus_musculus"
+        gtf_assembly = "GRCm39.115"
     elif ORGANISM_CODE == "hg38":
         species_taxid = "9606"
+        species_file_name = "Homo_sapiens"
+        gtf_assembly = "GRCh38.113"
 
     gc = GeneCanonicalizer(use_mygene=False)
-    gc.load_gtf(str(GTF_FILE_DIR / "Mus_musculus.GRCm39.115.gtf.gz"))
-    gc.load_ncbi_gene_info(str(NCBI_FILE_DIR / "Mus_musculus.gene_info.gz"), species_taxid=species_taxid)
+    gc.load_gtf(str(GTF_FILE_DIR / f"{species_file_name}.{gtf_assembly}.gtf.gz"))
+    gc.load_ncbi_gene_info(str(NCBI_FILE_DIR / f"{species_file_name}.gene_info.gz"), species_taxid=species_taxid)
     logging.info(f"Map sizes: {gc.coverage_report()}")
         
     # Format the gene TSS file to BED format (chrom, start, end, name)

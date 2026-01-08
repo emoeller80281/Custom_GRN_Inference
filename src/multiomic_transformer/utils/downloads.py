@@ -379,44 +379,131 @@ def _stream_download(url: str, dest: Path, chunk: int = 1 << 20, desc: Optional[
                 pbar.update(len(chunk_bytes))
     tmp.replace(dest)
 
-def download_ncbi_gene_info_mouse(out_path: Optional[Union[str, Path]] = None) -> Path:
+def download_ncbi_gene_info(organism_code: str, out_path: Optional[Union[str, Path]] = None) -> Path:
     """
-    Download NCBI Gene Info for mouse (Mus_musculus.gene_info.gz).
-    Default path: data/genome_data/genome_annotation/mm10/Mus_musculus.gene_info.gz
+    Download NCBI Gene Info for mouse or human.
+    
+    Parameters
+    ----------
+    organism_code : str
+        'mm10' for mouse or 'hg38' for human
+    out_path : Optional[Union[str, Path]]
+        Custom output path. If None, uses default based on organism.
+    
+    Returns
+    -------
+    Path
+        Path to the downloaded gene_info.gz file
     """
-    # Use HTTPS mirror (works anywhere):
-    url = "https://ftp.ncbi.nlm.nih.gov/gene/DATA/GENE_INFO/Mammalia/Mus_musculus.gene_info.gz"
-
-    # Default to your config layout
-    base = NCBI_FILE_DIR
-    dest = Path(out_path) if out_path is not None else (base / "Mus_musculus.gene_info.gz")
+    # Map organism code to NCBI species and paths
+    org_map = {
+        "mm10": {
+            "species": "Mus_musculus",
+            "subdir": "Mammalia",
+            "url": "https://ftp.ncbi.nlm.nih.gov/gene/DATA/GENE_INFO/Mammalia/Mus_musculus.gene_info.gz"
+        },
+        "hg38": {
+            "species": "Homo_sapiens",
+            "subdir": "Mammalia",
+            "url": "https://ftp.ncbi.nlm.nih.gov/gene/DATA/GENE_INFO/Mammalia/Homo_sapiens.gene_info.gz"
+        }
+    }
+    
+    if organism_code not in org_map:
+        raise ValueError(f"Unsupported organism_code: {organism_code}. Use 'mm10' or 'hg38'.")
+    
+    info = org_map[organism_code]
+    url = info["url"]
+    filename = f"{info['species']}.gene_info.gz"
+    
+    # Default to NCBI_FILE_DIR if available, otherwise current directory
+    try:
+        base = NCBI_FILE_DIR
+    except NameError:
+        base = Path(f"data/genome_data/genome_annotation/{organism_code}")
+    
+    dest = Path(out_path) if out_path is not None else (base / filename)
 
     if dest.exists():
         logging.info(f"Found existing gene_info: {dest}")
         return dest
 
-    logging.info(f"Downloading NCBI Gene Info:\n  {url}")
+    logging.info(f"Downloading NCBI Gene Info for {info['species']}:\n  {url}")
     _stream_download(url, dest, desc=dest.name)
     logging.info(f"Saved: {dest}")
     return dest
 
-def download_ensembl_gtf_mouse(
-    release: int = 115,
-    assembly: str = "GRCm39",
+# Backward compatibility
+def download_ncbi_gene_info_mouse(out_path: Optional[Union[str, Path]] = None) -> Path:
+    """Legacy wrapper for download_ncbi_gene_info with organism_code='mm10'"""
+    return download_ncbi_gene_info("mm10", out_path)
+
+def download_ensembl_gtf(
+    organism_code: str,
+    release: Optional[int] = None,
+    assembly: Optional[str] = None,
     out_dir: Optional[Union[str, Path]] = None,
     decompress: bool = False,
 ) -> Path:
     """
-    Download Ensembl GTF for mouse. By default keeps .gtf.gz.
+    Download Ensembl GTF for mouse or human. By default keeps .gtf.gz.
     If decompress=True, also writes an uncompressed .gtf alongside.
-    Default dir: data/genome_data/reference_genome/mm10
+    
+    Parameters
+    ----------
+    organism_code : str
+        'mm10' for mouse or 'hg38' for human
+    release : Optional[int]
+        Ensembl release version. If None, uses defaults (115 for mouse, 113 for human)
+    assembly : Optional[str]
+        Genome assembly. If None, uses defaults (GRCm39 for mouse, GRCh38 for human)
+    out_dir : Optional[Union[str, Path]]
+        Output directory. If None, uses GTF_FILE_DIR or creates default path
+    decompress : bool
+        Whether to also create an uncompressed .gtf file
+    
+    Returns
+    -------
+    Path
+        Path to the GTF file (.gtf.gz or .gtf if decompress=True)
     """
-    org = "mus_musculus"
-    fn_gz = f"Mus_musculus.{assembly}.{release}.gtf.gz"
+    # Map organism code to Ensembl parameters
+    org_map = {
+        "mm10": {
+            "species_dir": "mus_musculus",
+            "species_name": "Mus_musculus",
+            "default_assembly": "GRCm39",
+            "default_release": 115
+        },
+        "hg38": {
+            "species_dir": "homo_sapiens",
+            "species_name": "Homo_sapiens",
+            "default_assembly": "GRCh38",
+            "default_release": 113
+        }
+    }
+    
+    if organism_code not in org_map:
+        raise ValueError(f"Unsupported organism_code: {organism_code}. Use 'mm10' or 'hg38'.")
+    
+    info = org_map[organism_code]
+    release = release if release is not None else info["default_release"]
+    assembly = assembly if assembly is not None else info["default_assembly"]
+    
+    org = info["species_dir"]
+    species_name = info["species_name"]
+    fn_gz = f"{species_name}.{assembly}.{release}.gtf.gz"
     url = f"https://ftp.ensembl.org/pub/release-{release}/gtf/{org}/{fn_gz}"
 
-    # Default to your reference genome dir
-    out_dir = GTF_FILE_DIR
+    # Default to GTF_FILE_DIR if available
+    if out_dir is None:
+        try:
+            out_dir = GTF_FILE_DIR
+        except NameError:
+            out_dir = Path(f"data/genome_data/genome_annotation/{organism_code}")
+    else:
+        out_dir = Path(out_dir)
+    
     out_dir.mkdir(parents=True, exist_ok=True)
     dest_gz = out_dir / fn_gz
     dest_gtf = dest_gz.with_suffix("")  # drop .gz -> .gtf
@@ -424,7 +511,7 @@ def download_ensembl_gtf_mouse(
     if dest_gz.exists():
         logging.info(f"Found existing GTF: {dest_gz}")
     else:
-        logging.info(f"Downloading Ensembl GTF:\n  {url}")
+        logging.info(f"Downloading Ensembl GTF for {species_name}:\n  {url}")
         _stream_download(url, dest_gz, desc=dest_gz.name)
         logging.info(f"Saved: {dest_gz}")
 
@@ -438,3 +525,13 @@ def download_ensembl_gtf_mouse(
             logging.info(f"Wrote: {dest_gtf}")
 
     return dest_gtf if decompress else dest_gz
+
+# Backward compatibility
+def download_ensembl_gtf_mouse(
+    release: int = 115,
+    assembly: str = "GRCm39",
+    out_dir: Optional[Union[str, Path]] = None,
+    decompress: bool = False,
+) -> Path:
+    """Legacy wrapper for download_ensembl_gtf with organism_code='mm10'"""
+    return download_ensembl_gtf("mm10", release, assembly, out_dir, decompress)
