@@ -9,7 +9,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 4
 #SBATCH --mem=64G
-#SBATCH --array=0-21%6
+#SBATCH --array=0%6
 
 set -euo pipefail
 
@@ -40,28 +40,30 @@ PLOTTING_EXPERIMENT_LIST=(
     # "mESC_slow_decay_max_dist|model_training_001|trained_model.pt"
     # "mESC_filter_lowest_ten_pct|model_training_003|trained_model.pt"
 
-    "mESC_lower_peak_threshold|model_training_001|trained_model.pt"
-    "mESC_no_filter_to_nearest_gene|model_training_003|trained_model.pt"
-    "mESC_smaller_window_size|model_training_004|trained_model.pt"
-    "mESC_larger_window_size|model_training_002|trained_model.pt"
-    "mESC_lower_max_peak_dist|model_training_002|trained_model.pt"
-    "mESC_higher_max_peak_dist|model_training_002|trained_model.pt"
-    "mESC_test_new_pipeline|model_training_002|trained_model.pt"
-    "mESC_slow_decay_filter_ten_pct|model_training_001|trained_model.pt"
-    "mESC_fast_decay_large_window|model_training_001|trained_model.pt"
-    "mESC_slow_decay_small_window|model_training_001|trained_model.pt"
-    "mESC_fewer_pca_components|model_training_001|trained_model.pt"
-    "mESC_more_pca_components|model_training_001|trained_model.pt"
-    "mESC_one_hop_diffusion|model_training_001|trained_model.pt"
-    "mESC_two_hop_diffusion|model_training_001|trained_model.pt"
-    "mESC_one_hop_large_neighborhood|model_training_001|trained_model.pt"
-    "mESC_strict_genes_lenient_peaks|model_training_001|trained_model.pt"
-    "mESC_lenient_genes_strict_peaks|model_training_001|trained_model.pt"
-    "mESC_strict_filter_twenty_pct|model_training_001|trained_model.pt"
-    "mESC_promoter_2kb|model_training_001|trained_model.pt"
-    "mESC_promoter_5kb|model_training_001|trained_model.pt"
-    "mESC_very_short_range|model_training_001|trained_model.pt"
-    "mESC_long_range_enhancers|model_training_001|trained_model.pt"
+    # "mESC_lower_peak_threshold|model_training_001|trained_model.pt"
+    # "mESC_no_filter_to_nearest_gene|model_training_003|trained_model.pt"
+    # "mESC_smaller_window_size|model_training_004|trained_model.pt"
+    # "mESC_larger_window_size|model_training_002|trained_model.pt"
+    # "mESC_lower_max_peak_dist|model_training_002|trained_model.pt"
+    # "mESC_higher_max_peak_dist|model_training_002|trained_model.pt"
+    # "mESC_test_new_pipeline|model_training_002|trained_model.pt"
+    # "mESC_slow_decay_filter_ten_pct|model_training_001|trained_model.pt"
+    # "mESC_fast_decay_large_window|model_training_001|trained_model.pt"
+    # "mESC_slow_decay_small_window|model_training_001|trained_model.pt"
+    # "mESC_fewer_pca_components|model_training_001|trained_model.pt"
+    # "mESC_more_pca_components|model_training_001|trained_model.pt"
+    # "mESC_one_hop_diffusion|model_training_001|trained_model.pt"
+    # "mESC_two_hop_diffusion|model_training_001|trained_model.pt"
+    # "mESC_one_hop_large_neighborhood|model_training_001|trained_model.pt"
+    # "mESC_strict_genes_lenient_peaks|model_training_001|trained_model.pt"
+    # "mESC_lenient_genes_strict_peaks|model_training_001|trained_model.pt"
+    # "mESC_strict_filter_twenty_pct|model_training_001|trained_model.pt"
+    # "mESC_promoter_2kb|model_training_001|trained_model.pt"
+    # "mESC_promoter_5kb|model_training_001|trained_model.pt"
+    # "mESC_very_short_range|model_training_001|trained_model.pt"
+    # "mESC_long_range_enhancers|model_training_001|trained_model.pt"
+
+    "Macrophage_base_settings|model_training_005|trained_model.pt"
 )
 
 # ==========================================

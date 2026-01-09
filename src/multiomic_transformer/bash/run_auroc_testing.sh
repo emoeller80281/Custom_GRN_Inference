@@ -9,7 +9,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 4
 #SBATCH --mem=64G
-#SBATCH --array=0-2%3
+#SBATCH --array=0%3
 
 set -euo pipefail
 
@@ -63,9 +63,12 @@ EXPERIMENT_LIST=(
     # "mESC_very_short_range|model_training_001|trained_model.pt"
     # "mESC_long_range_enhancers|model_training_001|trained_model.pt"
 
-    "mESC_slow_decay_long_range_two_hop|model_training_001|trained_model.pt"
-    "mESC_slow_decay_long_range_zero_hops|model_training_001|trained_model.pt"
-    "mESC_promoter_only_5kb_two_hop|model_training_001|trained_model.pt"
+    # "mESC_slow_decay_long_range_two_hop|model_training_001|trained_model.pt"
+    # "mESC_slow_decay_long_range_zero_hops|model_training_001|trained_model.pt"
+    # "mESC_promoter_only_5kb_two_hop|model_training_001|trained_model.pt"
+
+    "Macrophage_base_settings|model_training_005|trained_model.pt"
+
 )
 
 # ==========================================

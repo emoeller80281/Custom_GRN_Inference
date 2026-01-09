@@ -288,17 +288,18 @@ fi
 ROOT_DIR="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
 PROJECT_DATA_DIR="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
 PROJECT_RESULT_DIR="/gpfs/Labs/Uzun/RESULTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
-RAW_SINGLE_CELL_DATA="${ROOT_DIR}/data/raw/macrophage"
 
 # Dataset configuration
 ORGANISM_CODE="hg38"
 
 # Derived paths (based on DATASET_NAME)
 DATABASE_DIR="${ROOT_DIR}/data"
+RAW_DATA="${DATABASE_DIR}/raw"
 PROCESSED_DATA="${DATABASE_DIR}/processed"
 TRAINING_DATA_CACHE="${DATABASE_DIR}/training_data_cache"
 EXPERIMENT_DIR="${PROJECT_DATA_DIR}/experiments"
 OUTPUT_DIR="${EXPERIMENT_DIR}/${DATASET_NAME}"
+RAW_SINGLE_CELL_DATA="${RAW_DATA}/${DATASET_NAME}"
 SAMPLE_PROCESSED_DATA_DIR="${PROCESSED_DATA}/${DATASET_NAME}"
 SAMPLE_DATA_CACHE_DIR="${TRAINING_DATA_CACHE}/${DATASET_NAME}"
 COMMON_DATA="${SAMPLE_DATA_CACHE_DIR}/common"
@@ -312,7 +313,7 @@ CHROM_ID="chr19"
 # CHROM_IDS="chr1 chr2 chr3 chr4 chr5 chr6 chr7 chr8 chr9 chr10 chr11 chr12 chr13 chr14 chr15 chr16 chr17 chr18 chr19"
 
 # Force recalculate (set to true if you want to reprocess data)
-FORCE_RECALCULATE=false
+FORCE_RECALCULATE=true
 
 # ==========================================
 #        CPU DETECTION
@@ -361,7 +362,7 @@ PREPROCESS_CMD="python src/multiomic_transformer/data/preprocess_argparse.py \
     --dataset_name ${DATASET_NAME} \
     --sample_names ${SAMPLE_NAMES} \
     --chrom_id ${CHROM_ID} \
-    --chrom_ids ${CHROM_IDS} \
+    --chrom_ids ${CHROM_IDS[@]} \
     --raw_single_cell_data ${RAW_SINGLE_CELL_DATA} \
     --min_genes_per_cell ${MIN_GENES_PER_CELL} \
     --min_peaks_per_cell ${MIN_PEAKS_PER_CELL} \
@@ -426,7 +427,7 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
         --common_data ${COMMON_DATA} \
         --output_dir ${OUTPUT_DIR} \
         --chrom_id ${CHROM_ID} \
-        --chrom_ids ${CHROM_IDS} \
+        --chrom_ids ${CHROM_IDS[@]} \
         --total_epochs ${TOTAL_EPOCHS} \
         --batch_size ${BATCH_SIZE} \
         --patience ${PATIENCE} \

@@ -28,6 +28,30 @@ from multiomic_transformer.utils.standardize import standardize_name
 from multiomic_transformer.utils.files import atomic_json_dump
 from multiomic_transformer.utils.peaks import find_genes_near_peaks, format_peaks, set_tg_as_closest_gene_tss
 from multiomic_transformer.utils.downloads import *
+
+def normalize_peak_format(peak_id: str) -> str:
+    """
+    Normalize peak format from chrN-start-end or chrN:start:end to chrN:start-end.
+    Handles both formats as input and always outputs chrN:start-end.
+    """
+    if not isinstance(peak_id, str):
+        return peak_id
+    
+    # Try to parse chr-start-end format (with dashes)
+    parts = peak_id.split('-')
+    if len(parts) >= 3:
+        # Assume format is chr-start-end where chr might have dashes
+        # Work backwards: the last two parts are start and end
+        try:
+            end = int(parts[-1])
+            start = int(parts[-2])
+            chrom = '-'.join(parts[:-2])  # Everything before the last two parts
+            return f"{chrom}:{start}-{end}"
+        except (ValueError, IndexError):
+            pass
+    
+    # Already in chr:start-end format or some other format, return as-is
+    return peak_id
 from multiomic_transformer.data.sliding_window import run_sliding_window_scan
 from multiomic_transformer.data.build_pkn import build_organism_pkns
 from multiomic_transformer.utils.gene_canonicalizer import GeneCanonicalizer
@@ -708,8 +732,10 @@ def process_or_load_rna_atac_data(
     adata_rna_file  = _configured_path(sample_input_dir, "ADATA_RNA_FILENAME",  "adata_RNA.h5ad", sample_name)
     adata_atac_file = _configured_path(sample_input_dir, "ADATA_ATAC_FILENAME", "adata_ATAC.h5ad", sample_name)
 
-    pseudobulk_TG_file = _configured_path(sample_input_dir, "PSEUDOBULK_TG_FILENAME", "TG_pseudobulk.parquet", sample_name)
-    pseudobulk_RE_file = _configured_path(sample_input_dir, "PSEUDOBULK_RE_FILENAME", "RE_pseudobulk.parquet", sample_name)
+    # Pseudobulk files are saved per-sample in the raw data directory
+    sample_raw_dir = RAW_SINGLE_CELL_DATA / sample_name if RAW_SINGLE_CELL_DATA else sample_input_dir
+    pseudobulk_TG_file = sample_raw_dir / "TG_pseudobulk.parquet"
+    pseudobulk_RE_file = sample_raw_dir / "RE_pseudobulk.parquet"
 
     neighbors_k = neighbors_k if neighbors_k is not None else NEIGHBORS_K
     
@@ -1025,6 +1051,8 @@ def process_or_load_rna_atac_data(
         
         TG_pseudobulk_df = _standardize_symbols_index(TG_pseudobulk_df, strip_version_suffix=True, uppercase=True, deduplicate="sum")
 
+        # Ensure the sample raw directory exists before saving pseudobulk files
+        pseudobulk_TG_file.parent.mkdir(parents=True, exist_ok=True)
         TG_pseudobulk_df.to_parquet(pseudobulk_TG_file, engine="pyarrow", compression="snappy")
         RE_pseudobulk_df.to_parquet(pseudobulk_RE_file, engine="pyarrow", compression="snappy")
     else:
@@ -1782,6 +1810,7 @@ def aggregate_pseudobulk_datasets(
     dataset_processed_data_dir: Path,
     chroms: list[str],
     gc: GeneCanonicalizer,
+    raw_single_cell_data: Path | None = None,
     force_recalculate: bool = False,
 ):
     # ----- Helpers -----
@@ -1834,8 +1863,8 @@ def aggregate_pseudobulk_datasets(
         # ---- 1) Build per-sample TG pseudobulk (canonicalized) ----
         per_sample_TG: dict[str, pd.DataFrame] = {}
         for sample_name in sample_names:
-            sdir = dataset_processed_data_dir / sample_name
-            tg_path = sdir / "TG_pseudobulk.parquet"
+            sample_raw_dir = raw_single_cell_data / sample_name if raw_single_cell_data else dataset_processed_data_dir / sample_name
+            tg_path = sample_raw_dir / "TG_pseudobulk.parquet"
             TG_pseudobulk = pd.read_parquet(tg_path, engine="pyarrow")
             TG_pseudobulk = _canon_index_sum(TG_pseudobulk, gc)
             per_sample_TG[sample_name] = TG_pseudobulk
@@ -1878,10 +1907,10 @@ def aggregate_pseudobulk_datasets(
             genes_on_chrom = gene_tss_chrom["name"].tolist()
 
             for sample_name in sample_names:
-                sample_processed_data_dir = dataset_processed_data_dir / sample_name
+                sample_raw_dir = raw_single_cell_data / sample_name if raw_single_cell_data else dataset_processed_data_dir / sample_name
 
-                # RE pseudobulk: peaks x metacells
-                re_path = sample_processed_data_dir / "RE_pseudobulk.parquet"
+                # RE pseudobulk: peaks x metacells (loaded from per-sample raw directory)
+                re_path = sample_raw_dir / "RE_pseudobulk.parquet"
                 RE_pseudobulk = pd.read_parquet(re_path, engine="pyarrow")
 
                 # TG: restrict to genes on this chrom
@@ -1889,20 +1918,27 @@ def aggregate_pseudobulk_datasets(
                     per_sample_TG[sample_name].index.intersection(genes_on_chrom)
                 ]
 
-                # RE: restrict to this chrom
-                RE_chr_specific = RE_pseudobulk[
-                    RE_pseudobulk.index.str.startswith(f"{chrom_id}:")
-                ]
+                # RE: restrict to this chrom (handle both chr:start-end and chr-start-end formats)
+                mask_colon = RE_pseudobulk.index.str.startswith(f"{chrom_id}:")
+                mask_dash = RE_pseudobulk.index.str.startswith(f"{chrom_id}-")
+                RE_chr_specific = RE_pseudobulk[mask_colon | mask_dash]
+                
+                logging.info(f"      - Sample {sample_name}, {chrom_id}: {len(RE_chr_specific)} peaks matched")
+                if len(RE_chr_specific) > 0:
+                    logging.info(f"      - First few peaks: {RE_chr_specific.index[:3].tolist()}")
 
                 # Build peaks df from RE index
+                # Handle both colon-separated (chr:start-end) and dash-separated (chr-start-end) formats
+                # Normalize all peaks to chr:start-end format for consistent storage
                 peaks_df = (
                     RE_chr_specific.index.to_series()
-                    .str.split("[:-]", expand=True)
+                    .apply(normalize_peak_format)
+                    .str.split("[-:]", n=2, expand=True, regex=True)
                     .rename(columns={0: "chrom", 1: "start", 2: "end"})
                 )
                 peaks_df["start"] = peaks_df["start"].astype(int)
                 peaks_df["end"] = peaks_df["end"].astype(int)
-                peaks_df["peak_id"] = RE_chr_specific.index
+                peaks_df["peak_id"] = RE_chr_specific.index.to_series().apply(normalize_peak_format)
 
                 TG_pseudobulk_samples.append(TG_chr_specific)
                 RE_pseudobulk_samples.append(RE_chr_specific)
@@ -1911,6 +1947,14 @@ def aggregate_pseudobulk_datasets(
             total_TG_pseudobulk_chr = _agg_sum(TG_pseudobulk_samples)
             total_RE_pseudobulk_chr = _agg_sum(RE_pseudobulk_samples)
             total_peaks_df = _agg_first(peaks_df_samples)
+            
+            # Normalize peak IDs to consistent chr:start:end format
+            total_RE_pseudobulk_chr.index = total_RE_pseudobulk_chr.index.to_series().apply(normalize_peak_format)
+            
+            logging.info(f"   - {chrom_id}: Aggregated {len(total_RE_pseudobulk_chr)} RE peaks, {len(total_TG_pseudobulk_chr)} genes")
+            logging.info(f"   - {chrom_id}: total_peaks_df shape: {total_peaks_df.shape}")
+            if len(total_peaks_df) > 0:
+                logging.info(f"   - {chrom_id}: Sample peak IDs: {total_peaks_df['peak_id'].head(3).tolist()}")
 
             pseudobulk_chrom_dict[chrom_id] = {
                 "total_TG_pseudobulk_chr": total_TG_pseudobulk_chr,
@@ -2134,6 +2178,15 @@ def precompute_input_tensors(
     # ---- ATAC window tensor ----
     num_windows = int(windows.shape[0])
     num_peaks   = int(total_RE_pseudobulk_chr.shape[0])
+    
+    logging.info(f"  - precompute_input_tensors: {num_windows} windows, {num_peaks} peaks")
+    logging.info(f"  - window_map has {len(window_map)} entries")
+    if len(window_map) > 0:
+        sample_peaks = list(window_map.keys())[:3]
+        logging.info(f"  - Sample peak IDs from window_map: {sample_peaks}")
+    if num_peaks > 0:
+        sample_re_peaks = total_RE_pseudobulk_chr.index[:3].tolist()
+        logging.info(f"  - Sample peak IDs from RE_pseudobulk: {sample_re_peaks}")
 
     rows, cols, vals = [], [], []
     peak_to_idx = {p: i for i, p in enumerate(total_RE_pseudobulk_chr.index)}
@@ -2146,6 +2199,7 @@ def precompute_input_tensors(
 
     if not rows:
         logging.warning("No peaks from window_map matched rows in total_RE_pseudobulk_chr. Returning None.")
+        logging.warning(f"  - Checked {len(window_map)} window_map entries against {num_peaks} RE peaks")
         return None, None, None
 
     W = sp.csr_matrix((vals, (rows, cols)), shape=(num_windows, num_peaks))
@@ -2570,9 +2624,9 @@ if __name__ == "__main__":
         total_peak_gene_dist_df = pd.concat(sample_level_peak_to_gene_dist_dfs)
         
         logging.info(f"Aggregating pseudobulk datasets")
-        dataset_processed_data_dir = RAW_DATA / DATASET_NAME
+        dataset_processed_data_dir = PROCESSED_DATA / DATASET_NAME
         total_TG_pseudobulk_global, pseudobulk_chrom_dict = \
-            aggregate_pseudobulk_datasets(SAMPLE_NAMES, dataset_processed_data_dir, chrom_list, gc, force_recalculate=FORCE_RECALCULATE)
+            aggregate_pseudobulk_datasets(SAMPLE_NAMES, dataset_processed_data_dir, chrom_list, gc, raw_single_cell_data=RAW_SINGLE_CELL_DATA, force_recalculate=FORCE_RECALCULATE)
             
         global_tf_tensor_path   = SAMPLE_DATA_CACHE_DIR / "tf_tensor_all.pt"
         global_tf_ids_path      = SAMPLE_DATA_CACHE_DIR / "tf_ids.pt"
