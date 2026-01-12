@@ -67,7 +67,7 @@ EXPERIMENT_LIST=(
     # "mESC_slow_decay_long_range_zero_hops|model_training_001|trained_model.pt"
     # "mESC_promoter_only_5kb_two_hop|model_training_001|trained_model.pt"
 
-    "Macrophage_base_settings|model_training_005|trained_model.pt"
+    "Macrophage_base_settings|model_training_006|trained_model.pt"
 
 )
 

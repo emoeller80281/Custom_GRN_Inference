@@ -3,13 +3,13 @@
 #SBATCH --output=LOGS/transformer_logs/experiments/%x_%A/%x_%A_%a.log
 #SBATCH --error=LOGS/transformer_logs/experiments/%x_%A/%x_%A_%a.err
 #SBATCH --time=36:00:00
-#SBATCH -p gpu
+#SBATCH -p dense
 #SBATCH -N 1
 #SBATCH --ntasks-per-node=1
-#SBATCH --gres=gpu:p100:2
+#SBATCH --gres=gpu:v100:2
 #SBATCH -c 12
 #SBATCH --mem=128G
-#SBATCH --array=0%2
+#SBATCH --array=0-7%8
 
 set -euo pipefail
 
@@ -71,7 +71,7 @@ DEFAULT_MIN_LR=2.5e-6
 DEFAULT_D_MODEL=192
 DEFAULT_NUM_HEADS=4
 DEFAULT_NUM_LAYERS=3
-DEFAULT_D_FF=768
+DEFAULT_D_FF=4*$DEFAULT_D_MODEL
 DEFAULT_DROPOUT=0.10
 DEFAULT_USE_DISTANCE_BIAS=true
 DEFAULT_USE_SHORTCUT=true
@@ -86,7 +86,7 @@ DEFAULT_SHORTCUT_DROPOUT=0.0
 DEFAULT_SUBSAMPLE_MAX_TFS=""
 DEFAULT_SUBSAMPLE_MAX_TGS=""
 DEFAULT_SUBSAMPLE_MAX_WINDOWS_PER_CHROM=""
-DEFAULT_SUBSAMPLE_MAX_CELLS=10000
+DEFAULT_SUBSAMPLE_MAX_CELLS=""
 DEFAULT_SUBSAMPLE_SEED=42
 DEFAULT_ALLOWED_SAMPLES=""
 DEFAULT_RESUME_CHECKPOINT_PATH=""
@@ -99,7 +99,15 @@ DEFAULT_RESUME_CHECKPOINT_PATH=""
 # "slow_decay_filter_ten_pct|mESC_slow_decay_filter_ten_pct|MIN_GENES_PER_CELL=100;MIN_PEAKS_PER_CELL=100;HOPS=0;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.1;FILTER_OUT_LOWEST_PCT_PEAKS=0.1;DISTANCE_SCALE_FACTOR=40000"
 
 EXPERIMENTS=(
-    "initial_test|Macrophage_base_settings"
+    # "initial_test|Macrophage_base_settings"
+    "model_small_batch_size|Macrophage_small_batch_size|BATCH_SIZE=8"
+    "loose_1_pct_filtering|Macrophage_loose_1_pct_filtering|MIN_GENES_PER_CELL=150;MIN_PEAKS_PER_CELL=50;HOPS=0;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.01;FILTER_OUT_LOWEST_PCT_PEAKS=0.01"
+    "strict_10_pct_filtering|Macrophage_strict_10_pct_filtering|MIN_GENES_PER_CELL=100;MIN_PEAKS_PER_CELL=100;HOPS=0;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.1;FILTER_OUT_LOWEST_PCT_PEAKS=0.1"
+    "40k_distance_scale_factor|Macrophage_40k_distance_scale_factor|DISTANCE_SCALE_FACTOR=40000"
+    "10k_distance_scale_factor|Macrophage_10k_distance_scale_factor|DISTANCE_SCALE_FACTOR=10000"
+    "150k_max_peak_dist|Macrophage_150k_max_peak_dist|MAX_PEAK_DISTANCE=150000"
+    "50k_max_peak_dist|Macrophage_50k_max_peak_dist|MAX_PEAK_DISTANCE=50000"
+    "slow_decay_long_range_two_hop|Macrophage_slow_decay_long_range_two_hop|DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;HOPS=2;NEIGHBORS_K=20"
 )
 
 
@@ -299,7 +307,7 @@ PROCESSED_DATA="${DATABASE_DIR}/processed"
 TRAINING_DATA_CACHE="${DATABASE_DIR}/training_data_cache"
 EXPERIMENT_DIR="${PROJECT_DATA_DIR}/experiments"
 OUTPUT_DIR="${EXPERIMENT_DIR}/${DATASET_NAME}"
-RAW_SINGLE_CELL_DATA="${RAW_DATA}/${DATASET_NAME}"
+RAW_SINGLE_CELL_DATA="${RAW_DATA}/macrophage"
 SAMPLE_PROCESSED_DATA_DIR="${PROCESSED_DATA}/${DATASET_NAME}"
 SAMPLE_DATA_CACHE_DIR="${TRAINING_DATA_CACHE}/${DATASET_NAME}"
 COMMON_DATA="${SAMPLE_DATA_CACHE_DIR}/common"

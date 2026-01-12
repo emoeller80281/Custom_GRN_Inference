@@ -641,6 +641,7 @@ def process_or_load_rna_atac_data(
     raw_atac_peak_file: Union[str, Path, None] = None,
     *,
     sample_name: Optional[str] = None,
+    sample_processed_dir: Optional[Union[str, Path]] = None,
     neighbors_k: Optional[int] = None,
     pca_components: Optional[int] = None,
     hops: Optional[int] = None,
@@ -722,20 +723,22 @@ def process_or_load_rna_atac_data(
     sample_name = sample_name or sample_input_dir.name
     raw_10x_rna_data_dir = Path(raw_10x_rna_data_dir) if raw_10x_rna_data_dir is not None else None
     raw_atac_peak_file = Path(raw_atac_peak_file) if raw_atac_peak_file is not None else None
+    
+    # Use sample_processed_dir for output files if provided, otherwise use sample_input_dir
+    output_dir = Path(sample_processed_dir) if sample_processed_dir else sample_input_dir
 
-    processed_rna_file  = _configured_path(sample_input_dir, "PROCESSED_RNA_FILENAME",  "scRNA_seq_processed.parquet", sample_name)
-    processed_atac_file = _configured_path(sample_input_dir, "PROCESSED_ATAC_FILENAME", "scATAC_seq_processed.parquet", sample_name)
+    processed_rna_file  = _configured_path(output_dir, "PROCESSED_RNA_FILENAME",  "scRNA_seq_processed.parquet", sample_name)
+    processed_atac_file = _configured_path(output_dir, "PROCESSED_ATAC_FILENAME", "scATAC_seq_processed.parquet", sample_name)
 
     raw_rna_file  = _configured_path(sample_input_dir, "RAW_RNA_FILE",  "scRNA_seq_raw.parquet", sample_name)
     raw_atac_file = _configured_path(sample_input_dir, "RAW_ATAC_FILE", "scATAC_seq_raw.parquet", sample_name)
 
-    adata_rna_file  = _configured_path(sample_input_dir, "ADATA_RNA_FILENAME",  "adata_RNA.h5ad", sample_name)
-    adata_atac_file = _configured_path(sample_input_dir, "ADATA_ATAC_FILENAME", "adata_ATAC.h5ad", sample_name)
+    adata_rna_file  = _configured_path(output_dir, "ADATA_RNA_FILENAME",  "adata_RNA.h5ad", sample_name)
+    adata_atac_file = _configured_path(output_dir, "ADATA_ATAC_FILENAME", "adata_ATAC.h5ad", sample_name)
 
-    # Pseudobulk files are saved per-sample in the raw data directory
-    sample_raw_dir = RAW_SINGLE_CELL_DATA / sample_name if RAW_SINGLE_CELL_DATA else sample_input_dir
-    pseudobulk_TG_file = sample_raw_dir / "TG_pseudobulk.parquet"
-    pseudobulk_RE_file = sample_raw_dir / "RE_pseudobulk.parquet"
+    # Pseudobulk files are saved per-sample in the processed data directory
+    pseudobulk_TG_file = output_dir / "TG_pseudobulk.parquet"
+    pseudobulk_RE_file = output_dir / "RE_pseudobulk.parquet"
 
     neighbors_k = neighbors_k if neighbors_k is not None else NEIGHBORS_K
     
@@ -1810,7 +1813,6 @@ def aggregate_pseudobulk_datasets(
     dataset_processed_data_dir: Path,
     chroms: list[str],
     gc: GeneCanonicalizer,
-    raw_single_cell_data: Path | None = None,
     force_recalculate: bool = False,
 ):
     # ----- Helpers -----
@@ -1863,7 +1865,7 @@ def aggregate_pseudobulk_datasets(
         # ---- 1) Build per-sample TG pseudobulk (canonicalized) ----
         per_sample_TG: dict[str, pd.DataFrame] = {}
         for sample_name in sample_names:
-            sample_raw_dir = raw_single_cell_data / sample_name if raw_single_cell_data else dataset_processed_data_dir / sample_name
+            sample_raw_dir = dataset_processed_data_dir / sample_name
             tg_path = sample_raw_dir / "TG_pseudobulk.parquet"
             TG_pseudobulk = pd.read_parquet(tg_path, engine="pyarrow")
             TG_pseudobulk = _canon_index_sum(TG_pseudobulk, gc)
@@ -1907,7 +1909,7 @@ def aggregate_pseudobulk_datasets(
             genes_on_chrom = gene_tss_chrom["name"].tolist()
 
             for sample_name in sample_names:
-                sample_raw_dir = raw_single_cell_data / sample_name if raw_single_cell_data else dataset_processed_data_dir / sample_name
+                sample_raw_dir = dataset_processed_data_dir if dataset_processed_data_dir else dataset_processed_data_dir / sample_name
 
                 # RE pseudobulk: peaks x metacells (loaded from per-sample raw directory)
                 re_path = sample_raw_dir / "RE_pseudobulk.parquet"
@@ -1923,9 +1925,9 @@ def aggregate_pseudobulk_datasets(
                 mask_dash = RE_pseudobulk.index.str.startswith(f"{chrom_id}-")
                 RE_chr_specific = RE_pseudobulk[mask_colon | mask_dash]
                 
-                logging.info(f"      - Sample {sample_name}, {chrom_id}: {len(RE_chr_specific)} peaks matched")
+                logging.debug(f"      - Sample {sample_name}, {chrom_id}: {len(RE_chr_specific)} peaks matched")
                 if len(RE_chr_specific) > 0:
-                    logging.info(f"      - First few peaks: {RE_chr_specific.index[:3].tolist()}")
+                    logging.debug(f"      - First few peaks: {RE_chr_specific.index[:3].tolist()}")
 
                 # Build peaks df from RE index
                 # Handle both colon-separated (chr:start-end) and dash-separated (chr-start-end) formats
@@ -1951,10 +1953,10 @@ def aggregate_pseudobulk_datasets(
             # Normalize peak IDs to consistent chr:start:end format
             total_RE_pseudobulk_chr.index = total_RE_pseudobulk_chr.index.to_series().apply(normalize_peak_format)
             
-            logging.info(f"   - {chrom_id}: Aggregated {len(total_RE_pseudobulk_chr)} RE peaks, {len(total_TG_pseudobulk_chr)} genes")
-            logging.info(f"   - {chrom_id}: total_peaks_df shape: {total_peaks_df.shape}")
+            logging.debug(f"   - {chrom_id}: Aggregated {len(total_RE_pseudobulk_chr)} RE peaks, {len(total_TG_pseudobulk_chr)} genes")
+            logging.debug(f"   - {chrom_id}: total_peaks_df shape: {total_peaks_df.shape}")
             if len(total_peaks_df) > 0:
-                logging.info(f"   - {chrom_id}: Sample peak IDs: {total_peaks_df['peak_id'].head(3).tolist()}")
+                logging.debug(f"   - {chrom_id}: Sample peak IDs: {total_peaks_df['peak_id'].head(3).tolist()}")
 
             pseudobulk_chrom_dict[chrom_id] = {
                 "total_TG_pseudobulk_chr": total_TG_pseudobulk_chr,
@@ -2179,14 +2181,14 @@ def precompute_input_tensors(
     num_windows = int(windows.shape[0])
     num_peaks   = int(total_RE_pseudobulk_chr.shape[0])
     
-    logging.info(f"  - precompute_input_tensors: {num_windows} windows, {num_peaks} peaks")
-    logging.info(f"  - window_map has {len(window_map)} entries")
+    logging.debug(f"  - precompute_input_tensors: {num_windows} windows, {num_peaks} peaks")
+    logging.debug(f"  - window_map has {len(window_map)} entries")
     if len(window_map) > 0:
         sample_peaks = list(window_map.keys())[:3]
-        logging.info(f"  - Sample peak IDs from window_map: {sample_peaks}")
+        logging.debug(f"  - Sample peak IDs from window_map: {sample_peaks}")
     if num_peaks > 0:
         sample_re_peaks = total_RE_pseudobulk_chr.index[:3].tolist()
-        logging.info(f"  - Sample peak IDs from RE_pseudobulk: {sample_re_peaks}")
+        logging.debug(f"  - Sample peak IDs from RE_pseudobulk: {sample_re_peaks}")
 
     rows, cols, vals = [], [], []
     peak_to_idx = {p: i for i, p in enumerate(total_RE_pseudobulk_chr.index)}
@@ -2400,7 +2402,11 @@ if __name__ == "__main__":
     if PROCESS_SAMPLE_DATA == True:
         def _per_sample_worker(sample_name: str) -> dict:
             try:
-                sample_input_dir = RAW_SINGLE_CELL_DATA if RAW_SINGLE_CELL_DATA else RAW_DATA / DATASET_NAME / sample_name
+                sample_input_dir = (
+                    RAW_SINGLE_CELL_DATA / sample_name
+                    if RAW_SINGLE_CELL_DATA
+                    else RAW_DATA / DATASET_NAME / sample_name
+                )
                 out_dir = SAMPLE_PROCESSED_DATA_DIR / sample_name
                 out_dir.mkdir(parents=True, exist_ok=True)
                 SAMPLE_DATA_CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -2411,6 +2417,7 @@ if __name__ == "__main__":
                     raw_10x_rna_data_dir=RAW_10X_RNA_DATA_DIR / sample_name if RAW_10X_RNA_DATA_DIR else None,
                     raw_atac_peak_file=RAW_ATAC_PEAK_MATRIX_FILE,
                     sample_name=sample_name,
+                    sample_processed_dir=out_dir,
                     neighbors_k=NEIGHBORS_K,
                     pca_components=PCA_COMPONENTS,
                     hops=HOPS,
@@ -2438,11 +2445,15 @@ if __name__ == "__main__":
             
         # Sample-specific preprocessing
         for sample_name in SAMPLE_NAMES:
-            sample_input_dir = RAW_SINGLE_CELL_DATA if RAW_SINGLE_CELL_DATA else RAW_DATA / DATASET_NAME / sample_name
+            sample_input_dir = (
+                RAW_SINGLE_CELL_DATA / sample_name
+                if RAW_SINGLE_CELL_DATA
+                else RAW_DATA / DATASET_NAME / sample_name
+            )
             
-            # Input Files (raw or processed scRNA-seq and scATAC-seq data)
-            processed_rna_file = sample_input_dir / "scRNA_seq_processed.parquet"
-            processed_atac_file = sample_input_dir / "scATAC_seq_processed.parquet"
+            # Input Files (raw or processed scRNA-seq and scATAC-seq data from processed dir)
+            processed_rna_file = SAMPLE_PROCESSED_DATA_DIR / sample_name / "scRNA_seq_processed.parquet"
+            processed_atac_file = SAMPLE_PROCESSED_DATA_DIR / sample_name / "scATAC_seq_processed.parquet"
             
             # Output Files
             peak_bed_file = SAMPLE_PROCESSED_DATA_DIR / sample_name / "peaks.bed"
@@ -2495,6 +2506,7 @@ if __name__ == "__main__":
                 raw_10x_rna_data_dir=sample_raw_10x_rna_data_dir,
                 raw_atac_peak_file=RAW_ATAC_PEAK_MATRIX_FILE,
                 sample_name=sample_name,
+                sample_processed_dir=SAMPLE_PROCESSED_DATA_DIR / sample_name,
                 neighbors_k=NEIGHBORS_K,
                 pca_components=PCA_COMPONENTS,
                 hops=HOPS,
@@ -2626,7 +2638,7 @@ if __name__ == "__main__":
         logging.info(f"Aggregating pseudobulk datasets")
         dataset_processed_data_dir = PROCESSED_DATA / DATASET_NAME
         total_TG_pseudobulk_global, pseudobulk_chrom_dict = \
-            aggregate_pseudobulk_datasets(SAMPLE_NAMES, dataset_processed_data_dir, chrom_list, gc, raw_single_cell_data=RAW_SINGLE_CELL_DATA, force_recalculate=FORCE_RECALCULATE)
+            aggregate_pseudobulk_datasets(SAMPLE_NAMES, dataset_processed_data_dir, chrom_list, gc, force_recalculate=FORCE_RECALCULATE)
             
         global_tf_tensor_path   = SAMPLE_DATA_CACHE_DIR / "tf_tensor_all.pt"
         global_tf_ids_path      = SAMPLE_DATA_CACHE_DIR / "tf_ids.pt"
