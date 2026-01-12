@@ -1909,7 +1909,7 @@ def aggregate_pseudobulk_datasets(
             genes_on_chrom = gene_tss_chrom["name"].tolist()
 
             for sample_name in sample_names:
-                sample_raw_dir = dataset_processed_data_dir if dataset_processed_data_dir else dataset_processed_data_dir / sample_name
+                sample_raw_dir = dataset_processed_data_dir / sample_name
 
                 # RE pseudobulk: peaks x metacells (loaded from per-sample raw directory)
                 re_path = sample_raw_dir / "RE_pseudobulk.parquet"
