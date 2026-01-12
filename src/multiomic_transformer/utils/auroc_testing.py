@@ -1762,20 +1762,20 @@ if __name__ == "__main__":
     if EXPERIMENT_DIR is None:
         EXPERIMENT_DIR = Path(f"/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/{experiment}/chr19") / training_num
 
-    ground_truth_file_dict = {
-        "RN204": GROUND_TRUTH_DIR / "rn204_macrophage_human_chipseq.tsv",
-    }
-    
     # ground_truth_file_dict = {
-    #     "ChIP-Atlas": GROUND_TRUTH_DIR / "chip_atlas_tf_peak_tg_dist.csv",
-    #     # "RN111_RN112": GROUND_TRUTH_DIR / "filtered_RN111_and_RN112_mESC_E7.5_rep1.tsv",
-    #     # "ORTI": GROUND_TRUTH_DIR / "ORTI_ground_truth_TF_TG.csv",
-    #     "RN111": GROUND_TRUTH_DIR / "RN111.tsv",
-    #     "RN112": GROUND_TRUTH_DIR / "RN112.tsv",
-    #     "RN114": GROUND_TRUTH_DIR / "RN114.tsv",
-    #     "RN115": GROUND_TRUTH_DIR / "RN115.tsv",
-    #     "RN116": GROUND_TRUTH_DIR / "RN116.tsv",
+    #     "RN204": GROUND_TRUTH_DIR / "rn204_macrophage_human_chipseq.tsv",
     # }
+    
+    ground_truth_file_dict = {
+        "ChIP-Atlas": GROUND_TRUTH_DIR / "chip_atlas_tf_peak_tg_dist.csv",
+        # "RN111_RN112": GROUND_TRUTH_DIR / "filtered_RN111_and_RN112_mESC_E7.5_rep1.tsv",
+        # "ORTI": GROUND_TRUTH_DIR / "ORTI_ground_truth_TF_TG.csv",
+        "RN111": GROUND_TRUTH_DIR / "RN111.tsv",
+        "RN112": GROUND_TRUTH_DIR / "RN112.tsv",
+        "RN114": GROUND_TRUTH_DIR / "RN114.tsv",
+        "RN115": GROUND_TRUTH_DIR / "RN115.tsv",
+        "RN116": GROUND_TRUTH_DIR / "RN116.tsv",
+    }
     
     FIG_DIR = Path("/gpfs/Labs/Uzun/RESULTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/FIGURES")
     FIG_DATA = Path("/gpfs/Labs/Uzun/RESULTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/FIGURE_DATA")

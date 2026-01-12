@@ -123,13 +123,13 @@ EXPERIMENTS=(
     # "slow_decay_long_range_two_hop|mESC_slow_decay_long_range_two_hop|DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;HOPS=2;NEIGHBORS_K=20"
     # "slow_decay_long_range_zero_hops|mESC_slow_decay_long_range_zero_hops|DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;HOPS=0;NEIGHBORS_K=20"
 
-    # "promoter_only_10kb_two_hop|mESC_promoter_only_10kb_two_hop|PROMOTER_BP=10000;HOPS=2;NEIGHBORS_K=20"
-    # "promoter_only_5kb_two_hop|mESC_promoter_only_5kb_two_hop|PROMOTER_BP=5000;HOPS=2;NEIGHBORS_K=20"
-    # "promoter_only_2kb_two_hop|mESC_promoter_only_2kb_two_hop|PROMOTER_BP=2000;HOPS=2;NEIGHBORS_K=20"
+    "promoter_only_10kb_two_hop|mESC_promoter_only_10kb_two_hop|PROMOTER_BP=10000;HOPS=2;NEIGHBORS_K=20"
+    "promoter_only_5kb_two_hop|mESC_promoter_only_5kb_two_hop|PROMOTER_BP=5000;HOPS=2;NEIGHBORS_K=20"
+    "promoter_only_2kb_two_hop|mESC_promoter_only_2kb_two_hop|PROMOTER_BP=2000;HOPS=2;NEIGHBORS_K=20"
     
-    # "decay_30k_long_range_two_hop|mESC_decay_30k_long_range_two_hop|DISTANCE_SCALE_FACTOR=30000;MAX_PEAK_DISTANCE=150000;HOPS=2;NEIGHBORS_K=20"
-    # "decay_50k_long_range_two_hop|mESC_decay_50k_long_range_two_hop|DISTANCE_SCALE_FACTOR=50000;MAX_PEAK_DISTANCE=150000;HOPS=2;NEIGHBORS_K=20"
-    # "decay_75k_long_range_two_hop|mESC_decay_75k_long_range_two_hop|DISTANCE_SCALE_FACTOR=75000;MAX_PEAK_DISTANCE=150000;HOPS=2;NEIGHBORS_K=20"
+    "decay_30k_long_range_two_hop|mESC_decay_30k_long_range_two_hop|DISTANCE_SCALE_FACTOR=30000;MAX_PEAK_DISTANCE=150000;HOPS=2;NEIGHBORS_K=20"
+    "decay_50k_long_range_two_hop|mESC_decay_50k_long_range_two_hop|DISTANCE_SCALE_FACTOR=50000;MAX_PEAK_DISTANCE=150000;HOPS=2;NEIGHBORS_K=20"
+    "decay_75k_long_range_two_hop|mESC_decay_75k_long_range_two_hop|DISTANCE_SCALE_FACTOR=75000;MAX_PEAK_DISTANCE=150000;HOPS=2;NEIGHBORS_K=20"
 
     # Testing running training using only one chromosome. Do we get similar results? Might be better for testing
     "slow_decay_long_range_two_hop|mESC_slow_decay_long_range_two_hop|DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;HOPS=2;NEIGHBORS_K=20;CHROM_IDS=chr1"

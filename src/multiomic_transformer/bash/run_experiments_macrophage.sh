@@ -9,7 +9,7 @@
 #SBATCH --gres=gpu:v100:2
 #SBATCH -c 12
 #SBATCH --mem=128G
-#SBATCH --array=0-7%8
+#SBATCH --array=0-8%8
 
 set -euo pipefail
 
@@ -71,7 +71,7 @@ DEFAULT_MIN_LR=2.5e-6
 DEFAULT_D_MODEL=192
 DEFAULT_NUM_HEADS=4
 DEFAULT_NUM_LAYERS=3
-DEFAULT_D_FF=4*$DEFAULT_D_MODEL
+DEFAULT_D_FF=768
 DEFAULT_DROPOUT=0.10
 DEFAULT_USE_DISTANCE_BIAS=true
 DEFAULT_USE_SHORTCUT=true
@@ -100,6 +100,7 @@ DEFAULT_RESUME_CHECKPOINT_PATH=""
 
 EXPERIMENTS=(
     # "initial_test|Macrophage_base_settings"
+    "model_d_128_ff_512|Macrophage_model_d_128_ff_512|D_MODEL=128;D_FF=512"
     "model_small_batch_size|Macrophage_small_batch_size|BATCH_SIZE=8"
     "loose_1_pct_filtering|Macrophage_loose_1_pct_filtering|MIN_GENES_PER_CELL=150;MIN_PEAKS_PER_CELL=50;HOPS=0;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.01;FILTER_OUT_LOWEST_PCT_PEAKS=0.01"
     "strict_10_pct_filtering|Macrophage_strict_10_pct_filtering|MIN_GENES_PER_CELL=100;MIN_PEAKS_PER_CELL=100;HOPS=0;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.1;FILTER_OUT_LOWEST_PCT_PEAKS=0.1"
@@ -321,7 +322,7 @@ CHROM_ID="chr19"
 # CHROM_IDS="chr1 chr2 chr3 chr4 chr5 chr6 chr7 chr8 chr9 chr10 chr11 chr12 chr13 chr14 chr15 chr16 chr17 chr18 chr19"
 
 # Force recalculate (set to true if you want to reprocess data)
-FORCE_RECALCULATE=true
+FORCE_RECALCULATE=false
 
 # ==========================================
 #        CPU DETECTION
@@ -464,7 +465,6 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
         --shortcut_l1 ${SHORTCUT_L1} \
         --shortcut_l2 ${SHORTCUT_L2} \
         --shortcut_dropout ${SHORTCUT_DROPOUT} \
-        --subsample_max_cells ${SUBSAMPLE_MAX_CELLS} \
         --subsample_seed ${SUBSAMPLE_SEED} \
         --use_torch_compile \
         --use_profiler \
