@@ -643,21 +643,22 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
     TRAINING_NUM=""
     
     for dir in $(ls -d "${OUTPUT_DIR}"/model_training_* 2>/dev/null | sort -V -r); do
-        if [ -f "${dir}/${MODEL_FILE}" ]; then
+        if [ -f "${dir}/${CHROM_ID}/${MODEL_FILE}" ]; then
             TRAINING_NUM=$(basename "$dir")
             break
         fi
     done
 
     # Check if a valid training directory was found
-    if [ -n "${TRAINING_NUM}" ] && [ -f "${OUTPUT_DIR}/${TRAINING_NUM}/${MODEL_FILE}" ]; then
+    if [ -n "${TRAINING_NUM}" ] && [ -f "${OUTPUT_DIR}/${TRAINING_NUM}/${CHROM_ID}/${MODEL_FILE}" ]; then
         echo "[INFO] Selected latest training directory: ${TRAINING_NUM}"
-        echo "[INFO] Found trained model at ${OUTPUT_DIR}/${TRAINING_NUM}/${MODEL_FILE}"
+        echo "[INFO] Found trained model at ${OUTPUT_DIR}/${TRAINING_NUM}/${CHROM_ID}/${MODEL_FILE}"
 
         echo "Plotting Training Figures..."
         poetry run python ./src/multiomic_transformer/utils/plotting.py \
             --experiment "${DATASET_NAME}" \
             --training_num "${TRAINING_NUM}" \
+            --chrom_id "${CHROM_ID}" \
             --experiment_dir "${OUTPUT_DIR}" \
             --model_file "${MODEL_FILE}"
 
@@ -666,6 +667,7 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
         poetry run python ./src/multiomic_transformer/utils/auroc_testing.py \
             --experiment "${DATASET_NAME}" \
             --training_num "${TRAINING_NUM}" \
+            --chrom_id "${CHROM_ID}" \
             --experiment_dir "${OUTPUT_DIR}" \
             --model_file "${MODEL_FILE}" \
             --dataset_type "macrophage" \
@@ -678,7 +680,7 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
         echo "=========================================="
         echo ""
     else
-        echo "[WARNING] Trained model not found at ${OUTPUT_DIR}/${TRAINING_NUM}/${MODEL_FILE}"
+        echo "[WARNING] Trained model not found at ${OUTPUT_DIR}/${TRAINING_NUM}/${CHROM_ID}/${MODEL_FILE}"
         echo "[WARNING] Skipping plotting and AUROC testing"
         echo ""
         echo "=========================================="

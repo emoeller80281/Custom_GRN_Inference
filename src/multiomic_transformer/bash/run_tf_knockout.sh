@@ -3,10 +3,10 @@
 #SBATCH --output=LOGS/transformer_logs/04_testing/%x_%j.log
 #SBATCH --error=LOGS/transformer_logs/04_testing/%x_%j.err
 #SBATCH --time=12:00:00
-#SBATCH -p dense
+#SBATCH -p gpu
 #SBATCH -N 1
-#SBATCH --gres=gpu:v100:4
-#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:p100:2
+#SBATCH --ntasks-per-node=2
 #SBATCH -c 8
 #SBATCH --mem=64G
 
@@ -33,12 +33,12 @@ export KMP_AFFINITY=granularity=fine,compact,1,0
 # ------------------------------------------------------------
 # Run classifier for this chromosome
 # ------------------------------------------------------------
-EXPERIMENT_DIR=/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/Macrophage_small_batch_size/chr19
+EXPERIMENT_DIR=/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/Macrophage_two_hops_150k_max_peak_dist/chr19
 SELECTED_EXPERIMENT_DIR=$EXPERIMENT_DIR/model_training_001
 
 MODEL_FILE=trained_model.pt
 
-torchrun --standalone --nnodes=1 --nproc_per_node=4 ./src/multiomic_transformer/scripts/tf_knockout.py \
+torchrun --standalone --nnodes=1 --nproc_per_node=2 ./src/multiomic_transformer/scripts/tf_knockout.py \
     --selected_experiment_dir "$SELECTED_EXPERIMENT_DIR" \
     --model_file "$MODEL_FILE" \
     --use_amp

@@ -9,7 +9,7 @@
 #SBATCH --gres=gpu:v100:2
 #SBATCH -c 16
 #SBATCH --mem=192G
-#SBATCH --array=0%1
+#SBATCH --array=0-24%5
 
 set -euo pipefail
 
@@ -95,26 +95,35 @@ DEFAULT_RESUME_CHECKPOINT_PATH=""
 # Format: "EXPERIMENT_NAME|DATASET_NAME|PARAMETER_OVERRIDES"
 # PARAMETER_OVERRIDES format: "PARAM1=VALUE1;PARAM2=VALUE2;..."
 
-# "test_new_pipeline|mESC_test_new_pipeline|MIN_GENES_PER_CELL=100;MIN_PEAKS_PER_CELL=100;HOPS=0;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.1;FILTER_OUT_LOWEST_PCT_PEAKS=0.1"
-# "slow_decay_filter_ten_pct|mESC_slow_decay_filter_ten_pct|MIN_GENES_PER_CELL=100;MIN_PEAKS_PER_CELL=100;HOPS=0;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.1;FILTER_OUT_LOWEST_PCT_PEAKS=0.1;DISTANCE_SCALE_FACTOR=40000"
 
 EXPERIMENTS=(
-    # "initial_test|K562_base_settings"
-    "model_d_128_ff_512|K562_model_d_128_ff_512|D_MODEL=128;D_FF=512"
-    # "model_small_batch_size|K562_small_batch_size|BATCH_SIZE=8"
-    # "loose_1_pct_filtering|K562_loose_1_pct_filtering|MIN_GENES_PER_CELL=150;MIN_PEAKS_PER_CELL=50;HOPS=0;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.01;FILTER_OUT_LOWEST_PCT_PEAKS=0.01"
-    # "strict_10_pct_filtering|K562_strict_10_pct_filtering|MIN_GENES_PER_CELL=100;MIN_PEAKS_PER_CELL=100;HOPS=0;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.1;FILTER_OUT_LOWEST_PCT_PEAKS=0.1"
-    # "40k_distance_scale_factor|K562_40k_distance_scale_factor|DISTANCE_SCALE_FACTOR=40000"
-    # "10k_distance_scale_factor|K562_10k_distance_scale_factor|DISTANCE_SCALE_FACTOR=10000"
-    # "150k_max_peak_dist|K562_150k_max_peak_dist|MAX_PEAK_DISTANCE=150000"
-    # "50k_max_peak_dist|K562_50k_max_peak_dist|MAX_PEAK_DISTANCE=50000"
-    # "slow_decay_long_range_two_hop|K562_slow_decay_long_range_two_hop|DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;HOPS=2"
-    # "slow_decay_long_range|K562_slow_decay_long_range|DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;HOPS=1"
-    # "zero_hops|K562_zero_hops|HOPS=0"
-    # "one_hops|K562_one_hops|HOPS=1"
-    # "two_hops|K562_two_hops|HOPS=2"
-    # "loose_1_pct_filter_50_min_per_cell|K562_loose_1_pct_filter_50_min_per_cell|MIN_GENES_PER_CELL=50;MIN_PEAKS_PER_CELL=50;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.01;FILTER_OUT_LOWEST_PCT_PEAKS=0.01"
-    # "small_model_loose_1_pct_filtering|K562_small_model_loose_1_pct_filtering|MIN_GENES_PER_CELL=50;MIN_PEAKS_PER_CELL=50;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.01;FILTER_OUT_LOWEST_PCT_PEAKS=0.01;D_MODEL=128;D_FF=512;BATCH_SIZE=8"
+    "initial_test|K562_base_settings"
+    # "model_d_128_ff_512|K562_model_d_128_ff_512|D_MODEL=128;D_FF=512"
+    "model_small_batch_size|K562_small_batch_size|BATCH_SIZE=8"
+    "loose_1_pct_filtering|K562_loose_1_pct_filtering|MIN_GENES_PER_CELL=150;MIN_PEAKS_PER_CELL=50;HOPS=0;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.01;FILTER_OUT_LOWEST_PCT_PEAKS=0.01"
+    "strict_10_pct_filtering|K562_strict_10_pct_filtering|MIN_GENES_PER_CELL=100;MIN_PEAKS_PER_CELL=100;HOPS=0;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.1;FILTER_OUT_LOWEST_PCT_PEAKS=0.1"
+    "40k_distance_scale_factor|K562_40k_distance_scale_factor|DISTANCE_SCALE_FACTOR=40000"
+    "10k_distance_scale_factor|K562_10k_distance_scale_factor|DISTANCE_SCALE_FACTOR=10000"
+    "150k_max_peak_dist|K562_150k_max_peak_dist|MAX_PEAK_DISTANCE=150000"
+    "50k_max_peak_dist|K562_50k_max_peak_dist|MAX_PEAK_DISTANCE=50000"
+    "slow_decay_long_range_two_hop|K562_slow_decay_long_range_two_hop|DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;HOPS=2"
+    "slow_decay_long_range|K562_slow_decay_long_range|DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;HOPS=1"
+    "zero_hops|K562_zero_hops|HOPS=0"
+    "one_hops|K562_one_hops|HOPS=1"
+    "two_hops|K562_two_hops|HOPS=2"
+    "loose_1_pct_filter_50_min_per_cell|K562_loose_1_pct_filter_50_min_per_cell|MIN_GENES_PER_CELL=50;MIN_PEAKS_PER_CELL=50;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.01;FILTER_OUT_LOWEST_PCT_PEAKS=0.01"
+    "small_model_loose_1_pct_filtering|K562_small_model_loose_1_pct_filtering|MIN_GENES_PER_CELL=50;MIN_PEAKS_PER_CELL=50;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.01;FILTER_OUT_LOWEST_PCT_PEAKS=0.01;D_MODEL=128;D_FF=512;BATCH_SIZE=8"
+    "two_hops_small_batch|K562_two_hops_small_batch|HOPS=2;BATCH_SIZE=8"
+    "two_hops_150k_max_peak_dist|K562_two_hops_150k_max_peak_dist|HOPS=2;MAX_PEAK_DISTANCE=150000"
+    "two_hops_slow_decay_long_range|K562_two_hops_slow_decay_long_range|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000"
+    "two_hops_slow_decay_long_range_small_batch|K562_two_hops_slow_decay_long_range_small_batch|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8"
+    "three_hops_small_batch|K562_three_hops_small_batch|HOPS=3;BATCH_SIZE=8"
+    "two_hops_50k_max_peak_dist|K562_two_hops_50k_max_peak_dist|HOPS=2;MAX_PEAK_DISTANCE=50000"
+    "two_hops_10k_distance_scale_factor|K562_two_hops_10k_distance_scale_factor|HOPS=2;DISTANCE_SCALE_FACTOR=10000"
+    "two_hops_40k_distance_scale_factor|K562_two_hops_40k_distance_scale_factor|HOPS=2;DISTANCE_SCALE_FACTOR=40000"
+    "two_hops_loose_1_pct_filtering|K562_two_hops_loose_1_pct_filtering|HOPS=2;MIN_GENES_PER_CELL=150;MIN_PEAKS_PER_CELL=50;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.01;FILTER_OUT_LOWEST_PCT_PEAKS=0.01"
+    "two_hops_moderate_5_pct_filtering_small_batch|K562_two_hops_moderate_5_pct_filtering_small_batch|HOPS=2;BATCH_SIZE=8;MIN_GENES_PER_CELL=125;MIN_PEAKS_PER_CELL=75;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.05;FILTER_OUT_LOWEST_PCT_PEAKS=0.05"
+    "small_model_two_hops_long_range_small_batch|K562_small_model_two_hops_long_range_small_batch|D_MODEL=128;D_FF=512;HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8"
 )
 
 
