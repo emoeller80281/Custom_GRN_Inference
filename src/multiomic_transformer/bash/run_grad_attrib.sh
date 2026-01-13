@@ -27,8 +27,8 @@ export NUMEXPR_NUM_THREADS=8
 export BLIS_NUM_THREADS=8
 export KMP_AFFINITY=granularity=fine,compact,1,0
 
-EXPERIMENT_DIR=/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC_filter_lowest_ten_pct/chr19
-SELECTED_EXPERIMENT_DIR=$EXPERIMENT_DIR/model_training_003/fine_tuning
+EXPERIMENT_DIR=/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/Macrophage_small_batch_size/chr19
+SELECTED_EXPERIMENT_DIR=$EXPERIMENT_DIR/model_training_001
 
 MODEL_FILE=trained_model.pt
 

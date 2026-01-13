@@ -7,9 +7,9 @@
 #SBATCH -N 1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:v100:2
-#SBATCH -c 12
-#SBATCH --mem=128G
-#SBATCH --array=0-8%8
+#SBATCH -c 16
+#SBATCH --mem=192G
+#SBATCH --array=0-5%6
 
 set -euo pipefail
 
@@ -100,15 +100,15 @@ DEFAULT_RESUME_CHECKPOINT_PATH=""
 
 EXPERIMENTS=(
     # "initial_test|Macrophage_base_settings"
-    "model_d_128_ff_512|Macrophage_model_d_128_ff_512|D_MODEL=128;D_FF=512"
-    "model_small_batch_size|Macrophage_small_batch_size|BATCH_SIZE=8"
-    "loose_1_pct_filtering|Macrophage_loose_1_pct_filtering|MIN_GENES_PER_CELL=150;MIN_PEAKS_PER_CELL=50;HOPS=0;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.01;FILTER_OUT_LOWEST_PCT_PEAKS=0.01"
-    "strict_10_pct_filtering|Macrophage_strict_10_pct_filtering|MIN_GENES_PER_CELL=100;MIN_PEAKS_PER_CELL=100;HOPS=0;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.1;FILTER_OUT_LOWEST_PCT_PEAKS=0.1"
-    "40k_distance_scale_factor|Macrophage_40k_distance_scale_factor|DISTANCE_SCALE_FACTOR=40000"
-    "10k_distance_scale_factor|Macrophage_10k_distance_scale_factor|DISTANCE_SCALE_FACTOR=10000"
-    "150k_max_peak_dist|Macrophage_150k_max_peak_dist|MAX_PEAK_DISTANCE=150000"
-    "50k_max_peak_dist|Macrophage_50k_max_peak_dist|MAX_PEAK_DISTANCE=50000"
-    "slow_decay_long_range_two_hop|Macrophage_slow_decay_long_range_two_hop|DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;HOPS=2;NEIGHBORS_K=20"
+    # "model_d_128_ff_512|Macrophage_model_d_128_ff_512|D_MODEL=128;D_FF=512"
+    # "model_small_batch_size|Macrophage_small_batch_size|BATCH_SIZE=8"
+    # "loose_1_pct_filtering|Macrophage_loose_1_pct_filtering|MIN_GENES_PER_CELL=150;MIN_PEAKS_PER_CELL=50;HOPS=0;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.01;FILTER_OUT_LOWEST_PCT_PEAKS=0.01"
+    # "strict_10_pct_filtering|Macrophage_strict_10_pct_filtering|MIN_GENES_PER_CELL=100;MIN_PEAKS_PER_CELL=100;HOPS=0;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.1;FILTER_OUT_LOWEST_PCT_PEAKS=0.1"
+    # "40k_distance_scale_factor|Macrophage_40k_distance_scale_factor|DISTANCE_SCALE_FACTOR=40000"
+    # "10k_distance_scale_factor|Macrophage_10k_distance_scale_factor|DISTANCE_SCALE_FACTOR=10000"
+    # "150k_max_peak_dist|Macrophage_150k_max_peak_dist|MAX_PEAK_DISTANCE=150000"
+    # "50k_max_peak_dist|Macrophage_50k_max_peak_dist|MAX_PEAK_DISTANCE=50000"
+    # "slow_decay_long_range_two_hop|Macrophage_slow_decay_long_range_two_hop|DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;HOPS=2;NEIGHBORS_K=20"
 )
 
 
@@ -607,10 +607,59 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
 
     echo ""
     echo "=========================================="
-    echo "  EXPERIMENT COMPLETED: ${EXPERIMENT_NAME}"
+    echo "  TRAINING COMPLETED: ${EXPERIMENT_NAME}"
     echo "  DATASET: ${DATASET_NAME}"
     echo "=========================================="
     echo ""
+
+    # ==========================================
+    #           PLOTTING & AUROC TESTING
+    # ==========================================
+    echo ""
+    echo "=========================================="
+    echo "      RUNNING PLOTTING & AUROC TESTING"
+    echo "=========================================="
+    echo ""
+
+    # Find the latest training directory (assume model_training_001)
+    TRAINING_NUM="model_training_001"
+    MODEL_FILE="trained_model.pt"
+
+    # Check if the trained model exists
+    if [ -f "${OUTPUT_DIR}/${TRAINING_NUM}/${MODEL_FILE}" ]; then
+        echo "[INFO] Found trained model at ${OUTPUT_DIR}/${TRAINING_NUM}/${MODEL_FILE}"
+
+        echo "Plotting Training Figures..."
+        poetry run python ./src/multiomic_transformer/utils/plotting.py \
+            --experiment "${DATASET_NAME}" \
+            --training_num "${TRAINING_NUM}" \
+            --experiment_dir "${OUTPUT_DIR}" \
+            --model_file "${MODEL_FILE}"
+
+        echo ""
+        echo "Running AUROC Testing..."
+        poetry run python ./src/multiomic_transformer/utils/auroc_testing.py \
+            --experiment "${DATASET_NAME}" \
+            --training_num "${TRAINING_NUM}" \
+            --experiment_dir "${OUTPUT_DIR}" \
+            --model_file "${MODEL_FILE}"
+
+        echo ""
+        echo "=========================================="
+        echo "  EXPERIMENT COMPLETED: ${EXPERIMENT_NAME}"
+        echo "  DATASET: ${DATASET_NAME}"
+        echo "=========================================="
+        echo ""
+    else
+        echo "[WARNING] Trained model not found at ${OUTPUT_DIR}/${TRAINING_NUM}/${MODEL_FILE}"
+        echo "[WARNING] Skipping plotting and AUROC testing"
+        echo ""
+        echo "=========================================="
+        echo "  TRAINING COMPLETED (NO POST-PROCESSING): ${EXPERIMENT_NAME}"
+        echo "  DATASET: ${DATASET_NAME}"
+        echo "=========================================="
+        echo ""
+    fi
 else
     echo ""
     echo "=========================================="
