@@ -85,6 +85,9 @@ EXPERIMENT_LIST=(
 
 )
 
+DATASET_TYPE="Macrophage"
+SAMPLE_NAMES="Macrophage_S1 Macrophage_S2"
+
 # ==========================================
 #        EXPERIMENT SELECTION
 # ==========================================
@@ -122,6 +125,8 @@ poetry run python ./src/multiomic_transformer/utils/auroc_testing.py \
     --experiment "$EXPERIMENT_NAME" \
     --training_num "$TRAINING_NUM" \
     --experiment_dir "$EXPERIMENT_DIR" \
-    --model_file "$MODEL_FILE"
+    --model_file "$MODEL_FILE" \
+    --dataset_type "$DATASET_TYPE" \
+    --sample_name_list $SAMPLE_NAMES
 
 echo "finished"

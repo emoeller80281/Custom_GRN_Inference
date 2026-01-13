@@ -627,12 +627,20 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
     echo "=========================================="
     echo ""
 
-    # Find the latest training directory (assume model_training_001)
-    TRAINING_NUM="model_training_001"
+    # Find the latest training directory (highest numbered model_training_* that contains MODEL_FILE)
     MODEL_FILE="trained_model.pt"
+    TRAINING_NUM=""
+    
+    for dir in $(ls -d "${OUTPUT_DIR}"/model_training_* 2>/dev/null | sort -V -r); do
+        if [ -f "${dir}/${MODEL_FILE}" ]; then
+            TRAINING_NUM=$(basename "$dir")
+            break
+        fi
+    done
 
-    # Check if the trained model exists
-    if [ -f "${OUTPUT_DIR}/${TRAINING_NUM}/${MODEL_FILE}" ]; then
+    # Check if a valid training directory was found
+    if [ -n "${TRAINING_NUM}" ] && [ -f "${OUTPUT_DIR}/${TRAINING_NUM}/${MODEL_FILE}" ]; then
+        echo "[INFO] Selected latest training directory: ${TRAINING_NUM}"
         echo "[INFO] Found trained model at ${OUTPUT_DIR}/${TRAINING_NUM}/${MODEL_FILE}"
 
         echo "Plotting Training Figures..."
@@ -648,7 +656,9 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
             --experiment "${DATASET_NAME}" \
             --training_num "${TRAINING_NUM}" \
             --experiment_dir "${OUTPUT_DIR}" \
-            --model_file "${MODEL_FILE}"
+            --model_file "${MODEL_FILE}" \
+            --dataset_type "K562" \
+            --sample_name_list "${SAMPLE_NAMES}"
 
         echo ""
         echo "=========================================="

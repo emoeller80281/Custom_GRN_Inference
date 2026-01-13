@@ -1747,13 +1747,18 @@ if __name__ == "__main__":
     arg_parser.add_argument("--training_num", type=str, required=False, default="model_training_001", help="Training number folder to test")
     arg_parser.add_argument("--experiment_dir", type=Path, required=True, help="Full path to the experiment directory to test")
     arg_parser.add_argument("--model_file", type=str, required=False, default="trained_model.pt", help="Name of the trained model file (default: trained_model.pt)")
+    arg_parser.add_argument("--dataset_type", type=str, required=True, choices=["mESC", "macrophage", "K562"], help="Type of dataset: mESC, macrophage, or K562")
+    arg_parser.add_argument("--sample_name_list", type=str, nargs='+', required=False, default=[], help="List of sample names to include in the evaluation (optional)")
+    arg_parser.add_argument("--r2_threshold", type=float, required=False, default=None, help="R² threshold for filtering Gradient Attribution edges (optional)")
 
     args = arg_parser.parse_args()
 
     experiment = args.experiment
-    training_num = args.training_num if args.training_num else "model_training_001"
+    training_num = args.training_num if args.training_num else "model_training_001" 
     experiment_dir = Path(args.experiment_dir)
-
+    dataset_type = args.dataset_type
+    
+    sample_name_list = args.sample_name_list
     if "chr19" in [p.name for p in Path(experiment_dir / experiment).iterdir()] and experiment != "mESC_no_scale_linear":
         EXPERIMENT_DIR = experiment_dir / experiment / "chr19" / training_num
     else:
@@ -1762,20 +1767,26 @@ if __name__ == "__main__":
     if EXPERIMENT_DIR is None:
         EXPERIMENT_DIR = Path(f"/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/{experiment}/chr19") / training_num
 
-    ground_truth_file_dict = {
-        "RN204": GROUND_TRUTH_DIR / "rn204_macrophage_human_chipseq.tsv",
-    }
+    if dataset_type.lower() == "macrophage":
+        ground_truth_file_dict = {
+            "RN204": GROUND_TRUTH_DIR / "rn204_macrophage_human_chipseq.tsv",
+        }
     
-    # ground_truth_file_dict = {
-    #     "ChIP-Atlas": GROUND_TRUTH_DIR / "chip_atlas_tf_peak_tg_dist.csv",
-    #     # "RN111_RN112": GROUND_TRUTH_DIR / "filtered_RN111_and_RN112_mESC_E7.5_rep1.tsv",
-    #     # "ORTI": GROUND_TRUTH_DIR / "ORTI_ground_truth_TF_TG.csv",
-    #     "RN111": GROUND_TRUTH_DIR / "RN111.tsv",
-    #     "RN112": GROUND_TRUTH_DIR / "RN112.tsv",
-    #     "RN114": GROUND_TRUTH_DIR / "RN114.tsv",
-    #     "RN115": GROUND_TRUTH_DIR / "RN115.tsv",
-    #     "RN116": GROUND_TRUTH_DIR / "RN116.tsv",
-    # }
+    elif dataset_type.lower() == "mesc":
+        ground_truth_file_dict = {
+            "ChIP-Atlas": GROUND_TRUTH_DIR / "chip_atlas_tf_peak_tg_dist.csv",
+            # "RN111_RN112": GROUND_TRUTH_DIR / "filtered_RN111_and_RN112_mESC_E7.5_rep1.tsv",
+            # "ORTI": GROUND_TRUTH_DIR / "ORTI_ground_truth_TF_TG.csv",
+            "RN111": GROUND_TRUTH_DIR / "RN111.tsv",
+            "RN112": GROUND_TRUTH_DIR / "RN112.tsv",
+            "RN114": GROUND_TRUTH_DIR / "RN114.tsv",
+            "RN115": GROUND_TRUTH_DIR / "RN115.tsv",
+            "RN116": GROUND_TRUTH_DIR / "RN116.tsv",
+        }
+    elif dataset_type.lower() == "k562":
+        ground_truth_file_dict = {
+            "RN207": GROUND_TRUTH_DIR / "RN117.tsv",
+        }
     
     FIG_DIR = Path("/gpfs/Labs/Uzun/RESULTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/FIGURES")
     FIG_DATA = Path("/gpfs/Labs/Uzun/RESULTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/FIGURE_DATA")
@@ -1898,14 +1909,11 @@ if __name__ == "__main__":
     # ---------- LOAD METHOD GRNs ONCE ----------
     DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.GRN_BENCHMARKING.MOELLER/testing_bear_grn/INFERRED.GRNS")
 
-    # samples = ["E7.5_rep1", "E7.5_rep2", "E8.5_rep1", "E8.5_rep2", "Macrophage_S1", "Macrophage_S2"]
-    samples = ["Macrophage_S1", "Macrophage_S2"]
-
     sample_method_dict = {}
     
-    for sample_name in samples:
+    for sample_name in sample_name_list:
         
-        if sample_name.startswith("E"):
+        if dataset_type.lower() == "mesc":
             cell_oracle_path  = DIR / f"{sample_name}/CellOracle/filtered_L2_{sample_name}_out_E7.5_rep1_final_GRN.csv"
             directnet_path    = DIR / f"{sample_name}/DIRECTNET/{sample_name}_all_cells_Network_links.csv"
             figr_path         = DIR / f"{sample_name}/FigR/{sample_name}_all_cells_filtered_network.csv"
@@ -1915,24 +1923,35 @@ if __name__ == "__main__":
             scenic_plus_path  = DIR / f"{sample_name}/SCENIC+/scenic_plus_inferred_grn_mESC_filtered_L2_{sample_name}.tsv"
             tripod_path       = DIR / f"{sample_name}/TRIPOD/gene_TF_highest_abs_coef.csv"
         
-        elif sample_name == "Macrophage_S1":
-            cell_oracle_path  = DIR / f"{sample_name}/CellOracle/Macrophase_buffer1_filtered_out_E7.5_rep1_final_GRN.csv"
-            directnet_path    = DIR / f"{sample_name}/DIRECTNET/Network_links.csv"
-            figr_path         = DIR / f"{sample_name}/FigR/Buffer1_filtered_network.csv"
-            granie_path       = DIR / f"{sample_name}/GRaNIE/GRN_connections_filtered_sorted_scBuffer1_uniq.csv"
-            linger_path       = DIR / f"{sample_name}/LINGER/cell_type_TF_gene.csv"
-            pando_path        = DIR / f"{sample_name}/Pando/Macrophage_buffer1_raw_network.csv"
-            scenic_plus_path  = DIR / f"{sample_name}/SCENIC+/scenic_plus_inferred_grn_macrophage_macrophage_buffer1_filtered.tsv"
-            tripod_path       = DIR / f"{sample_name}/TRIPOD/gene_TF_highest_abs_coef.csv"
+        elif dataset_type.lower() == "macrophage":
+            if sample_name == "Macrophage_S1":
+                cell_oracle_path  = DIR / f"{sample_name}/CellOracle/Macrophase_buffer1_filtered_out_E7.5_rep1_final_GRN.csv"
+                directnet_path    = DIR / f"{sample_name}/DIRECTNET/Network_links.csv"
+                figr_path         = DIR / f"{sample_name}/FigR/Buffer1_filtered_network.csv"
+                granie_path       = DIR / f"{sample_name}/GRaNIE/GRN_connections_filtered_sorted_scBuffer1_uniq.csv"
+                linger_path       = DIR / f"{sample_name}/LINGER/cell_type_TF_gene.csv"
+                pando_path        = DIR / f"{sample_name}/Pando/Macrophage_buffer1_raw_network.csv"
+                scenic_plus_path  = DIR / f"{sample_name}/SCENIC+/scenic_plus_inferred_grn_macrophage_macrophage_buffer1_filtered.tsv"
+                tripod_path       = DIR / f"{sample_name}/TRIPOD/gene_TF_highest_abs_coef.csv"
 
-        if sample_name == "Macrophage_S2":
-            cell_oracle_path  = DIR / f"{sample_name}/CellOracle/Macrophase_buffer2_filtered_out_E7.5_rep1_final_GRN.csv"
+            elif sample_name == "Macrophage_S2":
+                cell_oracle_path  = DIR / f"{sample_name}/CellOracle/Macrophase_buffer2_filtered_out_E7.5_rep1_final_GRN.csv"
+                directnet_path    = DIR / f"{sample_name}/DIRECTNET/Network_links.csv"
+                figr_path         = DIR / f"{sample_name}/FigR/Buffer2_filtered_network.csv"
+                granie_path       = DIR / f"{sample_name}/GRaNIE/GRN_connections_filtered_sorted_scBuffer2_uniq.csv"
+                linger_path       = DIR / f"{sample_name}/LINGER/cell_type_TF_gene_buffer2.csv"
+                pando_path        = DIR / f"{sample_name}/Pando/Macrophage_buffer2_filtered_network.csv"
+                scenic_plus_path  = DIR / f"{sample_name}/SCENIC+/scenic_plus_inferred_grn_macrophage_macrophage_buffer2_filtered.tsv"
+                tripod_path       = DIR / f"{sample_name}/TRIPOD/gene_TF_highest_abs_coef.csv"
+        
+        elif dataset_type.lower() == "k562":
+            cell_oracle_path  = DIR / f"{sample_name}/CellOracle/K562_human_filtered_out_E7.5_rep1_final_GRN.csv"
             directnet_path    = DIR / f"{sample_name}/DIRECTNET/Network_links.csv"
-            figr_path         = DIR / f"{sample_name}/FigR/Buffer2_filtered_network.csv"
-            granie_path       = DIR / f"{sample_name}/GRaNIE/GRN_connections_filtered_sorted_scBuffer2_uniq.csv"
-            linger_path       = DIR / f"{sample_name}/LINGER/cell_type_TF_gene_buffer2.csv"
-            pando_path        = DIR / f"{sample_name}/Pando/Macrophage_buffer2_filtered_network.csv"
-            scenic_plus_path  = DIR / f"{sample_name}/SCENIC+/scenic_plus_inferred_grn_macrophage_macrophage_buffer2_filtered.tsv"
+            figr_path         = DIR / f"{sample_name}/FigR/K562_filtered_network.csv"
+            granie_path       = DIR / f"{sample_name}/GRaNIE/GRN_connections_filtered_sorted_scK562_uniq.csv"
+            linger_path       = DIR / f"{sample_name}/LINGER/K562_LINGER_GRN_long.tsv"
+            pando_path        = DIR / f"{sample_name}/Pando/K562_raw_network.csv"
+            scenic_plus_path  = DIR / f"{sample_name}/SCENIC+/scenic_plus_inferred_grn_K562_K562_human_filtered.tsv"
             tripod_path       = DIR / f"{sample_name}/TRIPOD/gene_TF_highest_abs_coef.csv"
             
         method_info = {
