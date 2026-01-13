@@ -14,7 +14,7 @@ import scipy.sparse as sp
 import random
 from scipy.special import softmax
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from typing import Tuple, Set, Optional, List, Iterable, Union, Dict
+from typing import Tuple, Set, Optional, List, Iterable, Union, Dict, Callable, Any
 from anndata import AnnData
 import pybedtools
 import argparse
@@ -28,30 +28,6 @@ from multiomic_transformer.utils.standardize import standardize_name
 from multiomic_transformer.utils.files import atomic_json_dump
 from multiomic_transformer.utils.peaks import find_genes_near_peaks, format_peaks, set_tg_as_closest_gene_tss
 from multiomic_transformer.utils.downloads import *
-
-def normalize_peak_format(peak_id: str) -> str:
-    """
-    Normalize peak format from chrN-start-end or chrN:start:end to chrN:start-end.
-    Handles both formats as input and always outputs chrN:start-end.
-    """
-    if not isinstance(peak_id, str):
-        return peak_id
-    
-    # Try to parse chr-start-end format (with dashes)
-    parts = peak_id.split('-')
-    if len(parts) >= 3:
-        # Assume format is chr-start-end where chr might have dashes
-        # Work backwards: the last two parts are start and end
-        try:
-            end = int(parts[-1])
-            start = int(parts[-2])
-            chrom = '-'.join(parts[:-2])  # Everything before the last two parts
-            return f"{chrom}:{start}-{end}"
-        except (ValueError, IndexError):
-            pass
-    
-    # Already in chr:start-end format or some other format, return as-is
-    return peak_id
 from multiomic_transformer.data.sliding_window import run_sliding_window_scan
 from multiomic_transformer.data.build_pkn import build_organism_pkns
 from multiomic_transformer.utils.gene_canonicalizer import GeneCanonicalizer
@@ -363,6 +339,30 @@ def setup_global_variables(args):
 
 
 # ----- Data Loading and Processing -----
+def normalize_peak_format(peak_id: str) -> str:
+    """
+    Normalize peak format from chrN-start-end or chrN:start:end to chrN:start-end.
+    Handles both formats as input and always outputs chrN:start-end.
+    """
+    if not isinstance(peak_id, str):
+        return peak_id
+    
+    # Try to parse chr-start-end format (with dashes)
+    parts = peak_id.split('-')
+    if len(parts) >= 3:
+        # Assume format is chr-start-end where chr might have dashes
+        # Work backwards: the last two parts are start and end
+        try:
+            end = int(parts[-1])
+            start = int(parts[-2])
+            chrom = '-'.join(parts[:-2])  # Everything before the last two parts
+            return f"{chrom}:{start}-{end}"
+        except (ValueError, IndexError):
+            pass
+    
+    # Already in chr:start-end format or some other format, return as-is
+    return peak_id
+
 def pseudo_bulk(
     rna_data: AnnData,
     atac_data: AnnData,
@@ -379,18 +379,25 @@ def pseudo_bulk(
     weight matrix W (including self loops), and returns neighborhood-averaged profiles:
         X_soft = W @ X
 
-    Args
-    ----
-    neighbors_k: K for the joint KNN graph.
-    pca_components: # PCs per modality before concatenation.
-    hops: how many times to diffuse (W^h). Larger = smoother.
-    self_weight: diagonal weight (>=0) added before row-normalization.
-    renormalize_each_hop: if True, row-normalize after every hop to keep rows summing to 1.
+    Parameters
+    ----------
+    neighbors_k : int
+        K for the joint KNN graph.
+    pca_components: int
+        Number of PCs per modality before concatenation.
+    hops: int
+        How many times to diffuse (W^h). Larger = smoother.
+    self_weight: float
+        Diagonal weight (>=0) added before row-normalization.
+    renormalize_each_hop: bool
+        If True, row-normalize after every hop to keep rows summing to 1.
 
     Returns
-    -------
-    soft_rna_df:  genes × cells (same cells as input)
-    soft_atac_df: peaks × cells (same cells as input)
+    ----------
+    soft_rna_df: pd.DataFrame
+        genes × cells (same cells as input)
+    soft_atac_df: pd.DataFrame
+        peaks × cells (same cells as input)
     """
     # --- copy and align cells across modalities (same as in your function) ---
     rna = rna_data.copy()
@@ -481,9 +488,48 @@ def pseudo_bulk(
 
     return pseudo_bulk_rna_df, pseudo_bulk_atac_df
 
-def process_10x_to_parquet(raw_10x_rna_data_dir, raw_atac_peak_file, rna_outfile_path, atac_outfile_path, sample_name):
+def process_10x_to_parquet(
+    raw_10x_rna_data_dir: Union[str, Path], 
+    raw_atac_peak_file: Union[str, Path], 
+    rna_outfile_path: Union[str, Path], 
+    atac_outfile_path: Union[str, Path], 
+    sample_name: str):
     
-    def _load_rna_adata(sample_raw_data_dir: str) -> sc.AnnData:
+    """
+    Process 10x data (RNA and ATAC) into parquet files.
+
+    Parameters
+    ----------
+    raw_10x_rna_data_dir : Union[str, Path]
+        Path to raw 10x RNA data directory.
+    raw_atac_peak_file : Union[str, Path]
+        Path to raw ATAC peak matrix file.
+    rna_outfile_path : Union[str, Path]
+        Path to output parquet file for RNA data.
+    atac_outfile_path : Union[str, Path]
+        Path to output parquet file for ATAC data.
+    sample_name : str
+        Sample name to associate with the data.
+
+    Returns
+    -------
+    None
+    """
+    def _load_rna_adata(sample_raw_data_dir: Union[str, Path]) -> sc.AnnData:
+        """
+        Load scRNA data from a 10x directory. Expects a single features.tsv.gz file.
+
+        Parameters
+        ----------
+        sample_raw_data_dir : Union[str, Path]
+            Path to the directory containing the 10x RNA data.
+
+        Returns
+        -------
+        adata : AnnData
+            Loaded scRNA data.
+        """
+        
         # Look for features file
         features = [f for f in os.listdir(sample_raw_data_dir) if f.endswith("features.tsv.gz")]
         assert len(features) == 1, \
@@ -503,7 +549,26 @@ def process_10x_to_parquet(raw_10x_rna_data_dir, raw_atac_peak_file, rna_outfile
         return adata
     
 
-    def _get_adata_from_peakmatrix(peak_matrix_file, label, sample_name, dtype=np.uint16):
+    def _get_adata_from_peakmatrix(peak_matrix_file: Union[str, Path], label: pd.DataFrame, sample_name: str, dtype=np.uint16) -> AnnData:
+        """
+        Load ATAC data from a peak matrix file.
+
+        Parameters
+        ----------
+        peak_matrix_file : Union[str, Path]
+            Path to the peak matrix file.
+        label : pd.DataFrame
+            DataFrame containing barcode information.
+        sample_name : str
+            Sample name to associate with the data.
+        dtype : np.dtype, optional
+            Data type to use for the data matrix, by default np.uint16.
+
+        Returns
+        -------
+        adata : AnnData
+            Loaded ATAC data.
+        """
         logging.info(f"  - [{sample_name}] Reading ATAC peaks")
 
         is_gz = str(peak_matrix_file).endswith(".gz")
@@ -769,6 +834,7 @@ def process_or_load_rna_atac_data(
 
     # helpers
     def _adata_to_dense_df(adata: AnnData) -> pd.DataFrame:
+        """Convert AnnData with log1p layer to dense DataFrame (features × cells)."""
         X = adata.layers["log1p"]
         if sp.issparse(X):
             X = X.toarray()
@@ -777,12 +843,13 @@ def process_or_load_rna_atac_data(
         # return gene/peak × cell matrix
         return pd.DataFrame(X, index=adata.obs_names, columns=adata.var_names).T
 
-    def _load_or_none(path: Path, loader):
+    def _load_or_none(path: Path, loader: Callable[[Path], Any]) -> Optional[Any]:
+        """Load data from path using loader if file exists, else return None."""
         if path.is_file():
             return loader(path)
         return None
     
-    def _normalize_barcodes(index_like) -> pd.Index:
+    def _normalize_barcodes(index_like: pd.Index) -> pd.Index:
         """
         Normalize cell barcodes so RNA/ATAC match.
         For macrophage data with format like "AAACCGAAGTCACTCC-1_4":
@@ -806,7 +873,31 @@ def process_or_load_rna_atac_data(
         
         return ix
 
-    def harmonize_and_intersect(ad_rna: AnnData, ad_atac: AnnData, *, verbose: bool=True):
+    def harmonize_and_intersect(ad_rna: AnnData, ad_atac: AnnData, *, verbose: bool=True) -> Tuple[AnnData, AnnData]:
+        """
+        Harmonize RNA/ATAC barcodes and intersect them to ensure a common set of barcodes.
+
+        Parameters
+        ----------
+        ad_rna : AnnData
+            RNA data
+        ad_atac : AnnData
+            ATAC data
+        verbose : bool, optional
+            Whether to print out intermediate results (default: True)
+
+        Returns
+        -------
+        ad_rna2 : AnnData
+            RNA data with harmonized barcodes
+        ad_atac2 : AnnData
+            ATAC data with harmonized barcodes
+
+        Raises
+        ------
+        RuntimeError
+            If no overlapping barcodes are found after normalization.
+        """
         rna_norm = _normalize_barcodes(ad_rna.obs_names)
         atac_norm = _normalize_barcodes(ad_atac.obs_names)
 
@@ -958,6 +1049,7 @@ def process_or_load_rna_atac_data(
                 atac_df = pd.read_parquet(raw_atac_file, engine="pyarrow")
             
             def _norm_names(names):
+                """Normalize a list of names for overlap checking."""
                 out = []
                 for s in map(str, names):
                     s = s.strip().lower()
@@ -967,6 +1059,7 @@ def process_or_load_rna_atac_data(
                 return set(out)
 
             def _obs_overlap(ad1, ad2) -> int:
+                """Count overlapping normalized obs_names between two AnnData objects."""
                 return len(_norm_names(ad1.obs_names) & _norm_names(ad2.obs_names))
 
             try:
@@ -1081,6 +1174,23 @@ def process_or_load_rna_atac_data(
     return processed_rna_df, processed_atac_df, TG_pseudobulk_df, RE_pseudobulk_df
 
 def filter_and_qc(adata_RNA: AnnData, adata_ATAC: AnnData) -> Tuple[AnnData, AnnData]:
+    """
+    Filter and quality control RNA and ATAC data.
+
+    Parameters
+    ----------
+    adata_RNA : AnnData
+        RNA data
+    adata_ATAC : AnnData
+        ATAC data
+
+    Returns
+    -------
+    filtered_RNA : AnnData
+        Filtered RNA data
+    filtered_ATAC : AnnData
+        Filtered ATAC data
+    """
     
     adata_RNA = adata_RNA.copy()
     adata_ATAC = adata_ATAC.copy()
@@ -1151,12 +1261,42 @@ def filter_and_qc(adata_RNA: AnnData, adata_ATAC: AnnData) -> Tuple[AnnData, Ann
     return adata_RNA, adata_ATAC
 
 def _canon(x: str) -> str:
+    """
+    Strips version suffix and uppercases a given string.
+
+    Parameters
+    ----------
+    x : str
+        The input string.
+
+    Returns
+    -------
+    str
+        The modified string.
+    """
+    
     # strip version suffix and uppercase
     s = str(x).strip()
     s = re.sub(r"\.\d+$", "", s)
     return s.upper()
 
 def _read_list(path: Path, col: str) -> list[str]:
+    """
+    Reads a list of elements from a CSV file.
+
+    Parameters
+    ----------
+    path : Path
+        The path to the CSV file.
+    col : str
+        The column name to read from. If the column does not exist and
+        the file has only one column, the function will read from the single column.
+
+    Returns
+    -------
+    list[str]
+        A sorted list of elements from the file.
+    """
     if path.is_file():
         df = pd.read_csv(path)
         if col not in df.columns and df.shape[1] == 1:
@@ -1423,36 +1563,6 @@ def calculate_peak_to_tg_distance_score(
     genes_near_peaks.to_parquet(peak_gene_dist_file, compression="snappy", engine="pyarrow")
     return genes_near_peaks
 
-def _softmax_1d_stable(x: np.ndarray, tau: float = 1.0) -> np.ndarray:
-    z = (x / float(tau)).astype(float)
-    z -= z.max()              # numerical stability
-    p = np.exp(z)
-    s = p.sum()
-    return p / s if s > 0 else np.full_like(p, 1.0 / len(p))
-
-def _process_single_tf(tf, tf_df, peak_to_gene_dist_df, *, temperature: float = 1.0):
-    # tf_df contains only one TF
-    scores = tf_df["sliding_window_score"].to_numpy()
-    tf_df = tf_df.copy()
-    tf_df["tf_peak_prob"] = _softmax_1d_stable(scores, tau=temperature)
-
-    merged = pd.merge(
-        tf_df[["peak_id", "tf_peak_prob"]],
-        peak_to_gene_dist_df[["peak_id", "target_id", "TSS_dist_score"]],
-        on="peak_id",
-        how="inner",
-    )
-    merged["tf_tg_contrib"] = merged["tf_peak_prob"] * merged["TSS_dist_score"]
-
-    out = (
-        merged.groupby("target_id", as_index=False)
-            .agg(reg_potential=("tf_tg_contrib", "sum"),
-                motif_density=("peak_id", "nunique"))
-            .rename(columns={"target_id": "TG"})
-    )
-    out["TF"] = tf
-    return out
-
 def calculate_tf_tg_regulatory_potential(
     sliding_window_score_file: Union[str, Path], 
     tf_tg_reg_pot_file: Union[str, Path], 
@@ -1460,6 +1570,25 @@ def calculate_tf_tg_regulatory_potential(
     num_cpu: int=8,
     ) -> pd.DataFrame:
     
+    """
+    Calculate the TF-TG regulatory potential (per TF mode) by integrating the sliding window scores with the peak-to-gene distance scores.
+
+    Parameters
+    ----------
+    sliding_window_score_file : Union[str, Path]
+        The file containing the sliding window scores computed by calculate_sliding_window_scores.
+    tf_tg_reg_pot_file : Union[str, Path]
+        The file where the TF-TG regulatory potential will be saved.
+    peak_to_gene_dist_file : Union[str, Path]
+        The file containing the peak-to-gene distance scores computed by calculate_peak_to_gene_distance_score.
+    num_cpu : int, optional
+        The number of CPUs to use for parallel processing. Defaults to 8.
+
+    Returns
+    -------
+    pd.DataFrame
+        A dataframe containing the TF-TG regulatory potential scores.
+    """
     sliding_window_score_file = Path(sliding_window_score_file)
     tf_tg_reg_pot_file = Path(tf_tg_reg_pot_file)
     peak_to_gene_dist_file = Path(peak_to_gene_dist_file)
@@ -1482,6 +1611,55 @@ def calculate_tf_tg_regulatory_potential(
     logging.info(f"  - Calculating TF–TG regulatory potential: {len(tf_groups)} TFs | {num_cpu} CPUs")
 
     results = []
+    
+    def _process_single_tf(tf, tf_df, peak_to_gene_dist_df, *, temperature: float = 1.0):
+        """
+        Process a single TF to compute the TF-peak probability and TF-TG distance score contributions.
+
+        Parameters
+        ----------
+        tf : str
+            The name of the TF.
+        tf_df : pd.DataFrame
+            A dataframe containing the sliding window scores for the TF.
+        peak_to_gene_dist_df : pd.DataFrame
+            A dataframe containing the peak-to-gene distance scores.
+        temperature : float, optional
+            The temperature parameter for the softmax function. Defaults to 1.0.
+
+        Returns
+        -------
+        out : pd.DataFrame
+            A dataframe containing the TF-peak probability and TF-TG distance score contributions.
+        """
+        def _softmax_1d_stable(x: np.ndarray, tau: float = 1.0) -> np.ndarray:
+            z = (x / float(tau)).astype(float)
+            z -= z.max()              # numerical stability
+            p = np.exp(z)
+            s = p.sum()
+            return p / s if s > 0 else np.full_like(p, 1.0 / len(p))
+        
+        # tf_df contains only one TF
+        scores = tf_df["sliding_window_score"].to_numpy()
+        tf_df = tf_df.copy()
+        tf_df["tf_peak_prob"] = _softmax_1d_stable(scores, tau=temperature)
+
+        merged = pd.merge(
+            tf_df[["peak_id", "tf_peak_prob"]],
+            peak_to_gene_dist_df[["peak_id", "target_id", "TSS_dist_score"]],
+            on="peak_id",
+            how="inner",
+        )
+        merged["tf_tg_contrib"] = merged["tf_peak_prob"] * merged["TSS_dist_score"]
+
+        out = (
+            merged.groupby("target_id", as_index=False)
+                .agg(reg_potential=("tf_tg_contrib", "sum"),
+                    motif_density=("peak_id", "nunique"))
+                .rename(columns={"target_id": "TG"})
+        )
+        out["TF"] = tf
+        return out
     
     with ProcessPoolExecutor(max_workers=num_cpu) as ex:
         futures = {
@@ -1514,32 +1692,12 @@ def calculate_tf_tg_regulatory_potential(
     
     return tf_tg_reg_pot
 
-def select_pkn_edges_from_df(df: pd.DataFrame, pkn_edges: set[Tuple[str, str]]):
-    df['TF'] = df['TF'].str.upper()
-    df['TG'] = df['TG'].str.upper()
-    
-    df['in_pkn'] = df.apply(
-        lambda r: int((r['TF'], r['TG']) in pkn_edges or (r['TG'], r['TF']) in pkn_edges),
-        axis=1
-    )
-    
-    in_pkn_df = df[df['in_pkn'] == 1]
-    not_in_pkn_df = df[df['in_pkn'] == 0]
-    
-    return in_pkn_df, not_in_pkn_df
-
 def compute_minmax_expr_mean(
     tf_df: pd.DataFrame, 
     tg_df: pd.DataFrame, 
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Min–max normalize across columns (cells/pseudobulks) per row (gene),
-    then return row-wise means.
-
-    Returns
-    -------
-    mean_norm_tf_expr : DataFrame with columns ['TF', 'mean_tf_expr']
-    mean_norm_tg_expr : DataFrame with columns ['TG', 'mean_tg_expr']
+    Compute the mean min-max normalized expression for TFs and TGs.
     """
     def _rowwise_minmax_mean(x: pd.DataFrame) -> pd.Series:
         xmin = x.min(axis=1)
@@ -1647,7 +1805,24 @@ def merge_tf_tg_attributes_with_combinations(
     
     return tf_tg_df
 
-def make_chrom_gene_tss_df(gene_tss_file, chrom_id, genome_dir):
+def make_chrom_gene_tss_df(gene_tss_file: Union[str, Path], chrom_id: str, genome_dir: Union[str, Path]) -> pd.DataFrame:
+    """
+    Builds a gene TSS dataframe for a given chromosome and dataset.
+
+    Parameters
+    ----------
+    gene_tss_file : str
+        Gene TSS bed file with columns 'chrom', 'start', 'end', 'name'
+    chrom_id : str
+        Chromosome ID to process
+    genome_dir : str
+        Directory containing preprocessed data for this dataset
+
+    Returns
+    -------
+    pd.DataFrame
+        Gene TSS dataframe with columns 'chrom', 'start', 'end', 'name'
+    """
     gene_tss_bed = pybedtools.BedTool(gene_tss_file)
     gene_tss_df = (
         gene_tss_bed
@@ -1663,8 +1838,20 @@ def make_chrom_gene_tss_df(gene_tss_file, chrom_id, genome_dir):
 # ----- MultiomicTransformer Chromsome-Specific Dataset -----
 def build_global_tg_vocab(gene_tss_file: Union[str, Path], vocab_file: Union[str, Path]) -> dict[str, int]:
     """
-    Build a global TG vocab from the TSS file with contiguous IDs [0..N-1].
+    Builds a global TG vocab from the TSS file with contiguous IDs [0..N-1].
     Overwrites existing vocab if it's missing or non-contiguous.
+    
+    Parameters
+    ----------
+    gene_tss_file : str | Path
+        Gene TSS bed file with columns 'chrom', 'start', 'end', 'name'
+    vocab_file : str | Path
+        File to write the global TG vocab to
+    
+    Returns
+    -------
+    dict[str, int]
+        Global TG vocab with contiguous IDs [0..N-1]
     """
     # 1) Load all genes genome-wide (bed: chrom start end name)
     gene_tss_bed = pybedtools.BedTool(gene_tss_file)
@@ -1695,7 +1882,6 @@ def create_single_cell_tensors(
     chrom_id: str,
     single_cell_dir: Path,
 ):
-    # Ensure gene_tss_df names are normalized
     """
     Builds single-cell tensors for a given chromosome and dataset.
 
@@ -1815,6 +2001,29 @@ def aggregate_pseudobulk_datasets(
     gc: GeneCanonicalizer,
     force_recalculate: bool = False,
 ):
+    """
+    Aggregate pseudobulk datasets across all samples and chromosomes.
+
+    Parameters
+    ----------
+    sample_names : list[str]
+        List of sample names to process
+    dataset_processed_data_dir : Path
+        Directory containing preprocessed data for this dataset
+    chroms : list[str]
+        List of chromosome IDs to process
+    gc : GeneCanonicalizer
+        Gene canonicalizer object
+    force_recalculate : bool, optional
+        Whether to recompute everything (default is False)
+
+    Returns
+    -------
+    total_TG_pseudobulk_global : pd.DataFrame
+        Global TG pseudobulk across all samples
+    pseudobulk_chrom_dict : dict[str, dict]
+        Per-chromosome aggregates of TG pseudobulk and RE pseudobulk
+    """
     # ----- Helpers -----
     def _canon_index_sum(df: pd.DataFrame, gc) -> pd.DataFrame:
         """Canonicalize df.index with GeneCanonicalizer and sum duplicate rows."""
@@ -1986,19 +2195,42 @@ def aggregate_pseudobulk_datasets(
     return total_TG_pseudobulk_global, pseudobulk_chrom_dict
 
 def create_or_load_genomic_windows(
-    window_size,
-    chrom_id,
-    genome_window_file,
-    chrom_sizes_file,
-    force_recalculate=False,
-    promoter_only=False,
+    window_size: int,
+    chrom_id: str,
+    genome_window_file: Union[str, Path],
+    chrom_sizes_file: Union[str, Path],
+    force_recalculate: bool = False,
+    promoter_only: bool = False,
 ):
     """
-    Create/load fixed-size genomic windows for a chromosome.
+    Create or load fixed-size genomic windows for a chromosome.
+
     When `promoter_only=True`, skip windows entirely and return an empty
     DataFrame with the expected schema so callers don't break.
-    """
 
+    Parameters
+    ----------
+    window_size : int
+        Size of genomic windows to create.
+    chrom_id : str
+        Chromosome identifier.
+    genome_window_file : Union[str, Path]
+        Path to save/load genomic windows to/from.
+    chrom_sizes_file : Union[str, Path]
+        Path to chromosome sizes file (e.g. UCSC chrom.sizes.txt).
+    force_recalculate : bool, optional
+        Whether to recompute genomic windows even if they already exist.
+        Defaults to False.
+    promoter_only : bool, optional
+        Whether to skip creating genomic windows and return an empty DataFrame.
+        Defaults to False.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with genomic windows, with columns "chrom", "start", "end", and "win_idx".
+    """
+    
     # Promoter-centric evaluation: no windows needed
     if promoter_only:
         return pd.DataFrame(columns=["chrom", "start", "end", "win_idx"])
@@ -2025,8 +2257,20 @@ def make_peak_to_window_map(peaks_bed: pd.DataFrame, windows_bed: pd.DataFrame, 
     """
     Map each peak to the window it overlaps the most.
     Ensures the BedTool 'name' field is exactly the `peak_id` column.
+    Parameters
+    ----------
+    peaks_bed : pd.DataFrame
+        DataFrame of peaks, with columns "chrom", "start", "end", "peak_id".
+    windows_bed : pd.DataFrame
+        DataFrame of genomic windows, with columns "chrom", "start", "end", "win_idx".
+    peaks_as_windows : bool, optional
+        Whether to treat peaks as genomic windows. Defaults to True.
+    Returns
+    -------
+    dict[str, int]
+        Mapping of peak_id to win_idx, with the peak_id as key and the win_idx as value.
     """
-    # Defensive copy & column order
+    
     pb = peaks_bed.copy()
     required = ["chrom", "start", "end", "peak_id"]
     missing = [c for c in required if c not in pb.columns]
@@ -2084,7 +2328,7 @@ def make_peak_to_window_map(peaks_bed: pd.DataFrame, windows_bed: pd.DataFrame, 
 
     return mapping
 
-def align_to_vocab(names, vocab, tensor_all, label="genes"):
+def align_to_vocab(names: list[str], vocab: dict[str, int], tensor_all: torch.Tensor, label: str = "genes") -> tuple[torch.Tensor, list[str], list[int]]:
     """
     Restrict to the subset of names that exist in the global vocab.
     Returns:
@@ -2110,10 +2354,27 @@ def align_to_vocab(names, vocab, tensor_all, label="genes"):
 
     return aligned_tensor, kept_names, kept_ids
 
-def build_motif_mask(tf_names, tg_names, sliding_window_df, genes_near_peaks):
+def build_motif_mask(tf_names: list[str], tg_names: list[str], sliding_window_df: pd.DataFrame, genes_near_peaks: pd.DataFrame) -> np.ndarray:
     """
     Build motif mask [TG x TF] with max logodds per (TG, TF).
+
+    Parameters
+    ----------
+    tf_names : list[str]
+        List of TF names.
+    tg_names : list[str]
+        List of TG names.
+    sliding_window_df : pd.DataFrame
+        DataFrame containing the sliding window scores.
+    genes_near_peaks : pd.DataFrame
+        DataFrame containing the peak-to-gene distance scores.
+
+    Returns
+    -------
+    np.ndarray
+        The motif mask [TG x TF] with max logodds per (TG, TF).
     """
+    
     # map TFs and TGs to ids
     tf_index = {tf: i for i, tf in enumerate(tf_names)}
     tg_index = {tg: i for i, tg in enumerate(tg_names)}
@@ -2151,11 +2412,12 @@ def precompute_input_tensors(
     output_dir: str,
     genome_wide_tf_expression: np.ndarray,   # [num_TF, num_cells]
     genome_wide_tg_expression: np.ndarray,                   # [num_TG_chr, num_cells]
-    total_RE_pseudobulk_chr,                 # pd.DataFrame: rows=peak_id, cols=metacells
-    window_map,
-    windows,                            # pd.DataFrame with shape[0] = num_windows
+    total_RE_pseudobulk_chr: pd.DataFrame,                 # pd.DataFrame: rows=peak_id, cols=metacells
+    window_map: dict,
+    windows: pd.DataFrame,                            # pd.DataFrame with shape[0] = num_windows
     dtype: torch.dtype = torch.float32,
-):
+) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
+
     """
     Builds & saves:
       - tf_tensor_all.pt                        [num_TF, num_cells]
@@ -2222,7 +2484,7 @@ def build_distance_bias(
     device: Optional[torch.device] = None,
     mode: str = "logsumexp",   # "max" | "sum" | "mean" | "logsumexp"
     prune_empty_windows: bool = True,
-):
+) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, int], List[int]]]:
     """
     Build a [num_windows x num_tg_kept] (or pruned) distance-bias tensor aligned to the kept TGs.
 
@@ -2308,6 +2570,7 @@ def build_distance_bias(
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     
+    # ----- SETUP -----
     # Parse command-line arguments
     args = parse_preprocessing_args()
     num_cpu = args.num_cpu
@@ -2315,7 +2578,6 @@ if __name__ == "__main__":
     # Setup global variables from parsed arguments
     setup_global_variables(args)
     
-    # ----- GLOBAL SETTINGS -----
     # TF and TG vocab files
     common_tf_vocab_file: Path =  COMMON_DATA / f"tf_vocab.json"
     common_tg_vocab_file: Path =  COMMON_DATA / f"tg_vocab.json"
@@ -2367,6 +2629,7 @@ if __name__ == "__main__":
         species_taxid = "10090"
         species_file_name = "Mus_musculus"
         gtf_assembly = "GRCm39.115"
+        
     elif ORGANISM_CODE == "hg38":
         species_taxid = "9606"
         species_file_name = "Homo_sapiens"
@@ -2513,9 +2776,12 @@ if __name__ == "__main__":
                 self_weight=SELF_WEIGHT,
             )
 
-            processed_rna_df.index = pd.Index(
-                    gc.canonicalize_series(pd.Series(processed_rna_df.index, dtype=object)).array
-                )
+            # Canonicalize gene names in processed RNA data
+            if not gc.is_canonicalized_series(pd.Series(processed_rna_df.index, dtype=object)).all():
+                logging.info("  - Canonicalizing gene names in processed RNA data")
+                processed_rna_df.index = pd.Index(
+                        gc.canonicalize_series(pd.Series(processed_rna_df.index, dtype=object)).array
+                    )
             
             # ----- GET TFs, TGs, and TF-TG combinations -----
             genes = processed_rna_df.index.to_list()
@@ -2525,7 +2791,7 @@ if __name__ == "__main__":
             logging.info(f"    - Number of genes: {processed_rna_df.shape[0]}: {genes[:3]}")
             logging.info(f"    - Number of peaks: {processed_atac_df.shape[0]}: {peaks[:3]}")
 
-            
+            # Create TF-TG combination files
             tfs, tgs, tf_tg_df = create_tf_tg_combination_files(genes, TF_FILE, SAMPLE_PROCESSED_DATA_DIR, sample_name)
             
             tfs = sorted(set(gc.canonicalize_series(pd.Series(tfs)).tolist()))
@@ -2563,53 +2829,54 @@ if __name__ == "__main__":
                 logging.debug("  - Number of peaks to gene distances: " + str(peak_to_gene_dist_df.shape[0]))
                 logging.debug("  - Example peak to gene distances: \n" + str(peak_to_gene_dist_df.head()))
             
-            # ----- SLIDING WINDOW TF-PEAK SCORE -----
-            if not os.path.isfile(sliding_window_score_file):
+            # ----- SKIPPING SLIDING WINDOW AND TF-TG REGULATORY POTENTIAL CALCULATION -----
+            # # ----- SLIDING WINDOW TF-PEAK SCORE -----
+            # if not os.path.isfile(sliding_window_score_file):
 
-                peaks_df = pybedtools.BedTool(peak_bed_file)
+            #     peaks_df = pybedtools.BedTool(peak_bed_file)
 
-                logging.info("  - Running sliding window scan")
-                run_sliding_window_scan(
-                    tf_name_list=tfs,
-                    tf_info_file=str(TF_FILE),
-                    motif_dir=str(MOTIF_DIR),
-                    genome_fasta=str(genome_fasta_file),
-                    peak_bed_file=str(peak_bed_file),
-                    output_file=sliding_window_score_file,
-                    num_cpu=num_cpu,
-                    inner_executor="thread",
-                    inner_workers=4
-                )
+            #     logging.info("  - Running sliding window scan")
+            #     run_sliding_window_scan(
+            #         tf_name_list=tfs,
+            #         tf_info_file=str(TF_FILE),
+            #         motif_dir=str(MOTIF_DIR),
+            #         genome_fasta=str(genome_fasta_file),
+            #         peak_bed_file=str(peak_bed_file),
+            #         output_file=sliding_window_score_file,
+            #         num_cpu=num_cpu,
+            #         inner_executor="thread",
+            #         inner_workers=4
+            #     )
 
-            # ----- CALCULATE TF-TG REGULATORY POTENTIAL -----
-            if not os.path.isfile(tf_tg_reg_pot_file):
-                tf_tg_reg_pot = calculate_tf_tg_regulatory_potential(
-                    sliding_window_score_file, tf_tg_reg_pot_file, peak_to_gene_dist_file, num_cpu)
+            # # ----- CALCULATE TF-TG REGULATORY POTENTIAL -----
+            # if not os.path.isfile(tf_tg_reg_pot_file):
+            #     tf_tg_reg_pot = calculate_tf_tg_regulatory_potential(
+            #         sliding_window_score_file, tf_tg_reg_pot_file, peak_to_gene_dist_file, num_cpu)
 
 
-            # ----- MERGE TF-TG ATTRIBUTES WITH COMBINATIONS -----
-            if not os.path.isfile(tf_tg_combo_attr_file):
-                logging.info("  - Loading TF-TG regulatory potential scores")
-                tf_tg_reg_pot = pd.read_parquet(tf_tg_reg_pot_file, engine="pyarrow")
-                logging.debug("  - Example TF-TG regulatory potential: " + str(tf_tg_reg_pot.head()))
+            # # ----- MERGE TF-TG ATTRIBUTES WITH COMBINATIONS -----
+            # if not os.path.isfile(tf_tg_combo_attr_file):
+            #     logging.info("  - Loading TF-TG regulatory potential scores")
+            #     tf_tg_reg_pot = pd.read_parquet(tf_tg_reg_pot_file, engine="pyarrow")
+            #     logging.debug("  - Example TF-TG regulatory potential: " + str(tf_tg_reg_pot.head()))
                 
-                tf_df = processed_rna_df[processed_rna_df.index.isin(tfs)]
-                logging.debug("\nTFs in RNA data")
-                logging.debug(tf_df.head())
-                logging.info(f"    - TFs in RNA data: {tf_df.shape[0]}")
+            #     tf_df = processed_rna_df[processed_rna_df.index.isin(tfs)]
+            #     logging.debug("\nTFs in RNA data")
+            #     logging.debug(tf_df.head())
+            #     logging.info(f"    - TFs in RNA data: {tf_df.shape[0]}")
                 
-                tg_df = processed_rna_df[processed_rna_df.index.isin(tgs)]
-                logging.debug("\nTGs in RNA data")
-                logging.debug(tg_df.head())
-                logging.info(f"    - TGs in RNA data: {tg_df.shape[0]}")
-                sliding_window_df = pd.read_parquet(sliding_window_score_file, engine="pyarrow")
-                logging.debug("  - Example sliding window scores: \n" + str(sliding_window_df.head()))
+            #     tg_df = processed_rna_df[processed_rna_df.index.isin(tgs)]
+            #     logging.debug("\nTGs in RNA data")
+            #     logging.debug(tg_df.head())
+            #     logging.info(f"    - TGs in RNA data: {tg_df.shape[0]}")
+            #     sliding_window_df = pd.read_parquet(sliding_window_score_file, engine="pyarrow")
+            #     logging.debug("  - Example sliding window scores: \n" + str(sliding_window_df.head()))
                 
-                mean_norm_tf_expr, mean_norm_tg_expr = compute_minmax_expr_mean(tf_df, tg_df)
+            #     mean_norm_tf_expr, mean_norm_tg_expr = compute_minmax_expr_mean(tf_df, tg_df)
                 
-                logging.info("  - Merging TF-TG attributes with all combinations")
-                tf_tg_df = merge_tf_tg_attributes_with_combinations(
-                    tf_tg_df, tf_tg_reg_pot, mean_norm_tf_expr, mean_norm_tg_expr, tf_tg_combo_attr_file, set(tfs))            
+            #     logging.info("  - Merging TF-TG attributes with all combinations")
+            #     tf_tg_df = merge_tf_tg_attributes_with_combinations(
+            #         tf_tg_df, tf_tg_reg_pot, mean_norm_tf_expr, mean_norm_tg_expr, tf_tg_combo_attr_file, set(tfs))            
         
     # ----- CHROMOSOME-SPECIFIC PREPROCESSING -----
     if PROCESS_CHROMOSOME_SPECIFIC_DATA:        
