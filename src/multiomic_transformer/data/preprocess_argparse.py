@@ -1563,6 +1563,55 @@ def calculate_peak_to_tg_distance_score(
     genes_near_peaks.to_parquet(peak_gene_dist_file, compression="snappy", engine="pyarrow")
     return genes_near_peaks
 
+def _process_single_tf(tf, tf_df, peak_to_gene_dist_df, *, temperature: float = 1.0):
+    """
+    Process a single TF to compute the TF-peak probability and TF-TG distance score contributions.
+
+    Parameters
+    ----------
+    tf : str
+        The name of the TF.
+    tf_df : pd.DataFrame
+        A dataframe containing the sliding window scores for the TF.
+    peak_to_gene_dist_df : pd.DataFrame
+        A dataframe containing the peak-to-gene distance scores.
+    temperature : float, optional
+        The temperature parameter for the softmax function. Defaults to 1.0.
+
+    Returns
+    -------
+    out : pd.DataFrame
+        A dataframe containing the TF-peak probability and TF-TG distance score contributions.
+    """
+    def _softmax_1d_stable(x: np.ndarray, tau: float = 1.0) -> np.ndarray:
+        z = (x / float(tau)).astype(float)
+        z -= z.max()              # numerical stability
+        p = np.exp(z)
+        s = p.sum()
+        return p / s if s > 0 else np.full_like(p, 1.0 / len(p))
+    
+    # tf_df contains only one TF
+    scores = tf_df["sliding_window_score"].to_numpy()
+    tf_df = tf_df.copy()
+    tf_df["tf_peak_prob"] = _softmax_1d_stable(scores, tau=temperature)
+
+    merged = pd.merge(
+        tf_df[["peak_id", "tf_peak_prob"]],
+        peak_to_gene_dist_df[["peak_id", "target_id", "TSS_dist_score"]],
+        on="peak_id",
+        how="inner",
+    )
+    merged["tf_tg_contrib"] = merged["tf_peak_prob"] * merged["TSS_dist_score"]
+
+    out = (
+        merged.groupby("target_id", as_index=False)
+            .agg(reg_potential=("tf_tg_contrib", "sum"),
+                motif_density=("peak_id", "nunique"))
+            .rename(columns={"target_id": "TG"})
+    )
+    out["TF"] = tf
+    return out
+
 def calculate_tf_tg_regulatory_potential(
     sliding_window_score_file: Union[str, Path], 
     tf_tg_reg_pot_file: Union[str, Path], 
@@ -1611,55 +1660,6 @@ def calculate_tf_tg_regulatory_potential(
     logging.info(f"  - Calculating TF–TG regulatory potential: {len(tf_groups)} TFs | {num_cpu} CPUs")
 
     results = []
-    
-    def _process_single_tf(tf, tf_df, peak_to_gene_dist_df, *, temperature: float = 1.0):
-        """
-        Process a single TF to compute the TF-peak probability and TF-TG distance score contributions.
-
-        Parameters
-        ----------
-        tf : str
-            The name of the TF.
-        tf_df : pd.DataFrame
-            A dataframe containing the sliding window scores for the TF.
-        peak_to_gene_dist_df : pd.DataFrame
-            A dataframe containing the peak-to-gene distance scores.
-        temperature : float, optional
-            The temperature parameter for the softmax function. Defaults to 1.0.
-
-        Returns
-        -------
-        out : pd.DataFrame
-            A dataframe containing the TF-peak probability and TF-TG distance score contributions.
-        """
-        def _softmax_1d_stable(x: np.ndarray, tau: float = 1.0) -> np.ndarray:
-            z = (x / float(tau)).astype(float)
-            z -= z.max()              # numerical stability
-            p = np.exp(z)
-            s = p.sum()
-            return p / s if s > 0 else np.full_like(p, 1.0 / len(p))
-        
-        # tf_df contains only one TF
-        scores = tf_df["sliding_window_score"].to_numpy()
-        tf_df = tf_df.copy()
-        tf_df["tf_peak_prob"] = _softmax_1d_stable(scores, tau=temperature)
-
-        merged = pd.merge(
-            tf_df[["peak_id", "tf_peak_prob"]],
-            peak_to_gene_dist_df[["peak_id", "target_id", "TSS_dist_score"]],
-            on="peak_id",
-            how="inner",
-        )
-        merged["tf_tg_contrib"] = merged["tf_peak_prob"] * merged["TSS_dist_score"]
-
-        out = (
-            merged.groupby("target_id", as_index=False)
-                .agg(reg_potential=("tf_tg_contrib", "sum"),
-                    motif_density=("peak_id", "nunique"))
-                .rename(columns={"target_id": "TG"})
-        )
-        out["TF"] = tf
-        return out
     
     with ProcessPoolExecutor(max_workers=num_cpu) as ex:
         futures = {
