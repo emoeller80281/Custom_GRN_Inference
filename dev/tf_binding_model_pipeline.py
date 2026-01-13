@@ -180,7 +180,8 @@ class DataLoader:
         target_n = int(len(pos_df) * ratio)
 
         rng = np.random.default_rng(random_state)
-        neg_pairs, attempts = set(), 0
+        neg_pairs: set = set()
+        attempts = 0
         max_attempts = target_n * 50  # more attempts to honor avoidance constraints
 
         while len(neg_pairs) < target_n and attempts < max_attempts:
@@ -227,7 +228,8 @@ class DataLoader:
                 elif suf == ".tsv":
                     df = pd.read_csv(file_path, sep="\t", index_col=0)
                 elif suf in (".h5", ".hdf5"):
-                    df = pd.read_hdf(file_path)
+                    data = pd.read_hdf(file_path)
+                    df = data if isinstance(data, pd.DataFrame) else data.to_frame()
                 elif suf == ".pkl":
                     df = pd.read_pickle(file_path)
                 elif suf == ".parquet":
@@ -294,15 +296,15 @@ class FeatureEngineer:
     CRITICAL: Features are computed only from training data to prevent leakage.
     """
     
-    def __init__(self, feature_config: Dict[str, Any]):
+    def __init__(self, feature_config: Dict[str, Any]) -> None:
         """
         Initialize FeatureEngineer with configuration.
         
         Args:
             feature_config: Configuration for feature generation
         """
-        self.config = feature_config
-        self.feature_stats = {}  # Store statistics computed on training data
+        self.config: Dict[str, Any] = feature_config
+        self.feature_stats: Dict[str, Any] = {}  # Store statistics computed on training data
         logger.info("FeatureEngineer initialized")
     
     def compute_correlation_features(self,
@@ -327,13 +329,13 @@ class FeatureEngineer:
         logger.info(f"Computing correlation features for {len(train_edges)} training edges")
         
         # Identify unique peaks and genes in training set
-        train_peaks = train_edges['peak'].unique() if 'peak' in train_edges.columns else []
+        train_peaks: Union[np.ndarray, List[str]] = train_edges['peak'].unique() if 'peak' in train_edges.columns else []
         train_genes = train_edges['TG'].unique()
         
         # Filter data to only training entities to prevent leakage
         if len(train_peaks) > 0:
             peak_data_filtered = peak_data.loc[
-                peak_data.index.intersection(train_peaks)
+                peak_data.index.intersection(pd.Index(train_peaks))
             ]
         else:
             # If no peak column, use TF-associated peaks (requires mapping)

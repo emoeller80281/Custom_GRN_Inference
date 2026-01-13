@@ -89,7 +89,7 @@ effect_count = torch.zeros_like(effect_sum)
 
 model.to(device).eval()
 
-max_batches = None  # or set to e.g. 50 for a quick approximate matrix
+max_batches: Optional[int] = None  # or set to e.g. 50 for a quick approximate matrix
 
 with torch.no_grad():
     for b_idx, batch in enumerate(

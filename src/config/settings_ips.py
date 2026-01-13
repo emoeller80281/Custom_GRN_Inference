@@ -1,5 +1,6 @@
 from pathlib import Path
 import numpy as np
+from typing import Optional, Dict, Any, Union, List
 import itertools
 
 ROOT_DIR = Path(__file__).resolve().parent.parent.parent
@@ -16,7 +17,7 @@ CHROM_ID = "chr19"
 CHROM_IDS = chr_nums
 # , "E7.75_rep1", "E8.0_rep2", "E8.5_rep2", "E8.75_rep2", "E7.5_rep2", "E8.0_rep1", "E8.5_rep1"
 SAMPLE_NAMES = ["iPSC_sample"]
-FINE_TUNING_DATASETS = []
+FINE_TUNING_DATASETS: List[str] = []
 
 # Paths to the raw scRNA-seq and scATAC-seq data
 RAW_SINGLE_CELL_DATA = Path("/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/SINGLE_CELL_DATASETS")
@@ -52,7 +53,7 @@ DISTANCE_SCALE_FACTOR = 20_000           # Weights the peak-gene TSS distance sc
 MAX_PEAK_DISTANCE = 100_000              # Masks out peaks further than this distance from the gene TSS
 DIST_BIAS_MODE = "logsumexp"            # Method for calcuting window -> gene TSS distance. Options: "max" | "sum" | "mean" | "logsumexp"
 FILTER_TO_NEAREST_GENE = True           # Associate peaks to the nearest gene
-PROMOTER_BP = None #10_000
+PROMOTER_BP: Optional[int] = None #10_000
 
 # ----- MODEL TRAINING PARAMETERS -----
 TOTAL_EPOCHS=60
@@ -67,7 +68,7 @@ D_FF = D_MODEL * 4
 DROPOUT = 0.20
 
 SAVE_EVERY_N_EPOCHS=5           # Chooses how many epochs to run before saving a checkpoint
-RESUME_CHECKPOINT_PATH=None#"/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC_no_scale_linear/chr19/model_training_049/checkpoint_120.pt"
+RESUME_CHECKPOINT_PATH: Optional[str] = None#"/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC_no_scale_linear/chr19/model_training_049/checkpoint_120.pt"
 
 GRAD_ACCUM_STEPS=2
 USE_GRAD_ACCUMULATION=True
@@ -91,17 +92,17 @@ MOTIF_MASK_THRESH = 0.0         # Only allow TF-TG edges with p <= -log10(MOTIF_
 MOTIF_PRIOR_SCALE = 0.0         # Allows adding scaled motif scores on edges that are not filtered
 SHORTCUT_L1 = 0                 # Encourages sparsity between TF-TG edges in the TFtoTG shortcut
 SHORTCUT_L2 = 0 #1e-3
-SHORTCUT_TOPK = None
+SHORTCUT_TOPK: Optional[int] = None
 SHORTCUT_DROPOUT = 0.0 #0.1
 
 # peak-TG distance bias
 ATTN_BIAS_SCALE = 1.0 
 
 # Sampling (optional)
-SUBSAMPLE_MAX_TFS = None # 150
-SUBSAMPLE_MAX_TGS = None
-SUBSAMPLE_MAX_WINDOWS_PER_CHROM = None #8000
-SUBSAMPLE_MAX_CELLS= 5000
+SUBSAMPLE_MAX_TFS: Optional[int] = None # 150
+SUBSAMPLE_MAX_TGS: Optional[int] = None
+SUBSAMPLE_MAX_WINDOWS_PER_CHROM: Optional[int] = None #8000
+SUBSAMPLE_MAX_CELLS: Optional[int] = 5000
 SUBSAMPLE_SEED = 42
 
 # ----- FINE TUNING ON SINGLE-CELL DATA -----

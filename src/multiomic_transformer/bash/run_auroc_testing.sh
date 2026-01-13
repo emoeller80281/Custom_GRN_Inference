@@ -74,18 +74,23 @@ EXPERIMENT_LIST=(
 
     # "Macrophage_base_settings|model_training_006|trained_model.pt"
     # "Macrophage_model_d_128_ff_512|model_training_001|trained_model.pt"
-    "Macrophage_small_batch_size|model_training_002|trained_model.pt"
+    # "Macrophage_small_batch_size|model_training_002|trained_model.pt"
     # "Macrophage_loose_1_pct_filtering|model_training_001|trained_model.pt"
     # "Macrophage_strict_10_pct_filtering|model_training_001|trained_model.pt"
-    "Macrophage_40k_distance_scale_factor|model_training_001|trained_model.pt"
-    "Macrophage_10k_distance_scale_factor|model_training_002|trained_model.pt"
-    "Macrophage_150k_max_peak_dist|model_training_001|trained_model.pt"
-    "Macrophage_50k_max_peak_dist|model_training_001|trained_model.pt"
-    "Macrophage_slow_decay_long_range_two_hop|model_training_001|trained_model.pt"
+    # "Macrophage_40k_distance_scale_factor|model_training_001|trained_model.pt"
+    # "Macrophage_10k_distance_scale_factor|model_training_002|trained_model.pt"
+    # "Macrophage_150k_max_peak_dist|model_training_001|trained_model.pt"
+    # "Macrophage_50k_max_peak_dist|model_training_001|trained_model.pt"
+    # "Macrophage_slow_decay_long_range_two_hop|model_training_001|trained_model.pt"
+    "Macrophage_slow_decay_long_range|model_training_001|trained_model.pt"
+    "Macrophage_zero_hops|model_training_001|trained_model.pt"
+    "Macrophage_two_hops|model_training_001|trained_model.pt"
+    "Macrophage_loose_1_pct_filter_50_min_per_cell|model_training_001|trained_model.pt"
+    "Macrophage_small_model_loose_1_pct_filtering|model_training_001|trained_model.pt"
 
 )
 
-DATASET_TYPE="Macrophage"
+DATASET_TYPE="macrophage"
 SAMPLE_NAMES="Macrophage_S1 Macrophage_S2"
 
 # ==========================================

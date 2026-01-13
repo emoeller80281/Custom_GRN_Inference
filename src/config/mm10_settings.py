@@ -1,5 +1,6 @@
 from pathlib import Path
 import numpy as np
+from typing import Optional, Dict, Any, Union, List
 import itertools
 
 ROOT_DIR = Path(__file__).resolve().parent.parent.parent
@@ -61,7 +62,7 @@ USE_SHORTCUT = True
 USE_MOTIF_MASK = False
 SHORTCUT_L1 = 0
 SHORTCUT_L2 = 0
-SHORTCUT_TOPK = None
+SHORTCUT_TOPK: Optional[int] = None
 SHORTCUT_DROPOUT = 0
 
 # peak-TG distance bias

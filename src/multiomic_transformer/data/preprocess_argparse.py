@@ -2777,12 +2777,10 @@ if __name__ == "__main__":
             )
 
             # Canonicalize gene names in processed RNA data
-            if not gc.is_canonicalized_series(pd.Series(processed_rna_df.index, dtype=object)).all():
-                logging.info("  - Canonicalizing gene names in processed RNA data")
-                processed_rna_df.index = pd.Index(
-                        gc.canonicalize_series(pd.Series(processed_rna_df.index, dtype=object)).array
-                    )
-            
+            processed_rna_df.index = pd.Index(
+                    gc.canonicalize_series(pd.Series(processed_rna_df.index, dtype=object)).array
+                )
+        
             # ----- GET TFs, TGs, and TF-TG combinations -----
             genes = processed_rna_df.index.to_list()
             peaks = processed_atac_df.index.to_list()
@@ -2829,54 +2827,53 @@ if __name__ == "__main__":
                 logging.debug("  - Number of peaks to gene distances: " + str(peak_to_gene_dist_df.shape[0]))
                 logging.debug("  - Example peak to gene distances: \n" + str(peak_to_gene_dist_df.head()))
             
-            # ----- SKIPPING SLIDING WINDOW AND TF-TG REGULATORY POTENTIAL CALCULATION -----
-            # # ----- SLIDING WINDOW TF-PEAK SCORE -----
-            # if not os.path.isfile(sliding_window_score_file):
+            # ----- SLIDING WINDOW TF-PEAK SCORE -----
+            if not os.path.isfile(sliding_window_score_file):
 
-            #     peaks_df = pybedtools.BedTool(peak_bed_file)
+                peaks_df = pybedtools.BedTool(peak_bed_file)
 
-            #     logging.info("  - Running sliding window scan")
-            #     run_sliding_window_scan(
-            #         tf_name_list=tfs,
-            #         tf_info_file=str(TF_FILE),
-            #         motif_dir=str(MOTIF_DIR),
-            #         genome_fasta=str(genome_fasta_file),
-            #         peak_bed_file=str(peak_bed_file),
-            #         output_file=sliding_window_score_file,
-            #         num_cpu=num_cpu,
-            #         inner_executor="thread",
-            #         inner_workers=4
-            #     )
+                logging.info("  - Running sliding window scan")
+                run_sliding_window_scan(
+                    tf_name_list=tfs,
+                    tf_info_file=str(TF_FILE),
+                    motif_dir=str(MOTIF_DIR),
+                    genome_fasta=str(genome_fasta_file),
+                    peak_bed_file=str(peak_bed_file),
+                    output_file=sliding_window_score_file,
+                    num_cpu=num_cpu,
+                    inner_executor="thread",
+                    inner_workers=4
+                )
 
-            # # ----- CALCULATE TF-TG REGULATORY POTENTIAL -----
-            # if not os.path.isfile(tf_tg_reg_pot_file):
-            #     tf_tg_reg_pot = calculate_tf_tg_regulatory_potential(
-            #         sliding_window_score_file, tf_tg_reg_pot_file, peak_to_gene_dist_file, num_cpu)
+            # ----- CALCULATE TF-TG REGULATORY POTENTIAL -----
+            if not os.path.isfile(tf_tg_reg_pot_file):
+                tf_tg_reg_pot = calculate_tf_tg_regulatory_potential(
+                    sliding_window_score_file, tf_tg_reg_pot_file, peak_to_gene_dist_file, num_cpu)
 
 
-            # # ----- MERGE TF-TG ATTRIBUTES WITH COMBINATIONS -----
-            # if not os.path.isfile(tf_tg_combo_attr_file):
-            #     logging.info("  - Loading TF-TG regulatory potential scores")
-            #     tf_tg_reg_pot = pd.read_parquet(tf_tg_reg_pot_file, engine="pyarrow")
-            #     logging.debug("  - Example TF-TG regulatory potential: " + str(tf_tg_reg_pot.head()))
+            # ----- MERGE TF-TG ATTRIBUTES WITH COMBINATIONS -----
+            if not os.path.isfile(tf_tg_combo_attr_file):
+                logging.info("  - Loading TF-TG regulatory potential scores")
+                tf_tg_reg_pot = pd.read_parquet(tf_tg_reg_pot_file, engine="pyarrow")
+                logging.debug("  - Example TF-TG regulatory potential: " + str(tf_tg_reg_pot.head()))
                 
-            #     tf_df = processed_rna_df[processed_rna_df.index.isin(tfs)]
-            #     logging.debug("\nTFs in RNA data")
-            #     logging.debug(tf_df.head())
-            #     logging.info(f"    - TFs in RNA data: {tf_df.shape[0]}")
+                tf_df = processed_rna_df[processed_rna_df.index.isin(tfs)]
+                logging.debug("\nTFs in RNA data")
+                logging.debug(tf_df.head())
+                logging.info(f"    - TFs in RNA data: {tf_df.shape[0]}")
                 
-            #     tg_df = processed_rna_df[processed_rna_df.index.isin(tgs)]
-            #     logging.debug("\nTGs in RNA data")
-            #     logging.debug(tg_df.head())
-            #     logging.info(f"    - TGs in RNA data: {tg_df.shape[0]}")
-            #     sliding_window_df = pd.read_parquet(sliding_window_score_file, engine="pyarrow")
-            #     logging.debug("  - Example sliding window scores: \n" + str(sliding_window_df.head()))
+                tg_df = processed_rna_df[processed_rna_df.index.isin(tgs)]
+                logging.debug("\nTGs in RNA data")
+                logging.debug(tg_df.head())
+                logging.info(f"    - TGs in RNA data: {tg_df.shape[0]}")
+                sliding_window_df = pd.read_parquet(sliding_window_score_file, engine="pyarrow")
+                logging.debug("  - Example sliding window scores: \n" + str(sliding_window_df.head()))
                 
-            #     mean_norm_tf_expr, mean_norm_tg_expr = compute_minmax_expr_mean(tf_df, tg_df)
+                mean_norm_tf_expr, mean_norm_tg_expr = compute_minmax_expr_mean(tf_df, tg_df)
                 
-            #     logging.info("  - Merging TF-TG attributes with all combinations")
-            #     tf_tg_df = merge_tf_tg_attributes_with_combinations(
-            #         tf_tg_df, tf_tg_reg_pot, mean_norm_tf_expr, mean_norm_tg_expr, tf_tg_combo_attr_file, set(tfs))            
+                logging.info("  - Merging TF-TG attributes with all combinations")
+                tf_tg_df = merge_tf_tg_attributes_with_combinations(
+                    tf_tg_df, tf_tg_reg_pot, mean_norm_tf_expr, mean_norm_tg_expr, tf_tg_combo_attr_file, set(tfs))            
         
     # ----- CHROMOSOME-SPECIFIC PREPROCESSING -----
     if PROCESS_CHROMOSOME_SPECIFIC_DATA:        

@@ -48,7 +48,7 @@ def load_ground_truth(ground_truth_file):
         
     ground_truth_df = pd.read_csv(ground_truth_file, sep=sep, on_bad_lines="skip", engine="python")
     
-    if ground_truth_file.name == "chip_atlas_tf_peak_tg_dist.csv":
+    if "chip" in ground_truth_file.name and "atlas" in ground_truth_file.name:
         ground_truth_df = ground_truth_df[["source_id", "target_id"]]
 
     ground_truth_df = ground_truth_df.rename(columns={ground_truth_df.columns[0]: "Source", ground_truth_df.columns[1]: "Target"})
@@ -1769,6 +1769,7 @@ if __name__ == "__main__":
 
     if dataset_type.lower() == "macrophage":
         ground_truth_file_dict = {
+            "ChIP-Atlas": GROUND_TRUTH_DIR / "chipatlas_macrophage.csv",
             "RN204": GROUND_TRUTH_DIR / "rn204_macrophage_human_chipseq.tsv",
         }
     
@@ -1785,6 +1786,7 @@ if __name__ == "__main__":
         }
     elif dataset_type.lower() == "k562":
         ground_truth_file_dict = {
+            "ChIP-Atlas": GROUND_TRUTH_DIR / "chipatlas_K562.csv",
             "RN207": GROUND_TRUTH_DIR / "RN117.tsv",
         }
     

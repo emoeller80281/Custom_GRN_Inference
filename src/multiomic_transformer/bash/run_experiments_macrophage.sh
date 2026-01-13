@@ -109,6 +109,11 @@ EXPERIMENTS=(
     # "150k_max_peak_dist|Macrophage_150k_max_peak_dist|MAX_PEAK_DISTANCE=150000"
     # "50k_max_peak_dist|Macrophage_50k_max_peak_dist|MAX_PEAK_DISTANCE=50000"
     # "slow_decay_long_range_two_hop|Macrophage_slow_decay_long_range_two_hop|DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;HOPS=2;NEIGHBORS_K=20"
+    "slow_decay_long_range|Macrophage_slow_decay_long_range|DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000"
+    "zero_hops|Macrophage_zero_hops|HOPS=0"
+    "two_hops|Macrophage_two_hops|HOPS=2"
+    "loose_1_pct_filter_50_min_per_cell|Macrophage_loose_1_pct_filter_50_min_per_cell|MIN_GENES_PER_CELL=50;MIN_PEAKS_PER_CELL=50;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.01;FILTER_OUT_LOWEST_PCT_PEAKS=0.01"
+    "small_model_loose_1_pct_filtering|Macrophage_small_model_loose_1_pct_filtering|MIN_GENES_PER_CELL=50;MIN_PEAKS_PER_CELL=50;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.01;FILTER_OUT_LOWEST_PCT_PEAKS=0.01;D_MODEL=128;D_FF=512;BATCH_SIZE=8"
 )
 
 
@@ -651,7 +656,7 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
             --training_num "${TRAINING_NUM}" \
             --experiment_dir "${OUTPUT_DIR}" \
             --model_file "${MODEL_FILE}" \
-            --dataset_type "K562" \
+            --dataset_type "macrophage" \
             --sample_name_list "${SAMPLE_NAMES}"
 
         echo ""

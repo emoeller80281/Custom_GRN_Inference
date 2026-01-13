@@ -1,5 +1,6 @@
 from pathlib import Path
 import numpy as np
+from typing import Optional, Dict, Any, Union, List
 import itertools
 
 ROOT_DIR = Path(__file__).resolve().parent.parent.parent
@@ -68,14 +69,14 @@ DISTANCE_SCALE_FACTOR = 20_000           # Weights the peak-gene TSS distance sc
 MAX_PEAK_DISTANCE = 150_000              # Masks out peaks further than this distance from the gene TSS
 DIST_BIAS_MODE = "logsumexp"            # Method for calcuting window -> gene TSS distance. Options: "max" | "sum" | "mean" | "logsumexp"
 FILTER_TO_NEAREST_GENE = True           # Associate peaks to the nearest gene
-PROMOTER_BP = None #10_000
+PROMOTER_BP: Optional[int] = None #10_000
 
 # ----- MODEL TRAINING PARAMETERS -----
 TOTAL_EPOCHS=250
 BATCH_SIZE=16
 PATIENCE=10
 CORR_LOSS_WEIGHT=1.0    
-ALLOWED_SAMPLES=None #["E7.5_REP1"]        
+ALLOWED_SAMPLES: Optional[List[str]] = None #["E7.5_REP1"]        
 
 D_MODEL = 192
 NUM_HEADS = 4
@@ -86,7 +87,7 @@ EDGE_LOSS_WEIGHT=0.0            # Weight for edge loss contribution
 COS_WEIGHT=0.0                  # Weight for cosine contrastive loss contribution   
 
 SAVE_EVERY_N_EPOCHS=5           # Chooses how many epochs to run before saving a checkpoint
-RESUME_CHECKPOINT_PATH=None #"/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC_small_neighborhood/chr19/model_training_001/checkpoint_14.pt"
+RESUME_CHECKPOINT_PATH: Optional[str] = None #"/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC_small_neighborhood/chr19/model_training_001/checkpoint_14.pt"
 
 GRAD_ACCUM_STEPS=1
 USE_GRAD_ACCUMULATION=True
@@ -110,7 +111,7 @@ MOTIF_MASK_THRESH = 0.0         # Only allow TF-TG edges with p <= -log10(MOTIF_
 MOTIF_PRIOR_SCALE = 0.0         # Allows adding scaled motif scores on edges that are not filtered
 SHORTCUT_L1 = 0                 # Encourages sparsity between TF-TG edges in the TFtoTG shortcut
 SHORTCUT_L2 = 0 #1e-3
-SHORTCUT_TOPK = None
+SHORTCUT_TOPK: Optional[int] = None
 SHORTCUT_DROPOUT = 0.0 #0.1
 SHORTCUT_REG_WEIGHT = 0.0
 
@@ -118,10 +119,10 @@ SHORTCUT_REG_WEIGHT = 0.0
 ATTN_BIAS_SCALE = 0.0 
 
 # Sampling (optional)
-SUBSAMPLE_MAX_TFS = None #400 # 150
-SUBSAMPLE_MAX_TGS = None #2000 #None
-SUBSAMPLE_MAX_WINDOWS_PER_CHROM = None #1000
-SUBSAMPLE_MAX_CELLS = 10_000
+SUBSAMPLE_MAX_TFS: Optional[int] = None #400 # 150
+SUBSAMPLE_MAX_TGS: Optional[int] = None #2000 #None
+SUBSAMPLE_MAX_WINDOWS_PER_CHROM: Optional[int] = None #1000
+SUBSAMPLE_MAX_CELLS: Optional[int] = 10_000
 SUBSAMPLE_SEED = 42
 
 # ----- FINE TUNING ON SINGLE-CELL DATA -----
@@ -136,7 +137,7 @@ FINETUNE_GRAD_ACCUM_STEPS = 1
 FINETUNE_USE_GRAD_ACCUMULATION = True
 FINETUNE_USE_GRAD_CHECKPOINTING = True
 EWC_LAMBDA = 1e-5                       # Reduced from 2.5e-4 to allow model to adapt to single-cell data
-MAX_STEPS = None                     # Maximum number of batches to process
+MAX_STEPS: Optional[int] = None                     # Maximum number of batches to process
 FINETUNE_CORR_WEIGHT=0.2                # Increased from 0.05 to make R² penalty stronger
 FINETUNE_EDGE_WEIGHT=0.0
 FINETUNE_SHORTCUT_REG_WEIGHT=0.0
@@ -148,7 +149,7 @@ BCE_WEIGHT   = 1.0
 REG_WEIGHT   = 1.0
 
 # Sample the max number of cells per sample
-SUBSAMPLE_MAX_CELLS_FINETUNE = None
+SUBSAMPLE_MAX_CELLS_FINETUNE: Optional[int] = None
 
 
 # ----- PATH SETUP -----
