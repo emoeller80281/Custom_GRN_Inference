@@ -2,7 +2,7 @@
 #SBATCH --job-name=grn_experiments
 #SBATCH --output=LOGS/transformer_logs/experiments/%x_%A/%x_%A_%a.log
 #SBATCH --error=LOGS/transformer_logs/experiments/%x_%A/%x_%A_%a.err
-#SBATCH --time=36:00:00
+#SBATCH --time=10:00:00
 #SBATCH -p dense
 #SBATCH -N 1
 #SBATCH --ntasks-per-node=1
@@ -115,16 +115,16 @@ EXPERIMENTS=(
     # "loose_1_pct_filter_50_min_per_cell|Macrophage_loose_1_pct_filter_50_min_per_cell|MIN_GENES_PER_CELL=50;MIN_PEAKS_PER_CELL=50;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.01;FILTER_OUT_LOWEST_PCT_PEAKS=0.01"
     # "small_model_loose_1_pct_filtering|Macrophage_small_model_loose_1_pct_filtering|MIN_GENES_PER_CELL=50;MIN_PEAKS_PER_CELL=50;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.01;FILTER_OUT_LOWEST_PCT_PEAKS=0.01;D_MODEL=128;D_FF=512;BATCH_SIZE=8"
 
-    "two_hops_small_batch|Macrophage_two_hops_small_batch|HOPS=2;BATCH_SIZE=8"
-    "two_hops_150k_max_peak_dist|Macrophage_two_hops_150k_max_peak_dist|HOPS=2;MAX_PEAK_DISTANCE=150000"
-    "two_hops_slow_decay_long_range|Macrophage_two_hops_slow_decay_long_range|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000"
-    "two_hops_slow_decay_long_range_small_batch|Macrophage_two_hops_slow_decay_long_range_small_batch|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8"
-    "three_hops_small_batch|Macrophage_three_hops_small_batch|HOPS=3;BATCH_SIZE=8"
-    "two_hops_50k_max_peak_dist|Macrophage_two_hops_50k_max_peak_dist|HOPS=2;MAX_PEAK_DISTANCE=50000"
-    "two_hops_10k_distance_scale_factor|Macrophage_two_hops_10k_distance_scale_factor|HOPS=2;DISTANCE_SCALE_FACTOR=10000"
-    "two_hops_40k_distance_scale_factor|Macrophage_two_hops_40k_distance_scale_factor|HOPS=2;DISTANCE_SCALE_FACTOR=40000"
-    "two_hops_loose_1_pct_filtering|Macrophage_two_hops_loose_1_pct_filtering|HOPS=2;MIN_GENES_PER_CELL=150;MIN_PEAKS_PER_CELL=50;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.01;FILTER_OUT_LOWEST_PCT_PEAKS=0.01"
-    "two_hops_moderate_5_pct_filtering_small_batch|Macrophage_two_hops_moderate_5_pct_filtering_small_batch|HOPS=2;BATCH_SIZE=8;MIN_GENES_PER_CELL=125;MIN_PEAKS_PER_CELL=75;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.05;FILTER_OUT_LOWEST_PCT_PEAKS=0.05"
+    # "two_hops_small_batch|Macrophage_two_hops_small_batch|HOPS=2;BATCH_SIZE=8"
+    # "two_hops_150k_max_peak_dist|Macrophage_two_hops_150k_max_peak_dist|HOPS=2;MAX_PEAK_DISTANCE=150000"
+    # "two_hops_slow_decay_long_range|Macrophage_two_hops_slow_decay_long_range|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000"
+    # "two_hops_slow_decay_long_range_small_batch|Macrophage_two_hops_slow_decay_long_range_small_batch|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8"
+    # "three_hops_small_batch|Macrophage_three_hops_small_batch|HOPS=3;BATCH_SIZE=8"
+    # "two_hops_50k_max_peak_dist|Macrophage_two_hops_50k_max_peak_dist|HOPS=2;MAX_PEAK_DISTANCE=50000"
+    # "two_hops_10k_distance_scale_factor|Macrophage_two_hops_10k_distance_scale_factor|HOPS=2;DISTANCE_SCALE_FACTOR=10000"
+    # "two_hops_40k_distance_scale_factor|Macrophage_two_hops_40k_distance_scale_factor|HOPS=2;DISTANCE_SCALE_FACTOR=40000"
+    # "two_hops_loose_1_pct_filtering|Macrophage_two_hops_loose_1_pct_filtering|HOPS=2;MIN_GENES_PER_CELL=150;MIN_PEAKS_PER_CELL=50;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.01;FILTER_OUT_LOWEST_PCT_PEAKS=0.01"
+    # "two_hops_moderate_5_pct_filtering_small_batch|Macrophage_two_hops_moderate_5_pct_filtering_small_batch|HOPS=2;BATCH_SIZE=8;MIN_GENES_PER_CELL=125;MIN_PEAKS_PER_CELL=75;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.05;FILTER_OUT_LOWEST_PCT_PEAKS=0.05"
     "small_model_two_hops_long_range_small_batch|Macrophage_small_model_two_hops_long_range_small_batch|D_MODEL=128;D_FF=512;HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8"
 )
 
