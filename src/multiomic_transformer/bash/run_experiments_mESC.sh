@@ -701,13 +701,12 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
     if [ -n "${TRAINING_NUM}" ] && [ -f "${OUTPUT_DIR}/${CHROM_ID}/${TRAINING_NUM}/${MODEL_FILE}" ]; then
         echo "[INFO] Selected latest training directory: ${TRAINING_NUM}"
         echo "[INFO] Found trained model at ${OUTPUT_DIR}/${CHROM_ID}/${TRAINING_NUM}/${MODEL_FILE}"
-
+    
         echo ""
         echo "Running AUROC Testing..."
         poetry run python ./src/multiomic_transformer/utils/auroc_testing.py \
             --experiment "${DATASET_NAME}" \
             --training_num "${TRAINING_NUM}" \
-            --chrom_id "${CHROM_ID}" \
             --experiment_dir "${OUTPUT_DIR}" \
             --model_file "${MODEL_FILE}" \
             --dataset_type "mESC" \
@@ -717,7 +716,6 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
         poetry run python ./src/multiomic_transformer/utils/plotting.py \
             --experiment "${DATASET_NAME}" \
             --training_num "${TRAINING_NUM}" \
-            --chrom_id "${CHROM_ID}" \
             --experiment_dir "${OUTPUT_DIR}" \
             --model_file "${MODEL_FILE}"
 

@@ -9,7 +9,7 @@
 #SBATCH --gres=gpu:v100:2
 #SBATCH -c 16
 #SBATCH --mem=192G
-#SBATCH --array=0%1
+#SBATCH --array=0%7
 
 set -euo pipefail
 
@@ -125,7 +125,15 @@ EXPERIMENTS=(
     # "two_hops_40k_distance_scale_factor|Macrophage_two_hops_40k_distance_scale_factor|HOPS=2;DISTANCE_SCALE_FACTOR=40000"
     # "two_hops_loose_1_pct_filtering|Macrophage_two_hops_loose_1_pct_filtering|HOPS=2;MIN_GENES_PER_CELL=150;MIN_PEAKS_PER_CELL=50;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.01;FILTER_OUT_LOWEST_PCT_PEAKS=0.01"
     # "two_hops_moderate_5_pct_filtering_small_batch|Macrophage_two_hops_moderate_5_pct_filtering_small_batch|HOPS=2;BATCH_SIZE=8;MIN_GENES_PER_CELL=125;MIN_PEAKS_PER_CELL=75;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.05;FILTER_OUT_LOWEST_PCT_PEAKS=0.05"
-    "small_model_two_hops_long_range_small_batch|Macrophage_small_model_two_hops_long_range_small_batch|D_MODEL=128;D_FF=512;HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8"
+    # "small_model_two_hops_long_range_small_batch|Macrophage_small_model_two_hops_long_range_small_batch|D_MODEL=128;D_FF=512;HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8"
+
+    # "best_filter_long_range_2_hop_small|Macrophage_best_filter_long_range_2_hop_small|D_MODEL=128;D_FF=512;HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;MIN_GENES_PER_CELL=125;MIN_PEAKS_PER_CELL=50;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.05;FILTER_OUT_LOWEST_PCT_PEAKS=0.05;BATCH_SIZE=8"
+    # "best_filter_long_range_3_hop_small|Macrophage_best_filter_long_range_3_hop_small|D_MODEL=128;D_FF=512;HOPS=3;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;MIN_GENES_PER_CELL=125;MIN_PEAKS_PER_CELL=50;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.05;FILTER_OUT_LOWEST_PCT_PEAKS=0.05;BATCH_SIZE=8"
+    # "best_filter_long_range_2_hop_small_max_bias|Macrophage_best_filter_long_range_2_hop_small_max_bias|D_MODEL=128;D_FF=512;HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;MIN_GENES_PER_CELL=125;MIN_PEAKS_PER_CELL=50;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.05;FILTER_OUT_LOWEST_PCT_PEAKS=0.05;BATCH_SIZE=8;DIST_BIAS_MODE=max"
+    # "best_filter_long_range_2_hop_small_500bp_window|Macrophage_best_filter_long_range_2_hop_small_500bp_window|D_MODEL=128;D_FF=512;HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;MIN_GENES_PER_CELL=125;MIN_PEAKS_PER_CELL=50;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.05;FILTER_OUT_LOWEST_PCT_PEAKS=0.05;BATCH_SIZE=8;WINDOW_SIZE=500"
+    "best_filter_long_range_2_hop_small_1500bp_window|Macrophage_best_filter_long_range_2_hop_small_1500bp_window|D_MODEL=128;D_FF=512;HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;MIN_GENES_PER_CELL=125;MIN_PEAKS_PER_CELL=50;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.05;FILTER_OUT_LOWEST_PCT_PEAKS=0.05;BATCH_SIZE=8;WINDOW_SIZE=1500"
+    # "best_filter_long_range_2_hop_small_fewer_neighbors|Macrophage_best_filter_long_range_2_hop_small_fewer_neighbors|D_MODEL=128;D_FF=512;HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;MIN_GENES_PER_CELL=125;MIN_PEAKS_PER_CELL=50;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.05;FILTER_OUT_LOWEST_PCT_PEAKS=0.05;BATCH_SIZE=8;NEIGHBORS_K=15"
+    # "best_filter_long_range_2_hop_tiny|Macrophage_best_filter_long_range_2_hop_tiny|D_MODEL=64;D_FF=256;HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;MIN_GENES_PER_CELL=125;MIN_PEAKS_PER_CELL=50;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.05;FILTER_OUT_LOWEST_PCT_PEAKS=0.05;BATCH_SIZE=8"
 )
 
 
@@ -699,7 +707,6 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
         poetry run python ./src/multiomic_transformer/utils/auroc_testing.py \
             --experiment "${DATASET_NAME}" \
             --training_num "${TRAINING_NUM}" \
-            --chrom_id "${CHROM_ID}" \
             --experiment_dir "${OUTPUT_DIR}" \
             --model_file "${MODEL_FILE}" \
             --dataset_type "macrophage" \
@@ -709,7 +716,6 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
         poetry run python ./src/multiomic_transformer/utils/plotting.py \
             --experiment "${DATASET_NAME}" \
             --training_num "${TRAINING_NUM}" \
-            --chrom_id "${CHROM_ID}" \
             --experiment_dir "${OUTPUT_DIR}" \
             --model_file "${MODEL_FILE}"
 

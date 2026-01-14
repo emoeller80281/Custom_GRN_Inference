@@ -697,7 +697,6 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
         poetry run python ./src/multiomic_transformer/utils/auroc_testing.py \
             --experiment "${DATASET_NAME}" \
             --training_num "${TRAINING_NUM}" \
-            --chrom_id "${CHROM_ID}" \
             --experiment_dir "${OUTPUT_DIR}" \
             --model_file "${MODEL_FILE}" \
             --dataset_type "k562" \
@@ -707,7 +706,6 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
         poetry run python ./src/multiomic_transformer/utils/plotting.py \
             --experiment "${DATASET_NAME}" \
             --training_num "${TRAINING_NUM}" \
-            --chrom_id "${CHROM_ID}" \
             --experiment_dir "${OUTPUT_DIR}" \
             --model_file "${MODEL_FILE}"
 

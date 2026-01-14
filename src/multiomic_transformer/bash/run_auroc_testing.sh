@@ -9,7 +9,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 4
 #SBATCH --mem=64G
-#SBATCH --array=0-30%10
+#SBATCH --array=0%3
 
 set -euo pipefail
 
@@ -105,7 +105,7 @@ EXPERIMENT_LIST=(
     # "K562_strict_10_pct_filtering|model_training_001|trained_model.pt"
     # "K562_40k_distance_scale_factor|model_training_001|trained_model.pt"
     # "K562_10k_distance_scale_factor|model_training_001|trained_model.pt"
-    # "K562_150k_max_peak_dist|model_training_001|trained_model.pt"
+    "K562_150k_max_peak_dist|model_training_002|trained_model.pt"
     # "K562_50k_max_peak_dist|model_training_001|trained_model.pt"
     # "K562_slow_decay_long_range_two_hop|model_training_001|trained_model.pt"
     # "K562_slow_decay_long_range|model_training_001|trained_model.pt"
@@ -113,8 +113,10 @@ EXPERIMENT_LIST=(
     # "K562_two_hops|model_training_001|trained_model.pt"
     # "K562_loose_1_pct_filter_50_min_per_cell|model_training_001|trained_model.pt"
     # "K562_small_model_loose_1_pct_filtering|model_training_001|trained_model.pt"
-    "K562_two_hops_small_batch|model_training_002|trained_model.pt"
-    "K562_two_hops_150k_max_peak_dist|model_training_002|trained_model.pt"
+
+    # "K562_two_hops_small_batch|model_training_002|trained_model.pt"
+    # "K562_two_hops_150k_max_peak_dist|model_training_001|trained_model.pt"
+
     # "K562_two_hops_slow_decay_long_range|model_training_001|trained_model.pt"
     # "K562_two_hops_slow_decay_long_range_small_batch|model_training_001|trained_model.pt"
     # "K562_three_hops_small_batch|model_training_001|trained_model.pt"
@@ -123,7 +125,8 @@ EXPERIMENT_LIST=(
     # "K562_two_hops_40k_distance_scale_factor|model_training_001|trained_model.pt"
     # "K562_two_hops_loose_1_pct_filtering|model_training_001|trained_model.pt"
     # "K562_two_hops_moderate_5_pct_filtering_small_batch|model_training_001|trained_model.pt"
-    "K562_small_model_two_hops_long_range_small_batch|model_training_001|trained_model.pt"
+
+    # "K562_small_model_two_hops_long_range_small_batch|model_training_001|trained_model.pt"
 )
 
 # DATASET_TYPE="mESC"
