@@ -9,7 +9,7 @@
 #SBATCH --gres=gpu:v100:2
 #SBATCH -c 16
 #SBATCH --mem=192G
-#SBATCH --array=0-10%11
+#SBATCH --array=0%1
 
 set -euo pipefail
 
@@ -627,6 +627,45 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
     echo "  TRAINING COMPLETED: ${EXPERIMENT_NAME}"
     echo "  DATASET: ${DATASET_NAME}"
     echo "=========================================="
+    echo ""
+
+    # ==========================================
+    #       COPY LOGS TO EXPERIMENT DIRECTORY
+    # ==========================================
+    echo ""
+    echo "Copying GPU usage, log, and error files to experiment directory..."
+    echo ""
+
+    # Create logs subdirectory in experiment output
+    mkdir -p "${OUTPUT_DIR}/logs"
+
+    # Copy GPU usage file
+    GPU_LOG_SRC="${LOGDIR}/gpu_usage_${ARRAY_JOB_ID}_${ARRAY_TASK_ID}.csv"
+    if [ -f "${GPU_LOG_SRC}" ]; then
+        cp "${GPU_LOG_SRC}" "${OUTPUT_DIR}/logs/gpu_usage.csv"
+        echo "[INFO] Copied GPU usage log: ${OUTPUT_DIR}/logs/gpu_usage.csv"
+    else
+        echo "[WARNING] GPU usage log not found: ${GPU_LOG_SRC}"
+    fi
+
+    # Copy SLURM log file
+    LOG_FILE_SRC="LOGS/transformer_logs/experiments/grn_experiments_${ARRAY_JOB_ID}/grn_experiments_${ARRAY_JOB_ID}_${ARRAY_TASK_ID}.log"
+    if [ -f "${LOG_FILE_SRC}" ]; then
+        cp "${LOG_FILE_SRC}" "${OUTPUT_DIR}/logs/slurm_output.log"
+        echo "[INFO] Copied SLURM log file: ${OUTPUT_DIR}/logs/slurm_output.log"
+    else
+        echo "[WARNING] SLURM log file not found: ${LOG_FILE_SRC}"
+    fi
+
+    # Copy SLURM error file
+    ERR_FILE_SRC="LOGS/transformer_logs/experiments/grn_experiments_${ARRAY_JOB_ID}/grn_experiments_${ARRAY_JOB_ID}_${ARRAY_TASK_ID}.err"
+    if [ -f "${ERR_FILE_SRC}" ]; then
+        cp "${ERR_FILE_SRC}" "${OUTPUT_DIR}/logs/slurm_error.err"
+        echo "[INFO] Copied SLURM error file: ${OUTPUT_DIR}/logs/slurm_error.err"
+    else
+        echo "[WARNING] SLURM error file not found: ${ERR_FILE_SRC}"
+    fi
+
     echo ""
 
     # ==========================================

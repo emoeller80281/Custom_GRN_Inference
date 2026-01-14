@@ -638,6 +638,45 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
     echo ""
 
     # ==========================================
+    #       COPY LOGS TO EXPERIMENT DIRECTORY
+    # ==========================================
+    echo ""
+    echo "Copying GPU usage, log, and error files to experiment directory..."
+    echo ""
+
+    # Create logs subdirectory in experiment output
+    mkdir -p "${OUTPUT_DIR}/logs"
+
+    # Copy GPU usage file
+    GPU_LOG_SRC="${LOGDIR}/gpu_usage_${ARRAY_JOB_ID}_${ARRAY_TASK_ID}.csv"
+    if [ -f "${GPU_LOG_SRC}" ]; then
+        cp "${GPU_LOG_SRC}" "${OUTPUT_DIR}/logs/gpu_usage.csv"
+        echo "[INFO] Copied GPU usage log: ${OUTPUT_DIR}/logs/gpu_usage.csv"
+    else
+        echo "[WARNING] GPU usage log not found: ${GPU_LOG_SRC}"
+    fi
+
+    # Copy SLURM log file
+    LOG_FILE_SRC="LOGS/transformer_logs/experiments/grn_experiments_${ARRAY_JOB_ID}/grn_experiments_${ARRAY_JOB_ID}_${ARRAY_TASK_ID}.log"
+    if [ -f "${LOG_FILE_SRC}" ]; then
+        cp "${LOG_FILE_SRC}" "${OUTPUT_DIR}/logs/slurm_output.log"
+        echo "[INFO] Copied SLURM log file: ${OUTPUT_DIR}/logs/slurm_output.log"
+    else
+        echo "[WARNING] SLURM log file not found: ${LOG_FILE_SRC}"
+    fi
+
+    # Copy SLURM error file
+    ERR_FILE_SRC="LOGS/transformer_logs/experiments/grn_experiments_${ARRAY_JOB_ID}/grn_experiments_${ARRAY_JOB_ID}_${ARRAY_TASK_ID}.err"
+    if [ -f "${ERR_FILE_SRC}" ]; then
+        cp "${ERR_FILE_SRC}" "${OUTPUT_DIR}/logs/slurm_error.err"
+        echo "[INFO] Copied SLURM error file: ${OUTPUT_DIR}/logs/slurm_error.err"
+    else
+        echo "[WARNING] SLURM error file not found: ${ERR_FILE_SRC}"
+    fi
+
+    echo ""
+
+    # ==========================================
     #           PLOTTING & AUROC TESTING
     # ==========================================
     echo ""
@@ -651,21 +690,22 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
     TRAINING_NUM=""
     
     for dir in $(ls -d "${OUTPUT_DIR}"/model_training_* 2>/dev/null | sort -V -r); do
-        if [ -f "${dir}/${MODEL_FILE}" ]; then
+        if [ -f "${dir}/${CHROM_ID}/${MODEL_FILE}" ]; then
             TRAINING_NUM=$(basename "$dir")
             break
         fi
     done
 
     # Check if a valid training directory was found
-    if [ -n "${TRAINING_NUM}" ] && [ -f "${OUTPUT_DIR}/${TRAINING_NUM}/${MODEL_FILE}" ]; then
+    if [ -n "${TRAINING_NUM}" ] && [ -f "${OUTPUT_DIR}/${TRAINING_NUM}/${CHROM_ID}/${MODEL_FILE}" ]; then
         echo "[INFO] Selected latest training directory: ${TRAINING_NUM}"
-        echo "[INFO] Found trained model at ${OUTPUT_DIR}/${TRAINING_NUM}/${MODEL_FILE}"
+        echo "[INFO] Found trained model at ${OUTPUT_DIR}/${TRAINING_NUM}/${CHROM_ID}/${MODEL_FILE}"
 
         echo "Plotting Training Figures..."
         poetry run python ./src/multiomic_transformer/utils/plotting.py \
             --experiment "${DATASET_NAME}" \
             --training_num "${TRAINING_NUM}" \
+            --chrom_id "${CHROM_ID}" \
             --experiment_dir "${OUTPUT_DIR}" \
             --model_file "${MODEL_FILE}"
 
@@ -674,9 +714,10 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
         poetry run python ./src/multiomic_transformer/utils/auroc_testing.py \
             --experiment "${DATASET_NAME}" \
             --training_num "${TRAINING_NUM}" \
+            --chrom_id "${CHROM_ID}" \
             --experiment_dir "${OUTPUT_DIR}" \
             --model_file "${MODEL_FILE}" \
-            --dataset_type "mESC" \
+            --dataset_type "macrophage" \
             --sample_name_list "${SAMPLE_NAMES}"
 
         echo ""
@@ -686,7 +727,7 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
         echo "=========================================="
         echo ""
     else
-        echo "[WARNING] Trained model not found at ${OUTPUT_DIR}/${TRAINING_NUM}/${MODEL_FILE}"
+        echo "[WARNING] Trained model not found at ${OUTPUT_DIR}/${TRAINING_NUM}/${CHROM_ID}/${MODEL_FILE}"
         echo "[WARNING] Skipping plotting and AUROC testing"
         echo ""
         echo "=========================================="

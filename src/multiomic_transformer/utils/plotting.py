@@ -542,14 +542,12 @@ if __name__ == "__main__":
     TG_CHUNK = 64
     
     # Plot GPU usage
-    if os.path.exists(EXPERIMENT_DIR / "gpu_usage.csv"):
-        # Load GPU usage log
-        selected_exp_gpu_logs = {
-            f"GPU Usage":format_gpu_usage_file(EXPERIMENT_DIR / "gpu_usage.csv")
-        }
-        
+    for file in EXPERIMENT_DIR.glob("gpu_usage*.csv"):
+        print(f"Processing GPU log file: {file.name}")
+        gpu_file = format_gpu_usage_file(file)
+        gpu_fig = plot_gpu_usage({"GPU Usage": gpu_file})
+
         logging.info("Plotting GPU memory usage...")
-        gpu_fig = plot_gpu_usage(selected_exp_gpu_logs)
         gpu_fig.savefig(EXPERIMENT_DIR / "gpu_memory_requirements.svg")
         gpu_fig.savefig(exp_fig_dir / "gpu_memory_requirements.svg")
     else:
@@ -564,6 +562,7 @@ if __name__ == "__main__":
         logging.info("Plotting training R2 across epochs...")
         train_r2_fig = plot_R2_across_epochs(training_log_df)
         train_r2_fig.savefig(os.path.join(EXPERIMENT_DIR, "eval_results_pearson_corr.svg"))
+        train_r2_fig.savefig(os.path.join(EXPERIMENT_DIR, "eval_results_pearson_corr.png"), dpi=200)
         train_r2_fig.savefig(exp_fig_dir / "eval_results_pearson_corr.svg")
         training_log_df.to_csv(exp_fig_data_dir / "training_log_df.csv")
         
@@ -571,6 +570,7 @@ if __name__ == "__main__":
         logging.info("Plotting training and validation loss curves...")
         train_val_loss_fig = plot_train_val_loss(training_log_df)
         train_val_loss_fig.savefig(os.path.join(EXPERIMENT_DIR, "train_val_loss_curves.svg"))
+        train_val_loss_fig.savefig(os.path.join(EXPERIMENT_DIR, "train_val_loss_curves.png"), dpi=200)
         train_val_loss_fig.savefig(exp_fig_dir / "train_val_loss_curves.svg")
     else:
         logging.info("No training log found, skipping training R2 and loss plotting.")
