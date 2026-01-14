@@ -2,14 +2,14 @@
 #SBATCH --job-name=auroc_testing
 #SBATCH --output=LOGS/transformer_logs/04_testing/%x_%A/%x_%A_%a.log
 #SBATCH --error=LOGS/transformer_logs/04_testing/%x_%A/%x_%A_%a.err
-#SBATCH --time=12:00:00
+#SBATCH --time=10:00:00
 #SBATCH -p gpu
 #SBATCH -N 1
 #SBATCH --gres=gpu:p100:1
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 4
 #SBATCH --mem=64G
-#SBATCH --array=0%3
+#SBATCH --array=0-6%6
 
 set -euo pipefail
 
@@ -90,13 +90,20 @@ EXPERIMENT_LIST=(
     # "Macrophage_two_hops_slow_decay_long_range|model_training_001|trained_model.pt"
     # "Macrophage_two_hops_slow_decay_long_range_small_batch|model_training_001|trained_model.pt"
     # "Macrophage_three_hops_small_batch|model_training_001|trained_model.pt"
-
     # "Macrophage_two_hops_50k_max_peak_dist|model_training_001|trained_model.pt"
     # "Macrophage_two_hops_10k_distance_scale_factor|model_training_001|trained_model.pt"
     # "Macrophage_two_hops_40k_distance_scale_factor|model_training_001|trained_model.pt"
     # "Macrophage_two_hops_loose_1_pct_filtering|model_training_001|trained_model.pt"
     # "Macrophage_two_hops_moderate_5_pct_filtering_small_batch|model_training_001|trained_model.pt"
     # "Macrophage_small_model_two_hops_long_range_small_batch|model_training_002|trained_model.pt"
+    "Macrophage_best_filter_long_range_2_hop_small|model_training_001|trained_model.pt"
+    "Macrophage_best_filter_long_range_3_hop_small|model_training_001|trained_model.pt"
+    "Macrophage_best_filter_long_range_2_hop_small_max_bias|model_training_001|trained_model.pt"
+    "Macrophage_best_filter_long_range_2_hop_small_500bp_window|model_training_001|trained_model.pt"
+    "Macrophage_best_filter_long_range_2_hop_small_1500bp_window|model_training_001|trained_model.pt"
+    "Macrophage_best_filter_long_range_2_hop_small_fewer_neighbors|model_training_001|trained_model.pt"
+    "Macrophage_best_filter_long_range_2_hop_tiny|model_training_001|trained_model.pt"
+
 
     # "K562_base_settings|model_training_001|trained_model.pt"
     # "K562_model_d_128_ff_512|model_training_001|trained_model.pt"
@@ -105,7 +112,7 @@ EXPERIMENT_LIST=(
     # "K562_strict_10_pct_filtering|model_training_001|trained_model.pt"
     # "K562_40k_distance_scale_factor|model_training_001|trained_model.pt"
     # "K562_10k_distance_scale_factor|model_training_001|trained_model.pt"
-    "K562_150k_max_peak_dist|model_training_002|trained_model.pt"
+    # "K562_150k_max_peak_dist|model_training_002|trained_model.pt"
     # "K562_50k_max_peak_dist|model_training_001|trained_model.pt"
     # "K562_slow_decay_long_range_two_hop|model_training_001|trained_model.pt"
     # "K562_slow_decay_long_range|model_training_001|trained_model.pt"
@@ -132,11 +139,11 @@ EXPERIMENT_LIST=(
 # DATASET_TYPE="mESC"
 # SAMPLE_NAMES="E7.5_rep1 E7.5_rep2 E8.5_rep1 E8.5_rep2"
 
-# DATASET_TYPE="macrophage"
-# SAMPLE_NAMES="Macrophage_S1 Macrophage_S2"
+DATASET_TYPE="macrophage"
+SAMPLE_NAMES="Macrophage_S1 Macrophage_S2"
 
-DATASET_TYPE="K562"
-SAMPLE_NAMES="K562"
+# DATASET_TYPE="K562"
+# SAMPLE_NAMES="K562"
 
 
 # ==========================================

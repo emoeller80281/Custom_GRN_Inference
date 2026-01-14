@@ -323,6 +323,70 @@ PROCESSED_DATA="${DATABASE_DIR}/processed"
 TRAINING_DATA_CACHE="${DATABASE_DIR}/training_data_cache"
 EXPERIMENT_DIR="${PROJECT_DATA_DIR}/experiments"
 OUTPUT_DIR="${EXPERIMENT_DIR}/${DATASET_NAME}"
+
+# ==========================================
+#      WRITE RUN PARAMETERS (CSV)
+# ==========================================
+mkdir -p "${OUTPUT_DIR}"
+PARAM_CSV="${OUTPUT_DIR}/run_parameters_long.csv"
+
+csv_escape() {
+    local s="${1-}"
+    s="${s//$'\n'/ }"
+    s="${s//\"/\"\"}"
+    printf '%s' "$s"
+}
+
+write_param_csv_row() {
+    local name="$1"
+    local value=""
+
+    if declare -p "$name" &>/dev/null; then
+        if declare -p "$name" 2>/dev/null | grep -q 'declare \-a'; then
+            local -a arr=()
+            eval 'arr=( "${'"$name"'[@]}" )'
+            value="${arr[*]}"
+        else
+            value="${!name-}"
+        fi
+    else
+        value=""
+    fi
+
+    printf '"%s","%s"\n' "$name" "$(csv_escape "$value")"
+}
+
+{
+    echo "parameter,value"
+
+    PARAM_NAMES=(
+        EXPERIMENT_NAME DATASET_NAME ORGANISM_CODE CHROM_ID SAMPLE_NAMES VALIDATION_DATASETS FORCE_RECALCULATE
+        CHROM_IDS
+        MIN_GENES_PER_CELL MIN_PEAKS_PER_CELL FILTER_TYPE
+        FILTER_OUT_LOWEST_COUNTS_GENES FILTER_OUT_LOWEST_COUNTS_PEAKS
+        FILTER_OUT_LOWEST_PCT_GENES FILTER_OUT_LOWEST_PCT_PEAKS
+        NEIGHBORS_K PCA_COMPONENTS HOPS SELF_WEIGHT
+        WINDOW_SIZE DISTANCE_SCALE_FACTOR MAX_PEAK_DISTANCE
+        DIST_BIAS_MODE FILTER_TO_NEAREST_GENE PROMOTER_BP
+        RAW_SINGLE_CELL_DATA RAW_RNA_FILE RAW_ATAC_FILE
+        TOTAL_EPOCHS BATCH_SIZE PATIENCE SAVE_EVERY_N_EPOCHS
+        CORR_LOSS_WEIGHT EDGE_LOSS_WEIGHT COS_WEIGHT SHORTCUT_REG_WEIGHT
+        GRAD_ACCUM_STEPS USE_GRAD_ACCUMULATION USE_GRAD_CHECKPOINTING
+        MODE INITIAL_LEARNING_RATE SCHEDULER_FACTOR SCHEDULER_PATIENCE
+        THRESHOLD THRESHOLD_MODE COOLDOWN MIN_LR
+        D_MODEL NUM_HEADS NUM_LAYERS D_FF DROPOUT
+        USE_DISTANCE_BIAS USE_SHORTCUT USE_MOTIF_MASK
+        MOTIF_MASK_THRESH MOTIF_PRIOR_SCALE ATTN_BIAS_SCALE
+        SHORTCUT_L1 SHORTCUT_L2 SHORTCUT_TOPK SHORTCUT_DROPOUT
+        SUBSAMPLE_MAX_TFS SUBSAMPLE_MAX_TGS SUBSAMPLE_MAX_WINDOWS_PER_CHROM SUBSAMPLE_MAX_CELLS
+        SUBSAMPLE_SEED ALLOWED_SAMPLES RESUME_CHECKPOINT_PATH
+    )
+
+    for p in "${PARAM_NAMES[@]}"; do
+        write_param_csv_row "$p"
+    done
+} > "${PARAM_CSV}"
+
 RAW_SINGLE_CELL_DATA="${RAW_DATA}/K562"
 SAMPLE_PROCESSED_DATA_DIR="${PROCESSED_DATA}/${DATASET_NAME}"
 SAMPLE_DATA_CACHE_DIR="${TRAINING_DATA_CACHE}/${DATASET_NAME}"
@@ -697,7 +761,7 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
         poetry run python ./src/multiomic_transformer/utils/auroc_testing.py \
             --experiment "${DATASET_NAME}" \
             --training_num "${TRAINING_NUM}" \
-            --experiment_dir "${OUTPUT_DIR}" \
+            --experiment_dir "${EXPERIMENT_DIR}" \
             --model_file "${MODEL_FILE}" \
             --dataset_type "k562" \
             --sample_name_list "${SAMPLE_NAMES}"
@@ -706,7 +770,7 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
         poetry run python ./src/multiomic_transformer/utils/plotting.py \
             --experiment "${DATASET_NAME}" \
             --training_num "${TRAINING_NUM}" \
-            --experiment_dir "${OUTPUT_DIR}" \
+            --experiment_dir "${EXPERIMENT_DIR}" \
             --model_file "${MODEL_FILE}"
 
         echo ""
