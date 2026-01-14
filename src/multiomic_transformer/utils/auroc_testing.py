@@ -1048,7 +1048,7 @@ def plot_method_curve_variability(df_results, out_dir):
         ax[0].tick_params(axis="both", labelsize=tick_fontsize)
 
         # ================= PR panel =================
-        for (idx, row), label in zip(df_m.iterrows()):
+        for (idx, row), label in zip(df_m.iterrows(), labels):
             rec = row["rec"]
             prec = row["prec"]
             if rec is None or prec is None:
@@ -1146,7 +1146,7 @@ def plot_method_gt_heatmap(df_pooled: pd.DataFrame, metric: str = "auroc", per_t
         )
     else:
         ax.set_title(
-            f"Average pooled {metric.upper()} score × ground truth\n"
+            f"{metric.upper()} score × ground truth\n"
             f"(methods sorted by mean {metric.upper()} across GTs)",
             fontsize=12,
             pad=10,
@@ -2115,112 +2115,7 @@ if __name__ == "__main__":
             index=False,
         )
         logging.info(f"Saved all method results ({len(df_results)} rows) to detailed CSV")
-        # df_results has:
-        #   - one row per (feature, gt_name) from FEATURES_ONLY
-        #   - one row per (method, gt_name, sample) from each sample
 
-        # ------------------------------------------------------------
-        # 1) Pool across samples: one row per (gt_name, name)
-        #    AUROC/AUPRC = mean across samples
-        # ------------------------------------------------------------            
-        df_pooled = (
-            df_results
-            .groupby(["gt_name", "name"], as_index=False)
-            .agg(
-                auroc=("auroc", "mean"),
-                auprc=("auprc", "mean"),
-            )
-        )
-
-        # Optional: keep a 'sample' column so existing plotting
-        # functions expecting it keep working
-        df_pooled["sample"] = "POOLED"
-        
-        df_results.to_csv(
-            exp_fig_data_dir / "auroc_auprc_pooled_heatmap_data.csv",
-            index=False,
-        )
-        
-        auroc_heat_fig = plot_method_gt_heatmap(df_results, metric="auroc")
-        auroc_heat_fig.savefig(
-            EXPERIMENT_DIR / "method_gt_auroc_heatmap_pooled.png",
-            dpi=300,
-        )
-        auroc_heat_fig.savefig(
-            exp_fig_dir / f"method_gt_auroc_heatmap_pooled.svg"
-        )
-        plt.close(auroc_heat_fig)
-
-        auprc_heat_fig = plot_method_gt_heatmap(df_results, metric="auprc")
-        auprc_heat_fig.savefig(
-            EXPERIMENT_DIR / "method_gt_auprc_heatmap_pooled.png",
-            dpi=300,
-        )
-        auprc_heat_fig.savefig(
-            exp_fig_dir / f"method_gt_auprc_heatmap_pooled.svg"
-        )
-        plt.close(auprc_heat_fig)
-
-        # ------------------------------------------------------------
-        # 2) Method ranking on pooled AUROCs
-        # ------------------------------------------------------------
-        method_rank_pooled = (
-            df_pooled.groupby("name")
-            .agg(
-                mean_auroc=("auroc", "mean"),
-                std_auroc=("auroc", "std"),
-                mean_auprc=("auprc", "mean"),
-                std_auprc=("auprc", "std"),
-                n_gt=("gt_name", "nunique"),
-            )
-            .sort_values("mean_auroc", ascending=False)
-        )
-
-        logging.info("\n=== Method ranking by POOLED AUROC (all TFs together) ===")
-        logging.info(method_rank_pooled)
-
-        method_rank_pooled.to_csv(
-            EXPERIMENT_DIR / "method_ranking_by_auroc_pooled.csv"
-        )
-
-        # ------------------------------------------------------------
-        # 3) Per-GT table for boxplots (still one row per (gt_name, method))
-        # ------------------------------------------------------------
-        per_gt_rank = (
-            df_pooled
-            .sort_values(["gt_name", "auroc"], ascending=[True, False])
-            [["gt_name", "sample", "name", "auroc", "auprc"]]
-        )
-        per_gt_rank.to_csv(
-            EXPERIMENT_DIR / "per_gt_method_aucs_detailed.csv",
-            index=False,
-        )
-
-        # Boxplots reflect pooled AUROC/AUPRC per method & GT
-        all_auroc_boxplots = plot_all_results_auroc_boxplot(per_gt_rank)
-        all_auprc_boxplots = plot_all_results_auprc_boxplot(per_gt_rank)
-
-        all_auroc_boxplots.savefig(
-            EXPERIMENT_DIR / "all_results_auroc_boxplot_pooled.png",
-            dpi=300,
-        )
-        all_auprc_boxplots.savefig(
-            EXPERIMENT_DIR / "all_results_auprc_boxplot_pooled.png",
-            dpi=300,
-        )
-        all_auroc_boxplots.savefig(
-            exp_fig_dir / f"all_results_auroc_boxplot_pooled.svg"
-        )
-        all_auprc_boxplots.savefig(
-            exp_fig_dir / f"all_results_auprc_boxplot_pooled.svg"
-        )
-        plt.close(all_auroc_boxplots)
-        plt.close(all_auprc_boxplots)
-
-
-        # ------------------------------------------------------------
-        # 4) Per-TF metrics, ranking, and boxplots
-        # ------------------------------------------------------------
         if per_tf_all_results:
             # Concatenate all per-TF results ONCE
             per_tf_metrics = pd.concat(per_tf_all_results, ignore_index=True)
@@ -2234,109 +2129,6 @@ if __name__ == "__main__":
                 f"Saved detailed per-TF metrics ({len(per_tf_metrics)} rows)"
             )
             
-            # 4a) Create per-TF method ranking
-            # Average across TFs within each (method, GT)
-            method_gt_avg = (
-                per_tf_metrics
-                .groupby(['method', 'gt_name'], as_index=False)
-                .agg(
-                    auroc=('auroc', 'mean'),
-                    auprc=('auprc', 'mean'),
-                    n_tfs=('tf', 'nunique'),
-                )
-            )
-            
-            # Then average across GTs for each method
-            method_rank_per_tf = (
-                method_gt_avg
-                .groupby('method')
-                .agg(
-                    mean_auroc=('auroc', 'mean'),
-                    std_auroc=('auroc', 'std'),
-                    mean_auprc=('auprc', 'mean'),
-                    std_auprc=('auprc', 'std'),
-                    n_gt=('gt_name', 'nunique'),
-                )
-                .sort_values('mean_auroc', ascending=False)
-            )
-            
-            logging.info("\n=== Method ranking by PER-TF AUROC (averaged across TFs) ===")
-            logging.info(method_rank_per_tf)
-            
-            method_rank_per_tf.to_csv(
-                EXPERIMENT_DIR / "method_ranking_by_per_tf_auroc.csv"
-            )
-            
-            # 4b) Create per-TF boxplots
-            # Format data for boxplot functions: need ['name', 'auroc', 'auprc']
-            # Use RAW per-TF metrics, not the aggregated ranking
-            per_tf_for_plot = per_tf_metrics[['method', 'auroc', 'auprc']].copy()
-            per_tf_for_plot = per_tf_for_plot.rename(columns={'method': 'name'})
-            
-            per_tf_for_plot.to_csv(
-                exp_fig_data_dir / "per_tf_auroc_auprc_data.csv",
-                index=False,
-            )
-            
-            logging.info("Creating per-TF AUROC and AUPRC boxplots...")
-            
-            per_tf_auroc_boxplot = plot_all_results_auroc_boxplot(per_tf_for_plot, per_tf=True)
-            per_tf_auprc_boxplot = plot_all_results_auprc_boxplot(per_tf_for_plot, per_tf=True)
-            
-            per_tf_auroc_boxplot.savefig(EXPERIMENT_DIR / "all_results_auroc_boxplot_per_tf.png",dpi=300)
-            per_tf_auprc_boxplot.savefig(EXPERIMENT_DIR / "all_results_auprc_boxplot_per_tf.png",dpi=300)
-            
-            per_tf_auroc_boxplot.savefig(exp_fig_dir / f"all_results_auroc_boxplot_per_tf.svg")
-            per_tf_auprc_boxplot.savefig(exp_fig_dir / f"all_results_auprc_boxplot_per_tf.svg")
-            plt.close(per_tf_auroc_boxplot)
-            plt.close(per_tf_auprc_boxplot)
-                
-            # Save pooled per-GT metrics
-            per_gt_rank.to_csv(
-                EXPERIMENT_DIR / "per_gt_method_aucs_pooled.csv",
-                index=False,
-            )
-            
-            # 4a) Create per-TF method ranking
-            method_gt_avg = (
-                per_tf_metrics
-                .groupby(['method', 'gt_name'], as_index=False)
-                .agg(
-                    auroc=('auroc', 'mean'),
-                    auprc=('auprc', 'mean'),
-                    n_tfs=('tf', 'nunique'),
-                )
-            )
-
-            # For heatmap input, rename 'method' -> 'name'
-            method_gt_avg_for_heatmap = method_gt_avg.rename(columns={'method': 'name'})
-            
-            method_gt_avg_for_heatmap.to_csv(
-                EXPERIMENT_DIR / "per_tf_auroc_auprc_data.csv",
-                index=False,
-            )
-
-            # Per-TF AUROC heatmap
-            auroc_heat_fig = plot_method_gt_heatmap(
-                method_gt_avg_for_heatmap,
-                metric="auroc",
-                per_tf=True,
-            )
-            auroc_heat_fig.savefig(EXPERIMENT_DIR / "per_tf_auroc_heatmap.png", dpi=300)
-            auroc_heat_fig.savefig(exp_fig_dir / f"per_tf_auroc_heatmap.svg")
-            plt.close(auroc_heat_fig)
-
-            # Per-TF AUPRC heatmap
-            auprc_heat_fig = plot_method_gt_heatmap(
-                method_gt_avg_for_heatmap,
-                metric="auprc",
-                per_tf=True,
-            )
-            auprc_heat_fig.savefig(EXPERIMENT_DIR / "per_tf_auprc_heatmap.png", dpi=300)
-            auprc_heat_fig.savefig(exp_fig_dir / f"per_tf_auprc_heatmap.svg")
-            plt.close(auprc_heat_fig)
-            
-            logging.info("Per-TF analysis complete.")
         else:
             logging.info("No per-TF metrics computed (likely too few edges per TF).")
         

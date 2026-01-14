@@ -9,7 +9,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 4
 #SBATCH --mem=64G
-#SBATCH --array=0-9%10
+#SBATCH --array=0-30%10
 
 set -euo pipefail
 
@@ -113,25 +113,27 @@ EXPERIMENT_LIST=(
     "K562_two_hops|model_training_001|trained_model.pt"
     "K562_loose_1_pct_filter_50_min_per_cell|model_training_001|trained_model.pt"
     "K562_small_model_loose_1_pct_filtering|model_training_001|trained_model.pt"
-
-    # "K562_two_hops_small_batch|model_training_001|trained_model.pt"
-    # "K562_two_hops_150k_max_peak_dist|model_training_001|trained_model.pt"
-    # "K562_two_hops_slow_decay_long_range|model_training_001|trained_model.pt"
-    # "K562_two_hops_slow_decay_long_range_small_batch|model_training_001|trained_model.pt"
-    # "K562_three_hops_small_batch|model_training_001|trained_model.pt"
-    # "K562_two_hops_50k_max_peak_dist|model_training_001|trained_model.pt"
-    # "K562_two_hops_10k_distance_scale_factor|model_training_001|trained_model.pt"
-    # "K562_two_hops_40k_distance_scale_factor|model_training_001|trained_model.pt"
-    # "K562_two_hops_loose_1_pct_filtering|model_training_001|trained_model.pt"
-    # "K562_two_hops_moderate_5_pct_filtering_small_batch|model_training_001|trained_model.pt"
-    # "K562_small_model_two_hops_long_range_small_batch|model_training_001|trained_model.pt"
+    "K562_two_hops_small_batch|model_training_001|trained_model.pt"
+    "K562_two_hops_150k_max_peak_dist|model_training_001|trained_model.pt"
+    "K562_two_hops_slow_decay_long_range|model_training_001|trained_model.pt"
+    "K562_two_hops_slow_decay_long_range_small_batch|model_training_001|trained_model.pt"
+    "K562_three_hops_small_batch|model_training_001|trained_model.pt"
+    "K562_two_hops_50k_max_peak_dist|model_training_001|trained_model.pt"
+    "K562_two_hops_10k_distance_scale_factor|model_training_001|trained_model.pt"
+    "K562_two_hops_40k_distance_scale_factor|model_training_001|trained_model.pt"
+    "K562_two_hops_loose_1_pct_filtering|model_training_001|trained_model.pt"
+    "K562_two_hops_moderate_5_pct_filtering_small_batch|model_training_001|trained_model.pt"
+    "K562_small_model_two_hops_long_range_small_batch|model_training_001|trained_model.pt"
 )
 
-DATASET_TYPE="K562"
-SAMPLE_NAMES="K562"
+# DATASET_TYPE="mESC"
+# SAMPLE_NAMES="E7.5_rep1 E7.5_rep2 E8.5_rep1 E8.5_rep2"
 
 # DATASET_TYPE="macrophage"
 # SAMPLE_NAMES="Macrophage_S1 Macrophage_S2"
+
+DATASET_TYPE="K562"
+SAMPLE_NAMES="K562"
 
 
 # ==========================================
@@ -159,13 +161,6 @@ echo "  TASK ID: ${TASK_ID}"
 echo "=========================================="
 echo ""
 
-echo "Plotting Training Figures"
-poetry run python ./src/multiomic_transformer/utils/plotting.py \
-    --experiment "$EXPERIMENT_NAME" \
-    --training_num "$TRAINING_NUM" \
-    --experiment_dir "$EXPERIMENT_DIR" \
-    --model_file "$MODEL_FILE"
-
 echo "Running AUROC Testing"
 poetry run python ./src/multiomic_transformer/utils/auroc_testing.py \
     --experiment "$EXPERIMENT_NAME" \
@@ -174,5 +169,12 @@ poetry run python ./src/multiomic_transformer/utils/auroc_testing.py \
     --model_file "$MODEL_FILE" \
     --dataset_type "$DATASET_TYPE" \
     --sample_name_list $SAMPLE_NAMES
+
+echo "Plotting Training Figures"
+poetry run python ./src/multiomic_transformer/utils/plotting.py \
+    --experiment "$EXPERIMENT_NAME" \
+    --training_num "$TRAINING_NUM" \
+    --experiment_dir "$EXPERIMENT_DIR" \
+    --model_file "$MODEL_FILE"
 
 echo "finished"

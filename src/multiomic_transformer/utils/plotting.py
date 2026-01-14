@@ -6,11 +6,14 @@ import sys
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import seaborn as sns
 import numpy as np
 import pandas as pd
 import torch
+import random
+from itertools import cycle
 from matplotlib.ticker import FuncFormatter, MultipleLocator
-from sklearn.metrics import r2_score
+from sklearn.metrics import roc_auc_score, average_precision_score, precision_recall_curve, roc_curve, r2_score
 import argparse
 
 PROJECT_DIR = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
@@ -277,21 +280,21 @@ def load_model(selected_experiment_dir, checkpoint_file, device):
             state["model_state_dict"], strict=False
         )
         if len(missing) > 0:
-            logging.info("Missing keys:", missing)
+            logging.info(f"Missing keys: {missing}")
         if len(unexpected) > 0:
-            logging.info("Unexpected keys:", unexpected)
+            logging.info(f"Unexpected keys: {unexpected}")
     elif isinstance(state, dict) and "model_state_dict" not in state:
         missing, unexpected = model.load_state_dict(state, strict=False)
         if len(missing) > 0:
-            logging.info("Missing keys:", missing)
+            logging.info(f"Missing keys: {missing}")
         if len(unexpected) > 0:
-            logging.info("Unexpected keys:", unexpected)
+            logging.info(f"Unexpected keys: {unexpected}")
     else:
         missing, unexpected = model.load_state_dict(state, strict=False)
         if len(missing) > 0:
-            logging.info("Missing keys:", missing)
+            logging.info(f"Missing keys: {missing}")
         if len(unexpected) > 0:
-            logging.info("Unexpected keys:", unexpected)
+            logging.info(f"Unexpected keys: {unexpected}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device).eval()
@@ -494,6 +497,999 @@ def plot_model_tg_predictions(device, model, test_loader, tg_scaler, tf_scaler):
 
     return per_gene_mean_fig, all_point_fig, tgts_clean, preds_clean, mean_true, mean_pred
 
+# AUROC Testing Plots
+def balance_pos_neg(df, label_col="is_gt", random_state=0):
+    rng = np.random.default_rng(random_state)
+    df = df.copy()
+    pos_df = df[df[label_col]]
+    neg_df = df[~df[label_col]]
+
+    n_pos = len(pos_df)
+    n_neg = len(neg_df)
+    if n_pos == 0 or n_neg == 0:
+        logging.info("No positives or negatives, skipping balance")
+        return df
+
+    if n_neg < n_pos:
+        pos_idx = rng.choice(pos_df.index.to_numpy(), size=n_neg, replace=False)
+        pos_sample = pos_df.loc[pos_idx]
+        neg_sample = neg_df
+    else:
+        pos_sample = pos_df
+        neg_idx = rng.choice(neg_df.index.to_numpy(), size=n_pos, replace=False)
+        neg_sample = neg_df.loc[neg_idx]
+
+    balanced = pd.concat([pos_sample, neg_sample], axis=0)
+    return balanced.sample(frac=1.0, random_state=random_state).reset_index(drop=True)
+
+def create_random_distribution(scores: pd.Series, seed: int = 42) -> np.ndarray:
+    random.seed(seed)
+    uniform_distribution = np.random.uniform(low = scores.min(), high = scores.max(), size = len(scores))
+    resampled_scores = np.random.choice(uniform_distribution, size=len(scores), replace=True)
+    return resampled_scores
+
+def matrix_to_df(mat, tf_names, tg_names, colname):
+    """Flatten [T, G] matrix into (tf, tg, score) df."""
+    T, G = mat.shape
+    tf_idx, tg_idx = np.meshgrid(np.arange(T), np.arange(G), indexing="ij")
+    df = pd.DataFrame({
+        "Source": np.array(tf_names, dtype=object)[tf_idx.ravel()],
+        "Target": np.array(tg_names, dtype=object)[tg_idx.ravel()],
+        colname: mat.ravel(),
+    })
+    df["Source"] = df["Source"].astype(str).str.upper()
+    df["Target"] = df["Target"].astype(str).str.upper()
+    return df
+
+def make_label_df_universe(tf_names, tg_names, chip_tf_set, gt_set):
+    T, G = len(tf_names), len(tg_names)
+    tf_idx, tg_idx = np.meshgrid(np.arange(T), np.arange(G), indexing="ij")
+    df = pd.DataFrame({
+        "Source": np.array(tf_names, dtype=object)[tf_idx.ravel()],
+        "Target": np.array(tg_names, dtype=object)[tg_idx.ravel()],
+    })
+    df["Source"] = df["Source"].astype(str).str.upper()
+    df["Target"] = df["Target"].astype(str).str.upper()
+    df["is_gt"] = list(map(gt_set.__contains__, zip(df["Source"], df["Target"])))
+    # only ChIP TFs
+    df = df[df["Source"].isin(chip_tf_set)].reset_index(drop=True)
+
+    return df
+
+def label_edges(df, gt_edges):
+    df = df.copy()
+    df["is_gt"] = [(s, t) in gt_edges for s, t in zip(df["Source"], df["Target"])]
+    return df
+
+def filter_df_to_gene_set(df, gt_tfs, gt_tgs):
+    df = df.copy()
+    mask = df["Source"].isin(gt_tfs) & df["Target"].isin(gt_tgs)
+    df = df[mask].reset_index(drop=True)
+    return df
+
+def _compute_roc_auc(y_true, scores):
+    """
+    Minimal ROC/AUC for binary labels y_true in {0,1} and real-valued scores.
+    Returns fpr, tpr, auc.
+    """
+    y_true = np.asarray(y_true, dtype=np.int8)
+    scores = np.asarray(scores, dtype=np.float64)
+
+    # sort by descending score
+    order = np.argsort(-scores)
+    y = y_true[order]
+
+    P = y.sum()
+    N = len(y) - P
+    if P == 0 or N == 0:
+        return np.array([0, 1]), np.array([0, 1]), np.nan
+
+    # cumulative TP/FP as we move threshold down
+    tp = np.cumsum(y)
+    fp = np.cumsum(1 - y)
+
+    tpr = tp / P
+    fpr = fp / N
+
+    # prepend (0,0)
+    tpr = np.concatenate([[0.0], tpr])
+    fpr = np.concatenate([[0.0], fpr])
+
+    # trapezoidal AUC
+    auc = np.trapz(tpr, fpr)
+    return fpr, tpr, auc
+
+def compute_curves(df, score_col, label_col="is_gt", balance=True, name=""):
+    """Return AUROC, AUPRC, and PR/ROC curves for one method."""
+    df = df.dropna(subset=[score_col]).copy()
+    
+    if balance:
+        df = balance_pos_neg(df, label_col=label_col, random_state=0)
+        
+    if len(df) == 0 or df[label_col].nunique() < 2:
+        logging.info(f"Skipping {name}: need at least one positive and one negative, got {df[label_col].value_counts().to_dict()}")
+        return None
+    
+    y = df[label_col].astype(int).values
+    s = df[score_col].values
+
+    auroc = roc_auc_score(y, s)
+    auprc = average_precision_score(y, s)
+
+    prec, rec, _ = precision_recall_curve(y, s)
+    fpr, tpr, _ = roc_curve(y, s)
+
+    return {
+        "name": name,
+        "auroc": auroc,
+        "auprc": auprc,
+        "prec": prec,
+        "rec": rec,
+        "fpr": fpr,
+        "tpr": tpr,
+    }
+
+def plot_auroc_per_min_tg_r2(results_r2, min_r2_grid, baseline_macro, baseline_micro, experiment_dir):
+    fig, ax = plt.subplots(figsize=(9, 4))
+
+    ax.plot(results_r2["min_tg_r2"], results_r2["macro_auroc"], marker="o", label="macro")
+    ax.plot(results_r2["min_tg_r2"], results_r2["micro_auroc"], marker="o", label="micro")
+    ax.hlines(baseline_macro, min_r2_grid[0], min_r2_grid[-1],
+            color="grey", linestyle="dashed", label="baseline macro")
+    ax.hlines(baseline_micro, min_r2_grid[0], min_r2_grid[-1],
+            color="lightgrey", linestyle="dashed", label="baseline micro")
+
+    ax.set_title("Macro / Micro AUROC vs. min TG R²", fontsize=14)
+    ax.set_xlabel("Minimum TG R²", fontsize=11)
+    ax.set_ylabel("AUROC", fontsize=11)
+
+    # Major ticks every 0.2
+    ax.xaxis.set_major_locator(MultipleLocator(0.2))
+
+    # One minor tick between each major (every 0.1)
+    ax.xaxis.set_minor_locator(MultipleLocator(0.1))
+
+    ax.tick_params(axis="x", which="major", labelsize=11)
+    ax.tick_params(axis="y", which="major", labelsize=11)
+    ax.tick_params(axis="x", which="minor", length=4)  # just the small tick bars, no labels
+
+    ax.legend(bbox_to_anchor=(1.175, 0.5), loc="center", fontsize=11)
+    fig.tight_layout()
+    plt.savefig(Path(experiment_dir) / "threshold_GA_by_r2.svg")
+    plt.close()
+
+def plot_auroc_auprc(df, name, score_col, label_col="is_gt"):
+    """_summary_
+
+    Args:
+        name (str): Dataset name
+        score_col (str): Name of the score column
+        label_col (str): Name of the label column
+
+    Returns:
+        tuple(plt.Figure, float, float): AUROC/AUPRC Figure, AUROC, AUPRC
+    """
+    
+    df["random_scores"] = create_random_distribution(df[score_col])
+    
+    curves = compute_curves(df, score_col, label_col=label_col, balance=True, name=name)
+    rand_curves = compute_curves(df, "random_scores", label_col=label_col, balance=True, name=name)
+    
+    auroc = curves["auroc"]
+    auprc = curves["auprc"]
+    prec = curves["prec"]
+    rec = curves["rec"]
+    fpr = curves["fpr"]
+    tpr = curves["tpr"]
+    
+    rand_auroc = rand_curves["auroc"]
+    rand_auprc = rand_curves["auprc"]
+    rand_prec = rand_curves["prec"]
+    rand_rec = rand_curves["rec"]
+    rand_fpr = rand_curves["fpr"]
+    rand_tpr = rand_curves["tpr"]
+    
+    # ROC plot
+    fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(8, 4))
+    ax[0].plot(rand_fpr, rand_tpr, color="#7ab4e8", linestyle="--", lw=2)
+    ax[0].plot(fpr, tpr, lw=2, color="#4195df", label=f"AUROC = {auroc:.3f}\nRandom = {rand_auroc:.3f}")
+    ax[0].plot([0, 1], [0, 1], "k--", lw=1, alpha=0.5)
+    ax[0].set_xlabel("False Positive Rate")
+    ax[0].set_ylabel("True Positive Rate")
+    ax[0].set_title(f"AUROC")
+    ax[0].legend(
+        bbox_to_anchor=(0.5, -0.28),
+        loc="upper center",
+        borderaxespad=0.0
+    )
+    ax[0].set_xlim(0, 1)
+    ax[0].set_ylim(0, 1)
+    
+    # PR plot
+    ax[1].plot(rand_rec, rand_prec, color="#7ab4e8", linestyle="--", lw=2)
+    ax[1].plot(rec, prec, lw=2, color="#4195df", label=f"AUPRC = {auprc:.3f}\nRandom = {rand_auprc:.3f}")
+    ax[1].set_xlabel("Recall")
+    ax[1].set_ylabel("Precision")
+    ax[1].set_title(f"AUPRC")
+    ax[1].legend(
+        bbox_to_anchor=(0.5, -0.28),
+        loc="upper center",
+        borderaxespad=0.0
+    )
+    ax[1].set_ylim(0, 1.0)
+    ax[1].set_xlim(0, 1.0)
+    plt.suptitle(name, fontsize=14)
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    
+    return fig, auroc, auprc
+
+def plot_method_curve_variability(df_results, out_dir):
+    """
+    For each method in df_results, plot all ROC and PR curves across
+    ground truths and samples to visualize variability.
+
+    Parameters
+    ----------
+    df_results : pd.DataFrame
+        Must have columns:
+        - 'name'   : method name
+        - 'gt_name': ground truth identifier
+        - 'sample' : sample identifier (or 'FEATURES_ONLY' for feature-only runs)
+        - 'fpr', 'tpr', 'prec', 'rec' : arrays (ndarray/list)
+    out_dir : Path or str
+        Directory to save per-method figures.
+    feature_list : list of str, optional
+        If provided, you can choose to skip or style features differently.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Unique methods (including features unless you filter)
+    method_names = sorted(df_results["name"].unique())
+
+    for method in method_names:
+
+        df_m = df_results[df_results["name"] == method].copy()
+        if df_m.empty:
+            continue
+
+        # Build a label per curve: GT / sample
+        labels = df_m.apply(
+            lambda row: f"{row['gt_name']} / {row['sample']}", axis=1
+        )
+
+        # Figure + axes
+        fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(10, 4))
+
+        title_fontsize = 14
+        axes_fontsize = 12
+        tick_fontsize = 10
+
+        # Color cycle (reusable)
+        color_cycle = plt.rcParams["axes.prop_cycle"].by_key().get("color", ["tab:blue"])
+        n_colors = len(color_cycle)
+
+        # ================= ROC panel =================
+        for (idx, row), label in zip(df_m.iterrows(), labels):
+            fpr = row["fpr"]
+            tpr = row["tpr"]
+            if fpr is None or tpr is None:
+                continue
+
+            # choose a color deterministically based on label
+            c_idx = hash(label) % n_colors
+            color = color_cycle[c_idx]
+
+            ax[0].plot(
+                fpr, tpr,
+                lw=1.5,
+                alpha=0.4,
+                color=color,
+            )
+
+        ax[0].plot([0, 1], [0, 1], "k--", lw=1)
+        ax[0].set_xlabel("False Positive Rate", fontsize=axes_fontsize)
+        ax[0].set_ylabel("True Positive Rate", fontsize=axes_fontsize)
+        ax[0].set_title(f"ROC curves: {method}", fontsize=title_fontsize)
+        ax[0].set_xlim(0, 1)
+        ax[0].set_ylim(0, 1)
+        ax[0].tick_params(axis="both", labelsize=tick_fontsize)
+
+        # ================= PR panel =================
+        for (idx, row), label in zip(df_m.iterrows(), labels):
+            rec = row["rec"]
+            prec = row["prec"]
+            if rec is None or prec is None:
+                continue
+
+            c_idx = hash(label) % n_colors
+            color = color_cycle[c_idx]
+
+            ax[1].plot(
+                rec, prec,
+                lw=1.5,
+                alpha=0.4,
+                color=color,
+                label=label,
+            )
+
+        ax[1].set_xlabel("Recall", fontsize=axes_fontsize)
+        ax[1].set_ylabel("Precision", fontsize=axes_fontsize)
+        ax[1].set_title(f"PR curves: {method}", fontsize=title_fontsize)
+        ax[1].set_xlim(0, 1)
+        ax[1].set_ylim(0, 1)
+        ax[1].tick_params(axis="both", labelsize=tick_fontsize)
+
+        plt.tight_layout()
+
+        method_safe = (
+            method.replace(" ", "_")
+                  .replace("/", "_")
+                  .replace("+", "plus")
+                  .lower()
+        )
+        out_path = os.path.join(out_dir, f"{method_safe}_curve_variability.svg")
+        fig.savefig(out_path)
+        
+        plt.close(fig)
+
+def plot_method_gt_heatmap(df_pooled: pd.DataFrame, metric: str = "auroc", per_tf: bool = False) -> plt.Figure:
+    """
+    Plot a heatmap of METHOD (rows) x GROUND TRUTH (cols) for AUROC or AUPRC.
+
+    Rows are sorted by the mean metric across all ground truth datasets.
+    """
+    metric = metric.lower()
+    if metric not in ("auroc", "auprc"):
+        raise ValueError(f"metric must be 'auroc' or 'auprc', got {metric}")
+
+    metric_col = metric  # 'auroc' or 'auprc'
+
+    # 1) Order methods by mean metric across all GTs (descending)
+    method_order = (
+        df_pooled.groupby("name")[metric_col]
+        .mean()
+        .sort_values(ascending=False)
+        .index
+        .tolist()
+    )
+
+    # 2) Pivot to METHOD x GT matrix
+    heat_df = (
+        df_pooled
+        .pivot_table(index="name", columns="gt_name", values=metric_col)
+        .loc[method_order]  # apply sorted method order
+    )
+
+    # 3) Plot heatmap with better sizing
+    n_methods = len(heat_df.index)
+    n_gts = len(heat_df.columns)
+    
+    fig, ax = plt.subplots(
+        figsize=(
+            max(n_gts * 1.2, 4),      # Width: 1.5 inches per GT, min 6
+            max(n_methods * 0.4, 3),  # Height: 0.5 inches per method, min 4
+        )
+    )
+    
+    sns.heatmap(
+        heat_df,
+        annot=True,
+        fmt=".3f",
+        cmap="viridis",
+        vmin=0.3,
+        vmax=0.7,
+        cbar_kws={"label": metric.upper()},
+        ax=ax,
+    )
+
+    ax.set_xlabel("Ground truth dataset", fontsize=11)
+    ax.set_ylabel("Method", fontsize=11)
+    if per_tf == True:
+        ax.set_title(
+            f"Average per-TF {metric.upper()} score × ground truth\n"
+            f"(methods sorted by mean {metric.upper()} across GTs)",
+            fontsize=12,
+            pad=10,
+        )
+    else:
+        ax.set_title(
+            f"{metric.upper()} score × ground truth\n"
+            f"(methods sorted by mean {metric.upper()} across GTs)",
+            fontsize=12,
+            pad=10,
+        )
+    
+    # Improve tick label readability
+    plt.xticks(rotation=45, ha='right')
+    plt.yticks(rotation=0)
+    
+    fig.tight_layout()
+    return fig
+
+def plot_chiptf_metric_auroc_by_quantile_from_scores(
+    df,
+    score_col,
+    metric_name="scores",
+    quantile_step=0.02,
+    cmap_name="viridis",
+):
+    """
+    Plot ROC curves and AUROC vs score quantile for a given method,
+    using a long-form DataFrame with an 'is_gt' column.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Must contain at least:
+            - score_col : float scores
+            - "is_gt"   : boolean, True for ChIP edge, False otherwise
+        You should already have restricted df to the universe you care about
+        (e.g., ChIP TFs only) before calling this function.
+    score_col : str
+        Name of the column in df containing the scores for the method.
+    metric_name : str
+        Name to use in logging.infoouts and plot titles.
+    quantile_step : float
+        Step size for quantiles (e.g. 0.02).
+    cmap_name : str
+        Matplotlib colormap name.
+    """
+
+    # Drop missing scores
+    df_use = df.dropna(subset=[score_col]).copy()
+    
+    df_use = balance_pos_neg(df=df_use, label_col="is_gt")
+
+    scores = df_use[score_col].to_numpy(dtype=float)
+    y = df_use["is_gt"].astype(int).to_numpy()
+
+    # Filter out any non-finite scores
+    finite_mask = np.isfinite(scores)
+    scores = scores[finite_mask]
+    y = y[finite_mask]
+
+    if len(scores) == 0:
+        raise ValueError(f"[{metric_name}] No valid scores to evaluate.")
+
+    overall_frac = y.mean()
+
+    # ----- ROC curves by quantile subset -----
+    quantiles = np.arange(0.96, 0.04, -quantile_step)
+    cmap = plt.get_cmap(cmap_name)
+
+    fig_roc, ax_roc = plt.subplots(figsize=(6, 5))
+
+    qs_used = []
+    auc_scores = []
+    random_auc_scores = []
+    
+    for i, q in enumerate(quantiles):
+        thr = np.quantile(scores, q)
+        mask = scores >= thr
+        y_sub = y[mask]
+        s_sub = scores[mask]
+        
+        if len(s_sub) < 100:
+            continue
+        
+        # skip degenerate subsets
+        if len(y_sub) == 0 or y_sub.sum() == 0 or y_sub.sum() == len(y_sub):
+            continue
+
+        fpr, tpr, auc = _compute_roc_auc(y_sub, s_sub)
+
+        t = float(i) / max(1, len(quantiles) - 1)
+        color = cmap(1.0 - t)
+        ax_roc.plot(fpr, tpr, color=color, lw=1.5, alpha=0.7)
+
+        qs_used.append(q)
+        auc_scores.append(auc)
+
+    qs_used = np.array(qs_used)
+    auc_scores = np.array(auc_scores)
+
+    best_idx = np.nanargmax(auc_scores)
+    best_auc = float(auc_scores[best_idx])
+    best_q   = float(qs_used[best_idx])
+    logging.info(f"\t- {metric_name} Best AUROC {best_auc:.4f} above quantile {best_q:.3f}")
+
+    # diagonal baseline
+    ax_roc.plot([0, 1], [0, 1], "k--", lw=1, alpha=0.5)
+
+    ax_roc.set_xlim(0, 1)
+    ax_roc.set_ylim(0, 1)
+    ax_roc.set_xlabel("False positive rate")
+    ax_roc.set_ylabel("True positive rate")
+    ax_roc.set_title(f"ROC by score quantile ({metric_name})")
+
+    ax_roc.text(
+        1.02, 0.5,
+        f"Best AUROC = {best_auc:.3f}\nQuantile ≥ {best_q:.2f}",
+        transform=ax_roc.transAxes,
+        va="center",
+        ha="left",
+        clip_on=False,
+    )
+
+    plt.tight_layout()
+
+    # ----- BEST AUROC subset -----
+    best_thr = np.quantile(scores, best_q)
+    best_mask = scores >= best_thr
+    y_best = y[best_mask]
+    s_best = scores[best_mask]
+
+    fig_best, auc_best, auprc_best = plot_auroc_auprc(df=df_use[best_mask], name="", score_col=score_col, label_col="is_gt")
+    
+    fpr_best, tpr_best, auc_best = _compute_roc_auc(y_best, s_best)
+
+    fig_best.suptitle(
+        f"Best Quantile ROC\n{metric_name}, q ≥ {best_q:.2f}, AUC={auc_best:.3f}"
+    )
+    plt.show()
+
+    # ----- AUROC vs quantile figure -----
+    fig_auc, ax_auc = plt.subplots(figsize=(5, 4))
+    ax_auc.plot(qs_used, auc_scores, marker="o")
+    ax_auc.axhline(0.5, linestyle="--", linewidth=1, color="gray", alpha=0.7)
+
+    ax_auc.set_xlabel("Score quantile q (keep scores ≥ quantile(q))")
+    ax_auc.set_ylabel("AUROC within subset")
+    ax_auc.set_title(f"AUROC vs score quantile ({metric_name})")
+
+    # highlight best point
+    ax_auc.scatter([best_q], [best_auc], color="red", zorder=5, label="Best")
+    ax_auc.legend()
+
+    finite_auc = np.isfinite(auc_scores)
+    if finite_auc.any():
+        ymin = max(0.0, np.nanmin(auc_scores) - 0.05)
+        ymax = min(1.0, np.nanmax(auc_scores) + 0.05)
+        ax_auc.set_ylim(ymin, ymax)
+
+    plt.tight_layout()
+
+    return fig_roc, fig_auc, fig_best, best_auc, best_q
+
+def all_feature_auroc_auprc(feature_dict):
+    # -----------------------------
+    # Compute metrics for each method
+    # -----------------------------
+    results = []
+    rand_results = []
+    for name, df in feature_dict.items():
+        res = compute_curves(df, score_col="Score", name=name)
+        
+        if res is None:
+            # no usable data for this feature
+            continue
+        
+        results.append(res)
+        
+        rand_res = compute_curves(
+            df.assign(**{"Score": create_random_distribution(df["Score"])}),
+            score_col="Score",
+            name=f"{name} (Randomized Scores)"
+        )
+        rand_results.append(rand_res)
+
+    # -----------------------------
+    # Plot PR curves on one figure
+    # -----------------------------
+    colors = ["tab:blue", "tab:orange", "tab:green", "tab:red"]
+
+    fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(10,6))
+
+    # AUROC for each method
+    for i, (res, color) in enumerate(zip(results, colors)):
+        ax[0].plot(
+            res["fpr"], res["tpr"],
+            lw=2,
+            color=color,
+            label=f"{res['name']}: {res['auroc']:.2f}"
+        )
+        ax[0].plot(
+            rand_results[i]["fpr"], rand_results[i]["tpr"],
+            lw=1,
+            color=color,
+            linestyle="--",
+        )
+    ax[0].plot([0, 1], [0, 1], "k--", lw=1)
+    ax[0].set_xlabel("False Positive Rate")
+    ax[0].set_ylabel("True Positive Rate")
+    ax[0].set_title("TF–TG methods vs ChIP (ROC)")
+    ax[0].set_xlim(0, 1)
+    ax[0].set_ylim(0, 1)
+    ax[0].legend(
+        title="ROC Scores",
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.15),
+        frameon=False,
+        fontsize=10
+    )
+
+    # AUPRC for each method
+    for i, (res, color) in enumerate(zip(results, colors)):
+        ax[1].plot(
+            res["rec"], res["prec"],
+            lw=2,
+            color=color,
+            label=f"{res['name']}: {res['auprc']:.2f}"
+        )
+        ax[1].plot(
+            rand_results[i]["rec"], rand_results[i]["prec"],
+            lw=1,
+            color=color,
+            linestyle="--",
+        )
+
+    ax[1].set_xlabel("Recall")
+    ax[1].set_ylabel("Precision")
+    ax[1].set_title("TF–TG methods vs ChIP (Precision–Recall)")
+    ax[1].set_ylim(0, 1.0)
+    ax[1].set_xlim(0, 1.0)
+    ax[1].legend(
+        title="PRC Scores",
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.15),
+        frameon=False,
+        fontsize=10
+    )
+    plt.suptitle("AUROC and AUPRC All Model Features")
+    plt.tight_layout()
+    
+    return fig
+
+def plot_all_method_auroc_auprc(method_dict, gt_name, target_method="MultiomicTransformer", label_col="is_gt"):
+    results = []
+    rand_results = []
+
+    for name, df_m in method_dict.items():
+        
+        df = df_m.copy()
+        
+        if name != target_method:
+            df["Score"] = df["Score"].abs()
+        
+        # Compute and plot metrics
+        res = compute_curves(df, score_col="Score", name=name, balance=True, label_col=label_col)
+
+        if res is None:
+            logging.info(f"Skipping {name} on {gt_name} (no usable positives/negatives)")
+            continue
+
+        results.append(res)
+        
+        rand_res = compute_curves(
+            df.assign(**{
+                "Score": create_random_distribution(df["Score"])
+            }),
+            score_col="Score",
+            label_col=label_col,
+            name=f"{name} (Randomized Scores)",
+            balance=False  # Already balanced
+        )
+        rand_results.append(rand_res)
+        
+    # If nothing usable, bail out gracefully
+    if not results or not rand_results:
+        logging.info(f"No valid methods for {gt_name}")
+        fig, ax = plt.subplots()
+        return fig, results
+
+    # Make sure lengths match
+    min_len = min(len(results), len(rand_results))
+    results = results[:min_len]
+    rand_results = rand_results[:min_len]
+
+    # -----------------------------
+    # Sort methods
+    # -----------------------------
+    paired = list(zip(results, rand_results))
+
+    if not paired:
+        logging.info(f"No valid methods for {gt_name}")
+        fig, ax = plt.subplots()
+        return fig, results  # results will be empty
+
+    # Sorted for ROC: by AUROC (descending)
+    paired_by_auroc = sorted(paired, key=lambda pair: pair[0]["auroc"], reverse=True)
+
+    # Sorted for PR: by AUPRC (descending)
+    paired_by_auprc = sorted(paired, key=lambda pair: pair[0]["auprc"], reverse=True)
+
+    # -----------------------------
+    # Build color/alpha map per method
+    # -----------------------------
+    base_colors = ["tab:blue", "tab:orange", "tab:green", "tab:red", "tab:purple",
+                   "tab:brown", "tab:pink", "tab:gray", "tab:olive", "tab:cyan"]
+
+    # All base method names (no "(Randomized Scores)" suffix)
+    base_method_names = {res["name"] for res in results}
+
+    # Colors available for non-target methods (avoid explicit red)
+    other_colors = [c for c in base_colors if c not in ("red", "tab:red")]
+    random.shuffle(other_colors)
+    other_color_cycle = cycle(other_colors)
+
+    color_map = {}
+
+    for m in base_method_names:
+        if target_method in m:
+            # Highlight MultiomicTransformer
+            color_map[m] = ("red", 1.0)
+        else:
+            color_map[m] = (next(other_color_cycle), 0.6)
+
+    # -----------------------------
+    # Plot PR + ROC curves
+    # -----------------------------
+    fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(10, 8))
+
+    title_fontsize = 14      # panel titles
+    axes_fontsize = 12       # axis labels, legend text
+    tick_fontsize = 10       # tick labels
+
+    # ===== ROC panel: sorted by AUROC =====
+    for res, rand_res in paired_by_auroc:
+        base_name = res["name"]
+        color, alpha = color_map.get(base_name, ("tab:gray", 0.6))
+
+        ax[0].plot(
+            res["fpr"], res["tpr"],
+            lw=2,
+            color=color,
+            alpha=alpha,
+            label=f"{res['name']}: {res['auroc']:.2f}"
+        )
+        ax[0].plot(
+            rand_res["fpr"], rand_res["tpr"],
+            lw=1,
+            color=color,
+            alpha=alpha,
+            linestyle="--",
+        )
+
+    ax[0].plot([0, 1], [0, 1], "k--", lw=1)
+    ax[0].set_xlabel("False Positive Rate", fontsize=axes_fontsize)
+    ax[0].set_ylabel("True Positive Rate", fontsize=axes_fontsize)
+    ax[0].set_title("AUROC", fontsize=title_fontsize)
+    ax[0].set_xlim(0, 1)
+    ax[0].set_ylim(0, 1)
+    ax[0].tick_params(axis="both", labelsize=tick_fontsize)
+
+    leg = ax[0].legend(
+        title="ROC Scores",
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.18),
+        frameon=False,
+        fontsize=axes_fontsize,
+        title_fontsize=axes_fontsize,
+    )
+    leg.get_title().set_fontweight("bold")
+
+    # ===== PR panel: sorted by AUPRC =====
+    for res, rand_res in paired_by_auprc:
+        base_name = res["name"]
+        color, alpha = color_map.get(base_name, ("tab:gray", 0.6))
+
+        ax[1].plot(
+            res["rec"], res["prec"],
+            lw=2,
+            color=color,
+            alpha=alpha,
+            label=f"{res['name']}: {res['auprc']:.2f}"
+        )
+        ax[1].plot(
+            rand_res["rec"], rand_res["prec"],
+            lw=1,
+            color=color,
+            alpha=alpha,
+            linestyle="--",
+        )
+
+    ax[1].set_xlabel("Recall", fontsize=axes_fontsize)
+    ax[1].set_ylabel("Precision", fontsize=axes_fontsize)
+    ax[1].set_title("AUPRC", fontsize=title_fontsize)
+    ax[1].set_xlim(0, 1.0)
+    ax[1].set_ylim(0, 1.0)
+    ax[1].tick_params(axis="both", labelsize=tick_fontsize)
+
+    leg = ax[1].legend(
+        title="PRC Scores",
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.18),
+        frameon=False,
+        fontsize=axes_fontsize,
+        title_fontsize=axes_fontsize,
+    )
+    leg.get_title().set_fontweight("bold")
+
+    plt.suptitle(f"All Methods vs {gt_name}", fontsize=title_fontsize + 2)
+    plt.tight_layout()
+    
+    return fig, results
+
+def plot_all_results_auroc_boxplot(df, per_tf=False):
+    # 1. Order methods by mean AUROC (highest → lowest)
+    method_order = (
+        df.groupby("name")["auroc"]
+        .mean()
+        .sort_values(ascending=False)
+        .index
+    )
+
+    # 2. Prepare data in that order
+    data = [df.loc[df["name"] == m, "auroc"].values for m in method_order]
+
+    feature_list = [
+        "Gradient Attribution",
+        "TF Knockout",
+        "TF-TG Embedding Similarity",
+        "Shortcut Attention"
+    ]
+    my_color = "#4195df"
+    other_color = "#747474"
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    # Baseline random line
+    ax.axhline(y=0.5, color="#2D2D2D", linestyle='--', linewidth=1)
+
+    # --- Boxplot (existing styling) ---
+    bp = ax.boxplot(
+        data,
+        tick_labels=method_order,
+        patch_artist=True,
+        showfliers=False
+    )
+
+    # Color boxes: light blue for your methods, grey for others
+    for box, method in zip(bp["boxes"], method_order):
+        if method in feature_list:
+            box.set_facecolor(my_color)
+        else:
+            box.set_facecolor(other_color)
+
+    # Medians in black
+    for median in bp["medians"]:
+        median.set_color("black")
+
+    # --- NEW: overlay jittered points for each method ---
+    for i, method in enumerate(method_order, start=1):
+        y = df.loc[df["name"] == method, "auroc"].values
+        if len(y) == 0:
+            continue
+
+        # Small horizontal jitter around the box center (position i)
+        x = np.random.normal(loc=i, scale=0.06, size=len(y))
+
+        # Match point color to box color
+        point_color = my_color if method in feature_list else other_color
+
+        ax.scatter(
+            x, y,
+            color=point_color,
+            alpha=0.7,
+            s=18,
+            edgecolor="k",
+            linewidth=0.3,
+            zorder=3,
+        )
+        
+        mean_val = y.mean()
+        ax.scatter(
+            i, mean_val,
+            color="white",
+            edgecolor="k",
+            s=30,
+            zorder=4,
+        )
+
+    ax.set_xlabel("Method")
+    ax.set_ylabel("AUROC across ground truths")
+    if per_tf == True:
+        ax.set_title("per-TF AUROC Scores per method")
+        ax.set_ylim((0.0, 1.0))
+    else:
+        ax.set_title("AUROC Scores per method")
+        ax.set_ylim((0.2, 0.8))
+
+    plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
+    plt.tight_layout()
+    
+    return fig
+
+def plot_all_results_auprc_boxplot(df, per_tf=False):
+    # 1. Order methods by mean AUPRC (highest → lowest)
+    method_order = (
+        df.groupby("name")["auprc"]
+        .mean()
+        .sort_values(ascending=False)
+        .index
+    )
+
+    # 2. Prepare data in that order
+    data = [df.loc[df["name"] == m, "auprc"].values for m in method_order]
+
+    feature_list = [
+        "Gradient Attribution",
+        "TF Knockout",
+        "TF-TG Embedding Similarity",
+        "Shortcut Attention"
+    ]
+    my_color = "#4195df"
+    other_color = "#747474"
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    # Baseline line (same style as before)
+    ax.axhline(y=0.5, color="#2D2D2D", linestyle='--', linewidth=1)
+
+    # --- Boxplot (existing styling) ---
+    bp = ax.boxplot(
+        data,
+        tick_labels=method_order,
+        patch_artist=True,
+        showfliers=False
+    )
+
+    # Color boxes: light blue for your methods, grey for others
+    for box, method in zip(bp["boxes"], method_order):
+        if method in feature_list:
+            box.set_facecolor(my_color)
+        else:
+            box.set_facecolor(other_color)
+
+    # Medians in black
+    for median in bp["medians"]:
+        median.set_color("black")
+
+    # --- overlay jittered points for each method ---
+    for i, method in enumerate(method_order, start=1):
+        y = df.loc[df["name"] == method, "auprc"].values
+        if len(y) == 0:
+            continue
+
+        # Small horizontal jitter around the box center (position i)
+        x = np.random.normal(loc=i, scale=0.06, size=len(y))
+
+        # Match point color to box color
+        point_color = my_color if method in feature_list else other_color
+
+        ax.scatter(
+            x, y,
+            color=point_color,
+            alpha=0.7,
+            s=18,
+            edgecolor="k",
+            linewidth=0.3,
+            zorder=3,
+        )
+        
+        mean_val = y.mean()
+        ax.scatter(
+            i, mean_val,
+            color="white",
+            edgecolor="k",
+            s=30,
+            zorder=4,
+        )
+
+    ax.set_xlabel("Method")
+    ax.set_ylabel("AUPRC across ground truths")
+    if per_tf == True:
+        ax.set_title("per-TF AUPRC Scores per method")
+        ax.set_ylim((0.0, 1.0))
+    else:
+        ax.set_title("AUPRC Scores per method")
+        ax.set_ylim((0.2, 0.8))
+
+    plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
+    plt.tight_layout()
+    
+    return fig
+
 def locate_last_checkpoint(experiment_dir):
     checkpoint_files = sorted(experiment_dir.glob("checkpoint_*.pt"))
     if not checkpoint_files:
@@ -521,21 +1517,21 @@ if __name__ == "__main__":
     if "chr19" in [p.name for p in Path(experiment_dir / experiment).iterdir()] and experiment != "mESC_no_scale_linear":
         EXPERIMENT_DIR = experiment_dir / experiment / "chr19" / training_num
         
-        exp_fig_dir = FIG_DIR / experiment / training_num
-        exp_fig_data_dir = FIG_DATA / experiment / training_num
+        exp_fig_dir = FIG_DIR / experiment 
+        exp_fig_data_dir = FIG_DATA / experiment
     else:
         EXPERIMENT_DIR = experiment_dir / experiment / training_num
         
-        exp_fig_dir = FIG_DIR / experiment / training_num
-        exp_fig_data_dir = FIG_DATA / experiment / training_num
+        exp_fig_dir = FIG_DIR / experiment
+        exp_fig_data_dir = FIG_DATA / experiment
 
     logging.info(f"Selected experiment directory: {EXPERIMENT_DIR}")
 
     if not os.path.exists(exp_fig_data_dir):
-        os.makedirs(exp_fig_data_dir)
+        os.makedirs(exp_fig_data_dir, exist_ok=True)
         
     if not os.path.exists(exp_fig_dir):
-        os.makedirs(exp_fig_dir)
+        os.makedirs(exp_fig_dir, exist_ok=True)
 
     DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     BATCH  = 32
@@ -619,6 +1615,211 @@ if __name__ == "__main__":
     np.save(r2_acc_dir / "mean_pred.npy", mean_pred)
 
     logging.info("All done!")
+    
+    # ---- AUROC Testing Plots ----
+    df_results = pd.read_csv(EXPERIMENT_DIR / "auroc_auprc_results_detailed.csv", index_col=None)
+    df_pooled = (
+        df_results
+        .groupby(["gt_name", "name"], as_index=False)
+        .agg(
+            auroc=("auroc", "mean"),
+            auprc=("auprc", "mean"),
+        )
+    )
+
+    # Optional: keep a 'sample' column so existing plotting
+    # functions expecting it keep working
+    df_pooled["sample"] = "POOLED"
+
+    df_results.to_csv(
+        exp_fig_data_dir / "auroc_auprc_pooled_heatmap_data.csv",
+        index=False,
+    )
+
+    auroc_heat_fig = plot_method_gt_heatmap(df_results, metric="auroc")
+    auroc_heat_fig.savefig(
+        EXPERIMENT_DIR / "method_gt_auroc_heatmap_pooled.png",
+        dpi=300,
+    )
+    auroc_heat_fig.savefig(
+        exp_fig_dir / f"method_gt_auroc_heatmap_pooled.svg"
+    )
+    plt.close(auroc_heat_fig)
+
+    auprc_heat_fig = plot_method_gt_heatmap(df_results, metric="auprc")
+    auprc_heat_fig.savefig(
+        EXPERIMENT_DIR / "method_gt_auprc_heatmap_pooled.png",
+        dpi=300,
+    )
+    auprc_heat_fig.savefig(
+        exp_fig_dir / f"method_gt_auprc_heatmap_pooled.svg"
+    )
+    plt.close(auprc_heat_fig)
+
+    # ------------------------------------------------------------
+    # 2) Method ranking on pooled AUROCs
+    # ------------------------------------------------------------
+    method_rank_pooled = (
+        df_pooled.groupby("name")
+        .agg(
+            mean_auroc=("auroc", "mean"),
+            std_auroc=("auroc", "std"),
+            mean_auprc=("auprc", "mean"),
+            std_auprc=("auprc", "std"),
+            n_gt=("gt_name", "nunique"),
+        )
+        .sort_values("mean_auroc", ascending=False)
+    )
+
+    logging.info("\n=== Method ranking by POOLED AUROC (all TFs together) ===")
+    logging.info(method_rank_pooled)
+
+    method_rank_pooled.to_csv(
+        EXPERIMENT_DIR / "method_ranking_by_auroc_pooled.csv"
+    )
+
+    # ------------------------------------------------------------
+    # 3) Per-GT table for boxplots (still one row per (gt_name, method))
+    # ------------------------------------------------------------
+    per_gt_rank = (
+        df_pooled
+        .sort_values(["gt_name", "auroc"], ascending=[True, False])
+        [["gt_name", "sample", "name", "auroc", "auprc"]]
+    )
+    per_gt_rank.to_csv(
+        EXPERIMENT_DIR / "per_gt_method_aucs_detailed.csv",
+        index=False,
+    )
+
+    # Boxplots reflect pooled AUROC/AUPRC per method & GT
+    all_auroc_boxplots = plot_all_results_auroc_boxplot(per_gt_rank)
+    all_auprc_boxplots = plot_all_results_auprc_boxplot(per_gt_rank)
+
+    all_auroc_boxplots.savefig(
+        EXPERIMENT_DIR / "all_results_auroc_boxplot_pooled.png",
+        dpi=300,
+    )
+    all_auprc_boxplots.savefig(
+        EXPERIMENT_DIR / "all_results_auprc_boxplot_pooled.png",
+        dpi=300,
+    )
+    all_auroc_boxplots.savefig(
+        exp_fig_dir / f"all_results_auroc_boxplot_pooled.svg"
+    )
+    all_auprc_boxplots.savefig(
+        exp_fig_dir / f"all_results_auprc_boxplot_pooled.svg"
+    )
+    plt.close(all_auroc_boxplots)
+    plt.close(all_auprc_boxplots)
+
+
+    # ------------------------------------------------------------
+    # 4) Per-TF metrics, ranking, and boxplots
+    # ------------------------------------------------------------
+    per_tf_metrics = pd.read_csv(EXPERIMENT_DIR / "per_tf_auroc_auprc_detailed.csv", index_col=None)
+    
+    # 4a) Create per-TF method ranking
+    # Average across TFs within each (method, GT)
+    method_gt_avg = (
+        per_tf_metrics
+        .groupby(['method', 'gt_name'], as_index=False)
+        .agg(
+            auroc=('auroc', 'mean'),
+            auprc=('auprc', 'mean'),
+            n_tfs=('tf', 'nunique'),
+        )
+    )
+    
+    # Then average across GTs for each method
+    method_rank_per_tf = (
+        method_gt_avg
+        .groupby('method')
+        .agg(
+            mean_auroc=('auroc', 'mean'),
+            std_auroc=('auroc', 'std'),
+            mean_auprc=('auprc', 'mean'),
+            std_auprc=('auprc', 'std'),
+            n_gt=('gt_name', 'nunique'),
+        )
+        .sort_values('mean_auroc', ascending=False)
+    )
+    
+    logging.info("\n=== Method ranking by PER-TF AUROC (averaged across TFs) ===")
+    logging.info(method_rank_per_tf)
+    
+    method_rank_per_tf.to_csv(
+        EXPERIMENT_DIR / "method_ranking_by_per_tf_auroc.csv"
+    )
+    
+    # 4b) Create per-TF boxplots
+    # Format data for boxplot functions: need ['name', 'auroc', 'auprc']
+    # Use RAW per-TF metrics, not the aggregated ranking
+    per_tf_for_plot = per_tf_metrics[['method', 'auroc', 'auprc']].copy()
+    per_tf_for_plot = per_tf_for_plot.rename(columns={'method': 'name'})
+    
+    per_tf_for_plot.to_csv(
+        exp_fig_data_dir / "per_tf_auroc_auprc_data.csv",
+        index=False,
+    )
+    
+    logging.info("Creating per-TF AUROC and AUPRC boxplots...")
+    
+    per_tf_auroc_boxplot = plot_all_results_auroc_boxplot(per_tf_for_plot, per_tf=True)
+    per_tf_auprc_boxplot = plot_all_results_auprc_boxplot(per_tf_for_plot, per_tf=True)
+    
+    per_tf_auroc_boxplot.savefig(EXPERIMENT_DIR / "all_results_auroc_boxplot_per_tf.png",dpi=300)
+    per_tf_auprc_boxplot.savefig(EXPERIMENT_DIR / "all_results_auprc_boxplot_per_tf.png",dpi=300)
+    
+    per_tf_auroc_boxplot.savefig(exp_fig_dir / f"all_results_auroc_boxplot_per_tf.svg")
+    per_tf_auprc_boxplot.savefig(exp_fig_dir / f"all_results_auprc_boxplot_per_tf.svg")
+    plt.close(per_tf_auroc_boxplot)
+    plt.close(per_tf_auprc_boxplot)
+        
+    # Save pooled per-GT metrics
+    per_gt_rank.to_csv(
+        EXPERIMENT_DIR / "per_gt_method_aucs_pooled.csv",
+        index=False,
+    )
+    
+    # 4a) Create per-TF method ranking
+    method_gt_avg = (
+        per_tf_metrics
+        .groupby(['method', 'gt_name'], as_index=False)
+        .agg(
+            auroc=('auroc', 'mean'),
+            auprc=('auprc', 'mean'),
+            n_tfs=('tf', 'nunique'),
+        )
+    )
+
+    # For heatmap input, rename 'method' -> 'name'
+    method_gt_avg_for_heatmap = method_gt_avg.rename(columns={'method': 'name'})
+    
+    method_gt_avg_for_heatmap.to_csv(
+        EXPERIMENT_DIR / "per_tf_auroc_auprc_data.csv",
+        index=False,
+    )
+
+    # Per-TF AUROC heatmap
+    auroc_heat_fig = plot_method_gt_heatmap(
+        method_gt_avg_for_heatmap,
+        metric="auroc",
+        per_tf=True,
+    )
+    auroc_heat_fig.savefig(EXPERIMENT_DIR / "per_tf_auroc_heatmap.png", dpi=300)
+    auroc_heat_fig.savefig(exp_fig_dir / f"per_tf_auroc_heatmap.svg")
+    plt.close(auroc_heat_fig)
+
+    # Per-TF AUPRC heatmap
+    auprc_heat_fig = plot_method_gt_heatmap(
+        method_gt_avg_for_heatmap,
+        metric="auprc",
+        per_tf=True,
+    )
+    auprc_heat_fig.savefig(EXPERIMENT_DIR / "per_tf_auprc_heatmap.png", dpi=300)
+    auprc_heat_fig.savefig(exp_fig_dir / f"per_tf_auprc_heatmap.svg")
+    plt.close(auprc_heat_fig)
+
     
     
     

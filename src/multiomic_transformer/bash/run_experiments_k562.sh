@@ -2,14 +2,14 @@
 #SBATCH --job-name=grn_experiments
 #SBATCH --output=LOGS/transformer_logs/experiments/%x_%A/%x_%A_%a.log
 #SBATCH --error=LOGS/transformer_logs/experiments/%x_%A/%x_%A_%a.err
-#SBATCH --time=16:00:00
+#SBATCH --time=12:00:00
 #SBATCH -p dense
 #SBATCH -N 1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:v100:2
 #SBATCH -c 16
 #SBATCH --mem=192G
-#SBATCH --array=0-11%6
+#SBATCH --array=0-1%2
 
 set -euo pipefail
 
@@ -104,7 +104,7 @@ EXPERIMENTS=(
     # "strict_10_pct_filtering|K562_strict_10_pct_filtering|MIN_GENES_PER_CELL=100;MIN_PEAKS_PER_CELL=100;HOPS=0;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.1;FILTER_OUT_LOWEST_PCT_PEAKS=0.1"
     # "40k_distance_scale_factor|K562_40k_distance_scale_factor|DISTANCE_SCALE_FACTOR=40000"
     # "10k_distance_scale_factor|K562_10k_distance_scale_factor|DISTANCE_SCALE_FACTOR=10000"
-    # "150k_max_peak_dist|K562_150k_max_peak_dist|MAX_PEAK_DISTANCE=150000"
+    "150k_max_peak_dist|K562_150k_max_peak_dist|MAX_PEAK_DISTANCE=150000"
     # "50k_max_peak_dist|K562_50k_max_peak_dist|MAX_PEAK_DISTANCE=50000"
     # "slow_decay_long_range_two_hop|K562_slow_decay_long_range_two_hop|DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;HOPS=2"
     # "slow_decay_long_range|K562_slow_decay_long_range|DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;HOPS=1"
@@ -113,18 +113,17 @@ EXPERIMENTS=(
     # "two_hops|K562_two_hops|HOPS=2"
     # "loose_1_pct_filter_50_min_per_cell|K562_loose_1_pct_filter_50_min_per_cell|MIN_GENES_PER_CELL=50;MIN_PEAKS_PER_CELL=50;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.01;FILTER_OUT_LOWEST_PCT_PEAKS=0.01"
     # "small_model_loose_1_pct_filtering|K562_small_model_loose_1_pct_filtering|MIN_GENES_PER_CELL=50;MIN_PEAKS_PER_CELL=50;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.01;FILTER_OUT_LOWEST_PCT_PEAKS=0.01;D_MODEL=128;D_FF=512;BATCH_SIZE=8"
-    
     "two_hops_small_batch|K562_two_hops_small_batch|HOPS=2;BATCH_SIZE=8"
-    "two_hops_150k_max_peak_dist|K562_two_hops_150k_max_peak_dist|HOPS=2;MAX_PEAK_DISTANCE=150000"
-    "two_hops_slow_decay_long_range|K562_two_hops_slow_decay_long_range|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000"
-    "two_hops_slow_decay_long_range_small_batch|K562_two_hops_slow_decay_long_range_small_batch|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8"
-    "three_hops_small_batch|K562_three_hops_small_batch|HOPS=3;BATCH_SIZE=8"
-    "two_hops_50k_max_peak_dist|K562_two_hops_50k_max_peak_dist|HOPS=2;MAX_PEAK_DISTANCE=50000"
-    "two_hops_10k_distance_scale_factor|K562_two_hops_10k_distance_scale_factor|HOPS=2;DISTANCE_SCALE_FACTOR=10000"
-    "two_hops_40k_distance_scale_factor|K562_two_hops_40k_distance_scale_factor|HOPS=2;DISTANCE_SCALE_FACTOR=40000"
-    "two_hops_loose_1_pct_filtering|K562_two_hops_loose_1_pct_filtering|HOPS=2;MIN_GENES_PER_CELL=150;MIN_PEAKS_PER_CELL=50;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.01;FILTER_OUT_LOWEST_PCT_PEAKS=0.01"
-    "two_hops_moderate_5_pct_filtering_small_batch|K562_two_hops_moderate_5_pct_filtering_small_batch|HOPS=2;BATCH_SIZE=8;MIN_GENES_PER_CELL=125;MIN_PEAKS_PER_CELL=75;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.05;FILTER_OUT_LOWEST_PCT_PEAKS=0.05"
-    "small_model_two_hops_long_range_small_batch|K562_small_model_two_hops_long_range_small_batch|D_MODEL=128;D_FF=512;HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8"
+    # "two_hops_150k_max_peak_dist|K562_two_hops_150k_max_peak_dist|HOPS=2;MAX_PEAK_DISTANCE=150000"
+    # "two_hops_slow_decay_long_range|K562_two_hops_slow_decay_long_range|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000"
+    # "two_hops_slow_decay_long_range_small_batch|K562_two_hops_slow_decay_long_range_small_batch|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8"
+    # "three_hops_small_batch|K562_three_hops_small_batch|HOPS=3;BATCH_SIZE=8"
+    # "two_hops_50k_max_peak_dist|K562_two_hops_50k_max_peak_dist|HOPS=2;MAX_PEAK_DISTANCE=50000"
+    # "two_hops_10k_distance_scale_factor|K562_two_hops_10k_distance_scale_factor|HOPS=2;DISTANCE_SCALE_FACTOR=10000"
+    # "two_hops_40k_distance_scale_factor|K562_two_hops_40k_distance_scale_factor|HOPS=2;DISTANCE_SCALE_FACTOR=40000"
+    # "two_hops_loose_1_pct_filtering|K562_two_hops_loose_1_pct_filtering|HOPS=2;MIN_GENES_PER_CELL=150;MIN_PEAKS_PER_CELL=50;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.01;FILTER_OUT_LOWEST_PCT_PEAKS=0.01"
+    # "two_hops_moderate_5_pct_filtering_small_batch|K562_two_hops_moderate_5_pct_filtering_small_batch|HOPS=2;BATCH_SIZE=8;MIN_GENES_PER_CELL=125;MIN_PEAKS_PER_CELL=75;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.05;FILTER_OUT_LOWEST_PCT_PEAKS=0.05"
+    # "small_model_two_hops_long_range_small_batch|K562_small_model_two_hops_long_range_small_batch|D_MODEL=128;D_FF=512;HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8"
 )
 
 
@@ -594,7 +593,8 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
     # ---------- torchrun multi-node launch ----------
     # Pick the first node as rendezvous/master
     MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
-    MASTER_PORT=29500
+    # Use dynamic port based on job ID to avoid conflicts when multiple jobs run on same node
+    MASTER_PORT=$((29500 + (SLURM_JOB_ID % 1000)))
     export MASTER_ADDR MASTER_PORT
 
     echo "[INFO] MASTER_ADDR=${MASTER_ADDR}, MASTER_PORT=${MASTER_PORT}"
@@ -680,17 +680,28 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
     MODEL_FILE="trained_model.pt"
     TRAINING_NUM=""
     
-    for dir in $(ls -d "${OUTPUT_DIR}"/model_training_* 2>/dev/null | sort -V -r); do
-        if [ -f "${dir}/${CHROM_ID}/${MODEL_FILE}" ]; then
+    for dir in $(ls -d "${OUTPUT_DIR}/${CHROM_ID}"/model_training_* 2>/dev/null | sort -V -r); do
+        if [ -f "${dir}/${MODEL_FILE}" ]; then
             TRAINING_NUM=$(basename "$dir")
             break
         fi
     done
 
     # Check if a valid training directory was found
-    if [ -n "${TRAINING_NUM}" ] && [ -f "${OUTPUT_DIR}/${TRAINING_NUM}/${CHROM_ID}/${MODEL_FILE}" ]; then
+    if [ -n "${TRAINING_NUM}" ] && [ -f "${OUTPUT_DIR}/${CHROM_ID}/${TRAINING_NUM}/${MODEL_FILE}" ]; then
         echo "[INFO] Selected latest training directory: ${TRAINING_NUM}"
-        echo "[INFO] Found trained model at ${OUTPUT_DIR}/${TRAINING_NUM}/${CHROM_ID}/${MODEL_FILE}"
+        echo "[INFO] Found trained model at ${OUTPUT_DIR}/${CHROM_ID}/${TRAINING_NUM}/${MODEL_FILE}"
+
+        echo ""
+        echo "Running AUROC Testing..."
+        poetry run python ./src/multiomic_transformer/utils/auroc_testing.py \
+            --experiment "${DATASET_NAME}" \
+            --training_num "${TRAINING_NUM}" \
+            --chrom_id "${CHROM_ID}" \
+            --experiment_dir "${OUTPUT_DIR}" \
+            --model_file "${MODEL_FILE}" \
+            --dataset_type "k562" \
+            --sample_name_list "${SAMPLE_NAMES}"
 
         echo "Plotting Training Figures..."
         poetry run python ./src/multiomic_transformer/utils/plotting.py \
@@ -701,24 +712,13 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
             --model_file "${MODEL_FILE}"
 
         echo ""
-        echo "Running AUROC Testing..."
-        poetry run python ./src/multiomic_transformer/utils/auroc_testing.py \
-            --experiment "${DATASET_NAME}" \
-            --training_num "${TRAINING_NUM}" \
-            --chrom_id "${CHROM_ID}" \
-            --experiment_dir "${OUTPUT_DIR}" \
-            --model_file "${MODEL_FILE}" \
-            --dataset_type "macrophage" \
-            --sample_name_list "${SAMPLE_NAMES}"
-
-        echo ""
         echo "=========================================="
         echo "  EXPERIMENT COMPLETED: ${EXPERIMENT_NAME}"
         echo "  DATASET: ${DATASET_NAME}"
         echo "=========================================="
         echo ""
     else
-        echo "[WARNING] Trained model not found at ${OUTPUT_DIR}/${TRAINING_NUM}/${CHROM_ID}/${MODEL_FILE}"
+        echo "[WARNING] Trained model not found at ${OUTPUT_DIR}/${CHROM_ID}/${TRAINING_NUM}/${MODEL_FILE}"
         echo "[WARNING] Skipping plotting and AUROC testing"
         echo ""
         echo "=========================================="

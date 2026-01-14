@@ -9,17 +9,14 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 4
 #SBATCH --mem=64G
-#SBATCH --array=0%6
+#SBATCH --array=0-47%10
 
 set -euo pipefail
-
 cd "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
-
 source .venv/bin/activate
-
 EXPERIMENT_DIR=${EXPERIMENT_DIR:-/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments}
 
-PLOTTING_EXPERIMENT_LIST=(
+EXPERIMENT_LIST=(
     # "mESC_no_scale_linear|model_training_128_10k_metacells|trained_model.pt"
     # "mESC_no_scale_linear|model_training_192_1k_metacells|trained_model.pt"
     # "mESC_no_scale_linear|model_training_192_5k_metacells|trained_model.pt"
@@ -39,7 +36,6 @@ PLOTTING_EXPERIMENT_LIST=(
     # "mESC_max_dist_bias|model_training_002|trained_model.pt"
     # "mESC_slow_decay_max_dist|model_training_001|trained_model.pt"
     # "mESC_filter_lowest_ten_pct|model_training_003|trained_model.pt"
-
     # "mESC_lower_peak_threshold|model_training_001|trained_model.pt"
     # "mESC_no_filter_to_nearest_gene|model_training_003|trained_model.pt"
     # "mESC_smaller_window_size|model_training_004|trained_model.pt"
@@ -62,9 +58,81 @@ PLOTTING_EXPERIMENT_LIST=(
     # "mESC_promoter_5kb|model_training_001|trained_model.pt"
     # "mESC_very_short_range|model_training_001|trained_model.pt"
     # "mESC_long_range_enhancers|model_training_001|trained_model.pt"
+    # "mESC_slow_decay_long_range_two_hop|model_training_001|trained_model.pt"
+    # "mESC_slow_decay_long_range_zero_hops|model_training_001|trained_model.pt"
+    # "mESC_decay_30k_long_range_two_hop|model_training_001|trained_model.pt"
+    # "mESC_decay_50k_long_range_two_hop|model_training_001|trained_model.pt"
+    # "mESC_decay_75k_long_range_two_hop|model_training_001|trained_model.pt"
+    # "mESC_promoter_only_5kb_two_hop|model_training_001|trained_model.pt"
+    # "mESC_promoter_only_10kb_two_hop|model_training_001|trained_model.pt"
+    # "mESC_promoter_only_2kb_two_hop|model_training_001|trained_model.pt"
 
-    "Macrophage_base_settings|model_training_005|trained_model.pt"
+    # "Macrophage_base_settings|model_training_006|trained_model.pt"
+    # "Macrophage_model_d_128_ff_512|model_training_001|trained_model.pt"
+    # "Macrophage_small_batch_size|model_training_002|trained_model.pt"
+    # "Macrophage_loose_1_pct_filtering|model_training_001|trained_model.pt"
+    # "Macrophage_strict_10_pct_filtering|model_training_001|trained_model.pt"
+    # "Macrophage_40k_distance_scale_factor|model_training_001|trained_model.pt"
+    # "Macrophage_10k_distance_scale_factor|model_training_002|trained_model.pt"
+    # "Macrophage_150k_max_peak_dist|model_training_001|trained_model.pt"
+    # "Macrophage_50k_max_peak_dist|model_training_001|trained_model.pt"
+    # "Macrophage_slow_decay_long_range_two_hop|model_training_001|trained_model.pt"
+    # "Macrophage_slow_decay_long_range|model_training_001|trained_model.pt"
+    # "Macrophage_zero_hops|model_training_001|trained_model.pt"
+    # "Macrophage_two_hops|model_training_001|trained_model.pt"
+    # "Macrophage_loose_1_pct_filter_50_min_per_cell|model_training_001|trained_model.pt"
+    # "Macrophage_small_model_loose_1_pct_filtering|model_training_001|trained_model.pt"
+    # "Macrophage_two_hops_small_batch|model_training_001|trained_model.pt"
+    # "Macrophage_two_hops_150k_max_peak_dist|model_training_001|trained_model.pt"
+    # "Macrophage_two_hops_slow_decay_long_range|model_training_001|trained_model.pt"
+    # "Macrophage_two_hops_slow_decay_long_range_small_batch|model_training_001|trained_model.pt"
+    # "Macrophage_three_hops_small_batch|model_training_001|trained_model.pt"
+    # "Macrophage_two_hops_50k_max_peak_dist|model_training_001|trained_model.pt"
+    # "Macrophage_two_hops_10k_distance_scale_factor|model_training_001|trained_model.pt"
+    # "Macrophage_two_hops_40k_distance_scale_factor|model_training_001|trained_model.pt"
+    # "Macrophage_two_hops_loose_1_pct_filtering|model_training_001|trained_model.pt"
+    # "Macrophage_two_hops_moderate_5_pct_filtering_small_batch|model_training_001|trained_model.pt"
+    # "Macrophage_small_model_two_hops_long_range_small_batch|model_training_002|trained_model.pt"
+
+    "K562_base_settings|model_training_001|trained_model.pt"
+    "K562_model_d_128_ff_512|model_training_001|trained_model.pt"
+    "K562_small_batch_size|model_training_001|trained_model.pt"
+    "K562_loose_1_pct_filtering|model_training_001|trained_model.pt"
+    "K562_strict_10_pct_filtering|model_training_001|trained_model.pt"
+    "K562_40k_distance_scale_factor|model_training_001|trained_model.pt"
+    "K562_10k_distance_scale_factor|model_training_001|trained_model.pt"
+    "K562_150k_max_peak_dist|model_training_001|trained_model.pt"
+    "K562_50k_max_peak_dist|model_training_001|trained_model.pt"
+    "K562_slow_decay_long_range_two_hop|model_training_001|trained_model.pt"
+    "K562_slow_decay_long_range|model_training_001|trained_model.pt"
+    "K562_zero_hops|model_training_001|trained_model.pt"
+    "K562_two_hops|model_training_001|trained_model.pt"
+    "K562_loose_1_pct_filter_50_min_per_cell|model_training_001|trained_model.pt"
+    "K562_small_model_loose_1_pct_filtering|model_training_001|trained_model.pt"
+    "K562_two_hops_small_batch|model_training_001|trained_model.pt"
+    "K562_two_hops_150k_max_peak_dist|model_training_001|trained_model.pt"
+    "K562_two_hops_slow_decay_long_range|model_training_001|trained_model.pt"
+    "K562_two_hops_slow_decay_long_range_small_batch|model_training_001|trained_model.pt"
+    "K562_three_hops_small_batch|model_training_001|trained_model.pt"
+    "K562_two_hops_50k_max_peak_dist|model_training_001|trained_model.pt"
+    "K562_two_hops_10k_distance_scale_factor|model_training_001|trained_model.pt"
+    "K562_two_hops_40k_distance_scale_factor|model_training_001|trained_model.pt"
+    "K562_two_hops_loose_1_pct_filtering|model_training_001|trained_model.pt"
+    "K562_two_hops_moderate_5_pct_filtering_small_batch|model_training_001|trained_model.pt"
+    "K562_small_model_two_hops_long_range_small_batch|model_training_001|trained_model.pt"
 )
+
+# DATASET_TYPE="mESC"
+# SAMPLE_NAMES="E7.5_rep1 E7.5_rep2 E8.5_rep1 E8.5_rep2"
+
+# DATASET_TYPE="macrophage"
+# SAMPLE_NAMES="Macrophage_S1 Macrophage_S2"
+
+DATASET_TYPE="K562"
+SAMPLE_NAMES="K562"
+
+
+
 
 # ==========================================
 #        EXPERIMENT SELECTION
@@ -72,12 +140,12 @@ PLOTTING_EXPERIMENT_LIST=(
 # Get the current experiment based on SLURM_ARRAY_TASK_ID
 TASK_ID=${SLURM_ARRAY_TASK_ID:-0}
 
-if [ ${TASK_ID} -ge ${#PLOTTING_EXPERIMENT_LIST[@]} ]; then
-    echo "ERROR: SLURM_ARRAY_TASK_ID (${TASK_ID}) exceeds number of experiments (${#PLOTTING_EXPERIMENT_LIST[@]})"
+if [ ${TASK_ID} -ge ${#EXPERIMENT_LIST[@]} ]; then
+    echo "ERROR: SLURM_ARRAY_TASK_ID (${TASK_ID}) exceeds number of experiments (${#EXPERIMENT_LIST[@]})"
     exit 1
 fi
 
-EXPERIMENT_CONFIG="${PLOTTING_EXPERIMENT_LIST[$TASK_ID]}"
+EXPERIMENT_CONFIG="${EXPERIMENT_LIST[$TASK_ID]}"
 
 # Parse experiment configuration
 IFS='|' read -r EXPERIMENT_NAME TRAINING_NUM MODEL_FILE <<< "$EXPERIMENT_CONFIG"
@@ -90,7 +158,6 @@ echo "  MODEL_FILE ID: ${MODEL_FILE}"
 echo "  TASK ID: ${TASK_ID}"
 echo "=========================================="
 echo ""
-
 poetry run python ./src/multiomic_transformer/utils/plotting.py \
     --experiment "$EXPERIMENT_NAME" \
     --training_num "$TRAINING_NUM" \

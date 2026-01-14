@@ -595,7 +595,8 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
     # ---------- torchrun multi-node launch ----------
     # Pick the first node as rendezvous/master
     MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
-    MASTER_PORT=29500
+    # Use dynamic port based on job ID to avoid conflicts when multiple jobs run on same node
+    MASTER_PORT=$((29500 + (SLURM_JOB_ID % 1000)))
     export MASTER_ADDR MASTER_PORT
 
     echo "[INFO] MASTER_ADDR=${MASTER_ADDR}, MASTER_PORT=${MASTER_PORT}"
@@ -681,25 +682,17 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
     MODEL_FILE="trained_model.pt"
     TRAINING_NUM=""
     
-    for dir in $(ls -d "${OUTPUT_DIR}"/model_training_* 2>/dev/null | sort -V -r); do
-        if [ -f "${dir}/${CHROM_ID}/${MODEL_FILE}" ]; then
+    for dir in $(ls -d "${OUTPUT_DIR}/${CHROM_ID}"/model_training_* 2>/dev/null | sort -V -r); do
+        if [ -f "${dir}/${MODEL_FILE}" ]; then
             TRAINING_NUM=$(basename "$dir")
             break
         fi
     done
 
     # Check if a valid training directory was found
-    if [ -n "${TRAINING_NUM}" ] && [ -f "${OUTPUT_DIR}/${TRAINING_NUM}/${CHROM_ID}/${MODEL_FILE}" ]; then
+    if [ -n "${TRAINING_NUM}" ] && [ -f "${OUTPUT_DIR}/${CHROM_ID}/${TRAINING_NUM}/${MODEL_FILE}" ]; then
         echo "[INFO] Selected latest training directory: ${TRAINING_NUM}"
-        echo "[INFO] Found trained model at ${OUTPUT_DIR}/${TRAINING_NUM}/${CHROM_ID}/${MODEL_FILE}"
-
-        echo "Plotting Training Figures..."
-        poetry run python ./src/multiomic_transformer/utils/plotting.py \
-            --experiment "${DATASET_NAME}" \
-            --training_num "${TRAINING_NUM}" \
-            --chrom_id "${CHROM_ID}" \
-            --experiment_dir "${OUTPUT_DIR}" \
-            --model_file "${MODEL_FILE}"
+        echo "[INFO] Found trained model at ${OUTPUT_DIR}/${CHROM_ID}/${TRAINING_NUM}/${MODEL_FILE}"
 
         echo ""
         echo "Running AUROC Testing..."
@@ -712,6 +705,15 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
             --dataset_type "macrophage" \
             --sample_name_list "${SAMPLE_NAMES}"
 
+        echo "Plotting Training Figures..."
+        poetry run python ./src/multiomic_transformer/utils/plotting.py \
+            --experiment "${DATASET_NAME}" \
+            --training_num "${TRAINING_NUM}" \
+            --chrom_id "${CHROM_ID}" \
+            --experiment_dir "${OUTPUT_DIR}" \
+            --model_file "${MODEL_FILE}"
+
+
         echo ""
         echo "=========================================="
         echo "  EXPERIMENT COMPLETED: ${EXPERIMENT_NAME}"
@@ -719,7 +721,7 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
         echo "=========================================="
         echo ""
     else
-        echo "[WARNING] Trained model not found at ${OUTPUT_DIR}/${TRAINING_NUM}/${CHROM_ID}/${MODEL_FILE}"
+        echo "[WARNING] Trained model not found at ${OUTPUT_DIR}/${CHROM_ID}/${TRAINING_NUM}/${MODEL_FILE}"
         echo "[WARNING] Skipping plotting and AUROC testing"
         echo ""
         echo "=========================================="
