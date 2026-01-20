@@ -808,7 +808,6 @@ class Trainer:
         total_mse_scaled_sum   = 0.0
         total_mse_unscaled_sum = 0.0
         n_batches              = 0
-        self.epoch             = epoch
 
         self.optimizer.zero_grad(set_to_none=True)
         progress_marks = [25, 50, 75]

@@ -54,7 +54,7 @@ def load_ground_truth(ground_truth_file):
     ground_truth_df = ground_truth_df.rename(columns={ground_truth_df.columns[0]: "Source", ground_truth_df.columns[1]: "Target"})
     ground_truth_df["Source"] = ground_truth_df["Source"].astype(str).str.upper()
     ground_truth_df["Target"] = ground_truth_df["Target"].astype(str).str.upper()
-    
+        
     return ground_truth_df
 
 def nanaware_per_gene_stats(y_true, y_pred, eps=1e-8):
@@ -1787,7 +1787,9 @@ if __name__ == "__main__":
     elif dataset_type.lower() == "k562":
         ground_truth_file_dict = {
             "ChIP-Atlas": GROUND_TRUTH_DIR / "chipatlas_K562.csv",
-            "RN207": GROUND_TRUTH_DIR / "RN117.tsv",
+            "RN117": GROUND_TRUTH_DIR / "RN117.tsv",
+            # "RN118": GROUND_TRUTH_DIR / "RN118.tsv",
+            # "RN119": GROUND_TRUTH_DIR / "RN119.tsv",
         }
     
     FIG_DIR = Path("/gpfs/Labs/Uzun/RESULTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/FIGURES")
@@ -1812,6 +1814,7 @@ if __name__ == "__main__":
         ground_truth_df = load_ground_truth(ground_truth_file)
         
         ground_truth_df_dict[gt_name] = ground_truth_df
+        print(f"  - TFs: {ground_truth_df['Source'].nunique():,}, TGs: {ground_truth_df['Target'].nunique():,}, Edges: {len(ground_truth_df):,}")
 
     feature_to_plot = "Gradient Attribution"
 

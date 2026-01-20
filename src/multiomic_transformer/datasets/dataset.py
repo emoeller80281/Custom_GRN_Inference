@@ -8,12 +8,8 @@ from torch.utils.data import Dataset, Sampler
 from pathlib import Path
 import logging
 from collections import OrderedDict
-
 from dataclasses import dataclass
 
-# in datasets/dataset.py (or wherever you defined fit_simple_scalers)
-import torch
-from dataclasses import dataclass
 
 @dataclass
 class SimpleScaler:
@@ -81,6 +77,7 @@ def fit_simple_scalers(
     for batch in train_loader:
         # unpack like your collate_fn returns
         atac_wins, tf_tensor, tg_tensor, bias, tf_ids, tg_ids, motif_mask = batch
+        
         # move minimal things to GPU to sum efficiently, then bring back to CPU
         tf_tensor = tf_tensor.to(device_for_reduce, non_blocking=True)   # [B,T_eval]
         tg_tensor = tg_tensor.to(device_for_reduce, non_blocking=True)   # [B,G_eval]
@@ -115,7 +112,7 @@ def fit_simple_scalers(
             torch.distributed.all_reduce(acc_cuda, op=torch.distributed.ReduceOp.SUM)
             acc.copy_(acc_cuda.to("cpu"))
 
-    # means and stds (unseen dims keep mean=0, std=1)
+    # Calculate the TF means/stds
     tf_mean = torch.zeros(T_expected, dtype=torch.float32)
     tf_std  = torch.ones(T_expected,  dtype=torch.float32)
     mask_tf = tf_count > 0
@@ -124,6 +121,7 @@ def fit_simple_scalers(
     tf_var[mask_tf] = (tf_sqsum[mask_tf] / tf_count[mask_tf]).to(torch.float32) - tf_mean[mask_tf]**2
     tf_std = torch.sqrt(torch.clamp(tf_var, min=1e-6))
 
+    # Calculate the TG means/stds
     tg_mean = torch.zeros(G_expected, dtype=torch.float32)
     tg_std  = torch.ones(G_expected,  dtype=torch.float32)
     mask_tg = tg_count > 0
