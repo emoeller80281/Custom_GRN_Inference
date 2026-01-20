@@ -345,7 +345,7 @@ def plot_model_tg_predictions(device, model, test_loader, tg_scaler, tf_scaler):
             else:
                 targets_s = targets
 
-            preds_s, _, _, _ = model(
+            preds_s, _, _ = model(
                 atac_wins, tf_tensor,
                 tf_ids=tf_ids, tg_ids=tg_ids,
                 bias=bias, motif_mask=motif_mask,

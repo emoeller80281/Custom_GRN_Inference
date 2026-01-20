@@ -514,7 +514,7 @@ class Trainer:
         with record_function("forward_pass"):
             with autocast(device_type="cuda"):
                 mask_arg = motif_mask if USE_MOTIF_MASK else None
-                preds, attn, shortcut_contrib, _ = self.model(
+                preds, attn, shortcut_contrib = self.model(
                     atac_wins,
                     tf_tensor,
                     tf_ids=tf_ids,
@@ -644,7 +644,7 @@ class Trainer:
                     targets_s = targets
                 mask_arg = motif_mask if USE_MOTIF_MASK else None
 
-                preds, _, _, _ = self.model(
+                preds, _, _ = self.model(
                     atac_wins, tf_tensor,
                     tf_ids=tf_ids, tg_ids=tg_ids,
                     bias=bias, motif_mask=mask_arg,

@@ -199,7 +199,7 @@ def run_tf_knockout(
                 # Use original scaled base (2D/3D) for the model
                 tf_scaled_for_model = tf_scaled_base if tf_tensor.dim() == 2 else tf_scaled_base_3d
 
-                preds_base_s, _, _, _ = model(
+                preds_base_s, _, _ = model(
                     atac_wins, tf_scaled_for_model,
                     tf_ids=tf_ids, tg_ids=tg_ids,
                     bias=bias, motif_mask=motif_mask,
@@ -253,7 +253,7 @@ def run_tf_knockout(
 
                 # Run knockout forward pass
                 with autocast(device_type=device.type, enabled=use_amp):
-                    preds_ko_s, _, _, _ = model(
+                    preds_ko_s, _, _ = model(
                         atac_wins, tf_scaled_input,
                         tf_ids=tf_ids, tg_ids=tg_ids,
                         bias=bias, motif_mask=motif_mask,

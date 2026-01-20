@@ -181,7 +181,7 @@ def run_gradient_attribution(
                 if tf_scaler is not None
                 else tf_tensor
             )
-            preds_s_base, _, _, _ = model(
+            preds_s_base, _, _ = model(
                 atac_wins,
                 tf_scaled_base,
                 tf_ids=tf_ids,
@@ -215,7 +215,7 @@ def run_gradient_attribution(
                     if tf_scaler is not None
                     else tf_tensor
                 )
-                preds_s, _, _, _ = model(
+                preds_s, _, _ = model(
                     atac_wins,
                     tf_scaled,
                     tf_ids=tf_ids,
@@ -293,7 +293,7 @@ def run_gradient_attribution(
                             if tf_scaler is not None
                             else tf_noisy
                         )
-                        preds_s, _, _, _ = model(
+                        preds_s, _, _ = model(
                             atac_wins,
                             tf_scaled,
                             tf_ids=tf_ids,
@@ -375,7 +375,7 @@ def run_gradient_attribution(
                             if tf_scaler is not None
                             else tf_step
                         )
-                        preds_s, _, _, _ = model(
+                        preds_s, _, _ = model(
                             atac_wins,
                             tf_scaled,
                             tf_ids=tf_ids,

@@ -1386,7 +1386,7 @@ def calculate_per_tg_r2(model, test_loader, tg_names, tg_scaler, tf_scaler, stat
             else:
                 targets_s = targets
 
-            preds_s, _, _, _ = model(
+            preds_s, _, _ = model(
                 atac_wins, tf_tensor,
                 tf_ids=tf_ids, tg_ids=tg_ids,
                 bias=bias, motif_mask=motif_mask,
