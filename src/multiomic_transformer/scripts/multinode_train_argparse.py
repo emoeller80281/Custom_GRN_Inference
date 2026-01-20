@@ -14,26 +14,23 @@ sys.path.append(Path(__file__).resolve().parent.parent.parent)
 import random
 import signal
 import joblib
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import seaborn as sns
 import torch
 from torch.profiler import profile, record_function, ProfilerActivity, schedule
 import torch.distributed as dist
-from typing import Union
+from typing import Any, Union
 import torch.nn as nn
 import torch.nn.functional as F
-from scipy.stats import pearsonr, spearmanr
 from torch.amp import GradScaler, autocast
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from torch.utils.data import DataLoader, random_split, Sampler
+from torch.utils.data import DataLoader, random_split
 from torch.utils.data.distributed import DistributedSampler
 
 from multiomic_transformer.datasets.dataset import (
     MultiomicTransformerDataset, MultiChromosomeDataset,
-    ChromSubsetBatchSampler, DistributedBatchSampler, fit_simple_scalers,
+    DistributedBatchSampler, fit_simple_scalers,
     SimpleScaler, IndexedChromBucketBatchSampler
     )
 from multiomic_transformer.models.model import MultiomicTransformer
@@ -285,6 +282,21 @@ def setup_training_globals(args):
     # ----- Model Compilation -----
     USE_TORCH_COMPILE = args.use_torch_compile
 
+def update_info_file(info_file: Path, key: str, value: Any) -> None:
+    """
+    Update a JSON info file with a new key-value pair.
+    If the file does not exist, it will be created.
+    """
+    if info_file.exists():
+        with open(info_file, 'r') as f:
+            info_data = json.load(f)
+    else:
+        info_data = {}
+    
+    info_data[key] = value
+    
+    with open(info_file, 'w') as f:
+        json.dump(info_data, f, indent=4)
 
 def _signal_handler(signum, frame):
     # Mark that we should shut down gracefully.

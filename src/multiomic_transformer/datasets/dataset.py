@@ -158,6 +158,12 @@ class IndexedChromBucketBatchSampler(Sampler):
         self.epoch = int(epoch)
 
     def __iter__(self):
+        """
+        Yields batches of indices from a single chromosome.
+
+        Each batch is a contiguous block of indices from the same chromosome.
+        The order of chromosomes and indices is shuffled randomly each epoch if `shuffle=True`.
+        """
         import numpy as np
 
         rng = np.random.RandomState(self.seed + self.epoch)
@@ -183,61 +189,6 @@ class IndexedChromBucketBatchSampler(Sampler):
             total += (n + self.batch_size - 1) // self.batch_size
         return total
 
-
-class ChromSubsetBatchSampler(Sampler):
-    """
-    Batch sampler that:
-        - Operates on a shared MultiChromosomeDataset.
-        - Restricts indices to a given subset of chromosomes.
-        - Keeps batches chromosome-homogeneous (no shape mismatches).
-    """
-    def __init__(self, ds, chrom_subset, batch_size, shuffle=True, seed=0):
-        self.ds = ds
-        self.chrom_subset = set(chrom_subset)
-        self.batch_size = int(batch_size)
-        self.shuffle = bool(shuffle)
-        self.seed = int(seed)
-        self.epoch = 0
-        self._build_ranges()
-
-    def _build_ranges(self):
-        self._chrom_ranges = []
-        # dataset._offsets[i] is the start index for ds.chrom_ids[i]
-        for i, chrom in enumerate(self.ds.chrom_ids):
-            if chrom not in self.chrom_subset:
-                continue
-            start = self.ds._offsets[i]
-            end = self.ds._offsets[i+1] if i + 1 < len(self.ds._offsets) else len(self.ds)
-            if end > start:
-                idxs = list(range(start, end))
-                self._chrom_ranges.append((chrom, idxs))
-
-    def set_epoch(self, epoch: int):
-        self.epoch = int(epoch)
-
-    def __iter__(self):
-        if not self._chrom_ranges:
-            return
-        rng = np.random.RandomState(self.seed + self.epoch)
-        chrom_blocks = self._chrom_ranges[:]
-        if self.shuffle:
-            rng.shuffle(chrom_blocks)
-        for _, idxs in chrom_blocks:
-            idxs = idxs[:]  # copy
-            if self.shuffle:
-                rng.shuffle(idxs)
-            for s in range(0, len(idxs), self.batch_size):
-                batch = idxs[s:s + self.batch_size]
-                if batch:  # non-empty
-                    yield batch
-
-    def __len__(self):
-        count = 0
-        for _, idxs in self._chrom_ranges:
-            if not idxs:
-                continue
-            count += (len(idxs) + self.batch_size - 1) // self.batch_size
-        return count
 
 class DistributedBatchSampler(torch.utils.data.Sampler):
     """
@@ -319,7 +270,7 @@ class MultiChromosomeDataset(Dataset):
             # Start with all cell indices
             base_idx = np.arange(full_num_cells)
 
-            # --- Optional: restrict by sample tag from metacell_names.json ---
+            # --- Optional: don't load data for a specific sample ---
             if self.allowed_samples:
                 metacell_path = self.data_dir / "metacell_names.json"
                 try:
@@ -620,75 +571,6 @@ class MultiChromosomeDataset(Dataset):
 
         # If we still came up short (all chromosomes tiny), just return whatever exists
         return sorted(chosen)
-
-
-
-class ChromBucketBatchSampler(Sampler[list]):
-    """
-    Produces batches grouped by chromosome so that sequence length W
-    and bias shapes match within the batch (no padding needed).
-    """
-    def __init__(self, dataset: MultiChromosomeDataset, batch_size: int, shuffle: bool = True, seed: int = 0):
-        self.ds = dataset
-        self.batch_size = batch_size
-        self.shuffle = shuffle
-        self.seed = int(seed)
-        self.epoch = 0
-        self._chrom_ranges: list[tuple[str, list[int]]] = []
-        self._refresh_ranges()
-        
-    def _refresh_ranges(self):
-        self._chrom_ranges = []
-        # Recompute from dataset offsets/length (works for train/val)
-        for i, chrom in enumerate(self.ds.chrom_ids):
-            start = self.ds._offsets[i]
-            end = self.ds._offsets[i+1] if i+1 < len(self.ds._offsets) else len(self.ds)
-            if end > start:
-                self._chrom_ranges.append((chrom, list(range(start, end))))
-
-
-    def set_epoch(self, epoch: int):
-        self.epoch = epoch
-
-        # Build per-chrom index ranges
-        self._chrom_ranges = []
-        for i, chrom in enumerate(self.ds.chrom_ids):
-            start = self.ds._offsets[i]
-            end = self.ds._offsets[i+1] if i+1 < len(self.ds._offsets) else len(self.ds)
-            idxs = list(range(start, end))
-            self._chrom_ranges.append((chrom, idxs))
-
-    def __iter__(self):
-        rng = np.random.RandomState(self.seed + self.epoch)
-        chrom_blocks = self._chrom_ranges[:]
-        if self.shuffle:
-            rng.shuffle(chrom_blocks)
-        for chrom, idxs in chrom_blocks:
-            idxs = idxs[:]  # copy
-            if self.shuffle:
-                rng.shuffle(idxs)
-            for s in range(0, len(idxs), self.batch_size):
-                yield idxs[s:s+self.batch_size]
-
-    def __len__(self):
-        count = 0
-        for _, idxs in self._chrom_ranges:
-            count += (len(idxs) + self.batch_size - 1) // self.batch_size
-        return count
-
-def _subsample_vocab(name2id: dict, max_n: int, rng: np.random.RandomState):
-    if max_n is None or max_n >= len(name2id):
-        return name2id
-    names = list(name2id.keys())
-    keep = set(rng.choice(names, size=max_n, replace=False))
-    # rebuild compact 0..N-1 id map
-    return {n:i for i,n in enumerate(sorted(keep))}
-
-def _reindex_tensor_rows(tensor, old_name2id, new_name2id, axis=0):
-    # assumes rows (axis=0) correspond to vocab order; select rows that survive + in new order
-    keep_names = sorted(new_name2id, key=new_name2id.get)
-    idx = [old_name2id[n] for n in keep_names]
-    return tensor.index_select(axis, torch.tensor(idx, dtype=torch.long))
 
 class MultiomicTransformerDataset(Dataset):
     def __init__(

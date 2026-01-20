@@ -1718,6 +1718,7 @@ if __name__ == "__main__":
     # ------------------------------------------------------------
     per_tf_metrics = pd.read_csv(EXPERIMENT_DIR / "per_tf_auroc_auprc_detailed.csv", index_col=None)
     
+    
     # 4a) Create per-TF method ranking
     # Average across TFs within each (method, GT)
     method_gt_avg = (
@@ -1728,6 +1729,25 @@ if __name__ == "__main__":
             auprc=('auprc', 'mean'),
             n_tfs=('tf', 'nunique'),
         )
+    )
+    
+    # Plots a boxplot of per-TF AUROC/AUPRC scores for each method, aggregated by GT
+    per_tf_df_agg_by_gt = method_gt_avg.copy().rename(columns={'method': 'name'})
+    per_tf_auroc_agg_by_gt_boxplot = plot_all_results_auroc_boxplot(per_tf_df_agg_by_gt, per_tf=True)
+    per_tf_auprc_agg_by_gt_boxplot = plot_all_results_auprc_boxplot(per_tf_df_agg_by_gt, per_tf=True)
+    
+    per_tf_auroc_agg_by_gt_boxplot.savefig(EXPERIMENT_DIR / "per_tf_auroc_agg_by_gt.png",dpi=300)
+    per_tf_auprc_agg_by_gt_boxplot.savefig(EXPERIMENT_DIR / "per_tf_auprc_agg_by_gt.png",dpi=300)
+    
+    per_tf_auroc_agg_by_gt_boxplot.savefig(exp_fig_dir / f"per_tf_auroc_agg_by_gt.svg")
+    per_tf_auprc_agg_by_gt_boxplot.savefig(exp_fig_dir / f"per_tf_auprc_agg_by_gt.svg")
+    plt.close(per_tf_auroc_agg_by_gt_boxplot)
+    plt.close(per_tf_auprc_agg_by_gt_boxplot)
+    
+    
+    per_tf_df_agg_by_gt.to_csv(
+        EXPERIMENT_DIR / "per_tf_auroc_auprc_agg_by_gt.csv",
+        index=False,
     )
     
     # Then average across GTs for each method
@@ -1752,10 +1772,10 @@ if __name__ == "__main__":
     )
     
     # 4b) Create per-TF boxplots
-    # Format data for boxplot functions: need ['name', 'auroc', 'auprc']
-    # Use RAW per-TF metrics, not the aggregated ranking
+    # Plots each individual (method, TF) pair
     per_tf_for_plot = per_tf_metrics[['method', 'auroc', 'auprc']].copy()
     per_tf_for_plot = per_tf_for_plot.rename(columns={'method': 'name'})
+    
     
     per_tf_for_plot.to_csv(
         exp_fig_data_dir / "per_tf_auroc_auprc_data.csv",
@@ -1763,17 +1783,16 @@ if __name__ == "__main__":
     )
     
     logging.info("Creating per-TF AUROC and AUPRC boxplots...")
+    per_tf_auroc_agg_by_tf_boxplot = plot_all_results_auroc_boxplot(per_tf_for_plot, per_tf=True)
+    per_tf_auprc_agg_by_tf_boxplot = plot_all_results_auprc_boxplot(per_tf_for_plot, per_tf=True)
     
-    per_tf_auroc_boxplot = plot_all_results_auroc_boxplot(per_tf_for_plot, per_tf=True)
-    per_tf_auprc_boxplot = plot_all_results_auprc_boxplot(per_tf_for_plot, per_tf=True)
+    per_tf_auroc_agg_by_tf_boxplot.savefig(EXPERIMENT_DIR / "per_tf_auroc_agg_by_tf_boxplot.png",dpi=300)
+    per_tf_auprc_agg_by_tf_boxplot.savefig(EXPERIMENT_DIR / "per_tf_auprc_agg_by_tf_boxplot.png",dpi=300)
     
-    per_tf_auroc_boxplot.savefig(EXPERIMENT_DIR / "all_results_auroc_boxplot_per_tf.png",dpi=300)
-    per_tf_auprc_boxplot.savefig(EXPERIMENT_DIR / "all_results_auprc_boxplot_per_tf.png",dpi=300)
-    
-    per_tf_auroc_boxplot.savefig(exp_fig_dir / f"all_results_auroc_boxplot_per_tf.svg")
-    per_tf_auprc_boxplot.savefig(exp_fig_dir / f"all_results_auprc_boxplot_per_tf.svg")
-    plt.close(per_tf_auroc_boxplot)
-    plt.close(per_tf_auprc_boxplot)
+    per_tf_auroc_agg_by_tf_boxplot.savefig(exp_fig_dir / f"per_tf_auroc_agg_by_tf_boxplot.svg")
+    per_tf_auprc_agg_by_tf_boxplot.savefig(exp_fig_dir / f"per_tf_auprc_agg_by_tf_boxplot.svg")
+    plt.close(per_tf_auroc_agg_by_tf_boxplot)
+    plt.close(per_tf_auprc_agg_by_tf_boxplot)
         
     # Save pooled per-GT metrics
     per_gt_rank.to_csv(

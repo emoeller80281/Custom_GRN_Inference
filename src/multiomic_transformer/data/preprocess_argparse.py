@@ -336,7 +336,28 @@ def setup_global_variables(args):
     SAMPLE_PROCESSED_DATA_DIR = PROCESSED_DATA / DATASET_NAME
     SAMPLE_DATA_CACHE_DIR = TRAINING_DATA_CACHE / DATASET_NAME
     COMMON_DATA = SAMPLE_DATA_CACHE_DIR / "common"
+    
+    # Write all variables to a config file for reference
+    config_path = OUTPUT_DIR / "preprocessing_config.json"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_dict = {k: v for k, v in globals().items() if k.isupper()}
+    atomic_json_dump(config_dict, config_path)
 
+def update_info_file(info_file: Path, key: str, value: Any) -> None:
+    """
+    Update a JSON info file with a new key-value pair.
+    If the file does not exist, it will be created.
+    """
+    if info_file.exists():
+        with open(info_file, 'r') as f:
+            info_data = json.load(f)
+    else:
+        info_data = {}
+    
+    info_data[key] = value
+    
+    with open(info_file, 'w') as f:
+        json.dump(info_data, f, indent=4)
 
 # ----- Data Loading and Processing -----
 def normalize_peak_format(peak_id: str) -> str:
@@ -711,7 +732,8 @@ def process_or_load_rna_atac_data(
     pca_components: Optional[int] = None,
     hops: Optional[int] = None,
     self_weight: Optional[float] = None,
-    load: Optional[bool] = True
+    load: Optional[bool] = True,
+    summary_file: Optional[Union[str, Path]] = None,
 ) -> Tuple[
         Optional[pd.DataFrame], 
         Optional[pd.DataFrame], 
@@ -1048,6 +1070,23 @@ def process_or_load_rna_atac_data(
             else:
                 atac_df = pd.read_parquet(raw_atac_file, engine="pyarrow")
             
+            # Update the information file with raw data stats
+            num_rna_cells_before_filter = rna_df.shape[0]
+            num_atac_cells_before_filter = atac_df.shape[0]
+            num_genes_before_filter = rna_df.shape[1]
+            num_peaks_before_filter = atac_df.shape[1]
+            logging.info(f"  - Raw RNA data:   {num_rna_cells_before_filter:,} cells × {num_genes_before_filter:,} genes")
+            logging.info(f"  - Raw ATAC data:  {num_atac_cells_before_filter:,} cells × {num_peaks_before_filter:,} peaks")
+
+            raw_data_info_dict = {
+                "raw_data_info": {
+                    "num_rna_cells": num_rna_cells_before_filter,
+                    "num_atac_cells": num_atac_cells_before_filter,
+                    "num_genes": num_genes_before_filter,
+                    "num_peaks": num_peaks_before_filter,
+                }
+            }
+            
             def _norm_names(names):
                 """Normalize a list of names for overlap checking."""
                 out = []
@@ -1117,6 +1156,23 @@ def process_or_load_rna_atac_data(
         logging.info("Writing processed parquet files")
         processed_rna_df.to_parquet(processed_rna_file, engine="pyarrow", compression="snappy")
         processed_atac_df.to_parquet(processed_atac_file, engine="pyarrow", compression="snappy")
+        
+        # Update the information file with filtered data stats
+        num_rna_cells_after_filter = processed_rna_df.shape[1]
+        num_atac_cells_after_filter = processed_atac_df.shape[1]
+        num_genes_after_filter = processed_rna_df.shape[0]
+        num_peaks_after_filter = processed_atac_df.shape[0]
+        logging.info(f"  - Filtered RNA data:   {num_rna_cells_after_filter:,} cells × {num_genes_after_filter:,} genes")
+        logging.info(f"  - Filtered ATAC data:  {num_atac_cells_after_filter:,} cells × {num_peaks_after_filter:,} peaks")
+
+        preprocessed_info_dict = {
+            "preprocessed_data_info": {
+                "num_rna_cells": num_rna_cells_after_filter,
+                "num_atac_cells": num_atac_cells_after_filter,
+                "num_genes": num_genes_after_filter,
+                "num_peaks": num_peaks_after_filter,
+            }
+        }
 
     # =======================================
     # 4) Ensure pseudobulks exist and return
@@ -1159,6 +1215,40 @@ def process_or_load_rna_atac_data(
         RE_pseudobulk_df = pd.read_parquet(pseudobulk_RE_file, engine="pyarrow")
         
         TG_pseudobulk_df = _standardize_symbols_index(TG_pseudobulk_df, strip_version_suffix=True, uppercase=True, deduplicate="sum")
+        
+    # Update the information file with pseudobulk data stats
+    num_TG_cells = TG_pseudobulk_df.shape[0]
+    num_RE_cells = RE_pseudobulk_df.shape[0]
+    num_TG_genes = TG_pseudobulk_df.shape[1]
+    num_RE_peaks = RE_pseudobulk_df.shape[1]
+    logging.info(f"  - TG pseudobulk: {num_TG_cells:,} metacells × {num_TG_genes:,} genes")
+    logging.info(f"  - RE pseudobulk: {num_RE_cells:,} metacells × {num_RE_peaks:,} peaks")
+    
+    pseudobulk_info_dict = {
+        "pseudobulk_data_info": {
+            "num_TG_cells": num_TG_cells,
+            "num_RE_cells": num_RE_cells,
+            "num_TG_genes": num_TG_genes,
+            "num_RE_peaks": num_RE_peaks,
+        }
+    }
+
+    sample_info = {
+        "sample_name": sample_name,
+
+    }
+    
+    if raw_data_info_dict is not None:
+        sample_info.update(raw_data_info_dict)
+    if preprocessed_info_dict is not None:
+        sample_info.update(preprocessed_info_dict)
+    if pseudobulk_info_dict is not None:
+        sample_info.update(pseudobulk_info_dict)
+    
+    if summary_file is None:
+        summary_file = EXPERIMENT_DIR / "experiment_info.json"
+        
+    update_info_file(summary_file, f"{sample_name}_pseudobulk_info", sample_info)
 
     # Final sanity checks
     for name, df in [
@@ -1214,7 +1304,7 @@ def filter_and_qc(adata_RNA: AnnData, adata_ATAC: AnnData) -> Tuple[AnnData, Ann
     )
     
     # QC and filtering
-    
+    # Filter out 
     adata_RNA.var['mt'] = adata_RNA.var_names.str.startswith("MT-")
     sc.pp.calculate_qc_metrics(adata_RNA, qc_vars=["mt"], inplace=True)
     adata_RNA = adata_RNA[adata_RNA.obs.pct_counts_mt < 5].copy()
@@ -1240,7 +1330,7 @@ def filter_and_qc(adata_RNA: AnnData, adata_ATAC: AnnData) -> Tuple[AnnData, Ann
     sc.pp.log1p(adata_RNA)
     sc.pp.highly_variable_genes(adata_RNA, min_mean=0.0125, max_mean=3, min_disp=0.5)
     adata_RNA.layers["log1p"] = adata_RNA.X.copy()
-    sc.pp.scale(adata_RNA, max_value=10)
+    sc.pp.scale(adata_RNA, max_value=10, zero_center=True)
     adata_RNA = adata_RNA[:, adata_RNA.var.highly_variable]
     sc.tl.pca(adata_RNA, n_comps=PCA_COMPONENTS, svd_solver="arpack")
 
@@ -1312,7 +1402,7 @@ def create_tf_tg_combination_files(
     sample_name: Union[str, Path],
     *,
     tf_name_col: Optional[str] = "TF_Name",  # if None, will auto-detect
-) -> Tuple[List[str], List[str], pd.DataFrame]:
+) -> Tuple[List[str], List[str]]:
     """
     Build and persist TF/TG lists and the full TF–TG Cartesian product, updating any
     existing files by taking the union with newly supplied genes.
@@ -1348,8 +1438,7 @@ def create_tf_tg_combination_files(
         Final TF set (sorted, normalized).
     tgs : list[str]
         Final TG set (sorted, normalized, guaranteed disjoint from TFs).
-    tf_tg_df : pd.DataFrame
-        Cartesian product of `tfs × tgs`, columns ['TF','TG'].
+
     """
     dataset_dir = Path(dataset_dir)
     sample_dir = Path(dataset_dir, sample_name)
@@ -1392,7 +1481,6 @@ def create_tf_tg_combination_files(
     total_file = out_dir / "total_genes.csv"
     tf_file    = out_dir / "tf_list.csv"
     tg_file    = out_dir / "tg_list.csv"
-    combo_file = out_dir / "tf_tg_combos.csv"
 
     total_existing = _read_list(total_file, "Gene")
     tf_existing    = _read_list(tf_file, "TF")
@@ -1408,22 +1496,12 @@ def create_tf_tg_combination_files(
     pd.DataFrame({"TF": tfs}).to_csv(tf_file, index=False)
     pd.DataFrame({"TG": tgs}).to_csv(tg_file, index=False)
 
-    # full Cartesian product for current state (always rewrite)
-    if tfs and tgs:
-        mux = pd.MultiIndex.from_product([tfs, tgs], names=["TF", "TG"])
-        tf_tg_df = mux.to_frame(index=False)
-    else:
-        tf_tg_df = pd.DataFrame(columns=["TF", "TG"])
-
-    tf_tg_df.to_csv(combo_file, index=False)
-
     logging.info("  - Creating TF-TG combination files")
     logging.info(f"    - Number of TFs: {len(tfs):,}")
     logging.info(f"    - Number of TGs: {len(tgs):,}")
-    logging.info(f"    - TF-TG combinations: {len(tf_tg_df):,}")
     logging.info(f"    - Files written under: {out_dir}")
 
-    return tfs, tgs, tf_tg_df
+    return tfs, tgs
 
 # ----- MultiomicTransformer Global Dataset -----
 def make_gene_tss_bed_file(gene_tss_file, genome_dir):
@@ -2566,7 +2644,6 @@ def build_distance_bias(
 
     return dist_bias, new_window_map, kept_window_indices
 
-
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     
@@ -2577,6 +2654,9 @@ if __name__ == "__main__":
     
     # Setup global variables from parsed arguments
     setup_global_variables(args)
+    
+    # Create an information json file to log information about the experiment
+    summary_file = EXPERIMENT_DIR / "experiment_info.json"
     
     # TF and TG vocab files
     common_tf_vocab_file: Path =  COMMON_DATA / f"tf_vocab.json"
@@ -2723,7 +2803,6 @@ if __name__ == "__main__":
             peak_to_gene_dist_file = SAMPLE_PROCESSED_DATA_DIR / sample_name / "peak_to_gene_dist.parquet"
             sliding_window_score_file = SAMPLE_PROCESSED_DATA_DIR / sample_name / "sliding_window.parquet"
             tf_tg_reg_pot_file = SAMPLE_PROCESSED_DATA_DIR / sample_name / "tf_tg_regulatory_potential.parquet"
-            tf_tg_combo_attr_file = SAMPLE_PROCESSED_DATA_DIR / sample_name / "tf_tg_combos_with_attributes.parquet"
             gat_training_file = SAMPLE_PROCESSED_DATA_DIR / sample_name / "tf_tg_data.parquet"
             
             # Sample-specific cache files
@@ -2746,7 +2825,6 @@ if __name__ == "__main__":
                 peak_to_gene_dist_file,
                 sliding_window_score_file,
                 tf_tg_reg_pot_file,
-                tf_tg_combo_attr_file,
                 total_genes_file,
                 tf_list_file,
                 tg_list_file,
@@ -2790,7 +2868,7 @@ if __name__ == "__main__":
             logging.info(f"    - Number of peaks: {processed_atac_df.shape[0]}: {peaks[:3]}")
 
             # Create TF-TG combination files
-            tfs, tgs, tf_tg_df = create_tf_tg_combination_files(genes, TF_FILE, SAMPLE_PROCESSED_DATA_DIR, sample_name)
+            tfs, tgs = create_tf_tg_combination_files(genes, TF_FILE, SAMPLE_PROCESSED_DATA_DIR, sample_name)
             
             tfs = sorted(set(gc.canonicalize_series(pd.Series(tfs)).tolist()))
             tgs = sorted(set(gc.canonicalize_series(pd.Series(tgs)).tolist()))
@@ -2851,29 +2929,29 @@ if __name__ == "__main__":
                     sliding_window_score_file, tf_tg_reg_pot_file, peak_to_gene_dist_file, num_cpu)
 
 
-            # ----- MERGE TF-TG ATTRIBUTES WITH COMBINATIONS -----
-            if not os.path.isfile(tf_tg_combo_attr_file):
-                logging.info("  - Loading TF-TG regulatory potential scores")
-                tf_tg_reg_pot = pd.read_parquet(tf_tg_reg_pot_file, engine="pyarrow")
-                logging.debug("  - Example TF-TG regulatory potential: " + str(tf_tg_reg_pot.head()))
+            # # ----- MERGE TF-TG ATTRIBUTES WITH COMBINATIONS -----
+            # if not os.path.isfile(tf_tg_combo_attr_file):
+            #     logging.info("  - Loading TF-TG regulatory potential scores")
+            #     tf_tg_reg_pot = pd.read_parquet(tf_tg_reg_pot_file, engine="pyarrow")
+            #     logging.debug("  - Example TF-TG regulatory potential: " + str(tf_tg_reg_pot.head()))
                 
-                tf_df = processed_rna_df[processed_rna_df.index.isin(tfs)]
-                logging.debug("\nTFs in RNA data")
-                logging.debug(tf_df.head())
-                logging.info(f"    - TFs in RNA data: {tf_df.shape[0]}")
+            #     tf_df = processed_rna_df[processed_rna_df.index.isin(tfs)]
+            #     logging.debug("\nTFs in RNA data")
+        #     logging.debug(tf_df.head())
+            #     logging.info(f"    - TFs in RNA data: {tf_df.shape[0]}")
                 
-                tg_df = processed_rna_df[processed_rna_df.index.isin(tgs)]
-                logging.debug("\nTGs in RNA data")
-                logging.debug(tg_df.head())
-                logging.info(f"    - TGs in RNA data: {tg_df.shape[0]}")
-                sliding_window_df = pd.read_parquet(sliding_window_score_file, engine="pyarrow")
-                logging.debug("  - Example sliding window scores: \n" + str(sliding_window_df.head()))
+            #     tg_df = processed_rna_df[processed_rna_df.index.isin(tgs)]
+            #     logging.debug("\nTGs in RNA data")
+            #     logging.debug(tg_df.head())
+            #     logging.info(f"    - TGs in RNA data: {tg_df.shape[0]}")
+            #     sliding_window_df = pd.read_parquet(sliding_window_score_file, engine="pyarrow")
+            #     logging.debug("  - Example sliding window scores: \n" + str(sliding_window_df.head()))
                 
-                mean_norm_tf_expr, mean_norm_tg_expr = compute_minmax_expr_mean(tf_df, tg_df)
+            #     mean_norm_tf_expr, mean_norm_tg_expr = compute_minmax_expr_mean(tf_df, tg_df)
                 
-                logging.info("  - Merging TF-TG attributes with all combinations")
-                tf_tg_df = merge_tf_tg_attributes_with_combinations(
-                    tf_tg_df, tf_tg_reg_pot, mean_norm_tf_expr, mean_norm_tg_expr, tf_tg_combo_attr_file, set(tfs))            
+            #     logging.info("  - Merging TF-TG attributes with all combinations")
+            #     tf_tg_df = merge_tf_tg_attributes_with_combinations(
+            #         tf_tg_df, tf_tg_reg_pot, mean_norm_tf_expr, mean_norm_tg_expr, tf_tg_combo_attr_file, set(tfs))            
         
     # ----- CHROMOSOME-SPECIFIC PREPROCESSING -----
     if PROCESS_CHROMOSOME_SPECIFIC_DATA:        
@@ -2888,7 +2966,6 @@ if __name__ == "__main__":
         for sample_name in SAMPLE_NAMES:
             sliding_window_score_file = SAMPLE_PROCESSED_DATA_DIR / sample_name / "sliding_window.parquet"
             peak_to_gene_dist_file = SAMPLE_PROCESSED_DATA_DIR / sample_name / "peak_to_gene_dist.parquet"
-            
             
             sliding_window_df = pd.read_parquet(sliding_window_score_file, engine="pyarrow")
             sample_level_sliding_window_dfs.append(sliding_window_df)
@@ -3021,7 +3098,7 @@ if __name__ == "__main__":
             genome_wide_tf_expression = total_TG_pseudobulk_global.reindex(tf_names).fillna(0).values.astype("float32")
             metacell_names = total_TG_pseudobulk_global.columns.tolist()
             
-            # Scale TG expression
+            # Downcast the TG expression to float32
             TG_expression = total_TG_pseudobulk_chr.values.astype("float32")
             
             chrom_peak_ids = set(total_peaks_df["peak_id"].astype(str))
