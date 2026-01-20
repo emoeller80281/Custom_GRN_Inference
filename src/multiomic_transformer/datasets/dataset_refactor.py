@@ -226,7 +226,6 @@ class MultiChromosomeDataset(Dataset):
         chrom_ids,
         tf_vocab_path: Optional[Union[str, Path]] = None,
         tg_vocab_path: Optional[Union[str, Path]] = None,
-        fine_tuner: bool = False,
         sample_name: Optional[str] = None,
         max_cached: int = 2,
         subset_seed: int = 42,
@@ -235,9 +234,8 @@ class MultiChromosomeDataset(Dataset):
         super().__init__()
         self.data_dir = Path(data_dir)
         self.chrom_ids = list(chrom_ids)
-        self.tf_vocab_path = Path(tf_vocab_path)
-        self.tg_vocab_path = Path(tg_vocab_path)
-        self.fine_tuner = fine_tuner
+        self.tf_vocab_path = Path(tf_vocab_path) if tf_vocab_path is not None else None
+        self.tg_vocab_path = Path(tg_vocab_path) if tg_vocab_path is not None else None
         self.sample_name = sample_name
         self.max_cached = max_cached
         self.subset_seed = subset_seed
@@ -245,8 +243,15 @@ class MultiChromosomeDataset(Dataset):
             set(str(s) for s in allowed_samples) if allowed_samples is not None else None
         )
 
-        self._tf_name2id = self._load_vocab_dict(tf_vocab_path)
-        self._tg_name2id = self._load_vocab_dict(tg_vocab_path)
+        self._tf_name2id = self._load_vocab_dict(self.tf_vocab_path)
+        self._tg_name2id = self._load_vocab_dict(self.tg_vocab_path)
+
+        if self._tf_name2id is None or self._tg_name2id is None:
+            raise ValueError("tf_vocab_path and tg_vocab_path must be provided and exist")
+
+        # Public aliases used by training scripts/utilities
+        self.tf_name2id = self._tf_name2id
+        self.tg_name2id = self._tg_name2id
         
         # Track the gene IDs and names
         self.tf_ids = torch.arange(len(self._tf_name2id), dtype=torch.long)
@@ -260,8 +265,10 @@ class MultiChromosomeDataset(Dataset):
         # Small LRU cache of per-chrom datasets (Keeps track of windows and TGs for each chromosome)
         self._cache: OrderedDict[str, MultiomicTransformerDataset] = OrderedDict()
         
-        tf_global = torch.load(self.data_dir / "tf_tensor_all.pt", map_location="cpu")
-        full_num_cells = int(tf_global.shape[1])
+        tf_global = torch.load(self.data_dir / "tf_tensor_all.pt", map_location="cpu") if self.tf_vocab_path is not None else None
+        full_num_cells = int(tf_global.shape[1]) if tf_global is not None else 0
+        
+        assert full_num_cells > 0, "No cells found in tf_tensor_all.pt"
         
         if self.allowed_samples:
             base_idx = self._load_allowed_samples(full_num_cells)
@@ -274,11 +281,10 @@ class MultiChromosomeDataset(Dataset):
         # offsets tell us where each chromosome's indices start in the concatenated space
         self._offsets = []
         running = 0
-        if not fine_tuner:
-            for _ in self.chrom_ids:
-                self._offsets.append(running)
-                running += self._num_cells
-            self._length = running
+        for _ in self.chrom_ids:
+            self._offsets.append(running)
+            running += self._num_cells
+        self._length = running
         
         self._windows_per_chrom = {}
         _total_windows = 0
@@ -361,8 +367,6 @@ class MultiChromosomeDataset(Dataset):
         # support either {"name_to_id": {...}} or flat dict
         raw = obj.get("name_to_id", obj)
         return {self.standardize_name(k): int(v) for k, v in raw.items()}
-
-        
         
     def _load_allowed_samples(self, full_num_cells: int) -> np.ndarray:
         metacell_path = self.data_dir / "metacell_names.json"
@@ -412,8 +416,8 @@ class MultiChromosomeDataset(Dataset):
                 chrom_id=chrom_id,
                 tf_vocab_path=self.tf_vocab_path,
                 tg_vocab_path=self.tg_vocab_path,
-                fine_tuner=self.fine_tuner,
-                sample_name=self.sample_name
+                sample_name=self.sample_name,
+                cell_idx=self._cell_idx,
             )
             self._cache[chrom_id] = ds
             self._evict_if_needed()
@@ -429,18 +433,14 @@ class MultiomicTransformerDataset(Dataset):
         tf_vocab_path: Optional[Path] = None,
         tg_vocab_path: Optional[Path] = None,
         sample_name: Optional[str] = None,
-        max_tfs: Optional[int] = None,
-        max_tgs: Optional[int] = None,
-        max_windows: Optional[int] = None,
+        cell_idx: Optional[np.ndarray] = None,
         subset_seed: int = 42,
     ):
         self.data_dir = Path(data_dir)
         self.chrom_id = chrom_id
         self.sample_name = sample_name
-        self._max_tfs = max_tfs
-        self._max_tgs = max_tgs
-        self._max_windows = max_windows
         self._subset_rng = np.random.RandomState(subset_seed)
+        self._cell_idx: Optional[np.ndarray] = None
 
         chrom_dir = self.data_dir / chrom_id
         if not chrom_dir.is_dir():
@@ -518,21 +518,28 @@ class MultiomicTransformerDataset(Dataset):
             self.motif_mask_tensor = torch.load(motif_mask_path).bool()
         else:
             self.motif_mask_tensor = torch.zeros((self.tg_ids.numel(), self.tf_ids.numel()), dtype=torch.float32)
+
+        # Optional: restrict to a subset of cells (column indices)
+        if cell_idx is not None:
+            self.set_cell_idx(cell_idx)
             
         self._validate_sizes()
     
     def __len__(self):
-        return self.num_cells
+        return int(self._cell_idx.size) if self._cell_idx is not None else int(self.num_cells)
     
     def __getitem__(self, idx):
+        if self._cell_idx is not None:
+            idx = int(self._cell_idx[int(idx)])
+
         # Get the TF, TG, and ATAC window tensors for a given cell index
         tf_tensor = self.tf_tensor_all[:, idx]                      # [T_eval]
         tg_tensor = self.tg_tensor_all[:, idx]                      # [G_eval]
         atac_wins = self.atac_window_tensor_all[:, idx].unsqueeze(-1)  # [W,1]
 
         # Distance bias
-        if self.distance_bias_tensor is not None:
-            dist_bias = self.distance_bias_tensor                     # [G_eval, W]
+        if self.dist_bias_tensor is not None:
+            dist_bias = self.dist_bias_tensor                     # [G_eval, W]
         else:
             dist_bias = torch.zeros((self.tg_ids.numel(), self.num_windows), dtype=torch.float32)
             
@@ -551,6 +558,16 @@ class MultiomicTransformerDataset(Dataset):
             self.tg_ids,
             motif_mask,
         )
+
+    def set_cell_idx(self, cell_idx: np.ndarray):
+        cell_idx = np.asarray(cell_idx, dtype=int)
+        if cell_idx.ndim != 1:
+            raise ValueError("cell_idx must be a 1D array of column indices")
+        if cell_idx.size == 0:
+            raise ValueError("cell_idx cannot be empty")
+        if cell_idx.min() < 0 or cell_idx.max() >= int(self.num_cells):
+            raise IndexError("cell_idx out of bounds for dataset")
+        self._cell_idx = cell_idx
         
     def _validate_sizes(self):
         # Check that the TF, TG, and ATAC window tensor sizes match the ids and names
@@ -560,8 +577,8 @@ class MultiomicTransformerDataset(Dataset):
         
         # Check that the metecell names match the cell count and tensors
         assert self.metacell_names is not None and len(self.metacell_names) == self.num_cells, "Metacell names count mismatch"
-        assert self.metacell_names == self.tf_tensor_all.shape[1], "Cell count mismatch between TF tensor and metacell names"
-        assert self.metacell_names == self.tg_tensor_all.shape[1], "Cell count mismatch between TG tensor and metacell names"
+        assert len(self.metacell_names) == self.tf_tensor_all.shape[1], "Cell count mismatch between TF tensor and metacell names"
+        assert len(self.metacell_names) == self.tg_tensor_all.shape[1], "Cell count mismatch between TG tensor and metacell names"
         assert self.tf_tensor_all.shape[1] == self.tg_tensor_all.shape[1] == self.atac_window_tensor_all.shape[1], "Cell count mismatch across tensors"
             
         # Make sure counts align with tensors

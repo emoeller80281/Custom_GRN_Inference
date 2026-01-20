@@ -5,21 +5,16 @@ import os
 import sys
 import time
 import warnings
-import pickle
 from pathlib import Path
 
 import sys
 sys.path.append(Path(__file__).resolve().parent.parent.parent)
 
-import random
 import signal
-import joblib
-import numpy as np
-import pandas as pd
 import torch
 from torch.profiler import profile, record_function, ProfilerActivity, schedule
 import torch.distributed as dist
-from typing import Any, Union
+from typing import Any
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.amp import GradScaler, autocast
@@ -28,14 +23,17 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, random_split
 from torch.utils.data.distributed import DistributedSampler
 
-from multiomic_transformer.datasets.dataset import (
-    MultiomicTransformerDataset, MultiChromosomeDataset,
-    DistributedBatchSampler, fit_simple_scalers,
-    SimpleScaler, IndexedChromBucketBatchSampler
-    )
+from multiomic_transformer.datasets.dataset_refactor import (
+    MultiomicTransformerDataset,
+    MultiChromosomeDataset,
+    DistributedBatchSampler,
+    fit_simple_scalers,
+    SimpleScaler,
+    IndexedChromBucketBatchSampler,
+)
 from multiomic_transformer.models.model import MultiomicTransformer
 from multiomic_transformer.utils.files import unique_path
-from multiomic_transformer.utils import ewc_utils, plotting
+from multiomic_transformer.utils import ewc_utils
 from multiomic_transformer.scripts import gradient_attribution, tf_knockout
 
 warnings.filterwarnings("ignore", message="No device id is provided via `init_process_group`")
@@ -151,14 +149,6 @@ def parse_training_args():
                         help="Dropout rate for shortcut")
     
     # ----- Data Subsampling -----
-    parser.add_argument("--subsample_max_tfs", type=int, default=None,
-                        help="Maximum number of TFs to sample")
-    parser.add_argument("--subsample_max_tgs", type=int, default=None,
-                        help="Maximum number of TGs to sample")
-    parser.add_argument("--subsample_max_windows_per_chrom", type=int, default=None,
-                        help="Maximum windows per chromosome")
-    parser.add_argument("--subsample_max_cells", type=int, default=10000,
-                        help="Maximum number of cells/metacells")
     parser.add_argument("--subsample_seed", type=int, default=42,
                         help="Random seed for subsampling")
     parser.add_argument("--allowed_samples", type=str, nargs="*", default=None,
@@ -182,7 +172,6 @@ def parse_training_args():
     
     return parser.parse_args()
 
-
 def setup_training_globals(args):
     """
     Convert argparse arguments to global variables.
@@ -198,8 +187,7 @@ def setup_training_globals(args):
     global USE_DISTANCE_BIAS, USE_SHORTCUT, USE_MOTIF_MASK
     global MOTIF_MASK_THRESH, MOTIF_PRIOR_SCALE, ATTN_BIAS_SCALE
     global SHORTCUT_L1, SHORTCUT_L2, SHORTCUT_TOPK, SHORTCUT_DROPOUT
-    global SUBSAMPLE_MAX_TFS, SUBSAMPLE_MAX_TGS, SUBSAMPLE_MAX_WINDOWS_PER_CHROM
-    global SUBSAMPLE_MAX_CELLS, SUBSAMPLE_SEED, ALLOWED_SAMPLES
+    global SUBSAMPLE_SEED, ALLOWED_SAMPLES
     global RESUME_CHECKPOINT_PATH, USE_TORCH_COMPILE
     global USE_PROFILER, PROFILER_START_STEP, PROFILER_ACTIVE_STEPS
     
@@ -269,10 +257,6 @@ def setup_training_globals(args):
     SHORTCUT_DROPOUT = args.shortcut_dropout
     
     # ----- Data Subsampling -----
-    SUBSAMPLE_MAX_TFS = args.subsample_max_tfs
-    SUBSAMPLE_MAX_TGS = args.subsample_max_tgs
-    SUBSAMPLE_MAX_WINDOWS_PER_CHROM = args.subsample_max_windows_per_chrom
-    SUBSAMPLE_MAX_CELLS = args.subsample_max_cells
     SUBSAMPLE_SEED = args.subsample_seed
     ALLOWED_SAMPLES = args.allowed_samples
     
@@ -390,58 +374,6 @@ def save_tf_tg_embeddings_from_model(model, out_dir, vocab_dir, epoch=None):
         {"tf_id2name": tf_id2name, "tg_id2name": tg_id2name},
         os.path.join(out_dir, "tf_tg_vocab_id2name.pt")
     )
-
-def _balance_pos_neg(df, label_col="is_gt", pos_to_neg_ratio=1.0, random_state=0):
-    """Return a dataframe with a controlled positive:negative ratio."""
-    rng = np.random.default_rng(random_state)
-
-    pos_df = df[df[label_col] == True]
-    neg_df = df[df[label_col] == False]
-
-    n_pos = len(pos_df)
-    n_neg_desired = int(n_pos * pos_to_neg_ratio)
-
-    if n_pos == 0:
-        # No positives -> AUROC undefined.
-        return None
-
-    n_neg_desired = min(n_neg_desired, len(neg_df))
-    neg_idx = rng.choice(neg_df.index.to_numpy(), size=n_neg_desired, replace=False)
-    neg_sample = neg_df.loc[neg_idx]
-
-    balanced = pd.concat([pos_df, neg_sample], axis=0)
-    balanced = balanced.sample(frac=1.0, random_state=random_state).reset_index(drop=True)
-    return balanced
-
-def _build_all_pairs_df(scores_matrix, tf_names, tg_names, gt_set,
-                        restrict_tf_idx=None, score_name="score"):
-    """
-    scores_matrix: [T, G] numpy array
-    restrict_tf_idx: optional list/array of TF indices (rows) to keep
-    gt_set: set of (tf_name, tg_name) that are positives
-    """
-    T, G = scores_matrix.shape
-
-    if restrict_tf_idx is None:
-        tf_idx = np.arange(T)
-    else:
-        tf_idx = np.asarray(restrict_tf_idx, dtype=int)
-
-    tf_grid, tg_grid = np.meshgrid(tf_idx, np.arange(G), indexing="ij")
-    tf_flat = tf_grid.ravel()
-    tg_flat = tg_grid.ravel()
-
-    vals = scores_matrix[tf_flat, tg_flat]
-    tfs = np.array(tf_names, dtype=object)[tf_flat]
-    tgs = np.array(tg_names, dtype=object)[tg_flat]
-
-    df = pd.DataFrame({
-        "tf": tfs,
-        "tg": tgs,
-        score_name: vals,
-    })
-    df["is_gt"] = list(map(gt_set.__contains__, zip(df["tf"], df["tg"])))
-    return df
     
 class Trainer:
     def __init__(
@@ -936,8 +868,6 @@ class Trainer:
         out_path = os.path.join(path, f"checkpoint_{epoch}.pt")
         torch.save(ckpt, out_path)
         logging.info(f"\tTraining checkpoint saved to {out_path}")
-
-
         
     def train(self, max_epochs: int, path: str, start_epoch: int = 0):
         best_r2 = float("-inf")
@@ -1196,16 +1126,12 @@ def load_train_objs(run_cfg):
         tf_vocab_path=os.path.join(COMMON_DATA, "tf_vocab.json"),
         tg_vocab_path=os.path.join(COMMON_DATA, "tg_vocab.json"),
         max_cached=2,
-        max_tfs=SUBSAMPLE_MAX_TFS,
-        max_tgs=SUBSAMPLE_MAX_TGS,
-        max_windows_per_chrom=SUBSAMPLE_MAX_WINDOWS_PER_CHROM,
-        max_cells=SUBSAMPLE_MAX_CELLS,
         subset_seed=SUBSAMPLE_SEED,
         allowed_samples=ALLOWED_SAMPLES
     )
 
-    tf_vocab_size = len(dataset.tf_name2id_sub)
-    tg_vocab_size = len(dataset.tg_name2id_sub)
+    tf_vocab_size = int(dataset.tf_ids.numel())
+    tg_vocab_size = int(dataset.tg_ids.numel())
 
     model = MultiomicTransformer(
         d_model=run_cfg["d_model"],
@@ -1299,6 +1225,7 @@ def prepare_dataloader(dataset, batch_size, world_size=1, rank=0,
             idxs_shuf = idxs[:]
             rnd.shuffle(idxs_shuf)
 
+            # 70% train, 15% val, 15% test
             n_train = int(0.70 * n)
             n_val   = int(0.15 * n)
             n_test  = n - n_train - n_val
@@ -1322,7 +1249,7 @@ def prepare_dataloader(dataset, batch_size, world_size=1, rank=0,
             if test_idx:
                 test_map[chrom] = test_idx
 
-        # 3) Build base batch samplers (chrom-homogeneous, but all chroms per split)
+        # Split 
         base_train_bs = IndexedChromBucketBatchSampler(
             train_map, batch_size=batch_size, shuffle=True, seed=seed
         )
@@ -1333,7 +1260,7 @@ def prepare_dataloader(dataset, batch_size, world_size=1, rank=0,
             test_map, batch_size=batch_size, shuffle=False, seed=seed
         )
 
-        # 4) Optionally shard batches across ranks for DDP
+        # Creates distributed batch samplers if needed
         if world_size > 1:
             train_bs = DistributedBatchSampler(base_train_bs, world_size, rank, drop_last=drop_last)
             val_bs   = DistributedBatchSampler(base_val_bs,   world_size, rank, drop_last=False)
@@ -1481,132 +1408,6 @@ def write_run_parameters(dataset, out_dir, world_size):
         json.dump(run_params, f, indent=4)  # indent=4 for readability
     logging.info(f"Run parameters written to {path}")
 
-import torch
-import torch.distributed as dist
-from torch.utils._contextlib import _DecoratorContextManager  # if needed elsewhere
-
-
-@torch.no_grad()
-def get_mean_tf_tg_attention_ddp(model,
-                                 dataloader,
-                                 num_tfs: int,
-                                 num_tgs: int,
-                                 device: Union[str, torch.device]):
-    """
-    Compute global mean TF–TG attention over a (possibly DDP) dataloader.
-
-    Assumes:
-      - model.shortcut_layer.attn is set on each forward.
-      - attn shape is one of:
-          [B, H, G, T], [B, G, T], or [G, T]
-        where G = #TG in batch, T = #TF in batch.
-      - tf_ids and tg_ids in the batch give TF/TG indices in [0,num_tfs) / [0,num_tgs),
-        either shape [B, T] (same across batch) or [T]; similarly for TG.
-
-    Returns:
-      mean_attn: [num_tgs, num_tfs] tensor on current device
-                 (after all_reduce: identical on all ranks).
-    """
-    if isinstance(device, str):
-        device = torch.device(device)
-
-    model.eval()
-
-    # global accumulators on this rank
-    attn_sum = torch.zeros(num_tgs, num_tfs, device=device)
-    attn_cnt = torch.zeros(num_tgs, num_tfs, device=device)
-
-    for batch in dataloader:
-        atac_wins, tf_tensor, _, bias, tf_ids, tg_ids, motif_mask = batch
-
-        atac_wins  = atac_wins.to(device, non_blocking=True)
-        tf_tensor  = tf_tensor.to(device, non_blocking=True)
-        bias       = bias.to(device, non_blocking=True)
-        tf_ids     = tf_ids.to(device, non_blocking=True)
-        tg_ids     = tg_ids.to(device, non_blocking=True)
-        motif_mask = motif_mask.to(device, non_blocking=True)
-
-        # forward pass (no grad)
-        _ = model(
-            atac_wins,
-            tf_tensor,
-            tf_ids=tf_ids,
-            tg_ids=tg_ids,
-            bias=bias,
-            motif_mask=motif_mask,
-        )
-
-        if not hasattr(model, "shortcut_layer"):
-            raise RuntimeError("Model has no shortcut_layer; cannot read TF–TG attention.")
-
-        if not hasattr(model.shortcut_layer, "attn"):
-            # no attention recorded for this batch; skip
-            continue
-
-        attn = model.shortcut_layer.attn
-        if attn is None:
-            continue
-        attn = attn.detach()
-
-        # ---- Collapse attn to [G, T] ----
-        if attn.dim() == 4:
-            # [B, H, G, T] -> average over batch + heads
-            attn_mat = attn.mean(dim=(0, 1))
-        elif attn.dim() == 3:
-            # [B, G, T] -> average over batch
-            attn_mat = attn.mean(dim=0)
-        elif attn.dim() == 2:
-            # [G, T]
-            attn_mat = attn
-        else:
-            raise RuntimeError(f"Unexpected attn dim {attn.shape}")
-
-        G_b, T_b = attn_mat.shape
-
-        # ---- Get TF/TG ids for this batch ----
-        # If [B, T] with same row, take first; if [T], use as is.
-        if tf_ids.dim() == 2:
-            tf_ids_b = tf_ids[0]
-        else:
-            tf_ids_b = tf_ids
-        if tg_ids.dim() == 2:
-            tg_ids_b = tg_ids[0]
-        else:
-            tg_ids_b = tg_ids
-
-        if tf_ids_b.numel() != T_b or tg_ids_b.numel() != G_b:
-            raise RuntimeError(
-                f"Mismatch: attn_mat {attn_mat.shape}, "
-                f"tf_ids {tf_ids_b.shape}, tg_ids {tg_ids_b.shape}"
-            )
-
-        # ---- Scatter into global [num_tgs, num_tfs] ----
-        # Build all (tg_idx, tf_idx) pairs for this block
-        tf_idx = tf_ids_b.view(1, -1).expand(G_b, -1).reshape(-1)   # [G_b*T_b]
-        tg_idx = tg_ids_b.view(-1, 1).expand(-1, T_b).reshape(-1)   # [G_b*T_b]
-        vals   = attn_mat.reshape(-1)
-
-        # Safety: keep only in-range indices
-        valid = (tf_idx >= 0) & (tf_idx < num_tfs) & (tg_idx >= 0) & (tg_idx < num_tgs)
-        if not valid.all():
-            tf_idx = tf_idx[valid]
-            tg_idx = tg_idx[valid]
-            vals   = vals[valid]
-
-        one = torch.ones_like(vals, device=device)
-
-        attn_sum.index_put_((tg_idx, tf_idx), vals, accumulate=True)
-        attn_cnt.index_put_((tg_idx, tf_idx), one,  accumulate=True)
-
-    # ---- All-reduce across ranks ----
-    if dist.is_available() and dist.is_initialized():
-        dist.all_reduce(attn_sum, op=dist.ReduceOp.SUM)
-        dist.all_reduce(attn_cnt, op=dist.ReduceOp.SUM)
-
-    mean_attn = attn_sum / attn_cnt.clamp_min(1e-8)
-    return mean_attn
-
-
 def _mapping_to_ordered_list(name2id: dict):
     # convert {name: id} → [names] in id order
     return [k for k, _ in sorted(name2id.items(), key=lambda kv: kv[1])]
@@ -1618,12 +1419,12 @@ def write_experiment_settings_and_objects(training_output_dir: Path, dataset, te
     """
     os.makedirs(training_output_dir, exist_ok=True)
 
-    # Pick the right mappings depending on dataset type
-    tf_map = getattr(dataset, "tf_name2id_sub", None)
-    tg_map = getattr(dataset, "tg_name2id_sub", None)
+    # Persist full vocab mappings (no subsampling)
+    tf_map = getattr(dataset, "tf_name2id", None)
+    tg_map = getattr(dataset, "tg_name2id", None)
 
     if tf_map is None or tg_map is None:
-        raise RuntimeError("Dataset is missing TF/TG name→id mappings.")
+        raise RuntimeError("Dataset is missing TF/TG name→id mappings (tf_name2id/tg_name2id).")
 
     # Persist mappings (name→id)
     with open(os.path.join(training_output_dir, "tf_vocab.json"), "w") as f:
@@ -1634,8 +1435,10 @@ def write_experiment_settings_and_objects(training_output_dir: Path, dataset, te
     # Also persist ordered name lists (useful for plotting/inspection)
     tf_names_ordered = _mapping_to_ordered_list(tf_map)
     tg_names_ordered = _mapping_to_ordered_list(tg_map)
+    
     with open(os.path.join(training_output_dir, "tf_names_ordered.json"), "w") as f:
         json.dump(tf_names_ordered, f)
+        
     with open(os.path.join(training_output_dir, "tg_names_ordered.json"), "w") as f:
         json.dump(tg_names_ordered, f)
     
@@ -1732,11 +1535,8 @@ def main(rank: int, local_rank: int, world_size: int, save_every: int, total_epo
         dataset, model, optimizer = load_train_objs(run_cfg)
         
         # After dataset/model are created and you know these:
-        tf_name2id = dataset.tf_name2id_sub
-        tg_name2id = dataset.tg_name2id_sub
-
-        T = len(tf_name2id)
-        G = len(tg_name2id)
+        T = int(dataset.tf_ids.numel())
+        G = int(dataset.tg_ids.numel())
 
         if rank == 0:
             logging.info("Preparing dataloader")
@@ -1779,8 +1579,8 @@ def main(rank: int, local_rank: int, world_size: int, save_every: int, total_epo
             start_epoch = load_checkpoint(str(resume_ckpt), trainer, rank_device)
             logging.info(f"Resuming training from epoch {start_epoch}")
         else:
-            T = len(dataset.tf_name2id_sub)
-            G = len(dataset.tg_name2id_sub)
+            T = int(dataset.tf_ids.numel())
+            G = int(dataset.tg_ids.numel())
             use_ddp_reduce = torch.distributed.is_initialized()
 
             tf_s, tg_s = fit_simple_scalers(
@@ -1840,56 +1640,6 @@ def main(rank: int, local_rank: int, world_size: int, save_every: int, total_epo
                 n_batches=100,
             )
             ewc_utils.save_ewc_bundle(ewc_bundle_path, model_for_eval, fisher)
-
-        # ----- Global mean TF–TG attention via DDP all-reduce -----
-        mean_attn = None
-        if hasattr(model_for_eval, "shortcut_layer"):
-            mean_attn = get_mean_tf_tg_attention_ddp(
-                model_for_eval,
-                test_loader,
-                num_tfs=T,
-                num_tgs=G,
-                device=rank_device,
-            )
-
-            if rank == 0:
-                mean_attn_cpu = mean_attn.detach().cpu()
-                torch.save(
-                    mean_attn_cpu,
-                    training_output_dir / "mean_tf_tg_attention.pt"
-                )
-                logging.info("Saved global mean TF–TG attention matrix")
-
-        # ----- Rank-0: save attention CSV + plots -----
-        if rank == 0:
-            # Build ordered name lists from vocab files (IDs -> names)
-            with open(os.path.join(training_output_dir, "tf_vocab.json")) as f:
-                tf_vocab_obj = json.load(f)
-            with open(os.path.join(training_output_dir, "tg_vocab.json")) as f:
-                tg_vocab_obj = json.load(f)
-
-            tf_name2id = tf_vocab_obj.get("name_to_id", tf_vocab_obj)
-            tg_name2id = tg_vocab_obj.get("name_to_id", tg_vocab_obj)
-
-            tf_id2name = [None] * len(tf_name2id)
-            for name, idx in tf_name2id.items():
-                tf_id2name[idx] = name
-
-            tg_id2name = [None] * len(tg_name2id)
-            for name, idx in tg_name2id.items():
-                tg_id2name[idx] = name
-
-            if mean_attn is not None:
-                mean_attn_df = pd.DataFrame(
-                    mean_attn.detach().cpu().numpy(),
-                    index=tg_id2name,
-                    columns=tf_id2name,
-                )
-                mean_attn_df.to_csv(os.path.join(training_output_dir, "tf_tg_mean_attention.csv"))
-                logging.info("Saved TF→TG attention weights to 'tf_tg_mean_attention.csv'")
-
-            # Training figures
-            log_path = os.path.join(training_output_dir, "training_log.csv")
 
             if rank == 0:
                 logging.info("\nIterations complete")
