@@ -302,12 +302,16 @@ class MultiChromosomeDataset(Dataset):
         
         self._windows_per_chrom = {}
         _total_windows = 0
+        _total_tgs = 0
+        _total_tfs = 0
         self.metacell_names = None
         for cid in self.chrom_ids:
             ds = self._load_chrom(cid)   # uses cache + applies global sub-vocab + max_windows_per_chrom
             w = int(ds.num_windows)
             self._windows_per_chrom[cid] = w
             _total_windows += w
+            _total_tgs += int(ds.num_tgs)
+            _total_tfs += int(ds.num_tfs)
             self._evict_if_needed()
             
             # Check metacell names consistency between chromosome datasets
@@ -318,6 +322,8 @@ class MultiChromosomeDataset(Dataset):
                     logging.warning(f"metacell_names differ on {cid}; using the first set.")
                     
         self.num_windows = int(_total_windows)
+        self.num_tgs = int(_total_tgs)
+        self.num_tfs = int(_total_tfs)
             
     def _evict_if_needed(self):
         """
@@ -494,13 +500,17 @@ class MultiomicTransformerDataset(Dataset):
         # load tensors
         self.tf_tensor_all = torch.load(tf_path).float()
         self.tg_tensor_all = torch.load(tg_path).float()
+        
         self.atac_window_tensor_all = torch.load(atac_path).float()
         self.num_cells   = self.tf_tensor_all.shape[1]
+        self.num_tfs     = self.tf_tensor_all.shape[0]
+        self.num_tgs = self.tg_tensor_all.shape[0]
         self.num_windows = self.atac_window_tensor_all.shape[0]
         
         # ids + names
         self.tf_ids = torch.load(tf_ids_path).long()
         self.tg_ids = torch.load(tg_ids_path).long()
+        
         with open(tf_names_json) as f: self.tf_names = [self.standardize_name(n) for n in json.load(f)]
         with open(tg_names_json) as f: self.tg_names = [self.standardize_name(n) for n in json.load(f)]
         
@@ -511,16 +521,13 @@ class MultiomicTransformerDataset(Dataset):
         # Load the metacell names
         with open(metacell_names_path, "r") as f:
             self.metacell_names = json.load(f)
-            
-        self.num_cells = self.tf_tensor_all.shape[1]  # already set
-        self.num_windows = self.atac_window_tensor_all.shape[0]
-        
+                    
         # Load Distance Bias tensor
         if dist_bias_path.exists():
             bias_WG = torch.load(dist_bias_path).float()
-            if bias_WG.shape[0] == self.atac_window_tensor_all.shape[0]:
+            if bias_WG.shape[0] == self.num_windows:
                 self.dist_bias_tensor = bias_WG.T.contiguous()
-            elif bias_WG.shape[1] == self.atac_window_tensor_all.shape[0]:
+            elif bias_WG.shape[1] == self.num_windows:
                 self.dist_bias_tensor = bias_WG.contiguous()
             else:
                 raise ValueError(f"dist_bias_{chrom_id}.pt shape mismatch: {tuple(bias_WG.shape)}")

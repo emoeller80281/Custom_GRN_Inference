@@ -1346,9 +1346,9 @@ def write_run_parameters(dataset, out_dir, world_size):
     if ALLOWED_SAMPLES is not None:
         logging.info(f"Samples:             {ALLOWED_SAMPLES}")
     logging.info(f"Chromosome:          {CHROM_IDS}")
-    logging.info(f"Genes:               {len(dataset.tg_ids)}")
+    logging.info(f"Genes:               {dataset.num_tgs}")
     logging.info(f"Windows (RE):        {dataset.num_windows}")
-    logging.info(f"TFs:                 {len(dataset.tf_ids)}")
+    logging.info(f"TFs:                 {dataset.num_tfs}")
     logging.info(f"Model Size:          {D_MODEL}")
     logging.info(f"Metacells:           {len(dataset.metacell_names)}")
     logging.info(f"Epochs:              {TOTAL_EPOCHS}")
