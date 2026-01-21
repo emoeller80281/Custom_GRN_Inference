@@ -21,7 +21,7 @@ SRC_DIR = str(Path(PROJECT_DIR) / "src")
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-from multiomic_transformer.datasets.dataset import SimpleScaler
+from multiomic_transformer.datasets.dataset_refactor import SimpleScaler
 from multiomic_transformer.models.model import MultiomicTransformer
 
 logging.basicConfig(level=logging.INFO, format='%(message)s')
@@ -349,8 +349,7 @@ def plot_model_tg_predictions(device, model, test_loader, tg_scaler, tf_scaler):
                 atac_wins, tf_tensor,
                 tf_ids=tf_ids, tg_ids=tg_ids,
                 bias=bias, motif_mask=motif_mask,
-                return_edge_logits=True, return_shortcut_contrib=False,
-                edge_extra_features=None,
+                return_shortcut_contrib=False
             )
 
             preds_s   = torch.nan_to_num(preds_s.float(),   nan=0.0, posinf=1e6, neginf=-1e6)
@@ -439,6 +438,11 @@ def plot_model_tg_predictions(device, model, test_loader, tg_scaler, tf_scaler):
     var_g = (sumy2_g[mask] / cnt_g[mask]) - (mean_true_g[mask] ** 2)
     keep = var_g.cpu().numpy() > 1e-6
 
+    # Restrict to genes that actually appeared in the test set, then
+    # apply the variance-based filter (keep is defined on this subset).
+    mask_np = mask.cpu().numpy()
+    mean_true = mean_true[mask_np]
+    mean_pred = mean_pred[mask_np]
     mean_true = mean_true[keep]
     mean_pred = mean_pred[keep]
 

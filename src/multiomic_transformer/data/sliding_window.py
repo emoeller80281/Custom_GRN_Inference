@@ -1,25 +1,19 @@
 #!/usr/bin/env python3
-import argparse
 import logging
 import os
 import glob
 import math
 import re
-import sys
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from typing import Any, Union, Optional
 from pyfaidx import Fasta
-import dask.dataframe as dd
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
-from Bio import SeqIO
 import pybedtools
 import pyfaidx
-from matplotlib.ticker import FuncFormatter
 import multiprocessing as mp
 import MOODS.tools
 import pyarrow as pa
@@ -28,16 +22,7 @@ import pyarrow.dataset as ds
 from numba import njit, prange
 from pyarrow.lib import ArrowInvalid
 from pyarrow.parquet import ParquetFile
-from scipy import stats
 from tqdm import tqdm
-
-# from grn_inference.normalization import minmax_normalize_dask
-from grn_inference.plotting import plot_feature_score_histogram
-from grn_inference.normalization import (
-    clip_and_normalize_log1p_pandas,
-    minmax_normalize_pandas
-)
-from grn_inference.create_homer_peak_file import format_peaks
 
 DNA = "ACGT"
 IDX = {c:i for i,c in enumerate(DNA)}

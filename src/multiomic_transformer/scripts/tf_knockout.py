@@ -1,18 +1,8 @@
-from collections import defaultdict
-# transformer_testing.py
-import dis
 import os, sys, json
-import time
-from threading import local
-import joblib
 import numpy as np
-import pandas as pd
 import torch
 from pathlib import Path
-from sklearn.metrics import roc_auc_score, average_precision_score
-from matplotlib.ticker import FuncFormatter, MultipleLocator
 import logging
-import matplotlib.pyplot as plt
 from tqdm import tqdm
 import argparse
 
@@ -25,12 +15,10 @@ SRC_DIR = str(Path(PROJECT_DIR) / "src")
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-from datetime import datetime
-
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 
 from multiomic_transformer.models.model import MultiomicTransformer
-from multiomic_transformer.datasets.dataset import MultiChromosomeDataset, SimpleScaler, fit_simple_scalers
+from multiomic_transformer.datasets.dataset_refactor import SimpleScaler
 
 def setup_distributed():
     if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
@@ -203,8 +191,7 @@ def run_tf_knockout(
                     atac_wins, tf_scaled_for_model,
                     tf_ids=tf_ids, tg_ids=tg_ids,
                     bias=bias, motif_mask=motif_mask,
-                    return_edge_logits=True, return_shortcut_contrib=False,
-                    edge_extra_features=None,
+                    return_shortcut_contrib=False,
                 )
 
                 if tg_scaler is not None:
@@ -257,8 +244,7 @@ def run_tf_knockout(
                         atac_wins, tf_scaled_input,
                         tf_ids=tf_ids, tg_ids=tg_ids,
                         bias=bias, motif_mask=motif_mask,
-                        return_edge_logits=True, return_shortcut_contrib=False,
-                        edge_extra_features=None,
+                        return_shortcut_contrib=False,
                     )
 
                     if tg_scaler is not None:

@@ -26,10 +26,9 @@ sys.path.append(Path(__file__).resolve().parent.parent.parent)
 
 from multiomic_transformer.utils.standardize import standardize_name
 from multiomic_transformer.utils.files import atomic_json_dump
-from multiomic_transformer.utils.peaks import find_genes_near_peaks, format_peaks, set_tg_as_closest_gene_tss
+from multiomic_transformer.utils.peaks import find_genes_near_peaks, format_peaks
 from multiomic_transformer.utils.downloads import *
 from multiomic_transformer.data.sliding_window import run_sliding_window_scan
-from multiomic_transformer.data.build_pkn import build_organism_pkns
 from multiomic_transformer.utils.gene_canonicalizer import GeneCanonicalizer
 
 random.seed(1337)
@@ -65,8 +64,6 @@ def parse_preprocessing_args():
                         help="Organism code (mm10 for mouse, hg38 for human)")
     parser.add_argument("--dataset_name", type=str, default="mESC_default",
                         help="Name of the dataset/experiment")
-    parser.add_argument("--chrom_id_list", type=str, nargs="+", default=None,
-                        help="List of chromosome IDs to process (e.g., chr1 chr2 chr3)")
     parser.add_argument("--chrom_id", type=str, default="chr19",
                         help="Single chromosome ID for processing")
     parser.add_argument("--chrom_ids", type=str, nargs="+", default=None,
@@ -207,7 +204,7 @@ def setup_global_variables(args):
     This maintains backward compatibility with code that expects global variables.
     """
     global ROOT_DIR, PROJECT_DATA_DIR, PROJECT_RESULT_DIR
-    global ORGANISM_CODE, DATASET_NAME, CHROM_ID_LIST, CHROM_ID, CHROM_IDS
+    global ORGANISM_CODE, DATASET_NAME, CHROM_ID, CHROM_IDS
     global SAMPLE_NAMES, FINE_TUNING_DATASETS
     global RAW_SINGLE_CELL_DATA, RAW_10X_RNA_DATA_DIR, RAW_ATAC_PEAK_MATRIX_FILE
     global RAW_GSE218576_DIR, PROCESSED_GSE218576_DIR
@@ -239,24 +236,11 @@ def setup_global_variables(args):
     ORGANISM_CODE = args.organism_code
     DATASET_NAME = args.dataset_name
     
-    # Handle chromosome lists
-    if args.chrom_id_list:
-        CHROM_ID_LIST = args.chrom_id_list
-    else:
-        # Default for mouse
-        chr_nums = [f"chr{i}" for i in range(1, 20)]
-        CHROM_ID_LIST = chr_nums
-    
     CHROM_ID = args.chrom_id
-    CHROM_IDS = args.chrom_ids if args.chrom_ids else CHROM_ID_LIST
+    CHROM_IDS = args.chrom_ids
     
     # Sample names
-    if args.sample_names:
-        SAMPLE_NAMES = args.sample_names
-    else:
-        # Default samples
-        SAMPLE_NAMES = ["E7.5_rep1", "E7.5_rep2", "E7.75_rep1", "E8.0_rep2", 
-                        "E8.5_rep2", "E8.75_rep2", "E8.0_rep1", "E8.5_rep1"]
+    SAMPLE_NAMES = args.sample_names
     
     FINE_TUNING_DATASETS = args.fine_tuning_datasets if args.fine_tuning_datasets else SAMPLE_NAMES
     
@@ -805,6 +789,10 @@ def process_or_load_rna_atac_data(
     - If adata_ATAC has a 'gene_ids' column in .var, it becomes var_names.
     - Will use existing artifacts when available unless `force_recalculate=True`.
     """
+    raw_data_info_dict = None
+    preprocessed_info_dict = None
+    pseudobulk_info_dict = None
+    
     # ---- resolve paths and names ----
     sample_input_dir = Path(sample_input_dir)
     sample_name = sample_name or sample_input_dir.name
@@ -1217,10 +1205,10 @@ def process_or_load_rna_atac_data(
         TG_pseudobulk_df = _standardize_symbols_index(TG_pseudobulk_df, strip_version_suffix=True, uppercase=True, deduplicate="sum")
         
     # Update the information file with pseudobulk data stats
-    num_TG_cells = TG_pseudobulk_df.shape[0]
-    num_RE_cells = RE_pseudobulk_df.shape[0]
-    num_TG_genes = TG_pseudobulk_df.shape[1]
-    num_RE_peaks = RE_pseudobulk_df.shape[1]
+    num_TG_cells = TG_pseudobulk_df.shape[1]
+    num_RE_cells = RE_pseudobulk_df.shape[1]
+    num_TG_genes = TG_pseudobulk_df.shape[0]
+    num_RE_peaks = RE_pseudobulk_df.shape[0]
     logging.info(f"  - TG pseudobulk: {num_TG_cells:,} metacells × {num_TG_genes:,} genes")
     logging.info(f"  - RE pseudobulk: {num_RE_cells:,} metacells × {num_RE_peaks:,} peaks")
     
@@ -1246,7 +1234,7 @@ def process_or_load_rna_atac_data(
         sample_info.update(pseudobulk_info_dict)
     
     if summary_file is None:
-        summary_file = EXPERIMENT_DIR / "experiment_info.json"
+        summary_file = EXPERIMENT_DIR / DATASET_NAME / "experiment_info.json"
         
     update_info_file(summary_file, f"{sample_name}_pseudobulk_info", sample_info)
 
@@ -1328,17 +1316,17 @@ def filter_and_qc(adata_RNA: AnnData, adata_ATAC: AnnData) -> Tuple[AnnData, Ann
     # Preprocess RNA
     sc.pp.normalize_total(adata_RNA, target_sum=1e4)
     sc.pp.log1p(adata_RNA)
-    sc.pp.highly_variable_genes(adata_RNA, min_mean=0.0125, max_mean=3, min_disp=0.5)
+    # sc.pp.highly_variable_genes(adata_RNA, min_mean=0.0125, max_mean=3, min_disp=0.5)
     adata_RNA.layers["log1p"] = adata_RNA.X.copy()
     sc.pp.scale(adata_RNA, max_value=10, zero_center=True)
-    adata_RNA = adata_RNA[:, adata_RNA.var.highly_variable]
+    # adata_RNA = adata_RNA[:, adata_RNA.var.highly_variable]
     sc.tl.pca(adata_RNA, n_comps=PCA_COMPONENTS, svd_solver="arpack")
 
     # Preprocess ATAC
     sc.pp.log1p(adata_ATAC)
-    sc.pp.highly_variable_genes(adata_ATAC, min_mean=0.0125, max_mean=3, min_disp=0.5)
+    # sc.pp.highly_variable_genes(adata_ATAC, min_mean=0.0125, max_mean=3, min_disp=0.5)
     adata_ATAC.layers["log1p"] = adata_ATAC.X.copy()
-    adata_ATAC = adata_ATAC[:, adata_ATAC.var.highly_variable]
+    # adata_ATAC = adata_ATAC[:, adata_ATAC.var.highly_variable]
     sc.pp.scale(adata_ATAC, max_value=10, zero_center=True)
     sc.tl.pca(adata_ATAC, n_comps=PCA_COMPONENTS, svd_solver="arpack")
     
@@ -2803,7 +2791,6 @@ if __name__ == "__main__":
             peak_to_gene_dist_file = SAMPLE_PROCESSED_DATA_DIR / sample_name / "peak_to_gene_dist.parquet"
             sliding_window_score_file = SAMPLE_PROCESSED_DATA_DIR / sample_name / "sliding_window.parquet"
             tf_tg_reg_pot_file = SAMPLE_PROCESSED_DATA_DIR / sample_name / "tf_tg_regulatory_potential.parquet"
-            gat_training_file = SAMPLE_PROCESSED_DATA_DIR / sample_name / "tf_tg_data.parquet"
             
             # Sample-specific cache files
             tf_tensor_path: Path =        SAMPLE_DATA_CACHE_DIR / "tf_tensor_all.pt"
@@ -2905,28 +2892,28 @@ if __name__ == "__main__":
                 logging.debug("  - Number of peaks to gene distances: " + str(peak_to_gene_dist_df.shape[0]))
                 logging.debug("  - Example peak to gene distances: \n" + str(peak_to_gene_dist_df.head()))
             
-            # ----- SLIDING WINDOW TF-PEAK SCORE -----
-            if not os.path.isfile(sliding_window_score_file):
+            # # ----- SLIDING WINDOW TF-PEAK SCORE -----
+            # if not os.path.isfile(sliding_window_score_file):
 
-                peaks_df = pybedtools.BedTool(peak_bed_file)
+            #     peaks_df = pybedtools.BedTool(peak_bed_file)
 
-                logging.info("  - Running sliding window scan")
-                run_sliding_window_scan(
-                    tf_name_list=tfs,
-                    tf_info_file=str(TF_FILE),
-                    motif_dir=str(MOTIF_DIR),
-                    genome_fasta=str(genome_fasta_file),
-                    peak_bed_file=str(peak_bed_file),
-                    output_file=sliding_window_score_file,
-                    num_cpu=num_cpu,
-                    inner_executor="thread",
-                    inner_workers=4
-                )
+            #     logging.info("  - Running sliding window scan")
+            #     run_sliding_window_scan(
+            #         tf_name_list=tfs,
+            #         tf_info_file=str(TF_FILE),
+            #         motif_dir=str(MOTIF_DIR),
+            #         genome_fasta=str(genome_fasta_file),
+            #         peak_bed_file=str(peak_bed_file),
+            #         output_file=sliding_window_score_file,
+            #         num_cpu=num_cpu,
+            #         inner_executor="thread",
+            #         inner_workers=4
+            #     )
 
             # ----- CALCULATE TF-TG REGULATORY POTENTIAL -----
-            if not os.path.isfile(tf_tg_reg_pot_file):
-                tf_tg_reg_pot = calculate_tf_tg_regulatory_potential(
-                    sliding_window_score_file, tf_tg_reg_pot_file, peak_to_gene_dist_file, num_cpu)
+            # if not os.path.isfile(tf_tg_reg_pot_file):
+            #     tf_tg_reg_pot = calculate_tf_tg_regulatory_potential(
+            #         sliding_window_score_file, tf_tg_reg_pot_file, peak_to_gene_dist_file, num_cpu)
 
 
             # # ----- MERGE TF-TG ATTRIBUTES WITH COMBINATIONS -----
@@ -2961,19 +2948,19 @@ if __name__ == "__main__":
         tf_names = _read_list(total_tf_list_file, "TF")
         
         # Aggregate sample-level data for sliding window scores and peak to gene distance
-        sample_level_sliding_window_dfs = []
+        # sample_level_sliding_window_dfs = []
         sample_level_peak_to_gene_dist_dfs = []
         for sample_name in SAMPLE_NAMES:
-            sliding_window_score_file = SAMPLE_PROCESSED_DATA_DIR / sample_name / "sliding_window.parquet"
+            # sliding_window_score_file = SAMPLE_PROCESSED_DATA_DIR / sample_name / "sliding_window.parquet"
             peak_to_gene_dist_file = SAMPLE_PROCESSED_DATA_DIR / sample_name / "peak_to_gene_dist.parquet"
             
-            sliding_window_df = pd.read_parquet(sliding_window_score_file, engine="pyarrow")
-            sample_level_sliding_window_dfs.append(sliding_window_df)
+            # sliding_window_df = pd.read_parquet(sliding_window_score_file, engine="pyarrow")
+            # sample_level_sliding_window_dfs.append(sliding_window_df)
             
             peak_to_gene_dist_df = pd.read_parquet(peak_to_gene_dist_file, engine="pyarrow")
             sample_level_peak_to_gene_dist_dfs.append(peak_to_gene_dist_df)
 
-        total_sliding_window_score_df = pd.concat(sample_level_sliding_window_dfs)
+        # total_sliding_window_score_df = pd.concat(sample_level_sliding_window_dfs)
         total_peak_gene_dist_df = pd.concat(sample_level_peak_to_gene_dist_dfs)
         
         logging.info(f"Aggregating pseudobulk datasets")
@@ -3122,31 +3109,31 @@ if __name__ == "__main__":
             logging.debug(f"  - Saved peak-to-TG distance scores to {peak_to_tss_dist_path}")
 
             
-            # ----- SLIDING WINDOW TF-PEAK SCORE -----
-            if (not os.path.isfile(chrom_sliding_window_file)) or (FORCE_RECALCULATE == True):
+            # # ----- SLIDING WINDOW TF-PEAK SCORE -----
+            # if (not os.path.isfile(chrom_sliding_window_file)) or (FORCE_RECALCULATE == True):
                 
-                sliding_window_df = total_sliding_window_score_df[
-                    total_sliding_window_score_df["peak_id"].astype(str).isin(chrom_peak_ids)
-                ][["TF","peak_id","sliding_window_score"]].copy()
+            #     sliding_window_df = total_sliding_window_score_df[
+            #         total_sliding_window_score_df["peak_id"].astype(str).isin(chrom_peak_ids)
+            #     ][["TF","peak_id","sliding_window_score"]].copy()
 
-                # normalize types/names
-                sliding_window_df["TF"] = sliding_window_df["TF"].astype(str)
-                sliding_window_df["peak_id"] = sliding_window_df["peak_id"].astype(str)
-                sliding_window_df["sliding_window_score"] = pd.to_numeric(sliding_window_df["sliding_window_score"], errors="coerce")
+            #     # normalize types/names
+            #     sliding_window_df["TF"] = sliding_window_df["TF"].astype(str)
+            #     sliding_window_df["peak_id"] = sliding_window_df["peak_id"].astype(str)
+            #     sliding_window_df["sliding_window_score"] = pd.to_numeric(sliding_window_df["sliding_window_score"], errors="coerce")
 
-                # collapse duplicates across samples
-                sliding_window_df = (
-                    sliding_window_df
-                    .groupby(["TF","peak_id"], as_index=False, sort=False)
-                    .agg(sliding_window_score=("sliding_window_score","mean"))
-                )
+            #     # collapse duplicates across samples
+            #     sliding_window_df = (
+            #         sliding_window_df
+            #         .groupby(["TF","peak_id"], as_index=False, sort=False)
+            #         .agg(sliding_window_score=("sliding_window_score","mean"))
+            #     )
                 
-                sliding_window_df.to_parquet(chrom_sliding_window_file, engine="pyarrow", compression="snappy")
+            #     sliding_window_df.to_parquet(chrom_sliding_window_file, engine="pyarrow", compression="snappy")
 
-                logging.debug(f"  - Wrote sliding window scores to {chrom_sliding_window_file}")
-            else:
-                logging.debug("Loading existing sliding window scores")
-                sliding_window_df = pd.read_parquet(chrom_sliding_window_file, engine="pyarrow")
+            #     logging.debug(f"  - Wrote sliding window scores to {chrom_sliding_window_file}")
+            # else:
+            #     logging.debug("Loading existing sliding window scores")
+            #     sliding_window_df = pd.read_parquet(chrom_sliding_window_file, engine="pyarrow")
             
             total_peaks_df["peak_id"] = total_peaks_df["peak_id"].astype(str)
             genes_near_peaks["peak_id"] = genes_near_peaks["peak_id"].astype(str)
@@ -3208,13 +3195,13 @@ if __name__ == "__main__":
 
             logging.debug(f"\t- Matched {len(tg_names_kept)} TGs to global vocab")
             
-            # Build motif mask using merged info
-            motif_mask = build_motif_mask(
-                tf_names=tf_names_kept,
-                tg_names=tg_names_kept,
-                sliding_window_df=sliding_window_df,
-                genes_near_peaks=genes_near_peaks
-            )
+            # # Build motif mask using merged info
+            # motif_mask = build_motif_mask(
+            #     tf_names=tf_names_kept,
+            #     tg_names=tg_names_kept,
+            #     sliding_window_df=sliding_window_df,
+            #     genes_near_peaks=genes_near_peaks
+            # )
 
             if not tf_ids: raise ValueError("No TFs matched the common vocab.")
             if not tg_ids: raise ValueError("No TGs matched the common vocab.")
@@ -3264,12 +3251,11 @@ if __name__ == "__main__":
             # Write TF and TG names and global vocab indices present in the sample
             atomic_json_dump(tg_names_kept, sample_tg_name_file)
 
-
             # Write the distance bias and metacell names for the sample
             torch.save(dist_bias, dist_bias_file)
             logging.debug(f"  - Saved distance bias tensor with shape {tuple(dist_bias.shape)} to {dist_bias_file}")
             
-            torch.save(torch.from_numpy(motif_mask), motif_mask_file)
+            # torch.save(torch.from_numpy(motif_mask), motif_mask_file)
 
             # Manifest of general sample info and file paths
             manifest = {
@@ -3293,7 +3279,7 @@ if __name__ == "__main__":
                     "common_tg_vocab": str(common_tg_vocab_file),
                     "window_map": str(sample_window_map_file),
                     "genes_near_peaks": str(peak_to_tss_dist_path),
-                    "motif_mask": str(motif_mask_file),
+                    # "motif_mask": str(motif_mask_file),
                 }
             }
             with open(manifest_file, "w") as f:

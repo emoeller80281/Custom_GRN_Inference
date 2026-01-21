@@ -964,6 +964,7 @@ def prepare_dataloader(dataset, batch_size, world_size=1, rank=0,
       - Fallback to legacy random_split + DistributedSampler.
     """
     import random as pyrandom
+    import zlib
     g = torch.Generator()
     g.manual_seed(seed)
 
@@ -985,7 +986,8 @@ def prepare_dataloader(dataset, batch_size, world_size=1, rank=0,
             if n == 0:
                 continue
 
-            rnd = pyrandom.Random(seed + hash(chrom) % 10_000_000)
+            chrom_hash = zlib.crc32(str(chrom).encode("utf-8")) & 0xFFFFFFFF
+            rnd = pyrandom.Random(seed + chrom_hash % 10_000_000)
             idxs_shuf = idxs[:]
             rnd.shuffle(idxs_shuf)
 

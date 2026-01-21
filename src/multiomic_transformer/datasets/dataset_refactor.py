@@ -22,6 +22,14 @@ class SimpleScaler:
     std:  torch.Tensor  # shape [D] on the correct device
 
     def transform(self, x: torch.Tensor, ids: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        Scale x using the mean and std stored in this object.
+        
+        If ids is provided, we slice the global mean/std to match the current batch's genes.
+        Otherwise, we use the whole-dim mean/std for scaling.
+        
+        The scaling is done by subtracting the mean and dividing by the standard deviation.
+        """
         eps = 1e-6
         
         # Slice mean/std if ids are provided
@@ -36,6 +44,13 @@ class SimpleScaler:
         return (x - mu) / sig
     
     def inverse_transform(self, x: torch.Tensor, ids: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        Undo z-scoring that was applied by `transform`.
+        
+        Works with either global stats or a sliced subset via `ids`.
+        - x:   [..., D_batch]
+        - ids: [D_batch] (global ids used during transform), or None for full-dim inverse
+        """
         eps = 1e-6
         if ids is not None:
             mu  = self.mean.index_select(0, ids)
@@ -131,7 +146,6 @@ def fit_simple_scalers(
     return SimpleScaler(tf_mean, tf_std), SimpleScaler(tg_mean, tg_std)
 
     
-
 class IndexedChromBucketBatchSampler(Sampler):
     """
     Batches over a provided {chrom: [indices]} mapping.

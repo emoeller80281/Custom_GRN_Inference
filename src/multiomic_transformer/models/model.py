@@ -396,6 +396,7 @@ class MultiomicTransformer(nn.Module):
         win_emb = self.atac_acc_dense_input_layer(atac_windows)       # [batch_size,n_window,d_model]
         pos = torch.arange(n_window, device=device, dtype=torch.float32)
         win_emb = win_emb + self.posenc(pos, bsz=batch_size).transpose(0, 1)  # [batch_size,n_window,d_model]
+        
         if self.use_gradient_checkpointing and self.training:
             win_emb = self._encode_with_checkpointing(win_emb)
         else:

@@ -1390,8 +1390,7 @@ def calculate_per_tg_r2(model, test_loader, tg_names, tg_scaler, tf_scaler, stat
                 atac_wins, tf_tensor,
                 tf_ids=tf_ids, tg_ids=tg_ids,
                 bias=bias, motif_mask=motif_mask,
-                return_edge_logits=True, return_shortcut_contrib=False,
-                edge_extra_features=None,
+                return_shortcut_contrib=False,
             )
 
             preds_s   = torch.nan_to_num(preds_s.float(),   nan=0.0, posinf=1e6, neginf=-1e6)
@@ -1747,7 +1746,7 @@ if __name__ == "__main__":
     arg_parser.add_argument("--training_num", type=str, required=False, default="model_training_001", help="Training number folder to test")
     arg_parser.add_argument("--experiment_dir", type=Path, required=True, help="Full path to the experiment directory to test")
     arg_parser.add_argument("--model_file", type=str, required=False, default="trained_model.pt", help="Name of the trained model file (default: trained_model.pt)")
-    arg_parser.add_argument("--dataset_type", type=str, required=True, choices=["mESC", "macrophage", "K562"], help="Type of dataset: mESC, macrophage, or K562")
+    arg_parser.add_argument("--dataset_type", type=str, required=True, choices=["mESC", "macrophage", "k562"], help="Type of dataset: mESC, macrophage, or k562")
     arg_parser.add_argument("--sample_name_list", type=str, nargs='+', required=False, default=[], help="List of sample names to include in the evaluation (optional)")
     arg_parser.add_argument("--r2_threshold", type=float, required=False, default=None, help="R² threshold for filtering Gradient Attribution edges (optional)")
 

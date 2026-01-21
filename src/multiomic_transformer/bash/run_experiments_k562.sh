@@ -9,7 +9,7 @@
 #SBATCH --gres=gpu:v100:2
 #SBATCH -c 16
 #SBATCH --mem=192G
-#SBATCH --array=0-1%2
+#SBATCH --array=0-4%5
 
 set -euo pipefail
 
@@ -111,7 +111,7 @@ EXPERIMENTS=(
     # "small_model_loose_1_pct_filtering|K562_small_model_loose_1_pct_filtering|MIN_GENES_PER_CELL=50;MIN_PEAKS_PER_CELL=50;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.01;FILTER_OUT_LOWEST_PCT_PEAKS=0.01;D_MODEL=128;D_FF=512;BATCH_SIZE=8"
     # "two_hops_small_batch|K562_two_hops_small_batch|HOPS=2;BATCH_SIZE=8"
     # "two_hops_150k_max_peak_dist|K562_two_hops_150k_max_peak_dist|HOPS=2;MAX_PEAK_DISTANCE=150000"
-    "two_hops_slow_decay_long_range|K562_two_hops_slow_decay_long_range|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000"
+    # "two_hops_slow_decay_long_range|K562_two_hops_slow_decay_long_range|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000"
     # "two_hops_slow_decay_long_range_small_batch|K562_two_hops_slow_decay_long_range_small_batch|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8"
     # "three_hops_small_batch|K562_three_hops_small_batch|HOPS=3;BATCH_SIZE=8"
     # "two_hops_50k_max_peak_dist|K562_two_hops_50k_max_peak_dist|HOPS=2;MAX_PEAK_DISTANCE=50000"
@@ -120,6 +120,11 @@ EXPERIMENTS=(
     # "two_hops_loose_1_pct_filtering|K562_two_hops_loose_1_pct_filtering|HOPS=2;MIN_GENES_PER_CELL=150;MIN_PEAKS_PER_CELL=50;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.01;FILTER_OUT_LOWEST_PCT_PEAKS=0.01"
     # "two_hops_moderate_5_pct_filtering_small_batch|K562_two_hops_moderate_5_pct_filtering_small_batch|HOPS=2;BATCH_SIZE=8;MIN_GENES_PER_CELL=125;MIN_PEAKS_PER_CELL=75;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.05;FILTER_OUT_LOWEST_PCT_PEAKS=0.05"
     # "small_model_two_hops_long_range_small_batch|K562_small_model_two_hops_long_range_small_batch|D_MODEL=128;D_FF=512;HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8"
+    "stability_test_01|K562_stability_test_01|HOPS=2;D_MODEL=128;D_FF=512"
+    "stability_test_02|K562_stability_test_02|HOPS=2;D_MODEL=128;D_FF=512"
+    "stability_test_03|K562_stability_test_03|HOPS=2;D_MODEL=128;D_FF=512"
+    "stability_test_04|K562_stability_test_04|HOPS=2;D_MODEL=128;D_FF=512"
+    "stability_test_05|K562_stability_test_05|HOPS=2;D_MODEL=128;D_FF=512"
 )
 
 
@@ -211,10 +216,6 @@ SHORTCUT_L1=${DEFAULT_SHORTCUT_L1}
 SHORTCUT_L2=${DEFAULT_SHORTCUT_L2}
 SHORTCUT_TOPK=${DEFAULT_SHORTCUT_TOPK}
 SHORTCUT_DROPOUT=${DEFAULT_SHORTCUT_DROPOUT}
-SUBSAMPLE_MAX_TFS=${DEFAULT_SUBSAMPLE_MAX_TFS}
-SUBSAMPLE_MAX_TGS=${DEFAULT_SUBSAMPLE_MAX_TGS}
-SUBSAMPLE_MAX_WINDOWS_PER_CHROM=${DEFAULT_SUBSAMPLE_MAX_WINDOWS_PER_CHROM}
-SUBSAMPLE_MAX_CELLS=${DEFAULT_SUBSAMPLE_MAX_CELLS}
 SUBSAMPLE_SEED=${DEFAULT_SUBSAMPLE_SEED}
 ALLOWED_SAMPLES=${DEFAULT_ALLOWED_SAMPLES}
 RESUME_CHECKPOINT_PATH=${DEFAULT_RESUME_CHECKPOINT_PATH}
@@ -286,10 +287,6 @@ if [ -n "${PARAM_OVERRIDES}" ]; then
                 SHORTCUT_L2) SHORTCUT_L2=$param_value ;;
                 SHORTCUT_TOPK) SHORTCUT_TOPK=$param_value ;;
                 SHORTCUT_DROPOUT) SHORTCUT_DROPOUT=$param_value ;;
-                SUBSAMPLE_MAX_TFS) SUBSAMPLE_MAX_TFS=$param_value ;;
-                SUBSAMPLE_MAX_TGS) SUBSAMPLE_MAX_TGS=$param_value ;;
-                SUBSAMPLE_MAX_WINDOWS_PER_CHROM) SUBSAMPLE_MAX_WINDOWS_PER_CHROM=$param_value ;;
-                SUBSAMPLE_MAX_CELLS) SUBSAMPLE_MAX_CELLS=$param_value ;;
                 SUBSAMPLE_SEED) SUBSAMPLE_SEED=$param_value ;;
                 ALLOWED_SAMPLES) ALLOWED_SAMPLES=$param_value ;;
                 RESUME_CHECKPOINT_PATH) RESUME_CHECKPOINT_PATH=$param_value ;;

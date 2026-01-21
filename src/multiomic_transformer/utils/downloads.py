@@ -12,8 +12,6 @@ from tqdm.auto import tqdm
 from pybiomart import Dataset
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from config.settings import *
-
 def download_gene_tss_file(
     save_file: Union[Path, str], 
     gene_dataset_name: str = "hsapiens_gene_ensembl", 
