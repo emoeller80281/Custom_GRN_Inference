@@ -3,13 +3,13 @@
 #SBATCH --output=LOGS/transformer_logs/experiments/%x_%A/%x_%A_%a.log
 #SBATCH --error=LOGS/transformer_logs/experiments/%x_%A/%x_%A_%a.err
 #SBATCH --time=36:00:00
-#SBATCH -p gpu
-#SBATCH -N 2
+#SBATCH -p dense
+#SBATCH -N 1
 #SBATCH --ntasks-per-node=1
-#SBATCH --gres=gpu:p100:2
+#SBATCH --gres=gpu:v100:4
 #SBATCH -c 12
 #SBATCH --mem=128G
-#SBATCH --array=0%2
+#SBATCH --array=0%1
 
 set -euo pipefail
 
@@ -43,6 +43,10 @@ DEFAULT_MAX_PEAK_DISTANCE=100000
 DEFAULT_DIST_BIAS_MODE="logsumexp"
 DEFAULT_FILTER_TO_NEAREST_GENE=true
 DEFAULT_PROMOTER_BP=""
+
+# Raw data file names (template with {sample} placeholder)
+DEFAULT_RAW_RNA_FILE="TG_pseudobulk.tsv"
+DEFAULT_RAW_ATAC_FILE="RE_pseudobulk.tsv"
 
 # Model training parameters
 DEFAULT_TOTAL_EPOCHS=250
@@ -79,10 +83,6 @@ DEFAULT_SHORTCUT_L1=0.0
 DEFAULT_SHORTCUT_L2=0.0
 DEFAULT_SHORTCUT_TOPK=""
 DEFAULT_SHORTCUT_DROPOUT=0.0
-DEFAULT_SUBSAMPLE_MAX_TFS=""
-DEFAULT_SUBSAMPLE_MAX_TGS=""
-DEFAULT_SUBSAMPLE_MAX_WINDOWS_PER_CHROM=""
-DEFAULT_SUBSAMPLE_MAX_CELLS=10000
 DEFAULT_SUBSAMPLE_SEED=42
 DEFAULT_ALLOWED_SAMPLES=""
 DEFAULT_RESUME_CHECKPOINT_PATH=""
@@ -123,18 +123,18 @@ EXPERIMENTS=(
     # "slow_decay_long_range_two_hop|mESC_slow_decay_long_range_two_hop|DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;HOPS=2;NEIGHBORS_K=20"
     # "slow_decay_long_range_zero_hops|mESC_slow_decay_long_range_zero_hops|DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;HOPS=0;NEIGHBORS_K=20"
 
-    "promoter_only_10kb_two_hop|mESC_promoter_only_10kb_two_hop|PROMOTER_BP=10000;HOPS=2;NEIGHBORS_K=20"
-    "promoter_only_5kb_two_hop|mESC_promoter_only_5kb_two_hop|PROMOTER_BP=5000;HOPS=2;NEIGHBORS_K=20"
-    "promoter_only_2kb_two_hop|mESC_promoter_only_2kb_two_hop|PROMOTER_BP=2000;HOPS=2;NEIGHBORS_K=20"
+    # "promoter_only_10kb_two_hop|mESC_promoter_only_10kb_two_hop|PROMOTER_BP=10000;HOPS=2;NEIGHBORS_K=20"
+    # "promoter_only_5kb_two_hop|mESC_promoter_only_5kb_two_hop|PROMOTER_BP=5000;HOPS=2;NEIGHBORS_K=20"
+    # "promoter_only_2kb_two_hop|mESC_promoter_only_2kb_two_hop|PROMOTER_BP=2000;HOPS=2;NEIGHBORS_K=20"
     
-    "decay_30k_long_range_two_hop|mESC_decay_30k_long_range_two_hop|DISTANCE_SCALE_FACTOR=30000;MAX_PEAK_DISTANCE=150000;HOPS=2;NEIGHBORS_K=20"
-    "decay_50k_long_range_two_hop|mESC_decay_50k_long_range_two_hop|DISTANCE_SCALE_FACTOR=50000;MAX_PEAK_DISTANCE=150000;HOPS=2;NEIGHBORS_K=20"
-    "decay_75k_long_range_two_hop|mESC_decay_75k_long_range_two_hop|DISTANCE_SCALE_FACTOR=75000;MAX_PEAK_DISTANCE=150000;HOPS=2;NEIGHBORS_K=20"
+    # "decay_30k_long_range_two_hop|mESC_decay_30k_long_range_two_hop|DISTANCE_SCALE_FACTOR=30000;MAX_PEAK_DISTANCE=150000;HOPS=2;NEIGHBORS_K=20"
+    # "decay_50k_long_range_two_hop|mESC_decay_50k_long_range_two_hop|DISTANCE_SCALE_FACTOR=50000;MAX_PEAK_DISTANCE=150000;HOPS=2;NEIGHBORS_K=20"
+    # "decay_75k_long_range_two_hop|mESC_decay_75k_long_range_two_hop|DISTANCE_SCALE_FACTOR=75000;MAX_PEAK_DISTANCE=150000;HOPS=2;NEIGHBORS_K=20"
 
     # Testing running training using only one chromosome. Do we get similar results? Might be better for testing
-    "slow_decay_long_range_two_hop|mESC_slow_decay_long_range_two_hop|DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;HOPS=2;NEIGHBORS_K=20;CHROM_IDS=chr1"
+    # "slow_decay_long_range_two_hop|mESC_slow_decay_long_range_two_hop|DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;HOPS=2;NEIGHBORS_K=20;CHROM_IDS=chr1"
 
-
+    "linger_preprocessing|LINGER_mESC|DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;HOPS=2;NEIGHBORS_K=20"
 
 )
 
@@ -189,6 +189,8 @@ MAX_PEAK_DISTANCE=${DEFAULT_MAX_PEAK_DISTANCE}
 DIST_BIAS_MODE=${DEFAULT_DIST_BIAS_MODE}
 FILTER_TO_NEAREST_GENE=${DEFAULT_FILTER_TO_NEAREST_GENE}
 PROMOTER_BP=${DEFAULT_PROMOTER_BP}
+RAW_RNA_FILE=${DEFAULT_RAW_RNA_FILE}
+RAW_ATAC_FILE=${DEFAULT_RAW_ATAC_FILE}
 
 # Model training parameters
 TOTAL_EPOCHS=${DEFAULT_TOTAL_EPOCHS}
@@ -225,10 +227,6 @@ SHORTCUT_L1=${DEFAULT_SHORTCUT_L1}
 SHORTCUT_L2=${DEFAULT_SHORTCUT_L2}
 SHORTCUT_TOPK=${DEFAULT_SHORTCUT_TOPK}
 SHORTCUT_DROPOUT=${DEFAULT_SHORTCUT_DROPOUT}
-SUBSAMPLE_MAX_TFS=${DEFAULT_SUBSAMPLE_MAX_TFS}
-SUBSAMPLE_MAX_TGS=${DEFAULT_SUBSAMPLE_MAX_TGS}
-SUBSAMPLE_MAX_WINDOWS_PER_CHROM=${DEFAULT_SUBSAMPLE_MAX_WINDOWS_PER_CHROM}
-SUBSAMPLE_MAX_CELLS=${DEFAULT_SUBSAMPLE_MAX_CELLS}
 SUBSAMPLE_SEED=${DEFAULT_SUBSAMPLE_SEED}
 ALLOWED_SAMPLES=${DEFAULT_ALLOWED_SAMPLES}
 RESUME_CHECKPOINT_PATH=${DEFAULT_RESUME_CHECKPOINT_PATH}
@@ -263,6 +261,8 @@ if [ -n "${PARAM_OVERRIDES}" ]; then
                 DIST_BIAS_MODE) DIST_BIAS_MODE=$param_value ;;
                 FILTER_TO_NEAREST_GENE) FILTER_TO_NEAREST_GENE=$param_value ;;
                 PROMOTER_BP) PROMOTER_BP=$param_value ;;
+                RAW_RNA_FILE) RAW_RNA_FILE=$param_value ;;
+                RAW_ATAC_FILE) RAW_ATAC_FILE=$param_value ;;
                 # Model training parameters
                 TOTAL_EPOCHS) TOTAL_EPOCHS=$param_value ;;
                 BATCH_SIZE) BATCH_SIZE=$param_value ;;
@@ -298,10 +298,6 @@ if [ -n "${PARAM_OVERRIDES}" ]; then
                 SHORTCUT_L2) SHORTCUT_L2=$param_value ;;
                 SHORTCUT_TOPK) SHORTCUT_TOPK=$param_value ;;
                 SHORTCUT_DROPOUT) SHORTCUT_DROPOUT=$param_value ;;
-                SUBSAMPLE_MAX_TFS) SUBSAMPLE_MAX_TFS=$param_value ;;
-                SUBSAMPLE_MAX_TGS) SUBSAMPLE_MAX_TGS=$param_value ;;
-                SUBSAMPLE_MAX_WINDOWS_PER_CHROM) SUBSAMPLE_MAX_WINDOWS_PER_CHROM=$param_value ;;
-                SUBSAMPLE_MAX_CELLS) SUBSAMPLE_MAX_CELLS=$param_value ;;
                 SUBSAMPLE_SEED) SUBSAMPLE_SEED=$param_value ;;
                 ALLOWED_SAMPLES) ALLOWED_SAMPLES=$param_value ;;
                 RESUME_CHECKPOINT_PATH) RESUME_CHECKPOINT_PATH=$param_value ;;
@@ -320,15 +316,17 @@ fi
 ROOT_DIR="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
 PROJECT_DATA_DIR="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
 PROJECT_RESULT_DIR="/gpfs/Labs/Uzun/RESULTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
-RAW_SINGLE_CELL_DATA="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/SINGLE_CELL_DATASETS"
-RAW_10X_RNA_DATA_DIR="${RAW_SINGLE_CELL_DATA}/DS014_DOI496239_MOUSE_ESC_RAW_FILES"
-RAW_ATAC_PEAK_MATRIX_FILE="${RAW_SINGLE_CELL_DATA}/DS014_DOI496239_MOUSE_ESCDAYS7AND8/scATAC_PeakMatrix.txt"
+
+# RAW_SINGLE_CELL_DATA="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SC_MO_TRN_DB.MIRA/REPOSITORY/CURRENT/SINGLE_CELL_DATASETS"
+# RAW_10X_RNA_DATA_DIR="${RAW_SINGLE_CELL_DATA}/DS014_DOI496239_MOUSE_ESC_RAW_FILES"
+# RAW_ATAC_PEAK_MATRIX_FILE="${RAW_SINGLE_CELL_DATA}/DS014_DOI496239_MOUSE_ESCDAYS7AND8/scATAC_PeakMatrix.txt"
 
 # Dataset configuration
 ORGANISM_CODE="mm10"
 
 # Derived paths (based on DATASET_NAME)
 DATABASE_DIR="${ROOT_DIR}/data"
+RAW_DATA="${DATABASE_DIR}/processed"
 PROCESSED_DATA="${DATABASE_DIR}/processed"
 TRAINING_DATA_CACHE="${DATABASE_DIR}/training_data_cache"
 EXPERIMENT_DIR="${PROJECT_DATA_DIR}/experiments"
@@ -378,7 +376,7 @@ write_param_csv_row() {
         NEIGHBORS_K PCA_COMPONENTS HOPS SELF_WEIGHT
         WINDOW_SIZE DISTANCE_SCALE_FACTOR MAX_PEAK_DISTANCE
         DIST_BIAS_MODE FILTER_TO_NEAREST_GENE PROMOTER_BP
-        RAW_SINGLE_CELL_DATA RAW_10X_RNA_DATA_DIR RAW_ATAC_PEAK_MATRIX_FILE
+        RAW_SINGLE_CELL_DATA RAW_RNA_FILE RAW_ATAC_FILE
         TOTAL_EPOCHS BATCH_SIZE PATIENCE SAVE_EVERY_N_EPOCHS
         CORR_LOSS_WEIGHT EDGE_LOSS_WEIGHT COS_WEIGHT SHORTCUT_REG_WEIGHT
         GRAD_ACCUM_STEPS USE_GRAD_ACCUMULATION USE_GRAD_CHECKPOINTING
@@ -388,7 +386,6 @@ write_param_csv_row() {
         USE_DISTANCE_BIAS USE_SHORTCUT USE_MOTIF_MASK
         MOTIF_MASK_THRESH MOTIF_PRIOR_SCALE ATTN_BIAS_SCALE
         SHORTCUT_L1 SHORTCUT_L2 SHORTCUT_TOPK SHORTCUT_DROPOUT
-        SUBSAMPLE_MAX_TFS SUBSAMPLE_MAX_TGS SUBSAMPLE_MAX_WINDOWS_PER_CHROM SUBSAMPLE_MAX_CELLS
         SUBSAMPLE_SEED ALLOWED_SAMPLES RESUME_CHECKPOINT_PATH
     )
 
@@ -397,13 +394,14 @@ write_param_csv_row() {
     done
 } > "${PARAM_CSV}"
 
+RAW_SINGLE_CELL_DATA="${RAW_DATA}/LINGER_mESC"
 SAMPLE_PROCESSED_DATA_DIR="${PROCESSED_DATA}/${DATASET_NAME}"
 SAMPLE_DATA_CACHE_DIR="${TRAINING_DATA_CACHE}/${DATASET_NAME}"
 COMMON_DATA="${SAMPLE_DATA_CACHE_DIR}/common"
 
 # Sample information
-SAMPLE_NAMES="E7.5_rep1 E7.5_rep2 E7.75_rep1 E8.0_rep2 E8.5_rep2 E8.75_rep2 E8.0_rep1 E8.5_rep1"
-VALIDATION_DATASETS="E8.75_rep1"
+SAMPLE_NAMES="E7.5_rep1 E7.5_rep2 E7.75_rep1 E8.0_rep2 E8.5_rep2 E8.75_rep2 E8.0_rep1 E8.5_rep1 E8.75_rep1"
+VALIDATION_DATASETS=""
 
 # Chromosomes to process
 CHROM_ID="chr19"
@@ -459,10 +457,8 @@ PREPROCESS_CMD="python src/multiomic_transformer/data/preprocess_argparse.py \
     --dataset_name ${DATASET_NAME} \
     --sample_names ${SAMPLE_NAMES} \
     --chrom_id ${CHROM_ID} \
-    --chrom_ids ${CHROM_IDS} \
+    --chrom_ids ${CHROM_IDS[@]} \
     --raw_single_cell_data ${RAW_SINGLE_CELL_DATA} \
-    --raw_10x_rna_data_dir ${RAW_10X_RNA_DATA_DIR} \
-    --raw_atac_peak_matrix_file ${RAW_ATAC_PEAK_MATRIX_FILE} \
     --min_genes_per_cell ${MIN_GENES_PER_CELL} \
     --min_peaks_per_cell ${MIN_PEAKS_PER_CELL} \
     --filter_type ${FILTER_TYPE} \
@@ -477,7 +473,9 @@ PREPROCESS_CMD="python src/multiomic_transformer/data/preprocess_argparse.py \
     --window_size ${WINDOW_SIZE} \
     --distance_scale_factor ${DISTANCE_SCALE_FACTOR} \
     --max_peak_distance ${MAX_PEAK_DISTANCE} \
-    --dist_bias_mode ${DIST_BIAS_MODE}"
+    --dist_bias_mode ${DIST_BIAS_MODE} \
+    --raw_rna_file ${RAW_RNA_FILE} \
+    --raw_atac_file ${RAW_ATAC_FILE}"
 
 # Add optional validation datasets
 if [ -n "${VALIDATION_DATASETS}" ]; then
@@ -524,7 +522,7 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
         --common_data ${COMMON_DATA} \
         --output_dir ${OUTPUT_DIR} \
         --chrom_id ${CHROM_ID} \
-        --chrom_ids ${CHROM_IDS} \
+        --chrom_ids ${CHROM_IDS[@]} \
         --total_epochs ${TOTAL_EPOCHS} \
         --batch_size ${BATCH_SIZE} \
         --patience ${PATIENCE} \
@@ -553,7 +551,6 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
         --shortcut_l1 ${SHORTCUT_L1} \
         --shortcut_l2 ${SHORTCUT_L2} \
         --shortcut_dropout ${SHORTCUT_DROPOUT} \
-        --subsample_max_cells ${SUBSAMPLE_MAX_CELLS} \
         --subsample_seed ${SUBSAMPLE_SEED} \
         --use_torch_compile \
         --use_profiler \
@@ -584,18 +581,6 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
     # Add optional integer/string parameters
     if [ -n "${SHORTCUT_TOPK}" ]; then
         TRAIN_CMD="${TRAIN_CMD} --shortcut_topk ${SHORTCUT_TOPK}"
-    fi
-
-    if [ -n "${SUBSAMPLE_MAX_TFS}" ]; then
-        TRAIN_CMD="${TRAIN_CMD} --subsample_max_tfs ${SUBSAMPLE_MAX_TFS}"
-    fi
-
-    if [ -n "${SUBSAMPLE_MAX_TGS}" ]; then
-        TRAIN_CMD="${TRAIN_CMD} --subsample_max_tgs ${SUBSAMPLE_MAX_TGS}"
-    fi
-
-    if [ -n "${SUBSAMPLE_MAX_WINDOWS_PER_CHROM}" ]; then
-        TRAIN_CMD="${TRAIN_CMD} --subsample_max_windows_per_chrom ${SUBSAMPLE_MAX_WINDOWS_PER_CHROM}"
     fi
 
     if [ -n "${ALLOWED_SAMPLES}" ]; then

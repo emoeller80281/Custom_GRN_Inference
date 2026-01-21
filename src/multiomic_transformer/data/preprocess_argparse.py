@@ -471,10 +471,18 @@ def pseudo_bulk(
             return X.tocsr().astype(dtype, copy=False)
         # X is dense (numpy ndarray / matrix)
         return sp.csr_matrix(np.asarray(X, dtype=dtype, order="C"))
+
+    def _select_matrix(adata: AnnData):
+        """Pick the best available expression/count matrix."""
+        if "log1p" in adata.layers:
+            return adata.layers["log1p"]
+        if "counts" in adata.layers:
+            return adata.layers["counts"]
+        return adata.X
     
     # X matrices are cells × features (CSR recommended)
-    X_rna  = _as_csr(rna.layers["log1p"])     # cells × genes
-    X_atac = _as_csr(atac.layers["log1p"])    # cells × peaks
+    X_rna  = _as_csr(_select_matrix(rna))      # cells × genes
+    X_atac = _as_csr(_select_matrix(atac))     # cells × peaks
 
     X_rna_soft = W @ X_rna      # cells × genes
     X_atac_soft = W @ X_atac    # cells × peaks
@@ -642,6 +650,22 @@ def process_10x_to_parquet(
         adata.obs["label"] = label.set_index("barcode_use").loc[keep_barcodes, "label"].values
         return adata
     
+    if raw_10x_rna_data_dir is None:
+        raise FileNotFoundError(
+            f"Neither processed files, filtered AnnData, nor raw data files are available.\n"
+            f"Expected raw RNA file: {raw_rna_file}\n"
+            f"Expected raw ATAC file: {raw_atac_file}\n"
+            f"Or provide raw_10x_rna_data_dir and raw_atac_peak_file to create from 10x data."
+        )
+    if not raw_10x_rna_data_dir.is_dir():
+        raise FileNotFoundError(f"10x RNA directory not found: {raw_10x_rna_data_dir}")
+    if raw_atac_peak_file is None or not raw_atac_peak_file.is_file():
+        raise FileNotFoundError(f"ATAC peak file not found: {raw_atac_peak_file}")
+
+    logging.info(f"[{sample_name}] Raw 10X RNA and ATAC inputs found, converting to parquet files")
+    logging.debug(f"  - raw_10x_rna_data_dir: {raw_10x_rna_data_dir}")
+    logging.debug(f"  - raw_atac_peak_file:  {raw_atac_peak_file}")
+    
     # --- load raw data ---
     adata_RNA = _load_rna_adata(raw_10x_rna_data_dir)
     adata_RNA.obs_names = [(sample_name + "." + i).replace("-", ".") for i in adata_RNA.obs_names]
@@ -718,263 +742,75 @@ def process_or_load_rna_atac_data(
     self_weight: Optional[float] = None,
     load: Optional[bool] = True,
     summary_file: Optional[Union[str, Path]] = None,
-) -> Tuple[
-        Optional[pd.DataFrame], 
-        Optional[pd.DataFrame], 
-        Optional[pd.DataFrame], 
-        Optional[pd.DataFrame]
-        ]:
-    """
-    Load or build processed scRNA/scATAC matrices and their pseudobulk aggregations.
+) -> Tuple[Optional[pd.DataFrame], Optional[pd.DataFrame]]:
+    """Create (or load) per-sample pseudobulk datasets and return them.
 
-    The function progressively searches for:
-        1) processed parquet files,
-        2) filtered AnnData (.h5ad),
-        3) raw CSVs,
-        4) raw 10x inputs (if provided),
-    and materializes missing artifacts as needed.
+    Resolution order (unless `force_recalculate=True`):
+      1) Pseudobulk parquet files (TG/RE)
+      2) Filtered AnnData files (RNA/ATAC)
+      3) Processed parquet files (scRNA/scATAC)
+      4) Raw data files (parquet/CSV/TSV)
+      5) Raw 10x inputs (if provided)
 
-    It also checks for pseudobulk TSV files (TG and RE). If they are missing, it
-    computes pseudobulks from filtered AnnData and writes them.
-
-    Parameters
-    ----------
-    sample_input_dir : str | Path
-        Directory that contains/should contain the processed files for one sample.
-    force_recalculate : bool, default False
-        Force recomputation even if processed/parquet/h5ad exists.
-    raw_10x_rna_data_dir : str | Path | None
-        Path to the 10x RNA directory if CSVs need to be generated.
-    raw_atac_peak_file : str | Path | None
-        Path to a peak matrix (or peak list) used when building ATAC CSVs from 10x.
-    sample_name : str | None, keyword-only
-        Pretty name for logging; defaults to the directory name if None.
-    neighbors_k : int | None, keyword-only
-        Number of nearest neighbors per cell for the joint KNN graph used by
-        pseudobulk grouping and/or soft metacell smoothing. Larger values yield
-        stronger smoothing / broader neighborhoods. If None, defaults to NEIGHBORS_K.
-
-    pca_components : int | None, keyword-only
-        Number of principal components per modality (RNA and ATAC) before
-        concatenation for the joint neighbor graph. If None, defaults to
-        PCA_COMPONENTS. Capped internally by min(n_cells, n_features).
-
-    hops : int | None, keyword-only
-        Diffusion depth for soft metacells (applies W^h over the KNN graph).
-        Higher values spread information to neighbors-of-neighbors. Typical 1–3.
-        If None, defaults to SOFT_HOPS.
-
-    self_weight : float | None, keyword-only
-        Additional diagonal weight added before row-normalization of the graph
-        (self-loops). Higher values keep a cell closer to its original profile.
-        If None, defaults to SOFT_SELF_WEIGHT.
-    load : bool | None
-        Chooses whether to return the processed datasets if they are found. Skipped for
-        parallelized pre-processing to avoid reading every processed data file in at once.
-        
     Returns
     -------
-    processed_rna_df : DataFrame
-        Genes × cells/pseudobulks, dense.
-    processed_atac_df : DataFrame
-        Peaks × cells/pseudobulks, dense.
-    TG_pseudobulk_df : DataFrame
-        Genes × pseudobulks.
-    RE_pseudobulk_df : DataFrame
-        Peaks × pseudobulks.
-
-    Notes
-    -----
-    - ATAC pseudobulk values are clipped to 100 to limit extreme counts.
-    - If adata_ATAC has a 'gene_ids' column in .var, it becomes var_names.
-    - Will use existing artifacts when available unless `force_recalculate=True`.
+    TG_pseudobulk_df, RE_pseudobulk_df : pd.DataFrame | None
+        DataFrames are features × metacells. If `load=False`, returns (None, None)
+        after ensuring files exist.
     """
     raw_data_info_dict = None
     preprocessed_info_dict = None
-    pseudobulk_info_dict = None
-    
-    # ---- resolve paths and names ----
+
     sample_input_dir = Path(sample_input_dir)
     sample_name = sample_name or sample_input_dir.name
     raw_10x_rna_data_dir = Path(raw_10x_rna_data_dir) if raw_10x_rna_data_dir is not None else None
     raw_atac_peak_file = Path(raw_atac_peak_file) if raw_atac_peak_file is not None else None
-    
-    # Use sample_processed_dir for output files if provided, otherwise use sample_input_dir
+
     output_dir = Path(sample_processed_dir) if sample_processed_dir else sample_input_dir
+    logging.info(f"\n[{sample_name}] Using input directory: {sample_input_dir}")
+    logging.info(f"[{sample_name}] Using output directory: {output_dir}")
 
-    processed_rna_file  = _configured_path(output_dir, "PROCESSED_RNA_FILENAME",  "scRNA_seq_processed.parquet", sample_name)
+    processed_rna_file = _configured_path(output_dir, "PROCESSED_RNA_FILENAME", "scRNA_seq_processed.parquet", sample_name)
     processed_atac_file = _configured_path(output_dir, "PROCESSED_ATAC_FILENAME", "scATAC_seq_processed.parquet", sample_name)
-
-    raw_rna_file  = _configured_path(sample_input_dir, "RAW_RNA_FILE",  "scRNA_seq_raw.parquet", sample_name)
+    raw_rna_file = _configured_path(sample_input_dir, "RAW_RNA_FILE", "scRNA_seq_raw.parquet", sample_name)
     raw_atac_file = _configured_path(sample_input_dir, "RAW_ATAC_FILE", "scATAC_seq_raw.parquet", sample_name)
+    adata_rna_file = _configured_path(output_dir, "ADATA_RNA_FILE", "adata_RNA.h5ad", sample_name)
+    adata_atac_file = _configured_path(output_dir, "ADATA_ATAC_FILE", "adata_ATAC.h5ad", sample_name)
 
-    adata_rna_file  = _configured_path(output_dir, "ADATA_RNA_FILENAME",  "adata_RNA.h5ad", sample_name)
-    adata_atac_file = _configured_path(output_dir, "ADATA_ATAC_FILENAME", "adata_ATAC.h5ad", sample_name)
-
-    # Pseudobulk files are saved per-sample in the processed data directory
     pseudobulk_TG_file = output_dir / "TG_pseudobulk.parquet"
     pseudobulk_RE_file = output_dir / "RE_pseudobulk.parquet"
 
     neighbors_k = neighbors_k if neighbors_k is not None else NEIGHBORS_K
-    
-    # If load is set to False, check that all of the preprocessed files exist
-    if load == False:
-        files_missing = False
-        
-        files = [
-            processed_rna_file,
-            processed_atac_file,
-            adata_rna_file,
-            adata_atac_file,
-            pseudobulk_TG_file,
-            pseudobulk_RE_file
-            ]
-        
-        for file in files:
-            if not file.is_file():
-                files_missing = True
-    
-        if not files_missing:
-            logging.info("All preprocessed files exist")
-            return None, None, None, None
-        
+    pca_components = pca_components if pca_components is not None else PCA_COMPONENTS
+    hops = hops if hops is not None else HOPS
+    self_weight = self_weight if self_weight is not None else SELF_WEIGHT
 
-    logging.info(f"\n[{sample_name}] Loading or Processing RNA and ATAC data")
-    logging.info("Searching for processed RNA/ATAC parquet files:")
+    # If load is False, we only care about whether pseudobulk exists.
+    if load is False and (not force_recalculate) and pseudobulk_TG_file.is_file() and pseudobulk_RE_file.is_file():
+        logging.info("Pseudobulk files already exist; skipping.")
+        return None, None
 
-    # helpers
-    def _adata_to_dense_df(adata: AnnData) -> pd.DataFrame:
-        """Convert AnnData with log1p layer to dense DataFrame (features × cells)."""
-        X = adata.layers["log1p"]
-        if sp.issparse(X):
-            X = X.toarray()
-        else:
-            X = np.asarray(X)
-        # return gene/peak × cell matrix
-        return pd.DataFrame(X, index=adata.obs_names, columns=adata.var_names).T
+    def _read_matrix_file(path: Path) -> pd.DataFrame:
+        suf = path.suffix.lower()
+        if suf in {".csv", ".tsv", ".txt"}:
+            sep = "," if suf == ".csv" else "\t"
+            return pd.read_csv(path, index_col=0, sep=sep)
+        return pd.read_parquet(path, engine="pyarrow")
 
-    def _load_or_none(path: Path, loader: Callable[[Path], Any]) -> Optional[Any]:
-        """Load data from path using loader if file exists, else return None."""
-        if path.is_file():
-            return loader(path)
-        return None
-    
-    def _normalize_barcodes(index_like: pd.Index) -> pd.Index:
-        """
-        Normalize cell barcodes so RNA/ATAC match.
-        For macrophage data with format like "AAACCGAAGTCACTCC-1_4":
-        - Strip the trailing buffer suffix (_1, _2, _3, _4) to get common barcode
-        """
-        ix = pd.Index(index_like).astype(str)
-        
-        # For barcodes with format "BARCODE-LANE_BUFFER", strip the _BUFFER suffix
-        # This allows barcodes from different buffers to match
-        ix = ix.str.replace(r'_\d+$', '', regex=True)
-        
-        # Also handle standard 10x suffixes if they exist
-        # Strip trailing -digits or .digits (10x suffix) like -1, -2, .1, .2
-        ix = ix.str.replace(r'[-\.]\d+$', '', regex=True)
-        
-        # Strip modality tags at end
-        ix = ix.str.replace(r'(?:_RNA|_GEX|_ATAC|#GEX|#ATAC)$', '', regex=True, case=False)
-        
-        # Unify case
-        ix = ix.str.upper()
-        
-        return ix
-
-    def harmonize_and_intersect(ad_rna: AnnData, ad_atac: AnnData, *, verbose: bool=True) -> Tuple[AnnData, AnnData]:
-        """
-        Harmonize RNA/ATAC barcodes and intersect them to ensure a common set of barcodes.
-
-        Parameters
-        ----------
-        ad_rna : AnnData
-            RNA data
-        ad_atac : AnnData
-            ATAC data
-        verbose : bool, optional
-            Whether to print out intermediate results (default: True)
-
-        Returns
-        -------
-        ad_rna2 : AnnData
-            RNA data with harmonized barcodes
-        ad_atac2 : AnnData
-            ATAC data with harmonized barcodes
-
-        Raises
-        ------
-        RuntimeError
-            If no overlapping barcodes are found after normalization.
-        """
-        rna_norm = _normalize_barcodes(ad_rna.obs_names)
-        atac_norm = _normalize_barcodes(ad_atac.obs_names)
-
-        if verbose:
-            print(f"[SYNC] RNA n={ad_rna.n_obs}, ATAC n={ad_atac.n_obs}")
-
-        # build maps from normalized→original to subset accurately
-        r_map = pd.Series(ad_rna.obs_names, index=rna_norm, dtype="object")
-        a_map = pd.Series(ad_atac.obs_names, index=atac_norm, dtype="object")
-
-        common = r_map.index.intersection(a_map.index)
-        if verbose:
-            print(f"[SYNC] common={len(common)}")
-
-        if len(common) == 0:
-            # Help the user debug: show top 10 of each set difference
-            r_only = r_map.index.difference(a_map.index)[:10]
-            a_only = a_map.index.difference(r_map.index)[:10]
-            raise RuntimeError(
-                "No overlapping barcodes after normalization.\n"
-                f"RNA-only examples: {list(r_only)}\n"
-                f"ATAC-only examples: {list(a_only)}\n"
-                "Adjust normalization rules to your dataset’s naming."
-            )
-
-        # subset both to common, in the same order
-        ad_rna2  = ad_rna[ r_map.loc[common].values, : ].copy()
-        ad_atac2 = ad_atac[ a_map.loc[common].values, : ].copy()
-
-        # set synchronized obs_names to the normalized common IDs
-        ad_rna2.obs_names  = common
-        ad_atac2.obs_names = common
-        return ad_rna2, ad_atac2
-    
     def _standardize_symbols_index(
         df: pd.DataFrame,
         *,
-        strip_version_suffix: bool = True,  # e.g., 'Gm12345.1' -> 'GM12345'
+        strip_version_suffix: bool = True,
         uppercase: bool = True,
-        deduplicate: str = "sum",          # {'sum','mean','first','max','min','median', None}
+        deduplicate: str = "sum",
     ) -> pd.DataFrame:
-        """
-        Standardize gene symbols in the DataFrame index.
-
-        - Assumes rows are genes (index), columns are cells/pseudobulks.
-        - Applies simple, offline normalization:
-            * strip whitespace
-            * optionally strip trailing transcript/version suffixes like '.1', '.2'
-            * optionally uppercase
-        - Optionally aggregates duplicate indices created by normalization.
-
-        Returns a NEW DataFrame.
-        """
         x = df.copy()
-
-        # ensure index is str
         idx = x.index.astype(str).str.strip()
-
         if strip_version_suffix:
-            # remove final dot-number ("ENSG000..", "Gene.1", etc.)
             idx = idx.str.replace(r"\.\d+$", "", regex=True)
-
         if uppercase:
             idx = idx.str.upper()
-
         x.index = idx
-
         if deduplicate:
             if deduplicate == "sum":
                 x = x.groupby(level=0).sum()
@@ -986,270 +822,189 @@ def process_or_load_rna_atac_data(
                 x = getattr(x.groupby(level=0), deduplicate)()
             else:
                 raise ValueError(f"Unknown deduplicate policy: {deduplicate}")
-
         return x
 
-    # placeholders
-    processed_rna_df: Optional[pd.DataFrame] = None
-    processed_atac_df: Optional[pd.DataFrame] = None
-    TG_pseudobulk_df: Optional[pd.DataFrame] = None
-    RE_pseudobulk_df: Optional[pd.DataFrame] = None
+    def _normalize_barcodes(index_like: pd.Index) -> pd.Index:
+        ix = pd.Index(index_like).astype(str)
+        ix = ix.str.replace(r"_\d+$", "", regex=True)
+        ix = ix.str.replace(r"[-\.]\d+$", "", regex=True)
+        ix = ix.str.replace(r"(?:_RNA|_GEX|_ATAC|#GEX|#ATAC)$", "", regex=True, case=False)
+        return ix.str.upper()
 
-    # =========================
-    # 1) Try processed parquet
-    # =========================
-    if not force_recalculate and processed_rna_file.is_file() and processed_atac_file.is_file():
-        logging.info(f"  - Pre-processed data files found! Loading...")
-        processed_rna_df = pd.read_parquet(processed_rna_file, engine="pyarrow")
-        processed_atac_df = pd.read_parquet(processed_atac_file, engine="pyarrow")
-        
-        processed_rna_df = _standardize_symbols_index(processed_rna_df, strip_version_suffix=True, uppercase=True, deduplicate="sum")
-        
-    else:
-        logging.info("  - Processed parquet missing or ignored – will (re)build from earlier stages.")
+    def harmonize_and_intersect(ad_rna: AnnData, ad_atac: AnnData) -> Tuple[AnnData, AnnData]:
+        rna_norm = _normalize_barcodes(ad_rna.obs_names)
+        atac_norm = _normalize_barcodes(ad_atac.obs_names)
+        r_map = pd.Series(ad_rna.obs_names, index=rna_norm, dtype="object")
+        a_map = pd.Series(ad_atac.obs_names, index=atac_norm, dtype="object")
+        common = r_map.index.intersection(a_map.index)
+        if len(common) == 0:
+            raise RuntimeError("No overlapping barcodes after normalization.")
+        ad_rna2 = ad_rna[r_map.loc[common].values, :].copy()
+        ad_atac2 = ad_atac[a_map.loc[common].values, :].copy()
+        ad_rna2.obs_names = common
+        ad_atac2.obs_names = common
+        return ad_rna2, ad_atac2
 
-        # ====================================
-        # 2) Try filtered AnnData (.h5ad) pair
-        # ====================================
-        ad_rna = _load_or_none(adata_rna_file, sc.read_h5ad)
-        ad_atac = _load_or_none(adata_atac_file, sc.read_h5ad)
+    # 1) Pseudobulk cache
+    if not force_recalculate and pseudobulk_TG_file.is_file() and pseudobulk_RE_file.is_file():
+        logging.info("Pseudobulk files found, loading from disk.")
+        if not load:
+            return None, None
+        tg = pd.read_parquet(pseudobulk_TG_file, engine="pyarrow")
+        re_df = pd.read_parquet(pseudobulk_RE_file, engine="pyarrow")
+        tg = _standardize_symbols_index(tg)
+        return tg, re_df
 
-        if ad_rna is None or ad_atac is None or force_recalculate:
-            logging.debug("  - Filtered AnnData missing or ignored – will look for raw files.")
+    # 2) AnnData
+    ad_rna: Optional[AnnData] = None
+    ad_atac: Optional[AnnData] = None
+    if not force_recalculate and adata_rna_file.is_file() and adata_atac_file.is_file():
+        logging.info("Filtered AnnData found. Loading to compute pseudobulk.")
+        ad_rna = sc.read_h5ad(adata_rna_file)
+        ad_atac = sc.read_h5ad(adata_atac_file)
 
-            # ===================
-            # 3) Try raw files (parquet or CSV)
-            # ===================
-            if not raw_rna_file.is_file() or not raw_atac_file.is_file():
-                logging.debug("  - Raw data files missing – will try to create from 10x inputs.")
-                logging.debug(f"    Expected RNA file: {raw_rna_file}")
-                logging.debug(f"    Expected ATAC file: {raw_atac_file}")
+    # 3) Processed parquet -> AnnData
+    if (ad_rna is None or ad_atac is None) and (not force_recalculate) and processed_rna_file.is_file() and processed_atac_file.is_file():
+        logging.info("Processed parquet found. Building AnnData to compute pseudobulk.")
+        proc_rna = pd.read_parquet(processed_rna_file, engine="pyarrow")
+        proc_atac = pd.read_parquet(processed_atac_file, engine="pyarrow")
+        proc_rna = _standardize_symbols_index(proc_rna)
+        ad_rna = AnnData(X=sp.csr_matrix(proc_rna.T.values.astype(np.float32, copy=False)))
+        ad_rna.obs_names = proc_rna.columns.astype(str)
+        ad_rna.var_names = proc_rna.index.astype(str)
+        ad_atac = AnnData(X=sp.csr_matrix(proc_atac.T.values.astype(np.float32, copy=False)))
+        ad_atac.obs_names = proc_atac.columns.astype(str)
+        ad_atac.var_names = proc_atac.index.astype(str)
 
-                if raw_10x_rna_data_dir is None:
-                    raise FileNotFoundError(
-                        f"Neither processed files, filtered AnnData, nor raw data files are available.\n"
-                        f"Expected raw RNA file: {raw_rna_file}\n"
-                        f"Expected raw ATAC file: {raw_atac_file}\n"
-                        f"Or provide raw_10x_rna_data_dir and raw_atac_peak_file to create from 10x data."
-                    )
-                if not raw_10x_rna_data_dir.is_dir():
-                    raise FileNotFoundError(f"10x RNA directory not found: {raw_10x_rna_data_dir}")
-                if raw_atac_peak_file is None or not raw_atac_peak_file.is_file():
-                    raise FileNotFoundError(f"ATAC peak file not found: {raw_atac_peak_file}")
+    # 4/5) Raw files (or 10x -> raw) -> AnnData
+    if ad_rna is None or ad_atac is None or force_recalculate:
+        if (not raw_rna_file.is_file()) or (not raw_atac_file.is_file()):
+            if raw_10x_rna_data_dir is None or raw_atac_peak_file is None:
+                raise FileNotFoundError(
+                    "Missing raw files and no 10x inputs provided. "
+                    f"Expected raw RNA file: {raw_rna_file}; raw ATAC file: {raw_atac_file}"
+                )
+            if not raw_10x_rna_data_dir.is_dir():
+                raise FileNotFoundError(f"10x RNA directory not found: {raw_10x_rna_data_dir}")
+            if not raw_atac_peak_file.is_file():
+                raise FileNotFoundError(f"ATAC peak file not found: {raw_atac_peak_file}")
+            logging.info(f"[{sample_name}] Building raw parquet from 10x inputs")
+            process_10x_to_parquet(raw_10x_rna_data_dir, raw_atac_peak_file, raw_rna_file, raw_atac_file, sample_name)
 
-                logging.info(f"[{sample_name}] Raw 10X RNA and ATAC inputs found, converting to parquet files")
-                logging.debug(f"  - raw_10x_rna_data_dir: {raw_10x_rna_data_dir}")
-                logging.debug(f"  - raw_atac_peak_file:  {raw_atac_peak_file}")
-                process_10x_to_parquet(raw_10x_rna_data_dir, raw_atac_peak_file, raw_rna_file, raw_atac_file, sample_name)
-
-            # Load raw data files (parquet or csv) and convert to AnnData
-            logging.info(f"[{sample_name}] Loading raw data files: {raw_rna_file.name}, {raw_atac_file.name}")
-            if str(raw_rna_file).endswith('.csv'):
-                # CSV files are typically genes × cells, need to transpose to cells × genes
-                rna_df = pd.read_csv(raw_rna_file, index_col=0)
-                rna_df = rna_df.T  # Transpose to cells × genes
-            else:
-                rna_df = pd.read_parquet(raw_rna_file, engine="pyarrow")
-            
-            if str(raw_atac_file).endswith('.csv'):
-                # CSV files are typically peaks × cells, need to transpose to cells × peaks  
-                atac_df = pd.read_csv(raw_atac_file, index_col=0)
-                atac_df = atac_df.T  # Transpose to cells × peaks
-            else:
-                atac_df = pd.read_parquet(raw_atac_file, engine="pyarrow")
-            
-            # Update the information file with raw data stats
-            num_rna_cells_before_filter = rna_df.shape[0]
-            num_atac_cells_before_filter = atac_df.shape[0]
-            num_genes_before_filter = rna_df.shape[1]
-            num_peaks_before_filter = atac_df.shape[1]
-            logging.info(f"  - Raw RNA data:   {num_rna_cells_before_filter:,} cells × {num_genes_before_filter:,} genes")
-            logging.info(f"  - Raw ATAC data:  {num_atac_cells_before_filter:,} cells × {num_peaks_before_filter:,} peaks")
-
-            raw_data_info_dict = {
-                "raw_data_info": {
-                    "num_rna_cells": num_rna_cells_before_filter,
-                    "num_atac_cells": num_atac_cells_before_filter,
-                    "num_genes": num_genes_before_filter,
-                    "num_peaks": num_peaks_before_filter,
-                }
+        logging.info(f"[{sample_name}] Loading raw data files: {raw_rna_file.name}, {raw_atac_file.name}")
+        rna_df = _read_matrix_file(raw_rna_file)
+        atac_df = _read_matrix_file(raw_atac_file)
+        raw_data_info_dict = {
+            "raw_data_info": {
+                "num_rna_cells": int(rna_df.shape[0]),
+                "num_atac_cells": int(atac_df.shape[0]),
+                "num_genes": int(rna_df.shape[1]),
+                "num_peaks": int(atac_df.shape[1]),
             }
-            
-            def _norm_names(names):
-                """Normalize a list of names for overlap checking."""
-                out = []
-                for s in map(str, names):
-                    s = s.strip().lower()
-                    s = re.sub(r"\s+", "", s)
-                    s = re.sub(r"[-\.]\d+$", "", s)
-                    out.append(s)
-                return set(out)
+        }
 
-            def _obs_overlap(ad1, ad2) -> int:
-                """Count overlapping normalized obs_names between two AnnData objects."""
-                return len(_norm_names(ad1.obs_names) & _norm_names(ad2.obs_names))
+        # try both orientations
+        try:
+            ad_rna = AnnData(rna_df)
+            ad_atac = AnnData(atac_df)
+            ad_rna, ad_atac = harmonize_and_intersect(ad_rna, ad_atac)
+        except Exception:
+            ad_rna = AnnData(rna_df.T)
+            ad_atac = AnnData(atac_df.T)
+            ad_rna, ad_atac = harmonize_and_intersect(ad_rna, ad_atac)
 
-            try:
-                # Try as-is (no transpose)
-                ad_rna = AnnData(rna_df)
-                ad_atac = AnnData(atac_df)
-                
-                if _obs_overlap(ad_rna, ad_atac) == 0:
-                    raise RuntimeError("No overlapping barcodes after initial orientation.")
-                ad_rna, ad_atac = harmonize_and_intersect(ad_rna, ad_atac, verbose=True)
+        ad_rna.layers["log1p"] = ad_rna.X.copy()
+        ad_atac.layers["log1p"] = ad_atac.X.copy()
+        logging.info("Running filter_and_qc on RNA/ATAC AnnData")
+        ad_rna, ad_atac = filter_and_qc(ad_rna, ad_atac)
+        logging.info("Writing filtered AnnData files")
+        ad_rna.write_h5ad(adata_rna_file)
+        ad_atac.write_h5ad(adata_atac_file)
 
-            except RuntimeError as e1:
-                logging.warning("No overlapping barcodes. Testing transposed matrices...")
-                # Retry with transpose
-                ad_rna = AnnData(rna_df.T)
-                ad_atac = AnnData(atac_df.T)
-                if _obs_overlap(ad_rna, ad_atac) == 0:
-                    raise RuntimeError(
-                        "Failed to align cell barcodes in both orientations. "
-                        "If your DataFrames are genes×cells, use non-transposed; "
-                        "if cells×genes, use transposed. Adjust normalization if needed."
-                    ) from e1
-                ad_rna, ad_atac = harmonize_and_intersect(ad_rna, ad_atac, verbose=True)
-            
-            # Save the expression to a layer so that scaling for PCA does not apply to the gene expression
-            # (we want to scale all of the samples together later so they are in the same z-space)
-            ad_rna.layers["log1p"]  = ad_rna.X.copy()
-            ad_atac.layers["log1p"] = ad_atac.X.copy()
-
-            # QC/filter
-            logging.info("Running filter_and_qc on RNA/ATAC AnnData")
-            ad_rna, ad_atac = filter_and_qc(ad_rna, ad_atac)
-
-            # Persist
-            logging.info("Writing filtered AnnData files")
-            ad_rna.write_h5ad(adata_rna_file)
-            ad_atac.write_h5ad(adata_atac_file)
-
+    # Ensure processed parquet exists for downstream single-cell tensor building.
+    # Only write when missing or when forcing recomputation.
+    def _adata_to_feature_by_cell_df(adata: AnnData) -> pd.DataFrame:
+        if "log1p" in adata.layers:
+            X = adata.layers["log1p"]
+        elif "counts" in adata.layers:
+            X = adata.layers["counts"]
         else:
-            logging.info("Reading pre-filtered RNA/ATAC AnnData from disk")
-            ad_rna = sc.read_h5ad(adata_rna_file)
-            ad_atac = sc.read_h5ad(adata_atac_file)
+            X = adata.X
+        if sp.issparse(X):
+            arr = X.T.toarray()
+        else:
+            arr = np.asarray(X, dtype=np.float32).T
+        return pd.DataFrame(arr, index=adata.var_names.astype(str), columns=adata.obs_names.astype(str))
 
-        # Optional: if ATAC var has gene ids, adopt them as var_names
-        if "gene_ids" in ad_atac.var.columns:
-            ad_atac.var_names = ad_atac.var["gene_ids"].astype(str)
-
-        logging.info("Converting AnnData to dense DataFrames")
-        processed_rna_df = _adata_to_dense_df(ad_rna)
-        processed_atac_df = _adata_to_dense_df(ad_atac)
-
-        processed_rna_df = _standardize_symbols_index(processed_rna_df, strip_version_suffix=True, uppercase=True, deduplicate="sum")
-        
-        # Persist processed parquets
-        logging.info("Writing processed parquet files")
+    wrote_processed = False
+    if force_recalculate or (not processed_rna_file.is_file()):
+        processed_rna_file.parent.mkdir(parents=True, exist_ok=True)
+        processed_rna_df = _adata_to_feature_by_cell_df(ad_rna).astype("float32")
+        processed_rna_df.index = processed_rna_df.index.astype(str).map(standardize_name)
         processed_rna_df.to_parquet(processed_rna_file, engine="pyarrow", compression="snappy")
-        processed_atac_df.to_parquet(processed_atac_file, engine="pyarrow", compression="snappy")
-        
-        # Update the information file with filtered data stats
-        num_rna_cells_after_filter = processed_rna_df.shape[1]
-        num_atac_cells_after_filter = processed_atac_df.shape[1]
-        num_genes_after_filter = processed_rna_df.shape[0]
-        num_peaks_after_filter = processed_atac_df.shape[0]
-        logging.info(f"  - Filtered RNA data:   {num_rna_cells_after_filter:,} cells × {num_genes_after_filter:,} genes")
-        logging.info(f"  - Filtered ATAC data:  {num_atac_cells_after_filter:,} cells × {num_peaks_after_filter:,} peaks")
+        wrote_processed = True
 
+    if force_recalculate or (not processed_atac_file.is_file()):
+        processed_atac_file.parent.mkdir(parents=True, exist_ok=True)
+        processed_atac_df = _adata_to_feature_by_cell_df(ad_atac).astype("float32")
+        processed_atac_df.to_parquet(processed_atac_file, engine="pyarrow", compression="snappy")
+        wrote_processed = True
+
+    if wrote_processed:
         preprocessed_info_dict = {
             "preprocessed_data_info": {
-                "num_rna_cells": num_rna_cells_after_filter,
-                "num_atac_cells": num_atac_cells_after_filter,
-                "num_genes": num_genes_after_filter,
-                "num_peaks": num_peaks_after_filter,
+                "num_rna_cells": int(ad_rna.n_obs),
+                "num_atac_cells": int(ad_atac.n_obs),
+                "num_genes": int(ad_rna.n_vars),
+                "num_peaks": int(ad_atac.n_vars),
             }
         }
 
-    # =======================================
-    # 4) Ensure pseudobulks exist and return
-    # =======================================
-    need_TG = not pseudobulk_TG_file.is_file()
-    need_RE = not pseudobulk_RE_file.is_file()
+    if ad_rna is None or ad_atac is None:
+        raise RuntimeError("Failed to construct AnnData for pseudobulk computation.")
 
-    if need_TG or need_RE or force_recalculate:
-        logging.info("Pseudobulk files missing or ignored – computing pseudobulk now.")
+    tg_df, re_df = pseudo_bulk(
+        rna_data=ad_rna,
+        atac_data=ad_atac,
+        neighbors_k=neighbors_k,
+        pca_components=pca_components,
+        hops=hops,
+        self_weight=self_weight,
+        renormalize_each_hop=True,
+    )
+    tg_df = tg_df.fillna(0)
+    re_df = re_df.fillna(0)
+    re_df[re_df > 100] = 100
+    tg_df = _standardize_symbols_index(tg_df)
 
-        ad_rna = _load_or_none(adata_rna_file, sc.read_h5ad)
-        ad_atac = _load_or_none(adata_atac_file, sc.read_h5ad)
+    pseudobulk_TG_file.parent.mkdir(parents=True, exist_ok=True)
+    tg_df.to_parquet(pseudobulk_TG_file, engine="pyarrow", compression="snappy")
+    re_df.to_parquet(pseudobulk_RE_file, engine="pyarrow", compression="snappy")
 
-        TG_pseudobulk_df, RE_pseudobulk_df = pseudo_bulk(
-            rna_data=ad_rna,
-            atac_data=ad_atac,
-            neighbors_k=neighbors_k,
-            pca_components=pca_components,
-            hops=hops,
-            self_weight=self_weight,
-            renormalize_each_hop=True
-        )
+    if summary_file is None:
+        summary_file = EXPERIMENT_DIR / DATASET_NAME / "experiment_info.json"
 
-        # Post-processing as in your original
-        TG_pseudobulk_df = TG_pseudobulk_df.fillna(0)
-        RE_pseudobulk_df = RE_pseudobulk_df.fillna(0)
-        RE_pseudobulk_df[RE_pseudobulk_df > 100] = 100
-        
-        TG_pseudobulk_df = _standardize_symbols_index(TG_pseudobulk_df, strip_version_suffix=True, uppercase=True, deduplicate="sum")
-
-        # Ensure the sample raw directory exists before saving pseudobulk files
-        pseudobulk_TG_file.parent.mkdir(parents=True, exist_ok=True)
-        TG_pseudobulk_df.to_parquet(pseudobulk_TG_file, engine="pyarrow", compression="snappy")
-        RE_pseudobulk_df.to_parquet(pseudobulk_RE_file, engine="pyarrow", compression="snappy")
-    else:
-        logging.info("Pseudobulk TSVs found, loading from disk.")
-        logging.info(f"  - Pseudobulk TG Path: {pseudobulk_TG_file}")
-        logging.info(f"  - Pseudobulk RE Path: {pseudobulk_RE_file}")
-        TG_pseudobulk_df = pd.read_parquet(pseudobulk_TG_file, engine="pyarrow")
-        RE_pseudobulk_df = pd.read_parquet(pseudobulk_RE_file, engine="pyarrow")
-        
-        TG_pseudobulk_df = _standardize_symbols_index(TG_pseudobulk_df, strip_version_suffix=True, uppercase=True, deduplicate="sum")
-        
-    # Update the information file with pseudobulk data stats
-    num_TG_cells = TG_pseudobulk_df.shape[1]
-    num_RE_cells = RE_pseudobulk_df.shape[1]
-    num_TG_genes = TG_pseudobulk_df.shape[0]
-    num_RE_peaks = RE_pseudobulk_df.shape[0]
-    logging.info(f"  - TG pseudobulk: {num_TG_cells:,} metacells × {num_TG_genes:,} genes")
-    logging.info(f"  - RE pseudobulk: {num_RE_cells:,} metacells × {num_RE_peaks:,} peaks")
-    
-    pseudobulk_info_dict = {
-        "pseudobulk_data_info": {
-            "num_TG_cells": num_TG_cells,
-            "num_RE_cells": num_RE_cells,
-            "num_TG_genes": num_TG_genes,
-            "num_RE_peaks": num_RE_peaks,
-        }
-    }
-
-    sample_info = {
-        "sample_name": sample_name,
-
-    }
-    
+    sample_info = {"sample_name": sample_name}
     if raw_data_info_dict is not None:
         sample_info.update(raw_data_info_dict)
     if preprocessed_info_dict is not None:
         sample_info.update(preprocessed_info_dict)
-    if pseudobulk_info_dict is not None:
-        sample_info.update(pseudobulk_info_dict)
-    
-    if summary_file is None:
-        summary_file = EXPERIMENT_DIR / DATASET_NAME / "experiment_info.json"
-        
+    sample_info.update(
+        {
+            "pseudobulk_data_info": {
+                "num_TG_cells": int(tg_df.shape[1]),
+                "num_RE_cells": int(re_df.shape[1]),
+                "num_TG_genes": int(tg_df.shape[0]),
+                "num_RE_peaks": int(re_df.shape[0]),
+            }
+        }
+    )
     update_info_file(summary_file, f"{sample_name}_pseudobulk_info", sample_info)
 
-    # Final sanity checks
-    for name, df in [
-        ("processed_rna_df", processed_rna_df),
-        ("processed_atac_df", processed_atac_df),
-        ("TG_pseudobulk_df", TG_pseudobulk_df),
-        ("RE_pseudobulk_df", RE_pseudobulk_df),
-    ]:
-        if df is None or df.empty:
-            raise ValueError(f"{name} is empty or missing; upstream steps did not produce valid data.")
-
-    logging.info("RNA/ATAC processed matrices and pseudobulks are ready.")
-    return processed_rna_df, processed_atac_df, TG_pseudobulk_df, RE_pseudobulk_df
+    if not load:
+        return None, None
+    logging.info("RNA/ATAC pseudobulk datasets are ready.")
+    return tg_df, re_df
 
 def filter_and_qc(adata_RNA: AnnData, adata_ATAC: AnnData) -> Tuple[AnnData, AnnData]:
     """
@@ -2828,7 +2583,7 @@ if __name__ == "__main__":
             
             sample_raw_10x_rna_data_dir = RAW_10X_RNA_DATA_DIR / sample_name if RAW_10X_RNA_DATA_DIR else None
             
-            processed_rna_df, processed_atac_df, pseudobulk_rna_df, pseudobulk_atac_df = process_or_load_rna_atac_data(
+            pseudobulk_rna_df, pseudobulk_atac_df = process_or_load_rna_atac_data(
                 sample_input_dir,
                 force_recalculate=FORCE_RECALCULATE,
                 raw_10x_rna_data_dir=sample_raw_10x_rna_data_dir,
@@ -2842,17 +2597,17 @@ if __name__ == "__main__":
             )
 
             # Canonicalize gene names in processed RNA data
-            processed_rna_df.index = pd.Index(
-                    gc.canonicalize_series(pd.Series(processed_rna_df.index, dtype=object)).array
+            pseudobulk_rna_df.index = pd.Index(
+                    gc.canonicalize_series(pd.Series(pseudobulk_rna_df.index, dtype=object)).array
                 )
-        
+            
             # ----- GET TFs, TGs, and TF-TG combinations -----
-            genes = processed_rna_df.index.to_list()
-            peaks = processed_atac_df.index.to_list()
+            genes = pseudobulk_rna_df.index.to_list()
+            peaks = pseudobulk_atac_df.index.to_list()
             
             logging.info("  - Processed RNA and ATAC files loaded")
-            logging.info(f"    - Number of genes: {processed_rna_df.shape[0]}: {genes[:3]}")
-            logging.info(f"    - Number of peaks: {processed_atac_df.shape[0]}: {peaks[:3]}")
+            logging.info(f"    - Number of genes: {pseudobulk_rna_df.shape[0]}: {genes[:3]}")
+            logging.info(f"    - Number of peaks: {pseudobulk_atac_df.shape[0]}: {peaks[:3]}")
 
             # Create TF-TG combination files
             tfs, tgs = create_tf_tg_combination_files(genes, TF_FILE, SAMPLE_PROCESSED_DATA_DIR, sample_name)
@@ -2861,7 +2616,7 @@ if __name__ == "__main__":
             tgs = sorted(set(gc.canonicalize_series(pd.Series(tgs)).tolist()))
             
             # Format the peaks to BED format (chrom, start, end, peak_id)
-            peak_locs_df = format_peaks(pd.Series(processed_atac_df.index)).rename(columns={"chromosome": "chrom"})
+            peak_locs_df = format_peaks(pd.Series(pseudobulk_atac_df.index)).rename(columns={"chromosome": "chrom"})
             
             if not os.path.isfile(peak_bed_file):
                 # Write the peak BED file
