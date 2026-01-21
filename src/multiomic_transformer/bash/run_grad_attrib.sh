@@ -27,7 +27,7 @@ export NUMEXPR_NUM_THREADS=8
 export BLIS_NUM_THREADS=8
 export KMP_AFFINITY=granularity=fine,compact,1,0
 
-EXPERIMENT_DIR=/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/Macrophage_small_batch_size/chr19
+EXPERIMENT_DIR=/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/K562_stability_test_04/chr19
 SELECTED_EXPERIMENT_DIR=$EXPERIMENT_DIR/model_training_001
 
 MODEL_FILE=trained_model.pt
@@ -35,9 +35,7 @@ MODEL_FILE=trained_model.pt
 torchrun --standalone --nnodes=1 --nproc_per_node=2 ./src/multiomic_transformer/scripts/gradient_attribution.py \
     --selected_experiment_dir "$SELECTED_EXPERIMENT_DIR" \
     --model_file "$MODEL_FILE" \
-    --method smoothgrad \
-    --smoothgrad_samples 1 \
-    --smoothgrad_noise_std 0.00 \
+    --method saliency \
     --use_amp 
 
 echo "finished successfully!"

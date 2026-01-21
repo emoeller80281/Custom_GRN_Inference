@@ -311,7 +311,7 @@ class MultiChromosomeDataset(Dataset):
             self._windows_per_chrom[cid] = w
             _total_windows += w
             _total_tgs += int(ds.num_tgs)
-            _total_tfs += int(ds.num_tfs)
+            _total_tfs = int(ds.num_tfs)
             self._evict_if_needed()
             
             # Check metacell names consistency between chromosome datasets

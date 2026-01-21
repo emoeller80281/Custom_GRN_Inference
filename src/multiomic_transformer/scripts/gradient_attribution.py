@@ -74,9 +74,7 @@ def load_model(selected_experiment_dir, checkpoint_file, device):
         use_bias=use_dist_bias,
         use_shortcut=use_shortcut,
         use_motif_mask=use_motif_mask,
-        use_edge_head=False,
-        edge_extra_dim=0,
-        edge_hidden_dim=128,
+
     )
 
     if isinstance(state, dict) and "model_state_dict" in state:
