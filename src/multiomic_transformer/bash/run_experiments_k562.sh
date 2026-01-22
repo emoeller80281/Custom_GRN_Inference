@@ -120,11 +120,13 @@ EXPERIMENTS=(
     # "two_hops_loose_1_pct_filtering|K562_two_hops_loose_1_pct_filtering|HOPS=2;MIN_GENES_PER_CELL=150;MIN_PEAKS_PER_CELL=50;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.01;FILTER_OUT_LOWEST_PCT_PEAKS=0.01"
     # "two_hops_moderate_5_pct_filtering_small_batch|K562_two_hops_moderate_5_pct_filtering_small_batch|HOPS=2;BATCH_SIZE=8;MIN_GENES_PER_CELL=125;MIN_PEAKS_PER_CELL=75;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.05;FILTER_OUT_LOWEST_PCT_PEAKS=0.05"
     # "small_model_two_hops_long_range_small_batch|K562_small_model_two_hops_long_range_small_batch|D_MODEL=128;D_FF=512;HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8"
-    "stability_test_01|K562_stability_test_01|HOPS=2;D_MODEL=128;D_FF=512"
-    "stability_test_02|K562_stability_test_02|HOPS=2;D_MODEL=128;D_FF=512"
-    "stability_test_03|K562_stability_test_03|HOPS=2;D_MODEL=128;D_FF=512"
-    "stability_test_04|K562_stability_test_04|HOPS=2;D_MODEL=128;D_FF=512"
-    "stability_test_05|K562_stability_test_05|HOPS=2;D_MODEL=128;D_FF=512"
+    # "stability_test_01|K562_stability_test_01|HOPS=2;D_MODEL=128;D_FF=512"
+    # "stability_test_02|K562_stability_test_02|HOPS=2;D_MODEL=128;D_FF=512"
+    # "stability_test_03|K562_stability_test_03|HOPS=2;D_MODEL=128;D_FF=512"
+    # "stability_test_04|K562_stability_test_04|HOPS=2;D_MODEL=128;D_FF=512"
+    # "stability_test_05|K562_stability_test_05|HOPS=2;D_MODEL=128;D_FF=512"
+    "two_hops_slow_decay_long_range_no_hvg|K562_two_hops_slow_decay_long_range_no_hvg|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000"
+
 )
 
 
@@ -745,7 +747,7 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
             --experiment_dir "${EXPERIMENT_DIR}" \
             --model_file "${MODEL_FILE}" \
             --dataset_type "k562" \
-            --sample_name_list "${SAMPLE_NAMES}"
+            --sample_name_list "K562"
 
         echo "Plotting Training Figures..."
         poetry run python ./src/multiomic_transformer/utils/plotting.py \

@@ -2778,7 +2778,7 @@ if __name__ == "__main__":
             dist_bias_file: Path =              SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"dist_bias_{chrom_id}.pt"
             tg_id_file: Path =                  SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"tg_ids_{chrom_id}.pt"
             manifest_file: Path =               SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"manifest_{chrom_id}.json"
-            motif_mask_file: Path =             SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"motif_mask_{chrom_id}.pt"
+            # motif_mask_file: Path =             SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"motif_mask_{chrom_id}.pt"
             chrom_sliding_window_file: Path =   SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"sliding_window_{chrom_id}.parquet"
             chrom_peak_bed_file: Path =         SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"peak_tmp_{chrom_id}.bed"
             tss_bed_file: Path =                SAMPLE_CHROM_SPECIFIC_DATA_CACHE_DIR / f"tss_tmp_{chrom_id}.bed"
@@ -2797,7 +2797,7 @@ if __name__ == "__main__":
                 dist_bias_file,
                 tg_id_file,
                 manifest_file,
-                motif_mask_file,
+                # motif_mask_file,
             ]
             
             if not FORCE_RECALCULATE and all(os.path.isfile(f) for f in required_files):

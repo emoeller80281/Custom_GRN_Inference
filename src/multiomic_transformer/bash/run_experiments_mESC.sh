@@ -4,9 +4,9 @@
 #SBATCH --error=LOGS/transformer_logs/experiments/%x_%A/%x_%A_%a.err
 #SBATCH --time=36:00:00
 #SBATCH -p dense
-#SBATCH -N 1
+#SBATCH -N 2
 #SBATCH --ntasks-per-node=1
-#SBATCH --gres=gpu:v100:4
+#SBATCH --gres=gpu:a100:4
 #SBATCH -c 12
 #SBATCH --mem=128G
 #SBATCH --array=0%1
@@ -45,8 +45,8 @@ DEFAULT_FILTER_TO_NEAREST_GENE=true
 DEFAULT_PROMOTER_BP=""
 
 # Raw data file names (template with {sample} placeholder)
-DEFAULT_RAW_RNA_FILE="TG_pseudobulk.tsv"
-DEFAULT_RAW_ATAC_FILE="RE_pseudobulk.tsv"
+DEFAULT_RAW_RNA_FILE="scRNA_seq_raw.parquet"
+DEFAULT_RAW_ATAC_FILE="scATAC_seq_raw.parquet"
 
 # Model training parameters
 DEFAULT_TOTAL_EPOCHS=250
@@ -74,7 +74,7 @@ DEFAULT_NUM_LAYERS=3
 DEFAULT_D_FF=768
 DEFAULT_DROPOUT=0.10
 DEFAULT_USE_DISTANCE_BIAS=true
-DEFAULT_USE_SHORTCUT=true
+DEFAULT_USE_SHORTCUT=false
 DEFAULT_USE_MOTIF_MASK=true
 DEFAULT_MOTIF_MASK_THRESH=0.0
 DEFAULT_MOTIF_PRIOR_SCALE=0.0
@@ -134,7 +134,13 @@ EXPERIMENTS=(
     # Testing running training using only one chromosome. Do we get similar results? Might be better for testing
     # "slow_decay_long_range_two_hop|mESC_slow_decay_long_range_two_hop|DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;HOPS=2;NEIGHBORS_K=20;CHROM_IDS=chr1"
 
-    "linger_preprocessing|LINGER_mESC|DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;HOPS=2;NEIGHBORS_K=20"
+    # "linger_preprocessing|LINGER_mESC|DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;HOPS=2;NEIGHBORS_K=20"
+    # "slow_decay_long_range_two_hop_no_hvg|mESC_slow_decay_long_range_two_hop_no_hvg|DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;HOPS=2;NEIGHBORS_K=20"
+    # "pct_filter_two_hop_no_hvg_small|mESC_pct_filter_two_hop_no_hvg_small|D_MODEL=128;D_FF=512;GRAD_ACCUM_STEPS=2;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.1;FILTER_OUT_LOWEST_PCT_PEAKS=0.2;HOPS=2;NEIGHBORS_K=20"
+    # "pct_filter_two_hop_hvg_small|mESC_pct_filter_two_hop_hvg_small|D_MODEL=128;D_FF=512;GRAD_ACCUM_STEPS=2;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.1;FILTER_OUT_LOWEST_PCT_PEAKS=0.2;HOPS=2;NEIGHBORS_K=20"
+    
+    "two_hop_hvg_no_small|mESC_two_hop_no_hvg_small|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20"
+    # "two_hop_hvg_small|mESC_two_hop_hvg_small|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20"
 
 )
 
@@ -326,7 +332,7 @@ ORGANISM_CODE="mm10"
 
 # Derived paths (based on DATASET_NAME)
 DATABASE_DIR="${ROOT_DIR}/data"
-RAW_DATA="${DATABASE_DIR}/processed"
+RAW_DATA="${DATABASE_DIR}/raw"
 PROCESSED_DATA="${DATABASE_DIR}/processed"
 TRAINING_DATA_CACHE="${DATABASE_DIR}/training_data_cache"
 EXPERIMENT_DIR="${PROJECT_DATA_DIR}/experiments"
@@ -394,13 +400,13 @@ write_param_csv_row() {
     done
 } > "${PARAM_CSV}"
 
-RAW_SINGLE_CELL_DATA="${RAW_DATA}/LINGER_mESC"
+RAW_SINGLE_CELL_DATA="${RAW_DATA}/mESC"
 SAMPLE_PROCESSED_DATA_DIR="${PROCESSED_DATA}/${DATASET_NAME}"
 SAMPLE_DATA_CACHE_DIR="${TRAINING_DATA_CACHE}/${DATASET_NAME}"
 COMMON_DATA="${SAMPLE_DATA_CACHE_DIR}/common"
 
 # Sample information
-SAMPLE_NAMES="E7.5_rep1 E7.5_rep2 E7.75_rep1 E8.0_rep2 E8.5_rep2 E8.75_rep2 E8.0_rep1 E8.5_rep1 E8.75_rep1"
+SAMPLE_NAMES="E7.5_rep1" # E7.5_rep2 E7.75_rep1 E8.0_rep2 E8.5_rep2 E8.75_rep2 E8.0_rep1 E8.5_rep1
 VALIDATION_DATASETS=""
 
 # Chromosomes to process
@@ -759,7 +765,7 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
             --experiment_dir "${EXPERIMENT_DIR}" \
             --model_file "${MODEL_FILE}" \
             --dataset_type "mESC" \
-            --sample_name_list "E7.5_rep1 E7.5_rep2 E8.5_rep1 E8.5_rep2"
+            --sample_name_list "E7.5_rep1" # E7.5_rep2 E8.5_rep1 E8.5_rep2
 
         echo "Plotting Training Figures..."
         poetry run python ./src/multiomic_transformer/utils/plotting.py \
