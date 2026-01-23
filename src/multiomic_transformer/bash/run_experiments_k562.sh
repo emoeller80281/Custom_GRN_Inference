@@ -9,7 +9,7 @@
 #SBATCH --gres=gpu:v100:2
 #SBATCH -c 16
 #SBATCH --mem=192G
-#SBATCH --array=0-4%5
+#SBATCH --array=0%5
 
 set -euo pipefail
 
@@ -125,7 +125,17 @@ EXPERIMENTS=(
     # "stability_test_03|K562_stability_test_03|HOPS=2;D_MODEL=128;D_FF=512"
     # "stability_test_04|K562_stability_test_04|HOPS=2;D_MODEL=128;D_FF=512"
     # "stability_test_05|K562_stability_test_05|HOPS=2;D_MODEL=128;D_FF=512"
-    "two_hops_slow_decay_long_range_no_hvg|K562_two_hops_slow_decay_long_range_no_hvg|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000"
+    # "two_hops_slow_decay_long_range_no_hvg|K562_two_hops_slow_decay_long_range_no_hvg|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000"
+    # "hvg_filter_only_rna|K562_hvg_filter_only_rna|HOPS=2;D_MODEL=128;D_FF=512;BATCH_SIZE=32;TOTAL_EPOCHS=100"
+    # "hvg_filter_disp_0.6|K562_hvg_filter_disp_0.6|HOPS=2;D_MODEL=128;D_FF=512;BATCH_SIZE=32;TOTAL_EPOCHS=100"
+    # "hvg_filter_disp_0.5|K562_hvg_filter_disp_0.5|HOPS=2;D_MODEL=128;D_FF=512;BATCH_SIZE=32;TOTAL_EPOCHS=100"
+    # "hvg_filter_disp_0.4|K562_hvg_filter_disp_0.4|HOPS=2;D_MODEL=128;D_FF=512;BATCH_SIZE=32;TOTAL_EPOCHS=100"
+    # "hvg_filter_disp_0.3|K562_hvg_filter_disp_0.3|HOPS=2;D_MODEL=128;D_FF=512;BATCH_SIZE=32;TOTAL_EPOCHS=100"
+    # "hvg_filter_disp_0.2|K562_hvg_filter_disp_0.2|HOPS=2;D_MODEL=128;D_FF=512;BATCH_SIZE=32;TOTAL_EPOCHS=100"
+    # "hvg_filter_disp_0.1|K562_hvg_filter_disp_0.1|HOPS=2;D_MODEL=128;D_FF=512;BATCH_SIZE=32;TOTAL_EPOCHS=100"
+    # "hvg_filter_disp_0.05|K562_hvg_filter_disp_0.05|HOPS=2;D_MODEL=128;D_FF=512;BATCH_SIZE=32;TOTAL_EPOCHS=100"
+    "hvg_filter_disp_0.01|K562_hvg_filter_disp_0.01|HOPS=2;D_MODEL=128;D_FF=512;BATCH_SIZE=32;TOTAL_EPOCHS=100"
+    # "hvg_filter_disp_none|K562_hvg_filter_none|HOPS=2;D_MODEL=128;D_FF=512;BATCH_SIZE=32;TOTAL_EPOCHS=100"
 
 )
 

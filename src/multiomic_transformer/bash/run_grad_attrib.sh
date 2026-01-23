@@ -5,7 +5,7 @@
 #SBATCH --time=12:00:00
 #SBATCH -p dense
 #SBATCH -N 1
-#SBATCH --gres=gpu:a100:4
+#SBATCH --gres=gpu:v100:4
 #SBATCH --ntasks-per-node=4
 #SBATCH -c 8
 #SBATCH --mem=64G
@@ -27,15 +27,16 @@ export NUMEXPR_NUM_THREADS=8
 export BLIS_NUM_THREADS=8
 export KMP_AFFINITY=granularity=fine,compact,1,0
 
-EXPERIMENT_DIR=/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC_two_hop_no_hvg_small/chr19
-SELECTED_EXPERIMENT_DIR=$EXPERIMENT_DIR/model_training_002
+EXPERIMENT_DIR=/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/K562_hvg_filter_none/chr19
+SELECTED_EXPERIMENT_DIR=$EXPERIMENT_DIR/model_training_001
 
-MODEL_FILE=checkpoint_150.pt
+MODEL_FILE=trained_model.pt
 
 torchrun --standalone --nnodes=1 --nproc_per_node=4 ./src/multiomic_transformer/scripts/gradient_attribution.py \
     --selected_experiment_dir "$SELECTED_EXPERIMENT_DIR" \
     --model_file "$MODEL_FILE" \
     --method saliency \
+    --max_tgs_per_batch 8 \
     --use_amp 
 
 echo "finished successfully!"

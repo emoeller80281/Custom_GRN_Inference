@@ -5,6 +5,7 @@ from pathlib import Path
 import logging
 from tqdm import tqdm
 import argparse
+from typing import Optional
 
 import torch.distributed as dist
 from torch.amp import autocast
@@ -111,6 +112,7 @@ def run_tf_knockout(
     distributed,
     max_batches=None,
     use_dataloader=False,
+    max_tgs_per_batch: Optional[int] = None,
     ):
 
     T_total = len(state["tf_scaler_mean"])   # total TF vocab size
@@ -201,6 +203,23 @@ def run_tf_knockout(
             )  # [B, G_eval]
             B, G_eval = preds_base_u.shape
 
+            # --------- 3b) Assign TGs to this rank and chunk ---------
+            owned_tg_indices = torch.arange(G_eval, device=device)
+            if world_size > 1:
+                owned_tg_indices = owned_tg_indices[owned_tg_indices % world_size == rank]
+
+            if owned_tg_indices.numel() == 0:
+                if rank == 0:
+                    print(f"[rank {rank}] owns 0 TGs out of {G_eval}; skipping this batch", flush=True)
+                continue
+
+            chunk_size = max_tgs_per_batch if max_tgs_per_batch is not None else owned_tg_indices.numel()
+            if rank == 0:
+                print(
+                    f"[rank {rank}] processing {owned_tg_indices.numel()} / {G_eval} TGs in chunks of {chunk_size}",
+                    flush=True,
+                )
+
             # --------- 4) Prepare a working scaled TF tensor (cloned ONCE) ---------
             # We will modify one TF position at a time, run the model, then restore.
             tf_scaled_work = tf_scaled_base_3d.clone()  # [B, T_eval, F_dim]
@@ -256,10 +275,17 @@ def run_tf_knockout(
                 # delta = baseline - knockout (positive: TF supports expression)
                 delta = preds_base_u - preds_ko_u          # [B, G_eval]
                 delta_mean = delta.mean(dim=0)             # [G_eval]
-                                
+
                 tf_global = int(tf_ids[t_pos].item())
-                effect_sum[tf_global, tg_ids] += delta_mean
-                effect_count[tf_global, tg_ids] += 1
+
+                # Aggregate only owned TGs, in chunks to control memory writes
+                for start in range(0, owned_tg_indices.numel(), chunk_size):
+                    tg_chunk = owned_tg_indices[start : start + chunk_size]
+                    tg_globals = tg_ids[tg_chunk]
+                    delta_chunk = delta_mean[tg_chunk]
+
+                    effect_sum[tf_global, tg_globals] += delta_chunk
+                    effect_count[tf_global, tg_globals] += 1
 
                 # ----------------------------------
                 # 5c) Restore baseline slice *without* cloning
@@ -288,14 +314,25 @@ if __name__ == "__main__":
                         help="File for model checkpoint (default: trained_model.pt)")
     argparser.add_argument("--max_batches", default=None, type=int,
                         help="Maximum number of batches to process (for debugging, defualts to all)")
+    argparser.add_argument("--max_tgs_per_batch", type=int, default=None,
+                        help="Maximum number of target genes to aggregate per batch per rank")
     args = argparser.parse_args()
 
     selected_experiment_dir = Path(args.selected_experiment_dir)
 
     rank, world_size, local_rank, distributed = setup_distributed()
     
-    # Use consistent device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # Use consistent device (respect local_rank)
+    if torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
+        device = torch.device(f"cuda:{local_rank}")
+    else:
+        device = torch.device("cpu")
+
+    print(
+        f"[rank {rank} local_rank {local_rank}] CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')} device_count={torch.cuda.device_count()}",
+        flush=True,
+    )
 
     # Check GPU capability for mixed precision
     use_amp = args.use_amp and device.type == 'cuda'
@@ -328,6 +365,7 @@ if __name__ == "__main__":
         distributed=distributed,
         max_batches=args.max_batches,
         use_dataloader=False,
+        max_tgs_per_batch=args.max_tgs_per_batch,
         )
 
     if distributed:

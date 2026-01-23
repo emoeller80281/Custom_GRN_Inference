@@ -147,10 +147,10 @@ def run_gradient_attribution(
         atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids, motif_mask = batch
         atac_wins = atac_wins.to(device)
         tf_tensor = tf_tensor.to(device)
-        bias = bias.to(device)
+        bias = bias
         tf_ids = tf_ids.to(device)
         tg_ids = tg_ids.to(device)
-        motif_mask = motif_mask.to(device)
+        motif_mask = motif_mask
 
         # Shapes
         if tf_tensor.dim() == 2:
@@ -165,35 +165,10 @@ def run_gradient_attribution(
         else:                  # [B, T_eval]
             tf_ids_flat = tf_ids.reshape(-1)
 
-        # One base forward to get G_eval (number of TGs)
-        with torch.amp.autocast(device_type=device.type, enabled=use_amp):
-            tf_scaled_base = (
-                tf_scaler.transform(tf_tensor, tf_ids)
-                if tf_scaler is not None
-                else tf_tensor
-            )
-            preds_s_base, _, _ = model(
-                atac_wins,
-                tf_scaled_base,
-                tf_ids=tf_ids,
-                tg_ids=tg_ids,
-                bias=bias,
-                motif_mask=motif_mask,
-                return_shortcut_contrib=False,
-            )
-            preds_u_base = (
-                tg_scaler.inverse_transform(preds_s_base, tg_ids)
-                if tg_scaler is not None
-                else preds_s_base
-            )
-            preds_u_base = torch.nan_to_num(
-                preds_u_base.float(), nan=0.0, posinf=1e6, neginf=-1e6
-            )
-
-        G_eval = preds_u_base.shape[1]
+        G_eval = tg_ids.shape[-1]
 
         # Assign TGs to this rank and optionally chunk them to control memory.
-        owned_tg_indices = torch.arange(G_eval, device=preds_u_base.device)
+        owned_tg_indices = torch.arange(G_eval, device=device)
         if world_size > 1:
             owned_tg_indices = owned_tg_indices[owned_tg_indices % world_size == rank]
 
@@ -216,64 +191,88 @@ def run_gradient_attribution(
 
         # ---------- METHOD 1: plain saliency (grad * input) ----------
         if method == "saliency":
-            # Need gradients w.r.t. tf_tensor
-            tf_tensor = tf_tensor.detach().requires_grad_(True)
-
-            # Re-run forward with grad-tracking on tf_tensor
-            with torch.amp.autocast(device_type=device.type, enabled=use_amp):
-                tf_scaled = (
-                    tf_scaler.transform(tf_tensor, tf_ids)
-                    if tf_scaler is not None
-                    else tf_tensor
-                )
-                preds_s, _, _ = model(
-                    atac_wins,
-                    tf_scaled,
-                    tf_ids=tf_ids,
-                    tg_ids=tg_ids,
-                    bias=bias,
-                    motif_mask=motif_mask,
-                    return_shortcut_contrib=False,
-                )
-                preds_u = (
-                    tg_scaler.inverse_transform(preds_s, tg_ids)
-                    if tg_scaler is not None
-                    else preds_s
-                )
-                preds_u = torch.nan_to_num(
-                    preds_u.float(), nan=0.0, posinf=1e6, neginf=-1e6
-                )
-
             total_owned = owned_tg_indices.numel()
 
             for chunk_start in range(0, total_owned, chunk_size):
                 tg_chunk = owned_tg_indices[chunk_start : chunk_start + chunk_size]
 
-                for offset, j in enumerate(tg_chunk):
-                    global_idx = chunk_start + offset
-                    retain = global_idx < (total_owned - 1)
+                # Slice TG-specific inputs to shrink the attention graph per chunk
+                if bias is not None:
+                    bias_idx = tg_chunk
+                    if bias.device != tg_chunk.device:
+                        bias_idx = tg_chunk.to(bias.device)
+                    if bias.dim() == 3:
+                        bias_chunk = bias[:, bias_idx, :]
+                    else:
+                        bias_chunk = bias[:, :, bias_idx, :]
+                    bias_chunk = bias_chunk.to(device, non_blocking=True)
+                else:
+                    bias_chunk = None
+
+                if motif_mask is not None:
+                    mm_idx = tg_chunk
+                    if motif_mask.device != tg_chunk.device:
+                        mm_idx = tg_chunk.to(motif_mask.device)
+                    motif_mask_chunk = motif_mask[mm_idx].to(device, non_blocking=True)
+                else:
+                    motif_mask_chunk = None
+
+                if tg_ids.dim() == 1:
+                    tg_ids_chunk = tg_ids[tg_chunk]
+                else:
+                    tg_ids_chunk = tg_ids[:, tg_chunk]
+
+                # Need gradients w.r.t. tf_tensor
+                tf_tensor_chunk = tf_tensor.detach().requires_grad_(True)
+
+                # Forward only for this TG chunk
+                with torch.amp.autocast(device_type=device.type, enabled=use_amp):
+                    tf_scaled = (
+                        tf_scaler.transform(tf_tensor_chunk, tf_ids)
+                        if tf_scaler is not None
+                        else tf_tensor_chunk
+                    )
+                    preds_s, _, _ = model(
+                        atac_wins,
+                        tf_scaled,
+                        tf_ids=tf_ids,
+                        tg_ids=tg_ids_chunk,
+                        bias=bias_chunk,
+                        motif_mask=motif_mask_chunk,
+                        return_shortcut_contrib=False,
+                    )
+                    preds_u = (
+                        tg_scaler.inverse_transform(preds_s, tg_ids_chunk)
+                        if tg_scaler is not None
+                        else preds_s
+                    )
+                    preds_u = torch.nan_to_num(
+                        preds_u.float(), nan=0.0, posinf=1e6, neginf=-1e6
+                    )
+
+                local_chunk = tg_chunk.numel()
+
+                for offset in range(local_chunk):
+                    retain = offset < (local_chunk - 1)
 
                     grad_output_j = torch.zeros_like(preds_u)
-                    grad_output_j[:, j] = 1.0
+                    grad_output_j[:, offset] = 1.0
 
                     grads = torch.autograd.grad(
                         outputs=preds_u,
-                        inputs=tf_tensor,
+                        inputs=tf_tensor_chunk,
                         grad_outputs=grad_output_j,
                         retain_graph=retain,
                         create_graph=False,
-                    )
-
-                    # autograd.grad returns a tuple; grab the first/only tensor
-                    grads = grads[0]
+                    )[0]
 
                     # grad * input (expression channel)
                     if grads.dim() == 3:
                         expr_grad = grads[..., 0]
-                        expr_input = tf_tensor[..., 0]
+                        expr_input = tf_tensor_chunk[..., 0]
                     else:
                         expr_grad = grads
-                        expr_input = tf_tensor
+                        expr_input = tf_tensor_chunk
 
                     saliency = expr_grad * expr_input  # optionally .abs()
 
@@ -283,7 +282,10 @@ def run_gradient_attribution(
                         grad_abs = saliency
 
                     grad_flat = grad_abs.reshape(-1)
-                    tg_global = int(tg_ids[j].item())
+                    if tg_ids_chunk.dim() == 1:
+                        tg_global = int(tg_ids_chunk[offset].item())
+                    else:
+                        tg_global = int(tg_ids_chunk[0, offset].item())
 
                     col_grad = grad_sum[:, tg_global]
                     col_count = grad_count[:, tg_global]
@@ -291,8 +293,23 @@ def run_gradient_attribution(
                     col_grad.index_add_(0, tf_ids_flat, grad_flat)
                     col_count.index_add_(0, tf_ids_flat, torch.ones_like(grad_flat))
 
+                # cleanup per chunk
+                del (
+                    preds_u,
+                    preds_s,
+                    tf_scaled,
+                    tf_tensor_chunk,
+                    bias_chunk,
+                    motif_mask_chunk,
+                    tg_ids_chunk,
+                )
+                if device.type == "cuda":
+                    torch.cuda.empty_cache()
+
         # ---------- METHOD 2: SmoothGrad ----------
         elif method == "smoothgrad":
+            bias_full = bias.to(device) if bias is not None else None
+            motif_mask_full = motif_mask.to(device) if motif_mask is not None else None
             S = max(smoothgrad_samples, 1)
 
             for chunk_start in range(0, owned_tg_indices.numel(), chunk_size):
@@ -318,8 +335,8 @@ def run_gradient_attribution(
                                 tf_scaled,
                                 tf_ids=tf_ids,
                                 tg_ids=tg_ids,
-                                bias=bias,
-                                motif_mask=motif_mask,
+                                bias=bias_full,
+                                motif_mask=motif_mask_full,
                                 return_shortcut_contrib=False,
                             )
                             preds_u = (
@@ -374,6 +391,8 @@ def run_gradient_attribution(
 
         # ---------- METHOD 3: Integrated Gradients ----------
         elif method == "ig":
+            bias_full = bias.to(device) if bias is not None else None
+            motif_mask_full = motif_mask.to(device) if motif_mask is not None else None
             M = max(ig_steps, 1)
             baseline = torch.zeros_like(tf_tensor)
             diff = tf_tensor - baseline
@@ -401,8 +420,8 @@ def run_gradient_attribution(
                                 tf_scaled,
                                 tf_ids=tf_ids,
                                 tg_ids=tg_ids,
-                                bias=bias,
-                                motif_mask=motif_mask,
+                                bias=bias_full,
+                                motif_mask=motif_mask_full,
                                 return_shortcut_contrib=False,
                             )
                             preds_u = (
@@ -449,9 +468,6 @@ def run_gradient_attribution(
 
         # cleanup
         del (
-            preds_u_base,
-            preds_s_base,
-            tf_scaled_base,
             atac_wins,
             tf_tensor,
             bias,

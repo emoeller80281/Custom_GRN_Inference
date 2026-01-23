@@ -1071,17 +1071,17 @@ def filter_and_qc(adata_RNA: AnnData, adata_ATAC: AnnData) -> Tuple[AnnData, Ann
     # Preprocess RNA
     sc.pp.normalize_total(adata_RNA, target_sum=1e4)
     sc.pp.log1p(adata_RNA)
-    # sc.pp.highly_variable_genes(adata_RNA, min_mean=0.0125, max_mean=3, min_disp=0.5)
+    sc.pp.highly_variable_genes(adata_RNA, min_mean=0.0125, max_mean=3, min_disp=0.01)
     adata_RNA.layers["log1p"] = adata_RNA.X.copy()
     sc.pp.scale(adata_RNA, max_value=10, zero_center=True)
-    # adata_RNA = adata_RNA[:, adata_RNA.var.highly_variable]
+    adata_RNA = adata_RNA[:, adata_RNA.var.highly_variable]
     sc.tl.pca(adata_RNA, n_comps=PCA_COMPONENTS, svd_solver="arpack")
 
     # Preprocess ATAC
     sc.pp.log1p(adata_ATAC)
-    # sc.pp.highly_variable_genes(adata_ATAC, min_mean=0.0125, max_mean=3, min_disp=0.5)
+    sc.pp.highly_variable_genes(adata_ATAC, min_mean=0.0125, max_mean=3, min_disp=0.01)
     adata_ATAC.layers["log1p"] = adata_ATAC.X.copy()
-    # adata_ATAC = adata_ATAC[:, adata_ATAC.var.highly_variable]
+    adata_ATAC = adata_ATAC[:, adata_ATAC.var.highly_variable]
     sc.pp.scale(adata_ATAC, max_value=10, zero_center=True)
     sc.tl.pca(adata_ATAC, n_comps=PCA_COMPONENTS, svd_solver="arpack")
     
