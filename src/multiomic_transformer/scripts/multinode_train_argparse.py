@@ -1399,9 +1399,9 @@ def write_run_parameters(dataset, out_dir, world_size):
         "shortcut_dropout": SHORTCUT_DROPOUT,
         "shortcut_topk": SHORTCUT_TOPK,
         "lr": INITIAL_LEARNING_RATE,
-        "genes": len(dataset.tg_ids),
+        "genes": len(dataset.num_tgs),
         "windows": dataset.num_windows,
-        "tfs": len(dataset.tf_ids),
+        "tfs": len(dataset.num_tfs),
         "metacells": len(dataset.metacell_names),
     }
 

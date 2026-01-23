@@ -1780,7 +1780,6 @@ if __name__ == "__main__":
             "RN111": GROUND_TRUTH_DIR / "RN111.tsv",
             "RN112": GROUND_TRUTH_DIR / "RN112.tsv",
             "RN114": GROUND_TRUTH_DIR / "RN114.tsv",
-            "RN115": GROUND_TRUTH_DIR / "RN115.tsv",
             "RN116": GROUND_TRUTH_DIR / "RN116.tsv",
         }
     elif dataset_type.lower() == "k562":

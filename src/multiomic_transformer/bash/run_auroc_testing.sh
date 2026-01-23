@@ -69,8 +69,8 @@ EXPERIMENT_LIST=(
     # "mESC_promoter_only_5kb_two_hop|model_training_001|trained_model.pt"
     # "mESC_promoter_only_10kb_two_hop|model_training_001|trained_model.pt"
     # "mESC_promoter_only_2kb_two_hop|model_training_001|trained_model.pt"
-    # "mESC_pct_filter_two_hop_no_hvg_small|model_training_001|checkpoint_155.pt"
-    "mESC_pct_filter_two_hop_hvg_small|model_training_001|checkpoint_85.pt"
+    # "mESC_two_hop_hvg_small|model_training_001|trained_model.pt"
+    "mESC_two_hop_no_hvg_small|model_training_002|trained_model.pt"
 
     # "Macrophage_base_settings|model_training_006|trained_model.pt"
     # "Macrophage_model_d_128_ff_512|model_training_001|trained_model.pt"
@@ -139,6 +139,7 @@ EXPERIMENT_LIST=(
     # "K562_stability_test_04|model_training_001|trained_model.pt"
     # "K562_stability_test_05|model_training_001|trained_model.pt"
     # "K562_two_hops_slow_decay_long_range_no_hvg|model_training_001|trained_model.pt"
+    # "K562_hvg_filter_none|model_training_001|trained_model.pt"
 )
 
 DATASET_TYPE="mESC"
