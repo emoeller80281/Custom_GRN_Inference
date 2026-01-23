@@ -5,8 +5,8 @@
 #SBATCH --time=12:00:00
 #SBATCH -p dense
 #SBATCH -N 1
-#SBATCH --gres=gpu:v100:4
-#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:a100:2
+#SBATCH --ntasks-per-node=2
 #SBATCH -c 8
 #SBATCH --mem=64G
 
@@ -33,12 +33,12 @@ export KMP_AFFINITY=granularity=fine,compact,1,0
 # ------------------------------------------------------------
 # Run classifier for this chromosome
 # ------------------------------------------------------------
-EXPERIMENT_DIR=/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC_pct_filter_two_hop_hvg_small/chr19
-SELECTED_EXPERIMENT_DIR=$EXPERIMENT_DIR/model_training_001
+EXPERIMENT_DIR=/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC_two_hop_no_hvg_small/chr19
+SELECTED_EXPERIMENT_DIR=$EXPERIMENT_DIR/model_training_002
 
-MODEL_FILE=checkpoint_85.pt
+MODEL_FILE=checkpoint_150.pt
 
-torchrun --standalone --nnodes=1 --nproc_per_node=4 ./src/multiomic_transformer/scripts/tf_knockout.py \
+torchrun --standalone --nnodes=1 --nproc_per_node=2 ./src/multiomic_transformer/scripts/tf_knockout.py \
     --selected_experiment_dir "$SELECTED_EXPERIMENT_DIR" \
     --model_file "$MODEL_FILE" \
     --use_amp

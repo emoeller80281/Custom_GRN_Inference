@@ -114,6 +114,7 @@ def run_gradient_attribution(
     ig_steps: int = 8,
     max_batches: int = None,
     use_dataloader: bool = False,
+    max_tgs_per_batch: int = None,
 ):
 
     assert method in {"saliency", "smoothgrad", "ig"}, f"Unknown method: {method}"
@@ -189,7 +190,29 @@ def run_gradient_attribution(
                 preds_u_base.float(), nan=0.0, posinf=1e6, neginf=-1e6
             )
 
-        _, G_eval = preds_u_base.shape
+        G_eval = preds_u_base.shape[1]
+
+        # Assign TGs to this rank and optionally chunk them to control memory.
+        owned_tg_indices = torch.arange(G_eval, device=preds_u_base.device)
+        if world_size > 1:
+            owned_tg_indices = owned_tg_indices[owned_tg_indices % world_size == rank]
+
+        if owned_tg_indices.numel() == 0:
+            if rank == 0:
+                print(
+                    f"[rank {rank}] owns 0 TGs out of {G_eval}; skipping this batch",
+                    flush=True,
+                )
+            continue
+
+        # Chunk size = max_tgs_per_batch (if provided) otherwise process all owned TGs at once.
+        chunk_size = max_tgs_per_batch if max_tgs_per_batch is not None else owned_tg_indices.numel()
+
+        if rank == 0:
+            print(
+                f"[rank {rank}] processing {owned_tg_indices.numel()} / {G_eval} TGs in chunks of {chunk_size}",
+                flush=True,
+            )
 
         # ---------- METHOD 1: plain saliency (grad * input) ----------
         if method == "saliency":
@@ -221,122 +244,133 @@ def run_gradient_attribution(
                     preds_u.float(), nan=0.0, posinf=1e6, neginf=-1e6
                 )
 
-            for j in range(G_eval):
-                grad_output_j = torch.zeros_like(preds_u)
-                grad_output_j[:, j] = 1.0
+            total_owned = owned_tg_indices.numel()
 
-                retain = (j < G_eval - 1)
+            for chunk_start in range(0, total_owned, chunk_size):
+                tg_chunk = owned_tg_indices[chunk_start : chunk_start + chunk_size]
 
-                grads = torch.autograd.grad(
-                    outputs=preds_u,
-                    inputs=tf_tensor,
-                    grad_outputs=grad_output_j,
-                    retain_graph=retain,
-                    create_graph=False,
-                    allow_unused=False,
-                )[0]
-
-                # grad * input (expression channel)
-                if grads.dim() == 3:
-                    expr_grad = grads[..., 0]
-                    expr_input = tf_tensor[..., 0]
-                else:
-                    expr_grad = grads
-                    expr_input = tf_tensor
-
-                saliency = expr_grad * expr_input  # optionally .abs()
-
-                if saliency.dim() == 3:
-                    grad_abs = saliency.sum(dim=-1)
-                else:
-                    grad_abs = saliency
-
-                grad_flat = grad_abs.reshape(-1)
-                tg_global = int(tg_ids[j].item())
-
-                col_grad = grad_sum[:, tg_global]
-                col_count = grad_count[:, tg_global]
-
-                col_grad.index_add_(0, tf_ids_flat, grad_flat)
-                col_count.index_add_(0, tf_ids_flat, torch.ones_like(grad_flat))
-
-        # ---------- METHOD 2: SmoothGrad ----------
-        elif method == "smoothgrad":
-            S = max(smoothgrad_samples, 1)
-
-            for j in range(G_eval):
-                grad_accum = torch.zeros_like(tf_tensor, dtype=torch.float32)
-
-                for s in range(S):
-                    noise = smoothgrad_noise_std * torch.randn_like(tf_tensor)
-                    tf_noisy = (tf_tensor + noise).detach().requires_grad_(True)
-
-                    with torch.amp.autocast(
-                        device_type=device.type, enabled=use_amp
-                    ):
-                        tf_scaled = (
-                            tf_scaler.transform(tf_noisy, tf_ids)
-                            if tf_scaler is not None
-                            else tf_noisy
-                        )
-                        preds_s, _, _ = model(
-                            atac_wins,
-                            tf_scaled,
-                            tf_ids=tf_ids,
-                            tg_ids=tg_ids,
-                            bias=bias,
-                            motif_mask=motif_mask,
-                            return_shortcut_contrib=False,
-                        )
-                        preds_u = (
-                            tg_scaler.inverse_transform(preds_s, tg_ids)
-                            if tg_scaler is not None
-                            else preds_s
-                        )
-                        preds_u = torch.nan_to_num(
-                            preds_u.float(),
-                            nan=0.0,
-                            posinf=1e6,
-                            neginf=-1e6,
-                        )
+                for offset, j in enumerate(tg_chunk):
+                    global_idx = chunk_start + offset
+                    retain = global_idx < (total_owned - 1)
 
                     grad_output_j = torch.zeros_like(preds_u)
                     grad_output_j[:, j] = 1.0
 
                     grads = torch.autograd.grad(
                         outputs=preds_u,
-                        inputs=tf_noisy,
+                        inputs=tf_tensor,
                         grad_outputs=grad_output_j,
-                        retain_graph=False,
+                        retain_graph=retain,
                         create_graph=False,
-                        allow_unused=False,
-                    )[0]
+                    )
 
+                    # autograd.grad returns a tuple; grab the first/only tensor
+                    grads = grads[0]
+
+                    # grad * input (expression channel)
                     if grads.dim() == 3:
                         expr_grad = grads[..., 0]
-                        expr_input = tf_noisy[..., 0]
+                        expr_input = tf_tensor[..., 0]
                     else:
                         expr_grad = grads
-                        expr_input = tf_noisy
+                        expr_input = tf_tensor
 
-                    saliency = expr_grad * expr_input
-                    grad_accum = grad_accum + saliency
+                    saliency = expr_grad * expr_input  # optionally .abs()
 
-                grad_mean = grad_accum / float(S)
+                    if saliency.dim() == 3:
+                        grad_abs = saliency.sum(dim=-1)
+                    else:
+                        grad_abs = saliency
 
-                if grad_mean.dim() == 3:
-                    grad_abs = grad_mean.sum(dim=-1)
-                else:
-                    grad_abs = grad_mean
+                    grad_flat = grad_abs.reshape(-1)
+                    tg_global = int(tg_ids[j].item())
 
-                grad_flat = grad_abs.reshape(-1)
-                tg_global = int(tg_ids[j].item())
+                    col_grad = grad_sum[:, tg_global]
+                    col_count = grad_count[:, tg_global]
 
-                col_grad = grad_sum[:, tg_global]
-                col_count = grad_count[:, tg_global]
+                    col_grad.index_add_(0, tf_ids_flat, grad_flat)
+                    col_count.index_add_(0, tf_ids_flat, torch.ones_like(grad_flat))
 
-                col_grad.index_add_(0, tf_ids_flat, grad_flat)
-                col_count.index_add_(0, tf_ids_flat, torch.ones_like(grad_flat))
+        # ---------- METHOD 2: SmoothGrad ----------
+        elif method == "smoothgrad":
+            S = max(smoothgrad_samples, 1)
+
+            for chunk_start in range(0, owned_tg_indices.numel(), chunk_size):
+                tg_chunk = owned_tg_indices[chunk_start : chunk_start + chunk_size]
+
+                for j in tg_chunk:
+                    grad_accum = torch.zeros_like(tf_tensor, dtype=torch.float32)
+
+                    for s in range(S):
+                        noise = smoothgrad_noise_std * torch.randn_like(tf_tensor)
+                        tf_noisy = (tf_tensor + noise).detach().requires_grad_(True)
+
+                        with torch.amp.autocast(
+                            device_type=device.type, enabled=use_amp
+                        ):
+                            tf_scaled = (
+                                tf_scaler.transform(tf_noisy, tf_ids)
+                                if tf_scaler is not None
+                                else tf_noisy
+                            )
+                            preds_s, _, _ = model(
+                                atac_wins,
+                                tf_scaled,
+                                tf_ids=tf_ids,
+                                tg_ids=tg_ids,
+                                bias=bias,
+                                motif_mask=motif_mask,
+                                return_shortcut_contrib=False,
+                            )
+                            preds_u = (
+                                tg_scaler.inverse_transform(preds_s, tg_ids)
+                                if tg_scaler is not None
+                                else preds_s
+                            )
+                            preds_u = torch.nan_to_num(
+                                preds_u.float(),
+                                nan=0.0,
+                                posinf=1e6,
+                                neginf=-1e6,
+                            )
+
+                        grad_output_j = torch.zeros_like(preds_u)
+                        grad_output_j[:, j] = 1.0
+
+                        grads = torch.autograd.grad(
+                            outputs=preds_u,
+                            inputs=tf_noisy,
+                            grad_outputs=grad_output_j,
+                            retain_graph=False,
+                            create_graph=False,
+                            allow_unused=False,
+                        )[0]
+
+                        if grads.dim() == 3:
+                            expr_grad = grads[..., 0]
+                            expr_input = tf_noisy[..., 0]
+                        else:
+                            expr_grad = grads
+                            expr_input = tf_noisy
+
+                        saliency = expr_grad * expr_input
+                        grad_accum = grad_accum + saliency
+
+                    grad_mean = grad_accum / float(S)
+
+                    if grad_mean.dim() == 3:
+                        grad_abs = grad_mean.sum(dim=-1)
+                    else:
+                        grad_abs = grad_mean
+
+                    grad_flat = grad_abs.reshape(-1)
+                    tg_global = int(tg_ids[j].item())
+
+                    col_grad = grad_sum[:, tg_global]
+                    col_count = grad_count[:, tg_global]
+
+                    col_grad.index_add_(0, tf_ids_flat, grad_flat)
+                    col_count.index_add_(0, tf_ids_flat, torch.ones_like(grad_flat))
 
         # ---------- METHOD 3: Integrated Gradients ----------
         elif method == "ig":
@@ -344,71 +378,74 @@ def run_gradient_attribution(
             baseline = torch.zeros_like(tf_tensor)
             diff = tf_tensor - baseline
 
-            for j in range(G_eval):
-                ig_accum = torch.zeros_like(tf_tensor, dtype=torch.float32)
+            for chunk_start in range(0, owned_tg_indices.numel(), chunk_size):
+                tg_chunk = owned_tg_indices[chunk_start : chunk_start + chunk_size]
 
-                for m in range(1, M + 1):
-                    alpha = float(m) / float(M)
-                    tf_step = (baseline + alpha * diff).detach().requires_grad_(True)
+                for j in tg_chunk:
+                    ig_accum = torch.zeros_like(tf_tensor, dtype=torch.float32)
 
-                    with torch.amp.autocast(
-                        device_type=device.type, enabled=use_amp
-                    ):
-                        tf_scaled = (
-                            tf_scaler.transform(tf_step, tf_ids)
-                            if tf_scaler is not None
-                            else tf_step
-                        )
-                        preds_s, _, _ = model(
-                            atac_wins,
-                            tf_scaled,
-                            tf_ids=tf_ids,
-                            tg_ids=tg_ids,
-                            bias=bias,
-                            motif_mask=motif_mask,
-                            return_shortcut_contrib=False,
-                        )
-                        preds_u = (
-                            tg_scaler.inverse_transform(preds_s, tg_ids)
-                            if tg_scaler is not None
-                            else preds_s
-                        )
-                        preds_u = torch.nan_to_num(
-                            preds_u.float(),
-                            nan=0.0,
-                            posinf=1e6,
-                            neginf=-1e6,
-                        )
+                    for m in range(1, M + 1):
+                        alpha = float(m) / float(M)
+                        tf_step = (baseline + alpha * diff).detach().requires_grad_(True)
 
-                    grad_output_j = torch.zeros_like(preds_u)
-                    grad_output_j[:, j] = 1.0
+                        with torch.amp.autocast(
+                            device_type=device.type, enabled=use_amp
+                        ):
+                            tf_scaled = (
+                                tf_scaler.transform(tf_step, tf_ids)
+                                if tf_scaler is not None
+                                else tf_step
+                            )
+                            preds_s, _, _ = model(
+                                atac_wins,
+                                tf_scaled,
+                                tf_ids=tf_ids,
+                                tg_ids=tg_ids,
+                                bias=bias,
+                                motif_mask=motif_mask,
+                                return_shortcut_contrib=False,
+                            )
+                            preds_u = (
+                                tg_scaler.inverse_transform(preds_s, tg_ids)
+                                if tg_scaler is not None
+                                else preds_s
+                            )
+                            preds_u = torch.nan_to_num(
+                                preds_u.float(),
+                                nan=0.0,
+                                posinf=1e6,
+                                neginf=-1e6,
+                            )
 
-                    grads = torch.autograd.grad(
-                        outputs=preds_u,
-                        inputs=tf_step,
-                        grad_outputs=grad_output_j,
-                        retain_graph=False,
-                        create_graph=False,
-                        allow_unused=False,
-                    )[0]
+                        grad_output_j = torch.zeros_like(preds_u)
+                        grad_output_j[:, j] = 1.0
 
-                    ig_accum = ig_accum + grads
+                        grads = torch.autograd.grad(
+                            outputs=preds_u,
+                            inputs=tf_step,
+                            grad_outputs=grad_output_j,
+                            retain_graph=False,
+                            create_graph=False,
+                            allow_unused=False,
+                        )[0]
 
-                ig_attr = diff * (ig_accum / float(M))
+                        ig_accum = ig_accum + grads
 
-                if ig_attr.dim() == 3:
-                    grad_abs = ig_attr[..., 0]
-                else:
-                    grad_abs = ig_attr
+                    ig_attr = diff * (ig_accum / float(M))
 
-                grad_flat = grad_abs.reshape(-1)
-                tg_global = int(tg_ids[j].item())
+                    if ig_attr.dim() == 3:
+                        grad_abs = ig_attr[..., 0]
+                    else:
+                        grad_abs = ig_attr
 
-                col_grad = grad_sum[:, tg_global]
-                col_count = grad_count[:, tg_global]
+                    grad_flat = grad_abs.reshape(-1)
+                    tg_global = int(tg_ids[j].item())
 
-                col_grad.index_add_(0, tf_ids_flat, grad_flat)
-                col_count.index_add_(0, tf_ids_flat, torch.ones_like(grad_flat))
+                    col_grad = grad_sum[:, tg_global]
+                    col_count = grad_count[:, tg_global]
+
+                    col_grad.index_add_(0, tf_ids_flat, grad_flat)
+                    col_count.index_add_(0, tf_ids_flat, torch.ones_like(grad_flat))
 
         # cleanup
         del (
@@ -493,14 +530,42 @@ if __name__ == "__main__":
         default=8,
         help="Number of steps for Integrated Gradients",
     )
+    argparser.add_argument(
+        "--max_tgs_per_batch",
+        type=int,
+        default=None,
+        help="Maximum number of target genes to compute saliency for per batch"
+    )
 
     args = argparser.parse_args()
 
     selected_experiment_dir = Path(args.selected_experiment_dir)
 
     rank, world_size, local_rank, distributed = setup_distributed()
+    
+    if torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
+        device = torch.device(f"cuda:{local_rank}")
+    else:
+        device = torch.device("cpu")
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(
+        f"[rank {rank} local_rank {local_rank}] "
+        f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')} "
+        f"device_count={torch.cuda.device_count()}",
+        flush=True
+    )
+
+
+    print(
+        f"[rank {rank}] current_device={torch.cuda.current_device()} ",
+        flush=True
+    )
+
+    free, total = torch.cuda.mem_get_info(device)
+    print(f"[rank {rank}] mem free={free/1e9:.2f} GB / total={total/1e9:.2f} GB", flush=True)
+
+    
 
     use_amp = args.use_amp and device.type == "cuda"
     if use_amp and torch.cuda.is_available():
@@ -534,6 +599,7 @@ if __name__ == "__main__":
         smoothgrad_noise_std=args.smoothgrad_noise_std,
         ig_steps=args.ig_steps,
         max_batches=args.max_batches,
+        max_tgs_per_batch=args.max_tgs_per_batch,
         use_dataloader=False,
     )
 
