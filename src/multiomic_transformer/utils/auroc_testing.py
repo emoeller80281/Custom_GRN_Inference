@@ -239,21 +239,6 @@ def matrix_to_df(mat, tf_names, tg_names, colname):
     df["Target"] = df["Target"].astype(str).str.upper()
     return df
 
-def make_label_df_universe(tf_names, tg_names, chip_tf_set, gt_set):
-    T, G = len(tf_names), len(tg_names)
-    tf_idx, tg_idx = np.meshgrid(np.arange(T), np.arange(G), indexing="ij")
-    df = pd.DataFrame({
-        "Source": np.array(tf_names, dtype=object)[tf_idx.ravel()],
-        "Target": np.array(tg_names, dtype=object)[tg_idx.ravel()],
-    })
-    df["Source"] = df["Source"].astype(str).str.upper()
-    df["Target"] = df["Target"].astype(str).str.upper()
-    df["is_gt"] = list(map(gt_set.__contains__, zip(df["Source"], df["Target"])))
-    # only ChIP TFs
-    df = df[df["Source"].isin(chip_tf_set)].reset_index(drop=True)
-
-    return df
-
 def label_edges(df, gt_edges):
     df = df.copy()
     df["is_gt"] = [(s, t) in gt_edges for s, t in zip(df["Source"], df["Target"])]
@@ -1638,8 +1623,6 @@ def filter_grad_attrib_by_tg_r2(
                       [c for c in df_filt.columns if c not in ("Source","Target","Score","r2")]]
 
     return df_filt
-
-    
 
 def compute_per_tf_metrics(
     df,
