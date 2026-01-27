@@ -1501,6 +1501,9 @@ def locate_last_checkpoint(experiment_dir):
     last_checkpoint = checkpoint_files[-1]
     return last_checkpoint.name
 
+
+
+
 if __name__ == "__main__":    
     arg_parser = argparse.ArgumentParser(description="Run AUROC and AUPR testing for trained models")
 

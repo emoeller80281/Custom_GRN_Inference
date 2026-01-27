@@ -31,7 +31,6 @@ if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
 from datetime import datetime
-from config.settings_hpc import *
 
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 
@@ -1948,6 +1947,8 @@ if __name__ == "__main__":
             "FigR":       {"path": figr_path,        "tf_col": "Motif",     "target_col": "DORC",      "score_col": "Score"},
             "TRIPOD":     {"path": tripod_path,      "tf_col": "TF",        "target_col": "gene",      "score_col": "abs_coef"},
             "GRaNIE":     {"path": granie_path,      "tf_col": "TF.name",   "target_col": "gene.name", "score_col": "TF_gene.r"},
+            "DirectNet":   {"path": directnet_path,   "tf_col": "TF",        "target_col": "Gene",    "score_col": "types"},
+
         }
         
         standardized_method_dict = {}
