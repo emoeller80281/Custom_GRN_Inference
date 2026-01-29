@@ -224,7 +224,7 @@ def eval_method_vs_gt(
         "pos_rate": float(pos_rate) if pos_rate == pos_rate else np.nan,
         "lift_auprc": float(auprc / pos_rate) if (pos_rate > 0 and auprc == auprc) else np.nan,
         **prec_at
-    }
+    }, d
 
 def restrict_to_gt_universe(method_df: pd.DataFrame, gt_edges: pd.DataFrame) -> pd.DataFrame:
     gt_tfs = set(gt_edges["Source"])
@@ -481,13 +481,12 @@ def calculate_pooled_auroc(standardized_method_dict, ground_truth_edges_dict, pe
             if len(d_eval) == 0:
                 logging.info(f"  - {gt_name}: no overlap, skipping")
                 continue
-            metrics = eval_method_vs_gt(d_eval, gt_edges)
+            metrics, raw_results_df = eval_method_vs_gt(d_eval, gt_edges)
             all_results.append({"method": method_name, "gt": gt_name, **metrics})
 
     results_df = pd.DataFrame(all_results)
-    results_df.groupby("method")["auroc"].mean().sort_values(ascending=False)
     
-    return results_df
+    return results_df, raw_results_df
 
 def calculate_per_tf_auroc(standardized_method_dict, ground_truth_edges_dict, top_k_fracs, per_tf_methods=None):
     per_tf_methods = per_tf_methods or set()
@@ -625,22 +624,25 @@ if __name__ == "__main__":
     
     # Pooled AUROC/AUPRC
     logging.info("\nEvaluating pooled methods across samples")
-    results_df = calculate_pooled_auroc(
+    results_df, raw_results_df = calculate_pooled_auroc(
         standardized_method_dict, ground_truth_edges_dict, 
         per_tf_methods={"Gradient Attribution", "TF Knockout"}
         )
-        
+    
     logging.info(results_df.groupby("method")["auroc"].mean().sort_values(ascending=False))
 
+        
     # Per-TF AUROC/AUPRC
     logging.info("\nPer-TF evaluation of pooled methods across samples")
     per_tf_all_df, per_tf_summary_df = calculate_per_tf_auroc(
         standardized_method_dict, ground_truth_edges_dict, top_k_fracs, 
         per_tf_methods={"Gradient Attribution", "TF Knockout"}
         )    
+    
     logging.info(per_tf_summary_df.groupby("method")["mean_per_tf_auroc"].mean().sort_values(ascending=False))
     
     # Save results
+    raw_results_df.to_csv(EXPERIMENT_DIR / "pooled_auroc_auprc_raw_results.csv", index=False)
     results_df.to_csv(EXPERIMENT_DIR / "pooled_auroc_auprc_results.csv", index=False)
     per_tf_all_df.to_csv(EXPERIMENT_DIR / "per_tf_auroc_auprc_results.csv", index=False)
     per_tf_summary_df.to_csv(EXPERIMENT_DIR / "per_tf_auroc_auprc_summary.csv", index=False)
