@@ -148,6 +148,14 @@ def parse_preprocessing_args():
                         help="Associate peaks only to nearest gene")
     parser.add_argument("--promoter_bp", type=int, default=None,
                         help="Promoter region size in base pairs (None for no promoter filtering)")
+    parser.add_argument("--filter_rna", type=lambda x: str(x).lower() == "true", default=True,
+                        help="Filter RNA data (true/false)")
+    parser.add_argument("--filter_atac", type=lambda x: str(x).lower() == "true", default=True,
+                        help="Filter ATAC data (true/false)")
+    parser.add_argument("--min_rna_disp", type=float, default=0.5,
+                        help="Minimum RNA dispersion for highly variable gene selection")
+    parser.add_argument("--min_atac_disp", type=float, default=0.5,
+                        help="Minimum ATAC dispersion for highly variable peak selection")
     
     # ----- Database and Reference Files -----
     parser.add_argument("--database_dir", type=Path, default=None,
@@ -224,6 +232,7 @@ def setup_global_variables(args):
     global PROCESSED_DATA, TRAINING_DATA_CACHE, RAW_DATA, PKN_DIR
     global STRING_DIR, TRRUST_DIR, KEGG_DIR, EXPERIMENT_DIR, OUTPUT_DIR
     global SAMPLE_PROCESSED_DATA_DIR, SAMPLE_DATA_CACHE_DIR, COMMON_DATA
+    global FILTER_RNA, FILTER_ATAC, MIN_RNA_DISP, MIN_ATAC_DISP
     
     # Set ROOT_DIR from args or default to script's parent directory
     ROOT_DIR = args.root_dir if args.root_dir else Path(__file__).resolve().parent.parent.parent
@@ -259,6 +268,10 @@ def setup_global_variables(args):
     FILTER_OUT_LOWEST_COUNTS_PEAKS = args.filter_out_lowest_counts_peaks
     FILTER_OUT_LOWEST_PCT_GENES = args.filter_out_lowest_pct_genes
     FILTER_OUT_LOWEST_PCT_PEAKS = args.filter_out_lowest_pct_peaks
+    FILTER_RNA = args.filter_rna
+    FILTER_ATAC = args.filter_atac
+    MIN_RNA_DISP = args.min_rna_disp
+    MIN_ATAC_DISP = args.min_atac_disp
     
     # File naming
     PROCESSED_RNA_FILENAME = args.processed_rna_filename
@@ -326,6 +339,16 @@ def setup_global_variables(args):
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_dict = {k: v for k, v in globals().items() if k.isupper()}
     atomic_json_dump(config_dict, config_path)
+    
+    if FILTER_RNA:
+        logging.info(f"RNA filtering is enabled with min_disp={MIN_RNA_DISP}.")
+    else:
+        logging.info("RNA filtering is disabled.")
+        
+    if FILTER_ATAC:
+        logging.info(f"ATAC filtering is enabled with min_disp={MIN_ATAC_DISP}.")
+    else:
+        logging.info("ATAC filtering is disabled.")
 
 def update_info_file(info_file: Path, key: str, value: Any) -> None:
     """
@@ -742,6 +765,10 @@ def process_or_load_rna_atac_data(
     self_weight: Optional[float] = None,
     load: Optional[bool] = True,
     summary_file: Optional[Union[str, Path]] = None,
+    filter_rna: bool = True,
+    filter_atac: bool = True,
+    min_rna_disp: float = 0.5,
+    min_atac_disp: float = 0.5,
 ) -> Tuple[Optional[pd.DataFrame], Optional[pd.DataFrame]]:
     """Create (or load) per-sample pseudobulk datasets and return them.
 
@@ -769,6 +796,7 @@ def process_or_load_rna_atac_data(
     output_dir = Path(sample_processed_dir) if sample_processed_dir else sample_input_dir
     logging.info(f"\n[{sample_name}] Using input directory: {sample_input_dir}")
     logging.info(f"[{sample_name}] Using output directory: {output_dir}")
+    logging.info(f"[{sample_name}] Filter settings: filter_rna={filter_rna}, filter_atac={filter_atac}, min_rna_disp={min_rna_disp}, min_atac_disp={min_atac_disp}")
 
     processed_rna_file = _configured_path(output_dir, "PROCESSED_RNA_FILENAME", "scRNA_seq_processed.parquet", sample_name)
     processed_atac_file = _configured_path(output_dir, "PROCESSED_ATAC_FILENAME", "scATAC_seq_processed.parquet", sample_name)
@@ -916,7 +944,13 @@ def process_or_load_rna_atac_data(
         ad_rna.layers["log1p"] = ad_rna.X.copy()
         ad_atac.layers["log1p"] = ad_atac.X.copy()
         logging.info("Running filter_and_qc on RNA/ATAC AnnData")
-        ad_rna, ad_atac = filter_and_qc(ad_rna, ad_atac)
+        ad_rna, ad_atac = filter_and_qc(
+            ad_rna, ad_atac, 
+            filter_rna=filter_rna, 
+            filter_atac=filter_atac, 
+            min_rna_disp=min_rna_disp, 
+            min_atac_disp=min_atac_disp
+            )
         logging.info("Writing filtered AnnData files")
         ad_rna.write_h5ad(adata_rna_file)
         ad_atac.write_h5ad(adata_atac_file)
@@ -1006,7 +1040,14 @@ def process_or_load_rna_atac_data(
     logging.info("RNA/ATAC pseudobulk datasets are ready.")
     return tg_df, re_df
 
-def filter_and_qc(adata_RNA: AnnData, adata_ATAC: AnnData) -> Tuple[AnnData, AnnData]:
+def filter_and_qc(
+    adata_RNA: AnnData, 
+    adata_ATAC: AnnData, 
+    filter_rna: bool = True, 
+    filter_atac: bool = True,
+    min_rna_disp: float = 0.5, 
+    min_atac_disp: float = 0.5,
+    ) -> Tuple[AnnData, AnnData]:
     """
     Filter and quality control RNA and ATAC data.
 
@@ -1016,7 +1057,10 @@ def filter_and_qc(adata_RNA: AnnData, adata_ATAC: AnnData) -> Tuple[AnnData, Ann
         RNA data
     adata_ATAC : AnnData
         ATAC data
-
+    filter_rna : bool, optional
+        Whether to filter RNA data, by default True
+    filter_atac : bool, optional
+        Whether to filter ATAC data, by default True
     Returns
     -------
     filtered_RNA : AnnData
@@ -1071,17 +1115,30 @@ def filter_and_qc(adata_RNA: AnnData, adata_ATAC: AnnData) -> Tuple[AnnData, Ann
     # Preprocess RNA
     sc.pp.normalize_total(adata_RNA, target_sum=1e4)
     sc.pp.log1p(adata_RNA)
-    sc.pp.highly_variable_genes(adata_RNA, min_mean=0.0125, max_mean=3, min_disp=0.01)
+    
+    if filter_rna:
+        logging.info(f"  - Before HVG filtering: RNA has {adata_RNA.n_vars} genes")
+        sc.pp.highly_variable_genes(adata_RNA, min_mean=0.0125, max_mean=3, min_disp=min_rna_disp)
+        n_hvg = adata_RNA.var.highly_variable.sum()
+        logging.info(f"    - HVG filtering with min_disp={min_rna_disp}: {n_hvg} genes marked as highly variable")
     adata_RNA.layers["log1p"] = adata_RNA.X.copy()
     sc.pp.scale(adata_RNA, max_value=10, zero_center=True)
-    adata_RNA = adata_RNA[:, adata_RNA.var.highly_variable]
+    if filter_rna:
+        adata_RNA = adata_RNA[:, adata_RNA.var.highly_variable]
+        logging.info(f"    - After filtering: RNA has {adata_RNA.n_vars} genes")
     sc.tl.pca(adata_RNA, n_comps=PCA_COMPONENTS, svd_solver="arpack")
 
     # Preprocess ATAC
     sc.pp.log1p(adata_ATAC)
-    sc.pp.highly_variable_genes(adata_ATAC, min_mean=0.0125, max_mean=3, min_disp=0.01)
+    if filter_atac:
+        logging.info(f"  - Before HVG filtering: ATAC has {adata_ATAC.n_vars} peaks")
+        sc.pp.highly_variable_genes(adata_ATAC, min_mean=0.0125, max_mean=3, min_disp=min_atac_disp)
+        n_hvg = adata_ATAC.var.highly_variable.sum()
+        logging.info(f"    - HVG filtering with min_disp={min_atac_disp}: {n_hvg} peaks marked as highly variable")
     adata_ATAC.layers["log1p"] = adata_ATAC.X.copy()
-    adata_ATAC = adata_ATAC[:, adata_ATAC.var.highly_variable]
+    if filter_atac:
+        adata_ATAC = adata_ATAC[:, adata_ATAC.var.highly_variable]
+        logging.info(f"    - After filtering: ATAC has {adata_ATAC.n_vars} peaks")
     sc.pp.scale(adata_ATAC, max_value=10, zero_center=True)
     sc.tl.pca(adata_ATAC, n_comps=PCA_COMPONENTS, svd_solver="arpack")
     
@@ -2508,7 +2565,11 @@ if __name__ == "__main__":
                     pca_components=PCA_COMPONENTS,
                     hops=HOPS,
                     self_weight=SELF_WEIGHT,
-                    load=False
+                    load=False,
+                    filter_rna=FILTER_RNA,
+                    filter_atac=FILTER_ATAC,
+                    min_rna_disp=MIN_RNA_DISP,
+                    min_atac_disp=MIN_ATAC_DISP,
                 )
                 return {"sample": sample_name, "ok": True}
             
@@ -2585,7 +2646,7 @@ if __name__ == "__main__":
             
             pseudobulk_rna_df, pseudobulk_atac_df = process_or_load_rna_atac_data(
                 sample_input_dir,
-                force_recalculate=FORCE_RECALCULATE,
+                force_recalculate=False,
                 raw_10x_rna_data_dir=sample_raw_10x_rna_data_dir,
                 raw_atac_peak_file=RAW_ATAC_PEAK_MATRIX_FILE,
                 sample_name=sample_name,
@@ -2594,6 +2655,10 @@ if __name__ == "__main__":
                 pca_components=PCA_COMPONENTS,
                 hops=HOPS,
                 self_weight=SELF_WEIGHT,
+                filter_rna=FILTER_RNA,
+                filter_atac=FILTER_ATAC,
+                min_rna_disp=MIN_RNA_DISP,
+                min_atac_disp=MIN_ATAC_DISP,
             )
 
             # Canonicalize gene names in processed RNA data
@@ -2810,7 +2875,7 @@ if __name__ == "__main__":
             os.makedirs(single_cell_dir, exist_ok=True)
                         
             # Create or load the gene TSS information for the chromosome
-            if not os.path.isfile(os.path.join(GENOME_DIR, f"{chrom_id}_gene_tss.bed")):
+            if not os.path.isfile(os.path.join(GENOME_DIR, f"{chrom_id}_gene_tss.bed")) or FORCE_RECALCULATE:
                 gene_tss_df = make_chrom_gene_tss_df(
                     gene_tss_file=GENE_TSS_FILE,
                     chrom_id=chrom_id,

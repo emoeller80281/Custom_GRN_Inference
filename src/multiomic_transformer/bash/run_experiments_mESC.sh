@@ -4,12 +4,12 @@
 #SBATCH --error=LOGS/transformer_logs/experiments/%x_%A/%x_%A_%a.err
 #SBATCH --time=36:00:00
 #SBATCH -p dense
-#SBATCH -N 2
+#SBATCH -N 1
 #SBATCH --ntasks-per-node=1
-#SBATCH --gres=gpu:a100:4
+#SBATCH --gres=gpu:v100:4
 #SBATCH -c 12
 #SBATCH --mem=128G
-#SBATCH --array=0%1
+#SBATCH --array=0-8%4
 
 set -euo pipefail
 
@@ -51,7 +51,7 @@ DEFAULT_RAW_ATAC_FILE="scATAC_seq_raw.parquet"
 # Model training parameters
 DEFAULT_TOTAL_EPOCHS=250
 DEFAULT_BATCH_SIZE=16
-DEFAULT_PATIENCE=10
+DEFAULT_PATIENCE=8
 DEFAULT_SAVE_EVERY_N_EPOCHS=5
 DEFAULT_CORR_LOSS_WEIGHT=1.0
 DEFAULT_EDGE_LOSS_WEIGHT=0.0
@@ -63,7 +63,7 @@ DEFAULT_USE_GRAD_CHECKPOINTING=true
 DEFAULT_MODE="min"
 DEFAULT_INITIAL_LEARNING_RATE=2.5e-4
 DEFAULT_SCHEDULER_FACTOR=0.25
-DEFAULT_SCHEDULER_PATIENCE=5
+DEFAULT_SCHEDULER_PATIENCE=4
 DEFAULT_THRESHOLD=1e-3
 DEFAULT_THRESHOLD_MODE="rel"
 DEFAULT_COOLDOWN=4
@@ -86,6 +86,12 @@ DEFAULT_SHORTCUT_DROPOUT=0.0
 DEFAULT_SUBSAMPLE_SEED=42
 DEFAULT_ALLOWED_SAMPLES=""
 DEFAULT_RESUME_CHECKPOINT_PATH=""
+DEFAULT_FILTER_RNA=true
+DEFAULT_FILTER_ATAC=true
+DEFAULT_MIN_RNA_DISP=0.5
+DEFAULT_MIN_ATAC_DISP=0.5
+DEFAULT_SAMPLE_NAMES="E7.5_rep1" # E7.5_rep2 E7.75_rep1 E8.0_rep2 E8.5_rep2 E8.75_rep2 E8.0_rep1 E8.5_rep1
+
 
 # Define experiments as arrays
 # Format: "EXPERIMENT_NAME|DATASET_NAME|PARAMETER_OVERRIDES"
@@ -139,8 +145,77 @@ EXPERIMENTS=(
     # "pct_filter_two_hop_no_hvg_small|mESC_pct_filter_two_hop_no_hvg_small|D_MODEL=128;D_FF=512;GRAD_ACCUM_STEPS=2;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.1;FILTER_OUT_LOWEST_PCT_PEAKS=0.2;HOPS=2;NEIGHBORS_K=20"
     # "pct_filter_two_hop_hvg_small|mESC_pct_filter_two_hop_hvg_small|D_MODEL=128;D_FF=512;GRAD_ACCUM_STEPS=2;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.1;FILTER_OUT_LOWEST_PCT_PEAKS=0.2;HOPS=2;NEIGHBORS_K=20"
     
-    "two_hop_hvg_no_small|mESC_two_hop_no_hvg_small|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20"
+    # "two_hop_hvg_no_small|mESC_two_hop_no_hvg_small|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20"
     # "two_hop_hvg_small|mESC_two_hop_hvg_small|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20"
+
+    # E7.5_rep1 dispersion filtering experiments
+    "E7.5_rep1_hvg_filter_only_rna|mESC_E7.5_rep1_hvg_filter_only_rna|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=false;FILTER_RNA=true;SAMPLE_NAMES=E7.5_rep1"
+    "E7.5_rep1_hvg_filter_disp_0.6|mESC_E7.5_rep1_hvg_filter_disp_0.6|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.6;MIN_RNA_DISP=0.6;SAMPLE_NAMES=E7.5_rep1"
+    "E7.5_rep1_hvg_filter_disp_0.5|mESC_E7.5_rep1_hvg_filter_disp_0.5|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.5;MIN_RNA_DISP=0.5;SAMPLE_NAMES=E7.5_rep1"
+    "E7.5_rep1_hvg_filter_disp_0.4|mESC_E7.5_rep1_hvg_filter_disp_0.4|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.4;MIN_RNA_DISP=0.4;SAMPLE_NAMES=E7.5_rep1"
+    "E7.5_rep1_hvg_filter_disp_0.3|mESC_E7.5_rep1_hvg_filter_disp_0.3|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.3;MIN_RNA_DISP=0.3;SAMPLE_NAMES=E7.5_rep1"
+    "E7.5_rep1_hvg_filter_disp_0.2|mESC_E7.5_rep1_hvg_filter_disp_0.2|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E7.5_rep1"
+    "E7.5_rep1_hvg_filter_disp_0.1|mESC_E7.5_rep1_hvg_filter_disp_0.1|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.1;MIN_RNA_DISP=0.1;SAMPLE_NAMES=E7.5_rep1"
+    "E7.5_rep1_hvg_filter_disp_0.05|mESC_E7.5_rep1_hvg_filter_disp_0.05|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.05;MIN_RNA_DISP=0.05;SAMPLE_NAMES=E7.5_rep1"
+    "E7.5_rep1_hvg_filter_disp_0.01|mESC_E7.5_rep1_hvg_filter_disp_0.01|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E7.5_rep1"
+    # "E7.5_rep1_hvg_filter_none|mESC_E7.5_rep1_hvg_filter_none|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=false;FILTER_RNA=false;SAMPLE_NAMES=E7.5_rep1"
+
+    # E7.5_rep2 dispersion filtering experiments
+    "E7.5_rep2_hvg_filter_only_rna|mESC_E7.5_rep2_hvg_filter_only_rna|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=false;FILTER_RNA=true;SAMPLE_NAMES=E7.5_rep2"
+    "E7.5_rep2_hvg_filter_disp_0.6|mESC_E7.5_rep2_hvg_filter_disp_0.6|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.6;MIN_RNA_DISP=0.6;SAMPLE_NAMES=E7.5_rep2"
+    "E7.5_rep2_hvg_filter_disp_0.5|mESC_E7.5_rep2_hvg_filter_disp_0.5|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.5;MIN_RNA_DISP=0.5;SAMPLE_NAMES=E7.5_rep2"
+    "E7.5_rep2_hvg_filter_disp_0.4|mESC_E7.5_rep2_hvg_filter_disp_0.4|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.4;MIN_RNA_DISP=0.4;SAMPLE_NAMES=E7.5_rep2"
+    "E7.5_rep2_hvg_filter_disp_0.3|mESC_E7.5_rep2_hvg_filter_disp_0.3|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.3;MIN_RNA_DISP=0.3;SAMPLE_NAMES=E7.5_rep2"
+    "E7.5_rep2_hvg_filter_disp_0.2|mESC_E7.5_rep2_hvg_filter_disp_0.2|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E7.5_rep2"
+    "E7.5_rep2_hvg_filter_disp_0.1|mESC_E7.5_rep2_hvg_filter_disp_0.1|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.1;MIN_RNA_DISP=0.1;SAMPLE_NAMES=E7.5_rep2"
+    "E7.5_rep2_hvg_filter_disp_0.05|mESC_E7.5_rep2_hvg_filter_disp_0.05|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.05;MIN_RNA_DISP=0.05;SAMPLE_NAMES=E7.5_rep2"
+    "E7.5_rep2_hvg_filter_disp_0.01|mESC_E7.5_rep2_hvg_filter_disp_0.01|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E7.5_rep2"
+
+    # E7.75_rep1 dispersion filtering experiments
+    "E7.75_rep1_hvg_filter_only_rna|mESC_E7.75_rep1_hvg_filter_only_rna|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=false;FILTER_RNA=true;SAMPLE_NAMES=E7.75_rep1"
+    "E7.75_rep1_hvg_filter_disp_0.6|mESC_E7.75_rep1_hvg_filter_disp_0.6|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.6;MIN_RNA_DISP=0.6;SAMPLE_NAMES=E7.75_rep1"
+    "E7.75_rep1_hvg_filter_disp_0.5|mESC_E7.75_rep1_hvg_filter_disp_0.5|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.5;MIN_RNA_DISP=0.5;SAMPLE_NAMES=E7.75_rep1"
+    "E7.75_rep1_hvg_filter_disp_0.4|mESC_E7.75_rep1_hvg_filter_disp_0.4|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.4;MIN_RNA_DISP=0.4;SAMPLE_NAMES=E7.75_rep1"
+    "E7.75_rep1_hvg_filter_disp_0.3|mESC_E7.75_rep1_hvg_filter_disp_0.3|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.3;MIN_RNA_DISP=0.3;SAMPLE_NAMES=E7.75_rep1"
+    "E7.75_rep1_hvg_filter_disp_0.2|mESC_E7.75_rep1_hvg_filter_disp_0.2|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E7.75_rep1"
+    "E7.75_rep1_hvg_filter_disp_0.1|mESC_E7.75_rep1_hvg_filter_disp_0.1|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.1;MIN_RNA_DISP=0.1;SAMPLE_NAMES=E7.75_rep1"
+    "E7.75_rep1_hvg_filter_disp_0.05|mESC_E7.75_rep1_hvg_filter_disp_0.05|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.05;MIN_RNA_DISP=0.05;SAMPLE_NAMES=E7.75_rep1"
+    "E7.75_rep1_hvg_filter_disp_0.01|mESC_E7.75_rep1_hvg_filter_disp_0.01|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E7.75_rep1"
+    
+    # E8.0_rep1 dispersion filtering experiments
+    "E8.0_rep1_hvg_filter_only_rna|mESC_E8.0_rep1_hvg_filter_only_rna|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=false;FILTER_RNA=true;SAMPLE_NAMES=E8.0_rep1"
+    "E8.0_rep1_hvg_filter_disp_0.6|mESC_E8.0_rep1_hvg_filter_disp_0.6|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.6;MIN_RNA_DISP=0.6;SAMPLE_NAMES=E8.0_rep1"
+    "E8.0_rep1_hvg_filter_disp_0.5|mESC_E8.0_rep1_hvg_filter_disp_0.5|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.5;MIN_RNA_DISP=0.5;SAMPLE_NAMES=E8.0_rep1"
+    "E8.0_rep1_hvg_filter_disp_0.4|mESC_E8.0_rep1_hvg_filter_disp_0.4|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.4;MIN_RNA_DISP=0.4;SAMPLE_NAMES=E8.0_rep1"
+    "E8.0_rep1_hvg_filter_disp_0.3|mESC_E8.0_rep1_hvg_filter_disp_0.3|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.3;MIN_RNA_DISP=0.3;SAMPLE_NAMES=E8.0_rep1"
+    "E8.0_rep1_hvg_filter_disp_0.2|mESC_E8.0_rep1_hvg_filter_disp_0.2|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E8.0_rep1"
+    "E8.0_rep1_hvg_filter_disp_0.1|mESC_E8.0_rep1_hvg_filter_disp_0.1|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.1;MIN_RNA_DISP=0.1;SAMPLE_NAMES=E8.0_rep1"
+    "E8.0_rep1_hvg_filter_disp_0.05|mESC_E8.0_rep1_hvg_filter_disp_0.05|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.05;MIN_RNA_DISP=0.05;SAMPLE_NAMES=E8.0_rep1"
+    "E8.0_rep1_hvg_filter_disp_0.01|mESC_E8.0_rep1_hvg_filter_disp_0.01|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E8.0_rep1"
+
+    # E8.0_rep2 dispersion filtering experiments
+    "E8.0_rep2_hvg_filter_only_rna|mESC_E8.0_rep2_hvg_filter_only_rna|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=false;FILTER_RNA=true;SAMPLE_NAMES=E8.0_rep2"
+    "E8.0_rep2_hvg_filter_disp_0.6|mESC_E8.0_rep2_hvg_filter_disp_0.6|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.6;MIN_RNA_DISP=0.6;SAMPLE_NAMES=E8.0_rep2"
+    "E8.0_rep2_hvg_filter_disp_0.5|mESC_E8.0_rep2_hvg_filter_disp_0.5|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.5;MIN_RNA_DISP=0.5;SAMPLE_NAMES=E8.0_rep2"
+    "E8.0_rep2_hvg_filter_disp_0.4|mESC_E8.0_rep2_hvg_filter_disp_0.4|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.4;MIN_RNA_DISP=0.4;SAMPLE_NAMES=E8.0_rep2"
+    "E8.0_rep2_hvg_filter_disp_0.3|mESC_E8.0_rep2_hvg_filter_disp_0.3|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.3;MIN_RNA_DISP=0.3;SAMPLE_NAMES=E8.0_rep2"
+    "E8.0_rep2_hvg_filter_disp_0.2|mESC_E8.0_rep2_hvg_filter_disp_0.2|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E8.0_rep2"
+    "E8.0_rep2_hvg_filter_disp_0.1|mESC_E8.0_rep2_hvg_filter_disp_0.1|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.1;MIN_RNA_DISP=0.1;SAMPLE_NAMES=E8.0_rep2"
+    "E8.0_rep2_hvg_filter_disp_0.05|mESC_E8.0_rep2_hvg_filter_disp_0.05|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.05;MIN_RNA_DISP=0.05;SAMPLE_NAMES=E8.0_rep2"
+    "E8.0_rep2_hvg_filter_disp_0.01|mESC_E8.0_rep2_hvg_filter_disp_0.01|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E8.0_rep2"
+
+    # E8.5_rep1 dispersion filtering experiments
+    "E8.5_rep1_hvg_filter_only_rna|mESC_E8.5_rep1_hvg_filter_only_rna|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=false;FILTER_RNA=true;SAMPLE_NAMES=E8.5_rep1"
+    "E8.5_rep1_hvg_filter_disp_0.6|mESC_E8.5_rep1_hvg_filter_disp_0.6|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.6;MIN_RNA_DISP=0.6;SAMPLE_NAMES=E8.5_rep1"
+    "E8.5_rep1_hvg_filter_disp_0.5|mESC_E8.5_rep1_hvg_filter_disp_0.5|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.5;MIN_RNA_DISP=0.5;SAMPLE_NAMES=E8.5_rep1"
+    "E8.5_rep1_hvg_filter_disp_0.4|mESC_E8.5_rep1_hvg_filter_disp_0.4|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.4;MIN_RNA_DISP=0.4;SAMPLE_NAMES=E8.5_rep1"
+    "E8.5_rep1_hvg_filter_disp_0.3|mESC_E8.5_rep1_hvg_filter_disp_0.3|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.3;MIN_RNA_DISP=0.3;SAMPLE_NAMES=E8.5_rep1"
+    "E8.5_rep1_hvg_filter_disp_0.2|mESC_E8.5_rep1_hvg_filter_disp_0.2|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E8.5_rep1"
+    "E8.5_rep1_hvg_filter_disp_0.1|mESC_E8.5_rep1_hvg_filter_disp_0.1|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.1;MIN_RNA_DISP=0.1;SAMPLE_NAMES=E8.5_rep1"
+    "E8.5_rep1_hvg_filter_disp_0.05|mESC_E8.5_rep1_hvg_filter_disp_0.05|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.05;MIN_RNA_DISP=0.05;SAMPLE_NAMES=E8.5_rep1"
+    "E8.5_rep1_hvg_filter_disp_0.01|mESC_E8.5_rep1_hvg_filter_disp_0.01|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E8.5_rep1"
+
+    # "hvg_filter_disp_none|mESC_hvg_filter_none|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=false;FILTER_RNA=false"
 
 )
 
@@ -197,6 +272,11 @@ FILTER_TO_NEAREST_GENE=${DEFAULT_FILTER_TO_NEAREST_GENE}
 PROMOTER_BP=${DEFAULT_PROMOTER_BP}
 RAW_RNA_FILE=${DEFAULT_RAW_RNA_FILE}
 RAW_ATAC_FILE=${DEFAULT_RAW_ATAC_FILE}
+FILTER_RNA=${DEFAULT_FILTER_RNA}
+FILTER_ATAC=${DEFAULT_FILTER_ATAC}
+MIN_RNA_DISP=${DEFAULT_MIN_RNA_DISP}
+MIN_ATAC_DISP=${DEFAULT_MIN_ATAC_DISP}
+SAMPLE_NAMES=${DEFAULT_SAMPLE_NAMES}
 
 # Model training parameters
 TOTAL_EPOCHS=${DEFAULT_TOTAL_EPOCHS}
@@ -269,6 +349,11 @@ if [ -n "${PARAM_OVERRIDES}" ]; then
                 PROMOTER_BP) PROMOTER_BP=$param_value ;;
                 RAW_RNA_FILE) RAW_RNA_FILE=$param_value ;;
                 RAW_ATAC_FILE) RAW_ATAC_FILE=$param_value ;;
+                FILTER_RNA) FILTER_RNA=$param_value ;;
+                FILTER_ATAC) FILTER_ATAC=$param_value ;;
+                MIN_RNA_DISP) MIN_RNA_DISP=$param_value ;;
+                MIN_ATAC_DISP) MIN_ATAC_DISP=$param_value ;;
+                SAMPLE_NAMES) SAMPLE_NAMES=$param_value ;;
                 # Model training parameters
                 TOTAL_EPOCHS) TOTAL_EPOCHS=$param_value ;;
                 BATCH_SIZE) BATCH_SIZE=$param_value ;;
@@ -406,7 +491,6 @@ SAMPLE_DATA_CACHE_DIR="${TRAINING_DATA_CACHE}/${DATASET_NAME}"
 COMMON_DATA="${SAMPLE_DATA_CACHE_DIR}/common"
 
 # Sample information
-SAMPLE_NAMES="E7.5_rep1" # E7.5_rep2 E7.75_rep1 E8.0_rep2 E8.5_rep2 E8.75_rep2 E8.0_rep1 E8.5_rep1
 VALIDATION_DATASETS=""
 
 # Chromosomes to process
@@ -414,7 +498,7 @@ CHROM_ID="chr19"
 # CHROM_IDS="chr1 chr2 chr3 chr4 chr5 chr6 chr7 chr8 chr9 chr10 chr11 chr12 chr13 chr14 chr15 chr16 chr17 chr18 chr19"
 
 # Force recalculate (set to true if you want to reprocess data)
-FORCE_RECALCULATE=false
+FORCE_RECALCULATE=true
 
 # ==========================================
 #        CPU DETECTION
@@ -481,7 +565,11 @@ PREPROCESS_CMD="python src/multiomic_transformer/data/preprocess_argparse.py \
     --max_peak_distance ${MAX_PEAK_DISTANCE} \
     --dist_bias_mode ${DIST_BIAS_MODE} \
     --raw_rna_file ${RAW_RNA_FILE} \
-    --raw_atac_file ${RAW_ATAC_FILE}"
+    --raw_atac_file ${RAW_ATAC_FILE} \
+    --filter_rna ${FILTER_RNA} \
+    --filter_atac ${FILTER_ATAC} \
+    --min_rna_disp ${MIN_RNA_DISP} \
+    --min_atac_disp ${MIN_ATAC_DISP}"
 
 # Add optional validation datasets
 if [ -n "${VALIDATION_DATASETS}" ]; then
@@ -520,7 +608,7 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
     echo "         STARTING MODEL TRAINING"
     echo "=========================================="
     echo ""
-    echo "[INFO] Detected compute partition, progressing with model training"
+    echo "[INFO] Detected ${SLURM_JOB_PARTITION:-} partition, progressing with model training"
 
     # Build training command
     TRAIN_CMD="src/multiomic_transformer/scripts/multinode_train_argparse.py \
@@ -796,7 +884,7 @@ else
     echo "   SKIPPING MODEL TRAINING"
     echo "=========================================="
     echo ""
-    echo "[INFO] Running on ${SLURM_JOB_PARTITION:-unknown} partition (not 'dense'), skipping model training"
-    echo "[INFO] Submit another job on the 'dense' partition to run training"
+    echo "[INFO] Running on ${SLURM_JOB_PARTITION:-unknown} partition (not 'dense' or 'gpu'), skipping model training"
+    echo "[INFO] Submit another job on the 'dense' or 'gpu' partition to run training"
 fi
 

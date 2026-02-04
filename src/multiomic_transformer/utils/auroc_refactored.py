@@ -36,25 +36,25 @@ def load_other_method_grns(sample_name_list, dataset_type):
             tripod_path       = OTHER_METHOD_DIR / f"{sample_name}/TRIPOD/gene_TF_highest_abs_coef.csv"
         
         elif dataset_type.lower() == "macrophage":
-            if sample_name == "Macrophage_S1":
-                cell_oracle_path  = OTHER_METHOD_DIR / f"{sample_name}/CellOracle/Macrophase_buffer1_filtered_out_E7.5_rep1_final_GRN.csv"
-                directnet_path    = OTHER_METHOD_DIR / f"{sample_name}/DIRECTNET/Network_links.csv"
-                figr_path         = OTHER_METHOD_DIR / f"{sample_name}/FigR/Buffer1_filtered_network.csv"
-                granie_path       = OTHER_METHOD_DIR / f"{sample_name}/GRaNIE/GRN_connections_filtered_sorted_scBuffer1_uniq.csv"
-                linger_path       = OTHER_METHOD_DIR / f"{sample_name}/LINGER/cell_type_TF_gene.csv"
-                pando_path        = OTHER_METHOD_DIR / f"{sample_name}/Pando/Macrophage_buffer1_raw_network.csv"
-                scenic_plus_path  = OTHER_METHOD_DIR / f"{sample_name}/SCENIC+/scenic_plus_inferred_grn_macrophage_macrophage_buffer1_filtered.tsv"
-                tripod_path       = OTHER_METHOD_DIR / f"{sample_name}/TRIPOD/gene_TF_highest_abs_coef.csv"
+            if sample_name == "buffer_1":
+                cell_oracle_path  = OTHER_METHOD_DIR / f"Macrophage_S1/CellOracle/Macrophase_buffer1_filtered_out_E7.5_rep1_final_GRN.csv"
+                directnet_path    = OTHER_METHOD_DIR / f"Macrophage_S1/DIRECTNET/Network_links.csv"
+                figr_path         = OTHER_METHOD_DIR / f"Macrophage_S1/FigR/Buffer1_filtered_network.csv"
+                granie_path       = OTHER_METHOD_DIR / f"Macrophage_S1/GRaNIE/GRN_connections_filtered_sorted_scBuffer1_uniq.csv"
+                linger_path       = OTHER_METHOD_DIR / f"Macrophage_S1/LINGER/cell_type_TF_gene.csv"
+                pando_path        = OTHER_METHOD_DIR / f"Macrophage_S1/Pando/Macrophage_buffer1_raw_network.csv"
+                scenic_plus_path  = OTHER_METHOD_DIR / f"Macrophage_S1/SCENIC+/scenic_plus_inferred_grn_macrophage_macrophage_buffer1_filtered.tsv"
+                tripod_path       = OTHER_METHOD_DIR / f"Macrophage_S1/TRIPOD/gene_TF_highest_abs_coef.csv"
 
-            elif sample_name == "Macrophage_S2":
-                cell_oracle_path  = OTHER_METHOD_DIR / f"{sample_name}/CellOracle/Macrophase_buffer2_filtered_out_E7.5_rep1_final_GRN.csv"
-                directnet_path    = OTHER_METHOD_DIR / f"{sample_name}/DIRECTNET/Network_links.csv"
-                figr_path         = OTHER_METHOD_DIR / f"{sample_name}/FigR/Buffer2_filtered_network.csv"
-                granie_path       = OTHER_METHOD_DIR / f"{sample_name}/GRaNIE/GRN_connections_filtered_sorted_scBuffer2_uniq.csv"
-                linger_path       = OTHER_METHOD_DIR / f"{sample_name}/LINGER/cell_type_TF_gene_buffer2.csv"
-                pando_path        = OTHER_METHOD_DIR / f"{sample_name}/Pando/Macrophage_buffer2_filtered_network.csv"
-                scenic_plus_path  = OTHER_METHOD_DIR / f"{sample_name}/SCENIC+/scenic_plus_inferred_grn_macrophage_macrophage_buffer2_filtered.tsv"
-                tripod_path       = OTHER_METHOD_DIR / f"{sample_name}/TRIPOD/gene_TF_highest_abs_coef.csv"
+            elif sample_name == "buffer_2":
+                cell_oracle_path  = OTHER_METHOD_DIR / f"Macrophage_S2/CellOracle/Macrophase_buffer2_filtered_out_E7.5_rep1_final_GRN.csv"
+                directnet_path    = OTHER_METHOD_DIR / f"Macrophage_S2/DIRECTNET/Network_links.csv"
+                figr_path         = OTHER_METHOD_DIR / f"Macrophage_S2/FigR/Buffer2_filtered_network.csv"
+                granie_path       = OTHER_METHOD_DIR / f"Macrophage_S2/GRaNIE/GRN_connections_filtered_sorted_scBuffer2_uniq.csv"
+                linger_path       = OTHER_METHOD_DIR / f"Macrophage_S2/LINGER/cell_type_TF_gene_buffer2.csv"
+                pando_path        = OTHER_METHOD_DIR / f"Macrophage_S2/Pando/Macrophage_buffer2_filtered_network.csv"
+                scenic_plus_path  = OTHER_METHOD_DIR / f"Macrophage_S2/SCENIC+/scenic_plus_inferred_grn_macrophage_macrophage_buffer2_filtered.tsv"
+                tripod_path       = OTHER_METHOD_DIR / f"Macrophage_S2/TRIPOD/gene_TF_highest_abs_coef.csv"
         
         elif dataset_type.lower() == "k562":
             cell_oracle_path  = OTHER_METHOD_DIR / f"{sample_name}/CellOracle/K562_human_filtered_out_E7.5_rep1_final_GRN.csv"
@@ -551,6 +551,8 @@ if __name__ == "__main__":
     
     sample_name_list = args.sample_name_list
     
+    logging.info(f"Experiment: {experiment}, Training Num: {training_num}, Dataset Type: {dataset_type}")
+    
     if "chr19" in [p.name for p in Path(experiment_dir / experiment).iterdir()] and experiment != "mESC_no_scale_linear":
         EXPERIMENT_DIR = experiment_dir / experiment / "chr19" / training_num
     else:
@@ -612,6 +614,11 @@ if __name__ == "__main__":
     grad_pooled_df, grad_per_tf_df, tf_ko_pooled_df, tf_ko_per_tf_df = load_grad_and_tf_ko_df(
         selected_experiment_dir=EXPERIMENT_DIR,
     )
+    
+    grad_pooled_df.to_csv(EXPERIMENT_DIR / "gradient_attribution_pooled_scores.csv", index=False)
+    grad_per_tf_df.to_csv(EXPERIMENT_DIR / "gradient_attribution_per_tf_scores.csv", index=False)
+    tf_ko_pooled_df.to_csv(EXPERIMENT_DIR / "tf_knockout_pooled_scores.csv", index=False)
+    tf_ko_per_tf_df.to_csv(EXPERIMENT_DIR / "tf_knockout_per_tf_scores.csv", index=False)
     
     # Load the other method GRNs (TF-TG scores averaged across samples)
     standardized_method_dict = load_other_method_grns(sample_name_list, dataset_type)

@@ -5,11 +5,11 @@
 #SBATCH --time=10:00:00
 #SBATCH -p dense
 #SBATCH -N 1
-#SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:v100:2
+#SBATCH --ntasks-per-node=1
 #SBATCH -c 16
 #SBATCH --mem=192G
-#SBATCH --array=0%7
+#SBATCH --array=0-19%5
 
 set -euo pipefail
 
@@ -49,7 +49,7 @@ DEFAULT_RAW_RNA_FILE="matched_filtered_RNA_rawcounts_{sample}.csv"
 DEFAULT_RAW_ATAC_FILE="matched_filtered_ATAC_rawcounts_{sample}.csv"
 
 # Model training parameters
-DEFAULT_TOTAL_EPOCHS=250
+DEFAULT_TOTAL_EPOCHS=350
 DEFAULT_BATCH_SIZE=16
 DEFAULT_PATIENCE=10
 DEFAULT_SAVE_EVERY_N_EPOCHS=5
@@ -90,6 +90,12 @@ DEFAULT_SUBSAMPLE_MAX_CELLS=""
 DEFAULT_SUBSAMPLE_SEED=42
 DEFAULT_ALLOWED_SAMPLES=""
 DEFAULT_RESUME_CHECKPOINT_PATH=""
+DEFAULT_FILTER_RNA=true
+DEFAULT_FILTER_ATAC=true
+DEFAULT_MIN_RNA_DISP=0.5
+DEFAULT_MIN_ATAC_DISP=0.5
+DEFAULT_SAMPLE_NAMES="buffer_1" # buffer_2 buffer_3 buffer_4
+
 
 # Define experiments as arrays
 # Format: "EXPERIMENT_NAME|DATASET_NAME|PARAMETER_OVERRIDES"
@@ -134,6 +140,31 @@ EXPERIMENTS=(
     # "best_filter_long_range_2_hop_small_1500bp_window|Macrophage_best_filter_long_range_2_hop_small_1500bp_window|D_MODEL=128;D_FF=512;HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;MIN_GENES_PER_CELL=125;MIN_PEAKS_PER_CELL=50;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.05;FILTER_OUT_LOWEST_PCT_PEAKS=0.05;BATCH_SIZE=8;WINDOW_SIZE=1500"
     # "best_filter_long_range_2_hop_small_fewer_neighbors|Macrophage_best_filter_long_range_2_hop_small_fewer_neighbors|D_MODEL=128;D_FF=512;HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;MIN_GENES_PER_CELL=125;MIN_PEAKS_PER_CELL=50;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.05;FILTER_OUT_LOWEST_PCT_PEAKS=0.05;BATCH_SIZE=8;NEIGHBORS_K=15"
     # "best_filter_long_range_2_hop_tiny|Macrophage_best_filter_long_range_2_hop_tiny|D_MODEL=64;D_FF=256;HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;MIN_GENES_PER_CELL=125;MIN_PEAKS_PER_CELL=50;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.05;FILTER_OUT_LOWEST_PCT_PEAKS=0.05;BATCH_SIZE=8"
+
+    # Buffer 1 disperson filtering experiments
+    "buffer_1_hvg_filter_only_rna|Macrophage_buffer_1_hvg_filter_only_rna|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=false;FILTER_RNA=true;SAMPLE_NAMES=buffer_1"
+    "buffer_1_hvg_filter_disp_0.6|Macrophage_buffer_1_hvg_filter_disp_0.6|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.6;MIN_RNA_DISP=0.6;SAMPLE_NAMES=buffer_1"
+    "buffer_1_hvg_filter_disp_0.5|Macrophage_buffer_1_hvg_filter_disp_0.5|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.5;MIN_RNA_DISP=0.5;SAMPLE_NAMES=buffer_1"
+    "buffer_1_hvg_filter_disp_0.4|Macrophage_buffer_1_hvg_filter_disp_0.4|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.4;MIN_RNA_DISP=0.4;SAMPLE_NAMES=buffer_1"
+    "buffer_1_hvg_filter_disp_0.3|Macrophage_buffer_1_hvg_filter_disp_0.3|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.3;MIN_RNA_DISP=0.3;SAMPLE_NAMES=buffer_1"
+    "buffer_1_hvg_filter_disp_0.2|Macrophage_buffer_1_hvg_filter_disp_0.2|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=buffer_1"
+    "buffer_1_hvg_filter_disp_0.1|Macrophage_buffer_1_hvg_filter_disp_0.1|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.1;MIN_RNA_DISP=0.1;SAMPLE_NAMES=buffer_1"
+    "buffer_1_hvg_filter_disp_0.05|Macrophage_buffer_1_hvg_filter_disp_0.05|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.05;MIN_RNA_DISP=0.05;SAMPLE_NAMES=buffer_1"
+    "buffer_1_hvg_filter_disp_0.01|Macrophage_buffer_1_hvg_filter_disp_0.01|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=buffer_1"
+    "buffer_1_hvg_filter_none|Macrophage_buffer_1_hvg_filter_none|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=false;FILTER_RNA=false;SAMPLE_NAMES=buffer_1"
+
+    # Buffer 2 disperson filtering experiments
+    "buffer_2_hvg_filter_only_rna|Macrophage_buffer_2_hvg_filter_only_rna|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=false;FILTER_RNA=true;SAMPLE_NAMES=buffer_2"
+    "buffer_2_hvg_filter_disp_0.6|Macrophage_buffer_2_hvg_filter_disp_0.6|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.6;MIN_RNA_DISP=0.6;SAMPLE_NAMES=buffer_2"
+    "buffer_2_hvg_filter_disp_0.5|Macrophage_buffer_2_hvg_filter_disp_0.5|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.5;MIN_RNA_DISP=0.5;SAMPLE_NAMES=buffer_2"
+    "buffer_2_hvg_filter_disp_0.4|Macrophage_buffer_2_hvg_filter_disp_0.4|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.4;MIN_RNA_DISP=0.4;SAMPLE_NAMES=buffer_2"
+    "buffer_2_hvg_filter_disp_0.3|Macrophage_buffer_2_hvg_filter_disp_0.3|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.3;MIN_RNA_DISP=0.3;SAMPLE_NAMES=buffer_2"
+    "buffer_2_hvg_filter_disp_0.2|Macrophage_buffer_2_hvg_filter_disp_0.2|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=buffer_2"
+    "buffer_2_hvg_filter_disp_0.1|Macrophage_buffer_2_hvg_filter_disp_0.1|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.1;MIN_RNA_DISP=0.1;SAMPLE_NAMES=buffer_2"
+    "buffer_2_hvg_filter_disp_0.05|Macrophage_buffer_2_hvg_filter_disp_0.05|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.05;MIN_RNA_DISP=0.05;SAMPLE_NAMES=buffer_2"
+    "buffer_2_hvg_filter_disp_0.01|Macrophage_buffer_2_hvg_filter_disp_0.01|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=buffer_2"
+    "buffer_2_hvg_filter_none|Macrophage_buffer_2_hvg_filter_none|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=false;FILTER_RNA=false;SAMPLE_NAMES=buffer_2"
+
 
 )
 
@@ -190,6 +221,11 @@ FILTER_TO_NEAREST_GENE=${DEFAULT_FILTER_TO_NEAREST_GENE}
 PROMOTER_BP=${DEFAULT_PROMOTER_BP}
 RAW_RNA_FILE=${DEFAULT_RAW_RNA_FILE}
 RAW_ATAC_FILE=${DEFAULT_RAW_ATAC_FILE}
+FILTER_RNA=${DEFAULT_FILTER_RNA}
+FILTER_ATAC=${DEFAULT_FILTER_ATAC}
+MIN_RNA_DISP=${DEFAULT_MIN_RNA_DISP}
+MIN_ATAC_DISP=${DEFAULT_MIN_ATAC_DISP}
+SAMPLE_NAMES=${DEFAULT_SAMPLE_NAMES}
 
 # Model training parameters
 TOTAL_EPOCHS=${DEFAULT_TOTAL_EPOCHS}
@@ -266,6 +302,11 @@ if [ -n "${PARAM_OVERRIDES}" ]; then
                 PROMOTER_BP) PROMOTER_BP=$param_value ;;
                 RAW_RNA_FILE) RAW_RNA_FILE=$param_value ;;
                 RAW_ATAC_FILE) RAW_ATAC_FILE=$param_value ;;
+                FILTER_RNA) FILTER_RNA=$param_value ;;
+                FILTER_ATAC) FILTER_ATAC=$param_value ;;
+                MIN_RNA_DISP) MIN_RNA_DISP=$param_value ;;
+                MIN_ATAC_DISP) MIN_ATAC_DISP=$param_value ;;
+                SAMPLE_NAMES) SAMPLE_NAMES=$param_value ;;
                 # Model training parameters
                 TOTAL_EPOCHS) TOTAL_EPOCHS=$param_value ;;
                 BATCH_SIZE) BATCH_SIZE=$param_value ;;
@@ -379,6 +420,7 @@ write_param_csv_row() {
         WINDOW_SIZE DISTANCE_SCALE_FACTOR MAX_PEAK_DISTANCE
         DIST_BIAS_MODE FILTER_TO_NEAREST_GENE PROMOTER_BP
         RAW_SINGLE_CELL_DATA RAW_RNA_FILE RAW_ATAC_FILE
+        FILTER_RNA FILTER_ATAC MIN_RNA_DISP MIN_ATAC_DISP
         TOTAL_EPOCHS BATCH_SIZE PATIENCE SAVE_EVERY_N_EPOCHS
         CORR_LOSS_WEIGHT EDGE_LOSS_WEIGHT COS_WEIGHT SHORTCUT_REG_WEIGHT
         GRAD_ACCUM_STEPS USE_GRAD_ACCUMULATION USE_GRAD_CHECKPOINTING
@@ -403,7 +445,6 @@ SAMPLE_DATA_CACHE_DIR="${TRAINING_DATA_CACHE}/${DATASET_NAME}"
 COMMON_DATA="${SAMPLE_DATA_CACHE_DIR}/common"
 
 # Sample information
-SAMPLE_NAMES="buffer_1 buffer_2 buffer_3 buffer_4"
 VALIDATION_DATASETS="buffer_4"
 
 # Chromosomes to process
@@ -411,7 +452,7 @@ CHROM_ID="chr19"
 # CHROM_IDS="chr1 chr2 chr3 chr4 chr5 chr6 chr7 chr8 chr9 chr10 chr11 chr12 chr13 chr14 chr15 chr16 chr17 chr18 chr19"
 
 # Force recalculate (set to true if you want to reprocess data)
-FORCE_RECALCULATE=false
+FORCE_RECALCULATE=true
 
 # ==========================================
 #        CPU DETECTION
@@ -478,7 +519,11 @@ PREPROCESS_CMD="python src/multiomic_transformer/data/preprocess_argparse.py \
     --max_peak_distance ${MAX_PEAK_DISTANCE} \
     --dist_bias_mode ${DIST_BIAS_MODE} \
     --raw_rna_file ${RAW_RNA_FILE} \
-    --raw_atac_file ${RAW_ATAC_FILE}"
+    --raw_atac_file ${RAW_ATAC_FILE} \
+    --filter_rna ${FILTER_RNA} \
+    --filter_atac ${FILTER_ATAC} \
+    --min_rna_disp ${MIN_RNA_DISP} \
+    --min_atac_disp ${MIN_ATAC_DISP}"
 
 # Add optional validation datasets
 if [ -n "${VALIDATION_DATASETS}" ]; then
@@ -517,7 +562,7 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
     echo "         STARTING MODEL TRAINING"
     echo "=========================================="
     echo ""
-    echo "[INFO] Detected compute partition, progressing with model training"
+    echo "[INFO] Detected ${SLURM_JOB_PARTITION:-} partition, progressing with model training"
 
     # Build training command
     TRAIN_CMD="src/multiomic_transformer/scripts/multinode_train_argparse.py \
@@ -806,7 +851,7 @@ else
     echo "   SKIPPING MODEL TRAINING"
     echo "=========================================="
     echo ""
-    echo "[INFO] Running on ${SLURM_JOB_PARTITION:-unknown} partition (not 'dense'), skipping model training"
-    echo "[INFO] Submit another job on the 'dense' partition to run training"
+    echo "[INFO] Running on ${SLURM_JOB_PARTITION:-unknown} partition (not 'dense' or 'gpu'), skipping model training"
+    echo "[INFO] Submit another job on the 'dense' or 'gpu' partition to run training"
 fi
 

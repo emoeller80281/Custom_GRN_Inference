@@ -3,13 +3,13 @@
 #SBATCH --output=LOGS/transformer_logs/04_testing/%x_%A/%x_%A_%a.log
 #SBATCH --error=LOGS/transformer_logs/04_testing/%x_%A/%x_%A_%a.err
 #SBATCH --time=10:00:00
-#SBATCH -p gpu
+#SBATCH -p dense
 #SBATCH -N 1
-#SBATCH --gres=gpu:p100:1
+#SBATCH --gres=gpu:v100:1
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 4
 #SBATCH --mem=64G
-#SBATCH --array=0%5
+#SBATCH --array=0-8%9
 
 set -euo pipefail
 
@@ -140,13 +140,34 @@ EXPERIMENT_LIST=(
     # "K562_stability_test_05|model_training_001|trained_model.pt"
     # "K562_two_hops_slow_decay_long_range_no_hvg|model_training_001|trained_model.pt"
     # "K562_hvg_filter_none|model_training_001|trained_model.pt"
+
+    # "mESC_E7.5_rep1_hvg_filter_only_rna|model_training_001"
+    # "mESC_E7.5_rep1_hvg_filter_disp_0.6|model_training_001"
+    # "mESC_E7.5_rep1_hvg_filter_disp_0.5|model_training_001"
+    # "mESC_E7.5_rep1_hvg_filter_disp_0.4|model_training_001"
+    # "mESC_E7.5_rep1_hvg_filter_disp_0.3|model_training_001"
+    # "mESC_E7.5_rep1_hvg_filter_disp_0.2|model_training_001"
+    # "mESC_E7.5_rep1_hvg_filter_disp_0.1|model_training_001"
+    # "mESC_E7.5_rep1_hvg_filter_disp_0.05|model_training_001"
+    # "mESC_E7.5_rep1_hvg_filter_disp_0.01|model_training_001"
+
+    "Macrophage_buffer_1_hvg_filter_only_rna|model_training_001"
+    "Macrophage_buffer_1_hvg_filter_disp_0.6|model_training_001"
+    "Macrophage_buffer_1_hvg_filter_disp_0.5|model_training_001"
+    "Macrophage_buffer_1_hvg_filter_disp_0.4|model_training_001"
+    "Macrophage_buffer_1_hvg_filter_disp_0.3|model_training_001"
+    "Macrophage_buffer_1_hvg_filter_disp_0.2|model_training_001"
+    "Macrophage_buffer_1_hvg_filter_disp_0.1|model_training_001"
+    "Macrophage_buffer_1_hvg_filter_disp_0.05|model_training_001"
+    "Macrophage_buffer_1_hvg_filter_disp_0.01|model_training_001"
+
 )
 
-DATASET_TYPE="mESC"
-SAMPLE_NAMES="E7.5_rep1" # E7.5_rep2 E8.5_rep1 E8.5_rep2
+# DATASET_TYPE="mESC"
+# SAMPLE_NAMES="E7.5_rep1" # E7.5_rep2 E8.5_rep1 E8.5_rep2
 
-# DATASET_TYPE="macrophage"
-# SAMPLE_NAMES="Macrophage_S1 Macrophage_S2"
+DATASET_TYPE="macrophage"
+SAMPLE_NAMES="Macrophage_S1 Macrophage_S2"
 
 # DATASET_TYPE="k562"
 # SAMPLE_NAMES="K562"
