@@ -8,6 +8,8 @@ import warnings
 from pathlib import Path
 
 import sys
+
+from numpy import save
 sys.path.append(Path(__file__).resolve().parent.parent.parent)
 
 import signal
@@ -1414,6 +1416,54 @@ def _mapping_to_ordered_list(name2id: dict):
     # convert {name: id} → [names] in id order
     return [k for k, _ in sorted(name2id.items(), key=lambda kv: kv[1])]
 
+def save_test_loader_portable(
+    out_dir: Path,
+    test_loader,
+):
+    """
+    Save everything needed to reconstruct the test DataLoader
+    without pickling DataLoader / Dataset objects.
+
+    Parameters
+    ----------
+    out_dir : Path
+        Training output directory
+    test_loader : DataLoader
+        Test DataLoader with IndexedChromBucketBatchSampler
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Extract batch sampler (handle DistributedBatchSampler wrapper)
+    batch_sampler = test_loader.batch_sampler
+    if hasattr(batch_sampler, 'batch_sampler'):
+        # Wrapped in DistributedBatchSampler
+        batch_sampler = batch_sampler.batch_sampler
+    
+    # 1) Save test split indices (chrom -> list of indices)
+    test_map = batch_sampler.chrom_to_indices
+    split_path = out_dir / "test_split_indices.json"
+    with open(split_path, "w") as f:
+        json.dump(test_map, f)
+
+    # 2) Save loader config
+    loader_cfg = {
+        "batch_size": test_loader.batch_size,
+        "seed": batch_sampler.seed,
+        "num_workers": test_loader.num_workers,
+        "pin_memory": test_loader.pin_memory,
+    }
+
+    cfg_path = out_dir / "test_loader_config.json"
+    with open(cfg_path, "w") as f:
+        json.dump(loader_cfg, f, indent=4)
+
+    logging.info(
+        f"Saved portable test loader:\n"
+        f"  - {split_path}\n"
+        f"  - {cfg_path}"
+    )
+
 def write_experiment_settings_and_objects(training_output_dir: Path, dataset, test_loader, world_size: int):
     """
     Works for both MultiChromosomeDataset and single-chrom MultiomicTransformerDataset.
@@ -1446,6 +1496,12 @@ def write_experiment_settings_and_objects(training_output_dir: Path, dataset, te
     
     # Persist test loader
     torch.save(test_loader, os.path.join(training_output_dir, "test_loader.pt"))
+    
+    # Saves the inidces and config needed to reconstruct the test loader without pickling
+    save_test_loader_portable(
+        out_dir=training_output_dir,
+        test_loader=test_loader,
+    )
 
     # Your existing run-parameter writer is fine to call here if it doesn’t assume single-chrom only
     write_run_parameters(dataset, training_output_dir, world_size)

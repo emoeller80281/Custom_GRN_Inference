@@ -9,7 +9,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 16
 #SBATCH --mem=192G
-#SBATCH --array=0-19%5
+#SBATCH --array=0-2%3
 
 set -euo pipefail
 
@@ -142,29 +142,45 @@ EXPERIMENTS=(
     # "best_filter_long_range_2_hop_tiny|Macrophage_best_filter_long_range_2_hop_tiny|D_MODEL=64;D_FF=256;HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;MIN_GENES_PER_CELL=125;MIN_PEAKS_PER_CELL=50;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.05;FILTER_OUT_LOWEST_PCT_PEAKS=0.05;BATCH_SIZE=8"
 
     # Buffer 1 disperson filtering experiments
-    "buffer_1_hvg_filter_only_rna|Macrophage_buffer_1_hvg_filter_only_rna|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=false;FILTER_RNA=true;SAMPLE_NAMES=buffer_1"
-    "buffer_1_hvg_filter_disp_0.6|Macrophage_buffer_1_hvg_filter_disp_0.6|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.6;MIN_RNA_DISP=0.6;SAMPLE_NAMES=buffer_1"
-    "buffer_1_hvg_filter_disp_0.5|Macrophage_buffer_1_hvg_filter_disp_0.5|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.5;MIN_RNA_DISP=0.5;SAMPLE_NAMES=buffer_1"
-    "buffer_1_hvg_filter_disp_0.4|Macrophage_buffer_1_hvg_filter_disp_0.4|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.4;MIN_RNA_DISP=0.4;SAMPLE_NAMES=buffer_1"
-    "buffer_1_hvg_filter_disp_0.3|Macrophage_buffer_1_hvg_filter_disp_0.3|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.3;MIN_RNA_DISP=0.3;SAMPLE_NAMES=buffer_1"
-    "buffer_1_hvg_filter_disp_0.2|Macrophage_buffer_1_hvg_filter_disp_0.2|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=buffer_1"
-    "buffer_1_hvg_filter_disp_0.1|Macrophage_buffer_1_hvg_filter_disp_0.1|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.1;MIN_RNA_DISP=0.1;SAMPLE_NAMES=buffer_1"
-    "buffer_1_hvg_filter_disp_0.05|Macrophage_buffer_1_hvg_filter_disp_0.05|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.05;MIN_RNA_DISP=0.05;SAMPLE_NAMES=buffer_1"
-    "buffer_1_hvg_filter_disp_0.01|Macrophage_buffer_1_hvg_filter_disp_0.01|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=buffer_1"
-    "buffer_1_hvg_filter_none|Macrophage_buffer_1_hvg_filter_none|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=false;FILTER_RNA=false;SAMPLE_NAMES=buffer_1"
+    # "buffer_1_hvg_filter_only_rna|Macrophage_buffer_1_hvg_filter_only_rna|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=false;FILTER_RNA=true;SAMPLE_NAMES=buffer_1"
+    # "buffer_1_hvg_filter_disp_0.6|Macrophage_buffer_1_hvg_filter_disp_0.6|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.6;MIN_RNA_DISP=0.6;SAMPLE_NAMES=buffer_1"
+    # "buffer_1_hvg_filter_disp_0.5|Macrophage_buffer_1_hvg_filter_disp_0.5|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.5;MIN_RNA_DISP=0.5;SAMPLE_NAMES=buffer_1"
+    # "buffer_1_hvg_filter_disp_0.4|Macrophage_buffer_1_hvg_filter_disp_0.4|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.4;MIN_RNA_DISP=0.4;SAMPLE_NAMES=buffer_1"
+    # "buffer_1_hvg_filter_disp_0.3|Macrophage_buffer_1_hvg_filter_disp_0.3|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.3;MIN_RNA_DISP=0.3;SAMPLE_NAMES=buffer_1"
+    # "buffer_1_hvg_filter_disp_0.2|Macrophage_buffer_1_hvg_filter_disp_0.2|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=buffer_1"
+    # "buffer_1_hvg_filter_disp_0.1|Macrophage_buffer_1_hvg_filter_disp_0.1|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.1;MIN_RNA_DISP=0.1;SAMPLE_NAMES=buffer_1"
+    # "buffer_1_hvg_filter_disp_0.05|Macrophage_buffer_1_hvg_filter_disp_0.05|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.05;MIN_RNA_DISP=0.05;SAMPLE_NAMES=buffer_1"
+    # "buffer_1_hvg_filter_disp_0.01|Macrophage_buffer_1_hvg_filter_disp_0.01|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=buffer_1"
+    # "buffer_1_hvg_filter_none|Macrophage_buffer_1_hvg_filter_none|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=false;FILTER_RNA=false;SAMPLE_NAMES=buffer_1"
 
     # Buffer 2 disperson filtering experiments
-    "buffer_2_hvg_filter_only_rna|Macrophage_buffer_2_hvg_filter_only_rna|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=false;FILTER_RNA=true;SAMPLE_NAMES=buffer_2"
-    "buffer_2_hvg_filter_disp_0.6|Macrophage_buffer_2_hvg_filter_disp_0.6|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.6;MIN_RNA_DISP=0.6;SAMPLE_NAMES=buffer_2"
-    "buffer_2_hvg_filter_disp_0.5|Macrophage_buffer_2_hvg_filter_disp_0.5|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.5;MIN_RNA_DISP=0.5;SAMPLE_NAMES=buffer_2"
-    "buffer_2_hvg_filter_disp_0.4|Macrophage_buffer_2_hvg_filter_disp_0.4|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.4;MIN_RNA_DISP=0.4;SAMPLE_NAMES=buffer_2"
-    "buffer_2_hvg_filter_disp_0.3|Macrophage_buffer_2_hvg_filter_disp_0.3|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.3;MIN_RNA_DISP=0.3;SAMPLE_NAMES=buffer_2"
-    "buffer_2_hvg_filter_disp_0.2|Macrophage_buffer_2_hvg_filter_disp_0.2|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=buffer_2"
-    "buffer_2_hvg_filter_disp_0.1|Macrophage_buffer_2_hvg_filter_disp_0.1|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.1;MIN_RNA_DISP=0.1;SAMPLE_NAMES=buffer_2"
-    "buffer_2_hvg_filter_disp_0.05|Macrophage_buffer_2_hvg_filter_disp_0.05|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.05;MIN_RNA_DISP=0.05;SAMPLE_NAMES=buffer_2"
-    "buffer_2_hvg_filter_disp_0.01|Macrophage_buffer_2_hvg_filter_disp_0.01|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=buffer_2"
-    "buffer_2_hvg_filter_none|Macrophage_buffer_2_hvg_filter_none|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=false;FILTER_RNA=false;SAMPLE_NAMES=buffer_2"
+    # "buffer_2_hvg_filter_only_rna|Macrophage_buffer_2_hvg_filter_only_rna|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=false;FILTER_RNA=true;SAMPLE_NAMES=buffer_2"
+    # "buffer_2_hvg_filter_disp_0.6|Macrophage_buffer_2_hvg_filter_disp_0.6|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.6;MIN_RNA_DISP=0.6;SAMPLE_NAMES=buffer_2"
+    # "buffer_2_hvg_filter_disp_0.5|Macrophage_buffer_2_hvg_filter_disp_0.5|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.5;MIN_RNA_DISP=0.5;SAMPLE_NAMES=buffer_2"
+    # "buffer_2_hvg_filter_disp_0.4|Macrophage_buffer_2_hvg_filter_disp_0.4|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.4;MIN_RNA_DISP=0.4;SAMPLE_NAMES=buffer_2"
+    # "buffer_2_hvg_filter_disp_0.3|Macrophage_buffer_2_hvg_filter_disp_0.3|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.3;MIN_RNA_DISP=0.3;SAMPLE_NAMES=buffer_2"
+    # "buffer_2_hvg_filter_disp_0.2|Macrophage_buffer_2_hvg_filter_disp_0.2|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=buffer_2"
+    # "buffer_2_hvg_filter_disp_0.1|Macrophage_buffer_2_hvg_filter_disp_0.1|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.1;MIN_RNA_DISP=0.1;SAMPLE_NAMES=buffer_2"
+    # "buffer_2_hvg_filter_disp_0.05|Macrophage_buffer_2_hvg_filter_disp_0.05|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.05;MIN_RNA_DISP=0.05;SAMPLE_NAMES=buffer_2"
+    # "buffer_2_hvg_filter_disp_0.01|Macrophage_buffer_2_hvg_filter_disp_0.01|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=buffer_2"
+    # "buffer_2_hvg_filter_none|Macrophage_buffer_2_hvg_filter_none|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=false;FILTER_RNA=false;SAMPLE_NAMES=buffer_2"
 
+    # Buffer 3 disperson filtering experiments
+    # "buffer_3_hvg_filter_only_rna|Macrophage_buffer_3_hvg_filter_only_rna|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=false;FILTER_RNA=true;SAMPLE_NAMES=buffer_3"
+    # "buffer_3_hvg_filter_disp_0.6|Macrophage_buffer_3_hvg_filter_disp_0.6|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.6;MIN_RNA_DISP=0.6;SAMPLE_NAMES=buffer_3"
+    # "buffer_3_hvg_filter_disp_0.5|Macrophage_buffer_3_hvg_filter_disp_0.5|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.5;MIN_RNA_DISP=0.5;SAMPLE_NAMES=buffer_3"
+    # "buffer_3_hvg_filter_disp_0.4|Macrophage_buffer_3_hvg_filter_disp_0.4|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.4;MIN_RNA_DISP=0.4;SAMPLE_NAMES=buffer_3"
+    # "buffer_3_hvg_filter_disp_0.3|Macrophage_buffer_3_hvg_filter_disp_0.3|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.3;MIN_RNA_DISP=0.3;SAMPLE_NAMES=buffer_3"
+    # "buffer_3_hvg_filter_disp_0.2|Macrophage_buffer_3_hvg_filter_disp_0.2|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=buffer_3"
+    # "buffer_3_hvg_filter_disp_0.1|Macrophage_buffer_3_hvg_filter_disp_0.1|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.1;MIN_RNA_DISP=0.1;SAMPLE_NAMES=buffer_3"
+    # "buffer_3_hvg_filter_disp_0.05|Macrophage_buffer_3_hvg_filter_disp_0.05|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.05;MIN_RNA_DISP=0.05;SAMPLE_NAMES=buffer_3"
+    # "buffer_3_hvg_filter_disp_0.01|Macrophage_buffer_3_hvg_filter_disp_0.01|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=buffer_3"
+    # "buffer_3_hvg_filter_none|Macrophage_buffer_3_hvg_filter_none|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=false;FILTER_RNA=false;SAMPLE_NAMES=buffer_3"
+
+    # Testing effect of combining multiple samples
+    "buffer_12_hvg_filter_disp_0.1|Macrophage_buffer_12_hvg_filter_disp_0.1|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.1;MIN_RNA_DISP=0.1;SAMPLE_NAMES=buffer_1 buffer_2"
+    "buffer_123_hvg_filter_disp_0.1|Macrophage_buffer_123_hvg_filter_disp_0.1|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.1;MIN_RNA_DISP=0.1;SAMPLE_NAMES=buffer_1 buffer_2 buffer_3" 
+    "buffer_1234_hvg_filter_disp_0.1|Macrophage_buffer_1234_hvg_filter_disp_0.1|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.1;MIN_RNA_DISP=0.1;SAMPLE_NAMES=buffer_1 buffer_2 buffer_3 buffer_4" 
 
 )
 
@@ -452,7 +468,7 @@ CHROM_ID="chr19"
 # CHROM_IDS="chr1 chr2 chr3 chr4 chr5 chr6 chr7 chr8 chr9 chr10 chr11 chr12 chr13 chr14 chr15 chr16 chr17 chr18 chr19"
 
 # Force recalculate (set to true if you want to reprocess data)
-FORCE_RECALCULATE=true
+FORCE_RECALCULATE=false
 
 # ==========================================
 #        CPU DETECTION

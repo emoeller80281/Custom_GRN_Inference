@@ -1316,6 +1316,22 @@ def plot_all_method_auroc_auprc(method_dict, gt_name, target_method="MultiomicTr
 
 def plot_all_results_auroc_boxplot(df, per_tf=False):
     # 1. Order methods by mean AUROC (highest → lowest)
+    """
+    Plots AUROC boxplots for all GRN inference methods in the provided DataFrame.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame containing AUROC results with columns 'method' and 'auroc'.
+    per_tf : bool, optional
+        If True, indicates that the DataFrame contains per-TF AUROC scores. Default is False.
+
+    Returns
+    -------
+    fig : plt.Figure
+        Figure containing the plotted boxplots.
+    """
+    
     method_order = (
         df.groupby("name")["auroc"]
         .mean()

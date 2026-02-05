@@ -402,11 +402,37 @@ def load_and_standardize_method(name: str, info: dict) -> pd.DataFrame:
 
     return df
 
+def balance_pos_neg(df, label_col="_in_gt", random_state=0):
+    rng = np.random.default_rng(random_state)
+    df = df.copy()
+    pos_df = df[df[label_col] == 1]
+    neg_df = df[df[label_col] != 1]
+
+    n_pos = len(pos_df)
+    n_neg = len(neg_df)
+    if n_pos == 0 or n_neg == 0:
+        logging.info("No positives or negatives, skipping balance")
+        return df
+
+    if n_neg < n_pos:
+        pos_idx = rng.choice(pos_df.index.to_numpy(), size=n_neg, replace=False)
+        pos_sample = pos_df.loc[pos_idx]
+        neg_sample = neg_df
+    else:
+        pos_sample = pos_df
+        neg_idx = rng.choice(neg_df.index.to_numpy(), size=n_pos, replace=False)
+        neg_sample = neg_df.loc[neg_idx]
+
+    balanced = pd.concat([pos_sample, neg_sample], axis=0)
+    return balanced.sample(frac=1.0, random_state=random_state).reset_index(drop=True)
+
+
 def per_tf_metrics(
     method_df: pd.DataFrame, 
     gt_edges: pd.DataFrame, 
     top_fracs=(0.001, 0.005, 0.01, 0.05), 
-    min_edges=10, min_pos=1
+    min_edges=10, min_pos=1,
+    balance_for_auprc=False
     ) -> pd.DataFrame:
     """
     Returns a per-TF dataframe with:
@@ -434,7 +460,14 @@ def per_tf_metrics(
 
         # AUROC defined only if both classes present
         auc = roc_auc_score(y, s) if (n_pos > 0 and n_neg > 0) else np.nan
-        auprc = average_precision_score(y, s) if (n_pos > 0 and n_neg > 0) else np.nan
+        
+        if balance_for_auprc:
+            balanced = balance_pos_neg(g, label_col="_in_gt", random_state=42)
+            y_bal = balanced["_in_gt"].astype(int).to_numpy()
+            s_bal = balanced["Score"].to_numpy()
+            auprc = average_precision_score(y_bal, s_bal) if (y_bal.sum() > 0 and y_bal.sum() < len(y_bal)) else np.nan
+        else:
+            auprc = average_precision_score(y, s) if n_pos > 0 else np.nan
         
         # Pre-sort once for precision@K
         order = np.argsort(s)[::-1]
@@ -499,7 +532,14 @@ def calculate_per_tf_auroc(standardized_method_dict, ground_truth_edges_dict, to
             if len(d_eval) == 0:
                 continue
 
-            tf_df = per_tf_metrics(d_eval, gt_edges, top_fracs=top_k_fracs, min_edges=10, min_pos=1)
+            tf_df = per_tf_metrics(
+                d_eval, 
+                gt_edges, 
+                top_fracs=top_k_fracs, 
+                min_edges=50, 
+                min_pos=10,
+                balance_for_auprc=True
+                )
             tf_df.insert(0, "gt", gt_name)
             tf_df.insert(0, "method", method_name)
             per_tf_all.append(tf_df)

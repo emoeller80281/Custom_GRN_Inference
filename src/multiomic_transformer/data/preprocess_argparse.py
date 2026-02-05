@@ -1069,9 +1069,6 @@ def filter_and_qc(
         Filtered ATAC data
     """
     
-    adata_RNA = adata_RNA.copy()
-    adata_ATAC = adata_ATAC.copy()
-    
     logging.debug(f"[START] RNA shape={adata_RNA.shape}, ATAC shape={adata_ATAC.shape}")
     
     common_barcodes = adata_RNA.obs_names.isin(adata_ATAC.obs_names)
@@ -1083,8 +1080,8 @@ def filter_and_qc(
     adata_ATAC.obs['barcode'] = adata_ATAC.obs_names
 
     n_before = (adata_RNA.n_obs, adata_ATAC.n_obs)
-    adata_RNA = adata_RNA[common_barcodes].copy()
-    adata_ATAC = adata_ATAC[adata_ATAC.obs['barcode'].isin(adata_RNA.obs['barcode'])].copy()
+    adata_RNA = adata_RNA[common_barcodes]
+    adata_ATAC = adata_ATAC[common_barcodes]
     
     logging.debug(
         f"[BARCODES] before sync RNA={n_before[0]}, ATAC={n_before[1]} → after sync RNA={adata_RNA.n_obs}, ATAC={adata_ATAC.n_obs}"
@@ -1094,7 +1091,7 @@ def filter_and_qc(
     # Filter out 
     adata_RNA.var['mt'] = adata_RNA.var_names.str.startswith("MT-")
     sc.pp.calculate_qc_metrics(adata_RNA, qc_vars=["mt"], inplace=True)
-    adata_RNA = adata_RNA[adata_RNA.obs.pct_counts_mt < 5].copy()
+    adata_RNA = adata_RNA[adata_RNA.obs.pct_counts_mt < 5]
     adata_RNA.var_names_make_unique()
     adata_RNA.var['gene_ids'] = adata_RNA.var.index
     num_cells_rna = adata_RNA.n_obs
@@ -1121,7 +1118,7 @@ def filter_and_qc(
         sc.pp.highly_variable_genes(adata_RNA, min_mean=0.0125, max_mean=3, min_disp=min_rna_disp)
         n_hvg = adata_RNA.var.highly_variable.sum()
         logging.info(f"    - HVG filtering with min_disp={min_rna_disp}: {n_hvg} genes marked as highly variable")
-    adata_RNA.layers["log1p"] = adata_RNA.X.copy()
+    adata_RNA.layers["log1p"] = adata_RNA.X
     sc.pp.scale(adata_RNA, max_value=10, zero_center=True)
     if filter_rna:
         adata_RNA = adata_RNA[:, adata_RNA.var.highly_variable]
@@ -1135,7 +1132,7 @@ def filter_and_qc(
         sc.pp.highly_variable_genes(adata_ATAC, min_mean=0.0125, max_mean=3, min_disp=min_atac_disp)
         n_hvg = adata_ATAC.var.highly_variable.sum()
         logging.info(f"    - HVG filtering with min_disp={min_atac_disp}: {n_hvg} peaks marked as highly variable")
-    adata_ATAC.layers["log1p"] = adata_ATAC.X.copy()
+    adata_ATAC.layers["log1p"] = adata_ATAC.X
     if filter_atac:
         adata_ATAC = adata_ATAC[:, adata_ATAC.var.highly_variable]
         logging.info(f"    - After filtering: ATAC has {adata_ATAC.n_vars} peaks")
@@ -1145,8 +1142,8 @@ def filter_and_qc(
     # After filtering to common barcodes
     common_barcodes = adata_RNA.obs_names.intersection(adata_ATAC.obs_names)
     
-    adata_RNA = adata_RNA[common_barcodes].copy()
-    adata_ATAC = adata_ATAC[common_barcodes].copy()
+    adata_RNA = adata_RNA[common_barcodes]
+    adata_ATAC = adata_ATAC[common_barcodes]
     
     return adata_RNA, adata_ATAC
 
