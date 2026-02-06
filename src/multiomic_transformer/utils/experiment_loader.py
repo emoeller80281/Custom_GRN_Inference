@@ -297,6 +297,12 @@ class ExperimentLoader:
 
         return pred_df, true_df
 
+    def visualize_model_structure(self):
+        if self.model is None:
+            self.load_trained_model("trained_model.pt")
+
+        return self.model.module
+    
     def _locate_last_checkpoint(self):
         """
         Locate the checkpoint_<N>.pt file with the largest N in self.model_training_dir.
