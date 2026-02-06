@@ -24,21 +24,29 @@ class ExperimentLoader:
         
         self.experiment_dir = Path(experiment_dir)
         self.experiment_name = experiment_name
-        self.model_training_dir = Path(f"{experiment_dir}/{experiment_name}/chr19/model_training_00{model_num}")
         
+        if "chr19" in [p.name for p in Path(experiment_dir / experiment_name).iterdir()]:
+            self.model_training_dir = Path(f"{experiment_dir}/{experiment_name}/chr19/model_training_00{model_num}")
+        else:
+            self.model_training_dir = Path(f"{experiment_dir}/{experiment_name}/model_training_00{model_num}")
+                
         assert self.model_training_dir.exists(), f"Model training directory {self.model_training_dir} does not exist."
         
         # Load the run parameters saved during model training
         self.model_training_params = self._load_json(self.model_training_dir / "run_parameters.json")
         
         # Save the full list of experiment settings
-        self.experiment_settings = pd.read_csv(self.experiment_dir / self.experiment_name / "run_parameters_long.csv")
+        self.experiment_settings_df = pd.read_csv(self.experiment_dir / self.experiment_name / "run_parameters_long.csv")
         
         # Load the GPU usage log and format it into a more usable format
         self.gpu_usage_df, self.gpu_usage_mean_per_sec_df, self.gpu_memory_limit_gib = self._format_gpu_usage_file()
         
         # Load the model training log data
         self.training_df = pd.read_csv(self.model_training_dir / "training_log.csv")
+        
+        # Loads the TF and TG names in order by their index
+        self.tf_names = self._load_json(self.model_training_dir / "tf_names_ordered.json")
+        self.tg_names = self._load_json(self.model_training_dir / "tg_names_ordered.json")
         
         # Model and training state will be loaded when load_trained_model is called
         self.model = None
@@ -133,7 +141,110 @@ class ExperimentLoader:
             mean=torch.as_tensor(self.state["tf_scaler_mean"], device=self.device, dtype=torch.float32),
             std=torch.as_tensor(self.state["tf_scaler_std"],  device=self.device, dtype=torch.float32),
         )
-       
+    
+    def load_gradient_attribution(self):
+        gradient_attribution_file = self.model_training_dir / "tf_tg_grad_attribution.npy"
+        
+        assert gradient_attribution_file.exists(), f"Gradient attribution file {gradient_attribution_file} does not exist."
+        
+        grad = np.load(gradient_attribution_file).astype(np.float32)
+        assert grad.shape == (len(self.tf_names), len(self.tg_names))
+
+        grad = np.nan_to_num(grad, nan=0.0)
+        grad_abs = np.abs(grad)
+
+        score_pooled = np.log1p(grad_abs)
+
+        # Calculate per-TF robust z-score
+        median_val = np.median(grad_abs, axis=1, keepdims=True)
+        mad = np.median(np.abs(grad_abs - median_val), axis=1, keepdims=True) + 1e-6
+        score_per_tf = (grad_abs - median_val) / mad
+
+        T, G = grad_abs.shape
+        tf_idx, tg_idx = np.meshgrid(np.arange(T), np.arange(G), indexing="ij")
+                
+        eps = 1e-12
+        mask = (score_pooled > eps) | (np.abs(score_per_tf) > eps)
+
+        tf_idx, tg_idx = np.where(mask)
+
+        df = pd.DataFrame({
+            "Source": np.asarray(self.tf_names, dtype=object)[tf_idx],
+            "Target": np.asarray(self.tg_names, dtype=object)[tg_idx],
+            "Score_pooled": score_pooled[tf_idx, tg_idx],
+            "Score_per_tf": score_per_tf[tf_idx, tg_idx],
+        })
+        
+        df["Source"] = df["Source"].astype(str).str.upper()
+        df["Target"] = df["Target"].astype(str).str.upper()
+        
+        return df
+    
+    def load_tf_knockout(self, positive_only: bool = True, eps: float = 1e-6):
+        """
+        Loads TF-knockout effects and returns a long-form DF with two scores:
+
+        - Score_pooled: log1p(effect_used)  (global magnitude-compressed score)
+        - Score_per_tf: robust per-TF score = (effect_used - median_tf) / MAD_tf
+
+        Where effect_used is either:
+        - clip(effect, 0, inf) if positive_only=True
+        - effect (signed) if positive_only=False
+
+        Notes:
+        - Unobserved entries (counts==0) are set to NaN and dropped in the output.
+        - If positive_only=True, effects at 0 are valid and retained.
+        """
+        tf_knockout_file = self.model_training_dir / "tf_tg_fullmodel_knockout.npy"
+        assert tf_knockout_file.exists(), f"TF-knockout file {tf_knockout_file} does not exist."
+        
+        
+        effect = np.load(tf_knockout_file).astype(np.float32)         # [T, G]
+        counts = np.load(self.model_training_dir / "tf_tg_fullmodel_knockout_count.npy").astype(np.int32)    # [T, G]
+        assert effect.shape == (len(self.tf_names), len(self.tg_names))
+        assert counts.shape == effect.shape
+
+        # Mark unobserved as NaN
+        mask_observed = counts > 0
+        effect = effect.copy()
+        effect[~mask_observed] = np.nan
+
+        # Choose effect representation
+        if positive_only:
+            effect_used = np.clip(effect, 0, None)  # keep NaNs
+        else:
+            effect_used = effect  # signed, keep NaNs
+
+        # --- pooled score ---
+        # If signed, use abs for pooled magnitude (keeps "strength" notion comparable to gradient pooled)
+        pooled_base = effect_used if positive_only else np.abs(effect_used)
+        score_pooled = np.log1p(pooled_base)
+
+        # --- per-TF robust score ---
+        med = np.nanmedian(effect_used, axis=1, keepdims=True)
+        mad = np.nanmedian(np.abs(effect_used - med), axis=1, keepdims=True) + eps
+        score_per_tf = (effect_used - med) / mad
+
+        # --- build long-form DF ---
+        T, G = effect_used.shape
+        tf_idx, tg_idx = np.meshgrid(np.arange(T), np.arange(G), indexing="ij")
+
+        df = pd.DataFrame({
+            "Source": np.asarray(self.tf_names, dtype=object)[tf_idx.ravel()],
+            "Target": np.asarray(self.tg_names, dtype=object)[tg_idx.ravel()],
+            "Score_pooled": score_pooled.ravel(),
+            "Score_per_tf": score_per_tf.ravel(),
+            "counts": counts.ravel(),
+        })
+
+        # Drop unobserved (Score_pooled will be NaN there)
+        df = df.dropna(subset=["Score_pooled"]).reset_index(drop=True)
+
+        df["Source"] = df["Source"].astype(str).str.upper()
+        df["Target"] = df["Target"].astype(str).str.upper()
+        
+        return df
+    
     def run_forward_pass(self, num_batches: int = 1):
         if self.model is None:
             self.load_trained_model("trained_model.pt")
@@ -261,118 +372,3 @@ class ExperimentLoader:
         gpu_memory_limit_gib = float(gpu_usage_df["memory_total_gib"].iloc[0])
         return gpu_usage_df, mean_per_sec_df, gpu_memory_limit_gib
     
-    def load_gradient_attribution(self):
-        gradient_attribution_file = self.model_training_dir / "tf_tg_grad_attribution.npy"
-        
-        assert gradient_attribution_file.exists(), f"Gradient attribution file {gradient_attribution_file} does not exist."
-        
-        if self.test_loader is None:
-            assert (self.model_training_dir / "test_loader.pt").exists(), f"Test loader file {self.model_training_dir / 'test_loader.pt'} does not exist."
-            self.test_loader = torch.load(self.model_training_dir / "test_loader.pt", weights_only=True)
-        
-        tf_names = self.test_loader.dataset.tf_names
-        tg_names = self.test_loader.dataset.tg_names
-        
-        grad = np.load(gradient_attribution_file).astype(np.float32)
-        assert grad.shape == (len(tf_names), len(tg_names))
-
-        grad = np.nan_to_num(grad, nan=0.0)
-        grad_abs = np.abs(grad)
-
-        score_pooled = np.log1p(grad_abs)
-
-        # Calculate per-TF robust z-score
-        median_val = np.median(grad_abs, axis=1, keepdims=True)
-        mad = np.median(np.abs(grad_abs - median_val), axis=1, keepdims=True) + 1e-6
-        score_per_tf = (grad_abs - median_val) / mad
-
-        T, G = grad_abs.shape
-        tf_idx, tg_idx = np.meshgrid(np.arange(T), np.arange(G), indexing="ij")
-                
-        eps = 1e-12
-        mask = (score_pooled > eps) | (np.abs(score_per_tf) > eps)
-
-        tf_idx, tg_idx = np.where(mask)
-
-        df = pd.DataFrame({
-            "Source": np.asarray(tf_names, dtype=object)[tf_idx],
-            "Target": np.asarray(tg_names, dtype=object)[tg_idx],
-            "Score_pooled": score_pooled[tf_idx, tg_idx],
-            "Score_per_tf": score_per_tf[tf_idx, tg_idx],
-        })
-        
-        df["Source"] = df["Source"].astype(str).str.upper()
-        df["Target"] = df["Target"].astype(str).str.upper()
-        
-        return df
-    
-    def load_tf_knockout(self, positive_only: bool = True, eps: float = 1e-6):
-        """
-        Loads TF-knockout effects and returns a long-form DF with two scores:
-
-        - Score_pooled: log1p(effect_used)  (global magnitude-compressed score)
-        - Score_per_tf: robust per-TF score = (effect_used - median_tf) / MAD_tf
-
-        Where effect_used is either:
-        - clip(effect, 0, inf) if positive_only=True
-        - effect (signed) if positive_only=False
-
-        Notes:
-        - Unobserved entries (counts==0) are set to NaN and dropped in the output.
-        - If positive_only=True, effects at 0 are valid and retained.
-        """
-        tf_knockout_file = self.model_training_dir / "tf_tg_fullmodel_knockout.npy"
-        assert tf_knockout_file.exists(), f"TF-knockout file {tf_knockout_file} does not exist."
-        
-        if self.test_loader is None:
-            assert (self.model_training_dir / "test_loader.pt").exists(), f"Test loader file {self.model_training_dir / 'test_loader.pt'} does not exist."
-            self.test_loader = torch.load(self.model_training_dir / "test_loader.pt", weights_only=True)
-        
-        tf_names = self.test_loader.dataset.tf_names
-        tg_names = self.test_loader.dataset.tg_names
-        
-        effect = np.load(tf_knockout_file).astype(np.float32)         # [T, G]
-        counts = np.load(self.model_training_dir / "tf_tg_fullmodel_knockout_count.npy").astype(np.int32)    # [T, G]
-        assert effect.shape == (len(tf_names), len(tg_names))
-        assert counts.shape == effect.shape
-
-        # Mark unobserved as NaN
-        mask_observed = counts > 0
-        effect = effect.copy()
-        effect[~mask_observed] = np.nan
-
-        # Choose effect representation
-        if positive_only:
-            effect_used = np.clip(effect, 0, None)  # keep NaNs
-        else:
-            effect_used = effect  # signed, keep NaNs
-
-        # --- pooled score ---
-        # If signed, use abs for pooled magnitude (keeps "strength" notion comparable to gradient pooled)
-        pooled_base = effect_used if positive_only else np.abs(effect_used)
-        score_pooled = np.log1p(pooled_base)
-
-        # --- per-TF robust score ---
-        med = np.nanmedian(effect_used, axis=1, keepdims=True)
-        mad = np.nanmedian(np.abs(effect_used - med), axis=1, keepdims=True) + eps
-        score_per_tf = (effect_used - med) / mad
-
-        # --- build long-form DF ---
-        T, G = effect_used.shape
-        tf_idx, tg_idx = np.meshgrid(np.arange(T), np.arange(G), indexing="ij")
-
-        df = pd.DataFrame({
-            "Source": np.asarray(tf_names, dtype=object)[tf_idx.ravel()],
-            "Target": np.asarray(tg_names, dtype=object)[tg_idx.ravel()],
-            "Score_pooled": score_pooled.ravel(),
-            "Score_per_tf": score_per_tf.ravel(),
-            "counts": counts.ravel(),
-        })
-
-        # Drop unobserved (Score_pooled will be NaN there)
-        df = df.dropna(subset=["Score_pooled"]).reset_index(drop=True)
-
-        df["Source"] = df["Source"].astype(str).str.upper()
-        df["Target"] = df["Target"].astype(str).str.upper()
-        
-        return df

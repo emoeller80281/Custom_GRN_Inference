@@ -24,8 +24,6 @@ from sklearn.decomposition import TruncatedSVD
 import sys
 sys.path.append(Path(__file__).resolve().parent.parent.parent)
 
-from multiomic_transformer.utils.standardize import standardize_name
-from multiomic_transformer.utils.files import atomic_json_dump
 from multiomic_transformer.utils.peaks import find_genes_near_peaks, format_peaks
 from multiomic_transformer.utils.downloads import *
 from multiomic_transformer.data.sliding_window import run_sliding_window_scan
@@ -34,6 +32,24 @@ from multiomic_transformer.utils.gene_canonicalizer import GeneCanonicalizer
 random.seed(1337)
 np.random.seed(1337)
 torch.manual_seed(1337)
+
+def standardize_name(name: str) -> str:
+    """Convert gene/motif name to capitalization style (e.g. 'Hoxa2')."""
+    if not isinstance(name, str):
+        return name
+    return name.upper()
+
+def atomic_json_dump(obj, path: Path):
+    """Safe JSON dump, avoids race conditions by making a tmp file first, then updating the name"""
+    def convert(o):
+        if isinstance(o, Path):
+            return str(o)
+        raise TypeError(f"Object of type {o.__class__.__name__} is not JSON serializable")
+
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp, "w") as f:
+        json.dump(obj, f, indent=2, default=convert)
+    os.replace(tmp, path)
 
 # ----- Argument Parser Setup -----
 def parse_preprocessing_args():
@@ -64,8 +80,6 @@ def parse_preprocessing_args():
                         help="Organism code (mm10 for mouse, hg38 for human)")
     parser.add_argument("--dataset_name", type=str, default="mESC_default",
                         help="Name of the dataset/experiment")
-    parser.add_argument("--chrom_id", type=str, default="chr19",
-                        help="Single chromosome ID for processing")
     parser.add_argument("--chrom_ids", type=str, nargs="+", default=None,
                         help="List of chromosome IDs for multi-chromosome processing")
     parser.add_argument("--sample_names", type=str, nargs="+", default=None,
@@ -212,7 +226,7 @@ def setup_global_variables(args):
     This maintains backward compatibility with code that expects global variables.
     """
     global ROOT_DIR, PROJECT_DATA_DIR, PROJECT_RESULT_DIR
-    global ORGANISM_CODE, DATASET_NAME, CHROM_ID, CHROM_IDS
+    global ORGANISM_CODE, DATASET_NAME, CHROM_IDS
     global SAMPLE_NAMES, FINE_TUNING_DATASETS
     global RAW_SINGLE_CELL_DATA, RAW_10X_RNA_DATA_DIR, RAW_ATAC_PEAK_MATRIX_FILE
     global RAW_GSE218576_DIR, PROCESSED_GSE218576_DIR
@@ -245,7 +259,6 @@ def setup_global_variables(args):
     ORGANISM_CODE = args.organism_code
     DATASET_NAME = args.dataset_name
     
-    CHROM_ID = args.chrom_id
     CHROM_IDS = args.chrom_ids
     
     # Sample names

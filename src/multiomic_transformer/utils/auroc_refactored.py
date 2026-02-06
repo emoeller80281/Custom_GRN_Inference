@@ -426,7 +426,6 @@ def balance_pos_neg(df, label_col="_in_gt", random_state=0):
     balanced = pd.concat([pos_sample, neg_sample], axis=0)
     return balanced.sample(frac=1.0, random_state=random_state).reset_index(drop=True)
 
-
 def per_tf_metrics(
     method_df: pd.DataFrame, 
     gt_edges: pd.DataFrame, 
@@ -599,14 +598,10 @@ if __name__ == "__main__":
     
     logging.info(f"Experiment: {experiment}, Training Num: {training_num}, Dataset Type: {dataset_type}")
     
-    if "chr19" in [p.name for p in Path(experiment_dir / experiment).iterdir()] and experiment != "mESC_no_scale_linear":
+    if "chr19" in [p.name for p in Path(experiment_dir / experiment).iterdir()]:
         EXPERIMENT_DIR = experiment_dir / experiment / "chr19" / training_num
     else:
         EXPERIMENT_DIR = experiment_dir / experiment / training_num
-
-    if EXPERIMENT_DIR is None:
-        EXPERIMENT_DIR = Path(f"/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/{experiment}/chr19") / training_num
-
     
     # mESC ground truth files
     if "mesc" == dataset_type.lower():

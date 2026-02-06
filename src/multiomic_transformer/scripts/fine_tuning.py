@@ -28,7 +28,7 @@ from torch.utils.data import DataLoader, random_split
 from torch.utils.data.distributed import DistributedSampler
 
 from config.settings_hpc import *
-from multiomic_transformer.datasets.dataset import (
+from multiomic_transformer.datasets.dataset_refactor import (
     MultiChromosomeDataset,
     MultiomicTransformerDataset,
     SimpleScaler,
@@ -38,12 +38,37 @@ from multiomic_transformer.datasets.dataset import (
 )
 from multiomic_transformer.models.model import MultiomicTransformer
 from multiomic_transformer.utils import ewc_utils
-from multiomic_transformer.utils.files import unique_path
 
 warnings.filterwarnings("ignore", message="No device id is provided via `init_process_group`")
 
 STOP_REQUESTED = False
 
+def unique_path(directory: Path, name_pattern: str):
+    """
+    Returns a path for the next iteration in a directory naming pattern
+    
+    e.g. if `directory` contains the subdirectories `test_001` and `test_002`,
+    then the template `test_{:03d}` will return `test_003`.
+
+    Parameters
+    -----------
+        directory (Path)
+            A `Path` object for the target directory.
+        name_pattern (str)
+            An iterable pattern for the iteration.
+    
+    Returns
+    ----------
+        path (Path)
+        Path for the next iteration in the pattern.
+    
+    """
+    counter = 0
+    while True:
+        counter += 1
+        path = directory / name_pattern.format(counter)
+        if not path.exists():
+            return path
 
 def _signal_handler(signum, frame):
     global STOP_REQUESTED

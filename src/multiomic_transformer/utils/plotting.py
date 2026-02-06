@@ -1537,7 +1537,7 @@ if __name__ == "__main__":
     FIG_DIR = Path("/gpfs/Labs/Uzun/RESULTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/FIGURES")
     FIG_DATA = Path("/gpfs/Labs/Uzun/RESULTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/FIGURE_DATA")
 
-    if "chr19" in [p.name for p in Path(experiment_dir / experiment).iterdir()] and experiment != "mESC_no_scale_linear":
+    if "chr19" in [p.name for p in Path(experiment_dir / experiment).iterdir()]:
         EXPERIMENT_DIR = experiment_dir / experiment / "chr19" / training_num
         
         exp_fig_dir = FIG_DIR / experiment 

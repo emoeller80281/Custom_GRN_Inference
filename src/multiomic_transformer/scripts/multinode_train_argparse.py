@@ -34,7 +34,6 @@ from multiomic_transformer.datasets.dataset_refactor import (
     IndexedChromBucketBatchSampler,
 )
 from multiomic_transformer.models.model import MultiomicTransformer
-from multiomic_transformer.utils.files import unique_path
 from multiomic_transformer.utils import ewc_utils
 from multiomic_transformer.scripts import gradient_attribution, tf_knockout
 
@@ -267,6 +266,33 @@ def setup_training_globals(args):
     
     # ----- Model Compilation -----
     USE_TORCH_COMPILE = args.use_torch_compile
+
+def unique_path(directory: Path, name_pattern: str):
+    """
+    Returns a path for the next iteration in a directory naming pattern
+    
+    e.g. if `directory` contains the subdirectories `test_001` and `test_002`,
+    then the template `test_{:03d}` will return `test_003`.
+
+    Parameters
+    -----------
+        directory (Path)
+            A `Path` object for the target directory.
+        name_pattern (str)
+            An iterable pattern for the iteration.
+    
+    Returns
+    ----------
+        path (Path)
+        Path for the next iteration in the pattern.
+    
+    """
+    counter = 0
+    while True:
+        counter += 1
+        path = directory / name_pattern.format(counter)
+        if not path.exists():
+            return path
 
 def update_info_file(info_file: Path, key: str, value: Any) -> None:
     """

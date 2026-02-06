@@ -433,6 +433,17 @@ TRAINING_DATA_CACHE="${DATABASE_DIR}/training_data_cache"
 EXPERIMENT_DIR="${PROJECT_DATA_DIR}/experiments"
 OUTPUT_DIR="${EXPERIMENT_DIR}/${DATASET_NAME}"
 
+RAW_SINGLE_CELL_DATA="${RAW_DATA}/mESC"
+SAMPLE_PROCESSED_DATA_DIR="${PROCESSED_DATA}/${DATASET_NAME}"
+SAMPLE_DATA_CACHE_DIR="${TRAINING_DATA_CACHE}/${DATASET_NAME}"
+COMMON_DATA="${SAMPLE_DATA_CACHE_DIR}/common"
+
+# Sample information
+VALIDATION_DATASETS=""
+
+# Force recalculate (set to true if you want to reprocess data)
+FORCE_RECALCULATE=false
+
 # ==========================================
 #      WRITE RUN PARAMETERS (CSV)
 # ==========================================
@@ -462,14 +473,14 @@ write_param_csv_row() {
         value=""
     fi
 
-    printf '"%s","%s"\n' "$name" "$(csv_escape "$value")"
+    printf '"%s",%s\n' "$name" "$(csv_escape "$value")"
 }
 
 {
     echo "parameter,value"
 
     PARAM_NAMES=(
-        EXPERIMENT_NAME DATASET_NAME ORGANISM_CODE CHROM_ID SAMPLE_NAMES VALIDATION_DATASETS FORCE_RECALCULATE
+        EXPERIMENT_NAME DATASET_NAME ORGANISM_CODE SAMPLE_NAMES VALIDATION_DATASETS FORCE_RECALCULATE
         CHROM_IDS
         MIN_GENES_PER_CELL MIN_PEAKS_PER_CELL FILTER_TYPE
         FILTER_OUT_LOWEST_COUNTS_GENES FILTER_OUT_LOWEST_COUNTS_PEAKS
@@ -478,6 +489,7 @@ write_param_csv_row() {
         WINDOW_SIZE DISTANCE_SCALE_FACTOR MAX_PEAK_DISTANCE
         DIST_BIAS_MODE FILTER_TO_NEAREST_GENE PROMOTER_BP
         RAW_SINGLE_CELL_DATA RAW_RNA_FILE RAW_ATAC_FILE
+        FILTER_RNA FILTER_ATAC MIN_RNA_DISP MIN_ATAC_DISP
         TOTAL_EPOCHS BATCH_SIZE PATIENCE SAVE_EVERY_N_EPOCHS
         CORR_LOSS_WEIGHT EDGE_LOSS_WEIGHT COS_WEIGHT SHORTCUT_REG_WEIGHT
         GRAD_ACCUM_STEPS USE_GRAD_ACCUMULATION USE_GRAD_CHECKPOINTING
@@ -494,21 +506,6 @@ write_param_csv_row() {
         write_param_csv_row "$p"
     done
 } > "${PARAM_CSV}"
-
-RAW_SINGLE_CELL_DATA="${RAW_DATA}/mESC"
-SAMPLE_PROCESSED_DATA_DIR="${PROCESSED_DATA}/${DATASET_NAME}"
-SAMPLE_DATA_CACHE_DIR="${TRAINING_DATA_CACHE}/${DATASET_NAME}"
-COMMON_DATA="${SAMPLE_DATA_CACHE_DIR}/common"
-
-# Sample information
-VALIDATION_DATASETS=""
-
-# Chromosomes to process
-CHROM_ID="chr19"
-# CHROM_IDS="chr1 chr2 chr3 chr4 chr5 chr6 chr7 chr8 chr9 chr10 chr11 chr12 chr13 chr14 chr15 chr16 chr17 chr18 chr19"
-
-# Force recalculate (set to true if you want to reprocess data)
-FORCE_RECALCULATE=false
 
 # ==========================================
 #        CPU DETECTION
@@ -556,7 +553,6 @@ PREPROCESS_CMD="python src/multiomic_transformer/data/preprocess_argparse.py \
     --organism_code ${ORGANISM_CODE} \
     --dataset_name ${DATASET_NAME} \
     --sample_names ${SAMPLE_NAMES} \
-    --chrom_id ${CHROM_ID} \
     --chrom_ids ${CHROM_IDS[@]} \
     --raw_single_cell_data ${RAW_SINGLE_CELL_DATA} \
     --min_genes_per_cell ${MIN_GENES_PER_CELL} \
@@ -625,7 +621,6 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
         --sample_data_cache_dir ${SAMPLE_DATA_CACHE_DIR} \
         --common_data ${COMMON_DATA} \
         --output_dir ${OUTPUT_DIR} \
-        --chrom_id ${CHROM_ID} \
         --chrom_ids ${CHROM_IDS[@]} \
         --total_epochs ${TOTAL_EPOCHS} \
         --batch_size ${BATCH_SIZE} \
@@ -843,7 +838,7 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
     MODEL_FILE="trained_model.pt"
     TRAINING_NUM=""
     
-    for dir in $(ls -d "${OUTPUT_DIR}/${CHROM_ID}"/model_training_* 2>/dev/null | sort -V -r); do
+    for dir in $(ls -d "${OUTPUT_DIR}"/model_training_* 2>/dev/null | sort -V -r); do
         if [ -f "${dir}/${MODEL_FILE}" ]; then
             TRAINING_NUM=$(basename "$dir")
             break
@@ -851,9 +846,9 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
     done
 
     # Check if a valid training directory was found
-    if [ -n "${TRAINING_NUM}" ] && [ -f "${OUTPUT_DIR}/${CHROM_ID}/${TRAINING_NUM}/${MODEL_FILE}" ]; then
+    if [ -n "${TRAINING_NUM}" ] && [ -f "${OUTPUT_DIR}/${TRAINING_NUM}/${MODEL_FILE}" ]; then
         echo "[INFO] Selected latest training directory: ${TRAINING_NUM}"
-        echo "[INFO] Found trained model at ${OUTPUT_DIR}/${CHROM_ID}/${TRAINING_NUM}/${MODEL_FILE}"
+        echo "[INFO] Found trained model at ${OUTPUT_DIR}/${TRAINING_NUM}/${MODEL_FILE}"
     
         echo ""
         echo "Running AUROC Testing..."
@@ -879,7 +874,7 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
         echo "=========================================="
         echo ""
     else
-        echo "[WARNING] Trained model not found at ${OUTPUT_DIR}/${CHROM_ID}/${TRAINING_NUM}/${MODEL_FILE}"
+        echo "[WARNING] Trained model not found at ${OUTPUT_DIR}/${TRAINING_NUM}/${MODEL_FILE}"
         echo "[WARNING] Skipping plotting and AUROC testing"
         echo ""
         echo "=========================================="

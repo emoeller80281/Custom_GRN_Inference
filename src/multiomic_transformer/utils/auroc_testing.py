@@ -1740,13 +1740,10 @@ if __name__ == "__main__":
     dataset_type = args.dataset_type
     
     sample_name_list = args.sample_name_list
-    if "chr19" in [p.name for p in Path(experiment_dir / experiment).iterdir()] and experiment != "mESC_no_scale_linear":
+    if "chr19" in [p.name for p in Path(experiment_dir / experiment).iterdir()]:
         EXPERIMENT_DIR = experiment_dir / experiment / "chr19" / training_num
     else:
         EXPERIMENT_DIR = experiment_dir / experiment / training_num
-
-    if EXPERIMENT_DIR is None:
-        EXPERIMENT_DIR = Path(f"/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/{experiment}/chr19") / training_num
 
     if dataset_type.lower() == "macrophage":
         ground_truth_file_dict = {
