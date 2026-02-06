@@ -540,6 +540,12 @@ def calculate_per_tf_auroc(standardized_method_dict, ground_truth_edges_dict, to
                 min_pos=10,
                 balance_for_auprc=True
                 )
+            
+            # Skip if no TFs passed the filtering criteria
+            if len(tf_df) == 0 or "auroc" not in tf_df.columns:
+                logging.info(f"    No TFs passed filtering criteria for {gt_name}")
+                continue
+                
             tf_df.insert(0, "gt", gt_name)
             tf_df.insert(0, "method", method_name)
             per_tf_all.append(tf_df)

@@ -1909,17 +1909,7 @@ if __name__ == "__main__":
             tripod_path       = DIR / f"{sample_name}/TRIPOD/gene_TF_highest_abs_coef.csv"
         
         elif dataset_type.lower() == "macrophage":
-            if sample_name == "buffer_1":
-                cell_oracle_path  = DIR / f"Macrophage_S1/CellOracle/Macrophase_buffer1_filtered_out_E7.5_rep1_final_GRN.csv"
-                directnet_path    = DIR / f"Macrophage_S1/DIRECTNET/Network_links.csv"
-                figr_path         = DIR / f"Macrophage_S1/FigR/Buffer1_filtered_network.csv"
-                granie_path       = DIR / f"Macrophage_S1/GRaNIE/GRN_connections_filtered_sorted_scBuffer1_uniq.csv"
-                linger_path       = DIR / f"Macrophage_S1/LINGER/cell_type_TF_gene.csv"
-                pando_path        = DIR / f"Macrophage_S1/Pando/Macrophage_buffer1_raw_network.csv"
-                scenic_plus_path  = DIR / f"Macrophage_S1/SCENIC+/scenic_plus_inferred_grn_macrophage_macrophage_buffer1_filtered.tsv"
-                tripod_path       = DIR / f"Macrophage_S1/TRIPOD/gene_TF_highest_abs_coef.csv"
-
-            elif sample_name == "buffer_2":
+            if sample_name == "buffer_2":
                 cell_oracle_path  = DIR / f"Macrophage_S2/CellOracle/Macrophase_buffer2_filtered_out_E7.5_rep1_final_GRN.csv"
                 directnet_path    = DIR / f"Macrophage_S2/DIRECTNET/Network_links.csv"
                 figr_path         = DIR / f"Macrophage_S2/FigR/Buffer2_filtered_network.csv"
@@ -1928,6 +1918,15 @@ if __name__ == "__main__":
                 pando_path        = DIR / f"Macrophage_S2/Pando/Macrophage_buffer2_filtered_network.csv"
                 scenic_plus_path  = DIR / f"Macrophage_S2/SCENIC+/scenic_plus_inferred_grn_macrophage_macrophage_buffer2_filtered.tsv"
                 tripod_path       = DIR / f"Macrophage_S2/TRIPOD/gene_TF_highest_abs_coef.csv"
+            else: # Use buffer 1 as default
+                cell_oracle_path  = DIR / f"Macrophage_S1/CellOracle/Macrophase_buffer1_filtered_out_E7.5_rep1_final_GRN.csv"
+                directnet_path    = DIR / f"Macrophage_S1/DIRECTNET/Network_links.csv"
+                figr_path         = DIR / f"Macrophage_S1/FigR/Buffer1_filtered_network.csv"
+                granie_path       = DIR / f"Macrophage_S1/GRaNIE/GRN_connections_filtered_sorted_scBuffer1_uniq.csv"
+                linger_path       = DIR / f"Macrophage_S1/LINGER/cell_type_TF_gene.csv"
+                pando_path        = DIR / f"Macrophage_S1/Pando/Macrophage_buffer1_raw_network.csv"
+                scenic_plus_path  = DIR / f"Macrophage_S1/SCENIC+/scenic_plus_inferred_grn_macrophage_macrophage_buffer1_filtered.tsv"
+                tripod_path       = DIR / f"Macrophage_S1/TRIPOD/gene_TF_highest_abs_coef.csv"
         
         elif dataset_type.lower() == "k562":
             cell_oracle_path  = DIR / f"{sample_name}/CellOracle/K562_human_filtered_out_E7.5_rep1_final_GRN.csv"

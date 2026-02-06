@@ -1,9 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.nn import GCNConv, GATConv, GINEConv
-from torch_geometric.data import Data
-from torch_geometric.utils import negative_sampling
 import torch.utils.checkpoint as cp
 from typing import Optional
 import numpy as np
