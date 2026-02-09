@@ -60,8 +60,6 @@ def parse_training_args():
                         help="Directory containing common data (vocabs, etc.)")
     parser.add_argument("--output_dir", type=Path, required=True,
                         help="Base output directory for experiments")
-    parser.add_argument("--chrom_id", type=str, default="chr19",
-                        help="Chromosome ID for single-chromosome mode")
     parser.add_argument("--chrom_ids", type=str, nargs="+", default=None,
                         help="List of chromosome IDs for multi-chromosome mode")
     
@@ -178,7 +176,7 @@ def setup_training_globals(args):
     Convert argparse arguments to global variables.
     This maintains backward compatibility with code that expects global variables.
     """
-    global SAMPLE_DATA_CACHE_DIR, COMMON_DATA, OUTPUT_DIR, CHROM_ID, CHROM_IDS
+    global SAMPLE_DATA_CACHE_DIR, COMMON_DATA, OUTPUT_DIR, CHROM_IDS
     global TOTAL_EPOCHS, BATCH_SIZE, PATIENCE, SAVE_EVERY_N_EPOCHS
     global CORR_LOSS_WEIGHT, EDGE_LOSS_WEIGHT, COS_WEIGHT, SHORTCUT_REG_WEIGHT
     global GRAD_ACCUM_STEPS, USE_GRAD_ACCUMULATION, USE_GRAD_CHECKPOINTING
@@ -196,7 +194,6 @@ def setup_training_globals(args):
     SAMPLE_DATA_CACHE_DIR = args.sample_data_cache_dir
     COMMON_DATA = args.common_data
     OUTPUT_DIR = args.output_dir
-    CHROM_ID = args.chrom_id
     USE_PROFILER = args.use_profiler
     PROFILER_START_STEP = args.profiler_start_step
     PROFILER_ACTIVE_STEPS = args.profiler_active_steps  
@@ -1588,7 +1585,7 @@ def main(rank: int, local_rank: int, world_size: int, save_every: int, total_epo
         else:
             # New experiment
             training_file_iter_format = "model_training_{:03d}"
-            training_output_dir = unique_path(OUTPUT_DIR / CHROM_ID, training_file_iter_format)
+            training_output_dir = unique_path(OUTPUT_DIR, training_file_iter_format)
             logging.info(f"\n=========== EXPERIMENT {training_output_dir.name.upper()} ===========")
 
             run_cfg = {

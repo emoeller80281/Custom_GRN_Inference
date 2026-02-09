@@ -316,10 +316,10 @@ class MultiomicTransformer(nn.Module):
         #    Weighted average of softmax-norm dot product between learnable query vector and each element in the sequence.
         #    Creates a global TF or ATAC sample-level summary of shape d_model
         
-        # TF -> ATAC Cross Attention Pooling
+        # TF Q -> ATAC K Cross Attention Pooling
         self.tf_to_atac_cross_attn_pool = AttentionPooling(d_model)     # [batch_size, d_model]
         
-        # ATAC -> TF Cross Attention Pooling
+        # ATAC Q -> TF KCross Attention Pooling
         self.atac_to_tf_cross_attn_pool = AttentionPooling(d_model)     # [batch_size, d_model]
         
         # TF-ATAC and ATAC-TF attention pooling output is concatenated  # [batch_size, 2*d_model]

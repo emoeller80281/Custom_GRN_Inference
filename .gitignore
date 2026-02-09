@@ -91,6 +91,7 @@ data/training_data_cache/**
 training_data_cache_old/
 
 dev/model_heatmaps_svg
+dev/input_heatmaps_svg
 
 GAT_training_outputs/
 experiments/*

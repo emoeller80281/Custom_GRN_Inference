@@ -25,7 +25,7 @@ class ExperimentLoader:
         self.experiment_dir = Path(experiment_dir)
         self.experiment_name = experiment_name
         
-        if "chr19" in [p.name for p in Path(experiment_dir / experiment_name).iterdir()]:
+        if "chr19" in [p.name for p in (Path(experiment_dir) / experiment_name).iterdir()]:
             self.model_training_dir = Path(f"{experiment_dir}/{experiment_name}/chr19/model_training_00{model_num}")
         else:
             self.model_training_dir = Path(f"{experiment_dir}/{experiment_name}/model_training_00{model_num}")

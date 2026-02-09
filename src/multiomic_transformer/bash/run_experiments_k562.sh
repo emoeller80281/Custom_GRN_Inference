@@ -134,8 +134,11 @@ EXPERIMENTS=(
     # "hvg_filter_disp_0.2|K562_hvg_filter_disp_0.2|HOPS=2;D_MODEL=128;D_FF=512;BATCH_SIZE=32;TOTAL_EPOCHS=100"
     # "hvg_filter_disp_0.1|K562_hvg_filter_disp_0.1|HOPS=2;D_MODEL=128;D_FF=512;BATCH_SIZE=32;TOTAL_EPOCHS=100"
     # "hvg_filter_disp_0.05|K562_hvg_filter_disp_0.05|HOPS=2;D_MODEL=128;D_FF=512;BATCH_SIZE=32;TOTAL_EPOCHS=100"
-    "hvg_filter_disp_0.01|K562_hvg_filter_disp_0.01|HOPS=2;D_MODEL=128;D_FF=512;BATCH_SIZE=32;TOTAL_EPOCHS=100"
+    # "hvg_filter_disp_0.01|K562_hvg_filter_disp_0.01|HOPS=2;D_MODEL=128;D_FF=512;BATCH_SIZE=32;TOTAL_EPOCHS=100"
     # "hvg_filter_disp_none|K562_hvg_filter_none|HOPS=2;D_MODEL=128;D_FF=512;BATCH_SIZE=32;TOTAL_EPOCHS=100"
+
+    # Best Settings
+    "sample_1_best_settings|K562_sample_1_best_settings|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=sample_1"
 
 )
 

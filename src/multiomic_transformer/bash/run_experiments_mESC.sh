@@ -9,7 +9,7 @@
 #SBATCH --gres=gpu:a100:4
 #SBATCH -c 12
 #SBATCH --mem=128G
-#SBATCH --array=0-6%2
+#SBATCH --array=0-15%2
 
 set -euo pipefail
 
@@ -149,84 +149,102 @@ EXPERIMENTS=(
     # "two_hop_hvg_small|mESC_two_hop_hvg_small|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20"
 
     # Testing how adding more samples to the training data affects performance
-    "1_sample_hvg_filter_disp_0.01|mESC_1_sample_hvg_filter_disp_0.01|D_MODEL=192;D_FF=768;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E7.5_rep1"
-    "2_sample_hvg_filter_disp_0.01|mESC_2_sample_hvg_filter_disp_0.01|D_MODEL=192;D_FF=768;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E7.5_rep1 E7.5_rep2"
-    "3_sample_hvg_filter_disp_0.01|mESC_3_sample_hvg_filter_disp_0.01|D_MODEL=192;D_FF=768;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E7.5_rep1 E7.5_rep2 E7.75_rep1"
-    "4_sample_hvg_filter_disp_0.01|mESC_4_sample_hvg_filter_disp_0.01|D_MODEL=192;D_FF=768;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E7.5_rep1 E7.5_rep2 E7.75_rep1 E8.0_rep1"
-    "5_sample_hvg_filter_disp_0.01|mESC_5_sample_hvg_filter_disp_0.01|D_MODEL=192;D_FF=768;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E7.5_rep1 E7.5_rep2 E7.75_rep1 E8.0_rep1 E8.0_rep2"
-    "6_sample_hvg_filter_disp_0.01|mESC_6_sample_hvg_filter_disp_0.01|D_MODEL=192;D_FF=768;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E7.5_rep1 E7.5_rep2 E7.75_rep1 E8.0_rep1 E8.0_rep2 E8.5_rep1"
-    "7_sample_hvg_filter_disp_0.01|mESC_7_sample_hvg_filter_disp_0.01|D_MODEL=192;D_FF=768;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E7.5_rep1 E7.5_rep2 E7.75_rep1 E8.0_rep1 E8.0_rep2 E8.5_rep1 E8.5_rep2"
+    # "1_sample_hvg_filter_disp_0.01|mESC_1_sample_hvg_filter_disp_0.01|D_MODEL=192;D_FF=768;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E7.5_rep1"
+    # "2_sample_hvg_filter_disp_0.01|mESC_2_sample_hvg_filter_disp_0.01|D_MODEL=192;D_FF=768;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E7.5_rep1 E7.5_rep2"
+    # "3_sample_hvg_filter_disp_0.01|mESC_3_sample_hvg_filter_disp_0.01|D_MODEL=192;D_FF=768;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E7.5_rep1 E7.5_rep2 E7.75_rep1"
+    # "4_sample_hvg_filter_disp_0.01|mESC_4_sample_hvg_filter_disp_0.01|D_MODEL=192;D_FF=768;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E7.5_rep1 E7.5_rep2 E7.75_rep1 E8.0_rep1"
+    # "5_sample_hvg_filter_disp_0.01|mESC_5_sample_hvg_filter_disp_0.01|D_MODEL=192;D_FF=768;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E7.5_rep1 E7.5_rep2 E7.75_rep1 E8.0_rep1 E8.0_rep2"
+    # "6_sample_hvg_filter_disp_0.01|mESC_6_sample_hvg_filter_disp_0.01|D_MODEL=192;D_FF=768;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E7.5_rep1 E7.5_rep2 E7.75_rep1 E8.0_rep1 E8.0_rep2 E8.5_rep1"
+    # "7_sample_hvg_filter_disp_0.01|mESC_7_sample_hvg_filter_disp_0.01|D_MODEL=192;D_FF=768;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E7.5_rep1 E7.5_rep2 E7.75_rep1 E8.0_rep1 E8.0_rep2 E8.5_rep1 E8.5_rep2"
 
     # E7.5_rep1 dispersion filtering experiments
     # "E7.5_rep1_hvg_filter_only_rna|mESC_E7.5_rep1_hvg_filter_only_rna|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=false;FILTER_RNA=true;SAMPLE_NAMES=E7.5_rep1"
-    # "E7.5_rep1_hvg_filter_disp_0.6|mESC_E7.5_rep1_hvg_filter_disp_0.6|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.6;MIN_RNA_DISP=0.6;SAMPLE_NAMES=E7.5_rep1"
-    # "E7.5_rep1_hvg_filter_disp_0.5|mESC_E7.5_rep1_hvg_filter_disp_0.5|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.5;MIN_RNA_DISP=0.5;SAMPLE_NAMES=E7.5_rep1"
-    # "E7.5_rep1_hvg_filter_disp_0.4|mESC_E7.5_rep1_hvg_filter_disp_0.4|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.4;MIN_RNA_DISP=0.4;SAMPLE_NAMES=E7.5_rep1"
-    # "E7.5_rep1_hvg_filter_disp_0.3|mESC_E7.5_rep1_hvg_filter_disp_0.3|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.3;MIN_RNA_DISP=0.3;SAMPLE_NAMES=E7.5_rep1"
-    # "E7.5_rep1_hvg_filter_disp_0.2|mESC_E7.5_rep1_hvg_filter_disp_0.2|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E7.5_rep1"
-    # "E7.5_rep1_hvg_filter_disp_0.1|mESC_E7.5_rep1_hvg_filter_disp_0.1|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.1;MIN_RNA_DISP=0.1;SAMPLE_NAMES=E7.5_rep1"
-    # "E7.5_rep1_hvg_filter_disp_0.05|mESC_E7.5_rep1_hvg_filter_disp_0.05|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.05;MIN_RNA_DISP=0.05;SAMPLE_NAMES=E7.5_rep1"
-    # "E7.5_rep1_hvg_filter_disp_0.01|mESC_E7.5_rep1_hvg_filter_disp_0.01|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E7.5_rep1"
+    # "E7.5_rep1_hvg_filter_disp_0.6|mESC_E7.5_rep1_hvg_filter_disp_0.6|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.6;MIN_RNA_DISP=0.6;SAMPLE_NAMES=E7.5_rep1"
+    # "E7.5_rep1_hvg_filter_disp_0.5|mESC_E7.5_rep1_hvg_filter_disp_0.5|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.5;MIN_RNA_DISP=0.5;SAMPLE_NAMES=E7.5_rep1"
+    # "E7.5_rep1_hvg_filter_disp_0.4|mESC_E7.5_rep1_hvg_filter_disp_0.4|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.4;MIN_RNA_DISP=0.4;SAMPLE_NAMES=E7.5_rep1"
+    # "E7.5_rep1_hvg_filter_disp_0.3|mESC_E7.5_rep1_hvg_filter_disp_0.3|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.3;MIN_RNA_DISP=0.3;SAMPLE_NAMES=E7.5_rep1"
+    # "E7.5_rep1_hvg_filter_disp_0.2|mESC_E7.5_rep1_hvg_filter_disp_0.2|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E7.5_rep1"
+    # "E7.5_rep1_hvg_filter_disp_0.1|mESC_E7.5_rep1_hvg_filter_disp_0.1|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.1;MIN_RNA_DISP=0.1;SAMPLE_NAMES=E7.5_rep1"
+    # "E7.5_rep1_hvg_filter_disp_0.05|mESC_E7.5_rep1_hvg_filter_disp_0.05|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.05;MIN_RNA_DISP=0.05;SAMPLE_NAMES=E7.5_rep1"
+    # "E7.5_rep1_hvg_filter_disp_0.01|mESC_E7.5_rep1_hvg_filter_disp_0.01|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E7.5_rep1"
     # "E7.5_rep1_hvg_filter_none|mESC_E7.5_rep1_hvg_filter_none|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=false;FILTER_RNA=false;SAMPLE_NAMES=E7.5_rep1"
 
     # # E7.5_rep2 dispersion filtering experiments
     # "E7.5_rep2_hvg_filter_only_rna|mESC_E7.5_rep2_hvg_filter_only_rna|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=false;FILTER_RNA=true;SAMPLE_NAMES=E7.5_rep2"
-    # "E7.5_rep2_hvg_filter_disp_0.6|mESC_E7.5_rep2_hvg_filter_disp_0.6|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.6;MIN_RNA_DISP=0.6;SAMPLE_NAMES=E7.5_rep2"
-    # "E7.5_rep2_hvg_filter_disp_0.5|mESC_E7.5_rep2_hvg_filter_disp_0.5|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.5;MIN_RNA_DISP=0.5;SAMPLE_NAMES=E7.5_rep2"
-    # "E7.5_rep2_hvg_filter_disp_0.4|mESC_E7.5_rep2_hvg_filter_disp_0.4|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.4;MIN_RNA_DISP=0.4;SAMPLE_NAMES=E7.5_rep2"
-    # "E7.5_rep2_hvg_filter_disp_0.3|mESC_E7.5_rep2_hvg_filter_disp_0.3|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.3;MIN_RNA_DISP=0.3;SAMPLE_NAMES=E7.5_rep2"
-    # "E7.5_rep2_hvg_filter_disp_0.2|mESC_E7.5_rep2_hvg_filter_disp_0.2|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E7.5_rep2"
-    # "E7.5_rep2_hvg_filter_disp_0.1|mESC_E7.5_rep2_hvg_filter_disp_0.1|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.1;MIN_RNA_DISP=0.1;SAMPLE_NAMES=E7.5_rep2"
-    # "E7.5_rep2_hvg_filter_disp_0.05|mESC_E7.5_rep2_hvg_filter_disp_0.05|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.05;MIN_RNA_DISP=0.05;SAMPLE_NAMES=E7.5_rep2"
-    # "E7.5_rep2_hvg_filter_disp_0.01|mESC_E7.5_rep2_hvg_filter_disp_0.01|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E7.5_rep2"
+    # "E7.5_rep2_hvg_filter_disp_0.6|mESC_E7.5_rep2_hvg_filter_disp_0.6|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.6;MIN_RNA_DISP=0.6;SAMPLE_NAMES=E7.5_rep2"
+    # "E7.5_rep2_hvg_filter_disp_0.5|mESC_E7.5_rep2_hvg_filter_disp_0.5|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.5;MIN_RNA_DISP=0.5;SAMPLE_NAMES=E7.5_rep2"
+    # "E7.5_rep2_hvg_filter_disp_0.4|mESC_E7.5_rep2_hvg_filter_disp_0.4|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.4;MIN_RNA_DISP=0.4;SAMPLE_NAMES=E7.5_rep2"
+    # "E7.5_rep2_hvg_filter_disp_0.3|mESC_E7.5_rep2_hvg_filter_disp_0.3|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.3;MIN_RNA_DISP=0.3;SAMPLE_NAMES=E7.5_rep2"
+    # "E7.5_rep2_hvg_filter_disp_0.2|mESC_E7.5_rep2_hvg_filter_disp_0.2|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E7.5_rep2"
+    # "E7.5_rep2_hvg_filter_disp_0.1|mESC_E7.5_rep2_hvg_filter_disp_0.1|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.1;MIN_RNA_DISP=0.1;SAMPLE_NAMES=E7.5_rep2"
+    # "E7.5_rep2_hvg_filter_disp_0.05|mESC_E7.5_rep2_hvg_filter_disp_0.05|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.05;MIN_RNA_DISP=0.05;SAMPLE_NAMES=E7.5_rep2"
+    # "E7.5_rep2_hvg_filter_disp_0.01|mESC_E7.5_rep2_hvg_filter_disp_0.01|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E7.5_rep2"
     # "E7.5_rep2_hvg_filter_none|mESC_E7.5_rep2_hvg_filter_none|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=false;FILTER_RNA=false;SAMPLE_NAMES=E7.5_rep2"
 
     # # E7.75_rep1 dispersion filtering experiments
     # "E7.75_rep1_hvg_filter_only_rna|mESC_E7.75_rep1_hvg_filter_only_rna|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=false;FILTER_RNA=true;SAMPLE_NAMES=E7.75_rep1"
-    # "E7.75_rep1_hvg_filter_disp_0.6|mESC_E7.75_rep1_hvg_filter_disp_0.6|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.6;MIN_RNA_DISP=0.6;SAMPLE_NAMES=E7.75_rep1"
-    # "E7.75_rep1_hvg_filter_disp_0.5|mESC_E7.75_rep1_hvg_filter_disp_0.5|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.5;MIN_RNA_DISP=0.5;SAMPLE_NAMES=E7.75_rep1"
-    # "E7.75_rep1_hvg_filter_disp_0.4|mESC_E7.75_rep1_hvg_filter_disp_0.4|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.4;MIN_RNA_DISP=0.4;SAMPLE_NAMES=E7.75_rep1"
-    # "E7.75_rep1_hvg_filter_disp_0.3|mESC_E7.75_rep1_hvg_filter_disp_0.3|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.3;MIN_RNA_DISP=0.3;SAMPLE_NAMES=E7.75_rep1"
-    # "E7.75_rep1_hvg_filter_disp_0.2|mESC_E7.75_rep1_hvg_filter_disp_0.2|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E7.75_rep1"
-    # "E7.75_rep1_hvg_filter_disp_0.1|mESC_E7.75_rep1_hvg_filter_disp_0.1|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.1;MIN_RNA_DISP=0.1;SAMPLE_NAMES=E7.75_rep1"
-    # "E7.75_rep1_hvg_filter_disp_0.05|mESC_E7.75_rep1_hvg_filter_disp_0.05|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.05;MIN_RNA_DISP=0.05;SAMPLE_NAMES=E7.75_rep1"
-    # "E7.75_rep1_hvg_filter_disp_0.01|mESC_E7.75_rep1_hvg_filter_disp_0.01|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E7.75_rep1"
+    # "E7.75_rep1_hvg_filter_disp_0.6|mESC_E7.75_rep1_hvg_filter_disp_0.6|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.6;MIN_RNA_DISP=0.6;SAMPLE_NAMES=E7.75_rep1"
+    # "E7.75_rep1_hvg_filter_disp_0.5|mESC_E7.75_rep1_hvg_filter_disp_0.5|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.5;MIN_RNA_DISP=0.5;SAMPLE_NAMES=E7.75_rep1"
+    # "E7.75_rep1_hvg_filter_disp_0.4|mESC_E7.75_rep1_hvg_filter_disp_0.4|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.4;MIN_RNA_DISP=0.4;SAMPLE_NAMES=E7.75_rep1"
+    # "E7.75_rep1_hvg_filter_disp_0.3|mESC_E7.75_rep1_hvg_filter_disp_0.3|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.3;MIN_RNA_DISP=0.3;SAMPLE_NAMES=E7.75_rep1"
+    # "E7.75_rep1_hvg_filter_disp_0.2|mESC_E7.75_rep1_hvg_filter_disp_0.2|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E7.75_rep1"
+    # "E7.75_rep1_hvg_filter_disp_0.1|mESC_E7.75_rep1_hvg_filter_disp_0.1|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.1;MIN_RNA_DISP=0.1;SAMPLE_NAMES=E7.75_rep1"
+    # "E7.75_rep1_hvg_filter_disp_0.05|mESC_E7.75_rep1_hvg_filter_disp_0.05|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.05;MIN_RNA_DISP=0.05;SAMPLE_NAMES=E7.75_rep1"
+    # "E7.75_rep1_hvg_filter_disp_0.01|mESC_E7.75_rep1_hvg_filter_disp_0.01|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E7.75_rep1"
     
     # # E8.0_rep1 dispersion filtering experiments
     # "E8.0_rep1_hvg_filter_only_rna|mESC_E8.0_rep1_hvg_filter_only_rna|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=false;FILTER_RNA=true;SAMPLE_NAMES=E8.0_rep1"
-    # "E8.0_rep1_hvg_filter_disp_0.6|mESC_E8.0_rep1_hvg_filter_disp_0.6|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.6;MIN_RNA_DISP=0.6;SAMPLE_NAMES=E8.0_rep1"
-    # "E8.0_rep1_hvg_filter_disp_0.5|mESC_E8.0_rep1_hvg_filter_disp_0.5|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.5;MIN_RNA_DISP=0.5;SAMPLE_NAMES=E8.0_rep1"
-    # "E8.0_rep1_hvg_filter_disp_0.4|mESC_E8.0_rep1_hvg_filter_disp_0.4|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.4;MIN_RNA_DISP=0.4;SAMPLE_NAMES=E8.0_rep1"
-    # "E8.0_rep1_hvg_filter_disp_0.3|mESC_E8.0_rep1_hvg_filter_disp_0.3|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.3;MIN_RNA_DISP=0.3;SAMPLE_NAMES=E8.0_rep1"
-    # "E8.0_rep1_hvg_filter_disp_0.2|mESC_E8.0_rep1_hvg_filter_disp_0.2|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E8.0_rep1"
-    # "E8.0_rep1_hvg_filter_disp_0.1|mESC_E8.0_rep1_hvg_filter_disp_0.1|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.1;MIN_RNA_DISP=0.1;SAMPLE_NAMES=E8.0_rep1"
-    # "E8.0_rep1_hvg_filter_disp_0.05|mESC_E8.0_rep1_hvg_filter_disp_0.05|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.05;MIN_RNA_DISP=0.05;SAMPLE_NAMES=E8.0_rep1"
-    # "E8.0_rep1_hvg_filter_disp_0.01|mESC_E8.0_rep1_hvg_filter_disp_0.01|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E8.0_rep1"
+    # "E8.0_rep1_hvg_filter_disp_0.6|mESC_E8.0_rep1_hvg_filter_disp_0.6|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.6;MIN_RNA_DISP=0.6;SAMPLE_NAMES=E8.0_rep1"
+    # "E8.0_rep1_hvg_filter_disp_0.5|mESC_E8.0_rep1_hvg_filter_disp_0.5|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.5;MIN_RNA_DISP=0.5;SAMPLE_NAMES=E8.0_rep1"
+    # "E8.0_rep1_hvg_filter_disp_0.4|mESC_E8.0_rep1_hvg_filter_disp_0.4|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.4;MIN_RNA_DISP=0.4;SAMPLE_NAMES=E8.0_rep1"
+    # "E8.0_rep1_hvg_filter_disp_0.3|mESC_E8.0_rep1_hvg_filter_disp_0.3|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.3;MIN_RNA_DISP=0.3;SAMPLE_NAMES=E8.0_rep1"
+    # "E8.0_rep1_hvg_filter_disp_0.2|mESC_E8.0_rep1_hvg_filter_disp_0.2|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E8.0_rep1"
+    # "E8.0_rep1_hvg_filter_disp_0.1|mESC_E8.0_rep1_hvg_filter_disp_0.1|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.1;MIN_RNA_DISP=0.1;SAMPLE_NAMES=E8.0_rep1"
+    # "E8.0_rep1_hvg_filter_disp_0.05|mESC_E8.0_rep1_hvg_filter_disp_0.05|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.05;MIN_RNA_DISP=0.05;SAMPLE_NAMES=E8.0_rep1"
+    # "E8.0_rep1_hvg_filter_disp_0.01|mESC_E8.0_rep1_hvg_filter_disp_0.01|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E8.0_rep1"
 
     # # E8.0_rep2 dispersion filtering experiments
     # "E8.0_rep2_hvg_filter_only_rna|mESC_E8.0_rep2_hvg_filter_only_rna|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=false;FILTER_RNA=true;SAMPLE_NAMES=E8.0_rep2"
-    # "E8.0_rep2_hvg_filter_disp_0.6|mESC_E8.0_rep2_hvg_filter_disp_0.6|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.6;MIN_RNA_DISP=0.6;SAMPLE_NAMES=E8.0_rep2"
-    # "E8.0_rep2_hvg_filter_disp_0.5|mESC_E8.0_rep2_hvg_filter_disp_0.5|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.5;MIN_RNA_DISP=0.5;SAMPLE_NAMES=E8.0_rep2"
-    # "E8.0_rep2_hvg_filter_disp_0.4|mESC_E8.0_rep2_hvg_filter_disp_0.4|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.4;MIN_RNA_DISP=0.4;SAMPLE_NAMES=E8.0_rep2"
-    # "E8.0_rep2_hvg_filter_disp_0.3|mESC_E8.0_rep2_hvg_filter_disp_0.3|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.3;MIN_RNA_DISP=0.3;SAMPLE_NAMES=E8.0_rep2"
-    # "E8.0_rep2_hvg_filter_disp_0.2|mESC_E8.0_rep2_hvg_filter_disp_0.2|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E8.0_rep2"
-    # "E8.0_rep2_hvg_filter_disp_0.1|mESC_E8.0_rep2_hvg_filter_disp_0.1|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.1;MIN_RNA_DISP=0.1;SAMPLE_NAMES=E8.0_rep2"
-    # "E8.0_rep2_hvg_filter_disp_0.05|mESC_E8.0_rep2_hvg_filter_disp_0.05|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.05;MIN_RNA_DISP=0.05;SAMPLE_NAMES=E8.0_rep2"
-    # "E8.0_rep2_hvg_filter_disp_0.01|mESC_E8.0_rep2_hvg_filter_disp_0.01|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E8.0_rep2"
+    # "E8.0_rep2_hvg_filter_disp_0.6|mESC_E8.0_rep2_hvg_filter_disp_0.6|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.6;MIN_RNA_DISP=0.6;SAMPLE_NAMES=E8.0_rep2"
+    # "E8.0_rep2_hvg_filter_disp_0.5|mESC_E8.0_rep2_hvg_filter_disp_0.5|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.5;MIN_RNA_DISP=0.5;SAMPLE_NAMES=E8.0_rep2"
+    # "E8.0_rep2_hvg_filter_disp_0.4|mESC_E8.0_rep2_hvg_filter_disp_0.4|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.4;MIN_RNA_DISP=0.4;SAMPLE_NAMES=E8.0_rep2"
+    # "E8.0_rep2_hvg_filter_disp_0.3|mESC_E8.0_rep2_hvg_filter_disp_0.3|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.3;MIN_RNA_DISP=0.3;SAMPLE_NAMES=E8.0_rep2"
+    # "E8.0_rep2_hvg_filter_disp_0.2|mESC_E8.0_rep2_hvg_filter_disp_0.2|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E8.0_rep2"
+    # "E8.0_rep2_hvg_filter_disp_0.1|mESC_E8.0_rep2_hvg_filter_disp_0.1|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.1;MIN_RNA_DISP=0.1;SAMPLE_NAMES=E8.0_rep2"
+    # "E8.0_rep2_hvg_filter_disp_0.05|mESC_E8.0_rep2_hvg_filter_disp_0.05|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.05;MIN_RNA_DISP=0.05;SAMPLE_NAMES=E8.0_rep2"
+    # "E8.0_rep2_hvg_filter_disp_0.01|mESC_E8.0_rep2_hvg_filter_disp_0.01|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E8.0_rep2"
 
-    # # E8.5_rep1 dispersion filtering experiments
+    # E8.5_rep1 dispersion filtering experiments
     # "E8.5_rep1_hvg_filter_only_rna|mESC_E8.5_rep1_hvg_filter_only_rna|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=false;FILTER_RNA=true;SAMPLE_NAMES=E8.5_rep1"
-    # "E8.5_rep1_hvg_filter_disp_0.6|mESC_E8.5_rep1_hvg_filter_disp_0.6|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.6;MIN_RNA_DISP=0.6;SAMPLE_NAMES=E8.5_rep1"
-    # "E8.5_rep1_hvg_filter_disp_0.5|mESC_E8.5_rep1_hvg_filter_disp_0.5|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.5;MIN_RNA_DISP=0.5;SAMPLE_NAMES=E8.5_rep1"
-    # "E8.5_rep1_hvg_filter_disp_0.4|mESC_E8.5_rep1_hvg_filter_disp_0.4|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.4;MIN_RNA_DISP=0.4;SAMPLE_NAMES=E8.5_rep1"
-    # "E8.5_rep1_hvg_filter_disp_0.3|mESC_E8.5_rep1_hvg_filter_disp_0.3|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.3;MIN_RNA_DISP=0.3;SAMPLE_NAMES=E8.5_rep1"
-    # "E8.5_rep1_hvg_filter_disp_0.2|mESC_E8.5_rep1_hvg_filter_disp_0.2|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E8.5_rep1"
-    # "E8.5_rep1_hvg_filter_disp_0.1|mESC_E8.5_rep1_hvg_filter_disp_0.1|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.1;MIN_RNA_DISP=0.1;SAMPLE_NAMES=E8.5_rep1"
-    # "E8.5_rep1_hvg_filter_disp_0.05|mESC_E8.5_rep1_hvg_filter_disp_0.05|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.05;MIN_RNA_DISP=0.05;SAMPLE_NAMES=E8.5_rep1"
-    # "E8.5_rep1_hvg_filter_disp_0.01|mESC_E8.5_rep1_hvg_filter_disp_0.01|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E8.5_rep1"
+    # "E8.5_rep1_hvg_filter_disp_0.6|mESC_E8.5_rep1_hvg_filter_disp_0.6|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.6;MIN_RNA_DISP=0.6;SAMPLE_NAMES=E8.5_rep1"
+    # "E8.5_rep1_hvg_filter_disp_0.5|mESC_E8.5_rep1_hvg_filter_disp_0.5|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.5;MIN_RNA_DISP=0.5;SAMPLE_NAMES=E8.5_rep1"
+    # "E8.5_rep1_hvg_filter_disp_0.4|mESC_E8.5_rep1_hvg_filter_disp_0.4|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.4;MIN_RNA_DISP=0.4;SAMPLE_NAMES=E8.5_rep1"
+    # "E8.5_rep1_hvg_filter_disp_0.3|mESC_E8.5_rep1_hvg_filter_disp_0.3|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.3;MIN_RNA_DISP=0.3;SAMPLE_NAMES=E8.5_rep1"
+    # "E8.5_rep1_hvg_filter_disp_0.2|mESC_E8.5_rep1_hvg_filter_disp_0.2|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E8.5_rep1"
+    # "E8.5_rep1_hvg_filter_disp_0.1|mESC_E8.5_rep1_hvg_filter_disp_0.1|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.1;MIN_RNA_DISP=0.1;SAMPLE_NAMES=E8.5_rep1"
+    # "E8.5_rep1_hvg_filter_disp_0.05|mESC_E8.5_rep1_hvg_filter_disp_0.05|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.05;MIN_RNA_DISP=0.05;SAMPLE_NAMES=E8.5_rep1"
+    # "E8.5_rep1_hvg_filter_disp_0.01|mESC_E8.5_rep1_hvg_filter_disp_0.01|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E8.5_rep1"
+
+    # E8.5_rep2 dispersion filtering experiments
+    # "E8.5_rep2_hvg_filter_only_rna|mESC_E8.5_rep2_hvg_filter_only_rna|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=false;FILTER_RNA=true;SAMPLE_NAMES=E8.5_rep2"
+    # "E8.5_rep2_hvg_filter_disp_0.6|mESC_E8.5_rep2_hvg_filter_disp_0.6|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.6;MIN_RNA_DISP=0.6;SAMPLE_NAMES=E8.5_rep2"
+    # "E8.5_rep2_hvg_filter_disp_0.5|mESC_E8.5_rep2_hvg_filter_disp_0.5|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.5;MIN_RNA_DISP=0.5;SAMPLE_NAMES=E8.5_rep2"
+    # "E8.5_rep2_hvg_filter_disp_0.4|mESC_E8.5_rep2_hvg_filter_disp_0.4|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.4;MIN_RNA_DISP=0.4;SAMPLE_NAMES=E8.5_rep2"
+    # "E8.5_rep2_hvg_filter_disp_0.3|mESC_E8.5_rep2_hvg_filter_disp_0.3|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.3;MIN_RNA_DISP=0.3;SAMPLE_NAMES=E8.5_rep2"
+    # "E8.5_rep2_hvg_filter_disp_0.2|mESC_E8.5_rep2_hvg_filter_disp_0.2|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E8.5_rep2"
+    # "E8.5_rep2_hvg_filter_disp_0.1|mESC_E8.5_rep2_hvg_filter_disp_0.1|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.1;MIN_RNA_DISP=0.1;SAMPLE_NAMES=E8.5_rep2"
+    # "E8.5_rep2_hvg_filter_disp_0.05|mESC_E8.5_rep2_hvg_filter_disp_0.05|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.05;MIN_RNA_DISP=0.05;SAMPLE_NAMES=E8.5_rep2"
+    # "E8.5_rep2_hvg_filter_disp_0.01|mESC_E8.5_rep2_hvg_filter_disp_0.01|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E8.5_rep2"
+
 
     # "hvg_filter_disp_none|mESC_hvg_filter_none|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=false;FILTER_RNA=false"
 
+    # Best overall settings
+    "E7.5_rep1_best_settings|mESC_E7.5_rep1_best_settings|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E7.5_rep1"
+    "E7.5_rep2_best_settings|mESC_E7.5_rep2_best_settings|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E7.5_rep2"
+    "E8.5_rep1_best_settings|mESC_E8.5_rep1_best_settings|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E8.5_rep1"
+    "E8.5_rep2_best_settings|mESC_E8.5_rep2_best_settings|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E8.5_rep2"
+    "all_bnchmk_samples_best_settings|mESC_all_bnchmk_samples_best_settings|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E7.5_rep1 E7.5_rep2 E8.5_rep1 E8.5_rep2"
 )
 
 

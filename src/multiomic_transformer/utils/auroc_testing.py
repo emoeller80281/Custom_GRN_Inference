@@ -35,7 +35,7 @@ from datetime import datetime
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 
 from multiomic_transformer.models.model import MultiomicTransformer
-from multiomic_transformer.datasets.dataset import MultiChromosomeDataset, SimpleScaler, fit_simple_scalers
+from multiomic_transformer.datasets.dataset_refactor import MultiChromosomeDataset, SimpleScaler, fit_simple_scalers
 
 GROUND_TRUTH_DIR = Path(PROJECT_DIR, "data/ground_truth_files")
 
