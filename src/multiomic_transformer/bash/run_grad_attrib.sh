@@ -27,10 +27,10 @@ export NUMEXPR_NUM_THREADS=8
 export BLIS_NUM_THREADS=8
 export KMP_AFFINITY=granularity=fine,compact,1,0
 
-EXPERIMENT_DIR=/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC_two_hop_no_hvg_small/chr19
-SELECTED_EXPERIMENT_DIR=$EXPERIMENT_DIR/model_training_002
+EXPERIMENT_DIR=/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC_7_sample_hvg_filter_disp_0.01/chr19
+SELECTED_EXPERIMENT_DIR=$EXPERIMENT_DIR/model_training_001
 
-MODEL_FILE=trained_model.pt
+MODEL_FILE=checkpoint_75.pt
 
 torchrun --standalone --nnodes=1 --nproc_per_node=4 ./src/multiomic_transformer/scripts/gradient_attribution.py \
     --selected_experiment_dir "$SELECTED_EXPERIMENT_DIR" \

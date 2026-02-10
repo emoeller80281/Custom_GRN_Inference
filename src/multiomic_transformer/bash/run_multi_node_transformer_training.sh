@@ -102,4 +102,4 @@ srun bash -c "torchrun \
   --rdzv_id=$SLURM_JOB_ID \
   --rdzv_backend=c10d \
   --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
-  src/multiomic_transformer/scripts/multinode_train.py"
+  src/multiomic_transformer/scripts/multinode_train.py

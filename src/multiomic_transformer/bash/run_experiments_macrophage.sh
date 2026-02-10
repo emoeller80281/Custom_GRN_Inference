@@ -9,7 +9,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 16
 #SBATCH --mem=192G
-#SBATCH --array=0-19%4
+#SBATCH --array=0-2%4
 
 set -euo pipefail
 

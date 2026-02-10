@@ -9,7 +9,7 @@
 #SBATCH --gres=gpu:a100:4
 #SBATCH -c 12
 #SBATCH --mem=128G
-#SBATCH --array=0-15%2
+#SBATCH --array=0-1%2
 
 set -euo pipefail
 
@@ -235,7 +235,6 @@ EXPERIMENTS=(
     # "E8.5_rep2_hvg_filter_disp_0.1|mESC_E8.5_rep2_hvg_filter_disp_0.1|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.1;MIN_RNA_DISP=0.1;SAMPLE_NAMES=E8.5_rep2"
     # "E8.5_rep2_hvg_filter_disp_0.05|mESC_E8.5_rep2_hvg_filter_disp_0.05|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.05;MIN_RNA_DISP=0.05;SAMPLE_NAMES=E8.5_rep2"
     # "E8.5_rep2_hvg_filter_disp_0.01|mESC_E8.5_rep2_hvg_filter_disp_0.01|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E8.5_rep2"
-
 
     # "hvg_filter_disp_none|mESC_hvg_filter_none|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=false;FILTER_RNA=false"
 
@@ -876,7 +875,7 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
             --experiment_dir "${EXPERIMENT_DIR}" \
             --model_file "${MODEL_FILE}" \
             --dataset_type "mESC" \
-            --sample_name_list "E7.5_rep1" # E7.5_rep2 E8.5_rep1 E8.5_rep2
+            --sample_name_list "${SAMPLE_NAMES}" # E7.5_rep2 E8.5_rep1 E8.5_rep2
 
         echo "Plotting Training Figures..."
         poetry run python ./src/multiomic_transformer/utils/plotting.py \
