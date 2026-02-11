@@ -127,7 +127,8 @@ def load_ground_truth(ground_truth_file):
     if "chip" in ground_truth_file.name and "atlas" in ground_truth_file.name:
         ground_truth_df = ground_truth_df[["source_id", "target_id"]]
 
-    ground_truth_df = ground_truth_df.rename(columns={ground_truth_df.columns[0]: "Source", ground_truth_df.columns[1]: "Target"})
+    if ground_truth_df.columns[0] != "Source" or ground_truth_df.columns[1] != "Target":
+        ground_truth_df = ground_truth_df.rename(columns={ground_truth_df.columns[0]: "Source", ground_truth_df.columns[1]: "Target"})
     ground_truth_df["Source"] = ground_truth_df["Source"].astype(str).str.upper()
     ground_truth_df["Target"] = ground_truth_df["Target"].astype(str).str.upper()
         
@@ -611,6 +612,7 @@ if __name__ == "__main__":
             "RN112": GROUND_TRUTH_DIR / "RN112.tsv",
             "RN114": GROUND_TRUTH_DIR / "RN114.tsv",
             "RN116": GROUND_TRUTH_DIR / "RN116.tsv",
+            "ENCODE": GROUND_TRUTH_DIR / "encode" / "mESC_encode_tf_peak_tg_dist.csv",
         }
     
     elif dataset_type.lower() == "macrophage":
@@ -623,6 +625,7 @@ if __name__ == "__main__":
         ground_truth_file_dict = {
             "ChIP-Atlas": GROUND_TRUTH_DIR / "chipatlas_K562.csv",
             "RN117": GROUND_TRUTH_DIR / "RN117.tsv",
+            # "ENCODE": GROUND_TRUTH_DIR / "encode" / "K562_encode_tf_peak_tg_dist.csv",
             # "RN118": GROUND_TRUTH_DIR / "RN118.tsv",
             # "RN119": GROUND_TRUTH_DIR / "RN119.tsv",
         }

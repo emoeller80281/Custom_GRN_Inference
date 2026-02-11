@@ -1,5 +1,6 @@
 import json
 import os
+from matplotlib.ticker import FuncFormatter, MultipleLocator
 from numpy import gradient
 import pandas as pd
 import numpy as np
@@ -7,6 +8,8 @@ from pathlib import Path
 import torch
 import sys
 import logging
+import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["OMP_NUM_THREADS"] = "1"
@@ -24,6 +27,7 @@ class ExperimentLoader:
         
         self.experiment_dir = Path(experiment_dir)
         self.experiment_name = experiment_name
+        self.model_num = model_num
         
         if "chr19" in [p.name for p in (Path(experiment_dir) / experiment_name).iterdir()]:
             self.model_training_dir = Path(f"{experiment_dir}/{experiment_name}/chr19/model_training_00{model_num}")
@@ -60,6 +64,12 @@ class ExperimentLoader:
         
         # Transcription Factor Knockout score dataframe will be loaded when load_tf_knockout is called
         self.tf_knockout_df = None
+        
+        # Model evaluation metric results
+        self.raw_results_df = None
+        self.results_df = None
+        self.per_tf_all_df = None
+        self.per_tf_summary_df = None
         
     def load_trained_model(self, checkpoint_file):
         """
@@ -303,6 +313,295 @@ class ExperimentLoader:
 
         return self.model.module
     
+    def plot_train_val_loss(self):
+        fig = plt.figure(figsize=(6, 5))
+        
+        df = self.training_df.iloc[5:, :]
+        plt.plot(df["Epoch"], df["Train MSE"], label="Train MSE", linewidth=2)
+        plt.plot(df["Epoch"], df["Val MSE"], label="Val MSE", linewidth=2)
+        # plt.plot(df["Epoch"], df["Train Total Loss"], label="Train Total Loss", linestyle="--", alpha=0.7)
+
+        plt.title(f"Train Val Loss Curves", fontsize=17)
+        plt.xlabel("Epoch", fontsize=17)
+        plt.ylabel("Loss", fontsize=17)
+        plt.xticks(fontsize=15)
+        plt.yticks(fontsize=15)
+        # plt.ylim([0, 1])
+        # plt.xlim(left=2)
+        plt.legend(fontsize=15)
+        plt.tight_layout()
+        
+        return fig
+    
+    def plot_train_correlation(self):
+        fig = plt.figure(figsize=(6, 5))
+        
+        df = self.training_df
+        plt.plot(df.index, df["R2_u"], linewidth=2, label=f"Best R2 (unscaled) = {df['R2_u'].max():.2f}")
+        plt.plot(df.index, df["R2_s"], linewidth=2, label=f"Best R2 (scaled)     = {df['R2_s'].max():.2f}")
+
+        plt.title(f"TG Expression R2 Across Training", fontsize=17)
+        plt.ylim((0,1))
+        plt.yticks(fontsize=15)
+        plt.xticks(fontsize=15)
+        plt.xlabel("Epoch", fontsize=17)
+        plt.ylabel("R2", fontsize=17)
+        plt.legend(fontsize=12)
+        plt.tight_layout()
+        
+        return fig
+    
+    def plot_gpu_usage(self, smooth=None):
+        """
+        align_to_common_duration: if True, truncate each run to the shortest duration so curves end together.
+        smooth: optional int window (in seconds) for a centered rolling mean on memory (e.g., smooth=5).
+        """
+        fig, ax = plt.subplots(figsize=(7,4))
+    
+        if smooth and smooth > 1:
+            self.gpu_usage_df["memory_used_gib"] = self.gpu_usage_df["memory_used_gib"].rolling(smooth, center=True, min_periods=1).mean()
+
+        ax.plot(self.gpu_usage_df["elapsed_hr"], self.gpu_usage_df["memory_used_gib"], label=f"Avg GPU RAM Used", linewidth=2)
+
+        ax.axhline(self.gpu_memory_limit_gib, linestyle="--", label=f"Max RAM")
+        ax.set_ylabel("GiB")
+        ax.set_xlabel("Minutes since start")
+        ax.set_ylim(0, self.gpu_memory_limit_gib + 5)
+        ax.xaxis.set_major_locator(MultipleLocator(1))  # tick every 1 hour
+        ax.xaxis.set_major_formatter(FuncFormatter(lambda x, pos: f"{x:.0f}"))
+        ax.set_xlabel("Hours since start")
+
+        handles, legend_labels = ax.get_legend_handles_labels()
+        if handles:
+            ax.legend(
+                handles,
+                legend_labels,
+                loc="center left",
+                bbox_to_anchor=(1.02, 0.5),
+                borderaxespad=0.0,
+            )
+        ax.set_title(
+            f"Average GPU Memory During Training"
+        )
+        plt.tight_layout()
+        plt.show()
+        return fig
+    
+    def plot_per_tf_auroc_boxplot(self, agg_by_gt: bool = True, ylim: tuple = (0.3, 0.7)):
+        """
+        Plots a boxplot of per-TF AUROC scores for each GRN inference method.
+
+        Parameters
+        ----------
+        agg_by_gt : bool, optional
+            * If **True**, plots the average per-TF AUROC score for all TFs for each ground truth
+            * If **False**, plots the per-TF AUROC scores for each TF for each ground truth
+
+        """
+        if self.per_tf_all_df is None:
+            
+            assert (self.model_training_dir / "per_tf_auroc_auprc_results.csv").exists(), \
+                f"Per-TF AUROC/AUPRC results file does not exist for {self.experiment_name}, model_training_00{self.model_num}"
+            
+            self.per_tf_all_df = pd.read_csv(self.model_training_dir / "per_tf_auroc_auprc_results.csv")
+        
+        if not agg_by_gt:
+            # Average the per-TF AUROC scores across ground truths for each method
+            per_tf_plot_df = (
+                self.per_tf_all_df.dropna(subset=["auroc"])
+                .groupby(['method', 'tf'], as_index=False)
+                .agg(
+                    auroc=('auroc', 'mean'),
+                    n_gt=('gt', 'nunique'),
+                )
+            )
+            
+        elif agg_by_gt:
+            # Average the per-TF AUROC scores across ground truths for each method
+            per_tf_plot_df = (
+                self.per_tf_all_df
+                .dropna(subset=["auroc"])
+                .groupby(["method", "gt"], as_index=False)
+                .agg(
+                    auroc=("auroc", "mean"),
+                    n_gt=("gt", "nunique"),
+                )
+            )
+
+
+        fig = self._plot_all_results_auroc_boxplot(
+            per_tf_plot_df, 
+            per_tf=True,
+            ylim=ylim
+            )
+        return fig
+        
+    def plot_pooled_auroc_boxplot(self, ylim: tuple = (0.3, 0.7)):
+        if self.results_df is None:
+            assert (self.model_training_dir / "pooled_auroc_auprc_results.csv").exists(), \
+                f"Pooled AUROC/AUPRC results file does not exist for {self.experiment_name}, model_training_00{self.model_num}"
+            self.results_df = pd.read_csv(self.model_training_dir / "pooled_auroc_auprc_results.csv")
+            
+        fig = self._plot_all_results_auroc_boxplot(
+            self.results_df, 
+            per_tf=False,
+            ylim=ylim,
+            )
+        
+        return fig
+    
+    def _plot_all_results_auroc_boxplot(
+        self,
+        df: pd.DataFrame, 
+        per_tf: bool = False, 
+        override_color: bool = False,
+        ylim: tuple = (0.3, 0.7),
+        sort_by_mean: bool = True,
+        ) -> plt.Figure:
+        """
+        Plots AUROC boxplots for all GRN inference methods in the provided DataFrame.
+        
+        Parameters
+        -------------
+        df : pd.DataFrame
+            DataFrame containing AUROC results with columns 'method' and 'auroc'.
+        per_tf : bool, optional
+            If True, indicates that the DataFrame contains per-TF AUROC scores. Default is False.
+        override_color : bool, optional
+            If True, overrides the default coloring scheme for methods to plot all boxes as blue. Default is False.
+        """
+        
+        
+        # 1. Order methods by mean AUROC (highest → lowest)
+        if sort_by_mean:
+            method_order = (
+                df.groupby("method")["auroc"]
+                .mean()
+                .sort_values(ascending=False)
+                .index
+                .tolist()
+            )
+        else:
+            method_order = (
+                df.groupby("method")["auroc"]
+                .mean()
+                .index
+                .tolist()
+            )
+
+        if "No Filtering" in method_order:
+            method_order = [m for m in method_order if m != "No Filtering"] + ["No Filtering"]
+        
+        mean_by_method = (
+            df.groupby("method")["auroc"]
+            .mean()
+        )
+        
+        # 2. Prepare data in that order
+        data = [df.loc[df["method"] == m, "auroc"].values for m in method_order]
+
+        feature_list = [
+            "Gradient Attribution",
+            "TF Knockout",
+        ]
+        my_color = "#4195df"
+        other_color = "#747474"
+
+        fig, ax = plt.subplots(figsize=(9, 5))
+
+        # Baseline random line
+        ax.axhline(y=0.5, color="#2D2D2D", linestyle='--', linewidth=1)
+
+        # --- Boxplot (existing styling) ---
+        bp = ax.boxplot(
+            data,
+            tick_labels=method_order,
+            patch_artist=True,
+            showfliers=False
+        )
+
+        # Color boxes: light blue for your methods, grey for others
+        for box, method in zip(bp["boxes"], method_order):
+            if method in feature_list or override_color:
+                box.set_facecolor(my_color)
+            else:
+                box.set_facecolor(other_color)
+
+        # Medians in black
+        for median in bp["medians"]:
+            median.set_color("black")
+
+        # --- NEW: overlay jittered points for each method ---
+        for i, method in enumerate(method_order, start=1):
+            y = df.loc[df["method"] == method, "auroc"].values
+            if len(y) == 0:
+                continue
+
+            # Small horizontal jitter around the box center (position i)
+            x = np.random.normal(loc=i, scale=0.06, size=len(y))
+
+            # Match point color to box color
+            point_color = my_color if method in feature_list or override_color else other_color
+
+            ax.scatter(
+                x, y,
+                color=point_color,
+                alpha=0.7,
+                s=18,
+                edgecolor="k",
+                linewidth=0.3,
+                zorder=3,
+            )
+            
+            mean_val = y.mean()
+            ax.scatter(
+                i, mean_val,
+                color="white",
+                edgecolor="k",
+                s=30,
+                zorder=4,
+            )
+            
+            # # Annotate the mean value above the mean point
+            # ax.text(i, y.max() + 0.015, f"{mean_val:.3f}", ha="center", va="bottom", fontsize=12)
+
+        legend_handles = [
+            Line2D(
+                [0], [0],
+                marker="o",
+                linestyle="None",
+                markerfacecolor=(
+                    my_color if (method in feature_list or override_color) else other_color
+                ),
+                markeredgecolor="k",
+                markersize=7,
+                label=f"{method}: {mean_by_method.loc[method]:.3f}"
+            )
+            for method in method_order
+        ]
+        
+        ax.legend(
+            handles=legend_handles,
+            title="Mean AUROC",
+            bbox_to_anchor=(1.05, 0.5),
+            loc="center left",
+            borderaxespad=0.0,
+            ncol=1,
+        )
+
+        ax.set_ylabel("AUROC across ground truths")
+        if per_tf == True:
+            ax.set_title("per-TF AUROC Scores per method")
+            ax.set_ylim(ylim)
+        else:
+            ax.set_title("AUROC Scores per method")
+            ax.set_ylim(ylim)
+
+        plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
+        plt.tight_layout()
+        
+        return fig
+    
     def _locate_last_checkpoint(self):
         """
         Locate the checkpoint_<N>.pt file with the largest N in self.model_training_dir.
@@ -377,4 +676,3 @@ class ExperimentLoader:
 
         gpu_memory_limit_gib = float(gpu_usage_df["memory_total_gib"].iloc[0])
         return gpu_usage_df, mean_per_sec_df, gpu_memory_limit_gib
-    

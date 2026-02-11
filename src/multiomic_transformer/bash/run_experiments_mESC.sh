@@ -9,7 +9,7 @@
 #SBATCH --gres=gpu:a100:4
 #SBATCH -c 12
 #SBATCH --mem=128G
-#SBATCH --array=0-1%2
+#SBATCH --array=0-4%1
 
 set -euo pipefail
 
