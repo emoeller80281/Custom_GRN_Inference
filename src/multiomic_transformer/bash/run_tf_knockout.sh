@@ -33,10 +33,10 @@ export KMP_AFFINITY=granularity=fine,compact,1,0
 # ------------------------------------------------------------
 # Run classifier for this chromosome
 # ------------------------------------------------------------
-EXPERIMENT_DIR=/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC_7_sample_hvg_filter_disp_0.01/chr19
+EXPERIMENT_DIR=/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/mESC_6_sample_hvg_filter_disp_0.01
 SELECTED_EXPERIMENT_DIR=$EXPERIMENT_DIR/model_training_001
 
-MODEL_FILE=checkpoint_75.pt
+MODEL_FILE=trained_model.pt
 
 torchrun --standalone --nnodes=1 --nproc_per_node=4 ./src/multiomic_transformer/scripts/tf_knockout.py \
     --selected_experiment_dir "$SELECTED_EXPERIMENT_DIR" \

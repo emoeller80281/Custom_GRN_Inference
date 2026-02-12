@@ -194,6 +194,9 @@ EXPERIMENT_LIST=(
     # "mESC_2_sample_hvg_filter_disp_0.01|model_training_001"
     # "mESC_3_sample_hvg_filter_disp_0.01|model_training_001"
     # "mESC_4_sample_hvg_filter_disp_0.01|model_training_001"
+    # "mESC_5_sample_hvg_filter_disp_0.01|model_training_001"
+    # "mESC_6_sample_hvg_filter_disp_0.01|model_training_001"
+    # "mESC_7_sample_hvg_filter_disp_0.01|model_training_001"
 
     # "Macrophage_buffer_1_hvg_filter_only_rna|model_training_002"
     # "Macrophage_buffer_1_hvg_filter_none|model_training_002"
@@ -244,23 +247,31 @@ EXPERIMENT_LIST=(
     # "Macrophage_buffer_1234_hvg_filter_disp_0.1|model_training_001"
 
     # "mESC_E7.5_rep1_best_settings|model_training_001"
+    # "mESC_E7.5_rep2_best_settings|model_training_001"
+    # "mESC_E8.5_rep1_best_settings|model_training_001"
+    "mESC_E8.5_rep2_best_settings|model_training_001"
 
     # "Macrophage_buffer_1_best_settings|model_training_001"
     # "Macrophage_buffer_2_best_settings|model_training_001"
     # "Macrophage_all_bnchmk_best_settings|model_training_001"
 
-    "K562_sample_1_best_settings|model_training_001"
+    # "K562_sample_1_best_settings|model_training_001"
+
+    # "BM_CD8_T_cells_initial_test|model_training_001"
 
 )
 
-# DATASET_TYPE="mESC"
-# SAMPLE_NAMES="E7.5_rep1" # E7.5_rep2 E8.5_rep1 E8.5_rep2
+DATASET_TYPE="mESC"
+SAMPLE_NAMES="E8.5_rep2" # E7.5_rep2 E8.5_rep1 E8.5_rep2
 
 # DATASET_TYPE="macrophage"
 # SAMPLE_NAMES="buffer_1 buffer_2" # Macrophage_S2
 
-DATASET_TYPE="k562"
-SAMPLE_NAMES="K562"
+# DATASET_TYPE="k562"
+# SAMPLE_NAMES="K562"
+
+# DATASET_TYPE="t_cell"
+# SAMPLE_NAMES="donor1"
 
 
 # ==========================================

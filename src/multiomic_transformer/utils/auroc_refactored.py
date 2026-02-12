@@ -188,17 +188,23 @@ def eval_method_vs_gt(
         return balanced.sample(frac=1.0, random_state=random_state).reset_index(drop=True)
     
     if balance == True:
-        d = balance_pos_neg(d, random_state=42)
+        balanced_d = balance_pos_neg(d, random_state=42)
+    else:
+        balanced_d = d.copy()
     
     y = d["_in_gt"].fillna(0).astype(int).to_numpy()
     s = d["Score"].to_numpy()
     
+    balanced_y = balanced_d["_in_gt"].fillna(0).astype(int).to_numpy()
+    balanced_s = balanced_d["Score"].to_numpy()
+    
     if use_abs_scores:
         s = np.abs(s)
+        balanced_s = np.abs(balanced_s)
     
     # Calculate AUROC and AUPRC scores
     auroc = roc_auc_score(y, s) if np.unique(y).size == 2 else np.nan
-    auprc = average_precision_score(y, s) if y.sum() > 0 else np.nan
+    auprc = average_precision_score(balanced_y, balanced_s) if balanced_y.sum() > 0 else np.nan
     pos_rate = y.mean()
 
     # Pre-sort once for precision@K
@@ -233,7 +239,11 @@ def restrict_to_gt_universe(method_df: pd.DataFrame, gt_edges: pd.DataFrame) -> 
     return method_df[method_df["Source"].isin(gt_tfs) & method_df["Target"].isin(gt_tgs)].copy()
 
 def load_grad_df_with_two_scores(selected_experiment_dir, tf_names, tg_names):
-    grad = np.load(selected_experiment_dir / "tf_tg_grad_attribution.npy").astype(np.float32)
+    gradient_attribution_file = selected_experiment_dir / "tf_tg_grad_attribution.npy"
+    
+    assert gradient_attribution_file.exists(), f"Gradient attribution file {gradient_attribution_file} does not exist."
+    
+    grad = np.load(gradient_attribution_file).astype(np.float32)
     assert grad.shape == (len(tf_names), len(tg_names))
 
     grad = np.nan_to_num(grad, nan=0.0)
@@ -248,16 +258,58 @@ def load_grad_df_with_two_scores(selected_experiment_dir, tf_names, tg_names):
 
     T, G = grad_abs.shape
     tf_idx, tg_idx = np.meshgrid(np.arange(T), np.arange(G), indexing="ij")
+            
+    eps = 1e-12
+    mask = (score_pooled > eps) | (np.abs(score_per_tf) > eps)
+
+    tf_idx, tg_idx = np.where(mask)
 
     df = pd.DataFrame({
-        "Source": np.asarray(tf_names, dtype=object)[tf_idx.ravel()],
-        "Target": np.asarray(tg_names, dtype=object)[tg_idx.ravel()],
-        "Score_pooled": score_pooled.ravel(),
-        "Score_per_tf": score_per_tf.ravel(),
+        "Source": np.asarray(tf_names, dtype=object)[tf_idx],
+        "Target": np.asarray(tg_names, dtype=object)[tg_idx],
+        "Score_pooled": score_pooled[tf_idx, tg_idx],
+        "Score_per_tf": score_per_tf[tf_idx, tg_idx],
     })
+    
     df["Source"] = df["Source"].astype(str).str.upper()
     df["Target"] = df["Target"].astype(str).str.upper()
+    
     return df
+
+def original_load_gradient_attribution_matrix(self):
+    # --- load gradient attribution matrix ---
+    grad = np.load(self.model_training_dir / "tf_tg_grad_attribution.npy")  # shape [T, G]
+    assert grad.shape == (len(self.tf_names), len(self.tg_names))
+
+    # Optional: handle NaNs
+    grad = np.nan_to_num(grad, nan=0.0)
+
+    # Use absolute gradient magnitude as importance
+    grad_abs = np.abs(grad)
+
+    # Row-wise z-score per TF (ignore NaNs if you keep them)
+    row_mean = grad_abs.mean(axis=1, keepdims=True)
+    row_std  = grad_abs.std(axis=1, keepdims=True) + 1e-6
+    grad_z = (grad_abs - row_mean) / row_std   # [T, G]
+
+    # Build long-form dataframe
+    T, G = grad_z.shape
+    tf_idx, tg_idx = np.meshgrid(np.arange(T), np.arange(G), indexing="ij")
+
+    gradient_attrib_df = pd.DataFrame({
+        "Source": np.array(self.tf_names, dtype=object)[tf_idx.ravel()],
+        "Target": np.array(self.tg_names, dtype=object)[tg_idx.ravel()],
+        "Score": grad_z.ravel(),
+    })
+    gradient_attrib_df["Source"] = gradient_attrib_df["Source"].astype(str).str.upper()
+    gradient_attrib_df["Target"] = gradient_attrib_df["Target"].astype(str).str.upper()
+    
+    gradient_attrib_df["Score"] = (
+        (gradient_attrib_df["Score"] - gradient_attrib_df["Score"].min()) / 
+        (gradient_attrib_df["Score"].max() - gradient_attrib_df["Score"].min())
+    )
+        
+    return gradient_attrib_df
 
 def load_tf_knockout_scores_with_two_scores(
     selected_experiment_dir,
@@ -280,6 +332,10 @@ def load_tf_knockout_scores_with_two_scores(
       - Unobserved entries (counts==0) are set to NaN and dropped in the output.
       - If positive_only=True, effects at 0 are valid and retained.
     """
+    
+    tf_knockout_file = selected_experiment_dir / "tf_tg_fullmodel_knockout.npy"
+    assert tf_knockout_file.exists(), f"TF-knockout file {tf_knockout_file} does not exist."
+        
     effect = np.load(selected_experiment_dir / "tf_tg_fullmodel_knockout.npy").astype(np.float32)         # [T, G]
     counts = np.load(selected_experiment_dir / "tf_tg_fullmodel_knockout_count.npy").astype(np.int32)    # [T, G]
     assert effect.shape == (len(tf_names), len(tg_names))
@@ -583,7 +639,7 @@ if __name__ == "__main__":
     arg_parser.add_argument("--experiment", type=str, required=True, help="Name of the experiment to test")
     arg_parser.add_argument("--training_num", type=str, required=False, default="model_training_001", help="Training number folder to test")
     arg_parser.add_argument("--experiment_dir", type=Path, required=True, help="Full path to the experiment directory to test")
-    arg_parser.add_argument("--dataset_type", type=str, required=True, choices=["mESC", "macrophage", "k562"], help="Type of dataset: mESC, macrophage, or k562")
+    arg_parser.add_argument("--dataset_type", type=str, required=True, choices=["mESC", "macrophage", "k562", "t_cell"], help="Type of dataset: mESC, macrophage, or k562")
     arg_parser.add_argument("--sample_name_list", type=str, nargs='+', required=False, default=[], help="List of sample names to include in the evaluation (optional)")
     arg_parser.add_argument("--top_k_fracs", type=float, nargs='+', required=False, default=[0.001, 0.005, 0.01, 0.05], help="List of top K fractions for precision@K evaluation")
 
@@ -628,6 +684,10 @@ if __name__ == "__main__":
             # "ENCODE": GROUND_TRUTH_DIR / "encode" / "K562_encode_tf_peak_tg_dist.csv",
             # "RN118": GROUND_TRUTH_DIR / "RN118.tsv",
             # "RN119": GROUND_TRUTH_DIR / "RN119.tsv",
+        }
+    elif dataset_type.lower() == "t_cell":
+        ground_truth_file_dict = {
+            "ChIP-Atlas": GROUND_TRUTH_DIR / "chipatlas_t_cell.csv",
         }
         
     FIG_DIR = Path("/gpfs/Labs/Uzun/RESULTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/FIGURES")

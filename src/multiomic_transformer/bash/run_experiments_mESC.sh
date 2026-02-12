@@ -2,7 +2,7 @@
 #SBATCH --job-name=grn_experiments
 #SBATCH --output=LOGS/transformer_logs/experiments/%x_%A/%x_%A_%a.log
 #SBATCH --error=LOGS/transformer_logs/experiments/%x_%A/%x_%A_%a.err
-#SBATCH --time=36:00:00
+#SBATCH --time=42:00:00
 #SBATCH -p dense
 #SBATCH -N 1
 #SBATCH --ntasks-per-node=1
@@ -883,6 +883,15 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
             --training_num "${TRAINING_NUM}" \
             --experiment_dir "${EXPERIMENT_DIR}" \
             --model_file "${MODEL_FILE}"
+
+        echo "Running AUROC Testing Refactored..."
+        poetry run python ./src/multiomic_transformer/utils/auroc_refactored.py \
+            --experiment "${DATASET_NAME}" \
+            --training_num "${TRAINING_NUM}" \
+            --experiment_dir "${EXPERIMENT_DIR}" \
+            --model_file "${MODEL_FILE}" \
+            --dataset_type "mESC" \
+            --sample_name_list "${SAMPLE_NAMES}"
 
         echo ""
         echo "=========================================="

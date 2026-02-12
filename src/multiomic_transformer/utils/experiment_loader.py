@@ -1,5 +1,8 @@
 import json
 import os
+import random
+from venv import create
+from flask import g
 from matplotlib.ticker import FuncFormatter, MultipleLocator
 from numpy import gradient
 import pandas as pd
@@ -8,6 +11,8 @@ from pathlib import Path
 import torch
 import sys
 import logging
+from sklearn.metrics import roc_auc_score, average_precision_score, precision_recall_curve, roc_curve
+from typing import Tuple, Optional
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 
@@ -37,10 +42,18 @@ class ExperimentLoader:
         assert self.model_training_dir.exists(), f"Model training directory {self.model_training_dir} does not exist."
         
         # Load the run parameters saved during model training
-        self.model_training_params = self._load_json(self.model_training_dir / "run_parameters.json")
+        if not (self.model_training_dir / "run_parameters.json").exists():
+            logging.warning(f"WARNING: Run parameters file {self.model_training_dir / 'run_parameters.json'} does not exist.")
+            self.model_training_params = None
+        else:
+            self.model_training_params = self._load_json(self.model_training_dir / "run_parameters.json")
         
-        # Save the full list of experiment settings
-        self.experiment_settings_df = pd.read_csv(self.experiment_dir / self.experiment_name / "run_parameters_long.csv")
+        # Open the full experiment settings file
+        if not (self.experiment_dir / self.experiment_name / "run_parameters_long.csv").exists():
+            logging.warning(f"WARNING: Experiment settings file {self.experiment_dir / self.experiment_name / 'run_parameters_long.csv'} does not exist.")
+            self.experiment_settings_df = None
+        else:
+            self.experiment_settings_df = pd.read_csv(self.experiment_dir / self.experiment_name / "run_parameters_long.csv")
         
         # Load the GPU usage log and format it into a more usable format
         self.gpu_usage_df, self.gpu_usage_mean_per_sec_df, self.gpu_memory_limit_gib = self._format_gpu_usage_file()
@@ -65,11 +78,18 @@ class ExperimentLoader:
         # Transcription Factor Knockout score dataframe will be loaded when load_tf_knockout is called
         self.tf_knockout_df = None
         
+        # Model forward pass predictions vs true values
+        self.tg_prediction_df = None
+        self.tg_true_df = None
+        
         # Model evaluation metric results
         self.raw_results_df = None
         self.results_df = None
         self.per_tf_all_df = None
         self.per_tf_summary_df = None
+        
+        # Model evaluation metric results with ground truth
+        self.df_with_ground_truth = None
         
     def load_trained_model(self, checkpoint_file):
         """
@@ -190,6 +210,41 @@ class ExperimentLoader:
         
         return df
     
+    def original_load_gradient_attribution_matrix(self):
+        # --- load gradient attribution matrix ---
+        grad = np.load(self.model_training_dir / "tf_tg_grad_attribution.npy")  # shape [T, G]
+        assert grad.shape == (len(self.tf_names), len(self.tg_names))
+
+        # Optional: handle NaNs
+        grad = np.nan_to_num(grad, nan=0.0)
+
+        # Use absolute gradient magnitude as importance
+        grad_abs = np.abs(grad)
+
+        # Row-wise z-score per TF (ignore NaNs if you keep them)
+        row_mean = grad_abs.mean(axis=1, keepdims=True)
+        row_std  = grad_abs.std(axis=1, keepdims=True) + 1e-6
+        grad_z = (grad_abs - row_mean) / row_std   # [T, G]
+
+        # Build long-form dataframe
+        T, G = grad_z.shape
+        tf_idx, tg_idx = np.meshgrid(np.arange(T), np.arange(G), indexing="ij")
+
+        gradient_attrib_df = pd.DataFrame({
+            "Source": np.array(self.tf_names, dtype=object)[tf_idx.ravel()],
+            "Target": np.array(self.tg_names, dtype=object)[tg_idx.ravel()],
+            "Score": grad_z.ravel(),
+        })
+        gradient_attrib_df["Source"] = gradient_attrib_df["Source"].astype(str).str.upper()
+        gradient_attrib_df["Target"] = gradient_attrib_df["Target"].astype(str).str.upper()
+        
+        gradient_attrib_df["Score"] = (
+            (gradient_attrib_df["Score"] - gradient_attrib_df["Score"].min()) / 
+            (gradient_attrib_df["Score"].max() - gradient_attrib_df["Score"].min())
+        )
+            
+        return gradient_attrib_df
+    
     def load_tf_knockout(self, positive_only: bool = True, eps: float = 1e-6):
         """
         Loads TF-knockout effects and returns a long-form DF with two scores:
@@ -255,6 +310,22 @@ class ExperimentLoader:
         
         return df
     
+    def load_eval_results(self):      
+        eval_files = [
+            "pooled_auroc_auprc_raw_results.csv",
+            "pooled_auroc_auprc_results.csv",
+            "per_tf_auroc_auprc_results.csv",
+            "per_tf_auroc_auprc_summary.csv",
+        ]
+        
+        assert all([(self.model_training_dir / f).exists() for f in eval_files]), \
+            f"Not all evaluation result files exist in {self.model_training_dir}. Expected files: {eval_files}"
+        
+        self.raw_results_df = pd.read_csv(self.model_training_dir / "pooled_auroc_auprc_raw_results.csv")
+        self.results_df = pd.read_csv(self.model_training_dir / "pooled_auroc_auprc_results.csv")
+        self.per_tf_all_df = pd.read_csv(self.model_training_dir / "per_tf_auroc_auprc_results.csv")
+        self.per_tf_summary_df = pd.read_csv(self.model_training_dir / "per_tf_auroc_auprc_summary.csv")
+    
     def run_forward_pass(self, num_batches: int = 1):
         if self.model is None:
             self.load_trained_model("trained_model.pt")
@@ -313,6 +384,219 @@ class ExperimentLoader:
 
         return self.model.module
     
+    def load_ground_truth(self, ground_truth_file: Tuple[str, Path]):
+        if type(ground_truth_file) == str:
+            ground_truth_file = Path(ground_truth_file)
+            
+        if ground_truth_file.suffix == ".csv":
+            sep = ","
+        elif ground_truth_file.suffix == ".tsv":
+            sep="\t"
+            
+        ground_truth_df = pd.read_csv(ground_truth_file, sep=sep, on_bad_lines="skip", engine="python")
+        
+        if "chip" in ground_truth_file.name and "atlas" in ground_truth_file.name:
+            ground_truth_df = ground_truth_df[["source_id", "target_id"]]
+
+        if ground_truth_df.columns[0] != "Source" or ground_truth_df.columns[1] != "Target":
+            ground_truth_df = ground_truth_df.rename(columns={ground_truth_df.columns[0]: "Source", ground_truth_df.columns[1]: "Target"})
+        ground_truth_df["Source"] = ground_truth_df["Source"].astype(str).str.upper()
+        ground_truth_df["Target"] = ground_truth_df["Target"].astype(str).str.upper()
+            
+        return ground_truth_df
+    
+    def create_ground_truth_comparison_df(self, score_df: pd.DataFrame, ground_truth_df: pd.DataFrame, ground_truth_name: str):
+        gt = ground_truth_df[["Source", "Target"]].dropna().copy()
+        gt["Source"] = gt["Source"].astype(str).str.upper()
+        gt["Target"] = gt["Target"].astype(str).str.upper()
+        gt = gt.drop_duplicates()
+        gt["_in_gt"] = 1
+        
+        # Restrict evaluated genes to only those that are in the ground truth
+        gt_tfs = set(gt["Source"])
+        gt_tgs = set(gt["Target"])
+        score_df = score_df[score_df["Source"].isin(gt_tfs) & score_df["Target"].isin(gt_tgs)].copy()
+
+        df = score_df.merge(gt, how="left", on=["Source", "Target"])
+        df["_in_gt"] = df["_in_gt"].fillna(0)
+        
+        df["ground_truth_name"] = ground_truth_name
+        
+        if self.df_with_ground_truth is None:
+            self.df_with_ground_truth = df
+        else:
+            self.df_with_ground_truth = pd.concat([self.df_with_ground_truth, df], axis=0, ignore_index=True)
+        
+        return df
+    
+    def create_overlap_info_df(
+        self, 
+        unlabeled_df: pd.DataFrame, 
+        labeled_df: pd.DataFrame,
+        ground_truth_df: pd.DataFrame, 
+        ground_truth_name: str,
+        auroc: float,
+        auprc: float,
+        ):
+        grn_unique_tfs = unlabeled_df["Source"].nunique()
+        grn_unique_tgs = unlabeled_df["Target"].nunique()
+        grn_unique_edges = len(unlabeled_df)
+
+        gt_unique_tfs = ground_truth_df["Source"].nunique()
+        gt_unique_tgs = ground_truth_df["Target"].nunique()
+        gt_unique_edges = len(ground_truth_df)
+
+        overlap_tfs = labeled_df["Source"].nunique()
+        overlap_tgs = labeled_df["Target"].nunique()
+        overlap_edges = len(labeled_df)
+        
+        comparison_dict = {
+            "TFs": [grn_unique_tfs, gt_unique_tfs, overlap_tfs, auroc, auprc],
+            "TGs": [grn_unique_tgs, gt_unique_tgs, overlap_tgs, np.nan, np.nan],
+            "edges": [grn_unique_edges, gt_unique_edges, overlap_edges, np.nan, np.nan],
+        }
+        
+        def pct(num, den):
+            return np.where(den == 0, np.nan, (num / den) * 100)
+
+        overlap_info_df = pd.DataFrame.from_dict(comparison_dict, orient="index", columns=["GRN", f"Ground Truth {ground_truth_name}", "Overlap (Score DF in GT)", "AUROC", "AUPRC"])
+        overlap_info_df["Pct of GRN in GT"] = pct(overlap_info_df["Overlap (Score DF in GT)"], overlap_info_df["GRN"]).round(2)
+        overlap_info_df["Pct of GT in GRN"] = pct(overlap_info_df["Overlap (Score DF in GT)"], overlap_info_df[f"Ground Truth {ground_truth_name}"]).round(2).astype(str) + "%"
+        return overlap_info_df
+    
+    def plot_auroc_auprc(
+        self, 
+        score_df: pd.DataFrame, 
+        ground_truth_df: pd.DataFrame, 
+        ground_truth_name: str, 
+        return_overlap_info: bool = True,
+        balance_auroc: bool = True,
+        balance_auprc: bool = True,
+        use_abs_scores: bool = True,
+        no_fig: bool = False,
+        ):
+        labeled_df = self.create_ground_truth_comparison_df(score_df, ground_truth_df, ground_truth_name)
+            
+        if len(labeled_df) == 0 or labeled_df["_in_gt"].nunique() < 2:
+            logging.info(f"Need at least one positive and one negative, got {labeled_df['_in_gt'].value_counts().to_dict()}")
+            return None
+        
+        score_col = "Score_pooled"
+        
+        def _balance_pos_neg(df, random_state=42):
+            """Balance the scores for positive and negative classes by inverting negative scores."""
+            rng = np.random.default_rng(random_state)
+            df = df.copy()
+            pos_df = df[df["_in_gt"] == 1]
+            neg_df = df[df["_in_gt"] != 1]
+            
+            n_pos = len(pos_df)
+            n_neg = len(neg_df)
+            if n_pos == 0 or n_neg == 0:
+                logging.info("No positives or negatives, skipping balance")
+                return df
+
+            if n_neg < n_pos:
+                pos_idx = rng.choice(pos_df.index.to_numpy(), size=n_neg, replace=False)
+                pos_sample = pos_df.loc[pos_idx]
+                neg_sample = neg_df
+            else:
+                pos_sample = pos_df
+                neg_idx = rng.choice(neg_df.index.to_numpy(), size=n_pos, replace=False)
+                neg_sample = neg_df.loc[neg_idx]
+            
+            balanced = pd.concat([pos_sample, neg_sample], axis=0)
+            return balanced.sample(frac=1.0, random_state=random_state).reset_index(drop=True)
+        
+        def _create_random_distribution(scores: pd.Series, seed: int = 42) -> np.ndarray:
+            random.seed(seed)
+            uniform_distribution = np.random.uniform(low = scores.min(), high = scores.max(), size = len(scores))
+            resampled_scores = np.random.choice(uniform_distribution, size=len(scores), replace=True)
+            return resampled_scores
+        
+        if use_abs_scores:
+            labeled_df[score_col] = labeled_df[score_col].abs()
+        
+        y = labeled_df["_in_gt"].fillna(0).astype(int).to_numpy()
+        s = labeled_df[score_col].to_numpy()
+        
+        if balance_auroc:
+            balanced = _balance_pos_neg(labeled_df, random_state=42)
+            
+            y_bal = balanced["_in_gt"].astype(int).to_numpy()
+            s_bal = balanced[score_col].to_numpy()
+            
+            auroc = roc_auc_score(y_bal, s_bal)
+            fpr, tpr, _ = roc_curve(y_bal, s_bal)
+            rand_fpr, rand_tpr, _ = roc_curve(y_bal, _create_random_distribution(s_bal))
+        else:
+            auroc = roc_auc_score(y, s)
+            fpr, tpr, _ = roc_curve(y, s)
+            rand_fpr, rand_tpr, _ = roc_curve(y, _create_random_distribution(s))
+        
+        if balance_auprc:
+            balanced = _balance_pos_neg(labeled_df, random_state=42)
+            
+            y_bal = balanced["_in_gt"].astype(int).to_numpy()
+            s_bal = balanced[score_col].to_numpy()
+            
+            auprc = average_precision_score(y_bal, s_bal)
+            prec, rec, _ = precision_recall_curve(y_bal, s_bal)
+            rand_prec, rand_rec, _ = precision_recall_curve(y_bal, _create_random_distribution(s_bal))
+        else:
+            auprc = average_precision_score(y, s)
+            prec, rec, _ = precision_recall_curve(y, s)
+            rand_prec, rand_rec, _ = precision_recall_curve(y, _create_random_distribution(s))
+                
+        # ROC plot
+        if no_fig:
+            if return_overlap_info:
+                overlap_info_df = self.create_overlap_info_df(
+                    score_df, labeled_df, ground_truth_df, ground_truth_name, auroc, auprc
+                )
+                return None, overlap_info_df
+            else:
+                return None, None
+        
+        fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(7, 4))
+        ax[0].plot(rand_fpr, rand_tpr, color="#747474", linestyle="--", lw=2)
+        ax[0].plot(fpr, tpr, lw=2, color="#4195df", label=f"AUROC = {auroc:.3f}")
+        ax[0].plot([0, 1], [0, 1], "k--", lw=1, alpha=0.5)
+        ax[0].set_xlabel("False Positive Rate", fontsize=12)
+        ax[0].set_ylabel("True Positive Rate", fontsize=12)
+        ax[0].set_title(f"AUROC", fontsize=12)
+        ax[0].legend(
+            bbox_to_anchor=(0.5, -0.28),
+            loc="upper center",
+            borderaxespad=0.0
+        )
+        ax[0].set_xlim(0, 1)
+        ax[0].set_ylim(0, 1)
+        
+        # Precision-Recall plot
+        ax[1].plot(rand_rec, rand_prec, color="#747474", linestyle="--", lw=2)
+        ax[1].plot(rec, prec, lw=2, color="#4195df", label=f"AUPRC = {auprc:.3f}")
+        ax[1].set_xlabel("Recall", fontsize=12)
+        ax[1].set_ylabel("Precision", fontsize=12)
+        ax[1].set_title(f"AUPRC", fontsize=12)
+        ax[1].legend(
+            bbox_to_anchor=(0.5, -0.28),
+            loc="upper center",
+            borderaxespad=0.0
+        )
+        ax[1].set_ylim(0, 1.0)
+        ax[1].set_xlim(0, 1.0)
+        plt.suptitle(f"{self.experiment_name} vs {ground_truth_name}", fontsize=14)
+        plt.tight_layout()
+        
+        if return_overlap_info:
+            overlap_info_df = self.create_overlap_info_df(
+                score_df, labeled_df, ground_truth_df, ground_truth_name, auroc, auprc
+            )
+            return fig, overlap_info_df
+        
+        return fig, None
+    
     def plot_train_val_loss(self):
         fig = plt.figure(figsize=(6, 5))
         
@@ -356,8 +640,12 @@ class ExperimentLoader:
         align_to_common_duration: if True, truncate each run to the shortest duration so curves end together.
         smooth: optional int window (in seconds) for a centered rolling mean on memory (e.g., smooth=5).
         """
+        if self.gpu_usage_df is None:
+            logging.warning(f"GPU usage data not available for {self.experiment_name}. Cannot plot GPU usage.")
+            return
+        
         fig, ax = plt.subplots(figsize=(7,4))
-    
+
         if smooth and smooth > 1:
             self.gpu_usage_df["memory_used_gib"] = self.gpu_usage_df["memory_used_gib"].rolling(smooth, center=True, min_periods=1).mean()
 
@@ -385,6 +673,40 @@ class ExperimentLoader:
         )
         plt.tight_layout()
         plt.show()
+        return fig
+    
+    def plot_true_vs_predicted_tg_expression(self, num_batches: int=15, rerun_forward_pass: bool = False):
+        fig, ax = plt.subplots(figsize=(5,5))
+
+        if self.tg_prediction_df is None or self.tg_true_df is None or rerun_forward_pass:
+            logging.info("Running forward pass to get predicted vs true TG expression for a subset of test batches...")
+            self.tg_prediction_df, self.tg_true_df = self.run_forward_pass(num_batches=num_batches)
+        
+        x = self.tg_prediction_df.mean(axis=1).values
+        y = self.tg_true_df.mean(axis=1).values
+        
+        x = np.nan_to_num(x, nan=0.0, posinf=1e6, neginf=-1e6)
+        y = np.nan_to_num(y, nan=0.0, posinf=1e6, neginf=-1e6)
+        
+        correlation = np.corrcoef(x, y)[0, 1]
+        ax.set_title(f"Model Prediction vs True TG Expression\nPearson Correlation = {correlation:.2f}")
+
+        ax.scatter(x, y, s=10, alpha=0.6)
+
+        lims = [
+            min(x.min(), y.min()),
+            max(x.max(), y.max()),
+        ]
+
+        ax.plot(lims, lims, color="grey", linestyle="--", linewidth=1)
+
+        ax.set_xlim(lims)
+        ax.set_ylim(lims)
+        ax.set_aspect("equal", adjustable="box")
+
+        ax.set_xlabel("True mean expression")
+        ax.set_ylabel("Predicted mean expression")
+
         return fig
     
     def plot_per_tf_auroc_boxplot(self, agg_by_gt: bool = True, ylim: tuple = (0.3, 0.7)):
@@ -649,30 +971,35 @@ class ExperimentLoader:
         memory usage per second, and a float containing the total memory available on the GPU in GiB.
 
         """
-        gpu_usage_file = Path(f"{self.experiment_dir}/{self.experiment_name}") / "logs" / "gpu_usage.csv"
+        try:
+            gpu_usage_file = Path(f"{self.experiment_dir}/{self.experiment_name}") / "logs" / "gpu_usage.csv"
 
-        gpu_usage_df = pd.read_csv(gpu_usage_file)
-        gpu_usage_df.columns = gpu_usage_df.columns.str.strip()
-        gpu_usage_df["timestamp"] = pd.to_datetime(gpu_usage_df["timestamp"], errors="coerce")
-        gpu_usage_df["tsec"] = gpu_usage_df["timestamp"].dt.floor("s")
+            gpu_usage_df = pd.read_csv(gpu_usage_file)
+            gpu_usage_df.columns = gpu_usage_df.columns.str.strip()
+            gpu_usage_df["timestamp"] = pd.to_datetime(gpu_usage_df["timestamp"], errors="coerce")
+            gpu_usage_df["tsec"] = gpu_usage_df["timestamp"].dt.floor("s")
 
-        gpu_usage_df["memory_used_gib"]  = gpu_usage_df["memory.used [MiB]"].astype(str).str.extract(r"(\d+)").astype(float) / 1024
-        gpu_usage_df["memory_total_gib"] = gpu_usage_df["memory.total [MiB]"].astype(str).str.extract(r"(\d+)").astype(float) / 1024
+            gpu_usage_df["memory_used_gib"]  = gpu_usage_df["memory.used [MiB]"].astype(str).str.extract(r"(\d+)").astype(float) / 1024
+            gpu_usage_df["memory_total_gib"] = gpu_usage_df["memory.total [MiB]"].astype(str).str.extract(r"(\d+)").astype(float) / 1024
 
-        t0 = gpu_usage_df["tsec"].min()
-        gpu_usage_df["elapsed_s"] = (gpu_usage_df["tsec"] - t0).dt.total_seconds().astype(int)
-        gpu_usage_df["elapsed_min"] = gpu_usage_df["elapsed_s"] / 60.0
-        gpu_usage_df["elapsed_hr"] = gpu_usage_df["elapsed_s"] / 3600.0
+            t0 = gpu_usage_df["tsec"].min()
+            gpu_usage_df["elapsed_s"] = (gpu_usage_df["tsec"] - t0).dt.total_seconds().astype(int)
+            gpu_usage_df["elapsed_min"] = gpu_usage_df["elapsed_s"] / 60.0
+            gpu_usage_df["elapsed_hr"] = gpu_usage_df["elapsed_s"] / 3600.0
+            
+
+            # mean per second, then carry minutes as a column
+            mean_per_sec_df = (
+                gpu_usage_df.groupby("elapsed_s", as_index=False)["memory_used_gib"]
+                .mean()
+                .sort_values("elapsed_s")
+            )
+            mean_per_sec_df["elapsed_min"] = mean_per_sec_df["elapsed_s"] / 60.0
+            mean_per_sec_df["elapsed_hr"] = mean_per_sec_df["elapsed_s"] / 3600.0
+
+            gpu_memory_limit_gib = float(gpu_usage_df["memory_total_gib"].iloc[0])
+            return gpu_usage_df, mean_per_sec_df, gpu_memory_limit_gib
         
-
-        # mean per second, then carry minutes as a column
-        mean_per_sec_df = (
-            gpu_usage_df.groupby("elapsed_s", as_index=False)["memory_used_gib"]
-            .mean()
-            .sort_values("elapsed_s")
-        )
-        mean_per_sec_df["elapsed_min"] = mean_per_sec_df["elapsed_s"] / 60.0
-        mean_per_sec_df["elapsed_hr"] = mean_per_sec_df["elapsed_s"] / 3600.0
-
-        gpu_memory_limit_gib = float(gpu_usage_df["memory_total_gib"].iloc[0])
-        return gpu_usage_df, mean_per_sec_df, gpu_memory_limit_gib
+        except FileNotFoundError:
+            logging.warning(f"WARNING: GPU usage file not found for {self.experiment_name}. GPU usage plotting will be unavailable.")
+            return None, None, None

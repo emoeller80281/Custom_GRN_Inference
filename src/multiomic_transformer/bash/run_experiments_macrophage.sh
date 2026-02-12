@@ -856,6 +856,15 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
             --experiment_dir "${EXPERIMENT_DIR}" \
             --model_file "${MODEL_FILE}"
 
+        echo "Running AUROC Testing Refactored..."
+        poetry run python ./src/multiomic_transformer/utils/auroc_refactored.py \
+            --experiment "${DATASET_NAME}" \
+            --training_num "${TRAINING_NUM}" \
+            --experiment_dir "${EXPERIMENT_DIR}" \
+            --model_file "${MODEL_FILE}" \
+            --dataset_type "macrophage" \
+            --sample_name_list "${SAMPLE_NAMES}"
+
 
         echo ""
         echo "=========================================="

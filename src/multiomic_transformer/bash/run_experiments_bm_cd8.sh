@@ -2,14 +2,14 @@
 #SBATCH --job-name=grn_experiments
 #SBATCH --output=LOGS/transformer_logs/experiments/%x_%A/%x_%A_%a.log
 #SBATCH --error=LOGS/transformer_logs/experiments/%x_%A/%x_%A_%a.err
-#SBATCH --time=12:00:00
+#SBATCH --time=10:00:00
 #SBATCH -p dense
 #SBATCH -N 1
-#SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:v100:2
+#SBATCH --ntasks-per-node=1
 #SBATCH -c 16
 #SBATCH --mem=192G
-#SBATCH --array=0%5
+#SBATCH --array=0%3
 
 set -euo pipefail
 
@@ -45,11 +45,11 @@ DEFAULT_FILTER_TO_NEAREST_GENE=true
 DEFAULT_PROMOTER_BP=""
 
 # Raw data file names (template with {sample} placeholder)
-DEFAULT_RAW_RNA_FILE="K562_human_filtered_RNA.csv"
-DEFAULT_RAW_ATAC_FILE="K562_human_filtered_ATAC.csv"
+DEFAULT_RAW_RNA_FILE="scRNA_seq_raw.parquet"
+DEFAULT_RAW_ATAC_FILE="scATAC_seq_raw.parquet"
 
 # Model training parameters
-DEFAULT_TOTAL_EPOCHS=250
+DEFAULT_TOTAL_EPOCHS=350
 DEFAULT_BATCH_SIZE=16
 DEFAULT_PATIENCE=10
 DEFAULT_SAVE_EVERY_N_EPOCHS=5
@@ -83,63 +83,26 @@ DEFAULT_SHORTCUT_L1=0.0
 DEFAULT_SHORTCUT_L2=0.0
 DEFAULT_SHORTCUT_TOPK=""
 DEFAULT_SHORTCUT_DROPOUT=0.0
+DEFAULT_SUBSAMPLE_MAX_TFS=""
+DEFAULT_SUBSAMPLE_MAX_TGS=""
+DEFAULT_SUBSAMPLE_MAX_WINDOWS_PER_CHROM=""
+DEFAULT_SUBSAMPLE_MAX_CELLS=""
 DEFAULT_SUBSAMPLE_SEED=42
 DEFAULT_ALLOWED_SAMPLES=""
 DEFAULT_RESUME_CHECKPOINT_PATH=""
+DEFAULT_FILTER_RNA=true
+DEFAULT_FILTER_ATAC=true
+DEFAULT_MIN_RNA_DISP=0.5
+DEFAULT_MIN_ATAC_DISP=0.5
+DEFAULT_SAMPLE_NAMES="donor1" # donor2 donor3 donor4 donor5 donor6 donor7 donor8 donor9 donor10
+
 
 # Define experiments as arrays
 # Format: "EXPERIMENT_NAME|DATASET_NAME|PARAMETER_OVERRIDES"
 # PARAMETER_OVERRIDES format: "PARAM1=VALUE1;PARAM2=VALUE2;..."
 
-
 EXPERIMENTS=(
-    # "initial_test|K562_base_settings"
-    # # "model_d_128_ff_512|K562_model_d_128_ff_512|D_MODEL=128;D_FF=512"
-    # "model_small_batch_size|K562_small_batch_size|BATCH_SIZE=8"
-    # "loose_1_pct_filtering|K562_loose_1_pct_filtering|MIN_GENES_PER_CELL=150;MIN_PEAKS_PER_CELL=50;HOPS=0;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.01;FILTER_OUT_LOWEST_PCT_PEAKS=0.01"
-    # "strict_10_pct_filtering|K562_strict_10_pct_filtering|MIN_GENES_PER_CELL=100;MIN_PEAKS_PER_CELL=100;HOPS=0;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.1;FILTER_OUT_LOWEST_PCT_PEAKS=0.1"
-    # "40k_distance_scale_factor|K562_40k_distance_scale_factor|DISTANCE_SCALE_FACTOR=40000"
-    # "10k_distance_scale_factor|K562_10k_distance_scale_factor|DISTANCE_SCALE_FACTOR=10000"
-    # "150k_max_peak_dist|K562_150k_max_peak_dist|MAX_PEAK_DISTANCE=150000"
-    # "50k_max_peak_dist|K562_50k_max_peak_dist|MAX_PEAK_DISTANCE=50000"
-    # "slow_decay_long_range_two_hop|K562_slow_decay_long_range_two_hop|DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;HOPS=2"
-    # "slow_decay_long_range|K562_slow_decay_long_range|DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;HOPS=1"
-    # "zero_hops|K562_zero_hops|HOPS=0"
-    # "one_hops|K562_one_hops|HOPS=1"
-    # "two_hops|K562_two_hops|HOPS=2"
-    # "loose_1_pct_filter_50_min_per_cell|K562_loose_1_pct_filter_50_min_per_cell|MIN_GENES_PER_CELL=50;MIN_PEAKS_PER_CELL=50;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.01;FILTER_OUT_LOWEST_PCT_PEAKS=0.01"
-    # "small_model_loose_1_pct_filtering|K562_small_model_loose_1_pct_filtering|MIN_GENES_PER_CELL=50;MIN_PEAKS_PER_CELL=50;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.01;FILTER_OUT_LOWEST_PCT_PEAKS=0.01;D_MODEL=128;D_FF=512;BATCH_SIZE=8"
-    # "two_hops_small_batch|K562_two_hops_small_batch|HOPS=2;BATCH_SIZE=8"
-    # "two_hops_150k_max_peak_dist|K562_two_hops_150k_max_peak_dist|HOPS=2;MAX_PEAK_DISTANCE=150000"
-    # "two_hops_slow_decay_long_range|K562_two_hops_slow_decay_long_range|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000"
-    # "two_hops_slow_decay_long_range_small_batch|K562_two_hops_slow_decay_long_range_small_batch|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8"
-    # "three_hops_small_batch|K562_three_hops_small_batch|HOPS=3;BATCH_SIZE=8"
-    # "two_hops_50k_max_peak_dist|K562_two_hops_50k_max_peak_dist|HOPS=2;MAX_PEAK_DISTANCE=50000"
-    # "two_hops_10k_distance_scale_factor|K562_two_hops_10k_distance_scale_factor|HOPS=2;DISTANCE_SCALE_FACTOR=10000"
-    # "two_hops_40k_distance_scale_factor|K562_two_hops_40k_distance_scale_factor|HOPS=2;DISTANCE_SCALE_FACTOR=40000"
-    # "two_hops_loose_1_pct_filtering|K562_two_hops_loose_1_pct_filtering|HOPS=2;MIN_GENES_PER_CELL=150;MIN_PEAKS_PER_CELL=50;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.01;FILTER_OUT_LOWEST_PCT_PEAKS=0.01"
-    # "two_hops_moderate_5_pct_filtering_small_batch|K562_two_hops_moderate_5_pct_filtering_small_batch|HOPS=2;BATCH_SIZE=8;MIN_GENES_PER_CELL=125;MIN_PEAKS_PER_CELL=75;FILTER_TYPE=pct;FILTER_OUT_LOWEST_PCT_GENES=0.05;FILTER_OUT_LOWEST_PCT_PEAKS=0.05"
-    # "small_model_two_hops_long_range_small_batch|K562_small_model_two_hops_long_range_small_batch|D_MODEL=128;D_FF=512;HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8"
-    # "stability_test_01|K562_stability_test_01|HOPS=2;D_MODEL=128;D_FF=512"
-    # "stability_test_02|K562_stability_test_02|HOPS=2;D_MODEL=128;D_FF=512"
-    # "stability_test_03|K562_stability_test_03|HOPS=2;D_MODEL=128;D_FF=512"
-    # "stability_test_04|K562_stability_test_04|HOPS=2;D_MODEL=128;D_FF=512"
-    # "stability_test_05|K562_stability_test_05|HOPS=2;D_MODEL=128;D_FF=512"
-    # "two_hops_slow_decay_long_range_no_hvg|K562_two_hops_slow_decay_long_range_no_hvg|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000"
-    # "hvg_filter_only_rna|K562_hvg_filter_only_rna|HOPS=2;D_MODEL=128;D_FF=512;BATCH_SIZE=32;TOTAL_EPOCHS=100"
-    # "hvg_filter_disp_0.6|K562_hvg_filter_disp_0.6|HOPS=2;D_MODEL=128;D_FF=512;BATCH_SIZE=32;TOTAL_EPOCHS=100"
-    # "hvg_filter_disp_0.5|K562_hvg_filter_disp_0.5|HOPS=2;D_MODEL=128;D_FF=512;BATCH_SIZE=32;TOTAL_EPOCHS=100"
-    # "hvg_filter_disp_0.4|K562_hvg_filter_disp_0.4|HOPS=2;D_MODEL=128;D_FF=512;BATCH_SIZE=32;TOTAL_EPOCHS=100"
-    # "hvg_filter_disp_0.3|K562_hvg_filter_disp_0.3|HOPS=2;D_MODEL=128;D_FF=512;BATCH_SIZE=32;TOTAL_EPOCHS=100"
-    # "hvg_filter_disp_0.2|K562_hvg_filter_disp_0.2|HOPS=2;D_MODEL=128;D_FF=512;BATCH_SIZE=32;TOTAL_EPOCHS=100"
-    # "hvg_filter_disp_0.1|K562_hvg_filter_disp_0.1|HOPS=2;D_MODEL=128;D_FF=512;BATCH_SIZE=32;TOTAL_EPOCHS=100"
-    # "hvg_filter_disp_0.05|K562_hvg_filter_disp_0.05|HOPS=2;D_MODEL=128;D_FF=512;BATCH_SIZE=32;TOTAL_EPOCHS=100"
-    # "hvg_filter_disp_0.01|K562_hvg_filter_disp_0.01|HOPS=2;D_MODEL=128;D_FF=512;BATCH_SIZE=32;TOTAL_EPOCHS=100"
-    # "hvg_filter_disp_none|K562_hvg_filter_none|HOPS=2;D_MODEL=128;D_FF=512;BATCH_SIZE=32;TOTAL_EPOCHS=100"
-
-    # Best Settings
-    "sample_1_best_settings|K562_sample_1_best_settings|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=sample_1"
-
+    "initial_test|BM_CD8_T_cells_initial_test|HOPS=2;SAMPLE_NAMES=donor1"
 )
 
 
@@ -195,6 +158,11 @@ FILTER_TO_NEAREST_GENE=${DEFAULT_FILTER_TO_NEAREST_GENE}
 PROMOTER_BP=${DEFAULT_PROMOTER_BP}
 RAW_RNA_FILE=${DEFAULT_RAW_RNA_FILE}
 RAW_ATAC_FILE=${DEFAULT_RAW_ATAC_FILE}
+FILTER_RNA=${DEFAULT_FILTER_RNA}
+FILTER_ATAC=${DEFAULT_FILTER_ATAC}
+MIN_RNA_DISP=${DEFAULT_MIN_RNA_DISP}
+MIN_ATAC_DISP=${DEFAULT_MIN_ATAC_DISP}
+SAMPLE_NAMES=${DEFAULT_SAMPLE_NAMES}
 
 # Model training parameters
 TOTAL_EPOCHS=${DEFAULT_TOTAL_EPOCHS}
@@ -231,6 +199,10 @@ SHORTCUT_L1=${DEFAULT_SHORTCUT_L1}
 SHORTCUT_L2=${DEFAULT_SHORTCUT_L2}
 SHORTCUT_TOPK=${DEFAULT_SHORTCUT_TOPK}
 SHORTCUT_DROPOUT=${DEFAULT_SHORTCUT_DROPOUT}
+SUBSAMPLE_MAX_TFS=${DEFAULT_SUBSAMPLE_MAX_TFS}
+SUBSAMPLE_MAX_TGS=${DEFAULT_SUBSAMPLE_MAX_TGS}
+SUBSAMPLE_MAX_WINDOWS_PER_CHROM=${DEFAULT_SUBSAMPLE_MAX_WINDOWS_PER_CHROM}
+SUBSAMPLE_MAX_CELLS=${DEFAULT_SUBSAMPLE_MAX_CELLS}
 SUBSAMPLE_SEED=${DEFAULT_SUBSAMPLE_SEED}
 ALLOWED_SAMPLES=${DEFAULT_ALLOWED_SAMPLES}
 RESUME_CHECKPOINT_PATH=${DEFAULT_RESUME_CHECKPOINT_PATH}
@@ -267,6 +239,11 @@ if [ -n "${PARAM_OVERRIDES}" ]; then
                 PROMOTER_BP) PROMOTER_BP=$param_value ;;
                 RAW_RNA_FILE) RAW_RNA_FILE=$param_value ;;
                 RAW_ATAC_FILE) RAW_ATAC_FILE=$param_value ;;
+                FILTER_RNA) FILTER_RNA=$param_value ;;
+                FILTER_ATAC) FILTER_ATAC=$param_value ;;
+                MIN_RNA_DISP) MIN_RNA_DISP=$param_value ;;
+                MIN_ATAC_DISP) MIN_ATAC_DISP=$param_value ;;
+                SAMPLE_NAMES) SAMPLE_NAMES=$param_value ;;
                 # Model training parameters
                 TOTAL_EPOCHS) TOTAL_EPOCHS=$param_value ;;
                 BATCH_SIZE) BATCH_SIZE=$param_value ;;
@@ -302,6 +279,10 @@ if [ -n "${PARAM_OVERRIDES}" ]; then
                 SHORTCUT_L2) SHORTCUT_L2=$param_value ;;
                 SHORTCUT_TOPK) SHORTCUT_TOPK=$param_value ;;
                 SHORTCUT_DROPOUT) SHORTCUT_DROPOUT=$param_value ;;
+                SUBSAMPLE_MAX_TFS) SUBSAMPLE_MAX_TFS=$param_value ;;
+                SUBSAMPLE_MAX_TGS) SUBSAMPLE_MAX_TGS=$param_value ;;
+                SUBSAMPLE_MAX_WINDOWS_PER_CHROM) SUBSAMPLE_MAX_WINDOWS_PER_CHROM=$param_value ;;
+                SUBSAMPLE_MAX_CELLS) SUBSAMPLE_MAX_CELLS=$param_value ;;
                 SUBSAMPLE_SEED) SUBSAMPLE_SEED=$param_value ;;
                 ALLOWED_SAMPLES) ALLOWED_SAMPLES=$param_value ;;
                 RESUME_CHECKPOINT_PATH) RESUME_CHECKPOINT_PATH=$param_value ;;
@@ -311,7 +292,6 @@ if [ -n "${PARAM_OVERRIDES}" ]; then
     done
     echo ""
 fi
-
 # ==========================================
 #        FIXED CONFIGURATION
 # ==========================================
@@ -332,14 +312,13 @@ TRAINING_DATA_CACHE="${DATABASE_DIR}/training_data_cache"
 EXPERIMENT_DIR="${PROJECT_DATA_DIR}/experiments"
 OUTPUT_DIR="${EXPERIMENT_DIR}/${DATASET_NAME}"
 
-RAW_SINGLE_CELL_DATA="${RAW_DATA}/K562"
+RAW_SINGLE_CELL_DATA="${RAW_DATA}/bone_marrow_cd8_t"
 SAMPLE_PROCESSED_DATA_DIR="${PROCESSED_DATA}/${DATASET_NAME}"
 SAMPLE_DATA_CACHE_DIR="${TRAINING_DATA_CACHE}/${DATASET_NAME}"
 COMMON_DATA="${SAMPLE_DATA_CACHE_DIR}/common"
 
 # Sample information
-SAMPLE_NAMES="sample_1"
-VALIDATION_DATASETS="sample_1"
+VALIDATION_DATASETS=""
 
 # Force recalculate (set to true if you want to reprocess data)
 FORCE_RECALCULATE=false
@@ -389,6 +368,7 @@ write_param_csv_row() {
         WINDOW_SIZE DISTANCE_SCALE_FACTOR MAX_PEAK_DISTANCE
         DIST_BIAS_MODE FILTER_TO_NEAREST_GENE PROMOTER_BP
         RAW_SINGLE_CELL_DATA RAW_RNA_FILE RAW_ATAC_FILE
+        FILTER_RNA FILTER_ATAC MIN_RNA_DISP MIN_ATAC_DISP
         TOTAL_EPOCHS BATCH_SIZE PATIENCE SAVE_EVERY_N_EPOCHS
         CORR_LOSS_WEIGHT EDGE_LOSS_WEIGHT COS_WEIGHT SHORTCUT_REG_WEIGHT
         GRAD_ACCUM_STEPS USE_GRAD_ACCUMULATION USE_GRAD_CHECKPOINTING
@@ -398,6 +378,7 @@ write_param_csv_row() {
         USE_DISTANCE_BIAS USE_SHORTCUT USE_MOTIF_MASK
         MOTIF_MASK_THRESH MOTIF_PRIOR_SCALE ATTN_BIAS_SCALE
         SHORTCUT_L1 SHORTCUT_L2 SHORTCUT_TOPK SHORTCUT_DROPOUT
+        SUBSAMPLE_MAX_TFS SUBSAMPLE_MAX_TGS SUBSAMPLE_MAX_WINDOWS_PER_CHROM SUBSAMPLE_MAX_CELLS
         SUBSAMPLE_SEED ALLOWED_SAMPLES RESUME_CHECKPOINT_PATH
     )
 
@@ -471,7 +452,11 @@ PREPROCESS_CMD="python src/multiomic_transformer/data/preprocess_argparse.py \
     --max_peak_distance ${MAX_PEAK_DISTANCE} \
     --dist_bias_mode ${DIST_BIAS_MODE} \
     --raw_rna_file ${RAW_RNA_FILE} \
-    --raw_atac_file ${RAW_ATAC_FILE}"
+    --raw_atac_file ${RAW_ATAC_FILE} \
+    --filter_rna ${FILTER_RNA} \
+    --filter_atac ${FILTER_ATAC} \
+    --min_rna_disp ${MIN_RNA_DISP} \
+    --min_atac_disp ${MIN_ATAC_DISP}"
 
 # Add optional validation datasets
 if [ -n "${VALIDATION_DATASETS}" ]; then
@@ -510,7 +495,7 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
     echo "         STARTING MODEL TRAINING"
     echo "=========================================="
     echo ""
-    echo "[INFO] Detected compute partition, progressing with model training"
+    echo "[INFO] Detected ${SLURM_JOB_PARTITION:-} partition, progressing with model training"
 
     # Build training command
     TRAIN_CMD="src/multiomic_transformer/scripts/multinode_train_argparse.py \
@@ -578,6 +563,17 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
         TRAIN_CMD="${TRAIN_CMD} --shortcut_topk ${SHORTCUT_TOPK}"
     fi
 
+    if [ -n "${SUBSAMPLE_MAX_TFS}" ]; then
+        TRAIN_CMD="${TRAIN_CMD} --subsample_max_tfs ${SUBSAMPLE_MAX_TFS}"
+    fi
+
+    if [ -n "${SUBSAMPLE_MAX_TGS}" ]; then
+        TRAIN_CMD="${TRAIN_CMD} --subsample_max_tgs ${SUBSAMPLE_MAX_TGS}"
+    fi
+
+    if [ -n "${SUBSAMPLE_MAX_WINDOWS_PER_CHROM}" ]; then
+        TRAIN_CMD="${TRAIN_CMD} --subsample_max_windows_per_chrom ${SUBSAMPLE_MAX_WINDOWS_PER_CHROM}"
+    fi
 
     if [ -n "${ALLOWED_SAMPLES}" ]; then
         TRAIN_CMD="${TRAIN_CMD} --allowed_samples ${ALLOWED_SAMPLES}"
@@ -754,8 +750,8 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
             --training_num "${TRAINING_NUM}" \
             --experiment_dir "${EXPERIMENT_DIR}" \
             --model_file "${MODEL_FILE}" \
-            --dataset_type "k562" \
-            --sample_name_list "K562"
+            --dataset_type "t_cell" \
+            --sample_name_list "${SAMPLE_NAMES}"
 
         echo "Plotting Training Figures..."
         poetry run python ./src/multiomic_transformer/utils/plotting.py \
@@ -764,14 +760,14 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
             --experiment_dir "${EXPERIMENT_DIR}" \
             --model_file "${MODEL_FILE}"
 
-        echo "Running AUROC Refactored"
+        echo "Running AUROC Testing Refactored..."
         poetry run python ./src/multiomic_transformer/utils/auroc_refactored.py \
             --experiment "${DATASET_NAME}" \
             --training_num "${TRAINING_NUM}" \
             --experiment_dir "${EXPERIMENT_DIR}" \
             --model_file "${MODEL_FILE}" \
-            --dataset_type "k562" \
-            --sample_name_list "K562"
+            --dataset_type "t_cell" \
+            --sample_name_list "${SAMPLE_NAMES}"
 
         echo ""
         echo "=========================================="
@@ -795,7 +791,7 @@ else
     echo "   SKIPPING MODEL TRAINING"
     echo "=========================================="
     echo ""
-    echo "[INFO] Running on ${SLURM_JOB_PARTITION:-unknown} partition (not 'dense'), skipping model training"
-    echo "[INFO] Submit another job on the 'dense' partition to run training"
+    echo "[INFO] Running on ${SLURM_JOB_PARTITION:-unknown} partition (not 'dense' or 'gpu'), skipping model training"
+    echo "[INFO] Submit another job on the 'dense' or 'gpu' partition to run training"
 fi
 
