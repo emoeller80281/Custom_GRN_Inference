@@ -188,23 +188,17 @@ def eval_method_vs_gt(
         return balanced.sample(frac=1.0, random_state=random_state).reset_index(drop=True)
     
     if balance == True:
-        balanced_d = balance_pos_neg(d, random_state=42)
-    else:
-        balanced_d = d.copy()
+        d = balance_pos_neg(d, random_state=42)
     
     y = d["_in_gt"].fillna(0).astype(int).to_numpy()
     s = d["Score"].to_numpy()
     
-    balanced_y = balanced_d["_in_gt"].fillna(0).astype(int).to_numpy()
-    balanced_s = balanced_d["Score"].to_numpy()
-    
     if use_abs_scores:
         s = np.abs(s)
-        balanced_s = np.abs(balanced_s)
     
     # Calculate AUROC and AUPRC scores
     auroc = roc_auc_score(y, s) if np.unique(y).size == 2 else np.nan
-    auprc = average_precision_score(balanced_y, balanced_s) if balanced_y.sum() > 0 else np.nan
+    auprc = average_precision_score(y, s) if y.sum() > 0 else np.nan
     pos_rate = y.mean()
 
     # Pre-sort once for precision@K
@@ -259,57 +253,25 @@ def load_grad_df_with_two_scores(selected_experiment_dir, tf_names, tg_names):
     T, G = grad_abs.shape
     tf_idx, tg_idx = np.meshgrid(np.arange(T), np.arange(G), indexing="ij")
             
-    eps = 1e-12
-    mask = (score_pooled > eps) | (np.abs(score_per_tf) > eps)
+    # eps = 1e-12
+    # mask = (score_pooled > eps) | (np.abs(score_per_tf) > eps)
 
-    tf_idx, tg_idx = np.where(mask)
+    # tf_idx, tg_idx = np.where(mask)
+    
+    tf_idx = tf_idx.ravel()
+    tg_idx = tg_idx.ravel()
 
     df = pd.DataFrame({
         "Source": np.asarray(tf_names, dtype=object)[tf_idx],
         "Target": np.asarray(tg_names, dtype=object)[tg_idx],
-        "Score_pooled": score_pooled[tf_idx, tg_idx],
-        "Score_per_tf": score_per_tf[tf_idx, tg_idx],
+        "Score_pooled": score_per_tf.ravel(),
+        "Score_per_tf": score_per_tf.ravel(),
     })
     
     df["Source"] = df["Source"].astype(str).str.upper()
     df["Target"] = df["Target"].astype(str).str.upper()
     
     return df
-
-def original_load_gradient_attribution_matrix(self):
-    # --- load gradient attribution matrix ---
-    grad = np.load(self.model_training_dir / "tf_tg_grad_attribution.npy")  # shape [T, G]
-    assert grad.shape == (len(self.tf_names), len(self.tg_names))
-
-    # Optional: handle NaNs
-    grad = np.nan_to_num(grad, nan=0.0)
-
-    # Use absolute gradient magnitude as importance
-    grad_abs = np.abs(grad)
-
-    # Row-wise z-score per TF (ignore NaNs if you keep them)
-    row_mean = grad_abs.mean(axis=1, keepdims=True)
-    row_std  = grad_abs.std(axis=1, keepdims=True) + 1e-6
-    grad_z = (grad_abs - row_mean) / row_std   # [T, G]
-
-    # Build long-form dataframe
-    T, G = grad_z.shape
-    tf_idx, tg_idx = np.meshgrid(np.arange(T), np.arange(G), indexing="ij")
-
-    gradient_attrib_df = pd.DataFrame({
-        "Source": np.array(self.tf_names, dtype=object)[tf_idx.ravel()],
-        "Target": np.array(self.tg_names, dtype=object)[tg_idx.ravel()],
-        "Score": grad_z.ravel(),
-    })
-    gradient_attrib_df["Source"] = gradient_attrib_df["Source"].astype(str).str.upper()
-    gradient_attrib_df["Target"] = gradient_attrib_df["Target"].astype(str).str.upper()
-    
-    gradient_attrib_df["Score"] = (
-        (gradient_attrib_df["Score"] - gradient_attrib_df["Score"].min()) / 
-        (gradient_attrib_df["Score"].max() - gradient_attrib_df["Score"].min())
-    )
-        
-    return gradient_attrib_df
 
 def load_tf_knockout_scores_with_two_scores(
     selected_experiment_dir,
@@ -369,7 +331,7 @@ def load_tf_knockout_scores_with_two_scores(
     df = pd.DataFrame({
         "Source": np.asarray(tf_names, dtype=object)[tf_idx.ravel()],
         "Target": np.asarray(tg_names, dtype=object)[tg_idx.ravel()],
-        "Score_pooled": score_pooled.ravel(),
+        "Score_pooled": score_per_tf.ravel(),
         "Score_per_tf": score_per_tf.ravel(),
         "counts": counts.ravel(),
     })
@@ -391,6 +353,7 @@ def load_grad_and_tf_ko_df(selected_experiment_dir):
     )
 
     grad_pooled_df = grad_attrib_df.copy()
+    
     grad_pooled_df["Score"] = grad_pooled_df["Score_pooled"]
     grad_pooled_df = grad_pooled_df[["Source", "Target", "Score"]]
     logging.info("  - Pooled Score DataFrame:")
@@ -488,7 +451,7 @@ def per_tf_metrics(
     gt_edges: pd.DataFrame, 
     top_fracs=(0.001, 0.005, 0.01, 0.05), 
     min_edges=10, min_pos=1,
-    balance_for_auprc=False
+    balance=True
     ) -> pd.DataFrame:
     """
     Returns a per-TF dataframe with:
@@ -513,16 +476,15 @@ def per_tf_metrics(
             continue
         if n_pos < min_pos or n_neg == 0:
             continue
-
-        # AUROC defined only if both classes present
-        auc = roc_auc_score(y, s) if (n_pos > 0 and n_neg > 0) else np.nan
         
-        if balance_for_auprc:
+        if balance:
             balanced = balance_pos_neg(g, label_col="_in_gt", random_state=42)
             y_bal = balanced["_in_gt"].astype(int).to_numpy()
             s_bal = balanced["Score"].to_numpy()
+            auc = roc_auc_score(y_bal, s_bal)
             auprc = average_precision_score(y_bal, s_bal) if (y_bal.sum() > 0 and y_bal.sum() < len(y_bal)) else np.nan
         else:
+            auc = roc_auc_score(y, s)
             auprc = average_precision_score(y, s) if n_pos > 0 else np.nan
         
         # Pre-sort once for precision@K
@@ -570,7 +532,7 @@ def calculate_pooled_auroc(standardized_method_dict, ground_truth_edges_dict, pe
             if len(d_eval) == 0:
                 logging.info(f"  - {gt_name}: no overlap, skipping")
                 continue
-            metrics, raw_results_df = eval_method_vs_gt(d_eval, gt_edges)
+            metrics, raw_results_df = eval_method_vs_gt(d_eval, gt_edges, balance=True)
             all_results.append({"method": method_name, "gt": gt_name, **metrics})
 
     results_df = pd.DataFrame(all_results)
@@ -594,7 +556,7 @@ def calculate_per_tf_auroc(standardized_method_dict, ground_truth_edges_dict, to
                 top_fracs=top_k_fracs, 
                 min_edges=50, 
                 min_pos=10,
-                balance_for_auprc=True
+                balance=True
                 )
             
             # Skip if no TFs passed the filtering criteria
@@ -668,7 +630,6 @@ if __name__ == "__main__":
             "RN112": GROUND_TRUTH_DIR / "RN112.tsv",
             "RN114": GROUND_TRUTH_DIR / "RN114.tsv",
             "RN116": GROUND_TRUTH_DIR / "RN116.tsv",
-            "ENCODE": GROUND_TRUTH_DIR / "encode" / "mESC_encode_tf_peak_tg_dist.csv",
         }
     
     elif dataset_type.lower() == "macrophage":

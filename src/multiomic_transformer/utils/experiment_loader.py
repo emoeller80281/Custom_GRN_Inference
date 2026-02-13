@@ -12,7 +12,7 @@ import torch
 import sys
 import logging
 from sklearn.metrics import roc_auc_score, average_precision_score, precision_recall_curve, roc_curve
-from typing import Tuple, Optional
+from typing import Set, Tuple, Optional
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 
@@ -90,6 +90,7 @@ class ExperimentLoader:
         
         # Model evaluation metric results with ground truth
         self.df_with_ground_truth = None
+        self.gt_labeled_dfs = {}
         
     def load_trained_model(self, checkpoint_file):
         """
@@ -189,7 +190,7 @@ class ExperimentLoader:
         median_val = np.median(grad_abs, axis=1, keepdims=True)
         mad = np.median(np.abs(grad_abs - median_val), axis=1, keepdims=True) + 1e-6
         score_per_tf = (grad_abs - median_val) / mad
-
+        
         T, G = grad_abs.shape
         tf_idx, tg_idx = np.meshgrid(np.arange(T), np.arange(G), indexing="ij")
                 
@@ -203,6 +204,41 @@ class ExperimentLoader:
             "Target": np.asarray(self.tg_names, dtype=object)[tg_idx],
             "Score_pooled": score_pooled[tf_idx, tg_idx],
             "Score_per_tf": score_per_tf[tf_idx, tg_idx],
+        })
+        
+        df["Source"] = df["Source"].astype(str).str.upper()
+        df["Target"] = df["Target"].astype(str).str.upper()
+        
+        return df
+    
+    def load_gradient_attribution_median(self):
+        gradient_attribution_file = self.model_training_dir / "tf_tg_grad_attribution.npy"
+        
+        assert gradient_attribution_file.exists(), f"Gradient attribution file {gradient_attribution_file} does not exist."
+        
+        grad = np.load(gradient_attribution_file).astype(np.float32)
+        assert grad.shape == (len(self.tf_names), len(self.tg_names))
+
+        grad = np.nan_to_num(grad, nan=0.0)
+        grad_abs = np.abs(grad)
+
+        # Row-wise z-score per TF (ignore NaNs if you keep them)
+        row_mean = np.median(grad_abs, axis=1, keepdims=True)
+        row_std  = grad_abs.std(axis=1, keepdims=True) + 1e-6
+        grad_z = (grad_abs - row_mean) / row_std   # [T, G]
+        
+        T, G = grad_abs.shape
+        tf_idx, tg_idx = np.meshgrid(np.arange(T), np.arange(G), indexing="ij")
+                
+        eps = 1e-12
+        mask = (grad_z > eps) | (np.abs(grad_z) > eps)
+
+        tf_idx, tg_idx = np.where(mask)
+
+        df = pd.DataFrame({
+            "Source": np.asarray(self.tf_names, dtype=object)[tf_idx],
+            "Target": np.asarray(self.tg_names, dtype=object)[tg_idx],
+            "Score": grad_z[tf_idx, tg_idx],
         })
         
         df["Source"] = df["Source"].astype(str).str.upper()
@@ -402,31 +438,37 @@ class ExperimentLoader:
             ground_truth_df = ground_truth_df.rename(columns={ground_truth_df.columns[0]: "Source", ground_truth_df.columns[1]: "Target"})
         ground_truth_df["Source"] = ground_truth_df["Source"].astype(str).str.upper()
         ground_truth_df["Target"] = ground_truth_df["Target"].astype(str).str.upper()
-            
-        return ground_truth_df
-    
-    def create_ground_truth_comparison_df(self, score_df: pd.DataFrame, ground_truth_df: pd.DataFrame, ground_truth_name: str):
-        gt = ground_truth_df[["Source", "Target"]].dropna().copy()
-        gt["Source"] = gt["Source"].astype(str).str.upper()
-        gt["Target"] = gt["Target"].astype(str).str.upper()
-        gt = gt.drop_duplicates()
-        gt["_in_gt"] = 1
         
-        # Restrict evaluated genes to only those that are in the ground truth
-        gt_tfs = set(gt["Source"])
-        gt_tgs = set(gt["Target"])
-        score_df = score_df[score_df["Source"].isin(gt_tfs) & score_df["Target"].isin(gt_tgs)].copy()
+        # Build TF, TG, and edge sets for quick lookup later
+        gt = ground_truth_df[["Source", "Target"]].dropna()
 
-        df = score_df.merge(gt, how="left", on=["Source", "Target"])
-        df["_in_gt"] = df["_in_gt"].fillna(0)
+        gt_tfs = set(gt["Source"].unique())
+        gt_tgs = set(gt["Target"].unique())
         
+        gt_pairs = (gt["Source"] + "\t" + gt["Target"]).drop_duplicates()
+        
+        gt_lookup = (gt_tfs, gt_tgs, set(gt_pairs))
+            
+        return ground_truth_df, gt_lookup
+    
+    def create_ground_truth_comparison_df(self, score_df, ground_truth_lookup, ground_truth_name):
+        # Normalize once
+        gt_tfs, gt_tgs, gt_pairs_set = ground_truth_lookup
+
+        src = score_df["Source"]
+        tgt = score_df["Target"]
+
+        mask = src.isin(gt_tfs) & tgt.isin(gt_tgs)
+
+        df = score_df.loc[mask].copy()
+        # re-use normalized versions so we don't upper twice
+        df["Source"] = src.loc[mask].values
+        df["Target"] = tgt.loc[mask].values
+
+        key = df["Source"] + "\t" + df["Target"]
+        df["_in_gt"] = key.isin(gt_pairs_set).astype("int8")
         df["ground_truth_name"] = ground_truth_name
-        
-        if self.df_with_ground_truth is None:
-            self.df_with_ground_truth = df
-        else:
-            self.df_with_ground_truth = pd.concat([self.df_with_ground_truth, df], axis=0, ignore_index=True)
-        
+
         return df
     
     def create_overlap_info_df(
@@ -467,15 +509,23 @@ class ExperimentLoader:
     def plot_auroc_auprc(
         self, 
         score_df: pd.DataFrame, 
-        ground_truth_df: pd.DataFrame, 
+        ground_truth: Tuple[pd.DataFrame, Tuple[Set[str], Set[str], Set[str]]],
         ground_truth_name: str, 
         return_overlap_info: bool = True,
         balance_auroc: bool = True,
         balance_auprc: bool = True,
-        use_abs_scores: bool = True,
         no_fig: bool = False,
         ):
-        labeled_df = self.create_ground_truth_comparison_df(score_df, ground_truth_df, ground_truth_name)
+        
+        # if labeled_df := self.gt_labeled_dfs.get(ground_truth_name) is not None:
+        #     logging.debug(f"Using cached labeled dataframe for ground truth {ground_truth_name}")
+        #     labeled_df = self.gt_labeled_dfs[ground_truth_name]
+        # else:
+        
+        ground_truth_df, gt_lookup = ground_truth
+        
+        labeled_df = self.create_ground_truth_comparison_df(score_df, gt_lookup, ground_truth_name)
+            # self.gt_labeled_dfs[ground_truth_name] = labeled_df
             
         if len(labeled_df) == 0 or labeled_df["_in_gt"].nunique() < 2:
             logging.info(f"Need at least one positive and one negative, got {labeled_df['_in_gt'].value_counts().to_dict()}")
@@ -484,38 +534,30 @@ class ExperimentLoader:
         score_col = "Score_pooled"
         
         def _balance_pos_neg(df, random_state=42):
-            """Balance the scores for positive and negative classes by inverting negative scores."""
             rng = np.random.default_rng(random_state)
-            df = df.copy()
-            pos_df = df[df["_in_gt"] == 1]
-            neg_df = df[df["_in_gt"] != 1]
-            
-            n_pos = len(pos_df)
-            n_neg = len(neg_df)
-            if n_pos == 0 or n_neg == 0:
-                logging.info("No positives or negatives, skipping balance")
-                return df
 
-            if n_neg < n_pos:
-                pos_idx = rng.choice(pos_df.index.to_numpy(), size=n_neg, replace=False)
-                pos_sample = pos_df.loc[pos_idx]
-                neg_sample = neg_df
-            else:
-                pos_sample = pos_df
-                neg_idx = rng.choice(neg_df.index.to_numpy(), size=n_pos, replace=False)
-                neg_sample = neg_df.loc[neg_idx]
-            
-            balanced = pd.concat([pos_sample, neg_sample], axis=0)
-            return balanced.sample(frac=1.0, random_state=random_state).reset_index(drop=True)
+            y = df["_in_gt"].to_numpy() == 1
+            pos_idx = np.flatnonzero(y)
+            neg_idx = np.flatnonzero(~y)
+
+            n_pos = pos_idx.size
+            n_neg = neg_idx.size
+            if n_pos == 0 or n_neg == 0:
+                return df  # no copy
+
+            n = min(n_pos, n_neg)
+            if n_pos > n:
+                pos_idx = rng.choice(pos_idx, size=n, replace=False)
+            if n_neg > n:
+                neg_idx = rng.choice(neg_idx, size=n, replace=False)
+
+            # iloc keeps column dtypes; copy only the subset
+            return df.iloc[np.concatenate([pos_idx, neg_idx])].reset_index(drop=True)
         
-        def _create_random_distribution(scores: pd.Series, seed: int = 42) -> np.ndarray:
-            random.seed(seed)
-            uniform_distribution = np.random.uniform(low = scores.min(), high = scores.max(), size = len(scores))
-            resampled_scores = np.random.choice(uniform_distribution, size=len(scores), replace=True)
-            return resampled_scores
-        
-        if use_abs_scores:
-            labeled_df[score_col] = labeled_df[score_col].abs()
+        def _create_random_distribution(scores, seed: int = 42) -> np.ndarray:
+            rng = np.random.default_rng(seed)
+            arr = np.asarray(scores)   # works for Series or ndarray, no copy if already ndarray
+            return rng.uniform(arr.min(), arr.max(), size=arr.shape[0])
         
         y = labeled_df["_in_gt"].fillna(0).astype(int).to_numpy()
         s = labeled_df[score_col].to_numpy()
