@@ -261,7 +261,7 @@ def plot_all_results_auroc_boxplot(
     
     return fig
 
-def plot_per_tf_auroc_agg_by_gt(selected_experiment: str, combined_per_tf_all_df: pd.DataFrame) -> plt.Figure:
+def plot_per_tf_auroc_agg_by_gt(name: str, selected_experiment: str, combined_per_tf_all_df: pd.DataFrame) -> plt.Figure:
     selected_per_tf_df = combined_per_tf_all_df.loc[combined_per_tf_all_df["experiment"] == selected_experiment].copy()
 
     # Average the per-TF AUROC scores across ground truths for each method
@@ -283,10 +283,15 @@ def plot_per_tf_auroc_agg_by_gt(selected_experiment: str, combined_per_tf_all_df
     
     exp_dir = FIGURE_DIR / selected_experiment
     exp_dir.mkdir(parents=True, exist_ok=True)
-    fig.savefig(exp_dir / "per_tf_auroc_agg_by_gt.svg", bbox_inches="tight")
+    
+    multi_exp_dir = FIGURE_DIR / 'multi_experiment' / name / selected_experiment
+    multi_exp_dir.mkdir(parents=True, exist_ok=True)
+    
+    fig.savefig(exp_dir / "per_tf_auroc_agg_by_gt_vs_other_methods.svg", bbox_inches="tight")
+    fig.savefig(multi_exp_dir / f"per_tf_auroc_agg_by_gt_vs_other_methods.svg", bbox_inches="tight")
     plt.close(fig)
 
-def plot_per_tf_auroc_agg_by_tf(selected_experiment: str, combined_per_tf_all_df: pd.DataFrame) -> plt.Figure:
+def plot_per_tf_auroc_agg_by_tf(name: str, selected_experiment: str, combined_per_tf_all_df: pd.DataFrame) -> plt.Figure:
     selected_per_tf_df = combined_per_tf_all_df.loc[combined_per_tf_all_df["experiment"] == selected_experiment].copy()
 
     per_tf_mean_across_tfs = (
@@ -305,10 +310,15 @@ def plot_per_tf_auroc_agg_by_tf(selected_experiment: str, combined_per_tf_all_df
     
     exp_dir = FIGURE_DIR / selected_experiment
     exp_dir.mkdir(parents=True, exist_ok=True)
-    fig.savefig(exp_dir / "per_tf_auroc_agg_by_tf.svg", bbox_inches="tight")
+    
+    multi_exp_dir = FIGURE_DIR / 'multi_experiment' / name / selected_experiment
+    multi_exp_dir.mkdir(parents=True, exist_ok=True)
+    
+    fig.savefig(exp_dir / "per_tf_auroc_agg_by_tf_vs_other_methods.svg", bbox_inches="tight")
+    fig.savefig(multi_exp_dir / f"per_tf_auroc_agg_by_tf_vs_other_methods.svg", bbox_inches="tight")
     plt.close(fig)
     
-def plot_pooled_auroc(selected_experiment: str, combined_results_df: pd.DataFrame) -> plt.Figure:
+def plot_pooled_auroc(name: str, selected_experiment: str, combined_results_df: pd.DataFrame) -> plt.Figure:
     selected_results_df = combined_results_df.loc[combined_results_df["experiment"] == selected_experiment].copy()
     
     fig = plot_all_results_auroc_boxplot(
@@ -319,7 +329,12 @@ def plot_pooled_auroc(selected_experiment: str, combined_results_df: pd.DataFram
     
     exp_dir = FIGURE_DIR / selected_experiment
     exp_dir.mkdir(parents=True, exist_ok=True)
-    fig.savefig(exp_dir / "pooled_auroc.svg", bbox_inches="tight")
+    
+    multi_exp_dir = FIGURE_DIR / 'multi_experiment' / name / selected_experiment
+    multi_exp_dir.mkdir(parents=True, exist_ok=True)
+    
+    fig.savefig(exp_dir / "pooled_auroc_vs_other_methods.svg", bbox_inches="tight")
+    fig.savefig(multi_exp_dir / f"pooled_auroc_vs_other_methods.svg", bbox_inches="tight")
     plt.close(fig)
 
 def plot_multiexperiment_per_tf_auroc_agg_by_gt(name: str, selected_method: str, combined_per_tf_all_df: pd.DataFrame) -> plt.Figure:
@@ -342,9 +357,9 @@ def plot_multiexperiment_per_tf_auroc_agg_by_gt(name: str, selected_method: str,
         ylim=(0.2, 0.8)
         )
     
-    exp_dir = FIGURE_DIR / "multi_experiment" / name
-    exp_dir.mkdir(parents=True, exist_ok=True)
-    fig.savefig(exp_dir / f"{selected_method_safe}_per_tf_agg_by_gt.svg", bbox_inches="tight")
+    multi_exp_dir = FIGURE_DIR / "multi_experiment" / name
+    multi_exp_dir.mkdir(parents=True, exist_ok=True)
+    fig.savefig(multi_exp_dir / f"{selected_method_safe}_per_tf_agg_by_gt.svg", bbox_inches="tight")
     plt.close(fig)
 
 def plot_multiexperiment_per_tf_auroc_agg_by_tf(name: str, selected_method: str, combined_per_tf_all_df: pd.DataFrame) -> plt.Figure:
@@ -358,9 +373,9 @@ def plot_multiexperiment_per_tf_auroc_agg_by_tf(name: str, selected_method: str,
         ylim=(0.2, 0.8)
         )
     
-    exp_dir = FIGURE_DIR / "multi_experiment" / name
-    exp_dir.mkdir(parents=True, exist_ok=True)
-    fig.savefig(exp_dir / f"{selected_method_safe}_per_tf_agg_by_tf.svg", bbox_inches="tight")
+    multi_exp_dir = FIGURE_DIR / "multi_experiment" / name
+    multi_exp_dir.mkdir(parents=True, exist_ok=True)
+    fig.savefig(multi_exp_dir / f"{selected_method_safe}_per_tf_agg_by_tf.svg", bbox_inches="tight")
     plt.close(fig)
 
 def plot_multiexperiment_pooled_auroc(name: str, selected_method: str, combined_results_df: pd.DataFrame) -> plt.Figure:
@@ -374,13 +389,13 @@ def plot_multiexperiment_pooled_auroc(name: str, selected_method: str, combined_
         ylim=(0.2, 0.8)
         )
     
-    exp_dir = FIGURE_DIR / "multi_experiment" / name
-    exp_dir.mkdir(parents=True, exist_ok=True)
-    fig.savefig(exp_dir / f"{selected_method_safe}_pooled_auroc.svg", bbox_inches="tight")
+    multi_exp_dir = FIGURE_DIR / "multi_experiment" / name
+    multi_exp_dir.mkdir(parents=True, exist_ok=True)
+    fig.savefig(multi_exp_dir / f"{selected_method_safe}_pooled_auroc.svg", bbox_inches="tight")
     plt.close(fig)
 
 
-def format_experiment_type_names(experiment_type, combined_results_df, combined_per_tf_all_df):
+def format_experiment_type_names(experiment_type, combined_results_df, combined_per_tf_all_df, selected_method):
     """
     Formats the method names in the combined results DataFrames based on the specified experiment type.
     Must be one of: ['mESC_sample_num', 'dispersion', 'macrophage_sample_num', 'generic']
@@ -614,12 +629,12 @@ if __name__ == "__main__":
             "experiment_type": "dispersion",
             "multi_experiment_name": "K562_dispersion",
         },
-        "K562_best_experiment_settings": {
+        "K562_best_settings": {
             "experiment_list": [
-                ("K562_best_experiment_settings", 1),
+                ("K562_sample_1_best_settings", 1),
             ],
             "experiment_type": "generic",
-            "multi_experiment_name": "K562_best_experiment_settings",
+            "multi_experiment_name": "K562_sample_1_best_settings",
         },
     }
     
@@ -630,8 +645,24 @@ if __name__ == "__main__":
     # Selected method options: ['Gradient Attribution', 'TF Knockout']
     # Experiment type options: ['mESC_sample_num', 'dispersion', 'macrophage_sample_num', 'generic']
     
-    experiments_to_run = ["mESC_E7.5_rep1_dispersion", "mESC_multiple_samples"]
-    selected_method = "Gradient Attribution"
+    experiments_to_run = [
+        # "mESC_best_settings",
+        # "mESC_E7.5_rep1_dispersion", 
+        # "mESC_multiple_samples",
+        # "mESC_E7.5_rep1_dispersion",
+        # "mESC_E7.5_rep2_dispersion",
+        # "mESC_E8.5_rep1_dispersion",
+        # "mESC_E8.5_rep2_dispersion",
+        # "macrophage_best_samples",
+        # "macrophage_multiple_samples",
+        # "macrophage_buffer_1_dispersion",
+        # "macrophage_buffer_2_dispersion",
+        # "macrophage_buffer_3_dispersion",
+        # "macrophage_buffer_4_dispersion",
+        # "K562_dispersion",
+        "K562_best_settings",
+        ]
+    selected_methods = ["Gradient Attribution", "TF Knockout"]
     
     for experiment_name in experiments_to_run:
         if experiment_name in multi_experiment_settings:
@@ -642,7 +673,6 @@ if __name__ == "__main__":
             logging.warning(f"Experiment {experiment_name} not found in settings. Skipping.")
 
         logging.info(f"Creating plots for experiment: {multi_experiment_name}")
-        logging.info(f" - Method: {selected_method}")
         logging.info(f" - Experiment type: {experiment_type}")
 
         logging.info("\nLoading and combining experiment results...")
@@ -653,18 +683,21 @@ if __name__ == "__main__":
         logging.info("\nPlotting individual experiment results...")
         for experiment_name, _ in selected_experiment_list:
             logging.info(f"  - {experiment_name}")
-            plot_pooled_auroc(experiment_name, combined_results_df)
-            plot_per_tf_auroc_agg_by_gt(experiment_name, combined_per_tf_all_df)
-            plot_per_tf_auroc_agg_by_tf(experiment_name, combined_per_tf_all_df)
+            plot_pooled_auroc(multi_experiment_name, experiment_name, combined_results_df)
+            plot_per_tf_auroc_agg_by_gt(multi_experiment_name, experiment_name, combined_per_tf_all_df)
+            plot_per_tf_auroc_agg_by_tf(multi_experiment_name, experiment_name, combined_per_tf_all_df)
         
         # Format the x-axis labels based on the experiment type for the combined results DataFrames
         logging.info("\nFormatting combined experiment results...")
-        formatted_results_df, formatted_per_tf_all_df = format_experiment_type_names(experiment_type, combined_results_df, combined_per_tf_all_df)
         
         logging.info("\nPlotting multi-experiment combined results...")
-        plot_multiexperiment_pooled_auroc(multi_experiment_name, selected_method, formatted_results_df)
-        plot_multiexperiment_per_tf_auroc_agg_by_gt(multi_experiment_name, selected_method, formatted_per_tf_all_df)
-        plot_multiexperiment_per_tf_auroc_agg_by_tf(multi_experiment_name, selected_method, formatted_per_tf_all_df)
+        
+        for selected_method in selected_methods:
+            formatted_results_df, formatted_per_tf_all_df = format_experiment_type_names(experiment_type, combined_results_df, combined_per_tf_all_df, selected_method)
+
+            plot_multiexperiment_pooled_auroc(multi_experiment_name, selected_method, formatted_results_df)
+            plot_multiexperiment_per_tf_auroc_agg_by_gt(multi_experiment_name, selected_method, formatted_per_tf_all_df)
+            plot_multiexperiment_per_tf_auroc_agg_by_tf(multi_experiment_name, selected_method, formatted_per_tf_all_df)
         
         logging.info(f"\nPlots saved to: {FIGURE_DIR / 'multi_experiment' / multi_experiment_name}")
         logging.info(f"{'-'*60}\n")

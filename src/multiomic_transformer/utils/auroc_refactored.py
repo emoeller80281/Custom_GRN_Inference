@@ -252,11 +252,6 @@ def load_grad_df_with_two_scores(selected_experiment_dir, tf_names, tg_names):
 
     T, G = grad_abs.shape
     tf_idx, tg_idx = np.meshgrid(np.arange(T), np.arange(G), indexing="ij")
-            
-    # eps = 1e-12
-    # mask = (score_pooled > eps) | (np.abs(score_per_tf) > eps)
-
-    # tf_idx, tg_idx = np.where(mask)
     
     tf_idx = tf_idx.ravel()
     tg_idx = tg_idx.ravel()
