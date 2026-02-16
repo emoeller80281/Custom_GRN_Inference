@@ -15,6 +15,7 @@ from sklearn.metrics import roc_auc_score, average_precision_score, precision_re
 from typing import Set, Tuple, Optional
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
+from tqdm import tqdm
 
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["OMP_NUM_THREADS"] = "1"
@@ -252,12 +253,37 @@ class ExperimentLoader:
 
         pred_blocks = []
         true_blocks = []
+        
+        dataset = self.test_loader.dataset
 
         with torch.no_grad():
-            for b, batch in enumerate(self.test_loader):
+            for b, (batch_indices, batch) in tqdm(
+                enumerate(
+                    zip(self.test_loader.batch_sampler, self.test_loader)
+                    ), 
+                total=min(num_batches, len(self.test_loader.batch_sampler)), 
+                desc="Running forward pass",
+                ncols=80,
+                ):
                 if b >= num_batches:
                     break
+                
+                # Gets the cell indices for the batch, which is used to align the metacell names
+                if hasattr(dataset, "_locate"):
+                    local_indices = [dataset._locate(i)[1] for i in batch_indices]
+                    if dataset._cell_idx is not None:
+                        col_indices = [int(dataset._cell_idx[i]) for i in local_indices]
+                    else:
+                        col_indices = [int(i) for i in local_indices]
+                else:
+                    # Single-chrom dataset
+                    if getattr(dataset, "_cell_idx", None) is not None:
+                        col_indices = [int(dataset._cell_idx[i]) for i in batch_indices]
+                    else:
+                        col_indices = [int(i) for i in batch_indices]
 
+                metacell_names = [dataset.metacell_names[i] for i in col_indices]
+                
                 atac_wins, tf_tensor, tg_expr_true, bias, tf_ids, tg_ids, motif_mask = batch
                 atac_wins    = atac_wins.to(device, non_blocking=True)
                 tf_tensor    = tf_tensor.to(device, non_blocking=True)
@@ -265,7 +291,7 @@ class ExperimentLoader:
                 bias         = bias.to(device, non_blocking=True)
                 tf_ids       = tf_ids.to(device, non_blocking=True)
                 tg_ids       = tg_ids.to(device, non_blocking=True)
-                motif_mask   = motif_mask.to(device, non_blocking=True)
+                motif_mask   = motif_mask.to(device, non_blocking=True)            
 
                 out, _, _ = self.model(
                     atac_wins, tf_tensor,
@@ -280,10 +306,14 @@ class ExperimentLoader:
                 tg_ids_cpu = tg_ids.detach().cpu().numpy().astype(int)
                 tg_names_batch = [global_tg_names[i] for i in tg_ids_cpu]
 
-                cols = [f"batch{b}_cell{i}" for i in range(pred.shape[0])]
+                pred_df = pd.DataFrame(pred.T, index=tg_names_batch, columns=metacell_names)
+                true_df = pd.DataFrame(true.T, index=tg_names_batch, columns=metacell_names)
 
-                pred_blocks.append(pd.DataFrame(pred.T, index=tg_names_batch, columns=cols))
-                true_blocks.append(pd.DataFrame(true.T, index=tg_names_batch, columns=cols))
+                pred_df = pred_df.reindex(index=global_tg_names)
+                true_df = true_df.reindex(index=global_tg_names)
+
+                pred_blocks.append(pred_df)
+                true_blocks.append(true_df)
 
         pred_df = pd.concat(pred_blocks, axis=1, copy=False) if pred_blocks else pd.DataFrame()
         true_df = pd.concat(true_blocks, axis=1, copy=False) if true_blocks else pd.DataFrame()
@@ -312,6 +342,9 @@ class ExperimentLoader:
             return merged
         
         pred_vs_true_expr_comparison_df = _compare_pred_true(pred_df, true_df)
+        
+        self.tg_prediction_df = pred_df
+        self.tg_true_df = true_df
 
         return pred_df, true_df, pred_vs_true_expr_comparison_df
 
@@ -633,7 +666,7 @@ class ExperimentLoader:
 
         if self.tg_prediction_df is None or self.tg_true_df is None or rerun_forward_pass:
             logging.info("Running forward pass to get predicted vs true TG expression for a subset of test batches...")
-            self.tg_prediction_df, self.tg_true_df = self.run_forward_pass(num_batches=num_batches)
+            self.tg_prediction_df, self.tg_true_df, _ = self.run_forward_pass(num_batches=num_batches)
         
         x = self.tg_prediction_df.mean(axis=1).values
         y = self.tg_true_df.mean(axis=1).values
