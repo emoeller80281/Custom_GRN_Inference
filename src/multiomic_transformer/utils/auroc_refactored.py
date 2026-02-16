@@ -232,7 +232,7 @@ def restrict_to_gt_universe(method_df: pd.DataFrame, gt_edges: pd.DataFrame) -> 
     gt_tgs = set(gt_edges["Target"])
     return method_df[method_df["Source"].isin(gt_tfs) & method_df["Target"].isin(gt_tgs)].copy()
 
-def load_grad_df_with_two_scores(selected_experiment_dir, tf_names, tg_names):
+def load_gradient_attribution(selected_experiment_dir, tf_names, tg_names):
     gradient_attribution_file = selected_experiment_dir / "tf_tg_grad_attribution.npy"
     
     assert gradient_attribution_file.exists(), f"Gradient attribution file {gradient_attribution_file} does not exist."
@@ -243,12 +243,10 @@ def load_grad_df_with_two_scores(selected_experiment_dir, tf_names, tg_names):
     grad = np.nan_to_num(grad, nan=0.0)
     grad_abs = np.abs(grad)
 
-    score_pooled = np.log1p(grad_abs)
-
     # Calculate per-TF robust z-score
     median_val = np.median(grad_abs, axis=1, keepdims=True)
     mad = np.median(np.abs(grad_abs - median_val), axis=1, keepdims=True) + 1e-6
-    score_per_tf = (grad_abs - median_val) / mad
+    score = (grad_abs - median_val) / mad
 
     T, G = grad_abs.shape
     tf_idx, tg_idx = np.meshgrid(np.arange(T), np.arange(G), indexing="ij")
@@ -259,8 +257,7 @@ def load_grad_df_with_two_scores(selected_experiment_dir, tf_names, tg_names):
     df = pd.DataFrame({
         "Source": np.asarray(tf_names, dtype=object)[tf_idx],
         "Target": np.asarray(tg_names, dtype=object)[tg_idx],
-        "Score_pooled": score_per_tf.ravel(),
-        "Score_per_tf": score_per_tf.ravel(),
+        "Score": score.ravel(),
     })
     
     df["Source"] = df["Source"].astype(str).str.upper()
@@ -268,7 +265,7 @@ def load_grad_df_with_two_scores(selected_experiment_dir, tf_names, tg_names):
     
     return df
 
-def load_tf_knockout_scores_with_two_scores(
+def load_tf_knockout(
     selected_experiment_dir,
     tf_names,
     tg_names,
@@ -278,8 +275,7 @@ def load_tf_knockout_scores_with_two_scores(
     """
     Loads TF-knockout effects and returns a long-form DF with two scores:
 
-      - Score_pooled: log1p(effect_used)  (global magnitude-compressed score)
-      - Score_per_tf: robust per-TF score = (effect_used - median_tf) / MAD_tf
+      - Score: robust per-TF score = (effect_used - median_tf) / MAD_tf
 
     Where effect_used is either:
       - clip(effect, 0, inf) if positive_only=True
@@ -312,12 +308,11 @@ def load_tf_knockout_scores_with_two_scores(
     # --- pooled score ---
     # If signed, use abs for pooled magnitude (keeps "strength" notion comparable to gradient pooled)
     pooled_base = effect_used if positive_only else np.abs(effect_used)
-    score_pooled = np.log1p(pooled_base)
 
     # --- per-TF robust score ---
     med = np.nanmedian(effect_used, axis=1, keepdims=True)
     mad = np.nanmedian(np.abs(effect_used - med), axis=1, keepdims=True) + eps
-    score_per_tf = (effect_used - med) / mad
+    score = (effect_used - med) / mad
 
     # --- build long-form DF ---
     T, G = effect_used.shape
@@ -326,22 +321,19 @@ def load_tf_knockout_scores_with_two_scores(
     df = pd.DataFrame({
         "Source": np.asarray(tf_names, dtype=object)[tf_idx.ravel()],
         "Target": np.asarray(tg_names, dtype=object)[tg_idx.ravel()],
-        "Score_pooled": score_per_tf.ravel(),
-        "Score_per_tf": score_per_tf.ravel(),
+        "Score": score.ravel(),
         "counts": counts.ravel(),
     })
 
-    # Drop unobserved (Score_pooled will be NaN there)
-    df = df.dropna(subset=["Score_pooled"]).reset_index(drop=True)
-
     df["Source"] = df["Source"].astype(str).str.upper()
     df["Target"] = df["Target"].astype(str).str.upper()
+    
     return df
 
 def load_grad_and_tf_ko_df(selected_experiment_dir):
     tf_names, tg_names = load_vocab(selected_experiment_dir)
     logging.info("Loading Gradient Attribution")
-    grad_attrib_df = load_grad_df_with_two_scores(
+    grad_attrib_df = load_gradient_attribution(
         selected_experiment_dir=selected_experiment_dir,
         tf_names=tf_names,
         tg_names=tg_names,
@@ -349,19 +341,17 @@ def load_grad_and_tf_ko_df(selected_experiment_dir):
 
     grad_pooled_df = grad_attrib_df.copy()
     
-    grad_pooled_df["Score"] = grad_pooled_df["Score_pooled"]
     grad_pooled_df = grad_pooled_df[["Source", "Target", "Score"]]
     logging.info("  - Pooled Score DataFrame:")
     logging.info(f"    - TFs: {len(tf_names)}, TGs: {len(tg_names)}, Edges: {len(grad_pooled_df)}")
     
     grad_per_tf_df = grad_attrib_df.copy()
-    grad_per_tf_df["Score"] = grad_per_tf_df["Score_per_tf"]
     grad_per_tf_df = grad_per_tf_df[["Source", "Target", "Score"]]
     logging.info("  - Per-TF Score DataFrame:")
     logging.info(f"    - TFs: {len(tf_names)}, TGs: {len(tg_names)}, Edges: {len(grad_per_tf_df)}")
     
     logging.info("Loading TF Knockout")
-    tf_ko_df = load_tf_knockout_scores_with_two_scores(
+    tf_ko_df = load_tf_knockout(
         selected_experiment_dir=selected_experiment_dir,
         tf_names=tf_names,
         tg_names=tg_names,
@@ -370,13 +360,11 @@ def load_grad_and_tf_ko_df(selected_experiment_dir):
     )
     
     tf_ko_pooled_df = tf_ko_df.copy()
-    tf_ko_pooled_df["Score"] = tf_ko_pooled_df["Score_pooled"]
     tf_ko_pooled_df = tf_ko_pooled_df[["Source", "Target", "Score"]]
     logging.info("  - Pooled Score DataFrame:")
     logging.info(f"    - TFs: {len(tf_names)}, TGs: {len(tg_names)}, Edges: {len(tf_ko_pooled_df)}")
     
     tf_ko_per_tf_df = tf_ko_df.copy()
-    tf_ko_per_tf_df["Score"] = tf_ko_per_tf_df["Score_per_tf"]
     tf_ko_per_tf_df = tf_ko_per_tf_df[["Source", "Target", "Score"]]
     logging.info("  - Per-TF Score DataFrame:")
     logging.info(f"    - TFs: {len(tf_names)}, TGs: {len(tg_names)}, Edges: {len(tf_ko_per_tf_df)}")

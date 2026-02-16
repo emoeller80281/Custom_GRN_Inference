@@ -91,6 +91,7 @@ class ExperimentLoader:
         # Model evaluation metric results with ground truth
         self.df_with_ground_truth = None
         self.gt_labeled_dfs = {}
+        self.auroc_auprc_scores = None
         
     def load_trained_model(self, checkpoint_file):
         """
@@ -173,174 +174,52 @@ class ExperimentLoader:
             std=torch.as_tensor(self.state["tf_scaler_std"],  device=self.device, dtype=torch.float32),
         )
     
-    def load_gradient_attribution(self):
-        gradient_attribution_file = self.model_training_dir / "tf_tg_grad_attribution.npy"
-        
-        assert gradient_attribution_file.exists(), f"Gradient attribution file {gradient_attribution_file} does not exist."
-        
-        grad = np.load(gradient_attribution_file).astype(np.float32)
-        assert grad.shape == (len(self.tf_names), len(self.tg_names))
+    def load_grn(self, method="gradient attribution"):
+        """
+        Loads a GRN dataframe given a method. The dataframe contains the source transcription factor, target gene, and score.
 
-        grad = np.nan_to_num(grad, nan=0.0)
-        grad_abs = np.abs(grad)
+        Parameters:
+        method (str): The method to use. Must be 'Gradient Attribution' or 'TF Knockout'.
 
-        score_pooled = np.log1p(grad_abs)
+        Returns:
+        pd.DataFrame: The GRN dataframe containing the source transcription factor, target gene, and score.
+        """
+        method = method.lower()
+        
+        assert method in ["gradient attribution", "tf knockout"], \
+            f"Invalid GRN method {method}. Must be 'Gradient Attribution' or 'TF Knockout'."        
+        
+        if method == "gradient attribution":
+            score_file = self.model_training_dir / "tf_tg_grad_attribution.npy"
+            
+        elif method == "tf knockout":
+            score_file = self.model_training_dir / "tf_tg_fullmodel_knockout.npy"
+            
+        assert score_file.exists(), f"GRN file for method {method} {score_file} does not exist."
+        
+        score = np.load(score_file).astype(np.float32)
+        assert score.shape == (len(self.tf_names), len(self.tg_names))
+
+        score = np.nan_to_num(score, nan=0.0)
+        score_abs = np.abs(score)
 
         # Calculate per-TF robust z-score
-        median_val = np.median(grad_abs, axis=1, keepdims=True)
-        mad = np.median(np.abs(grad_abs - median_val), axis=1, keepdims=True) + 1e-6
-        score_per_tf = (grad_abs - median_val) / mad
+        median_val = np.median(score_abs, axis=1, keepdims=True)
+        mad = np.median(np.abs(score_abs - median_val), axis=1, keepdims=True) + 1e-6
+        score = (score_abs - median_val) / mad
         
-        T, G = grad_abs.shape
+        T, G = score_abs.shape
         tf_idx, tg_idx = np.meshgrid(np.arange(T), np.arange(G), indexing="ij")
-                
-        eps = 1e-12
-        mask = (score_pooled > eps) | (np.abs(score_per_tf) > eps)
-
-        tf_idx, tg_idx = np.where(mask)
+        
+        tf_idx = tf_idx.ravel()
+        tg_idx = tg_idx.ravel()
 
         df = pd.DataFrame({
             "Source": np.asarray(self.tf_names, dtype=object)[tf_idx],
             "Target": np.asarray(self.tg_names, dtype=object)[tg_idx],
-            "Score_pooled": score_pooled[tf_idx, tg_idx],
-            "Score_per_tf": score_per_tf[tf_idx, tg_idx],
+            "Score": score.ravel(),
         })
         
-        df["Source"] = df["Source"].astype(str).str.upper()
-        df["Target"] = df["Target"].astype(str).str.upper()
-        
-        return df
-    
-    def load_gradient_attribution_median(self):
-        gradient_attribution_file = self.model_training_dir / "tf_tg_grad_attribution.npy"
-        
-        assert gradient_attribution_file.exists(), f"Gradient attribution file {gradient_attribution_file} does not exist."
-        
-        grad = np.load(gradient_attribution_file).astype(np.float32)
-        assert grad.shape == (len(self.tf_names), len(self.tg_names))
-
-        grad = np.nan_to_num(grad, nan=0.0)
-        grad_abs = np.abs(grad)
-
-        # Row-wise z-score per TF (ignore NaNs if you keep them)
-        row_mean = np.median(grad_abs, axis=1, keepdims=True)
-        row_std  = grad_abs.std(axis=1, keepdims=True) + 1e-6
-        grad_z = (grad_abs - row_mean) / row_std   # [T, G]
-        
-        T, G = grad_abs.shape
-        tf_idx, tg_idx = np.meshgrid(np.arange(T), np.arange(G), indexing="ij")
-                
-        eps = 1e-12
-        mask = (grad_z > eps) | (np.abs(grad_z) > eps)
-
-        tf_idx, tg_idx = np.where(mask)
-
-        df = pd.DataFrame({
-            "Source": np.asarray(self.tf_names, dtype=object)[tf_idx],
-            "Target": np.asarray(self.tg_names, dtype=object)[tg_idx],
-            "Score": grad_z[tf_idx, tg_idx],
-        })
-        
-        df["Source"] = df["Source"].astype(str).str.upper()
-        df["Target"] = df["Target"].astype(str).str.upper()
-        
-        return df
-    
-    def original_load_gradient_attribution_matrix(self):
-        # --- load gradient attribution matrix ---
-        grad = np.load(self.model_training_dir / "tf_tg_grad_attribution.npy")  # shape [T, G]
-        assert grad.shape == (len(self.tf_names), len(self.tg_names))
-
-        # Optional: handle NaNs
-        grad = np.nan_to_num(grad, nan=0.0)
-
-        # Use absolute gradient magnitude as importance
-        grad_abs = np.abs(grad)
-
-        # Row-wise z-score per TF (ignore NaNs if you keep them)
-        row_mean = grad_abs.mean(axis=1, keepdims=True)
-        row_std  = grad_abs.std(axis=1, keepdims=True) + 1e-6
-        grad_z = (grad_abs - row_mean) / row_std   # [T, G]
-
-        # Build long-form dataframe
-        T, G = grad_z.shape
-        tf_idx, tg_idx = np.meshgrid(np.arange(T), np.arange(G), indexing="ij")
-
-        gradient_attrib_df = pd.DataFrame({
-            "Source": np.array(self.tf_names, dtype=object)[tf_idx.ravel()],
-            "Target": np.array(self.tg_names, dtype=object)[tg_idx.ravel()],
-            "Score": grad_z.ravel(),
-        })
-        gradient_attrib_df["Source"] = gradient_attrib_df["Source"].astype(str).str.upper()
-        gradient_attrib_df["Target"] = gradient_attrib_df["Target"].astype(str).str.upper()
-        
-        gradient_attrib_df["Score"] = (
-            (gradient_attrib_df["Score"] - gradient_attrib_df["Score"].min()) / 
-            (gradient_attrib_df["Score"].max() - gradient_attrib_df["Score"].min())
-        )
-            
-        return gradient_attrib_df
-    
-    def load_tf_knockout(self, positive_only: bool = True, eps: float = 1e-6):
-        """
-        Loads TF-knockout effects and returns a long-form DF with two scores:
-
-        - Score_pooled: log1p(effect_used)  (global magnitude-compressed score)
-        - Score_per_tf: robust per-TF score = (effect_used - median_tf) / MAD_tf
-
-        Where effect_used is either:
-        - clip(effect, 0, inf) if positive_only=True
-        - effect (signed) if positive_only=False
-
-        Notes:
-        - Unobserved entries (counts==0) are set to NaN and dropped in the output.
-        - If positive_only=True, effects at 0 are valid and retained.
-        """
-        tf_knockout_file = self.model_training_dir / "tf_tg_fullmodel_knockout.npy"
-        assert tf_knockout_file.exists(), f"TF-knockout file {tf_knockout_file} does not exist."
-        
-        
-        effect = np.load(tf_knockout_file).astype(np.float32)         # [T, G]
-        counts = np.load(self.model_training_dir / "tf_tg_fullmodel_knockout_count.npy").astype(np.int32)    # [T, G]
-        assert effect.shape == (len(self.tf_names), len(self.tg_names))
-        assert counts.shape == effect.shape
-
-        # Mark unobserved as NaN
-        mask_observed = counts > 0
-        effect = effect.copy()
-        effect[~mask_observed] = np.nan
-
-        # Choose effect representation
-        if positive_only:
-            effect_used = np.clip(effect, 0, None)  # keep NaNs
-        else:
-            effect_used = effect  # signed, keep NaNs
-
-        # --- pooled score ---
-        # If signed, use abs for pooled magnitude (keeps "strength" notion comparable to gradient pooled)
-        pooled_base = effect_used if positive_only else np.abs(effect_used)
-        score_pooled = np.log1p(pooled_base)
-
-        # --- per-TF robust score ---
-        med = np.nanmedian(effect_used, axis=1, keepdims=True)
-        mad = np.nanmedian(np.abs(effect_used - med), axis=1, keepdims=True) + eps
-        score_per_tf = (effect_used - med) / mad
-
-        # --- build long-form DF ---
-        T, G = effect_used.shape
-        tf_idx, tg_idx = np.meshgrid(np.arange(T), np.arange(G), indexing="ij")
-
-        df = pd.DataFrame({
-            "Source": np.asarray(self.tf_names, dtype=object)[tf_idx.ravel()],
-            "Target": np.asarray(self.tg_names, dtype=object)[tg_idx.ravel()],
-            "Score_pooled": score_pooled.ravel(),
-            "Score_per_tf": score_per_tf.ravel(),
-            "counts": counts.ravel(),
-        })
-
-        # Drop unobserved (Score_pooled will be NaN there)
-        df = df.dropna(subset=["Score_pooled"]).reset_index(drop=True)
-
         df["Source"] = df["Source"].astype(str).str.upper()
         df["Target"] = df["Target"].astype(str).str.upper()
         
@@ -411,8 +290,30 @@ class ExperimentLoader:
 
         pred_df = pred_df.dropna(axis=0, how="all")
         true_df = true_df.loc[pred_df.index]
+        
+        def _compare_pred_true(pred_df, true_df):
+            pred_df["mean_expr"] = pred_df.mean(axis=1).values
+            pred_df["std_expr"] = pred_df.std(axis=1).values
+            predicted_expr = pred_df[["mean_expr", "std_expr"]]
 
-        return pred_df, true_df
+            true_df["mean_expr"] = true_df.mean(axis=1).values
+            true_df["std_expr"] = true_df.std(axis=1).values
+            true_expr = true_df[["mean_expr", "std_expr"]]
+
+            merged = predicted_expr.merge(
+                true_expr,
+                left_index=True,
+                right_index=True,
+                suffixes=("_pred", "_true")
+            )
+
+            merged["diff"] = merged["mean_expr_pred"] - merged["mean_expr_true"]
+            
+            return merged
+        
+        pred_vs_true_expr_comparison_df = _compare_pred_true(pred_df, true_df)
+
+        return pred_df, true_df, pred_vs_true_expr_comparison_df
 
     def visualize_model_structure(self):
         if self.model is None:
@@ -471,15 +372,32 @@ class ExperimentLoader:
 
         return df
     
-    def create_overlap_info_df(
+    def create_grn_ground_truth_overlap_comparison_df(
         self, 
         unlabeled_df: pd.DataFrame, 
         labeled_df: pd.DataFrame,
         ground_truth_df: pd.DataFrame, 
         ground_truth_name: str,
-        auroc: float,
-        auprc: float,
         ):
+        """
+        Creates a DataFrame that compares the TF, TG, and edge sets of GRN and Ground Truth.
+        
+        Parameters
+        ----------
+        unlabeled_df : pd.DataFrame
+            DataFrame with at least ['Source', 'Target'] columns that contains the GRN edges
+        labeled_df : pd.DataFrame
+            DataFrame with at least ['Source', 'Target'] columns that contains the overlap between GRN and Ground Truth
+        ground_truth_df : pd.DataFrame
+            DataFrame with at least ['Source', 'Target'] columns that contains the Ground Truth edges
+        ground_truth_name : str
+            The name of the Ground Truth dataset
+        
+        Returns
+        -------
+        overlap_info_df : pd.DataFrame
+            DataFrame containing the comparison information
+        """
         grn_unique_tfs = unlabeled_df["Source"].nunique()
         grn_unique_tgs = unlabeled_df["Target"].nunique()
         grn_unique_edges = len(unlabeled_df)
@@ -493,17 +411,17 @@ class ExperimentLoader:
         overlap_edges = len(labeled_df)
         
         comparison_dict = {
-            "TFs": [grn_unique_tfs, gt_unique_tfs, overlap_tfs, auroc, auprc],
-            "TGs": [grn_unique_tgs, gt_unique_tgs, overlap_tgs, np.nan, np.nan],
-            "edges": [grn_unique_edges, gt_unique_edges, overlap_edges, np.nan, np.nan],
+            "TFs": [grn_unique_tfs, gt_unique_tfs, overlap_tfs],
+            "TGs": [grn_unique_tgs, gt_unique_tgs, overlap_tgs],
+            "edges": [grn_unique_edges, gt_unique_edges, overlap_edges],
         }
         
         def pct(num, den):
             return np.where(den == 0, np.nan, (num / den) * 100)
 
-        overlap_info_df = pd.DataFrame.from_dict(comparison_dict, orient="index", columns=["GRN", f"Ground Truth {ground_truth_name}", "Overlap (Score DF in GT)", "AUROC", "AUPRC"])
+        overlap_info_df = pd.DataFrame.from_dict(comparison_dict, orient="index", columns=["GRN", f"Ground Truth {ground_truth_name}", "Overlap (Score DF in GT)"])
         overlap_info_df["Pct of GRN in GT"] = pct(overlap_info_df["Overlap (Score DF in GT)"], overlap_info_df["GRN"]).round(2)
-        overlap_info_df["Pct of GT in GRN"] = pct(overlap_info_df["Overlap (Score DF in GT)"], overlap_info_df[f"Ground Truth {ground_truth_name}"]).round(2).astype(str) + "%"
+        overlap_info_df["Pct of GT in GRN"] = pct(overlap_info_df["Overlap (Score DF in GT)"], overlap_info_df[f"Ground Truth {ground_truth_name}"]).round(2)
         return overlap_info_df
     
     def plot_auroc_auprc(
@@ -512,28 +430,23 @@ class ExperimentLoader:
         ground_truth: Tuple[pd.DataFrame, Tuple[Set[str], Set[str], Set[str]]],
         ground_truth_name: str, 
         return_overlap_info: bool = True,
-        balance_auroc: bool = True,
-        balance_auprc: bool = True,
+        balance: bool = True,
         no_fig: bool = False,
+        save_fig: bool = False,
         ):
-        
-        # if labeled_df := self.gt_labeled_dfs.get(ground_truth_name) is not None:
-        #     logging.debug(f"Using cached labeled dataframe for ground truth {ground_truth_name}")
-        #     labeled_df = self.gt_labeled_dfs[ground_truth_name]
-        # else:
         
         ground_truth_df, gt_lookup = ground_truth
         
+        # Uses a fast lookup to label GRN edges as 1 or 0 depending on whether they are in the ground truth or not
+        # (only compares TFs and TGs that are in both the GRN and the ground truth)
         labeled_df = self.create_ground_truth_comparison_df(score_df, gt_lookup, ground_truth_name)
-            # self.gt_labeled_dfs[ground_truth_name] = labeled_df
             
         if len(labeled_df) == 0 or labeled_df["_in_gt"].nunique() < 2:
             logging.info(f"Need at least one positive and one negative, got {labeled_df['_in_gt'].value_counts().to_dict()}")
             return None
-        
-        score_col = "Score_pooled"
-        
+                
         def _balance_pos_neg(df, random_state=42):
+            """Balances positive and negative edges by downsampling the majority class."""
             rng = np.random.default_rng(random_state)
 
             y = df["_in_gt"].to_numpy() == 1
@@ -560,100 +473,98 @@ class ExperimentLoader:
             return rng.uniform(arr.min(), arr.max(), size=arr.shape[0])
         
         y = labeled_df["_in_gt"].fillna(0).astype(int).to_numpy()
-        s = labeled_df[score_col].to_numpy()
+        s = labeled_df["Score"].to_numpy()
         
-        if balance_auroc:
+        if balance:
             balanced = _balance_pos_neg(labeled_df, random_state=42)
-            
-            y_bal = balanced["_in_gt"].astype(int).to_numpy()
-            s_bal = balanced[score_col].to_numpy()
-            
-            auroc = roc_auc_score(y_bal, s_bal)
-            fpr, tpr, _ = roc_curve(y_bal, s_bal)
-            rand_fpr, rand_tpr, _ = roc_curve(y_bal, _create_random_distribution(s_bal))
-        else:
-            auroc = roc_auc_score(y, s)
-            fpr, tpr, _ = roc_curve(y, s)
-            rand_fpr, rand_tpr, _ = roc_curve(y, _create_random_distribution(s))
+            y = balanced["_in_gt"].astype(int).to_numpy()
+            s = balanced["Score"].to_numpy()
         
-        if balance_auprc:
-            balanced = _balance_pos_neg(labeled_df, random_state=42)
-            
-            y_bal = balanced["_in_gt"].astype(int).to_numpy()
-            s_bal = balanced[score_col].to_numpy()
-            
-            auprc = average_precision_score(y_bal, s_bal)
-            prec, rec, _ = precision_recall_curve(y_bal, s_bal)
-            rand_prec, rand_rec, _ = precision_recall_curve(y_bal, _create_random_distribution(s_bal))
+        auroc = roc_auc_score(y, s)
+        fpr, tpr, _ = roc_curve(y, s)
+        rand_fpr, rand_tpr, _ = roc_curve(y, _create_random_distribution(s))
+        
+        auprc = average_precision_score(y, s)
+        prec, rec, _ = precision_recall_curve(y, s)
+        rand_prec, rand_rec, _ = precision_recall_curve(y, _create_random_distribution(s))
+        
+        metric_df = pd.DataFrame({
+            "experiment": self.experiment_name,
+            "ground_truth": ground_truth_name,
+            "auroc": auroc,
+            "auprc": auprc,
+        }, index=[0])
+        
+        
+        if self.auroc_auprc_scores is None:
+            self.auroc_auprc_scores = metric_df
         else:
-            auprc = average_precision_score(y, s)
-            prec, rec, _ = precision_recall_curve(y, s)
-            rand_prec, rand_rec, _ = precision_recall_curve(y, _create_random_distribution(s))
+            self.auroc_auprc_scores = pd.concat([self.auroc_auprc_scores, metric_df], ignore_index=True)
                 
-        # ROC plot
-        if no_fig:
-            if return_overlap_info:
-                overlap_info_df = self.create_overlap_info_df(
-                    score_df, labeled_df, ground_truth_df, ground_truth_name, auroc, auprc
-                )
-                return None, overlap_info_df
-            else:
-                return None, None
-        
-        fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(7, 4))
-        ax[0].plot(rand_fpr, rand_tpr, color="#747474", linestyle="--", lw=2)
-        ax[0].plot(fpr, tpr, lw=2, color="#4195df", label=f"AUROC = {auroc:.3f}")
-        ax[0].plot([0, 1], [0, 1], "k--", lw=1, alpha=0.5)
-        ax[0].set_xlabel("False Positive Rate", fontsize=12)
-        ax[0].set_ylabel("True Positive Rate", fontsize=12)
-        ax[0].set_title(f"AUROC", fontsize=12)
-        ax[0].legend(
-            bbox_to_anchor=(0.5, -0.28),
-            loc="upper center",
-            borderaxespad=0.0
-        )
-        ax[0].set_xlim(0, 1)
-        ax[0].set_ylim(0, 1)
-        
-        # Precision-Recall plot
-        ax[1].plot(rand_rec, rand_prec, color="#747474", linestyle="--", lw=2)
-        ax[1].plot(rec, prec, lw=2, color="#4195df", label=f"AUPRC = {auprc:.3f}")
-        ax[1].set_xlabel("Recall", fontsize=12)
-        ax[1].set_ylabel("Precision", fontsize=12)
-        ax[1].set_title(f"AUPRC", fontsize=12)
-        ax[1].legend(
-            bbox_to_anchor=(0.5, -0.28),
-            loc="upper center",
-            borderaxespad=0.0
-        )
-        ax[1].set_ylim(0, 1.0)
-        ax[1].set_xlim(0, 1.0)
-        plt.suptitle(f"{self.experiment_name} vs {ground_truth_name}", fontsize=14)
-        plt.tight_layout()
-        
-        if return_overlap_info:
-            overlap_info_df = self.create_overlap_info_df(
-                score_df, labeled_df, ground_truth_df, ground_truth_name, auroc, auprc
+        if not no_fig:
+            # ROC plot
+            fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(7, 4))
+            ax[0].plot(rand_fpr, rand_tpr, color="#747474", linestyle="--", lw=2)
+            ax[0].plot(fpr, tpr, lw=2, color="#4195df", label=f"AUROC = {auroc:.3f}")
+            ax[0].plot([0, 1], [0, 1], "k--", lw=1, alpha=0.5)
+            ax[0].set_xlabel("False Positive Rate", fontsize=12)
+            ax[0].set_ylabel("True Positive Rate", fontsize=12)
+            ax[0].set_title(f"AUROC", fontsize=12)
+            ax[0].legend(
+                bbox_to_anchor=(0.5, -0.28),
+                loc="upper center",
+                borderaxespad=0.0
             )
-            return fig, overlap_info_df
+            ax[0].set_xlim(0, 1)
+            ax[0].set_ylim(0, 1)
+            
+            # Precision-Recall plot
+            ax[1].plot(rand_rec, rand_prec, color="#747474", linestyle="--", lw=2)
+            ax[1].plot(rec, prec, lw=2, color="#4195df", label=f"AUPRC = {auprc:.3f}")
+            ax[1].set_xlabel("Recall", fontsize=12)
+            ax[1].set_ylabel("Precision", fontsize=12)
+            ax[1].set_title(f"AUPRC", fontsize=12)
+            ax[1].legend(
+                bbox_to_anchor=(0.5, -0.28),
+                loc="upper center",
+                borderaxespad=0.0
+            )
+            ax[1].set_ylim(0, 1.0)
+            ax[1].set_xlim(0, 1.0)
+            plt.suptitle(f"{self.experiment_name} vs {ground_truth_name}", fontsize=14)
+            plt.tight_layout()
+            
+            if save_fig:
+                fig_dir = os.path.join(self.experiment_dir, self.experiment_name, ground_truth_name)
+                if not os.path.exists(fig_dir):
+                    os.makedirs(fig_dir)
+                auroc_fig_path = os.path.join(fig_dir, f"{ground_truth_name}_auroc_auprc.png")
+
+                fig.savefig(auroc_fig_path, dpi=300)
+        else:
+            fig = None
+            
+        if return_overlap_info:
+            overlap_info_df = self.create_grn_ground_truth_overlap_comparison_df(
+                score_df, labeled_df, ground_truth_df, ground_truth_name
+            )
+        else:
+            overlap_info_df = None
         
-        return fig, None
+        return fig, overlap_info_df
     
     def plot_train_val_loss(self):
         fig = plt.figure(figsize=(6, 5))
-        
         df = self.training_df.iloc[5:, :]
+        
         plt.plot(df["Epoch"], df["Train MSE"], label="Train MSE", linewidth=2)
         plt.plot(df["Epoch"], df["Val MSE"], label="Val MSE", linewidth=2)
-        # plt.plot(df["Epoch"], df["Train Total Loss"], label="Train Total Loss", linestyle="--", alpha=0.7)
-
         plt.title(f"Train Val Loss Curves", fontsize=17)
         plt.xlabel("Epoch", fontsize=17)
         plt.ylabel("Loss", fontsize=17)
         plt.xticks(fontsize=15)
         plt.yticks(fontsize=15)
-        # plt.ylim([0, 1])
-        # plt.xlim(left=2)
+
         plt.legend(fontsize=15)
         plt.tight_layout()
         
