@@ -116,6 +116,13 @@ def run_gradient_attribution(
     use_dataloader: bool = False,
     max_tgs_per_batch: int = None,
 ):
+    # Handle None values for non-distributed calls
+    if rank is None:
+        rank = 0
+    if distributed is None:
+        distributed = False
+    if world_size is None:
+        world_size = 1
 
     assert method in {"saliency", "smoothgrad", "ig"}, f"Unknown method: {method}"
 
@@ -134,6 +141,7 @@ def run_gradient_attribution(
             desc=f"Gradient attributions ({method})",
             unit="batches",
             total=max_batches,
+            ncols=100,
         )
 
     for b_idx, batch in enumerate(iterator):
@@ -147,10 +155,10 @@ def run_gradient_attribution(
         atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids, motif_mask = batch
         atac_wins = atac_wins.to(device)
         tf_tensor = tf_tensor.to(device)
-        bias = bias
+        bias = bias.to(device) if bias is not None else None
         tf_ids = tf_ids.to(device)
         tg_ids = tg_ids.to(device)
-        motif_mask = motif_mask
+        motif_mask = motif_mask.to(device) if motif_mask is not None else None
 
         # Shapes
         if tf_tensor.dim() == 2:
@@ -183,11 +191,11 @@ def run_gradient_attribution(
         # Chunk size = max_tgs_per_batch (if provided) otherwise process all owned TGs at once.
         chunk_size = max_tgs_per_batch if max_tgs_per_batch is not None else owned_tg_indices.numel()
 
-        if rank == 0:
-            print(
-                f"[rank {rank}] processing {owned_tg_indices.numel()} / {G_eval} TGs in chunks of {chunk_size}",
-                flush=True,
-            )
+        # if rank == 0:
+        #     print(
+        #         f"[rank {rank}] processing {owned_tg_indices.numel()} / {G_eval} TGs in chunks of {chunk_size}",
+        #         flush=True,
+        #     )
 
         # ---------- METHOD 1: plain saliency (grad * input) ----------
         if method == "saliency":
@@ -274,7 +282,8 @@ def run_gradient_attribution(
                         expr_grad = grads
                         expr_input = tf_tensor_chunk
 
-                    saliency = expr_grad * expr_input  # optionally .abs()
+                    # saliency = expr_grad * expr_input  # optionally .abs()
+                    saliency = expr_grad.abs()  # optionally .abs()
 
                     if saliency.dim() == 3:
                         grad_abs = saliency.sum(dim=-1)
@@ -484,7 +493,7 @@ def run_gradient_attribution(
         dist.all_reduce(grad_sum, op=dist.ReduceOp.SUM)
         dist.all_reduce(grad_count, op=dist.ReduceOp.SUM)
 
-    if rank == 0:
+    if distributed and rank == 0:
         grad_attr = grad_sum / (grad_count + 1e-12)
         grad_attr_np = grad_attr.detach().cpu().numpy()
 
@@ -492,6 +501,11 @@ def run_gradient_attribution(
         out_path = selected_experiment_dir / f"tf_tg_grad_attribution.npy"
         np.save(out_path, grad_attr_np)
         logging.info(f"Saved gradient attribution matrix to {out_path}")
+    else:
+        grad_attr = grad_sum / (grad_count + 1e-12)
+        grad_attr_np = grad_attr.detach().cpu().numpy()
+        
+    return grad_attr_np
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@
 #SBATCH -p dense
 #SBATCH -N 1
 #SBATCH --ntasks-per-node=1
-#SBATCH --gres=gpu:v100:2
+#SBATCH --gres=gpu:v100:1
 #SBATCH -c 16
 #SBATCH --mem=192G
 #SBATCH --array=0%5
@@ -138,7 +138,9 @@ EXPERIMENTS=(
     # "hvg_filter_disp_none|K562_hvg_filter_none|HOPS=2;D_MODEL=128;D_FF=512;BATCH_SIZE=32;TOTAL_EPOCHS=100"
 
     # Best Settings
-    "sample_1_best_settings|K562_sample_1_best_settings|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=sample_1"
+    # "sample_1_best_settings|K562_sample_1_best_settings|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=sample_1"
+    
+    "small_model_long_training|K562_small_model_long_training|D_MODEL=64;D_FF=256;BATCH_SIZE=256;HOPS=2;PATIENCE=20;TOTAL_EPOCHS=15000;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=sample_1"
 
 )
 

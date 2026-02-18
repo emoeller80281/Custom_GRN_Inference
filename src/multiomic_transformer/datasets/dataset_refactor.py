@@ -498,18 +498,18 @@ class MultiomicTransformerDataset(Dataset):
                 raise FileNotFoundError(f"Required file not found: {f}")
             
         # load tensors
-        self.tf_tensor_all = torch.load(tf_path).float()
-        self.tg_tensor_all = torch.load(tg_path).float()
+        self.tf_tensor_all = torch.load(tf_path, weights_only=True).float()
+        self.tg_tensor_all = torch.load(tg_path, weights_only=True).float()
         
-        self.atac_window_tensor_all = torch.load(atac_path).float()
+        self.atac_window_tensor_all = torch.load(atac_path, weights_only=True).float()
         self.num_cells   = self.tf_tensor_all.shape[1]
         self.num_tfs     = self.tf_tensor_all.shape[0]
         self.num_tgs = self.tg_tensor_all.shape[0]
         self.num_windows = self.atac_window_tensor_all.shape[0]
         
         # ids + names
-        self.tf_ids = torch.load(tf_ids_path).long()
-        self.tg_ids = torch.load(tg_ids_path).long()
+        self.tf_ids = torch.load(tf_ids_path, weights_only=True).long()
+        self.tg_ids = torch.load(tg_ids_path, weights_only=True).long()
         
         with open(tf_names_json) as f: self.tf_names = [self.standardize_name(n) for n in json.load(f)]
         with open(tg_names_json) as f: self.tg_names = [self.standardize_name(n) for n in json.load(f)]
@@ -524,7 +524,7 @@ class MultiomicTransformerDataset(Dataset):
                     
         # Load Distance Bias tensor
         if dist_bias_path.exists():
-            bias_WG = torch.load(dist_bias_path).float()
+            bias_WG = torch.load(dist_bias_path, weights_only=True).float()
             if bias_WG.shape[0] == self.num_windows:
                 self.dist_bias_tensor = bias_WG.T.contiguous()
             elif bias_WG.shape[1] == self.num_windows:
@@ -536,7 +536,7 @@ class MultiomicTransformerDataset(Dataset):
             
         # Load Motif Mask tensor
         if motif_mask_path.exists():
-            self.motif_mask_tensor = torch.load(motif_mask_path).bool()
+            self.motif_mask_tensor = torch.load(motif_mask_path, weights_only=True).bool()
         else:
             self.motif_mask_tensor = torch.zeros((self.tg_ids.numel(), self.tf_ids.numel()), dtype=torch.float32)
 

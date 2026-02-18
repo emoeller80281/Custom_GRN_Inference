@@ -1,10 +1,7 @@
 import json
 import os
 import random
-from venv import create
-from flask import g
 from matplotlib.ticker import FuncFormatter, MultipleLocator
-from numpy import gradient
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -27,13 +24,14 @@ from multiomic_transformer.models.model import MultiomicTransformer
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 
 class ExperimentLoader:
-    def __init__(self, experiment_dir: str, experiment_name: str, model_num: int):
+    def __init__(self, experiment_dir: str, experiment_name: str, model_num: int, silence_warnings: bool = False):
         
         assert os.path.exists(experiment_dir), f"Experiment directory {experiment_dir} does not exist."
         
         self.experiment_dir = Path(experiment_dir)
         self.experiment_name = experiment_name
         self.model_num = model_num
+        self.silence_warnings = silence_warnings
         
         if "chr19" in [p.name for p in (Path(experiment_dir) / experiment_name).iterdir()]:
             self.model_training_dir = Path(f"{experiment_dir}/{experiment_name}/chr19/model_training_00{model_num}")
@@ -44,14 +42,16 @@ class ExperimentLoader:
         
         # Load the run parameters saved during model training
         if not (self.model_training_dir / "run_parameters.json").exists():
-            logging.warning(f"WARNING: Run parameters file {self.model_training_dir / 'run_parameters.json'} does not exist.")
+            if not self.silence_warnings:
+                logging.warning(f"WARNING: Run parameters file {self.model_training_dir / 'run_parameters.json'} does not exist.")
             self.model_training_params = None
         else:
             self.model_training_params = self._load_json(self.model_training_dir / "run_parameters.json")
         
         # Open the full experiment settings file
         if not (self.experiment_dir / self.experiment_name / "run_parameters_long.csv").exists():
-            logging.warning(f"WARNING: Experiment settings file {self.experiment_dir / self.experiment_name / 'run_parameters_long.csv'} does not exist.")
+            if not self.silence_warnings:
+                logging.warning(f"WARNING: Experiment settings file {self.experiment_dir / self.experiment_name / 'run_parameters_long.csv'} does not exist.")
             self.experiment_settings_df = None
         else:
             self.experiment_settings_df = pd.read_csv(self.experiment_dir / self.experiment_name / "run_parameters_long.csv")
@@ -105,7 +105,8 @@ class ExperimentLoader:
         None
         """
         if not os.path.exists(self.model_training_dir / checkpoint_file):
-            logging.warning(f"Checkpoint file {checkpoint_file} does not exist in {self.model_training_dir}. Attempting to locate the last checkpoint.")
+            if not self.silence_warnings:
+                logging.warning(f"Checkpoint file {checkpoint_file} does not exist in {self.model_training_dir}. Attempting to locate the last checkpoint.")
             checkpoint_file = self._locate_last_checkpoint()
             logging.info(f"Located checkpoint file: {checkpoint_file}")
 
@@ -125,7 +126,7 @@ class ExperimentLoader:
 
         # Load the model checkpoint and state dictionary
         ckpt_path = os.path.join(self.model_training_dir, checkpoint_file)
-        self.state = torch.load(ckpt_path, map_location="cpu")
+        self.state = torch.load(ckpt_path, map_location="cpu", weights_only=True)
         
         # Recreate the model from the training parameters
         self.model = MultiomicTransformer(
@@ -175,7 +176,7 @@ class ExperimentLoader:
             std=torch.as_tensor(self.state["tf_scaler_std"],  device=self.device, dtype=torch.float32),
         )
     
-    def load_grn(self, method="gradient attribution"):
+    def load_grn(self, method="gradient attribution", zscore_method="median_mad"):
         """
         Loads a GRN dataframe given a method. The dataframe contains the source transcription factor, target gene, and score.
 
@@ -205,9 +206,15 @@ class ExperimentLoader:
         score_abs = np.abs(score)
 
         # Calculate per-TF robust z-score
-        median_val = np.median(score_abs, axis=1, keepdims=True)
-        mad = np.median(np.abs(score_abs - median_val), axis=1, keepdims=True) + 1e-6
-        score = (score_abs - median_val) / mad
+        if zscore_method == "median_mad":
+            median_val = np.median(score_abs, axis=1, keepdims=True)
+            mad = np.median(np.abs(score_abs - median_val), axis=1, keepdims=True) + 1e-6
+            score = (score_abs - median_val) / mad
+            
+        elif zscore_method == "mean_std":
+            mean_val = np.mean(score_abs, axis=1, keepdims=True)
+            std_val = np.std(score_abs, axis=1, keepdims=True) + 1e-6
+            score = (score_abs - mean_val) / std_val
         
         T, G = score_abs.shape
         tf_idx, tg_idx = np.meshgrid(np.arange(T), np.arange(G), indexing="ij")
@@ -457,6 +464,154 @@ class ExperimentLoader:
         overlap_info_df["Pct of GT in GRN"] = pct(overlap_info_df["Overlap (Score DF in GT)"], overlap_info_df[f"Ground Truth {ground_truth_name}"]).round(2)
         return overlap_info_df
     
+    def generate_pooled_metrics(
+        self,
+        method_name: str,
+        score_df: pd.DataFrame,
+        ground_truth: tuple[pd.DataFrame, dict[str, set[str]]],
+        ground_truth_name: str,
+        top_fracs=(0.001, 0.005, 0.01, 0.05), 
+        balance=True
+        ) -> pd.DataFrame:
+        
+        ground_truth_df, gt_lookup = ground_truth
+        
+        # Uses a fast lookup to label GRN edges as 1 or 0 depending on whether they are in the ground truth or not
+        # (only compares TFs and TGs that are in both the GRN and the ground truth)
+        labeled_df = self.create_ground_truth_comparison_df(score_df, gt_lookup, ground_truth_name)
+            
+        if len(labeled_df) == 0 or labeled_df["_in_gt"].nunique() < 2:
+            logging.info(f"Need at least one positive and one negative, got {labeled_df['_in_gt'].value_counts().to_dict()}")
+            return None
+        
+        if balance:
+            balanced = self._balance_pos_neg(labeled_df, random_state=42)
+            y = balanced["_in_gt"].astype(int).to_numpy()
+            s = balanced["Score"].to_numpy()
+        else:
+            y = labeled_df["_in_gt"].fillna(0).astype(int).to_numpy()
+            s = labeled_df["Score"].to_numpy()
+            
+        auroc = roc_auc_score(y, s)
+        auprc = average_precision_score(y, s)
+        
+        # # Pre-sort once for precision@K
+        # pos_rate = y.mean()
+        # order = np.argsort(s)[::-1]
+        # y_sorted = y[order]
+        # tp = np.cumsum(y_sorted)
+        # k = np.arange(1, len(y_sorted) + 1)
+        # prec = tp / k
+        
+        # # Calculate precision@K and lift@K for each K
+        # prec_at = {}
+        # for frac in top_fracs:
+        #     K = int(frac * len(y_sorted))
+        #     if K < 1:
+        #         K = 1
+        #     if K > len(prec):
+        #         K = len(prec)
+        #     prec_at[f"precision@{frac*100:.2f}%"] = float(prec[K-1]) if len(prec) else np.nan
+        #     prec_at[f"lift@{frac*100:.2f}%"] = float(prec[K-1] / pos_rate) if (len(prec) and pos_rate > 0) else np.nan
+
+        pooled_metrics_df = pd.DataFrame({
+            "method": method_name,
+            "gt": ground_truth_name,
+            "auroc": float(auroc) if not np.isnan(auroc) else np.nan,
+            "auprc": float(auprc) if not np.isnan(auprc) else np.nan,
+            # "pos_rate": float(pos_rate) if not np.isnan(pos_rate) else np.nan,
+            # "lift_auprc": float(auprc / pos_rate) if (not np.isnan(auprc) and pos_rate > 0) else np.nan,
+            # **prec_at
+        }, index=[0])
+        return pooled_metrics_df
+    
+    def generate_per_tf_metrics(
+        self,
+        method_name: str,
+        score_df: pd.DataFrame, 
+        ground_truth: tuple[pd.DataFrame, dict[str, set[str]]],
+        ground_truth_name: str,
+        top_fracs=(0.001, 0.005, 0.01, 0.05), 
+        min_edges=10, min_pos=1,
+        balance=True
+        ) -> pd.DataFrame:
+        """
+        Returns a per-TF dataframe with:
+        TF, AUROC, n_pos, n_neg, pos_rate, Precision@K, Lift@K (for each K)
+        """
+        ground_truth_df, gt_lookup = ground_truth
+        
+        # Uses a fast lookup to label GRN edges as 1 or 0 depending on whether they are in the ground truth or not
+        # (only compares TFs and TGs that are in both the GRN and the ground truth)
+        labeled_df = self.create_ground_truth_comparison_df(score_df, gt_lookup, ground_truth_name)
+            
+        if len(labeled_df) == 0 or labeled_df["_in_gt"].nunique() < 2:
+            logging.info(f"Need at least one positive and one negative, got {labeled_df['_in_gt'].value_counts().to_dict()}")
+            return None
+
+        rows = []
+        for tf, g in labeled_df.groupby("Source", sort=False):
+            y = g["_in_gt"].to_numpy()
+            s = g["Score"].to_numpy()
+            n = len(y)
+            n_pos = int(y.sum())
+            n_neg = int(n - n_pos)
+            pos_rate = (n_pos / n) if n > 0 else np.nan
+            
+            # basic filters to avoid degenerate metrics
+            if n < min_edges:
+                continue
+            if n_pos < min_pos or n_neg == 0:
+                continue
+            
+            if balance:
+                balanced = self._balance_pos_neg(labeled_df, random_state=42)
+                y = balanced["_in_gt"].astype(int).to_numpy()
+                s = balanced["Score"].to_numpy()
+            else:
+                y = labeled_df["_in_gt"].fillna(0).astype(int).to_numpy()
+                s = labeled_df["Score"].to_numpy()
+            
+            auroc = roc_auc_score(y, s)
+            auprc = average_precision_score(y, s)
+            
+            # Pre-sort once for precision@K
+            # order = np.argsort(s)[::-1]
+            # y_sorted = y[order]
+            # tp = np.cumsum(y_sorted)
+
+            row = {
+                "tf": tf,
+                "n_edges": n,
+                "n_pos": n_pos,
+                "n_neg": n_neg,
+                "pos_rate": pos_rate,
+                "auroc": float(auroc) if not np.isnan(auroc) else np.nan,
+                "auprc": float(auprc) if not np.isnan(auprc) else np.nan,
+            }
+
+            # for frac in top_fracs:
+            #     K = max(1, int(frac * n))
+            #     K = min(K, n)
+            #     prec_k = float(tp[K-1] / K) if n > 0 else np.nan
+            #     row[f"precision@{frac*100:.2f}%"] = prec_k
+            #     row[f"lift@{frac*100:.2f}%"] = (prec_k / pos_rate) if (pos_rate and pos_rate > 0) else np.nan
+
+            rows.append(row)
+            
+        per_tf_df = pd.DataFrame(rows)
+        
+        # Skip if no TFs passed the filtering criteria
+        if len(per_tf_df) == 0 or "auroc" not in per_tf_df.columns:
+            if not self.silence_warnings:
+                logging.warning(f"WARNING: No TFs passed filtering criteria for {ground_truth_name}")
+            return None
+            
+        per_tf_df.insert(0, "gt", ground_truth_name)
+        per_tf_df.insert(0, "method", method_name)
+
+        return per_tf_df
+    
     def plot_auroc_auprc(
         self, 
         score_df: pd.DataFrame, 
@@ -466,6 +621,7 @@ class ExperimentLoader:
         balance: bool = True,
         no_fig: bool = False,
         save_fig: bool = False,
+        
         ):
         
         ground_truth_df, gt_lookup = ground_truth
@@ -477,49 +633,22 @@ class ExperimentLoader:
         if len(labeled_df) == 0 or labeled_df["_in_gt"].nunique() < 2:
             logging.info(f"Need at least one positive and one negative, got {labeled_df['_in_gt'].value_counts().to_dict()}")
             return None
-                
-        def _balance_pos_neg(df, random_state=42):
-            """Balances positive and negative edges by downsampling the majority class."""
-            rng = np.random.default_rng(random_state)
-
-            y = df["_in_gt"].to_numpy() == 1
-            pos_idx = np.flatnonzero(y)
-            neg_idx = np.flatnonzero(~y)
-
-            n_pos = pos_idx.size
-            n_neg = neg_idx.size
-            if n_pos == 0 or n_neg == 0:
-                return df  # no copy
-
-            n = min(n_pos, n_neg)
-            if n_pos > n:
-                pos_idx = rng.choice(pos_idx, size=n, replace=False)
-            if n_neg > n:
-                neg_idx = rng.choice(neg_idx, size=n, replace=False)
-
-            # iloc keeps column dtypes; copy only the subset
-            return df.iloc[np.concatenate([pos_idx, neg_idx])].reset_index(drop=True)
-        
-        def _create_random_distribution(scores, seed: int = 42) -> np.ndarray:
-            rng = np.random.default_rng(seed)
-            arr = np.asarray(scores)   # works for Series or ndarray, no copy if already ndarray
-            return rng.uniform(arr.min(), arr.max(), size=arr.shape[0])
-        
-        y = labeled_df["_in_gt"].fillna(0).astype(int).to_numpy()
-        s = labeled_df["Score"].to_numpy()
         
         if balance:
-            balanced = _balance_pos_neg(labeled_df, random_state=42)
+            balanced = self._balance_pos_neg(labeled_df, random_state=42)
             y = balanced["_in_gt"].astype(int).to_numpy()
             s = balanced["Score"].to_numpy()
+        else:
+            y = labeled_df["_in_gt"].fillna(0).astype(int).to_numpy()
+            s = labeled_df["Score"].to_numpy()
         
         auroc = roc_auc_score(y, s)
         fpr, tpr, _ = roc_curve(y, s)
-        rand_fpr, rand_tpr, _ = roc_curve(y, _create_random_distribution(s))
+        rand_fpr, rand_tpr, _ = roc_curve(y, self._create_random_distribution(s))
         
         auprc = average_precision_score(y, s)
         prec, rec, _ = precision_recall_curve(y, s)
-        rand_prec, rand_rec, _ = precision_recall_curve(y, _create_random_distribution(s))
+        rand_prec, rand_rec, _ = precision_recall_curve(y, self._create_random_distribution(s))
         
         metric_df = pd.DataFrame({
             "experiment": self.experiment_name,
@@ -627,7 +756,8 @@ class ExperimentLoader:
         smooth: optional int window (in seconds) for a centered rolling mean on memory (e.g., smooth=5).
         """
         if self.gpu_usage_df is None:
-            logging.warning(f"GPU usage data not available for {self.experiment_name}. Cannot plot GPU usage.")
+            if not self.silence_warnings:
+                logging.warning(f"GPU usage data not available for {self.experiment_name}. Cannot plot GPU usage.")
             return
         
         fig, ax = plt.subplots(figsize=(7,4))
@@ -987,5 +1117,33 @@ class ExperimentLoader:
             return gpu_usage_df, mean_per_sec_df, gpu_memory_limit_gib
         
         except FileNotFoundError:
-            logging.warning(f"WARNING: GPU usage file not found for {self.experiment_name}. GPU usage plotting will be unavailable.")
+            if not self.silence_warnings:
+                logging.warning(f"WARNING: GPU usage file not found for {self.experiment_name}. GPU usage plotting will be unavailable.")
             return None, None, None
+        
+    def _balance_pos_neg(self, df, random_state=42):
+        """Balances positive and negative edges by downsampling the majority class."""
+        rng = np.random.default_rng(random_state)
+
+        y = df["_in_gt"].to_numpy() == 1
+        pos_idx = np.flatnonzero(y)
+        neg_idx = np.flatnonzero(~y)
+
+        n_pos = pos_idx.size
+        n_neg = neg_idx.size
+        if n_pos == 0 or n_neg == 0:
+            return df  # no copy
+
+        n = min(n_pos, n_neg)
+        if n_pos > n:
+            pos_idx = rng.choice(pos_idx, size=n, replace=False)
+        if n_neg > n:
+            neg_idx = rng.choice(neg_idx, size=n, replace=False)
+
+        # iloc keeps column dtypes; copy only the subset
+        return df.iloc[np.concatenate([pos_idx, neg_idx])].reset_index(drop=True)
+    
+    def _create_random_distribution(self, scores, seed: int = 42) -> np.ndarray:
+        rng = np.random.default_rng(seed)
+        arr = np.asarray(scores)   # works for Series or ndarray, no copy if already ndarray
+        return rng.uniform(arr.min(), arr.max(), size=arr.shape[0])

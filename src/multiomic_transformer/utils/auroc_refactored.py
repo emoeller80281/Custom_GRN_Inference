@@ -339,16 +339,11 @@ def load_grad_and_tf_ko_df(selected_experiment_dir):
         tg_names=tg_names,
     )
 
-    grad_pooled_df = grad_attrib_df.copy()
+    grad_df = grad_attrib_df.copy()
     
-    grad_pooled_df = grad_pooled_df[["Source", "Target", "Score"]]
-    logging.info("  - Pooled Score DataFrame:")
-    logging.info(f"    - TFs: {len(tf_names)}, TGs: {len(tg_names)}, Edges: {len(grad_pooled_df)}")
-    
-    grad_per_tf_df = grad_attrib_df.copy()
-    grad_per_tf_df = grad_per_tf_df[["Source", "Target", "Score"]]
-    logging.info("  - Per-TF Score DataFrame:")
-    logging.info(f"    - TFs: {len(tf_names)}, TGs: {len(tg_names)}, Edges: {len(grad_per_tf_df)}")
+    grad_df = grad_df[["Source", "Target", "Score"]]
+    logging.info("  - Score DataFrame:")
+    logging.info(f"    - TFs: {len(tf_names)}, TGs: {len(tg_names)}, Edges: {len(grad_df)}")
     
     logging.info("Loading TF Knockout")
     tf_ko_df = load_tf_knockout(
@@ -359,17 +354,12 @@ def load_grad_and_tf_ko_df(selected_experiment_dir):
         eps=1e-6,
     )
     
-    tf_ko_pooled_df = tf_ko_df.copy()
-    tf_ko_pooled_df = tf_ko_pooled_df[["Source", "Target", "Score"]]
+    tf_ko_df = tf_ko_df.copy()
+    tf_ko_df = tf_ko_df[["Source", "Target", "Score"]]
     logging.info("  - Pooled Score DataFrame:")
-    logging.info(f"    - TFs: {len(tf_names)}, TGs: {len(tg_names)}, Edges: {len(tf_ko_pooled_df)}")
+    logging.info(f"    - TFs: {len(tf_names)}, TGs: {len(tg_names)}, Edges: {len(tf_ko_df)}")
     
-    tf_ko_per_tf_df = tf_ko_df.copy()
-    tf_ko_per_tf_df = tf_ko_per_tf_df[["Source", "Target", "Score"]]
-    logging.info("  - Per-TF Score DataFrame:")
-    logging.info(f"    - TFs: {len(tf_names)}, TGs: {len(tg_names)}, Edges: {len(tf_ko_per_tf_df)}")
-    
-    return grad_pooled_df, grad_per_tf_df, tf_ko_pooled_df, tf_ko_per_tf_df
+    return grad_df, tf_ko_df
 
 def load_and_standardize_method(name: str, info: dict) -> pd.DataFrame:
     """
@@ -496,19 +486,10 @@ def per_tf_metrics(
 
     return pd.DataFrame(rows)
 
-def _select_df(method_name, method_obj, per_tf_methods):
-    if isinstance(method_obj, dict):
-        if method_name in per_tf_methods and "per_tf" in method_obj:
-            return method_obj["per_tf"]
-        if "pooled" in method_obj:
-            return method_obj["pooled"]
-    return method_obj
-
 def calculate_pooled_auroc(standardized_method_dict, ground_truth_edges_dict, per_tf_methods=None):
     per_tf_methods = per_tf_methods or set()
     all_results = []
-    for method_name, method_obj in standardized_method_dict.items():
-        method_df = _select_df(method_name, method_obj, per_tf_methods)
+    for method_name, method_df in standardized_method_dict.items():
         logging.info(f"  - Evaluating {method_name}")
         for gt_name, gt_edges in ground_truth_edges_dict.items():
             d_eval = restrict_to_gt_universe(method_df, gt_edges)
@@ -525,8 +506,7 @@ def calculate_pooled_auroc(standardized_method_dict, ground_truth_edges_dict, pe
 def calculate_per_tf_auroc(standardized_method_dict, ground_truth_edges_dict, top_k_fracs, per_tf_methods=None):
     per_tf_methods = per_tf_methods or set()
     per_tf_all, per_tf_summary = [], []
-    for method_name, method_obj in standardized_method_dict.items():
-        method_df = _select_df(method_name, method_obj, per_tf_methods)
+    for method_name, method_df in standardized_method_dict.items():
         logging.info(f"  - Per-TF evaluating {method_name}")
         for gt_name, gt_edges in ground_truth_edges_dict.items():
             d_eval = restrict_to_gt_universe(method_df, gt_edges)
@@ -659,24 +639,20 @@ if __name__ == "__main__":
 
     ground_truth_edges_dict = {gt: prep_gt_edges(df) for gt, df in ground_truth_df_dict.items()}
     
-    grad_pooled_df, grad_per_tf_df, tf_ko_pooled_df, tf_ko_per_tf_df = load_grad_and_tf_ko_df(
+    grad_df, tf_ko_df = load_grad_and_tf_ko_df(
         selected_experiment_dir=EXPERIMENT_DIR,
     )
     
-    grad_pooled_df.to_csv(EXPERIMENT_DIR / "gradient_attribution_pooled_scores.csv", index=False)
-    grad_per_tf_df.to_csv(EXPERIMENT_DIR / "gradient_attribution_per_tf_scores.csv", index=False)
-    tf_ko_pooled_df.to_csv(EXPERIMENT_DIR / "tf_knockout_pooled_scores.csv", index=False)
-    tf_ko_per_tf_df.to_csv(EXPERIMENT_DIR / "tf_knockout_per_tf_scores.csv", index=False)
+    grad_df.to_csv(EXPERIMENT_DIR / "gradient_attribution_scores.csv", index=False)
+    tf_ko_df.to_csv(EXPERIMENT_DIR / "tf_knockout_scores.csv", index=False)
     
     # Load the other method GRNs (TF-TG scores averaged across samples)
     standardized_method_dict = load_other_method_grns(sample_name_list, dataset_type)
 
-    # Add the two transformer-based methods to the dictionary of method score dataframes
-    standardized_method_dict["Gradient Attribution"] = {"pooled": grad_pooled_df, "per_tf": grad_per_tf_df}
+    # Add the two MultiomicTransformer methods to the dictionary of method score dataframes
+    standardized_method_dict["Gradient Attribution"] = grad_df
+    standardized_method_dict["TF Knockout"] = tf_ko_df
 
-    standardized_method_dict["TF Knockout"] = {"pooled": tf_ko_pooled_df, "per_tf": tf_ko_per_tf_df}
-
-    
     # Pooled AUROC/AUPRC
     logging.info("\nEvaluating pooled methods across samples")
     results_df, raw_results_df = calculate_pooled_auroc(
@@ -686,7 +662,6 @@ if __name__ == "__main__":
     
     logging.info(results_df.groupby("method")["auroc"].mean().sort_values(ascending=False))
 
-        
     # Per-TF AUROC/AUPRC
     logging.info("\nPer-TF evaluation of pooled methods across samples")
     per_tf_all_df, per_tf_summary_df = calculate_per_tf_auroc(
