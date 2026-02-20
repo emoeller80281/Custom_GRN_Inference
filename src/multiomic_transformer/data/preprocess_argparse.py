@@ -303,7 +303,7 @@ def setup_global_variables(args):
     SELF_WEIGHT = args.self_weight
     
     # Preprocessing parameters
-    VALIDATION_DATASETS = args.validation_datasets if args.validation_datasets else ["E8.75_rep1"]
+    VALIDATION_DATASETS = args.validation_datasets if args.validation_datasets else None
     FORCE_RECALCULATE = args.force_recalculate
     WINDOW_SIZE = args.window_size
     DISTANCE_SCALE_FACTOR = args.distance_scale_factor
