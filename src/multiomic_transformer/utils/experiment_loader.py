@@ -495,33 +495,33 @@ class ExperimentLoader:
         auroc = roc_auc_score(y, s)
         auprc = average_precision_score(y, s)
         
-        # # Pre-sort once for precision@K
-        # pos_rate = y.mean()
-        # order = np.argsort(s)[::-1]
-        # y_sorted = y[order]
-        # tp = np.cumsum(y_sorted)
-        # k = np.arange(1, len(y_sorted) + 1)
-        # prec = tp / k
+        # Pre-sort once for precision@K
+        pos_rate = y.mean()
+        order = np.argsort(s)[::-1]
+        y_sorted = y[order]
+        tp = np.cumsum(y_sorted)
+        k = np.arange(1, len(y_sorted) + 1)
+        prec = tp / k
         
-        # # Calculate precision@K and lift@K for each K
-        # prec_at = {}
-        # for frac in top_fracs:
-        #     K = int(frac * len(y_sorted))
-        #     if K < 1:
-        #         K = 1
-        #     if K > len(prec):
-        #         K = len(prec)
-        #     prec_at[f"precision@{frac*100:.2f}%"] = float(prec[K-1]) if len(prec) else np.nan
-        #     prec_at[f"lift@{frac*100:.2f}%"] = float(prec[K-1] / pos_rate) if (len(prec) and pos_rate > 0) else np.nan
+        # Calculate precision@K and lift@K for each K
+        prec_at = {}
+        for frac in top_fracs:
+            K = int(frac * len(y_sorted))
+            if K < 1:
+                K = 1
+            if K > len(prec):
+                K = len(prec)
+            prec_at[f"precision@{frac*100:.2f}%"] = float(prec[K-1]) if len(prec) else np.nan
+            prec_at[f"lift@{frac*100:.2f}%"] = float(prec[K-1] / pos_rate) if (len(prec) and pos_rate > 0) else np.nan
 
         pooled_metrics_df = pd.DataFrame({
             "method": method_name,
             "gt": ground_truth_name,
             "auroc": float(auroc) if not np.isnan(auroc) else np.nan,
             "auprc": float(auprc) if not np.isnan(auprc) else np.nan,
-            # "pos_rate": float(pos_rate) if not np.isnan(pos_rate) else np.nan,
-            # "lift_auprc": float(auprc / pos_rate) if (not np.isnan(auprc) and pos_rate > 0) else np.nan,
-            # **prec_at
+            "pos_rate": float(pos_rate) if not np.isnan(pos_rate) else np.nan,
+            "lift_auprc": float(auprc / pos_rate) if (not np.isnan(auprc) and pos_rate > 0) else np.nan,
+            **prec_at
         }, index=[0])
         return pooled_metrics_df
     
@@ -565,12 +565,12 @@ class ExperimentLoader:
                 continue
             
             if balance:
-                balanced = self._balance_pos_neg(labeled_df, random_state=42)
+                balanced = self._balance_pos_neg(g, random_state=42)
                 y = balanced["_in_gt"].astype(int).to_numpy()
                 s = balanced["Score"].to_numpy()
             else:
-                y = labeled_df["_in_gt"].fillna(0).astype(int).to_numpy()
-                s = labeled_df["Score"].to_numpy()
+                y = g["_in_gt"].fillna(0).astype(int).to_numpy()
+                s = g["Score"].to_numpy()
             
             auroc = roc_auc_score(y, s)
             auprc = average_precision_score(y, s)

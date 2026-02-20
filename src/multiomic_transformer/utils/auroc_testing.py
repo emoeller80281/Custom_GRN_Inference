@@ -1772,6 +1772,11 @@ if __name__ == "__main__":
         ground_truth_file_dict = {
             "ChIP-Atlas": GROUND_TRUTH_DIR / "chipatlas_t_cell.csv",
         }
+    elif dataset_type.lower() == "ipsc":
+        ground_truth_file_dict = {
+            "ChIP-Atlas": GROUND_TRUTH_DIR / "chipatlas_iPSC.csv",
+            "RN108": GROUND_TRUTH_DIR / "RN108.tsv",
+        }
     
     FIG_DIR = Path("/gpfs/Labs/Uzun/RESULTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/FIGURES")
     FIG_DATA = Path("/gpfs/Labs/Uzun/RESULTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/FIGURE_DATA")
