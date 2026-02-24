@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=aggregate_features
+#SBATCH --job-name=generate_batch_grad_Attrib
 #SBATCH --output=LOGS/transformer_logs/04_testing/%x_%j.log
 #SBATCH --error=LOGS/transformer_logs/04_testing/%x_%j.err
 #SBATCH --time=12:00:00

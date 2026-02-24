@@ -216,7 +216,14 @@ class ExperimentLoader:
             std_val = np.std(score_abs, axis=1, keepdims=True) + 1e-6
             score = (score_abs - mean_val) / std_val
         
-        T, G = score_abs.shape
+        score = np.clip(score, 0, None)
+        
+        log1p_score = np.log1p(score)
+        log1p_score = np.clip(log1p_score, 1e-12, None)  # ensure > 0
+
+        score_log = np.log10(log1p_score)
+        
+        T, G = score_log.shape
         tf_idx, tg_idx = np.meshgrid(np.arange(T), np.arange(G), indexing="ij")
         
         tf_idx = tf_idx.ravel()
@@ -225,11 +232,14 @@ class ExperimentLoader:
         df = pd.DataFrame({
             "Source": np.asarray(self.tf_names, dtype=object)[tf_idx],
             "Target": np.asarray(self.tg_names, dtype=object)[tg_idx],
-            "Score": score.ravel(),
+            "Score": score_log.ravel(),
         })
         
         df["Source"] = df["Source"].astype(str).str.upper()
         df["Target"] = df["Target"].astype(str).str.upper()
+        
+        # Removes the 1e-12 pseudonumbers used for safe log transformation (originally scores of 0)
+        df = df[df["Score"] > 0]
         
         return df
     
@@ -550,6 +560,7 @@ class ExperimentLoader:
             return None
 
         rows = []
+        tf_curves = {}
         for tf, g in labeled_df.groupby("Source", sort=False):
             y = g["_in_gt"].to_numpy()
             s = g["Score"].to_numpy()
@@ -572,8 +583,27 @@ class ExperimentLoader:
                 y = g["_in_gt"].fillna(0).astype(int).to_numpy()
                 s = g["Score"].to_numpy()
             
+            # --- ROC/PR metrics and curves ---
             auroc = roc_auc_score(y, s)
+            fpr, tpr, _ = roc_curve(y, s)
+            rand_fpr, rand_tpr, _ = roc_curve(y, self._create_random_distribution(s))
+
             auprc = average_precision_score(y, s)
+            prec, rec, _ = precision_recall_curve(y, s)
+            rand_prec, rand_rec, _ = precision_recall_curve(y, self._create_random_distribution(s))
+            
+            tf_curves[tf] = {
+                "auroc": auroc,
+                "auprc": auprc,
+                "prec": prec,
+                "rec": rec,
+                "fpr": fpr,
+                "tpr": tpr,
+                "rand_prec": rand_prec,
+                "rand_rec": rand_rec,
+                "rand_fpr": rand_fpr,
+                "rand_tpr": rand_tpr,
+            }
             
             # Pre-sort once for precision@K
             # order = np.argsort(s)[::-1]
@@ -600,7 +630,7 @@ class ExperimentLoader:
             rows.append(row)
             
         per_tf_df = pd.DataFrame(rows)
-        
+                
         # Skip if no TFs passed the filtering criteria
         if len(per_tf_df) == 0 or "auroc" not in per_tf_df.columns:
             if not self.silence_warnings:
@@ -610,7 +640,7 @@ class ExperimentLoader:
         per_tf_df.insert(0, "gt", ground_truth_name)
         per_tf_df.insert(0, "method", method_name)
 
-        return per_tf_df
+        return per_tf_df, tf_curves
     
     def plot_auroc_auprc(
         self, 
@@ -714,6 +744,105 @@ class ExperimentLoader:
             overlap_info_df = None
         
         return fig, overlap_info_df
+    
+    def plot_hist_roc_pr(
+        self,
+        score_df, 
+        ground_truth_files,
+        method_name,
+        n_bins=75, 
+        random_state=42, 
+        hist_log=False,
+        selected_batch_num=None,
+        ):
+        
+        nrows = len(ground_truth_files)
+        fig, ax = plt.subplots(
+            nrows=nrows, 
+            ncols=3, 
+            figsize=(12, 2.5*nrows + 1),
+            squeeze=False
+            )
+        
+        for i, (ground_truth_name, ground_truth) in enumerate(ground_truth_files.items()):
+            ground_truth_df, gt_lookup = ground_truth
+                
+            # Uses a fast lookup to label GRN edges as 1 or 0 depending on whether they are in the ground truth or not
+            # (only compares TFs and TGs that are in both the GRN and the ground truth)
+            labeled_df = self.create_ground_truth_comparison_df(score_df, gt_lookup, ground_truth_name)
+
+            # --- balance pos/neg once so all three panels use same data ---
+            balanced = self._balance_pos_neg(labeled_df, random_state=random_state).copy()
+            
+            # safety: remove NaN/inf scores
+            balanced = balanced[np.isfinite(balanced["Score"].to_numpy())].copy()
+
+            if balanced["_in_gt"].nunique() < 2:
+                raise ValueError("Need both positive and negative examples to plot ROC/PR.")
+
+            y = balanced["_in_gt"].astype(int).to_numpy()
+            s = balanced["Score"].to_numpy()
+
+            # --- ROC/PR metrics and curves ---
+            auroc = roc_auc_score(y, s)
+            fpr, tpr, _ = roc_curve(y, s)
+            rand_fpr, rand_tpr, _ = roc_curve(y, self._create_random_distribution(s))
+
+            auprc = average_precision_score(y, s)
+            prec, rec, _ = precision_recall_curve(y, s)
+            rand_prec, rand_rec, _ = precision_recall_curve(y, self._create_random_distribution(s))
+
+            # --- Histogram data (balanced counts already, but keep code explicit) ---
+            true_vals = balanced.loc[balanced["_in_gt"] == 1, "Score"].dropna()
+            false_vals = balanced.loc[balanced["_in_gt"] == 0, "Score"].dropna()
+
+            min_len = min(len(true_vals), len(false_vals))
+            if min_len == 0:
+                raise ValueError("Not enough positives/negatives to plot histograms.")
+
+            true_vals = true_vals.sample(n=min_len, random_state=random_state)
+            false_vals = false_vals.sample(n=min_len, random_state=random_state)
+
+            combined = pd.concat([true_vals, false_vals])
+            bins = np.linspace(combined.min(), combined.max(), n_bins)
+
+            # (1) Histogram
+            ax[i, 0].hist(false_vals, bins=bins, alpha=0.6, color="#747474", label="False", log=hist_log)
+            ax[i, 0].hist(true_vals,  bins=bins, alpha=0.6, color="#4195df", label="True", log=hist_log)
+            ax[i, 0].set_title("True vs False Scores", fontsize=12)
+            ax[i, 0].set_xlabel("Score", fontsize=12)
+            ax[i, 0].set_ylabel(f"{ground_truth_name}\nFrequency", fontsize=12)
+            ax[i, 0].legend(fontsize=9)
+
+            # (2) ROC
+            ax[i, 1].plot(rand_fpr, rand_tpr, color="#747474", linestyle="--", lw=2)
+            ax[i, 1].plot(fpr, tpr, color="#4195df", lw=2, label=f"AUROC = {auroc:.3f}")
+            # ax[i, 1].plot([0, 1], [0, 1], "k--", lw=1, alpha=0.4)
+            ax[i, 1].set_title("ROC", fontsize=12)
+            ax[i, 1].set_xlabel("False Positive Rate", fontsize=12)
+            ax[i, 1].set_ylabel("True Positive Rate", fontsize=12)
+            ax[i, 1].set_xlim(0, 1)
+            ax[i, 1].set_ylim(0, 1)
+            ax[i, 1].legend(fontsize=9, loc="lower right")
+
+            # (3) PR
+            ax[i, 2].plot(rand_rec, rand_prec, color="#747474", linestyle="--", lw=2)
+            ax[i, 2].plot(rec, prec, color="#4195df", lw=2, label=f"AUPRC = {auprc:.3f}")
+            ax[i, 2].set_title("Precision–Recall", fontsize=12)
+            ax[i, 2].set_xlabel("Recall", fontsize=12)
+            ax[i, 2].set_ylabel("Precision", fontsize=12)
+            ax[i, 2].set_xlim(0, 1)
+            ax[i, 2].set_ylim(0, 1)
+            ax[i, 2].legend(fontsize=9, loc="lower right")
+
+        if selected_batch_num is not None:
+            fig.suptitle(f"{method_name}\n{self.experiment_name}\n{selected_batch_num} Batches", fontsize=14)
+        else:
+            fig.suptitle(f"{method_name}\n{self.experiment_name}", fontsize=14)
+        
+        fig.tight_layout(rect=[0, 0, 1, 0.98])
+
+        return fig
     
     def plot_train_val_loss(self):
         fig = plt.figure(figsize=(6, 5))

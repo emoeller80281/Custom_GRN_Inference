@@ -232,23 +232,51 @@ def restrict_to_gt_universe(method_df: pd.DataFrame, gt_edges: pd.DataFrame) -> 
     gt_tgs = set(gt_edges["Target"])
     return method_df[method_df["Source"].isin(gt_tfs) & method_df["Target"].isin(gt_tgs)].copy()
 
-def load_gradient_attribution(selected_experiment_dir, tf_names, tg_names):
-    gradient_attribution_file = selected_experiment_dir / "tf_tg_grad_attribution.npy"
-    
-    assert gradient_attribution_file.exists(), f"Gradient attribution file {gradient_attribution_file} does not exist."
-    
-    grad = np.load(gradient_attribution_file).astype(np.float32)
-    assert grad.shape == (len(tf_names), len(tg_names))
+def load_grn(selected_experiment_dir, tf_names, tg_names, method="gradient attribution"):
+    """
+    Loads a GRN dataframe given a method. The dataframe contains the source transcription factor, target gene, and score.
 
-    grad = np.nan_to_num(grad, nan=0.0)
-    grad_abs = np.abs(grad)
+    Parameters:
+    selected_experiment_dir (Path): The directory containing the GRN files for the selected experiment.
+    tf_names (list): List of transcription factor names corresponding to the rows of the GRN score matrix.
+    tg_names (list): List of target gene names corresponding to the columns of the GRN score matrix.
+    method (str): The method to use. Must be 'Gradient Attribution' or 'TF Knockout'.
+
+    Returns:
+    pd.DataFrame: The GRN dataframe containing the source transcription factor, target gene, and score.
+    """
+    method = method.lower()
+    
+    assert method in ["gradient attribution", "tf knockout"], \
+        f"Invalid GRN method {method}. Must be 'Gradient Attribution' or 'TF Knockout'."        
+    
+    if method == "gradient attribution":
+        score_file = selected_experiment_dir / "tf_tg_grad_attribution.npy"
+        
+    elif method == "tf knockout":
+        score_file = selected_experiment_dir / "tf_tg_fullmodel_knockout.npy"
+        
+    assert score_file.exists(), f"GRN file for method {method} {score_file} does not exist."
+    
+    score = np.load(score_file).astype(np.float32)
+    assert score.shape == (len(tf_names), len(tg_names))
+
+    score = np.nan_to_num(score, nan=0.0)
+    score_abs = np.abs(score)
 
     # Calculate per-TF robust z-score
-    median_val = np.median(grad_abs, axis=1, keepdims=True)
-    mad = np.median(np.abs(grad_abs - median_val), axis=1, keepdims=True) + 1e-6
-    score = (grad_abs - median_val) / mad
+    median_val = np.median(score_abs, axis=1, keepdims=True)
+    mad = np.median(np.abs(score_abs - median_val), axis=1, keepdims=True) + 1e-6
+    score = (score_abs - median_val) / mad
+    
+    score = np.clip(score, 0, None)
 
-    T, G = grad_abs.shape
+    log1p_score = np.log1p(score)
+    log1p_score = np.clip(log1p_score, 1e-12, None)  # ensure > 0
+
+    score_log = np.log10(log1p_score)
+    
+    T, G = score_log.shape
     tf_idx, tg_idx = np.meshgrid(np.arange(T), np.arange(G), indexing="ij")
     
     tf_idx = tf_idx.ravel()
@@ -257,86 +285,25 @@ def load_gradient_attribution(selected_experiment_dir, tf_names, tg_names):
     df = pd.DataFrame({
         "Source": np.asarray(tf_names, dtype=object)[tf_idx],
         "Target": np.asarray(tg_names, dtype=object)[tg_idx],
-        "Score": score.ravel(),
+        "Score": score_log.ravel(),
     })
     
     df["Source"] = df["Source"].astype(str).str.upper()
     df["Target"] = df["Target"].astype(str).str.upper()
     
-    return df
-
-def load_tf_knockout(
-    selected_experiment_dir,
-    tf_names,
-    tg_names,
-    positive_only: bool = True,
-    eps: float = 1e-6,
-):
-    """
-    Loads TF-knockout effects and returns a long-form DF with two scores:
-
-      - Score: robust per-TF score = (effect_used - median_tf) / MAD_tf
-
-    Where effect_used is either:
-      - clip(effect, 0, inf) if positive_only=True
-      - effect (signed) if positive_only=False
-
-    Notes:
-      - Unobserved entries (counts==0) are set to NaN and dropped in the output.
-      - If positive_only=True, effects at 0 are valid and retained.
-    """
-    
-    tf_knockout_file = selected_experiment_dir / "tf_tg_fullmodel_knockout.npy"
-    assert tf_knockout_file.exists(), f"TF-knockout file {tf_knockout_file} does not exist."
-        
-    effect = np.load(selected_experiment_dir / "tf_tg_fullmodel_knockout.npy").astype(np.float32)         # [T, G]
-    counts = np.load(selected_experiment_dir / "tf_tg_fullmodel_knockout_count.npy").astype(np.int32)    # [T, G]
-    assert effect.shape == (len(tf_names), len(tg_names))
-    assert counts.shape == effect.shape
-
-    # Mark unobserved as NaN
-    mask_observed = counts > 0
-    effect = effect.copy()
-    effect[~mask_observed] = np.nan
-
-    # Choose effect representation
-    if positive_only:
-        effect_used = np.clip(effect, 0, None)  # keep NaNs
-    else:
-        effect_used = effect  # signed, keep NaNs
-
-    # --- pooled score ---
-    # If signed, use abs for pooled magnitude (keeps "strength" notion comparable to gradient pooled)
-    pooled_base = effect_used if positive_only else np.abs(effect_used)
-
-    # --- per-TF robust score ---
-    med = np.nanmedian(effect_used, axis=1, keepdims=True)
-    mad = np.nanmedian(np.abs(effect_used - med), axis=1, keepdims=True) + eps
-    score = (effect_used - med) / mad
-
-    # --- build long-form DF ---
-    T, G = effect_used.shape
-    tf_idx, tg_idx = np.meshgrid(np.arange(T), np.arange(G), indexing="ij")
-
-    df = pd.DataFrame({
-        "Source": np.asarray(tf_names, dtype=object)[tf_idx.ravel()],
-        "Target": np.asarray(tg_names, dtype=object)[tg_idx.ravel()],
-        "Score": score.ravel(),
-        "counts": counts.ravel(),
-    })
-
-    df["Source"] = df["Source"].astype(str).str.upper()
-    df["Target"] = df["Target"].astype(str).str.upper()
+    df = df[df["Score"] > 0]
     
     return df
 
 def load_grad_and_tf_ko_df(selected_experiment_dir):
     tf_names, tg_names = load_vocab(selected_experiment_dir)
+    
     logging.info("Loading Gradient Attribution")
-    grad_attrib_df = load_gradient_attribution(
+    grad_attrib_df = load_grn(
         selected_experiment_dir=selected_experiment_dir,
         tf_names=tf_names,
         tg_names=tg_names,
+        method="gradient attribution",
     )
 
     grad_df = grad_attrib_df.copy()
@@ -346,12 +313,11 @@ def load_grad_and_tf_ko_df(selected_experiment_dir):
     logging.info(f"    - TFs: {len(tf_names)}, TGs: {len(tg_names)}, Edges: {len(grad_df)}")
     
     logging.info("Loading TF Knockout")
-    tf_ko_df = load_tf_knockout(
+    tf_ko_df = load_grn(
         selected_experiment_dir=selected_experiment_dir,
         tf_names=tf_names,
         tg_names=tg_names,
-        positive_only=True,
-        eps=1e-6,
+        method="tf knockout",
     )
     
     tf_ko_df = tf_ko_df.copy()

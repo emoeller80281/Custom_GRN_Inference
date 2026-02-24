@@ -13,6 +13,7 @@ logging.basicConfig(level=logging.INFO, format='%(message)s')
 
 FIGURE_DIR = Path("/gpfs/Labs/Uzun/RESULTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/FIGURES")
 EXPERIMENT_DATA_DIR = Path("/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments")
+MULTI_EXPERIMENT_DIR_NAME = "multi_experiment_log_scores"
 
 def format_path(experiment_name: str, model_training_number: int) -> Path:
     """
@@ -284,7 +285,7 @@ def plot_per_tf_auroc_agg_by_gt(name: str, selected_experiment: str, combined_pe
     exp_dir = FIGURE_DIR / selected_experiment
     exp_dir.mkdir(parents=True, exist_ok=True)
     
-    multi_exp_dir = FIGURE_DIR / 'multi_experiment' / name / selected_experiment
+    multi_exp_dir = FIGURE_DIR / MULTI_EXPERIMENT_DIR_NAME / name / selected_experiment
     multi_exp_dir.mkdir(parents=True, exist_ok=True)
     
     fig.savefig(exp_dir / "per_tf_auroc_agg_by_gt_vs_other_methods.svg", bbox_inches="tight")
@@ -311,7 +312,7 @@ def plot_per_tf_auroc_agg_by_tf(name: str, selected_experiment: str, combined_pe
     exp_dir = FIGURE_DIR / selected_experiment
     exp_dir.mkdir(parents=True, exist_ok=True)
     
-    multi_exp_dir = FIGURE_DIR / 'multi_experiment' / name / selected_experiment
+    multi_exp_dir = FIGURE_DIR / MULTI_EXPERIMENT_DIR_NAME / name / selected_experiment
     multi_exp_dir.mkdir(parents=True, exist_ok=True)
     
     fig.savefig(exp_dir / "per_tf_auroc_agg_by_tf_vs_other_methods.svg", bbox_inches="tight")
@@ -330,7 +331,7 @@ def plot_pooled_auroc(name: str, selected_experiment: str, combined_results_df: 
     exp_dir = FIGURE_DIR / selected_experiment
     exp_dir.mkdir(parents=True, exist_ok=True)
     
-    multi_exp_dir = FIGURE_DIR / 'multi_experiment' / name / selected_experiment
+    multi_exp_dir = FIGURE_DIR / MULTI_EXPERIMENT_DIR_NAME / name / selected_experiment
     multi_exp_dir.mkdir(parents=True, exist_ok=True)
     
     fig.savefig(exp_dir / "pooled_auroc_vs_other_methods.svg", bbox_inches="tight")
@@ -357,7 +358,7 @@ def plot_multiexperiment_per_tf_auroc_agg_by_gt(name: str, selected_method: str,
         ylim=(0.2, 0.8)
         )
     
-    multi_exp_dir = FIGURE_DIR / "multi_experiment" / name
+    multi_exp_dir = FIGURE_DIR / MULTI_EXPERIMENT_DIR_NAME / name
     multi_exp_dir.mkdir(parents=True, exist_ok=True)
     fig.savefig(multi_exp_dir / f"{selected_method_safe}_per_tf_agg_by_gt.svg", bbox_inches="tight")
     plt.close(fig)
@@ -373,7 +374,7 @@ def plot_multiexperiment_per_tf_auroc_agg_by_tf(name: str, selected_method: str,
         ylim=(0.2, 0.8)
         )
     
-    multi_exp_dir = FIGURE_DIR / "multi_experiment" / name
+    multi_exp_dir = FIGURE_DIR / MULTI_EXPERIMENT_DIR_NAME / name
     multi_exp_dir.mkdir(parents=True, exist_ok=True)
     fig.savefig(multi_exp_dir / f"{selected_method_safe}_per_tf_agg_by_tf.svg", bbox_inches="tight")
     plt.close(fig)
@@ -389,7 +390,7 @@ def plot_multiexperiment_pooled_auroc(name: str, selected_method: str, combined_
         ylim=(0.2, 0.8)
         )
     
-    multi_exp_dir = FIGURE_DIR / "multi_experiment" / name
+    multi_exp_dir = FIGURE_DIR / MULTI_EXPERIMENT_DIR_NAME / name
     multi_exp_dir.mkdir(parents=True, exist_ok=True)
     fig.savefig(multi_exp_dir / f"{selected_method_safe}_pooled_auroc.svg", bbox_inches="tight")
     plt.close(fig)
@@ -646,20 +647,20 @@ if __name__ == "__main__":
     # Experiment type options: ['mESC_sample_num', 'dispersion', 'macrophage_sample_num', 'generic']
     
     experiments_to_run = [
-        # "mESC_best_settings",
-        # "mESC_E7.5_rep1_dispersion", 
-        # "mESC_multiple_samples",
-        # "mESC_E7.5_rep1_dispersion",
-        # "mESC_E7.5_rep2_dispersion",
-        # "mESC_E8.5_rep1_dispersion",
-        # "mESC_E8.5_rep2_dispersion",
-        # "macrophage_best_samples",
-        # "macrophage_multiple_samples",
-        # "macrophage_buffer_1_dispersion",
-        # "macrophage_buffer_2_dispersion",
-        # "macrophage_buffer_3_dispersion",
-        # "macrophage_buffer_4_dispersion",
-        # "K562_dispersion",
+        "mESC_best_settings",
+        "mESC_E7.5_rep1_dispersion", 
+        "mESC_multiple_samples",
+        "mESC_E7.5_rep1_dispersion",
+        "mESC_E7.5_rep2_dispersion",
+        "mESC_E8.5_rep1_dispersion",
+        "mESC_E8.5_rep2_dispersion",
+        "macrophage_best_samples",
+        "macrophage_multiple_samples",
+        "macrophage_buffer_1_dispersion",
+        "macrophage_buffer_2_dispersion",
+        "macrophage_buffer_3_dispersion",
+        "macrophage_buffer_4_dispersion",
+        "K562_dispersion",
         "K562_best_settings",
         ]
     selected_methods = ["Gradient Attribution", "TF Knockout"]
@@ -699,7 +700,7 @@ if __name__ == "__main__":
             plot_multiexperiment_per_tf_auroc_agg_by_gt(multi_experiment_name, selected_method, formatted_per_tf_all_df)
             plot_multiexperiment_per_tf_auroc_agg_by_tf(multi_experiment_name, selected_method, formatted_per_tf_all_df)
         
-        logging.info(f"\nPlots saved to: {FIGURE_DIR / 'multi_experiment' / multi_experiment_name}")
+        logging.info(f"\nPlots saved to: {FIGURE_DIR / MULTI_EXPERIMENT_DIR_NAME / multi_experiment_name}")
         logging.info(f"{'-'*60}\n")
         
     logging.info("\nDone!")
