@@ -7,6 +7,7 @@ from typing import Optional, Union, Sequence
 from torch.utils.data import Dataset, Sampler
 from pathlib import Path
 import logging
+import warnings
 from collections import OrderedDict
 from dataclasses import dataclass
 
@@ -279,7 +280,9 @@ class MultiChromosomeDataset(Dataset):
         # Small LRU cache of per-chrom datasets (Keeps track of windows and TGs for each chromosome)
         self._cache: OrderedDict[str, MultiomicTransformerDataset] = OrderedDict()
         
-        tf_global = torch.load(self.data_dir / "tf_tensor_all.pt", map_location="cpu") if self.tf_vocab_path is not None else None
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=FutureWarning, message=".*torch.load.*weights_only.*")
+            tf_global = torch.load(self.data_dir / "tf_tensor_all.pt", map_location="cpu") if self.tf_vocab_path is not None else None
         full_num_cells = int(tf_global.shape[1]) if tf_global is not None else 0
         
         assert full_num_cells > 0, "No cells found in tf_tensor_all.pt"

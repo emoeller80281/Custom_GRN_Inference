@@ -166,7 +166,8 @@ def run_gradient_attribution(
             unit="batches",
             total=max_batches,
             ncols=100,
-            miniters=max(1, max_batches // 100),
+            miniters=1,
+            mininterval=1,
         )
 
     batch_grad_dfs = {}
@@ -485,7 +486,8 @@ def run_tf_knockout(
             desc="TF knockout", 
             unit="batches", 
             total=max_batches, 
-            miniters=max(1, max_batches // 100),
+            miniters=1,
+            mininterval=1,
             ncols=100
             )
 
@@ -755,10 +757,15 @@ def load_model(selected_experiment_dir, checkpoint_file, device):
 
     
     # 1) Load test loader and checkpoint
-    test_loader = torch.load(selected_experiment_dir / "test_loader.pt", weights_only=False)
+    import warnings
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=FutureWarning, message=".*torch.load.*weights_only.*")
+        test_loader = torch.load(selected_experiment_dir / "test_loader.pt", weights_only=False)
 
     ckpt_path = os.path.join(selected_experiment_dir, checkpoint_file)
-    state = torch.load(ckpt_path, map_location="cpu")
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=FutureWarning, message=".*torch.load.*weights_only.*")
+        state = torch.load(ckpt_path, map_location="cpu")
     
     # 2) Recreate model EXACTLY as in training
     model = model_module.MultiomicTransformer(
@@ -857,7 +864,7 @@ if __name__ == "__main__":
     if rank == 0:
         logging.info("Creating dataloader...")
     full_data_loader = prepare_dataloader(
-        dataset, batch_size=args.batch_size, world_size=world_size, rank=rank, num_workers=8, seed=42
+        dataset, batch_size=args.batch_size, world_size=world_size, rank=rank, num_workers=1, seed=42
     )
     
     sample_type = exp.experiment_name.split("_")[0]
@@ -917,9 +924,10 @@ if __name__ == "__main__":
     else:
         max_batches = len(full_data_loader)
     
-    logging.info(f"Checkpoint {checkpoint_name} loaded. Max batches for attribution: {max_batches}")
+    if rank == 0:
+        logging.info(f"Checkpoint {checkpoint_name} loaded. Max batches for attribution: {max_batches}")
     
-    selected_experiment_dir = exp.model_training_dir / "grn_results_by_checkpoint" / checkpoint_name
+    selected_experiment_dir = exp.model_training_dir
     selected_experiment_dir.mkdir(parents=True, exist_ok=True)
     
     start_time = time.time()

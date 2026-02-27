@@ -105,7 +105,6 @@ EXPERIMENT_LIST=(
     # "Macrophage_best_filter_long_range_2_hop_small_fewer_neighbors|model_training_001|macrophage|buffer_1"
     # "Macrophage_best_filter_long_range_2_hop_tiny|model_training_001|macrophage|buffer_1"
 
-
     # "K562_base_settings|model_training_001|k562|K562"
     # "K562_model_d_128_ff_512|model_training_001|k562|K562"
     # "K562_small_batch_size|model_training_001|k562|K562"
@@ -246,16 +245,16 @@ EXPERIMENT_LIST=(
     "Macrophage_buffer_123_hvg_filter_disp_0.1|model_training_001|macrophage|buffer_1 buffer_2"
     "Macrophage_buffer_1234_hvg_filter_disp_0.1|model_training_001|macrophage|buffer_1 buffer_2"
 
-    "mESC_E7.5_rep1_best_settings|model_training_001|mESC|E7.5_rep1"
-    "mESC_E7.5_rep2_best_settings|model_training_001|mESC|E7.5_rep2"
-    "mESC_E8.5_rep1_best_settings|model_training_001|mESC|E8.5_rep1"
-    "mESC_E8.5_rep2_best_settings|model_training_001|mESC|E8.5_rep2"
+    # "mESC_E7.5_rep1_best_settings|model_training_001|mESC|E7.5_rep1"
+    # "mESC_E7.5_rep2_best_settings|model_training_001|mESC|E7.5_rep2"
+    # "mESC_E8.5_rep1_best_settings|model_training_001|mESC|E8.5_rep1"
+    # "mESC_E8.5_rep2_best_settings|model_training_001|mESC|E8.5_rep2"
 
-    "Macrophage_buffer_1_best_settings|model_training_001|macrophage|buffer_1"
-    "Macrophage_buffer_2_best_settings|model_training_001|macrophage|buffer_2"
-    "Macrophage_all_bnchmk_best_settings|model_training_001|macrophage|buffer_1 buffer_2"
+    # "Macrophage_buffer_1_best_settings|model_training_001|macrophage|buffer_1"
+    # "Macrophage_buffer_2_best_settings|model_training_001|macrophage|buffer_2"
+    # "Macrophage_all_bnchmk_best_settings|model_training_001|macrophage|buffer_1 buffer_2"
 
-    "K562_sample_1_best_settings|model_training_001"
+    # "K562_sample_1_best_settings|model_training_001"
 
     # "BM_CD8_T_cells_initial_test|model_training_001"
 

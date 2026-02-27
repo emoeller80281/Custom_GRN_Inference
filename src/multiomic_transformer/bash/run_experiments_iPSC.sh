@@ -117,8 +117,6 @@ EXPERIMENTS=(
 
     # "3kb_max_dist_600_scale|iPSC_3kb_max_dist_600_scale|HOPS=2;MAX_PEAK_DISTANCE=3000;DISTANCE_SCALE_FACTOR=600;FILTER_RNA=false;FILTER_ATAC=false"
     # "3kb_max_dist_600_scale_filter_0.01|iPSC_3kb_max_dist_600_scale_filter_0.01|HOPS=2;MAX_PEAK_DISTANCE=3000;DISTANCE_SCALE_FACTOR=600;MIN_RNA_DISP=0.6;MIN_ATAC_DISP=0.6"
-
-    "test_local_tg_vocab|iPSC_test_local_tg_vocab|HOPS=2;MIN_RNA_DISP=0.01;MIN_ATAC_DISP=0.01"
     
 )
 
