@@ -144,6 +144,11 @@ def run_gradient_attribution(
     zero_tf_expr: bool = False,
     use_dataloader: bool = True,
 ):
+    
+    if max_batches is not None:
+        max_batches = min(max_batches, len(test_loader))
+    else:
+        max_batches = len(test_loader)
 
     T_total = len(tf_names)
     G_total = len(tg_names)
@@ -161,6 +166,7 @@ def run_gradient_attribution(
             unit="batches",
             total=max_batches,
             ncols=100,
+            miniters=max(1, max_batches // 100),
         )
 
     batch_grad_dfs = {}
@@ -458,6 +464,12 @@ def run_tf_knockout(
       tf_tg_effect_np: [T_total, G_total] float64 mean delta (baseline - KO), aggregated over observed contexts
       effect_count_np: [T_total, G_total] float64 counts (#times each TF,TG updated)
     """
+    
+    if max_batches is not None:
+        max_batches = min(max_batches, len(test_loader))
+    else:
+        max_batches = len(test_loader)
+    
     T_total = len(tf_names)
     G_total = len(tg_names)
 
@@ -468,7 +480,14 @@ def run_tf_knockout(
 
     iterator = test_loader
     if rank == 0:
-        iterator = tqdm(test_loader, desc="TF knockout", unit="batches", total=max_batches, ncols=100)
+        iterator = tqdm(
+            test_loader, 
+            desc="TF knockout", 
+            unit="batches", 
+            total=max_batches, 
+            miniters=max(1, max_batches // 100),
+            ncols=100
+            )
 
     batch_tf_ko_dfs = {}
     for b_idx, batch in enumerate(iterator):
@@ -778,9 +797,9 @@ def argparse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--experiment_name", type=str, required=True)
     parser.add_argument("--batch_size", type=int, default=64)
-    parser.add_argument("--model_num", type=int, default=1)
+    parser.add_argument("--model_num", type=str, default=1)
     parser.add_argument("--checkpoint_name", type=str, default="trained_model.pt")
-    parser.add_argument("--save_every_n_batches", type=int, default=20)
+    parser.add_argument("--save_every_n_batches", type=int, default=-1)
     
     args = parser.parse_args()
     return args
@@ -792,19 +811,35 @@ if __name__ == "__main__":
         
     if rank == 0:
         logging.info("Loading experiment...")
+    
+    experiment_dir = "/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/"
+    experiment_name = args.experiment_name
+    checkpoint_name = args.checkpoint_name
+    
+    model_training_dir = os.path.join(experiment_dir, experiment_name, args.model_num)
+
+    assert os.path.isdir(model_training_dir), \
+        f"Model training directory not found: {model_training_dir}"
+        
+    assert checkpoint_name in os.listdir(model_training_dir), \
+        f"Checkpoint {checkpoint_name} not found in {model_training_dir}"
+
+    model_num = int(args.model_num.split("_")[-1])
         
     exp = experiment_loader.ExperimentLoader(
-        experiment_dir = "/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/",
-        experiment_name=args.experiment_name,
-        model_num=args.model_num,
+        experiment_dir = experiment_dir,
+        experiment_name=experiment_name,
+        model_num=model_num,
     )
     
-    checkpoint_name = args.checkpoint_name
+    checkpoint_name = checkpoint_name
     
     assert checkpoint_name in os.listdir(exp.model_training_dir), \
         f"Checkpoint {checkpoint_name} not found in {exp.model_training_dir}"
     
     save_every_n_batches = args.save_every_n_batches
+    if save_every_n_batches < 1:
+        save_every_n_batches = None
     
     SAMPLE_DATA_CACHE_DIR = Path(PROJECT_DIR) / "data/training_data_cache" / exp.experiment_name
     CHROM_IDS = exp.experiment_settings_df.set_index("parameter").loc["CHROM_IDS"].value.split(" ")
