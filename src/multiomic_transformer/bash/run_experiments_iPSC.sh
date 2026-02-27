@@ -5,11 +5,11 @@
 #SBATCH --time=10:00:00
 #SBATCH -p dense
 #SBATCH -N 1
-#SBATCH --gres=gpu:v100:2
+#SBATCH --gres=gpu:a100:2
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 16
 #SBATCH --mem=192G
-#SBATCH --array=0%3
+#SBATCH --array=0-1%4
 
 set -euo pipefail
 
@@ -102,7 +102,24 @@ DEFAULT_SAMPLE_NAMES="iPSC_sample"
 # PARAMETER_OVERRIDES format: "PARAM1=VALUE1;PARAM2=VALUE2;..."
 
 EXPERIMENTS=(
-    "initial_test|iPSC_cells_initial_test|HOPS=2;MIN_RNA_DISP=0.01;MIN_ATAC_DISP=0.01"
+    # "initial_test|iPSC_cells_initial_test|HOPS=2;MIN_RNA_DISP=0.01;MIN_ATAC_DISP=0.01"
+
+    # "hvg_filter_disp_0.6|iPSC_hvg_filter_disp_0.6|HOPS=2;MIN_RNA_DISP=0.6;MIN_ATAC_DISP=0.6"
+    # "hvg_filter_disp_0.5|iPSC_hvg_filter_disp_0.5|HOPS=2;MIN_RNA_DISP=0.5;MIN_ATAC_DISP=0.5"
+    # "hvg_filter_disp_0.4|iPSC_hvg_filter_disp_0.4|HOPS=2;MIN_RNA_DISP=0.4;MIN_ATAC_DISP=0.4"
+    # "hvg_filter_disp_0.3|iPSC_hvg_filter_disp_0.3|HOPS=2;MIN_RNA_DISP=0.3;MIN_ATAC_DISP=0.3"
+    # "hvg_filter_disp_0.2|iPSC_hvg_filter_disp_0.2|HOPS=2;MIN_RNA_DISP=0.2;MIN_ATAC_DISP=0.2"
+    # "hvg_filter_disp_0.1|iPSC_hvg_filter_disp_0.1|HOPS=2;MIN_RNA_DISP=0.1;MIN_ATAC_DISP=0.1"
+    # "hvg_filter_disp_0.05|iPSC_hvg_filter_disp_0.05|HOPS=2;MIN_RNA_DISP=0.05;MIN_ATAC_DISP=0.05"
+
+    # "3kb_max_dist|iPSC_3kb_max_dist|HOPS=2;MAX_PEAK_DISTANCE=3000;FILTER_RNA=false;FILTER_ATAC=false"
+    # "6kb_max_dist|iPSC_6kb_max_dist|HOPS=2;MAX_PEAK_DISTANCE=6000;FILTER_RNA=false;FILTER_ATAC=false"
+
+    # "3kb_max_dist_600_scale|iPSC_3kb_max_dist_600_scale|HOPS=2;MAX_PEAK_DISTANCE=3000;DISTANCE_SCALE_FACTOR=600;FILTER_RNA=false;FILTER_ATAC=false"
+    # "3kb_max_dist_600_scale_filter_0.01|iPSC_3kb_max_dist_600_scale_filter_0.01|HOPS=2;MAX_PEAK_DISTANCE=3000;DISTANCE_SCALE_FACTOR=600;MIN_RNA_DISP=0.6;MIN_ATAC_DISP=0.6"
+
+    "test_local_tg_vocab|iPSC_test_local_tg_vocab|HOPS=2;MIN_RNA_DISP=0.01;MIN_ATAC_DISP=0.01"
+    
 )
 
 
@@ -745,7 +762,7 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
 
         echo ""
         echo "Running AUROC Testing..."
-        poetry run python ./src/multiomic_transformer/utils/auroc_testing.py \
+        python ./src/multiomic_transformer/utils/auroc_testing.py \
             --experiment "${DATASET_NAME}" \
             --training_num "${TRAINING_NUM}" \
             --experiment_dir "${EXPERIMENT_DIR}" \
@@ -754,14 +771,14 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
             --sample_name_list "${SAMPLE_NAMES}"
 
         echo "Plotting Training Figures..."
-        poetry run python ./src/multiomic_transformer/utils/plotting.py \
+        python ./src/multiomic_transformer/utils/plotting.py \
             --experiment "${DATASET_NAME}" \
             --training_num "${TRAINING_NUM}" \
             --experiment_dir "${EXPERIMENT_DIR}" \
             --model_file "${MODEL_FILE}"
 
         echo "Running AUROC Testing Refactored..."
-        poetry run python ./src/multiomic_transformer/utils/auroc_refactored.py \
+        python ./src/multiomic_transformer/utils/auroc_refactored.py \
             --experiment "${DATASET_NAME}" \
             --training_num "${TRAINING_NUM}" \
             --experiment_dir "${EXPERIMENT_DIR}" \

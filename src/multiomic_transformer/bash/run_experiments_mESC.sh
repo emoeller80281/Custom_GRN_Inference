@@ -869,7 +869,7 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
     
         echo ""
         echo "Running AUROC Testing..."
-        poetry run python ./src/multiomic_transformer/utils/auroc_testing.py \
+        python ./src/multiomic_transformer/utils/auroc_testing.py \
             --experiment "${DATASET_NAME}" \
             --training_num "${TRAINING_NUM}" \
             --experiment_dir "${EXPERIMENT_DIR}" \
@@ -878,14 +878,14 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
             --sample_name_list "${SAMPLE_NAMES}" # E7.5_rep2 E8.5_rep1 E8.5_rep2
 
         echo "Plotting Training Figures..."
-        poetry run python ./src/multiomic_transformer/utils/plotting.py \
+        python ./src/multiomic_transformer/utils/plotting.py \
             --experiment "${DATASET_NAME}" \
             --training_num "${TRAINING_NUM}" \
             --experiment_dir "${EXPERIMENT_DIR}" \
             --model_file "${MODEL_FILE}"
 
         echo "Running AUROC Testing Refactored..."
-        poetry run python ./src/multiomic_transformer/utils/auroc_refactored.py \
+        python ./src/multiomic_transformer/utils/auroc_refactored.py \
             --experiment "${DATASET_NAME}" \
             --training_num "${TRAINING_NUM}" \
             --experiment_dir "${EXPERIMENT_DIR}" \

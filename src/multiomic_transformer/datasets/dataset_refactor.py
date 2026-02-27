@@ -125,7 +125,7 @@ def fit_simple_scalers(
             torch.distributed.all_reduce(acc_cuda, op=torch.distributed.ReduceOp.SUM)
             acc.copy_(acc_cuda.to("cpu"))
 
-    # Calculate the TF means/stds
+    # Calculate the TF means/stds (only for TFs in the dataset with nonzero counts)
     tf_mean = torch.zeros(T_expected, dtype=torch.float32)
     tf_std  = torch.ones(T_expected,  dtype=torch.float32)
     mask_tf = tf_count > 0
@@ -134,7 +134,7 @@ def fit_simple_scalers(
     tf_var[mask_tf] = (tf_sqsum[mask_tf] / tf_count[mask_tf]).to(torch.float32) - tf_mean[mask_tf]**2
     tf_std = torch.sqrt(torch.clamp(tf_var, min=1e-6))
 
-    # Calculate the TG means/stds
+    # Calculate the TG means/stds (only for TGs in the dataset with nonzero counts)
     tg_mean = torch.zeros(G_expected, dtype=torch.float32)
     tg_std  = torch.ones(G_expected,  dtype=torch.float32)
     mask_tg = tg_count > 0

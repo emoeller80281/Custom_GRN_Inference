@@ -264,19 +264,14 @@ def load_grn(selected_experiment_dir, tf_names, tg_names, method="gradient attri
     score = np.nan_to_num(score, nan=0.0)
     score_abs = np.abs(score)
 
-    # Calculate per-TF robust z-score
-    median_val = np.median(score_abs, axis=1, keepdims=True)
-    mad = np.median(np.abs(score_abs - median_val), axis=1, keepdims=True) + 1e-6
-    score = (score_abs - median_val) / mad
+    with np.errstate(divide='ignore'):
+        log10_score = np.log10(score_abs)
+        
+    min_score = np.min(log10_score[np.isfinite(log10_score)])
+    log10_score_positive = log10_score - min_score
+    log10_score_percentage = log10_score_positive / np.max(log10_score_positive)
     
-    score = np.clip(score, 0, None)
-
-    log1p_score = np.log1p(score)
-    log1p_score = np.clip(log1p_score, 1e-12, None)  # ensure > 0
-
-    score_log = np.log10(log1p_score)
-    
-    T, G = score_log.shape
+    T, G = log10_score_percentage.shape
     tf_idx, tg_idx = np.meshgrid(np.arange(T), np.arange(G), indexing="ij")
     
     tf_idx = tf_idx.ravel()
@@ -285,7 +280,7 @@ def load_grn(selected_experiment_dir, tf_names, tg_names, method="gradient attri
     df = pd.DataFrame({
         "Source": np.asarray(tf_names, dtype=object)[tf_idx],
         "Target": np.asarray(tg_names, dtype=object)[tg_idx],
-        "Score": score_log.ravel(),
+        "Score": log10_score_percentage.ravel(),
     })
     
     df["Source"] = df["Source"].astype(str).str.upper()

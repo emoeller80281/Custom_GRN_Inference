@@ -1,5 +1,6 @@
 import os, sys, json
 import numpy as np
+import pandas as pd
 import torch
 from pathlib import Path
 import logging
@@ -96,7 +97,12 @@ def load_model(selected_experiment_dir, checkpoint_file, device):
         std=torch.as_tensor(state["tf_scaler_std"],  device=device, dtype=torch.float32),
     )
 
-    return model, test_loader, tg_scaler, tf_scaler, state
+    with open(selected_experiment_dir / "tf_names_ordered.json", "r") as f:
+        tf_names = json.load(f)
+    with open(selected_experiment_dir / "tg_names_ordered.json", "r") as f:
+        tg_names = json.load(f)
+
+    return model, test_loader, tg_scaler, tf_scaler, state, tf_names, tg_names
 
 def run_tf_knockout(
     selected_experiment_dir: Path, 
@@ -105,6 +111,8 @@ def run_tf_knockout(
     tg_scaler,
     tf_scaler,
     state,
+    tf_names,
+    tg_names,
     device,
     use_amp, 
     rank, 
@@ -115,8 +123,8 @@ def run_tf_knockout(
     max_tgs_per_batch: Optional[int] = None,
     ):
 
-    T_total = len(state["tf_scaler_mean"])   # total TF vocab size
-    G_total = len(state["tg_scaler_mean"])   # total TG vocab size
+    T_total = len(tf_names)   # total TF vocab size
+    G_total = len(tg_names)   # total TG vocab size
 
     # Accumulators for TF knockout effect (CPU)
     effect_sum   = torch.zeros(T_total, G_total, device=device, dtype=torch.float64)
@@ -297,12 +305,34 @@ def run_tf_knockout(
         dist.all_reduce(effect_sum,   op=dist.ReduceOp.SUM)
         dist.all_reduce(effect_count, op=dist.ReduceOp.SUM)
 
+    tf_tg_effect = effect_sum / (effect_count + 1e-12)
+
+    seen_tf_mask = effect_count.sum(dim=1) > 0
+    seen_tg_mask = effect_count.sum(dim=0) > 0
+
+    seen_tf_ids = torch.nonzero(seen_tf_mask, as_tuple=True)[0]
+    seen_tg_ids = torch.nonzero(seen_tg_mask, as_tuple=True)[0]
+
+    tf_tg_effect_compact = tf_tg_effect[seen_tf_mask][:, seen_tg_mask]
+    tf_tg_effect_np = np.nan_to_num(tf_tg_effect_compact.detach().cpu().numpy(), nan=0.0)
+
+    seen_tf_ids_np = seen_tf_ids.cpu().numpy()
+    seen_tg_ids_np = seen_tg_ids.cpu().numpy()
+
+    df_wide = pd.DataFrame(
+        tf_tg_effect_np,
+        index=[tf_names[i] for i in seen_tf_ids_np],
+        columns=[tg_names[i] for i in seen_tg_ids_np],
+    )
+
     if rank == 0:
-        tf_tg_effect_np = (effect_sum / (effect_count + 1e-12)).detach().cpu().numpy()
-        np.save(selected_experiment_dir / "tf_tg_fullmodel_knockout.npy", tf_tg_effect_np)
-        np.save(selected_experiment_dir / "tf_tg_fullmodel_knockout_count.npy",
-                effect_count.detach().cpu().numpy())
+        print(f"TF knockout: kept {len(seen_tf_ids_np)}/{T_total} TFs, {len(seen_tg_ids_np)}/{G_total} TGs")
+        out_path = selected_experiment_dir / "tf_knockout_raw.parquet"
+        df_wide.to_parquet(out_path)
+        logging.info(f"Saved TF knockout DataFrame to {out_path}")
         logging.info("Finished TF Knockout calculation!")
+
+    return df_wide
         
 if __name__ == "__main__":
     argparser = argparse.ArgumentParser(description="Compute gradient-based TF->TG attributions")
@@ -345,7 +375,7 @@ if __name__ == "__main__":
         else:
             use_amp = False
     
-    model, test_loader, tg_scaler, tf_scaler, state = load_model(
+    model, test_loader, tg_scaler, tf_scaler, state, tf_names, tg_names = load_model(
         selected_experiment_dir=selected_experiment_dir,
         checkpoint_file=args.model_file,
         device=device
@@ -358,6 +388,8 @@ if __name__ == "__main__":
         tg_scaler=tg_scaler,
         tf_scaler=tf_scaler,
         state=state,
+        tf_names=tf_names,
+        tg_names=tg_names,
         device=device,
         use_amp = use_amp,
         rank=rank, 

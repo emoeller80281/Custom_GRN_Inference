@@ -1,5 +1,6 @@
 import os, sys, json
 import numpy as np
+import pandas as pd
 import torch
 import torch.distributed as dist
 from pathlib import Path
@@ -94,7 +95,12 @@ def load_model(selected_experiment_dir, checkpoint_file, device):
         std=torch.as_tensor(state["tf_scaler_std"],  device=device, dtype=torch.float32),
     )
 
-    return model, test_loader, tg_scaler, tf_scaler, state
+    with open(selected_experiment_dir / "tf_names_ordered.json", "r") as f:
+        tf_names = json.load(f)
+    with open(selected_experiment_dir / "tg_names_ordered.json", "r") as f:
+        tg_names = json.load(f)
+
+    return model, test_loader, tg_scaler, tf_scaler, state, tf_names, tg_names
 
 def run_gradient_attribution(
     selected_experiment_dir,
@@ -103,6 +109,8 @@ def run_gradient_attribution(
     tg_scaler,
     tf_scaler,
     state,
+    tf_names,
+    tg_names,
     device,
     use_amp,
     rank,
@@ -126,8 +134,8 @@ def run_gradient_attribution(
 
     assert method in {"saliency", "smoothgrad", "ig"}, f"Unknown method: {method}"
 
-    T_total = len(state["tf_scaler_mean"])
-    G_total = len(state["tg_scaler_mean"])
+    T_total = len(tf_names)
+    G_total = len(tg_names)
 
     grad_sum = torch.zeros(T_total, G_total, device=device, dtype=torch.float32)
     grad_count = torch.zeros_like(grad_sum)
@@ -493,19 +501,33 @@ def run_gradient_attribution(
         dist.all_reduce(grad_sum, op=dist.ReduceOp.SUM)
         dist.all_reduce(grad_count, op=dist.ReduceOp.SUM)
 
-    if distributed and rank == 0:
-        grad_attr = grad_sum / (grad_count + 1e-12)
-        grad_attr_np = grad_attr.detach().cpu().numpy()
+    grad_attr = grad_sum / (grad_count + 1e-12)
 
-        print("Gradient attribution matrix shape:", grad_attr_np.shape)
-        out_path = selected_experiment_dir / f"tf_tg_grad_attribution.npy"
-        np.save(out_path, grad_attr_np)
-        logging.info(f"Saved gradient attribution matrix to {out_path}")
-    else:
-        grad_attr = grad_sum / (grad_count + 1e-12)
-        grad_attr_np = grad_attr.detach().cpu().numpy()
-        
-    return grad_attr_np
+    seen_tf_mask = grad_count.sum(dim=1) > 0
+    seen_tg_mask = grad_count.sum(dim=0) > 0
+
+    seen_tf_ids = torch.nonzero(seen_tf_mask, as_tuple=True)[0]
+    seen_tg_ids = torch.nonzero(seen_tg_mask, as_tuple=True)[0]
+
+    grad_attr_compact = grad_attr[seen_tf_mask][:, seen_tg_mask]
+    grad_attr_np = np.nan_to_num(grad_attr_compact.detach().cpu().numpy(), nan=0.0)
+
+    seen_tf_ids_np = seen_tf_ids.cpu().numpy()
+    seen_tg_ids_np = seen_tg_ids.cpu().numpy()
+
+    df_wide = pd.DataFrame(
+        grad_attr_np,
+        index=[tf_names[i] for i in seen_tf_ids_np],
+        columns=[tg_names[i] for i in seen_tg_ids_np],
+    )
+
+    if rank == 0:
+        print(f"Gradient attribution: kept {len(seen_tf_ids_np)}/{T_total} TFs, {len(seen_tg_ids_np)}/{G_total} TGs")
+        out_path = selected_experiment_dir / "gradient_attribution_raw.parquet"
+        df_wide.to_parquet(out_path)
+        logging.info(f"Saved gradient attribution DataFrame to {out_path}")
+
+    return df_wide
 
 
 if __name__ == "__main__":
@@ -606,7 +628,7 @@ if __name__ == "__main__":
             )
             use_amp = False
 
-    model, test_loader, tg_scaler, tf_scaler, state = load_model(
+    model, test_loader, tg_scaler, tf_scaler, state, tf_names, tg_names = load_model(
         selected_experiment_dir=selected_experiment_dir,
         checkpoint_file=args.model_file,
         device=device,
@@ -619,6 +641,8 @@ if __name__ == "__main__":
         tg_scaler=tg_scaler,
         tf_scaler=tf_scaler,
         state=state,
+        tf_names=tf_names,
+        tg_names=tg_names,
         device=device,
         use_amp=use_amp,
         rank=rank,

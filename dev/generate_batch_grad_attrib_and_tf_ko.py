@@ -11,6 +11,7 @@ from tqdm import tqdm
 import random
 import zlib
 import logging
+import argparse
 
 PROJECT_DIR = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
 SRC_DIR = str(Path(PROJECT_DIR) / "src")
@@ -48,77 +49,6 @@ def setup_distributed():
             device_id=device,
         )
     return rank, world_size, local_rank, distributed
-
-def format_grad_attrib_grn(grad_attr_np, tf_names, tg_names):
-    score = np.nan_to_num(grad_attr_np, nan=0.0)
-    score_abs = np.abs(score)
-    
-    median_val = np.median(score_abs, axis=1, keepdims=True)
-    mad = np.median(np.abs(score_abs - median_val), axis=1, keepdims=True) + 1e-6
-    score = (score_abs - median_val) / mad
-    
-    T, G = score_abs.shape
-    tf_idx, tg_idx = np.meshgrid(np.arange(T), np.arange(G), indexing="ij")
-    
-    tf_idx = tf_idx.ravel()
-    tg_idx = tg_idx.ravel()
-
-    df = pd.DataFrame({
-        "Source": np.asarray(tf_names, dtype=object)[tf_idx],
-        "Target": np.asarray(tg_names, dtype=object)[tg_idx],
-        "Score": score.ravel(),
-    })
-    
-    df["Source"] = df["Source"].astype(str).str.upper()
-    df["Target"] = df["Target"].astype(str).str.upper()
-    
-    return df
-
-def format_tf_ko_grn(tf_ko_np, tf_names, tg_names):
-    score = np.nan_to_num(tf_ko_np, nan=0.0)
-    score = np.maximum(score, 0.0) # Keep only activation-like effects; set inhibition-like effects to 0
-    score_abs = np.abs(score)
-    
-    median_val = np.median(score_abs, axis=1, keepdims=True)
-    mad = np.median(np.abs(score_abs - median_val), axis=1, keepdims=True) + 1e-6
-    score = (score_abs - median_val) / mad
-    
-    T, G = score.shape
-    tf_idx, tg_idx = np.meshgrid(np.arange(T), np.arange(G), indexing="ij")
-    
-    tf_idx = tf_idx.ravel()
-    tg_idx = tg_idx.ravel()
-
-    df = pd.DataFrame({
-        "Source": np.asarray(tf_names, dtype=object)[tf_idx],
-        "Target": np.asarray(tg_names, dtype=object)[tg_idx],
-        "Score": score.ravel(),
-    })
-    
-    df["Source"] = df["Source"].astype(str).str.upper()
-    df["Target"] = df["Target"].astype(str).str.upper()
-    
-    return df
-            
-def find_n_evenly_spaced_checkpoints(exp, n=10):
-    checkpoints = sorted([file.name for file in exp.model_training_dir.iterdir() if file.name.startswith("checkpoint_")], key=lambda x: int(x.split("_")[1].split(".")[0]))
-    checkpoint_nums = [int(name.split("_")[1].split(".")[0]) for name in checkpoints]
-
-    max_checkpoint = checkpoint_nums[-1]
-
-    # Process n checkpoints, evenly spaced across the range of available checkpoints
-    num_to_process = min(n, len(checkpoint_nums))
-    checkpoints_to_process = np.linspace(0, max_checkpoint, num=num_to_process, dtype=int)
-    
-    # Round to the nearest available checkpoint number
-    checkpoints_to_process = [min(checkpoint_nums, key=lambda x: abs(x - num)) for num in checkpoints_to_process]
-    checkpoints_to_process = sorted(set(checkpoints_to_process))
-    
-    logging.info(f"Checkpoint Numbers to process: {checkpoints_to_process}")
-    
-    checkpoint_files = [f"checkpoint_{num}.pt" for num in checkpoints_to_process]
-    
-    return checkpoint_files, checkpoints_to_process
 
 def load_ground_truth(ground_truth_file):
     if type(ground_truth_file) == str:
@@ -199,7 +129,8 @@ def run_gradient_attribution(
     test_loader,
     tg_scaler,
     tf_scaler,
-    state,
+    tf_names,
+    tg_names,
     device,
     use_amp,
     rank,
@@ -214,8 +145,8 @@ def run_gradient_attribution(
     use_dataloader: bool = True,
 ):
 
-    T_total = len(state["tf_scaler_mean"])
-    G_total = len(state["tg_scaler_mean"])
+    T_total = len(tf_names)
+    G_total = len(tg_names)
 
     grad_sum = torch.zeros(T_total, G_total, device=device, dtype=torch.float32)
     grad_count = torch.zeros_like(grad_sum)
@@ -232,7 +163,7 @@ def run_gradient_attribution(
             ncols=100,
         )
 
-    batch_grad_np = {}
+    batch_grad_dfs = {}
     for b_idx, batch in enumerate(iterator):
         if max_batches is not None and b_idx >= max_batches:
             break
@@ -419,14 +350,29 @@ def run_gradient_attribution(
                 
         if save_every_n_batches is not None and rank == 0:
             if b_idx % save_every_n_batches == 0:
-                grad_attr_np = (grad_sum / (grad_count + 1e-12)).detach().cpu().numpy()
-                batch_grad_np[b_idx] = grad_attr_np
-
-                out_dir = selected_experiment_dir / "tf_tg_grad_attribution_batches"
+                # Filter to genes seen SO FAR (up to this batch)
+                seen_tf_mask = grad_count.sum(dim=1) > 0
+                seen_tg_mask = grad_count.sum(dim=0) > 0
+                
+                seen_tf_ids_batch = torch.nonzero(seen_tf_mask, as_tuple=True)[0].cpu().numpy()
+                seen_tg_ids_batch = torch.nonzero(seen_tg_mask, as_tuple=True)[0].cpu().numpy()
+                
+                grad_attr_partial = grad_sum / (grad_count + 1e-12)
+                grad_attr_compact = grad_attr_partial[seen_tf_mask][:, seen_tg_mask]
+                grad_attr_np = grad_attr_compact.detach().cpu().numpy()
+                
+                batch_df_wide = pd.DataFrame(
+                    grad_attr_np, 
+                    index=[tf_names[i] for i in seen_tf_ids_batch],
+                    columns=[tg_names[i] for i in seen_tg_ids_batch]
+                )                
+                batch_grad_dfs[b_idx] = batch_df_wide
+                
+                out_dir = selected_experiment_dir / "grad_attribution_batches"
                 out_dir.mkdir(exist_ok=True)
-
-                out_path = out_dir / f"tf_tg_grad_attribution_batch_{b_idx}.npy"
-                np.save(out_path, grad_attr_np)
+                
+                out_path = out_dir / f"gradient_attribution_batch_{b_idx}.parquet"
+                batch_df_wide.to_parquet(out_path)
                 
 
         # cleanup
@@ -446,12 +392,36 @@ def run_gradient_attribution(
         dist.barrier()
         dist.all_reduce(grad_sum, op=dist.ReduceOp.SUM)
         dist.all_reduce(grad_count, op=dist.ReduceOp.SUM)
-
-    # Calculate the gradient attribution score by dividing the summed gradients by the count of contributions for each TG
+    
+    # After the loop - final output
+    # Calculate the final gradient attribution score
     grad_attr = grad_sum / (grad_count + 1e-12)
-    grad_attr_np = grad_attr.detach().cpu().numpy()
-        
-    return grad_attr_np, batch_grad_np
+
+    # Filter to only TFs and TGs seen across ALL batches
+    seen_tf_mask = grad_count.sum(dim=1) > 0
+    seen_tg_mask = grad_count.sum(dim=0) > 0
+
+    seen_tf_ids = torch.nonzero(seen_tf_mask, as_tuple=True)[0]
+    seen_tg_ids = torch.nonzero(seen_tg_mask, as_tuple=True)[0]
+
+    grad_attr_compact = grad_attr[seen_tf_mask][:, seen_tg_mask]
+    grad_attr_np = grad_attr_compact.detach().cpu().numpy()
+
+    seen_tf_ids_np = seen_tf_ids.cpu().numpy()
+    seen_tg_ids_np = seen_tg_ids.cpu().numpy()
+    
+    df_wide = pd.DataFrame(
+        grad_attr_np, 
+        index=[tf_names[i] for i in seen_tf_ids_np],
+        columns=[tg_names[i] for i in seen_tg_ids_np]
+    )
+    
+    out_path = selected_experiment_dir / f"gradient_attribution_raw.parquet"
+    df_wide.to_parquet(out_path)  # or .to_pickle() for exact dtype preservation
+
+    print(f"Gradient attribution: kept {len(seen_tf_ids_np)}/{T_total} TFs, {len(seen_tg_ids_np)}/{G_total} TGs")
+
+    return df_wide, batch_grad_dfs
 
 @torch.no_grad()
 def run_tf_knockout(
@@ -460,7 +430,8 @@ def run_tf_knockout(
     test_loader,
     tg_scaler,
     tf_scaler,
-    state,
+    tf_names,
+    tg_names,
     device,
     use_amp,
     rank,
@@ -487,8 +458,8 @@ def run_tf_knockout(
       tf_tg_effect_np: [T_total, G_total] float64 mean delta (baseline - KO), aggregated over observed contexts
       effect_count_np: [T_total, G_total] float64 counts (#times each TF,TG updated)
     """
-    T_total = len(state["tf_scaler_mean"])
-    G_total = len(state["tg_scaler_mean"])
+    T_total = len(tf_names)
+    G_total = len(tg_names)
 
     effect_sum   = torch.zeros((T_total, G_total), device=device, dtype=torch.float64)
     effect_count = torch.zeros((T_total, G_total), device=device, dtype=torch.float64)
@@ -499,7 +470,7 @@ def run_tf_knockout(
     if rank == 0:
         iterator = tqdm(test_loader, desc="TF knockout", unit="batches", total=max_batches, ncols=100)
 
-    batch_tf_ko_np = {}
+    batch_tf_ko_dfs = {}
     for b_idx, batch in enumerate(iterator):
         if (max_batches is not None) and (b_idx >= max_batches):
             break
@@ -686,14 +657,29 @@ def run_tf_knockout(
             
         if save_every_n_batches is not None and rank == 0:
             if b_idx % save_every_n_batches == 0:
-                tf_knockout_np = (effect_sum / (effect_count + 1e-12)).detach().cpu().numpy()
-                batch_tf_ko_np[b_idx] = tf_knockout_np
-
+                # Filter to genes seen SO FAR (up to this batch)
+                seen_tf_mask = effect_count.sum(dim=1) > 0
+                seen_tg_mask = effect_count.sum(dim=0) > 0
+                
+                seen_tf_ids_batch = torch.nonzero(seen_tf_mask, as_tuple=True)[0].cpu().numpy()
+                seen_tg_ids_batch = torch.nonzero(seen_tg_mask, as_tuple=True)[0].cpu().numpy()
+                
+                tf_knockout_partial = effect_sum / (effect_count + 1e-12)
+                tf_knockout_compact = tf_knockout_partial[seen_tf_mask][:, seen_tg_mask]
+                tf_knockout_np = tf_knockout_compact.detach().cpu().numpy()
+                
+                batch_df_wide = pd.DataFrame(
+                    tf_knockout_np, 
+                    index=[tf_names[i] for i in seen_tf_ids_batch],
+                    columns=[tg_names[i] for i in seen_tg_ids_batch]
+                )
+                batch_tf_ko_dfs[b_idx] = batch_df_wide
+                
                 out_dir = selected_experiment_dir / "tf_knockout_batches"
                 out_dir.mkdir(exist_ok=True)
-
-                out_path = out_dir / f"tf_knockout_batch_{b_idx}.npy"
-                np.save(out_path, tf_knockout_np)
+                
+                out_path = out_dir / f"tf_knockout_raw_batch_{b_idx}.parquet"
+                batch_df_wide.to_parquet(out_path)
 
         # free some refs (optional)
         del preds_base_s, preds_base_u
@@ -703,8 +689,35 @@ def run_tf_knockout(
         dist.all_reduce(effect_sum, op=dist.ReduceOp.SUM)
         dist.all_reduce(effect_count, op=dist.ReduceOp.SUM)
 
+    # After the loop - final output
+    # Calculate the final TF knockout effect
     tf_tg_effect = effect_sum / (effect_count + 1e-12)
-    return tf_tg_effect.detach().cpu().numpy(), effect_count.detach().cpu().numpy(), batch_tf_ko_np
+    
+    # Filter to only TFs and TGs seen across ALL batches
+    seen_tf_mask = effect_count.sum(dim=1) > 0
+    seen_tg_mask = effect_count.sum(dim=0) > 0
+    
+    seen_tf_ids = torch.nonzero(seen_tf_mask, as_tuple=True)[0]
+    seen_tg_ids = torch.nonzero(seen_tg_mask, as_tuple=True)[0]
+    
+    tf_tg_effect_compact = tf_tg_effect[seen_tf_mask][:, seen_tg_mask]
+    tf_tg_effect_np = tf_tg_effect_compact.detach().cpu().numpy()
+    
+    seen_tf_ids_np = seen_tf_ids.cpu().numpy()
+    seen_tg_ids_np = seen_tg_ids.cpu().numpy()
+    
+    df_wide = pd.DataFrame(
+        tf_tg_effect_np, 
+        index=[tf_names[i] for i in seen_tf_ids_np],
+        columns=[tg_names[i] for i in seen_tg_ids_np]
+    )
+    
+    out_path = selected_experiment_dir / f"tf_knockout_raw.parquet"
+    df_wide.to_parquet(out_path)
+    
+    print(f"TF knockout: kept {len(seen_tf_ids_np)}/{T_total} TFs, {len(seen_tg_ids_np)}/{G_total} TGs")
+    
+    return df_wide, batch_tf_ko_dfs
 
 def load_model(selected_experiment_dir, checkpoint_file, device):
     params_path = selected_experiment_dir / "run_parameters.json"
@@ -761,19 +774,37 @@ def load_model(selected_experiment_dir, checkpoint_file, device):
 
     return model, test_loader, tg_scaler, tf_scaler, state
 
+def argparse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--experiment_name", type=str, required=True)
+    parser.add_argument("--batch_size", type=int, default=64)
+    parser.add_argument("--model_num", type=int, default=1)
+    parser.add_argument("--checkpoint_name", type=str, default="trained_model.pt")
+    parser.add_argument("--save_every_n_batches", type=int, default=20)
+    
+    args = parser.parse_args()
+    return args
 
 if __name__ == "__main__":
     rank, world_size, local_rank, distributed = setup_distributed()
+    
+    args = argparse_args()
         
     if rank == 0:
         logging.info("Loading experiment...")
+        
     exp = experiment_loader.ExperimentLoader(
         experiment_dir = "/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/",
-        experiment_name="mESC_7_sample_hvg_filter_disp_0.01",
-        model_num=1,
+        experiment_name=args.experiment_name,
+        model_num=args.model_num,
     )
     
-    save_every_n_batches = 20
+    checkpoint_name = args.checkpoint_name
+    
+    assert checkpoint_name in os.listdir(exp.model_training_dir), \
+        f"Checkpoint {checkpoint_name} not found in {exp.model_training_dir}"
+    
+    save_every_n_batches = args.save_every_n_batches
     
     SAMPLE_DATA_CACHE_DIR = Path(PROJECT_DIR) / "data/training_data_cache" / exp.experiment_name
     CHROM_IDS = exp.experiment_settings_df.set_index("parameter").loc["CHROM_IDS"].value.split(" ")
@@ -791,16 +822,13 @@ if __name__ == "__main__":
     if rank == 0:
         logging.info("Creating dataloader...")
     full_data_loader = prepare_dataloader(
-        dataset, batch_size=64, world_size=world_size, rank=rank, num_workers=8, seed=42
+        dataset, batch_size=args.batch_size, world_size=world_size, rank=rank, num_workers=8, seed=42
     )
     
     sample_type = exp.experiment_name.split("_")[0]
 
     if rank == 0:
         logging.info(f"\nExperiment: {exp.experiment_name}, Sample type: {sample_type}")
-
-    checkpoints = ["trained_model.pt"] #"checkpoint_0.pt", 
-    checkpoint_nums = [0, 1]
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if rank == 0:
@@ -811,8 +839,6 @@ if __name__ == "__main__":
     disable_motif_mask = False
     disable_shortcut = False
     zero_tf_expr = False
-    
-    
     
     if torch.cuda.is_available():
         torch.cuda.set_device(local_rank)
@@ -836,8 +862,6 @@ if __name__ == "__main__":
     free, total = torch.cuda.mem_get_info(device)
     print(f"[rank {rank}] mem free={free/1e9:.2f} GB / total={total/1e9:.2f} GB", flush=True)
 
-    
-
     use_amp = True and device.type == "cuda"
     if torch.cuda.is_available():
         capability = torch.cuda.get_device_capability(device)
@@ -846,74 +870,75 @@ if __name__ == "__main__":
                 f"GPU compute capability {capability[0]}.{capability[1]} < 7.0, disabling AMP"
             )
             use_amp = False
-            
-    for checkpoint_name, checkpoint_num in zip(checkpoints, checkpoint_nums):
+                
+    model, test_loader, tg_scaler, tf_scaler, state = load_model(
+        selected_experiment_dir=exp.model_training_dir,
+        checkpoint_file=checkpoint_name,
+        device=device
+    )
+    
+    if max_batches is not None:
+        max_batches = min(max_batches, len(full_data_loader))
+    else:
+        max_batches = len(full_data_loader)
+    
+    logging.info(f"Checkpoint {checkpoint_name} loaded. Max batches for attribution: {max_batches}")
+    
+    selected_experiment_dir = exp.model_training_dir / "grn_results_by_checkpoint" / checkpoint_name
+    selected_experiment_dir.mkdir(parents=True, exist_ok=True)
+    
+    start_time = time.time()
+    grad_attr_df, batch_grad_df_dict = run_gradient_attribution(
+        selected_experiment_dir=selected_experiment_dir,
+        model=model,
+        test_loader=full_data_loader,
+        tg_scaler=tg_scaler,
+        tf_scaler=tf_scaler,
+        tf_names=exp.tf_names,
+        tg_names=exp.tg_names,
+        use_amp=use_amp,
+        max_batches=max_batches,
+        device=device,
+        rank=rank,
+        world_size=world_size,
+        distributed=distributed,
+        disable_bias=disable_bias,
+        disable_motif_mask=disable_motif_mask,
+        disable_shortcut=disable_shortcut,
+        zero_tf_expr=zero_tf_expr,
+        save_every_n_batches=save_every_n_batches,
+        use_dataloader=True,
         
-        model, test_loader, tg_scaler, tf_scaler, state = load_model(
-            selected_experiment_dir=exp.model_training_dir,
-            checkpoint_file=checkpoint_name,
-            device=device
-        )
-        if max_batches is not None:
-            max_batches = min(max_batches, len(full_data_loader))
-        else:
-            max_batches = len(full_data_loader)
-        
-        logging.info(f"Checkpoint {checkpoint_name} loaded. Max batches for attribution: {max_batches}")
-        
-        selected_experiment_dir = exp.model_training_dir / "grn_results_by_checkpoint" / checkpoint_name
-        selected_experiment_dir.mkdir(parents=True, exist_ok=True)
-        
+    )
+    end_time = time.time()
+    logging.info(f"  - Gradient attribution finished {max_batches} batches in {end_time - start_time:.2f} seconds.")
+    
+    for ko_mode in ["scaled_k_sigma"]: # "raw_zero", "raw_percentile", 
+        logging.info(f"  - Running TF knockout with mode: {ko_mode}")
         start_time = time.time()
-        grad_attr_np, batch_grad_np_dict = run_gradient_attribution(
+        tfko_df, batch_tf_ko_df_dict = run_tf_knockout(
             selected_experiment_dir=selected_experiment_dir,
             model=model,
             test_loader=full_data_loader,
             tg_scaler=tg_scaler,
             tf_scaler=tf_scaler,
-            state=state,
-            use_amp=use_amp,
-            max_batches=max_batches,
+            tf_names=exp.tf_names,
+            tg_names=exp.tg_names,
             device=device,
+            use_amp=use_amp,
             rank=rank,
             world_size=world_size,
             distributed=distributed,
+            max_batches=max_batches,
+            save_every_n_batches=save_every_n_batches,
+            ko_mode=ko_mode,
+            raw_percentile=0.01,
             disable_bias=disable_bias,
             disable_motif_mask=disable_motif_mask,
             disable_shortcut=disable_shortcut,
             zero_tf_expr=zero_tf_expr,
-            save_every_n_batches=save_every_n_batches,
             use_dataloader=True,
             
         )
         end_time = time.time()
-        logging.info(f"  - Gradient attribution finished {max_batches} batches in {end_time - start_time:.2f} seconds.")
-        
-        for ko_mode in ["scaled_k_sigma"]: # "raw_zero", "raw_percentile", 
-            logging.info(f"  - Running TF knockout with mode: {ko_mode}")
-            start_time = time.time()
-            tfko_np, counts, batch_tf_ko_np_dict = run_tf_knockout(
-                selected_experiment_dir=selected_experiment_dir,
-                model=model,
-                test_loader=full_data_loader,
-                tg_scaler=tg_scaler,
-                tf_scaler=tf_scaler,
-                state=state,
-                device=device,
-                use_amp=use_amp,
-                rank=rank,
-                world_size=world_size,
-                distributed=distributed,
-                max_batches=max_batches,
-                save_every_n_batches=save_every_n_batches,
-                ko_mode=ko_mode,
-                raw_percentile=0.01,
-                disable_bias=disable_bias,
-                disable_motif_mask=disable_motif_mask,
-                disable_shortcut=disable_shortcut,
-                zero_tf_expr=zero_tf_expr,
-                use_dataloader=True,
-                
-            )
-            end_time = time.time()
-            logging.info(f"  - TF knockout finished {max_batches} batches in {end_time - start_time:.2f} seconds.")
+        logging.info(f"  - TF knockout finished {max_batches} batches in {end_time - start_time:.2f} seconds.")

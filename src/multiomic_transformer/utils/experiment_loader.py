@@ -13,6 +13,7 @@ from typing import Set, Tuple, Optional
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from tqdm import tqdm
+import seaborn as sns
 
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["OMP_NUM_THREADS"] = "1"
@@ -176,7 +177,7 @@ class ExperimentLoader:
             std=torch.as_tensor(self.state["tf_scaler_std"],  device=self.device, dtype=torch.float32),
         )
     
-    def load_grn(self, method="gradient attribution", zscore_method="median_mad"):
+    def load_grn_old(self, method="gradient attribution", zscore_method="median_mad"):
         """
         Loads a GRN dataframe given a method. The dataframe contains the source transcription factor, target gene, and score.
 
@@ -221,9 +222,9 @@ class ExperimentLoader:
         log1p_score = np.log1p(score)
         log1p_score = np.clip(log1p_score, 1e-12, None)  # ensure > 0
 
-        score_log = np.log10(log1p_score)
+        score_log = np.log10(score_abs)
         
-        T, G = score_log.shape
+        T, G = score.shape
         tf_idx, tg_idx = np.meshgrid(np.arange(T), np.arange(G), indexing="ij")
         
         tf_idx = tf_idx.ravel()
@@ -232,7 +233,7 @@ class ExperimentLoader:
         df = pd.DataFrame({
             "Source": np.asarray(self.tf_names, dtype=object)[tf_idx],
             "Target": np.asarray(self.tg_names, dtype=object)[tg_idx],
-            "Score": score_log.ravel(),
+            "Score": score.ravel(),
         })
         
         df["Source"] = df["Source"].astype(str).str.upper()
@@ -240,6 +241,58 @@ class ExperimentLoader:
         
         # Removes the 1e-12 pseudonumbers used for safe log transformation (originally scores of 0)
         df = df[df["Score"] > 0]
+        
+        return df
+    
+    def load_grn(self, method="gradient attribution", z_scale=False):
+        method = method.lower()
+        
+        assert method in ["gradient attribution", "tf knockout"], \
+            f"Invalid GRN method {method}. Must be 'Gradient Attribution' or 'TF Knockout'."   
+        
+        if method == "gradient attribution":
+            df_file = self.model_training_dir / "gradient_attribution_raw.parquet"
+        elif method == "tf knockout":
+            df_file = self.model_training_dir / "tf_knockout_raw.parquet"
+        else:
+            raise ValueError(f"Invalid method {method}. Must be 'Gradient Attribution' or 'TF Knockout'.")
+        
+        assert df_file.exists(), \
+            f"GRN file for method {method} {df_file} does not exist."
+        
+        df_wide = pd.read_parquet(df_file) 
+        score = df_wide.values
+    
+        # Get the absolute value of the scores
+        score_abs = np.abs(score)
+        
+        # Log10 normalize the scores
+        log_scores = np.log10(score_abs + 1e-6)  # Add small epsilon to avoid log(0)
+        
+        
+        # Robust z-scale normalization across each TF's scores
+        if z_scale == True:
+            median_val = np.median(score_abs, axis=1, keepdims=True)
+            mad = np.median(np.abs(score_abs - median_val), axis=1, keepdims=True) + 1e-6
+            score_abs = (score_abs - median_val) / mad
+    
+        # Create a long DataFrame with Source, Target, and Score columns
+        T, G = log_scores.shape
+        tf_idx, tg_idx = np.meshgrid(np.arange(T), np.arange(G), indexing="ij")
+        
+        tf_idx = tf_idx.ravel()
+        tg_idx = tg_idx.ravel()
+
+        df = pd.DataFrame({
+            "Source": np.asarray(df_wide.index, dtype=object)[tf_idx],
+            "Target": np.asarray(df_wide.columns, dtype=object)[tg_idx],
+            "Score": log_scores.ravel(),
+        })
+        
+        df = df.dropna()
+        
+        df["Source"] = df["Source"].astype(str).str.upper()
+        df["Target"] = df["Target"].astype(str).str.upper()
         
         return df
     
@@ -564,6 +617,15 @@ class ExperimentLoader:
         for tf, g in labeled_df.groupby("Source", sort=False):
             y = g["_in_gt"].to_numpy()
             s = g["Score"].to_numpy()
+
+            if balance:
+                balanced = self._balance_pos_neg(g, random_state=42)
+                y = balanced["_in_gt"].astype(int).to_numpy()
+                s = balanced["Score"].to_numpy()
+            else:
+                y = g["_in_gt"].fillna(0).astype(int).to_numpy()
+                s = g["Score"].to_numpy()
+                
             n = len(y)
             n_pos = int(y.sum())
             n_neg = int(n - n_pos)
@@ -574,14 +636,6 @@ class ExperimentLoader:
                 continue
             if n_pos < min_pos or n_neg == 0:
                 continue
-            
-            if balance:
-                balanced = self._balance_pos_neg(g, random_state=42)
-                y = balanced["_in_gt"].astype(int).to_numpy()
-                s = balanced["Score"].to_numpy()
-            else:
-                y = g["_in_gt"].fillna(0).astype(int).to_numpy()
-                s = g["Score"].to_numpy()
             
             # --- ROC/PR metrics and curves ---
             auroc = roc_auc_score(y, s)
@@ -606,9 +660,9 @@ class ExperimentLoader:
             }
             
             # Pre-sort once for precision@K
-            # order = np.argsort(s)[::-1]
-            # y_sorted = y[order]
-            # tp = np.cumsum(y_sorted)
+            order = np.argsort(s)[::-1]
+            y_sorted = y[order]
+            tp = np.cumsum(y_sorted)
 
             row = {
                 "tf": tf,
@@ -620,12 +674,12 @@ class ExperimentLoader:
                 "auprc": float(auprc) if not np.isnan(auprc) else np.nan,
             }
 
-            # for frac in top_fracs:
-            #     K = max(1, int(frac * n))
-            #     K = min(K, n)
-            #     prec_k = float(tp[K-1] / K) if n > 0 else np.nan
-            #     row[f"precision@{frac*100:.2f}%"] = prec_k
-            #     row[f"lift@{frac*100:.2f}%"] = (prec_k / pos_rate) if (pos_rate and pos_rate > 0) else np.nan
+            for frac in top_fracs:
+                K = max(1, int(frac * n))
+                K = min(K, n)
+                prec_k = float(tp[K-1] / K) if n > 0 else np.nan
+                row[f"precision@{frac*100:.2f}%"] = prec_k
+                row[f"lift@{frac*100:.2f}%"] = (prec_k / pos_rate) if (pos_rate and pos_rate > 0) else np.nan
 
             rows.append(row)
             
@@ -752,7 +806,9 @@ class ExperimentLoader:
         method_name,
         n_bins=75, 
         random_state=42, 
-        hist_log=False,
+        y_log=False,
+        panel_kind="kde",  # "hist" or "kde"
+        density=False,
         selected_batch_num=None,
         ):
         
@@ -806,13 +862,32 @@ class ExperimentLoader:
             combined = pd.concat([true_vals, false_vals])
             bins = np.linspace(combined.min(), combined.max(), n_bins)
 
-            # (1) Histogram
-            ax[i, 0].hist(false_vals, bins=bins, alpha=0.6, color="#747474", label="False", log=hist_log)
-            ax[i, 0].hist(true_vals,  bins=bins, alpha=0.6, color="#4195df", label="True", log=hist_log)
-            ax[i, 0].set_title("True vs False Scores", fontsize=12)
-            ax[i, 0].set_xlabel("Score", fontsize=12)
-            ax[i, 0].set_ylabel(f"{ground_truth_name}\nFrequency", fontsize=12)
-            ax[i, 0].legend(fontsize=9)
+            # (1) Histogram or KDE
+            if panel_kind == "hist":
+                ax[i, 0].hist(false_vals, bins=n_bins, alpha=0.6, color="#747474", label="False",
+                            density=density)
+                ax[i, 0].hist(true_vals,  bins=n_bins, alpha=0.6, color="#4195df", label="True",
+                            density=density)
+
+                ax[i, 0].set_title("True vs False Scores", fontsize=12)
+                ax[i, 0].set_xlabel("Score", fontsize=12)
+                ax[i, 0].set_ylabel(f"{ground_truth_name}\n{'Density' if density else 'Count'}", fontsize=12)
+                ax[i, 0].legend(fontsize=9)
+
+            elif panel_kind == "kde":
+                sns.kdeplot(false_vals, ax=ax[i, 0], color="#747474", label="False",
+                            fill=True, common_norm=False, bw_adjust=1.0)
+                sns.kdeplot(true_vals,  ax=ax[i, 0], color="#4195df", label="True",
+                            fill=True, common_norm=False, bw_adjust=1.0)
+
+                ax[i, 0].set_title("True vs False Score Density", fontsize=12)
+                ax[i, 0].set_xlabel("Score", fontsize=12)
+                ax[i, 0].set_ylabel(f"{ground_truth_name}\nDensity", fontsize=12)
+                ax[i, 0].legend(fontsize=9)
+                
+            if y_log == True:
+                ax[i, 0].set_yscale("log")
+                ax[i, 0].set_ylim(bottom=0.1)
 
             # (2) ROC
             ax[i, 1].plot(rand_fpr, rand_tpr, color="#747474", linestyle="--", lw=2)
