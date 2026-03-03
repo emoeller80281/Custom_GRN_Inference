@@ -866,6 +866,7 @@ def process_or_load_rna_atac_data(
         return x
 
     def _normalize_barcodes(index_like: pd.Index) -> pd.Index:
+        """Normalizes cell barcodes by stripping common suffixes and standardizing case."""
         ix = pd.Index(index_like).astype(str)
         ix = ix.str.replace(r"_\d+$", "", regex=True)
         ix = ix.str.replace(r"[-\.]\d+$", "", regex=True)
@@ -873,11 +874,14 @@ def process_or_load_rna_atac_data(
         return ix.str.upper()
 
     def harmonize_and_intersect(ad_rna: AnnData, ad_atac: AnnData) -> Tuple[AnnData, AnnData]:
+        """Subset the RNA and ATAC AnnData objects to thier shared barcodes, after normalizing barcode formats."""
         rna_norm = _normalize_barcodes(ad_rna.obs_names)
         atac_norm = _normalize_barcodes(ad_atac.obs_names)
+        
         r_map = pd.Series(ad_rna.obs_names, index=rna_norm, dtype="object")
         a_map = pd.Series(ad_atac.obs_names, index=atac_norm, dtype="object")
         common = r_map.index.intersection(a_map.index)
+        
         if len(common) == 0:
             raise RuntimeError("No overlapping barcodes after normalization.")
         ad_rna2 = ad_rna[r_map.loc[common].values, :].copy()

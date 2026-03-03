@@ -166,8 +166,8 @@ def run_gradient_attribution(
             unit="batches",
             total=max_batches,
             ncols=100,
-            miniters=1,
-            mininterval=1,
+            miniters=10,
+            mininterval=2,
         )
 
     batch_grad_dfs = {}
@@ -486,8 +486,8 @@ def run_tf_knockout(
             desc="TF knockout", 
             unit="batches", 
             total=max_batches, 
-            miniters=1,
-            mininterval=1,
+            miniters=10,
+            mininterval=2,
             ncols=100
             )
 
@@ -664,6 +664,23 @@ def run_tf_knockout(
             delta_mean = (preds_base_u - preds_ko_u).mean(dim=0)  # [G_eval]
 
             tf_global = int(tf_ids[t_pos].item())
+            
+            if tf_global < 0 or tf_global >= T_total:
+                raise RuntimeError(
+                    f"tf_global out of range: {tf_global} (T_total={T_total}). "
+                    f"tf_ids min/max: {int(tf_ids.min())}/{int(tf_ids.max())}"
+                )
+
+            # tg ids that this rank will touch
+            tg_globals_all = tg_ids[owned_tg_indices].long()
+
+            bad = (tg_globals_all < 0) | (tg_globals_all >= G_total)
+            if bad.any():
+                bad_vals = tg_globals_all[bad][:20].detach().cpu().tolist()
+                raise RuntimeError(
+                    f"tg_globals out of range (showing up to 20): {bad_vals} (G_total={G_total}). "
+                    f"tg_ids min/max: {int(tg_ids.min())}/{int(tg_ids.max())}"
+                )
 
             # IMPORTANT: tg_ids are global vocab ids; tg_chunk indexes within batch output
             for start in range(0, owned_tg_indices.numel(), chunk_size):
@@ -807,6 +824,7 @@ def argparse_args():
     parser.add_argument("--model_num", type=str, default=1)
     parser.add_argument("--checkpoint_name", type=str, default="trained_model.pt")
     parser.add_argument("--save_every_n_batches", type=int, default=-1)
+    parser.add_argument("--force_recalculate", type=str, default="false", help="Whether to force recalculation even if output files already exist. Set to 'true' to enable.")
     
     args = parser.parse_args()
     return args
@@ -823,7 +841,17 @@ if __name__ == "__main__":
     experiment_name = args.experiment_name
     checkpoint_name = args.checkpoint_name
     
+    force_recalculate = args.force_recalculate
+    
+    if force_recalculate.lower() == "true":
+        force_recalculate = True
+    else:
+        force_recalculate = False
+    
     model_training_dir = os.path.join(experiment_dir, experiment_name, args.model_num)
+    
+    if not os.path.isdir(model_training_dir):
+        model_training_dir = os.path.join(experiment_dir, experiment_name, "chr19", args.model_num)
 
     assert os.path.isdir(model_training_dir), \
         f"Model training directory not found: {model_training_dir}"
@@ -831,157 +859,168 @@ if __name__ == "__main__":
     assert checkpoint_name in os.listdir(model_training_dir), \
         f"Checkpoint {checkpoint_name} not found in {model_training_dir}"
 
-    model_num = int(args.model_num.split("_")[-1])
+    if "gradient_attribution_raw.parquet" in os.listdir(model_training_dir) and "tf_knockout_raw.parquet" in os.listdir(model_training_dir) and not force_recalculate:
+        logging.info(f"Gradient attribution and TF knockout results already exist in {model_training_dir}, skipping computation.")
+        exit(0)
         
-    exp = experiment_loader.ExperimentLoader(
-        experiment_dir = experiment_dir,
-        experiment_name=experiment_name,
-        model_num=model_num,
-    )
-    
-    checkpoint_name = checkpoint_name
-    
-    assert checkpoint_name in os.listdir(exp.model_training_dir), \
-        f"Checkpoint {checkpoint_name} not found in {exp.model_training_dir}"
-    
-    save_every_n_batches = args.save_every_n_batches
-    if save_every_n_batches < 1:
-        save_every_n_batches = None
-    
-    SAMPLE_DATA_CACHE_DIR = Path(PROJECT_DIR) / "data/training_data_cache" / exp.experiment_name
-    CHROM_IDS = exp.experiment_settings_df.set_index("parameter").loc["CHROM_IDS"].value.split(" ")
-    COMMON_DATA = SAMPLE_DATA_CACHE_DIR / "common"
-
-    if rank == 0:
-        logging.info("Creating dataset and dataloader...")
-    dataset = MultiChromosomeDataset(
-        data_dir=SAMPLE_DATA_CACHE_DIR,
-        chrom_ids=CHROM_IDS,
-        tf_vocab_path=os.path.join(COMMON_DATA, "tf_vocab.json"),
-        tg_vocab_path=os.path.join(COMMON_DATA, "tg_vocab.json"),
-    )
-
-    if rank == 0:
-        logging.info("Creating dataloader...")
-    full_data_loader = prepare_dataloader(
-        dataset, batch_size=args.batch_size, world_size=world_size, rank=rank, num_workers=1, seed=42
-    )
-    
-    sample_type = exp.experiment_name.split("_")[0]
-
-    if rank == 0:
-        logging.info(f"\nExperiment: {exp.experiment_name}, Sample type: {sample_type}")
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    if rank == 0:
-        logging.info(f"Using device: {device}\n")
-
-    max_batches = None
-    disable_bias = False
-    disable_motif_mask = False
-    disable_shortcut = False
-    zero_tf_expr = False
-    
-    if torch.cuda.is_available():
-        torch.cuda.set_device(local_rank)
-        device = torch.device(f"cuda:{local_rank}")
     else:
-        device = torch.device("cpu")
-
-    print(
-        f"[rank {rank} local_rank {local_rank}] "
-        f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')} "
-        f"device_count={torch.cuda.device_count()}",
-        flush=True
-    )
-
-
-    print(
-        f"[rank {rank}] current_device={torch.cuda.current_device()} ",
-        flush=True
-    )
-
-    free, total = torch.cuda.mem_get_info(device)
-    print(f"[rank {rank}] mem free={free/1e9:.2f} GB / total={total/1e9:.2f} GB", flush=True)
-
-    use_amp = True and device.type == "cuda"
-    if torch.cuda.is_available():
-        capability = torch.cuda.get_device_capability(device)
-        if capability[0] < 7:
-            logging.warning(
-                f"GPU compute capability {capability[0]}.{capability[1]} < 7.0, disabling AMP"
-            )
-            use_amp = False
-                
-    model, test_loader, tg_scaler, tf_scaler, state = load_model(
-        selected_experiment_dir=exp.model_training_dir,
-        checkpoint_file=checkpoint_name,
-        device=device
-    )
-    
-    if max_batches is not None:
-        max_batches = min(max_batches, len(full_data_loader))
-    else:
-        max_batches = len(full_data_loader)
-    
-    if rank == 0:
-        logging.info(f"Checkpoint {checkpoint_name} loaded. Max batches for attribution: {max_batches}")
-    
-    selected_experiment_dir = exp.model_training_dir
-    selected_experiment_dir.mkdir(parents=True, exist_ok=True)
-    
-    start_time = time.time()
-    grad_attr_df, batch_grad_df_dict = run_gradient_attribution(
-        selected_experiment_dir=selected_experiment_dir,
-        model=model,
-        test_loader=full_data_loader,
-        tg_scaler=tg_scaler,
-        tf_scaler=tf_scaler,
-        tf_names=exp.tf_names,
-        tg_names=exp.tg_names,
-        use_amp=use_amp,
-        max_batches=max_batches,
-        device=device,
-        rank=rank,
-        world_size=world_size,
-        distributed=distributed,
-        disable_bias=disable_bias,
-        disable_motif_mask=disable_motif_mask,
-        disable_shortcut=disable_shortcut,
-        zero_tf_expr=zero_tf_expr,
-        save_every_n_batches=save_every_n_batches,
-        use_dataloader=True,
-        
-    )
-    end_time = time.time()
-    logging.info(f"  - Gradient attribution finished {max_batches} batches in {end_time - start_time:.2f} seconds.")
-    
-    for ko_mode in ["scaled_k_sigma"]: # "raw_zero", "raw_percentile", 
-        logging.info(f"  - Running TF knockout with mode: {ko_mode}")
-        start_time = time.time()
-        tfko_df, batch_tf_ko_df_dict = run_tf_knockout(
-            selected_experiment_dir=selected_experiment_dir,
-            model=model,
-            test_loader=full_data_loader,
-            tg_scaler=tg_scaler,
-            tf_scaler=tf_scaler,
-            tf_names=exp.tf_names,
-            tg_names=exp.tg_names,
-            device=device,
-            use_amp=use_amp,
-            rank=rank,
-            world_size=world_size,
-            distributed=distributed,
-            max_batches=max_batches,
-            save_every_n_batches=save_every_n_batches,
-            ko_mode=ko_mode,
-            raw_percentile=0.01,
-            disable_bias=disable_bias,
-            disable_motif_mask=disable_motif_mask,
-            disable_shortcut=disable_shortcut,
-            zero_tf_expr=zero_tf_expr,
-            use_dataloader=True,
+        model_num = int(args.model_num.split("_")[-1])
             
+        exp = experiment_loader.ExperimentLoader(
+            experiment_dir = experiment_dir,
+            experiment_name=experiment_name,
+            model_num=model_num,
         )
-        end_time = time.time()
-        logging.info(f"  - TF knockout finished {max_batches} batches in {end_time - start_time:.2f} seconds.")
+        
+        checkpoint_name = checkpoint_name
+        
+        assert checkpoint_name in os.listdir(exp.model_training_dir), \
+            f"Checkpoint {checkpoint_name} not found in {exp.model_training_dir}"
+        
+        save_every_n_batches = args.save_every_n_batches
+        if save_every_n_batches < 1:
+            save_every_n_batches = None
+        
+        SAMPLE_DATA_CACHE_DIR = Path(PROJECT_DIR) / "data/training_data_cache" / exp.experiment_name
+        CHROM_IDS = exp.experiment_settings_df.set_index("parameter").loc["CHROM_IDS"].value.split(" ")
+        COMMON_DATA = SAMPLE_DATA_CACHE_DIR / "common"
+
+        if rank == 0:
+            logging.info("Creating dataset and dataloader...")
+        dataset = MultiChromosomeDataset(
+            data_dir=SAMPLE_DATA_CACHE_DIR,
+            chrom_ids=CHROM_IDS,
+            tf_vocab_path=os.path.join(COMMON_DATA, "tf_vocab.json"),
+            tg_vocab_path=os.path.join(COMMON_DATA, "tg_vocab.json"),
+        )
+
+        if rank == 0:
+            logging.info("Creating dataloader...")
+        full_data_loader = prepare_dataloader(
+            dataset, batch_size=args.batch_size, world_size=world_size, rank=rank, num_workers=1, seed=42
+        )
+        
+        sample_type = exp.experiment_name.split("_")[0]
+
+        if rank == 0:
+            logging.info(f"\nExperiment: {exp.experiment_name}, Sample type: {sample_type}")
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if rank == 0:
+            logging.info(f"Using device: {device}\n")
+
+        max_batches = None
+        disable_bias = False
+        disable_motif_mask = False
+        disable_shortcut = False
+        zero_tf_expr = False
+        
+        if torch.cuda.is_available():
+            torch.cuda.set_device(local_rank)
+            device = torch.device(f"cuda:{local_rank}")
+        else:
+            device = torch.device("cpu")
+
+        print(
+            f"[rank {rank} local_rank {local_rank}] "
+            f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')} "
+            f"device_count={torch.cuda.device_count()}",
+            flush=True
+        )
+
+
+        print(
+            f"[rank {rank}] current_device={torch.cuda.current_device()} ",
+            flush=True
+        )
+
+        free, total = torch.cuda.mem_get_info(device)
+        print(f"[rank {rank}] mem free={free/1e9:.2f} GB / total={total/1e9:.2f} GB", flush=True)
+
+        use_amp = True and device.type == "cuda"
+        if torch.cuda.is_available():
+            capability = torch.cuda.get_device_capability(device)
+            if capability[0] < 7:
+                logging.warning(
+                    f"GPU compute capability {capability[0]}.{capability[1]} < 7.0, disabling AMP"
+                )
+                use_amp = False
+                    
+        model, test_loader, tg_scaler, tf_scaler, state = load_model(
+            selected_experiment_dir=exp.model_training_dir,
+            checkpoint_file=checkpoint_name,
+            device=device
+        )
+        
+        if max_batches is not None:
+            max_batches = min(max_batches, len(full_data_loader))
+        else:
+            max_batches = len(full_data_loader)
+        
+        if rank == 0:
+            logging.info(f"Checkpoint {checkpoint_name} loaded. Max batches for attribution: {max_batches}")
+        
+        selected_experiment_dir = exp.model_training_dir
+        selected_experiment_dir.mkdir(parents=True, exist_ok=True)
+        
+        if not "gradient_attribution_raw.parquet" in os.listdir(selected_experiment_dir) and not force_recalculate:
+            start_time = time.time()
+            grad_attr_df, batch_grad_df_dict = run_gradient_attribution(
+                selected_experiment_dir=selected_experiment_dir,
+                model=model,
+                test_loader=full_data_loader,
+                tg_scaler=tg_scaler,
+                tf_scaler=tf_scaler,
+                tf_names=exp.tf_names,
+                tg_names=exp.tg_names,
+                use_amp=use_amp,
+                max_batches=max_batches,
+                device=device,
+                rank=rank,
+                world_size=world_size,
+                distributed=distributed,
+                disable_bias=disable_bias,
+                disable_motif_mask=disable_motif_mask,
+                disable_shortcut=disable_shortcut,
+                zero_tf_expr=zero_tf_expr,
+                save_every_n_batches=save_every_n_batches,
+                use_dataloader=True,
+                
+            )
+            end_time = time.time()
+            logging.info(f"  - Gradient attribution finished {max_batches} batches in {end_time - start_time:.2f} seconds.")
+        else:
+            logging.info(f"Gradient attribution results already exist in {selected_experiment_dir}, skipping computation.")
+        
+        if not "tf_knockout_raw.parquet" in os.listdir(selected_experiment_dir) and not force_recalculate:
+            for ko_mode in ["scaled_k_sigma"]: # "raw_zero", "raw_percentile", 
+                logging.info(f"  - Running TF knockout with mode: {ko_mode}")
+                start_time = time.time()
+                tfko_df, batch_tf_ko_df_dict = run_tf_knockout(
+                    selected_experiment_dir=selected_experiment_dir,
+                    model=model,
+                    test_loader=full_data_loader,
+                    tg_scaler=tg_scaler,
+                    tf_scaler=tf_scaler,
+                    tf_names=exp.tf_names,
+                    tg_names=exp.tg_names,
+                    device=device,
+                    use_amp=use_amp,
+                    rank=rank,
+                    world_size=world_size,
+                    distributed=distributed,
+                    max_batches=max_batches,
+                    save_every_n_batches=save_every_n_batches,
+                    ko_mode=ko_mode,
+                    raw_percentile=0.01,
+                    disable_bias=disable_bias,
+                    disable_motif_mask=disable_motif_mask,
+                    disable_shortcut=disable_shortcut,
+                    zero_tf_expr=zero_tf_expr,
+                    use_dataloader=True,
+                    
+                )
+                end_time = time.time()
+                logging.info(f"  - TF knockout finished {max_batches} batches in {end_time - start_time:.2f} seconds.")
+        else:
+            logging.info(f"TF knockout results already exist in {selected_experiment_dir}, skipping computation.")

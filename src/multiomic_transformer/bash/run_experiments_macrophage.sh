@@ -9,7 +9,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 16
 #SBATCH --mem=192G
-#SBATCH --array=0-2%3
+#SBATCH --array=0%3
 
 set -euo pipefail
 
@@ -195,9 +195,11 @@ EXPERIMENTS=(
     # "buffer_1234_hvg_filter_disp_0.1|Macrophage_buffer_1234_hvg_filter_disp_0.1|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.1;MIN_RNA_DISP=0.1;SAMPLE_NAMES=buffer_1 buffer_2 buffer_3 buffer_4" 
 
     # Best Settings
-    "buffer_1_best_settings|Macrophage_buffer_1_best_settings|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=buffer_1"
-    "buffer_2_best_settings|Macrophage_buffer_2_best_settings|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=buffer_2"
-    "all_bnchmk_best_settings|Macrophage_all_bnchmk_best_settings|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=buffer_1 buffer_2"
+    # "buffer_1_best_settings|Macrophage_buffer_1_best_settings|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=buffer_1"
+    # "buffer_2_best_settings|Macrophage_buffer_2_best_settings|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=buffer_2"
+    # "all_bnchmk_best_settings|Macrophage_all_bnchmk_best_settings|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=buffer_1 buffer_2"
+
+    "buffer_2_small_hvg_filter_disp_0.2|Macrophage_buffer_2_small_hvg_filter_disp_0.2|HOPS=2;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=buffer_2"
 
 )
 
