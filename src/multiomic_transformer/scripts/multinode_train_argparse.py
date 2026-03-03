@@ -1736,6 +1736,10 @@ def main(rank: int, local_rank: int, world_size: int, save_every: int, total_epo
             "tg_scaler_mean": trainer.tg_scaler.mean,
             "tg_scaler_std": trainer.tg_scaler.std,
         }
+        with json.load(open(os.path.join(training_output_dir, "tf_names_ordered.json"), "r")) as f:
+            tf_names = f["tf_names"]
+        with json.load(open(os.path.join(training_output_dir, "tg_names_ordered.json"), "r")) as f:
+            tg_names = f["tg_names"]
                 
         # ----- Compute Gradient Attribution and TF Knockout -----
         gradient_attribution.run_gradient_attribution(
@@ -1745,8 +1749,8 @@ def main(rank: int, local_rank: int, world_size: int, save_every: int, total_epo
             tg_scaler=trainer.tg_scaler,
             tf_scaler=trainer.tf_scaler,
             state=state,
-            tf_names=os.path.join(training_output_dir, "tf_names_ordered.json"),
-            tg_names=os.path.join(training_output_dir, "tg_names_ordered.json"),
+            tf_names=tf_names,
+            tg_names=tg_names,
             device=rank_device,
             use_amp=True,
             rank=rank,
@@ -1763,8 +1767,8 @@ def main(rank: int, local_rank: int, world_size: int, save_every: int, total_epo
             tg_scaler=trainer.tg_scaler,
             tf_scaler=trainer.tf_scaler,
             state=state,
-            tf_names=os.path.join(training_output_dir, "tf_names_ordered.json"),
-            tg_names=os.path.join(training_output_dir, "tg_names_ordered.json"),
+            tf_names=tf_names,
+            tg_names=tg_names,
             device=rank_device,
             use_amp=True,
             rank=rank,
