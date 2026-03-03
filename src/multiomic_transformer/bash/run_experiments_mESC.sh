@@ -6,10 +6,10 @@
 #SBATCH -p dense
 #SBATCH -N 1
 #SBATCH --ntasks-per-node=1
-#SBATCH --gres=gpu:a100:4
+#SBATCH --gres=gpu:v100:2
 #SBATCH -c 12
 #SBATCH --mem=128G
-#SBATCH --array=0-4%1
+#SBATCH --array=0-31%2
 
 set -euo pipefail
 
@@ -239,12 +239,55 @@ EXPERIMENTS=(
     # "hvg_filter_disp_none|mESC_hvg_filter_none|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=false;FILTER_RNA=false"
 
     # Best overall settings
-    "E7.5_rep1_best_settings|mESC_E7.5_rep1_best_settings|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E7.5_rep1"
-    "E7.5_rep2_best_settings|mESC_E7.5_rep2_best_settings|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E7.5_rep2"
-    "E8.5_rep1_best_settings|mESC_E8.5_rep1_best_settings|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E8.5_rep1"
-    "E8.5_rep2_best_settings|mESC_E8.5_rep2_best_settings|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E8.5_rep2"
-    "all_bnchmk_samples_best_settings|mESC_all_bnchmk_samples_best_settings|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E7.5_rep1 E7.5_rep2 E8.5_rep1 E8.5_rep2"
+    # "E7.5_rep1_best_settings|mESC_E7.5_rep1_best_settings|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E7.5_rep1"
+    # "E7.5_rep2_best_settings|mESC_E7.5_rep2_best_settings|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E7.5_rep2"
+    # "E8.5_rep1_best_settings|mESC_E8.5_rep1_best_settings|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E8.5_rep1"
+    # "E8.5_rep2_best_settings|mESC_E8.5_rep2_best_settings|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E8.5_rep2"
+    # "all_bnchmk_samples_best_settings|mESC_all_bnchmk_samples_best_settings|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E7.5_rep1 E7.5_rep2 E8.5_rep1 E8.5_rep2"
+
+    # Model Size with Dispersion 0.2
+    "E7.5_rep1_disp_0.2_128d|mESC_E7.5_rep1_disp_0.2_128d|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E7.5_rep1"
+    "E7.5_rep2_disp_0.2_128d|mESC_E7.5_rep2_disp_0.2_128d|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E7.5_rep2"
+    "E8.5_rep1_disp_0.2_128d|mESC_E8.5_rep1_disp_0.2_128d|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E8.5_rep1"
+    "E8.5_rep2_disp_0.2_128d|mESC_E8.5_rep2_disp_0.2_128d|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E8.5_rep2"
+
+    "E7.5_rep1_disp_0.2_192d|mESC_E7.5_rep1_disp_0.2_192d|D_MODEL=192;D_FF=768;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E7.5_rep1"
+    "E7.5_rep2_disp_0.2_192d|mESC_E7.5_rep2_disp_0.2_192d|D_MODEL=192;D_FF=768;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E7.5_rep2"
+    "E8.5_rep1_disp_0.2_192d|mESC_E8.5_rep1_disp_0.2_192d|D_MODEL=192;D_FF=768;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E8.5_rep1"
+    "E8.5_rep2_disp_0.2_192d|mESC_E8.5_rep2_disp_0.2_192d|D_MODEL=192;D_FF=768;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E8.5_rep2"
+
+    "E7.5_rep1_disp_0.2_256d|mESC_E7.5_rep1_disp_0.2_256d|D_MODEL=256;D_FF=1024;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E7.5_rep1"
+    "E7.5_rep2_disp_0.2_256d|mESC_E7.5_rep2_disp_0.2_256d|D_MODEL=256;D_FF=1024;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E7.5_rep2"
+    "E8.5_rep1_disp_0.2_256d|mESC_E8.5_rep1_disp_0.2_256d|D_MODEL=256;D_FF=1024;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E8.5_rep1"
+    "E8.5_rep2_disp_0.2_256d|mESC_E8.5_rep2_disp_0.2_256d|D_MODEL=256;D_FF=1024;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E8.5_rep2"
+
+    # Number of layers with Dispersion 0.2
+    "E7.5_rep1_disp_0.2_1_layer|mESC_E7.5_rep1_disp_0.2_1_layer|D_MODEL=128;D_FF=512;NUM_LAYERS=1;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E7.5_rep1"
+    "E7.5_rep2_disp_0.2_1_layer|mESC_E7.5_rep2_disp_0.2_1_layer|D_MODEL=128;D_FF=512;NUM_LAYERS=1;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E7.5_rep2"
+    "E8.5_rep1_disp_0.2_1_layer|mESC_E8.5_rep1_disp_0.2_1_layer|D_MODEL=128;D_FF=512;NUM_LAYERS=1;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E8.5_rep1"
+    "E8.5_rep2_disp_0.2_1_layer|mESC_E8.5_rep2_disp_0.2_1_layer|D_MODEL=128;D_FF=512;NUM_LAYERS=1;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E8.5_rep2"
+
+    "E7.5_rep1_disp_0.2_2_layer|mESC_E7.5_rep1_disp_0.2_2_layer|D_MODEL=128;D_FF=512;NUM_LAYERS=2;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E7.5_rep1"
+    "E7.5_rep2_disp_0.2_2_layer|mESC_E7.5_rep2_disp_0.2_2_layer|D_MODEL=128;D_FF=512;NUM_LAYERS=2;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E7.5_rep2"
+    "E8.5_rep1_disp_0.2_2_layer|mESC_E8.5_rep1_disp_0.2_2_layer|D_MODEL=128;D_FF=512;NUM_LAYERS=2;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E8.5_rep1"
+    "E8.5_rep2_disp_0.2_2_layer|mESC_E8.5_rep2_disp_0.2_2_layer|D_MODEL=128;D_FF=512;NUM_LAYERS=2;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E8.5_rep2"
+
+    "E7.5_rep1_disp_0.2_3_layer|mESC_E7.5_rep1_disp_0.2_3_layer|D_MODEL=128;D_FF=512;NUM_LAYERS=3;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E7.5_rep1"
+    "E7.5_rep2_disp_0.2_3_layer|mESC_E7.5_rep2_disp_0.2_3_layer|D_MODEL=128;D_FF=512;NUM_LAYERS=3;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E7.5_rep2"
+    "E8.5_rep1_disp_0.2_3_layer|mESC_E8.5_rep1_disp_0.2_3_layer|D_MODEL=128;D_FF=512;NUM_LAYERS=3;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E8.5_rep1"
+    "E8.5_rep2_disp_0.2_3_layer|mESC_E8.5_rep2_disp_0.2_3_layer|D_MODEL=128;D_FF=512;NUM_LAYERS=3;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E8.5_rep2"
+
+    "E7.5_rep1_disp_0.2_4_layer|mESC_E7.5_rep1_disp_0.2_4_layer|D_MODEL=128;D_FF=512;NUM_LAYERS=4;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E7.5_rep1"
+    "E7.5_rep2_disp_0.2_4_layer|mESC_E7.5_rep2_disp_0.2_4_layer|D_MODEL=128;D_FF=512;NUM_LAYERS=4;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E7.5_rep2"
+    "E8.5_rep1_disp_0.2_4_layer|mESC_E8.5_rep1_disp_0.2_4_layer|D_MODEL=128;D_FF=512;NUM_LAYERS=4;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E8.5_rep1"
+    "E8.5_rep2_disp_0.2_4_layer|mESC_E8.5_rep2_disp_0.2_4_layer|D_MODEL=128;D_FF=512;NUM_LAYERS=4;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E8.5_rep2"
+
+    "E7.5_rep1_disp_0.2_5_layer|mESC_E7.5_rep1_disp_0.2_5_layer|D_MODEL=128;D_FF=512;NUM_LAYERS=5;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E7.5_rep1"
+    "E7.5_rep2_disp_0.2_5_layer|mESC_E7.5_rep2_disp_0.2_5_layer|D_MODEL=128;D_FF=512;NUM_LAYERS=5;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E7.5_rep2"
+    "E8.5_rep1_disp_0.2_5_layer|mESC_E8.5_rep1_disp_0.2_5_layer|D_MODEL=128;D_FF=512;NUM_LAYERS=5;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E8.5_rep1"
+    "E8.5_rep2_disp_0.2_5_layer|mESC_E8.5_rep2_disp_0.2_5_layer|D_MODEL=128;D_FF=512;NUM_LAYERS=5;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E8.5_rep2"
 )
+
 
 
 # ==========================================
@@ -840,75 +883,75 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
         echo "[WARNING] SLURM error file not found: ${ERR_FILE_SRC}"
     fi
 
-    echo ""
+    # echo ""
 
-    # ==========================================
-    #           PLOTTING & AUROC TESTING
-    # ==========================================
-    echo ""
-    echo "=========================================="
-    echo "      RUNNING PLOTTING & AUROC TESTING"
-    echo "=========================================="
-    echo ""
+    # # ==========================================
+    # #           PLOTTING & AUROC TESTING
+    # # ==========================================
+    # echo ""
+    # echo "=========================================="
+    # echo "      RUNNING PLOTTING & AUROC TESTING"
+    # echo "=========================================="
+    # echo ""
 
-    # Find the latest training directory (highest numbered model_training_* that contains MODEL_FILE)
-    MODEL_FILE="trained_model.pt"
-    TRAINING_NUM=""
+    # # Find the latest training directory (highest numbered model_training_* that contains MODEL_FILE)
+    # MODEL_FILE="trained_model.pt"
+    # TRAINING_NUM=""
     
-    for dir in $(ls -d "${OUTPUT_DIR}"/model_training_* 2>/dev/null | sort -V -r); do
-        if [ -f "${dir}/${MODEL_FILE}" ]; then
-            TRAINING_NUM=$(basename "$dir")
-            break
-        fi
-    done
+    # for dir in $(ls -d "${OUTPUT_DIR}"/model_training_* 2>/dev/null | sort -V -r); do
+    #     if [ -f "${dir}/${MODEL_FILE}" ]; then
+    #         TRAINING_NUM=$(basename "$dir")
+    #         break
+    #     fi
+    # done
 
-    # Check if a valid training directory was found
-    if [ -n "${TRAINING_NUM}" ] && [ -f "${OUTPUT_DIR}/${TRAINING_NUM}/${MODEL_FILE}" ]; then
-        echo "[INFO] Selected latest training directory: ${TRAINING_NUM}"
-        echo "[INFO] Found trained model at ${OUTPUT_DIR}/${TRAINING_NUM}/${MODEL_FILE}"
+    # # Check if a valid training directory was found
+    # if [ -n "${TRAINING_NUM}" ] && [ -f "${OUTPUT_DIR}/${TRAINING_NUM}/${MODEL_FILE}" ]; then
+    #     echo "[INFO] Selected latest training directory: ${TRAINING_NUM}"
+    #     echo "[INFO] Found trained model at ${OUTPUT_DIR}/${TRAINING_NUM}/${MODEL_FILE}"
     
-        echo ""
-        echo "Running AUROC Testing..."
-        python ./src/multiomic_transformer/utils/auroc_testing.py \
-            --experiment "${DATASET_NAME}" \
-            --training_num "${TRAINING_NUM}" \
-            --experiment_dir "${EXPERIMENT_DIR}" \
-            --model_file "${MODEL_FILE}" \
-            --dataset_type "mESC" \
-            --sample_name_list "${SAMPLE_NAMES}" # E7.5_rep2 E8.5_rep1 E8.5_rep2
+    #     echo ""
+    #     echo "Running AUROC Testing..."
+    #     python ./src/multiomic_transformer/utils/auroc_testing.py \
+    #         --experiment "${DATASET_NAME}" \
+    #         --training_num "${TRAINING_NUM}" \
+    #         --experiment_dir "${EXPERIMENT_DIR}" \
+    #         --model_file "${MODEL_FILE}" \
+    #         --dataset_type "mESC" \
+    #         --sample_name_list "${SAMPLE_NAMES}" # E7.5_rep2 E8.5_rep1 E8.5_rep2
 
-        echo "Plotting Training Figures..."
-        python ./src/multiomic_transformer/utils/plotting.py \
-            --experiment "${DATASET_NAME}" \
-            --training_num "${TRAINING_NUM}" \
-            --experiment_dir "${EXPERIMENT_DIR}" \
-            --model_file "${MODEL_FILE}"
+    #     echo "Plotting Training Figures..."
+    #     python ./src/multiomic_transformer/utils/plotting.py \
+    #         --experiment "${DATASET_NAME}" \
+    #         --training_num "${TRAINING_NUM}" \
+    #         --experiment_dir "${EXPERIMENT_DIR}" \
+    #         --model_file "${MODEL_FILE}"
 
-        echo "Running AUROC Testing Refactored..."
-        python ./src/multiomic_transformer/utils/auroc_refactored.py \
-            --experiment "${DATASET_NAME}" \
-            --training_num "${TRAINING_NUM}" \
-            --experiment_dir "${EXPERIMENT_DIR}" \
-            --model_file "${MODEL_FILE}" \
-            --dataset_type "mESC" \
-            --sample_name_list "${SAMPLE_NAMES}"
+    #     echo "Running AUROC Testing Refactored..."
+    #     python ./src/multiomic_transformer/utils/auroc_refactored.py \
+    #         --experiment "${DATASET_NAME}" \
+    #         --training_num "${TRAINING_NUM}" \
+    #         --experiment_dir "${EXPERIMENT_DIR}" \
+    #         --model_file "${MODEL_FILE}" \
+    #         --dataset_type "mESC" \
+    #         --sample_name_list "${SAMPLE_NAMES}"
 
-        echo ""
-        echo "=========================================="
-        echo "  EXPERIMENT COMPLETED: ${EXPERIMENT_NAME}"
-        echo "  DATASET: ${DATASET_NAME}"
-        echo "=========================================="
-        echo ""
-    else
-        echo "[WARNING] Trained model not found at ${OUTPUT_DIR}/${TRAINING_NUM}/${MODEL_FILE}"
-        echo "[WARNING] Skipping plotting and AUROC testing"
-        echo ""
-        echo "=========================================="
-        echo "  TRAINING COMPLETED (NO POST-PROCESSING): ${EXPERIMENT_NAME}"
-        echo "  DATASET: ${DATASET_NAME}"
-        echo "=========================================="
-        echo ""
-    fi
+    #     echo ""
+    #     echo "=========================================="
+    #     echo "  EXPERIMENT COMPLETED: ${EXPERIMENT_NAME}"
+    #     echo "  DATASET: ${DATASET_NAME}"
+    #     echo "=========================================="
+    #     echo ""
+    # else
+    #     echo "[WARNING] Trained model not found at ${OUTPUT_DIR}/${TRAINING_NUM}/${MODEL_FILE}"
+    #     echo "[WARNING] Skipping plotting and AUROC testing"
+    #     echo ""
+    #     echo "=========================================="
+    #     echo "  TRAINING COMPLETED (NO POST-PROCESSING): ${EXPERIMENT_NAME}"
+    #     echo "  DATASET: ${DATASET_NAME}"
+    #     echo "=========================================="
+    #     echo ""
+    # fi
 else
     echo ""
     echo "=========================================="
