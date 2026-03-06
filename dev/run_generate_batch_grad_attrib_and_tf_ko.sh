@@ -9,7 +9,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 8
 #SBATCH --mem=64G
-#SBATCH --array=0%4
+#SBATCH --array=0-9%3
 
 set -eo pipefail
 
@@ -130,17 +130,17 @@ EXPERIMENT_LIST=(
     # "mESC_E8.0_rep1_hvg_filter_disp_0.4|model_training_001|mESC|E8.0_rep1"
     # "mESC_E8.0_rep1_hvg_filter_disp_0.3|model_training_001|mESC|E8.0_rep1"
     # "mESC_E8.0_rep1_hvg_filter_disp_0.2|model_training_001|mESC|E8.0_rep1"
-    # "mESC_E8.0_rep1_hvg_filter_disp_0.1|model_training_001|mESC|E8.0_rep1"
-    # "mESC_E8.0_rep1_hvg_filter_disp_0.05|model_training_001|mESC|E8.0_rep1"
-    # "mESC_E8.0_rep1_hvg_filter_disp_0.01|model_training_001|mESC|E8.0_rep1"
+    "mESC_E8.0_rep1_hvg_filter_disp_0.1|model_training_001|mESC|E8.0_rep1"
+    "mESC_E8.0_rep1_hvg_filter_disp_0.05|model_training_001|mESC|E8.0_rep1"
+    "mESC_E8.0_rep1_hvg_filter_disp_0.01|model_training_001|mESC|E8.0_rep1"
 
-    # "mESC_E8.0_rep2_hvg_filter_only_rna|model_training_001|mESC|E8.0_rep2"
-    # "mESC_E8.0_rep2_hvg_filter_disp_0.6|model_training_001|mESC|E8.0_rep2"
-    # "mESC_E8.0_rep2_hvg_filter_disp_0.5|model_training_001|mESC|E8.0_rep2"
-    # "mESC_E8.0_rep2_hvg_filter_disp_0.4|model_training_001|mESC|E8.0_rep2"
-    # "mESC_E8.0_rep2_hvg_filter_disp_0.3|model_training_001|mESC|E8.0_rep2"
-    # "mESC_E8.0_rep2_hvg_filter_disp_0.2|model_training_001|mESC|E8.0_rep2"
-    # "mESC_E8.0_rep2_hvg_filter_disp_0.1|model_training_001|mESC|E8.0_rep2"
+    "mESC_E8.0_rep2_hvg_filter_only_rna|model_training_001|mESC|E8.0_rep2"
+    "mESC_E8.0_rep2_hvg_filter_disp_0.6|model_training_001|mESC|E8.0_rep2"
+    "mESC_E8.0_rep2_hvg_filter_disp_0.5|model_training_001|mESC|E8.0_rep2"
+    "mESC_E8.0_rep2_hvg_filter_disp_0.4|model_training_001|mESC|E8.0_rep2"
+    "mESC_E8.0_rep2_hvg_filter_disp_0.3|model_training_001|mESC|E8.0_rep2"
+    "mESC_E8.0_rep2_hvg_filter_disp_0.2|model_training_001|mESC|E8.0_rep2"
+    "mESC_E8.0_rep2_hvg_filter_disp_0.1|model_training_001|mESC|E8.0_rep2"
     # "mESC_E8.0_rep2_hvg_filter_disp_0.05|model_training_001|mESC|E8.0_rep2"
     # "mESC_E8.0_rep2_hvg_filter_disp_0.01|model_training_001|mESC|E8.0_rep2"
 
@@ -164,7 +164,18 @@ EXPERIMENT_LIST=(
     # "mESC_E8.5_rep2_hvg_filter_disp_0.05|model_training_001|mESC|E8.5_rep2"
     # "mESC_E8.5_rep2_hvg_filter_disp_0.01|model_training_001|mESC|E8.5_rep2"
 
-    "Macrophage_buffer_2_small_hvg_filter_disp_0.2|model_training_001|macrophage|buffer_2"
+    # "Macrophage_buffer_2_small_hvg_filter_disp_0.2|model_training_001|macrophage|buffer_2"
+
+    # "mESC_E7.5_rep1_disp_0.2_128d|model_training_001|mESC|E7.5_rep1"
+    # "mESC_E7.5_rep2_disp_0.2_128d|model_training_001|mESC|E7.5_rep2"
+    # "mESC_E8.5_rep1_disp_0.2_128d|model_training_001|mESC|E8.5_rep1"
+    # "mESC_E8.5_rep2_disp_0.2_128d|model_training_001|mESC|E8.5_rep2"
+
+    # "mESC_E7.5_rep1_disp_0.2_192d|model_training_001|mESC|E7.5_rep1"
+    # "mESC_E7.5_rep2_disp_0.2_192d|model_training_001|mESC|E7.5_rep2"
+    # "mESC_E8.5_rep1_disp_0.2_192d|model_training_001|mESC|E8.5_rep1"
+    # "mESC_E8.5_rep2_disp_0.2_192d|model_training_001|mESC|E8.5_rep2"
+
 )
 
 echo "Host: $(hostname)"

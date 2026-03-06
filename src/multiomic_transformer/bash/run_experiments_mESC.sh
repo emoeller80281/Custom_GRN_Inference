@@ -6,10 +6,10 @@
 #SBATCH -p dense
 #SBATCH -N 1
 #SBATCH --ntasks-per-node=1
-#SBATCH --gres=gpu:v100:2
+#SBATCH --gres=gpu:a100:4
 #SBATCH -c 12
 #SBATCH --mem=128G
-#SBATCH --array=0-24%2
+#SBATCH --array=0%2
 
 set -euo pipefail
 
@@ -183,36 +183,36 @@ EXPERIMENTS=(
 
     # E7.75_rep1 dispersion filtering experiments
     # "E7.75_rep1_hvg_filter_only_rna|mESC_E7.75_rep1_hvg_filter_only_rna|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=false;FILTER_RNA=true;SAMPLE_NAMES=E7.75_rep1"
-    "E7.75_rep1_hvg_filter_disp_0.6|mESC_E7.75_rep1_hvg_filter_disp_0.6|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.6;MIN_RNA_DISP=0.6;SAMPLE_NAMES=E7.75_rep1"
-    "E7.75_rep1_hvg_filter_disp_0.5|mESC_E7.75_rep1_hvg_filter_disp_0.5|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.5;MIN_RNA_DISP=0.5;SAMPLE_NAMES=E7.75_rep1"
-    "E7.75_rep1_hvg_filter_disp_0.4|mESC_E7.75_rep1_hvg_filter_disp_0.4|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.4;MIN_RNA_DISP=0.4;SAMPLE_NAMES=E7.75_rep1"
-    "E7.75_rep1_hvg_filter_disp_0.3|mESC_E7.75_rep1_hvg_filter_disp_0.3|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.3;MIN_RNA_DISP=0.3;SAMPLE_NAMES=E7.75_rep1"
-    "E7.75_rep1_hvg_filter_disp_0.2|mESC_E7.75_rep1_hvg_filter_disp_0.2|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E7.75_rep1"
-    "E7.75_rep1_hvg_filter_disp_0.1|mESC_E7.75_rep1_hvg_filter_disp_0.1|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.1;MIN_RNA_DISP=0.1;SAMPLE_NAMES=E7.75_rep1"
-    "E7.75_rep1_hvg_filter_disp_0.05|mESC_E7.75_rep1_hvg_filter_disp_0.05|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.05;MIN_RNA_DISP=0.05;SAMPLE_NAMES=E7.75_rep1"
-    "E7.75_rep1_hvg_filter_disp_0.01|mESC_E7.75_rep1_hvg_filter_disp_0.01|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E7.75_rep1"
+    # "E7.75_rep1_hvg_filter_disp_0.6|mESC_E7.75_rep1_hvg_filter_disp_0.6|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.6;MIN_RNA_DISP=0.6;SAMPLE_NAMES=E7.75_rep1"
+    # "E7.75_rep1_hvg_filter_disp_0.5|mESC_E7.75_rep1_hvg_filter_disp_0.5|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.5;MIN_RNA_DISP=0.5;SAMPLE_NAMES=E7.75_rep1"
+    # "E7.75_rep1_hvg_filter_disp_0.4|mESC_E7.75_rep1_hvg_filter_disp_0.4|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.4;MIN_RNA_DISP=0.4;SAMPLE_NAMES=E7.75_rep1"
+    # "E7.75_rep1_hvg_filter_disp_0.3|mESC_E7.75_rep1_hvg_filter_disp_0.3|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.3;MIN_RNA_DISP=0.3;SAMPLE_NAMES=E7.75_rep1"
+    # "E7.75_rep1_hvg_filter_disp_0.2|mESC_E7.75_rep1_hvg_filter_disp_0.2|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E7.75_rep1"
+    # "E7.75_rep1_hvg_filter_disp_0.1|mESC_E7.75_rep1_hvg_filter_disp_0.1|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.1;MIN_RNA_DISP=0.1;SAMPLE_NAMES=E7.75_rep1"
+    # "E7.75_rep1_hvg_filter_disp_0.05|mESC_E7.75_rep1_hvg_filter_disp_0.05|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.05;MIN_RNA_DISP=0.05;SAMPLE_NAMES=E7.75_rep1"
+    # "E7.75_rep1_hvg_filter_disp_0.01|mESC_E7.75_rep1_hvg_filter_disp_0.01|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E7.75_rep1"
     
     # E8.0_rep1 dispersion filtering experiments
     # "E8.0_rep1_hvg_filter_only_rna|mESC_E8.0_rep1_hvg_filter_only_rna|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=false;FILTER_RNA=true;SAMPLE_NAMES=E8.0_rep1"
-    "E8.0_rep1_hvg_filter_disp_0.6|mESC_E8.0_rep1_hvg_filter_disp_0.6|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.6;MIN_RNA_DISP=0.6;SAMPLE_NAMES=E8.0_rep1"
-    "E8.0_rep1_hvg_filter_disp_0.5|mESC_E8.0_rep1_hvg_filter_disp_0.5|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.5;MIN_RNA_DISP=0.5;SAMPLE_NAMES=E8.0_rep1"
-    "E8.0_rep1_hvg_filter_disp_0.4|mESC_E8.0_rep1_hvg_filter_disp_0.4|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.4;MIN_RNA_DISP=0.4;SAMPLE_NAMES=E8.0_rep1"
-    "E8.0_rep1_hvg_filter_disp_0.3|mESC_E8.0_rep1_hvg_filter_disp_0.3|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.3;MIN_RNA_DISP=0.3;SAMPLE_NAMES=E8.0_rep1"
-    "E8.0_rep1_hvg_filter_disp_0.2|mESC_E8.0_rep1_hvg_filter_disp_0.2|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E8.0_rep1"
-    "E8.0_rep1_hvg_filter_disp_0.1|mESC_E8.0_rep1_hvg_filter_disp_0.1|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.1;MIN_RNA_DISP=0.1;SAMPLE_NAMES=E8.0_rep1"
-    "E8.0_rep1_hvg_filter_disp_0.05|mESC_E8.0_rep1_hvg_filter_disp_0.05|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.05;MIN_RNA_DISP=0.05;SAMPLE_NAMES=E8.0_rep1"
-    "E8.0_rep1_hvg_filter_disp_0.01|mESC_E8.0_rep1_hvg_filter_disp_0.01|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E8.0_rep1"
+    # "E8.0_rep1_hvg_filter_disp_0.6|mESC_E8.0_rep1_hvg_filter_disp_0.6|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.6;MIN_RNA_DISP=0.6;SAMPLE_NAMES=E8.0_rep1"
+    # "E8.0_rep1_hvg_filter_disp_0.5|mESC_E8.0_rep1_hvg_filter_disp_0.5|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.5;MIN_RNA_DISP=0.5;SAMPLE_NAMES=E8.0_rep1"
+    # "E8.0_rep1_hvg_filter_disp_0.4|mESC_E8.0_rep1_hvg_filter_disp_0.4|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.4;MIN_RNA_DISP=0.4;SAMPLE_NAMES=E8.0_rep1"
+    # "E8.0_rep1_hvg_filter_disp_0.3|mESC_E8.0_rep1_hvg_filter_disp_0.3|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.3;MIN_RNA_DISP=0.3;SAMPLE_NAMES=E8.0_rep1"
+    # "E8.0_rep1_hvg_filter_disp_0.2|mESC_E8.0_rep1_hvg_filter_disp_0.2|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E8.0_rep1"
+    # "E8.0_rep1_hvg_filter_disp_0.1|mESC_E8.0_rep1_hvg_filter_disp_0.1|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.1;MIN_RNA_DISP=0.1;SAMPLE_NAMES=E8.0_rep1"
+    # "E8.0_rep1_hvg_filter_disp_0.05|mESC_E8.0_rep1_hvg_filter_disp_0.05|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.05;MIN_RNA_DISP=0.05;SAMPLE_NAMES=E8.0_rep1"
+    # "E8.0_rep1_hvg_filter_disp_0.01|mESC_E8.0_rep1_hvg_filter_disp_0.01|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E8.0_rep1"
 
     # E8.0_rep2 dispersion filtering experiments
     # "E8.0_rep2_hvg_filter_only_rna|mESC_E8.0_rep2_hvg_filter_only_rna|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=false;FILTER_RNA=true;SAMPLE_NAMES=E8.0_rep2"
-    "E8.0_rep2_hvg_filter_disp_0.6|mESC_E8.0_rep2_hvg_filter_disp_0.6|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.6;MIN_RNA_DISP=0.6;SAMPLE_NAMES=E8.0_rep2"
-    "E8.0_rep2_hvg_filter_disp_0.5|mESC_E8.0_rep2_hvg_filter_disp_0.5|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.5;MIN_RNA_DISP=0.5;SAMPLE_NAMES=E8.0_rep2"
-    "E8.0_rep2_hvg_filter_disp_0.4|mESC_E8.0_rep2_hvg_filter_disp_0.4|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.4;MIN_RNA_DISP=0.4;SAMPLE_NAMES=E8.0_rep2"
-    "E8.0_rep2_hvg_filter_disp_0.3|mESC_E8.0_rep2_hvg_filter_disp_0.3|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.3;MIN_RNA_DISP=0.3;SAMPLE_NAMES=E8.0_rep2"
-    "E8.0_rep2_hvg_filter_disp_0.2|mESC_E8.0_rep2_hvg_filter_disp_0.2|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E8.0_rep2"
-    "E8.0_rep2_hvg_filter_disp_0.1|mESC_E8.0_rep2_hvg_filter_disp_0.1|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.1;MIN_RNA_DISP=0.1;SAMPLE_NAMES=E8.0_rep2"
-    "E8.0_rep2_hvg_filter_disp_0.05|mESC_E8.0_rep2_hvg_filter_disp_0.05|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.05;MIN_RNA_DISP=0.05;SAMPLE_NAMES=E8.0_rep2"
-    "E8.0_rep2_hvg_filter_disp_0.01|mESC_E8.0_rep2_hvg_filter_disp_0.01|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E8.0_rep2"
+    # "E8.0_rep2_hvg_filter_disp_0.6|mESC_E8.0_rep2_hvg_filter_disp_0.6|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.6;MIN_RNA_DISP=0.6;SAMPLE_NAMES=E8.0_rep2"
+    # "E8.0_rep2_hvg_filter_disp_0.5|mESC_E8.0_rep2_hvg_filter_disp_0.5|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.5;MIN_RNA_DISP=0.5;SAMPLE_NAMES=E8.0_rep2"
+    # "E8.0_rep2_hvg_filter_disp_0.4|mESC_E8.0_rep2_hvg_filter_disp_0.4|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.4;MIN_RNA_DISP=0.4;SAMPLE_NAMES=E8.0_rep2"
+    # "E8.0_rep2_hvg_filter_disp_0.3|mESC_E8.0_rep2_hvg_filter_disp_0.3|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.3;MIN_RNA_DISP=0.3;SAMPLE_NAMES=E8.0_rep2"
+    # "E8.0_rep2_hvg_filter_disp_0.2|mESC_E8.0_rep2_hvg_filter_disp_0.2|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E8.0_rep2"
+    # "E8.0_rep2_hvg_filter_disp_0.1|mESC_E8.0_rep2_hvg_filter_disp_0.1|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.1;MIN_RNA_DISP=0.1;SAMPLE_NAMES=E8.0_rep2"
+    # "E8.0_rep2_hvg_filter_disp_0.05|mESC_E8.0_rep2_hvg_filter_disp_0.05|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.05;MIN_RNA_DISP=0.05;SAMPLE_NAMES=E8.0_rep2"
+    # "E8.0_rep2_hvg_filter_disp_0.01|mESC_E8.0_rep2_hvg_filter_disp_0.01|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=E8.0_rep2"
 
     # E8.5_rep1 dispersion filtering experiments
     # "E8.5_rep1_hvg_filter_only_rna|mESC_E8.5_rep1_hvg_filter_only_rna|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=false;FILTER_RNA=true;SAMPLE_NAMES=E8.5_rep1"
@@ -286,6 +286,11 @@ EXPERIMENTS=(
     # "E7.5_rep2_disp_0.2_5_layer|mESC_E7.5_rep2_disp_0.2_5_layer|D_MODEL=128;D_FF=512;NUM_LAYERS=5;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E7.5_rep2"
     # "E8.5_rep1_disp_0.2_5_layer|mESC_E8.5_rep1_disp_0.2_5_layer|D_MODEL=128;D_FF=512;NUM_LAYERS=5;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E8.5_rep1"
     # "E8.5_rep2_disp_0.2_5_layer|mESC_E8.5_rep2_disp_0.2_5_layer|D_MODEL=128;D_FF=512;NUM_LAYERS=5;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E8.5_rep2"
+
+    # "all_sample_disp_0.6|mESC_all_sample_disp_0.6|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.6;MIN_RNA_DISP=0.6;SAMPLE_NAMES=E7.5_rep1 E7.5_rep2 E7.75_rep1 E8.0_rep1 E8.0_rep2 E8.5_rep1 E8.5_rep2"
+
+    "preprocessing_testing|mESC_preprocessing_testing|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.5;MIN_RNA_DISP=0.5;SAMPLE_NAMES=E7.5_rep1"
+
 )
 
 

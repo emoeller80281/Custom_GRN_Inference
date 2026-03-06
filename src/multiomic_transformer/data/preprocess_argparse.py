@@ -34,7 +34,7 @@ np.random.seed(1337)
 torch.manual_seed(1337)
 
 def standardize_name(name: str) -> str:
-    """Convert gene/motif name to capitalization style (e.g. 'Hoxa2')."""
+    """Convert gene/motif name to upper style (e.g. 'HOXA2')."""
     if not isinstance(name, str):
         return name
     return name.upper()
@@ -488,7 +488,6 @@ def pseudo_bulk(
     W = _row_norm(W)
 
     # multi-hop diffusion: W <- W^h
-    
     if hops > 1:
         W_h = W
         for _ in range(1, int(hops)):

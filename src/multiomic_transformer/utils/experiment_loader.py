@@ -6,6 +6,7 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 import torch
+from scipy.stats import norm
 import sys
 import logging
 from sklearn.metrics import roc_auc_score, average_precision_score, precision_recall_curve, roc_curve
@@ -57,6 +58,22 @@ class ExperimentLoader:
         else:
             self.experiment_settings_df = pd.read_csv(self.experiment_dir / self.experiment_name / "run_parameters_long.csv")
         
+        # Open the preprocessing and pseudobulk file
+        if not (self.experiment_dir / self.experiment_name / "experiment_info.json").exists():
+            if not self.silence_warnings:
+                logging.warning(f"WARNING: Experiment info file {self.experiment_dir / self.experiment_name / 'experiment_info.json'} does not exist.")
+            self.preprocessing_info = None
+        else:
+            self.preprocessing_info = self._load_json(self.experiment_dir / self.experiment_name / "experiment_info.json")
+            
+        # Open the preprocessing settings file
+        if not (self.experiment_dir / self.experiment_name / "preprocessing_config.json").exists():
+            if not self.silence_warnings:
+                logging.warning(f"WARNING: Preprocessing settings file {self.experiment_dir / self.experiment_name / 'preprocessing_config.json'} does not exist.")
+            self.preprocessing_settings = None
+        else:
+            self.preprocessing_settings = self._load_json(self.experiment_dir / self.experiment_name / "preprocessing_config.json")
+
         # Load the GPU usage log and format it into a more usable format
         self.gpu_usage_df, self.gpu_usage_mean_per_sec_df, self.gpu_memory_limit_gib = self._format_gpu_usage_file()
         
@@ -244,7 +261,7 @@ class ExperimentLoader:
         
         return df
     
-    def load_grn(self, method="gradient attribution", z_scale=False):
+    def load_grn(self, method="gradient attribution"):
         method = method.lower()
         
         assert method in ["gradient attribution", "tf knockout"], \
@@ -261,32 +278,21 @@ class ExperimentLoader:
             f"GRN file for method {method} {df_file} does not exist."
         
         df_wide = pd.read_parquet(df_file) 
-        score = df_wide.values
-    
-        # Get the absolute value of the scores
-        score_abs = np.abs(score)
         
-        # Log10 normalize the scores
-        log_scores = np.log10(score_abs + 1e-6)  # Add small epsilon to avoid log(0)
+        df = (
+            df_wide
+            .reset_index(names="Source")
+            .melt(id_vars="Source", var_name="Target", value_name="Score")
+        )
         
-        # Robust z-scale normalization across each TF's scores
-        if z_scale == True:
-            median_val = np.median(score_abs, axis=1, keepdims=True)
-            mad = np.median(np.abs(score_abs - median_val), axis=1, keepdims=True) + 1e-6
-            score_abs = (score_abs - median_val) / mad
-    
-        # Create a long DataFrame with Source, Target, and Score columns
-        T, G = log_scores.shape
-        tf_idx, tg_idx = np.meshgrid(np.arange(T), np.arange(G), indexing="ij")
+        def inverse_normal_transform(x):
+            r = x.rank(method="average")
+            n = len(x)
+            p = (r - 0.5) / n          # avoids 0 and 1
+            return norm.ppf(p)
         
-        tf_idx = tf_idx.ravel()
-        tg_idx = tg_idx.ravel()
-
-        df = pd.DataFrame({
-            "Source": np.asarray(df_wide.index, dtype=object)[tf_idx],
-            "Target": np.asarray(df_wide.columns, dtype=object)[tg_idx],
-            "Score": log_scores.ravel(),
-        })
+        # Apply rank-based inverse normal transform (INT)
+        df["Score"] = df.groupby("Source")["Score"].transform(inverse_normal_transform)
         
         df = df.dropna()
         

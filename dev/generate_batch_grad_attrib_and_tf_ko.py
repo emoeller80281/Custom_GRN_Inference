@@ -992,35 +992,35 @@ if __name__ == "__main__":
         else:
             logging.info(f"Gradient attribution results already exist in {selected_experiment_dir}, skipping computation.")
         
-        if not "tf_knockout_raw.parquet" in os.listdir(selected_experiment_dir) and not force_recalculate:
-            for ko_mode in ["scaled_k_sigma"]: # "raw_zero", "raw_percentile", 
-                logging.info(f"  - Running TF knockout with mode: {ko_mode}")
-                start_time = time.time()
-                tfko_df, batch_tf_ko_df_dict = run_tf_knockout(
-                    selected_experiment_dir=selected_experiment_dir,
-                    model=model,
-                    test_loader=full_data_loader,
-                    tg_scaler=tg_scaler,
-                    tf_scaler=tf_scaler,
-                    tf_names=exp.tf_names,
-                    tg_names=exp.tg_names,
-                    device=device,
-                    use_amp=use_amp,
-                    rank=rank,
-                    world_size=world_size,
-                    distributed=distributed,
-                    max_batches=max_batches,
-                    save_every_n_batches=save_every_n_batches,
-                    ko_mode=ko_mode,
-                    raw_percentile=0.01,
-                    disable_bias=disable_bias,
-                    disable_motif_mask=disable_motif_mask,
-                    disable_shortcut=disable_shortcut,
-                    zero_tf_expr=zero_tf_expr,
-                    use_dataloader=True,
+        # if not "tf_knockout_raw.parquet" in os.listdir(selected_experiment_dir) and not force_recalculate:
+        #     for ko_mode in ["scaled_k_sigma"]: # "raw_zero", "raw_percentile", 
+        #         logging.info(f"  - Running TF knockout with mode: {ko_mode}")
+        #         start_time = time.time()
+        #         tfko_df, batch_tf_ko_df_dict = run_tf_knockout(
+        #             selected_experiment_dir=selected_experiment_dir,
+        #             model=model,
+        #             test_loader=full_data_loader,
+        #             tg_scaler=tg_scaler,
+        #             tf_scaler=tf_scaler,
+        #             tf_names=exp.tf_names,
+        #             tg_names=exp.tg_names,
+        #             device=device,
+        #             use_amp=use_amp,
+        #             rank=rank,
+        #             world_size=world_size,
+        #             distributed=distributed,
+        #             max_batches=max_batches,
+        #             save_every_n_batches=save_every_n_batches,
+        #             ko_mode=ko_mode,
+        #             raw_percentile=0.01,
+        #             disable_bias=disable_bias,
+        #             disable_motif_mask=disable_motif_mask,
+        #             disable_shortcut=disable_shortcut,
+        #             zero_tf_expr=zero_tf_expr,
+        #             use_dataloader=True,
                     
-                )
-                end_time = time.time()
-                logging.info(f"  - TF knockout finished {max_batches} batches in {end_time - start_time:.2f} seconds.")
-        else:
-            logging.info(f"TF knockout results already exist in {selected_experiment_dir}, skipping computation.")
+        #         )
+        #         end_time = time.time()
+        #         logging.info(f"  - TF knockout finished {max_batches} batches in {end_time - start_time:.2f} seconds.")
+        # else:
+        #     logging.info(f"TF knockout results already exist in {selected_experiment_dir}, skipping computation.")

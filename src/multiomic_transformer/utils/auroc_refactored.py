@@ -5,6 +5,7 @@ import numpy as np
 from pathlib import Path
 from sklearn.metrics import roc_auc_score, average_precision_score
 from matplotlib import pyplot as plt
+from scipy.stats import norm
 import seaborn as sns
 import torch
 import argparse
@@ -251,43 +252,55 @@ def load_grn(selected_experiment_dir, tf_names, tg_names, method="gradient attri
         f"Invalid GRN method {method}. Must be 'Gradient Attribution' or 'TF Knockout'."        
     
     if method == "gradient attribution":
+        df_file = selected_experiment_dir / "gradient_attribution_raw.parquet"
         score_file = selected_experiment_dir / "tf_tg_grad_attribution.npy"
         
     elif method == "tf knockout":
+        df_file = selected_experiment_dir / "tf_knockout_raw.parquet"
         score_file = selected_experiment_dir / "tf_tg_fullmodel_knockout.npy"
         
-    assert score_file.exists(), f"GRN file for method {method} {score_file} does not exist."
+    if os.path.exists(df_file):
+        df_wide = pd.read_parquet(df_file) 
     
-    score = np.load(score_file).astype(np.float32)
-    assert score.shape == (len(tf_names), len(tg_names))
-
-    score = np.nan_to_num(score, nan=0.0)
-    score_abs = np.abs(score)
-
-    with np.errstate(divide='ignore'):
-        log10_score = np.log10(score_abs)
+        df = (
+            df_wide
+            .reset_index(names="Source")
+            .melt(id_vars="Source", var_name="Target", value_name="Score")
+        )
         
-    min_score = np.min(log10_score[np.isfinite(log10_score)])
-    log10_score_positive = log10_score - min_score
-    log10_score_percentage = log10_score_positive / np.max(log10_score_positive)
-    
-    T, G = log10_score_percentage.shape
-    tf_idx, tg_idx = np.meshgrid(np.arange(T), np.arange(G), indexing="ij")
-    
-    tf_idx = tf_idx.ravel()
-    tg_idx = tg_idx.ravel()
+    elif os.path.exists(score_file):            
+        score = np.load(score_file).astype(np.float32)
 
-    df = pd.DataFrame({
-        "Source": np.asarray(tf_names, dtype=object)[tf_idx],
-        "Target": np.asarray(tg_names, dtype=object)[tg_idx],
-        "Score": log10_score_percentage.ravel(),
-    })
+        score = np.nan_to_num(score, nan=0.0)
+        
+        T, G = score.shape
+        tf_idx, tg_idx = np.meshgrid(np.arange(T), np.arange(G), indexing="ij")
+        
+        tf_idx = tf_idx.ravel()
+        tg_idx = tg_idx.ravel()
+
+        df = pd.DataFrame({
+            "Source": np.asarray(tf_names, dtype=object)[tf_idx],
+            "Target": np.asarray(tg_names, dtype=object)[tg_idx],
+            "Score": score.ravel(),
+        })
+        
+        df = df[df["Score"] != 0]
+        
+    def inverse_normal_transform(x):
+        r = x.rank(method="average")
+        n = len(x)
+        p = (r - 0.5) / n          # avoids 0 and 1
+        return norm.ppf(p)
     
+    # Apply rank-based inverse normal transform (INT)
+    df["Score"] = df.groupby("Source")["Score"].transform(inverse_normal_transform)
+    
+    df = df.dropna()
+
     df["Source"] = df["Source"].astype(str).str.upper()
     df["Target"] = df["Target"].astype(str).str.upper()
-    
-    df = df[df["Score"] > 0]
-    
+        
     return df
 
 def load_grad_and_tf_ko_df(selected_experiment_dir):
@@ -457,7 +470,11 @@ def calculate_pooled_auroc(standardized_method_dict, ground_truth_edges_dict, pe
             if len(d_eval) == 0:
                 logging.info(f"  - {gt_name}: no overlap, skipping")
                 continue
-            metrics, raw_results_df = eval_method_vs_gt(d_eval, gt_edges, balance=True)
+            if method_name == "Gradient Attribution" or method_name == "TF Knockout":
+                use_abs_scores = False
+            else:                
+                use_abs_scores = True
+            metrics, raw_results_df = eval_method_vs_gt(d_eval, gt_edges, balance=True, use_abs_scores=use_abs_scores)
             all_results.append({"method": method_name, "gt": gt_name, **metrics})
 
     results_df = pd.DataFrame(all_results)
@@ -558,8 +575,7 @@ if __name__ == "__main__":
     
     elif dataset_type.lower() == "macrophage":
         ground_truth_file_dict = {
-            "ChIP-Atlas": GROUND_TRUTH_DIR / "chipatlas_macrophage.csv",
-            "RN204": GROUND_TRUTH_DIR / "rn204_macrophage_human_chipseq.tsv",
+            "ChIP-Atlas": GROUND_TRUTH_DIR / "chipatlas_macrophage_1Mb.csv",
         }
         
     elif "k562" == dataset_type.lower():
