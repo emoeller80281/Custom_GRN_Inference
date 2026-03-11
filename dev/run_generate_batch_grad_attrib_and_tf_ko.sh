@@ -5,11 +5,11 @@
 #SBATCH --time=24:00:00
 #SBATCH -p dense
 #SBATCH -N 1
-#SBATCH --gres=gpu:a100:1
+#SBATCH --gres=gpu:a100:4
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 8
 #SBATCH --mem=64G
-#SBATCH --array=0-3%2
+#SBATCH --array=0%2
 
 set -eo pipefail
 
@@ -176,13 +176,14 @@ EXPERIMENT_LIST=(
     # "mESC_E8.5_rep1_disp_0.2_192d|model_training_001|mESC|E8.5_rep1"
     # "mESC_E8.5_rep2_disp_0.2_192d|model_training_001|mESC|E8.5_rep2"
 
-    "mESC_E7.5_rep1_disp_0.2_256d|model_training_001|mESC|E7.5_rep1"
-    "mESC_E7.5_rep2_disp_0.2_256d|model_training_001|mESC|E7.5_rep2"
-    "mESC_E8.5_rep1_disp_0.2_256d|model_training_001|mESC|E8.5_rep1"
-    "mESC_E8.5_rep2_disp_0.2_256d|model_training_001|mESC|E8.5_rep2"
+    # "mESC_E7.5_rep1_disp_0.2_256d|model_training_001|mESC|E7.5_rep1"
+    # "mESC_E7.5_rep2_disp_0.2_256d|model_training_001|mESC|E7.5_rep2"
+    # "mESC_E8.5_rep1_disp_0.2_256d|model_training_001|mESC|E8.5_rep1"
+    # "mESC_E8.5_rep2_disp_0.2_256d|model_training_001|mESC|E8.5_rep2"
 
     # "mESC_all_sample_disp_0.6|model_training_001|mESC|E7.5_rep1 E7.5_rep2 E8.5_rep1 E8.5_rep2"
     # "mESC_preprocessing_testing|model_training_001|mESC|E7.5_rep1"
+    "mESC_muon_preprocessing|model_training_001|mESC|E7.5_rep1"
 )
 
 echo "Host: $(hostname)"

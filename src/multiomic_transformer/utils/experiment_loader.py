@@ -1356,3 +1356,5 @@ class ExperimentLoader:
         rng = np.random.default_rng(seed)
         arr = np.asarray(scores)   # works for Series or ndarray, no copy if already ndarray
         return rng.uniform(arr.min(), arr.max(), size=arr.shape[0])
+    
+    
