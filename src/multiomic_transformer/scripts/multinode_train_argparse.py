@@ -245,6 +245,10 @@ def setup_training_globals(args):
     USE_SHORTCUT = args.use_shortcut
     USE_MOTIF_MASK = args.use_motif_mask
     MOTIF_MASK_THRESH = args.motif_mask_thresh
+    
+    if MOTIF_MASK_THRESH == 0.0:
+        MOTIF_MASK_THRESH = None
+    
     MOTIF_PRIOR_SCALE = args.motif_prior_scale
     ATTN_BIAS_SCALE = args.attn_bias_scale
     
@@ -1736,10 +1740,10 @@ def main(rank: int, local_rank: int, world_size: int, save_every: int, total_epo
             "tg_scaler_mean": trainer.tg_scaler.mean,
             "tg_scaler_std": trainer.tg_scaler.std,
         }
-        with json.load(open(os.path.join(training_output_dir, "tf_names_ordered.json"), "r")) as f:
-            tf_names = f["tf_names"]
-        with json.load(open(os.path.join(training_output_dir, "tg_names_ordered.json"), "r")) as f:
-            tg_names = f["tg_names"]
+        with open(os.path.join(training_output_dir, "tf_names_ordered.json"), "r") as f:
+            tf_names = json.load(f)
+        with open(os.path.join(training_output_dir, "tg_names_ordered.json"), "r") as f:
+            tg_names = json.load(f)
                 
         # ----- Compute Gradient Attribution and TF Knockout -----
         gradient_attribution.run_gradient_attribution(
