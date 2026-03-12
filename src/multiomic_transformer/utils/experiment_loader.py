@@ -366,7 +366,10 @@ class ExperimentLoader:
                 bias         = bias.to(device, non_blocking=True)
                 tf_ids       = tf_ids.to(device, non_blocking=True)
                 tg_ids       = tg_ids.to(device, non_blocking=True)
-                motif_mask   = motif_mask.to(device, non_blocking=True)            
+                motif_mask   = motif_mask.to(device, non_blocking=True)   
+                
+                if getattr(self, "tf_scaler", None) is not None:
+                    tf_tensor = self.tf_scaler.transform(tf_tensor, tf_ids)
 
                 out, _, _ = self.model(
                     atac_wins, tf_tensor,
@@ -376,7 +379,7 @@ class ExperimentLoader:
                 )
 
                 pred = self.tg_scaler.inverse_transform(out, ids=tg_ids).detach().cpu().numpy()
-                true = self.tg_scaler.inverse_transform(tg_expr_true, ids=tg_ids).detach().cpu().numpy()
+                true = tg_expr_true.detach().cpu().numpy()
 
                 tg_ids_cpu = tg_ids.detach().cpu().numpy().astype(int)
                 tg_names_batch = [global_tg_names[i] for i in tg_ids_cpu]
@@ -1000,38 +1003,82 @@ class ExperimentLoader:
         plt.show()
         return fig
     
-    def plot_true_vs_predicted_tg_expression(self, num_batches: int=15, rerun_forward_pass: bool = False):
+    def plot_true_vs_predicted_tg_expression(
+        self, 
+        num_batches: int=15, 
+        rerun_forward_pass: bool = False, 
+        set_axis_logscale: bool = False,
+        title: Optional[str] = None,
+        ):
         fig, ax = plt.subplots(figsize=(5,5))
 
         if self.tg_prediction_df is None or self.tg_true_df is None or rerun_forward_pass:
             logging.info("Running forward pass to get predicted vs true TG expression for a subset of test batches...")
             self.tg_prediction_df, self.tg_true_df, _ = self.run_forward_pass(num_batches=num_batches)
         
-        x = self.tg_prediction_df.mean(axis=1).values
-        y = self.tg_true_df.mean(axis=1).values
+        x = self.tg_true_df.median(axis=1).values
+        y = self.tg_prediction_df.median(axis=1).values
+        
+        # mask = np.isfinite(x) & np.isfinite(y) & (x > 0) & (y > 0)
+        # x = x[mask]
+        # y = y[mask]
         
         x = np.nan_to_num(x, nan=0.0, posinf=1e6, neginf=-1e6)
         y = np.nan_to_num(y, nan=0.0, posinf=1e6, neginf=-1e6)
         
-        correlation = np.corrcoef(x, y)[0, 1]
-        ax.set_title(f"Model Prediction vs True TG Expression\nPearson Correlation = {correlation:.2f}")
+        from sklearn.metrics import r2_score
+        # Calculate the R^2 value on all values, not the means
+        x_flat = self.tg_true_df.values.ravel()
+        y_flat = self.tg_prediction_df.values.ravel()
+        mask = np.isfinite(x_flat) & np.isfinite(y_flat)
 
-        ax.scatter(x, y, s=10, alpha=0.6)
+        x_flat = x_flat[mask]
+        y_flat = y_flat[mask]
+        
+        r2 = r2_score(x_flat, y_flat)
+        
+        # correlation = np.corrcoef(x, y)[0, 1]
+        if title is None:
+            ax.set_title(f"Model Prediction vs True TG Expression")
+        else:
+            ax.set_title(title)
 
-        lims = [
-            min(x.min(), y.min()),
-            max(x.max(), y.max()),
-        ]
+        ax.scatter(x, y, s=10, alpha=0.6, color="#4195df")
+        
+        min_val = min(x.min(), y.min())
+        max_val = max(x.max(), y.max())
 
-        ax.plot(lims, lims, color="grey", linestyle="--", linewidth=1)
+        pad = 1.2
+        lims = [min_val / pad, max_val * pad]
+
+        if set_axis_logscale:
+            ax.set_xscale("log")
+            ax.set_yscale("log")
 
         ax.set_xlim(lims)
         ax.set_ylim(lims)
+
+        ax.plot(lims, lims, color="grey", linestyle="--", linewidth=1)
+        
+        ax.text(
+            0.98, 0.02,
+            f"$R^2$ = {r2:.4f}",
+            transform=ax.transAxes,
+            ha="right",
+            va="bottom",
+            fontsize=11,
+            bbox=dict(
+                facecolor="white",
+                edgecolor="none",
+                alpha=0.8,
+                pad=2
+            )
+        )
         ax.set_aspect("equal", adjustable="box")
 
-        ax.set_xlabel("True mean expression")
-        ax.set_ylabel("Predicted mean expression")
-
+        ax.set_xlabel("True Expression")
+        ax.set_ylabel("Predicted Expression")
+        
         return fig
     
     def plot_per_tf_auroc_boxplot(self, agg_by_gt: bool = True, ylim: tuple = (0.3, 0.7)):
@@ -1058,7 +1105,7 @@ class ExperimentLoader:
                 self.per_tf_all_df.dropna(subset=["auroc"])
                 .groupby(['method', 'tf'], as_index=False)
                 .agg(
-                    auroc=('auroc', 'mean'),
+                    auroc=('auroc', 'median'),
                     n_gt=('gt', 'nunique'),
                 )
             )
@@ -1070,7 +1117,7 @@ class ExperimentLoader:
                 .dropna(subset=["auroc"])
                 .groupby(["method", "gt"], as_index=False)
                 .agg(
-                    auroc=("auroc", "mean"),
+                    auroc=("auroc", "median"),
                     n_gt=("gt", "nunique"),
                 )
             )
@@ -1103,7 +1150,7 @@ class ExperimentLoader:
         per_tf: bool = False, 
         override_color: bool = False,
         ylim: tuple = (0.3, 0.7),
-        sort_by_mean: bool = True,
+        sort_by_median: bool = True,
         ) -> plt.Figure:
         """
         Plots AUROC boxplots for all GRN inference methods in the provided DataFrame.
@@ -1119,11 +1166,11 @@ class ExperimentLoader:
         """
         
         
-        # 1. Order methods by mean AUROC (highest → lowest)
-        if sort_by_mean:
+        # 1. Order methods by median AUROC (highest → lowest)
+        if sort_by_median:
             method_order = (
                 df.groupby("method")["auroc"]
-                .mean()
+                .median()
                 .sort_values(ascending=False)
                 .index
                 .tolist()
@@ -1131,7 +1178,7 @@ class ExperimentLoader:
         else:
             method_order = (
                 df.groupby("method")["auroc"]
-                .mean()
+                .median()
                 .index
                 .tolist()
             )
@@ -1141,7 +1188,7 @@ class ExperimentLoader:
         
         mean_by_method = (
             df.groupby("method")["auroc"]
-            .mean()
+            .median()
         )
         
         # 2. Prepare data in that order
@@ -1200,14 +1247,14 @@ class ExperimentLoader:
                 zorder=3,
             )
             
-            mean_val = y.mean()
-            ax.scatter(
-                i, mean_val,
-                color="white",
-                edgecolor="k",
-                s=30,
-                zorder=4,
-            )
+            # mean_val = y.mean()
+            # ax.scatter(
+            #     i, mean_val,
+            #     color="white",
+            #     edgecolor="k",
+            #     s=30,
+            #     zorder=4,
+            # )
             
             # # Annotate the mean value above the mean point
             # ax.text(i, y.max() + 0.015, f"{mean_val:.3f}", ha="center", va="bottom", fontsize=12)
@@ -1229,7 +1276,7 @@ class ExperimentLoader:
         
         ax.legend(
             handles=legend_handles,
-            title="Mean AUROC",
+            title="Median AUROC",
             bbox_to_anchor=(1.05, 0.5),
             loc="center left",
             borderaxespad=0.0,

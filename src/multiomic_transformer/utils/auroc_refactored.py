@@ -287,6 +287,10 @@ def load_grn(selected_experiment_dir, tf_names, tg_names, method="gradient attri
         
         df = df[df["Score"] != 0]
         
+    else:
+        logging.warning(f"WARNING: Score file for {method} does not exist. Returning dummy DataFrame")
+        return None
+
     def inverse_normal_transform(x):
         r = x.rank(method="average")
         n = len(x)
@@ -303,7 +307,7 @@ def load_grn(selected_experiment_dir, tf_names, tg_names, method="gradient attri
         
     return df
 
-def load_grad_and_tf_ko_df(selected_experiment_dir):
+def load_grad_and_tf_ko_df(selected_experiment_dir, only_grad_attrib=False):
     tf_names, tg_names = load_vocab(selected_experiment_dir)
     
     logging.info("Loading Gradient Attribution")
@@ -314,11 +318,11 @@ def load_grad_and_tf_ko_df(selected_experiment_dir):
         method="gradient attribution",
     )
 
-    grad_df = grad_attrib_df.copy()
-    
-    grad_df = grad_df[["Source", "Target", "Score"]]
-    logging.info("  - Score DataFrame:")
-    logging.info(f"    - TFs: {len(tf_names)}, TGs: {len(tg_names)}, Edges: {len(grad_df)}")
+    if grad_attrib_df is not None:
+        grad_df = grad_attrib_df.copy()
+        grad_df = grad_df[["Source", "Target", "Score"]]
+        logging.info("  - Score DataFrame:")
+        logging.info(f"    - TFs: {len(tf_names)}, TGs: {len(tg_names)}, Edges: {len(grad_df)}")
     
     logging.info("Loading TF Knockout")
     tf_ko_df = load_grn(
@@ -328,10 +332,11 @@ def load_grad_and_tf_ko_df(selected_experiment_dir):
         method="tf knockout",
     )
     
-    tf_ko_df = tf_ko_df.copy()
-    tf_ko_df = tf_ko_df[["Source", "Target", "Score"]]
-    logging.info("  - Pooled Score DataFrame:")
-    logging.info(f"    - TFs: {len(tf_names)}, TGs: {len(tg_names)}, Edges: {len(tf_ko_df)}")
+    if tf_ko_df is not None:
+        tf_ko_df = tf_ko_df.copy()
+        tf_ko_df = tf_ko_df[["Source", "Target", "Score"]]
+        logging.info("  - Pooled Score DataFrame:")
+        logging.info(f"    - TFs: {len(tf_names)}, TGs: {len(tg_names)}, Edges: {len(tf_ko_df)}")
     
     return grad_df, tf_ko_df
 
@@ -616,20 +621,21 @@ if __name__ == "__main__":
 
     ground_truth_edges_dict = {gt: prep_gt_edges(df) for gt, df in ground_truth_df_dict.items()}
     
+    # Load the other method GRNs (TF-TG scores averaged across samples)
+    standardized_method_dict = load_other_method_grns(sample_name_list, dataset_type)
+    
     grad_df, tf_ko_df = load_grad_and_tf_ko_df(
         selected_experiment_dir=EXPERIMENT_DIR,
     )
     
-    grad_df.to_csv(EXPERIMENT_DIR / "gradient_attribution_scores.csv", index=False)
-    tf_ko_df.to_csv(EXPERIMENT_DIR / "tf_knockout_scores.csv", index=False)
+    if grad_df is not None:
+        standardized_method_dict["Gradient Attribution"] = grad_df
+        grad_df.to_csv(EXPERIMENT_DIR / "gradient_attribution_scores.csv", index=False)
     
-    # Load the other method GRNs (TF-TG scores averaged across samples)
-    standardized_method_dict = load_other_method_grns(sample_name_list, dataset_type)
-
-    # Add the two MultiomicTransformer methods to the dictionary of method score dataframes
-    standardized_method_dict["Gradient Attribution"] = grad_df
-    standardized_method_dict["TF Knockout"] = tf_ko_df
-
+    if tf_ko_df is not None:
+        standardized_method_dict["TF Knockout"] = tf_ko_df
+        tf_ko_df.to_csv(EXPERIMENT_DIR / "tf_knockout_scores.csv", index=False)    
+    
     # Pooled AUROC/AUPRC
     logging.info("\nEvaluating pooled methods across samples")
     results_df, raw_results_df = calculate_pooled_auroc(

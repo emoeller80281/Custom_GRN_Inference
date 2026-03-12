@@ -270,7 +270,7 @@ EXPERIMENTS=(
     # "E7.5_rep1_disp_0.2_2_layer|mESC_E7.5_rep1_disp_0.2_2_layer|D_MODEL=128;D_FF=512;NUM_LAYERS=2;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E7.5_rep1"
     # "E7.5_rep2_disp_0.2_2_layer|mESC_E7.5_rep2_disp_0.2_2_layer|D_MODEL=128;D_FF=512;NUM_LAYERS=2;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E7.5_rep2"
     # "E8.5_rep1_disp_0.2_2_layer|mESC_E8.5_rep1_disp_0.2_2_layer|D_MODEL=128;D_FF=512;NUM_LAYERS=2;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E8.5_rep1"
-    # "E8.5_rep2_disp_0.2_2_layer|mESC_E8.5_rep2_disp_0.2_2_layer|D_MODEL=128;D_FF=512;NUM_LAYERS=2;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E8.5_rep2"
+    "E8.5_rep2_disp_0.2_2_layer|mESC_E8.5_rep2_disp_0.2_2_layer|D_MODEL=128;D_FF=512;NUM_LAYERS=2;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E8.5_rep2"
 
     # "E7.5_rep1_disp_0.2_3_layer|mESC_E7.5_rep1_disp_0.2_3_layer|D_MODEL=128;D_FF=512;NUM_LAYERS=3;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E7.5_rep1"
     # "E7.5_rep2_disp_0.2_3_layer|mESC_E7.5_rep2_disp_0.2_3_layer|D_MODEL=128;D_FF=512;NUM_LAYERS=3;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E7.5_rep2"
@@ -291,7 +291,7 @@ EXPERIMENTS=(
 
     # "preprocessing_testing|mESC_preprocessing_testing|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.5;MIN_RNA_DISP=0.5;SAMPLE_NAMES=E7.5_rep1"
     # "muon_preprocessing|mESC_muon_preprocessing|D_MODEL=128;D_FF=512;SAMPLE_NAMES=E7.5_rep1"
-    "linger_preprocessed_data|mESC_linger_preprocessed_data|D_MODEL=128;D_FF=512;SAMPLE_NAMES=E7.5_rep1"
+    # "linger_preprocessed_data|mESC_linger_preprocessed_data|D_MODEL=128;D_FF=512;SAMPLE_NAMES=E7.5_rep1"
 
 )
 
