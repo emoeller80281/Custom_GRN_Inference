@@ -1727,7 +1727,11 @@ def make_chrom_gene_tss_df(gene_tss_file: Union[str, Path], chrom_id: str, genom
     return gene_tss_df
 
 # ----- MultiomicTransformer Chromsome-Specific Dataset -----
-def build_global_tg_vocab(gene_tss_file: Union[str, Path], vocab_file: Union[str, Path]) -> dict[str, int]:
+def build_global_tg_vocab(
+    gene_tss_file: Union[str, Path], 
+    vocab_file: Union[str, Path],
+    dataset_tgs: Optional[Iterable[str]] = None,
+    ) -> dict[str, int]:
     """
     Builds a global TG vocab from the TSS file with contiguous IDs [0..N-1].
     Overwrites existing vocab if it's missing or non-contiguous.
@@ -1750,7 +1754,13 @@ def build_global_tg_vocab(gene_tss_file: Union[str, Path], vocab_file: Union[str
 
     # 2) Canonical symbol list (MUST match downstream normalization)
     gene_tss_df["name"] = gc.canonicalize_series(gene_tss_df["name"])
-    names = sorted(set(gene_tss_df["name"]))  # unique + stable order
+    tss_genes = set(gene_tss_df["name"])
+
+    if dataset_tgs is not None:
+        dataset_tgs = {gc.canonical_symbol(g) for g in dataset_tgs}
+        names = sorted(tss_genes & dataset_tgs)
+    else:
+        names = sorted(tss_genes)
     logging.info(f"  - Writing global TG vocab with {len(names)} genes")
 
     # 3) Build fresh contiguous mapping
@@ -2538,9 +2548,6 @@ if __name__ == "__main__":
         gene_tss_file=GENE_TSS_FILE,
         genome_dir=GENOME_DIR
     )
-    
-    # ----- BUILD GLOBAL TG VOCAB FROM THE GENE TSS FILE-----
-    tg_vocab = build_global_tg_vocab(GENE_TSS_FILE, common_tg_vocab_file)
 
     # PKN files
     string_csv_file = STRING_DIR / f"string_{ORGANISM_CODE}_pkn.csv"
@@ -2692,7 +2699,7 @@ if __name__ == "__main__":
             
             tfs = sorted(set(gc.canonicalize_series(pd.Series(tfs)).tolist()))
             tgs = sorted(set(gc.canonicalize_series(pd.Series(tgs)).tolist()))
-            
+                        
             # Format the peaks to BED format (chrom, start, end, peak_id)
             peak_locs_df = format_peaks(pd.Series(pseudobulk_atac_df.index)).rename(columns={"chromosome": "chrom"})
             
@@ -2772,7 +2779,9 @@ if __name__ == "__main__":
             #     logging.info("  - Merging TF-TG attributes with all combinations")
             #     tf_tg_df = merge_tf_tg_attributes_with_combinations(
             #         tf_tg_df, tf_tg_reg_pot, mean_norm_tf_expr, mean_norm_tg_expr, tf_tg_combo_attr_file, set(tfs))            
-        
+    
+
+    
     # ----- CHROMOSOME-SPECIFIC PREPROCESSING -----
     if PROCESS_CHROMOSOME_SPECIFIC_DATA:        
         logging.info("\n\n===== PROCESSING PER-CHROMOSOME DATA =====")
@@ -2780,6 +2789,11 @@ if __name__ == "__main__":
         total_tf_list_file = SAMPLE_PROCESSED_DATA_DIR / "tf_tg_combos" / "tf_list.csv"
         tf_names = _read_list(total_tf_list_file, "TF")
         
+        # ----- BUILD GLOBAL TG VOCAB FROM THE GENE TSS FILE-----
+        dataset_tg_list_file = SAMPLE_PROCESSED_DATA_DIR / "tf_tg_combos" / "tg_list.csv"
+        total_dataset_tgs = _read_list(dataset_tg_list_file, "TG")
+        tg_vocab = build_global_tg_vocab(GENE_TSS_FILE, common_tg_vocab_file, total_dataset_tgs)
+            
         # Aggregate sample-level data for sliding window scores and peak to gene distance
         # sample_level_sliding_window_dfs = []
         sample_level_peak_to_gene_dist_dfs = []

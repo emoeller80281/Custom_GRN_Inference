@@ -5,7 +5,7 @@
 #SBATCH --time=10:00:00
 #SBATCH -p dense
 #SBATCH -N 1
-#SBATCH --gres=gpu:v100:2
+#SBATCH --gres=gpu:v100:4
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 16
 #SBATCH --mem=192G
@@ -49,7 +49,7 @@ DEFAULT_RAW_RNA_FILE="matched_filtered_RNA_rawcounts_{sample}.csv"
 DEFAULT_RAW_ATAC_FILE="matched_filtered_ATAC_rawcounts_{sample}.csv"
 
 # Model training parameters
-DEFAULT_TOTAL_EPOCHS=350
+DEFAULT_TOTAL_EPOCHS=1000
 DEFAULT_BATCH_SIZE=16
 DEFAULT_PATIENCE=10
 DEFAULT_SAVE_EVERY_N_EPOCHS=5
@@ -199,7 +199,9 @@ EXPERIMENTS=(
     # "buffer_2_best_settings|Macrophage_buffer_2_best_settings|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=buffer_2"
     # "all_bnchmk_best_settings|Macrophage_all_bnchmk_best_settings|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=buffer_1 buffer_2"
 
-    "buffer_2_small_hvg_filter_disp_0.2|Macrophage_buffer_2_small_hvg_filter_disp_0.2|HOPS=2;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=buffer_2"
+    # "buffer_2_small_hvg_filter_disp_0.2|Macrophage_buffer_2_small_hvg_filter_disp_0.2|HOPS=2;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=buffer_2"
+    # "buffer_1_muon_preprocessing|Macrophage_buffer_1_muon_preprocessing|TOTAL_EPOCHS=5000;D_MODEL=128;D_FF=512;BATCH_SIZE=8;INITIAL_LEARNING_RATE=1.00e-4;MIN_LR=1.00e-7;PATIENCE=30;SCHEDULER_FACTOR=0.10;SAMPLE_NAMES=buffer_1"
+    "buffer_1_muon_preprocessing_dataset_tgs|Macrophage_buffer_1_muon_preprocessing_dataset_tgs|TOTAL_EPOCHS=5000;D_MODEL=128;D_FF=512;BATCH_SIZE=8;SAMPLE_NAMES=buffer_1"
 
 )
 

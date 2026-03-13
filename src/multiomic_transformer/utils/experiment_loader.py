@@ -1010,7 +1010,7 @@ class ExperimentLoader:
         set_axis_logscale: bool = False,
         title: Optional[str] = None,
         ):
-        fig, ax = plt.subplots(figsize=(5,5))
+        fig, ax = plt.subplots(figsize=(4,4))
 
         if self.tg_prediction_df is None or self.tg_true_df is None or rerun_forward_pass:
             logging.info("Running forward pass to get predicted vs true TG expression for a subset of test batches...")
@@ -1039,9 +1039,9 @@ class ExperimentLoader:
         
         # correlation = np.corrcoef(x, y)[0, 1]
         if title is None:
-            ax.set_title(f"Model Prediction vs True TG Expression")
+            ax.set_title(f"Model Prediction vs True TG Expression", fontsize=16)
         else:
-            ax.set_title(title)
+            ax.set_title(title, fontsize=16)
 
         ax.scatter(x, y, s=10, alpha=0.6, color="#4195df")
         
@@ -1066,7 +1066,7 @@ class ExperimentLoader:
             transform=ax.transAxes,
             ha="right",
             va="bottom",
-            fontsize=11,
+            fontsize=12,
             bbox=dict(
                 facecolor="white",
                 edgecolor="none",
@@ -1076,8 +1076,8 @@ class ExperimentLoader:
         )
         ax.set_aspect("equal", adjustable="box")
 
-        ax.set_xlabel("True Expression")
-        ax.set_ylabel("Predicted Expression")
+        ax.set_xlabel("True Expression", fontsize=13)
+        ax.set_ylabel("Predicted Expression", fontsize=13)
         
         return fig
     
@@ -1151,6 +1151,7 @@ class ExperimentLoader:
         override_color: bool = False,
         ylim: tuple = (0.3, 0.7),
         sort_by_median: bool = True,
+        override_title: Optional[str] = None,
         ) -> plt.Figure:
         """
         Plots AUROC boxplots for all GRN inference methods in the provided DataFrame.
@@ -1201,7 +1202,7 @@ class ExperimentLoader:
         my_color = "#4195df"
         other_color = "#747474"
 
-        fig, ax = plt.subplots(figsize=(9, 5))
+        fig, ax = plt.subplots(figsize=(8, 5))
 
         # Baseline random line
         ax.axhline(y=0.5, color="#2D2D2D", linestyle='--', linewidth=1)
@@ -1269,27 +1270,35 @@ class ExperimentLoader:
                 ),
                 markeredgecolor="k",
                 markersize=7,
-                label=f"{method}: {mean_by_method.loc[method]:.3f}"
+                label=f"{method_name}: {mean_by_method.loc[method]:.3f}"
             )
             for method in method_order
+            for method_name in [method.replace(" ", "\n")]
         ]
         
         ax.legend(
             handles=legend_handles,
             title="Median AUROC",
-            bbox_to_anchor=(1.05, 0.5),
+            bbox_to_anchor=(1.02, 0.5),
             loc="center left",
             borderaxespad=0.0,
             ncol=1,
         )
 
         ax.set_ylabel("AUROC across ground truths")
-        if per_tf == True:
-            ax.set_title("per-TF AUROC Scores per method")
-            ax.set_ylim(ylim)
+        
+        if override_title is not None:
+            ax.set_title(override_title)
         else:
-            ax.set_title("AUROC Scores per method")
-            ax.set_ylim(ylim)
+            if per_tf == True:
+                ax.set_title("per-TF AUROC Scores per method")
+            else:
+                ax.set_title("AUROC Scores per method")
+            
+        ax.set_ylim(ylim)
+
+        labels = [t.get_text().replace(" ", "\n") for t in ax.get_xticklabels()]
+        ax.set_xticklabels(labels)
 
         plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
         plt.tight_layout()
