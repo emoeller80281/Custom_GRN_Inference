@@ -5,11 +5,11 @@
 #SBATCH --time=10:00:00
 #SBATCH -p dense
 #SBATCH -N 1
-#SBATCH --gres=gpu:a100:2
+#SBATCH --gres=gpu:a100:4
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 16
 #SBATCH --mem=192G
-#SBATCH --array=0-1%4
+#SBATCH --array=0%4
 
 set -euo pipefail
 
@@ -118,6 +118,7 @@ EXPERIMENTS=(
     # "3kb_max_dist_600_scale|iPSC_3kb_max_dist_600_scale|HOPS=2;MAX_PEAK_DISTANCE=3000;DISTANCE_SCALE_FACTOR=600;FILTER_RNA=false;FILTER_ATAC=false"
     # "3kb_max_dist_600_scale_filter_0.01|iPSC_3kb_max_dist_600_scale_filter_0.01|HOPS=2;MAX_PEAK_DISTANCE=3000;DISTANCE_SCALE_FACTOR=600;MIN_RNA_DISP=0.6;MIN_ATAC_DISP=0.6"
     
+    "muon_preprocessing|iPSC_muon_preprocessing|D_MODEL=128;D_FF=512;BATCH_SIZE=8;SAMPLE_NAMES=CG_D13_rep1_rep2_rep3"
 )
 
 

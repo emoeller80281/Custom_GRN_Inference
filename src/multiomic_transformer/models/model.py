@@ -87,6 +87,7 @@ class MultiHeadAttention(nn.Module):
     
 class PositionalEmbedding(nn.Module):
     def __init__(self, d_model):
+        """Generates sinusoidal positional embeddings for a given sequence length and model dimension."""
         super(PositionalEmbedding, self).__init__()
 
         self.d_model = d_model
@@ -477,7 +478,7 @@ class MultiomicTransformer(nn.Module):
         tg_similarity_to_attn_output = (tg_cross_attn_repr * tg_emb).sum(dim=-1)     # [batch_size,n_tgs]
         
         # Sum the TG similarity score and the per-TG cross attention output
-        # If both similarit and weighted context features are high, predicts higher expression
+        # If both similarity and weighted context features are high, predicts higher expression
         tg_pred = tg_similarity_to_attn_output + self.gene_pred_dense(tg_cross_attn_repr).squeeze(-1)
         
         if motif_mask is not None and self.use_motif_mask:
