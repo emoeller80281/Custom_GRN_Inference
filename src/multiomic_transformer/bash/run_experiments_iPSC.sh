@@ -5,7 +5,7 @@
 #SBATCH --time=10:00:00
 #SBATCH -p dense
 #SBATCH -N 1
-#SBATCH --gres=gpu:a100:4
+#SBATCH --gres=gpu:a100:3
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 16
 #SBATCH --mem=192G
@@ -118,7 +118,9 @@ EXPERIMENTS=(
     # "3kb_max_dist_600_scale|iPSC_3kb_max_dist_600_scale|HOPS=2;MAX_PEAK_DISTANCE=3000;DISTANCE_SCALE_FACTOR=600;FILTER_RNA=false;FILTER_ATAC=false"
     # "3kb_max_dist_600_scale_filter_0.01|iPSC_3kb_max_dist_600_scale_filter_0.01|HOPS=2;MAX_PEAK_DISTANCE=3000;DISTANCE_SCALE_FACTOR=600;MIN_RNA_DISP=0.6;MIN_ATAC_DISP=0.6"
     
-    "muon_preprocessing|iPSC_muon_preprocessing|D_MODEL=128;D_FF=512;BATCH_SIZE=8;SAMPLE_NAMES=CG_D13_rep1_rep2_rep3"
+    # "muon_preprocessing|iPSC_muon_preprocessing|D_MODEL=128;D_FF=512;BATCH_SIZE=8;SAMPLE_NAMES=CG_D13_rep1_rep2_rep3"
+    # "muon_preprocessing|iPSC_muon_preprocessing_WT_D13_rep1|D_MODEL=128;D_FF=512;BATCH_SIZE=8;SAMPLE_NAMES=WT_D13_rep1"
+    "muon_preprocessing|iPSC_muon_preprocessing_CG_D13_rep1_rep2_rep3|D_MODEL=128;D_FF=512;BATCH_SIZE=8;SAMPLE_NAMES=CG_D13_rep1_rep2_rep3"
 )
 
 
