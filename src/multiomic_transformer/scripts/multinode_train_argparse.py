@@ -469,19 +469,31 @@ class Trainer:
         global STOP_REQUESTED
         return self.stop_requested or STOP_REQUESTED
     
-    def _save_trained_model(self, path: str):
-        if not self.is_main:
+    def _save_trained_model(self, epoch: int, path: str):
+        # Only main rank writes (see Fix 2 below!)
+        if not getattr(self, "is_main", self.gpu_id == 0):
             return
 
-        if hasattr(self.model, "module"):
-            model = self.model.module
-        else:
-            model = self.model
+        # Make sure directory exists
+        os.makedirs(path, exist_ok=True)
 
-        model.eval()
+        # Get the unwrapped model for saving both state_dict and embeddings
+        if hasattr(self.model, "module"):
+            model_for_save = self.model.module
+        else:
+            model_for_save = self.model
+
+        model_state = model_for_save.state_dict()
+
         ckpt = {
-            "model_state_dict": model.state_dict(),
+            "epoch": epoch,
+            "model_state_dict": model_state,
         }
+        
+        if hasattr(self, "optimizer") and self.optimizer is not None:
+            ckpt["optimizer_state_dict"] = self.optimizer.state_dict()
+        if hasattr(self, "scheduler") and self.scheduler is not None:
+            ckpt["scheduler_state_dict"] = self.scheduler.state_dict()
 
         if hasattr(self, "tf_scaler") and self.tf_scaler is not None:
             ckpt["tf_scaler_mean"] = self.tf_scaler.mean.detach().cpu()
@@ -493,6 +505,46 @@ class Trainer:
         out_path = os.path.join(path, "trained_model.pt")
         torch.save(ckpt, out_path)
         logging.info(f"Saved trained model to {out_path}")
+        
+    def _save_checkpoint(self, epoch: int, path: str):
+        # Only main rank writes (see Fix 2 below!)
+        if not getattr(self, "is_main", self.gpu_id == 0):
+            return
+
+        # Make sure directory exists
+        os.makedirs(path, exist_ok=True)
+
+        # Get the unwrapped model for saving both state_dict and embeddings
+        if hasattr(self.model, "module"):
+            model_for_save = self.model.module
+        else:
+            model_for_save = self.model
+
+        model_state = model_for_save.state_dict()
+
+        ckpt = {
+            "epoch": epoch,
+            "model_state_dict": model_state,
+        }
+
+
+        if hasattr(self, "tf_scaler") and self.tf_scaler is not None:
+            ckpt["tf_scaler_mean"] = self.tf_scaler.mean.detach().cpu()
+            ckpt["tf_scaler_std"]  = self.tf_scaler.std.detach().cpu()
+        if hasattr(self, "tg_scaler") and self.tg_scaler is not None:
+            ckpt["tg_scaler_mean"] = self.tg_scaler.mean.detach().cpu()
+            ckpt["tg_scaler_std"]  = self.tg_scaler.std.detach().cpu()
+
+        # ---- Save embeddings from the model (not the state dict) ----
+        save_tf_tg_embeddings_from_model(
+            model_for_save,
+            out_dir=path,
+            vocab_dir=path,   # or training_output_dir if your vocabs live elsewhere
+        )
+
+        out_path = os.path.join(path, f"checkpoint_{epoch}.pt")
+        torch.save(ckpt, out_path)
+        logging.info(f"\tTraining checkpoint saved to {out_path}")
 
     def _handle_abort(self, epoch, path, history, reason: str):
         # Only rank 0 writes, but all ranks should sync.
@@ -500,7 +552,7 @@ class Trainer:
             logging.info(f"{reason}: saving checkpoint and logs before exit.")
             last_epoch = max(0, epoch)
             self._save_checkpoint(last_epoch, path)
-            self._save_trained_model(path)
+            self._save_trained_model(last_epoch, path)
 
         if dist.is_available() and dist.is_initialized():
             dist.barrier()
@@ -852,51 +904,6 @@ class Trainer:
             r2_s,
             r2_u,
         )
-
-
-    def _save_checkpoint(self, epoch: int, path: str):
-        # Only main rank writes (see Fix 2 below!)
-        if not getattr(self, "is_main", self.gpu_id == 0):
-            return
-
-        # Make sure directory exists
-        os.makedirs(path, exist_ok=True)
-
-        # Get the unwrapped model for saving both state_dict and embeddings
-        if hasattr(self.model, "module"):
-            model_for_save = self.model.module
-        else:
-            model_for_save = self.model
-
-        model_state = model_for_save.state_dict()
-
-        ckpt = {
-            "epoch": epoch,
-            "model_state_dict": model_state,
-        }
-
-        if hasattr(self, "optimizer") and self.optimizer is not None:
-            ckpt["optimizer_state_dict"] = self.optimizer.state_dict()
-        if hasattr(self, "scheduler") and self.scheduler is not None:
-            ckpt["scheduler_state_dict"] = self.scheduler.state_dict()
-
-        if hasattr(self, "tf_scaler") and self.tf_scaler is not None:
-            ckpt["tf_scaler_mean"] = self.tf_scaler.mean.detach().cpu()
-            ckpt["tf_scaler_std"]  = self.tf_scaler.std.detach().cpu()
-        if hasattr(self, "tg_scaler") and self.tg_scaler is not None:
-            ckpt["tg_scaler_mean"] = self.tg_scaler.mean.detach().cpu()
-            ckpt["tg_scaler_std"]  = self.tg_scaler.std.detach().cpu()
-
-        # ---- Save embeddings from the model (not the state dict) ----
-        save_tf_tg_embeddings_from_model(
-            model_for_save,
-            out_dir=path,
-            vocab_dir=path,   # or training_output_dir if your vocabs live elsewhere
-        )
-
-        out_path = os.path.join(path, f"checkpoint_{epoch}.pt")
-        torch.save(ckpt, out_path)
-        logging.info(f"\tTraining checkpoint saved to {out_path}")
         
     def train(self, max_epochs: int, path: str, start_epoch: int = 0):
         best_r2 = float("-inf")

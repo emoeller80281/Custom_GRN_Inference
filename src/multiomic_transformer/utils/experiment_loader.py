@@ -144,7 +144,7 @@ class ExperimentLoader:
 
         # Load the model checkpoint and state dictionary
         ckpt_path = os.path.join(self.model_training_dir, checkpoint_file)
-        self.state = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+        self.state = torch.load(ckpt_path, map_location="cpu", weights_only=False)
         
         # Recreate the model from the training parameters
         self.model = MultiomicTransformer(
