@@ -18,6 +18,10 @@ import seaborn as sns
 from muon import atac as ac  # the module containing function for scATAC data processing
 import matplotlib.pyplot as plt
 
+from config.settings_hpc import MIN_GENES_PER_CELL
+from grn_inference.pipeline import data_processing
+from multiomic_transformer.data.preprocess_argparse import MIN_RNA_DISP
+
 # Setting figure parameters
 sc.settings.verbosity = 0
 
@@ -116,26 +120,6 @@ def filter_to_human(mdata):
         mdata = mu.MuData(mdata.mod)
 
     return mdata
-
-def flag_tfs_to_keep(rna, tf_list_file):
-    """
-    Flags TF genes to keep based on a provided list of TFs. If the list is not provided or the file does not exist, flags all genes as False.
-    """
-    rna.var['keep_tf'] = False
-    
-    if tf_list_file is not None and tf_list_file.exists():
-        tf_list_df = pd.read_csv(tf_list_file)
-
-        tf_genes_to_keep = set(
-            tf_list_df["source_id"].astype(str).str.strip().str.upper()
-        )
-
-        rna.var["keep_tf"] = (
-            rna.var_names.astype(str).str.strip().str.upper().isin(tf_genes_to_keep)
-        )
-
-def process_rna(mdata):
-    rna = mdata.mod['rna']
     
 class MudataProcessor:
     def __init__(
@@ -143,10 +127,12 @@ class MudataProcessor:
         mdata, 
         processed_data_dir,
         sample_name,
+        tss_path,
         tf_list_file=None,
         ):
         
         self.mdata = mdata
+        self.tss_path = tss_path
         self.rna = mdata.mod['rna']
         self.atac = mdata.mod['atac']
         self.tf_list_file = tf_list_file
@@ -178,7 +164,7 @@ class MudataProcessor:
         norm_target_sum: float = 1e4,
         min_rna_disp: float = 0.5,
         filter_hvgs: bool = True,
-        tf_list_file: str|None = None,
+        tf_list_file: Path|None = None,
         fig_dir: Path|None = None,
         
     ):
@@ -210,6 +196,9 @@ class MudataProcessor:
         -------
         Nothing. The function modifies the RNA data in-place.
         """
+        
+        if fig_dir is not None:
+            fig_dir.mkdir(parents=True, exist_ok=True)
         
         self.rna.var['mt'] = self.rna.var_names.str.upper().str.startswith('MT-')  # annotate the group of mitochondrial genes as 'mt'
         sc.pp.calculate_qc_metrics(self.rna, qc_vars=['mt'], percent_top=None, log1p=False, inplace=True)
@@ -255,7 +244,7 @@ class MudataProcessor:
         self.rna.raw = self.rna
         sc.pp.scale(self.rna, max_value=10)
     
-    def rna_pca_and_neighbors(self, rna, n_pcs=20, n_neighbors=10, fig_dir=None):
+    def rna_pca_and_neighbors(self, rna, n_pcs=20, n_neighbors=10, fig_dir: Path|None = None):
         """
         Perform principal component analysis (PCA) and k-nearest neighbors (kNN) on the RNA data.
 
@@ -277,6 +266,9 @@ class MudataProcessor:
         -------
         Nothing. The function modifies the RNA data in-place.
         """
+        if fig_dir is not None:
+            fig_dir.mkdir(parents=True, exist_ok=True)
+        
         sc.tl.pca(rna, svd_solver='arpack')
 
         if fig_dir is not None and fig_dir.exists():
@@ -299,48 +291,575 @@ class MudataProcessor:
             sc.pl.umap(rna, color=["leiden"])
             plt.savefig(fig_dir / "umap_leiden.png")
             plt.close()
-            
+    
+    def construct_peak_annotation(
+        self, 
+        save_dir: Path,
+        promoter_upstream: int = 1000,
+        promoter_downstream: int = 100,
+        distal_max: int = 200_000
+        ):
+        """Construct a peak annotation table in 10x-style format, assigning each peak to a gene and distance based on TSS proximity."""
+
+        peaks = pd.DataFrame({"peak": self.atac.var_names.astype(str)})
+        
+        coords = peaks["peak"].str.extract(
+            r"^(?P<chrom>[^:]+):(?P<start>\d+)-(?P<end>\d+)$"
+        )
+
+        if coords.isna().any().any():
+            bad = peaks.loc[coords.isna().any(axis=1), "peak"].head(10).tolist()
+            raise ValueError(f"Could not parse some peak names. Examples: {bad}")
+
+        peaks = pd.concat([peaks, coords], axis=1)
+        peaks["start"] = peaks["start"].astype(int)
+        peaks["end"] = peaks["end"].astype(int)
+
+        tss = pd.read_csv(
+            self.tss_path,
+            sep="\t",
+            header=None,
+            names=["chrom", "tss_start", "tss_end", "gene"]
+        )
+
+        tss["tss"] = tss["tss_start"].astype(int)
+
+        # Only keep protein coding genes
+        if "gene_biotype" in tss.columns:
+            tss = tss[tss["gene_biotype"] == "protein_coding"].copy()
+
+        # Cross-join peaks and genes by chromosome
+        cand = peaks.merge(
+            tss[["chrom", "gene", "tss"]],
+            on="chrom",
+            how="inner"
+        )
+
+        # 10x signed distance:
+        # positive if peak start is downstream of TSS
+        # negative if peak end is upstream of TSS
+        # zero if TSS overlaps peak
+        cand["distance"] = np.where(
+            cand["start"] > cand["tss"],
+            cand["start"] - cand["tss"],
+            np.where(
+                cand["end"] < cand["tss"],
+                cand["end"] - cand["tss"],
+                0
+            )
+        )
+
+        cand["abs_distance"] = cand["distance"].abs()
+
+        # PROMOTER peaks:
+        # overlap promoter region [TSS-1000, TSS+100]
+        cand["is_promoter"] = (
+            (cand["end"] >= (cand["tss"] - promoter_upstream)) &
+            (cand["start"] <= (cand["tss"] + promoter_downstream))
+        )
+
+        promoter = cand.loc[cand["is_promoter"], ["peak", "chrom", "start", "end", "gene", "distance"]].copy()
+        promoter["peak_type"] = "promoter"
+
+        # DISTAL peaks:
+        # within 200 kb of the CLOSEST TSS,
+        # but not promoter for that same gene
+        
+        # find closest TSS gene per peak
+        closest_idx = cand.groupby("peak")["abs_distance"].idxmin()
+        closest = cand.loc[closest_idx, ["peak", "chrom", "start", "end", "gene", "distance", "abs_distance"]].copy()
+
+        closest = closest.loc[closest["abs_distance"] <= distal_max].copy()
+
+        # remove cases where that peak is already promoter for that same gene
+        promoter_pairs = set(zip(promoter["peak"], promoter["gene"]))
+        closest["is_promoter_same_gene"] = [
+            (p, g) in promoter_pairs for p, g in zip(closest["peak"], closest["gene"])
+        ]
+
+        distal = closest.loc[~closest["is_promoter_same_gene"], ["peak", "chrom", "start", "end", "gene", "distance"]].copy()
+        distal["peak_type"] = "distal"
+
+        # INTERGENIC peaks:
+        # peaks with no promoter or distal assignment
+        assigned_peaks = set(promoter["peak"]) | set(distal["peak"])
+
+        intergenic = peaks.loc[~peaks["peak"].isin(assigned_peaks), ["peak", "chrom", "start", "end"]].copy()
+        intergenic["gene"] = ""
+        intergenic["distance"] = np.nan
+        intergenic["peak_type"] = "intergenic"
+
+        # Final table in 10x format
+        peak_annotation_10x = pd.concat(
+            [
+                promoter[["chrom", "start", "end", "gene", "distance", "peak_type"]],
+                distal[["chrom", "start", "end", "gene", "distance", "peak_type"]],
+                intergenic[["chrom", "start", "end", "gene", "distance", "peak_type"]],
+            ],
+            axis=0,
+            ignore_index=True
+        ).sort_values(["chrom", "start", "end", "gene", "peak_type"])
+        
+        peak_annotation_10x = peak_annotation_10x.dropna()
+
+        # save as 10x-style TSV
+        out_path = save_dir / "atac_peak_annotation.tsv"
+        if not out_path.parent.exists():
+            out_path.parent.mkdir(parents=True)
+        peak_annotation_10x.to_csv(out_path, sep="\t", index=False)
+
+    
     def atac_qc_filter(
         self, 
         min_cells_per_peak=20, 
         min_peaks_per_cell=500, 
         max_peaks_per_cell=2500, 
         min_total_counts_per_cell=1000, 
-        max_total_counts_per_cell=5000
+        max_total_counts_per_cell=5000,
+        min_atac_disp=0.5,
+        promoter_upstream=1000,
+        promoter_downstream=100,
+        distal_max=200_000,
+        filter_hvgs: bool = True,
+        fig_dir: Path|None = None
         ):
-        ac.pp.calculate_qc_metrics(self.atac, inplace=True)
+        sc.pp.calculate_qc_metrics(self.atac, percent_top=None, log1p=False, inplace=True)
+        
+        if fig_dir is not None and fig_dir.exists():
+            sc.pl.violin(self.atac, ['n_genes_by_counts', 'total_counts'], jitter=0.4, multi_panel=True)            
+            plt.savefig(fig_dir / "atac_qc_violin_plots_pre_filtering.png")
+            plt.close()
+        
         
         ac.pp.filter_var(self.atac, 'n_cells_by_counts', lambda x: x >= min_cells_per_peak)
-        ac.pp.filter_obs(self.atac, 'n_peaks_by_counts', lambda x: (x >= min_peaks_per_cell) & (x <= max_peaks_per_cell))
+        ac.pp.filter_obs(self.atac, 'n_genes_by_counts', lambda x: (x >= min_peaks_per_cell) & (x <= max_peaks_per_cell))
         ac.pp.filter_obs(self.atac, 'total_counts', lambda x: (x >= min_total_counts_per_cell) & (x <= max_total_counts_per_cell))
+        
+        if fig_dir is not None and fig_dir.exists():
+            sc.pl.violin(self.atac, ['n_genes_by_counts', 'total_counts'], jitter=0.4, multi_panel=True)            
+            plt.savefig(fig_dir / "atac_qc_violin_plots_post_filtering.png")
+            plt.close()
             
+            mu.pl.histogram(self.atac, ['n_genes_by_counts', 'total_counts'])
+            plt.savefig(fig_dir / "atac_qc_peak_histogram_post_filtering.png")
+            plt.close()
+            
+        sc.pp.highly_variable_genes(self.atac, min_mean=0.05, max_mean=1.5, min_disp=min_atac_disp)
+
+        if fig_dir is not None and fig_dir.exists():
+            sc.pl.highly_variable_genes(self.atac)
+            plt.savefig(fig_dir / "atac_highly_variable_peaks.png")
+            plt.close()
+            
+        if filter_hvgs:
+            keep_peaks = self.atac.var['highly_variable']
+            self.atac = self.atac[:, keep_peaks]
+        
+        # Scaling
+        self.atac.raw = self.atac
+        
+        # LSI
+        ac.tl.lsi(self.atac)
+        
+        self.atac.obsm['X_lsi'] = self.atac.obsm['X_lsi'][:,1:]
+        self.atac.varm["LSI"] = self.atac.varm["LSI"][:,1:]
+        self.atac.uns["lsi"]["stdev"] = self.atac.uns["lsi"]["stdev"][1:]
+        
+        # Neighbors
+        sc.pp.neighbors(self.atac, use_rep="X_lsi", n_neighbors=10, n_pcs=30)
+        
+        # PCA
+        sc.pp.scale(self.atac)
+        sc.tl.pca(self.atac)
+        
+        if fig_dir is not None and fig_dir.exists():
+            sc.pl.pca(self.atac, color=["n_genes_by_counts", "n_counts"])
+            plt.savefig(fig_dir / "atac_pca.png")
+            plt.close()
+        
+        # Annotate peaks as promoter/distal/intergenic based on TSS proximity
+        # assign gene names and distances for promoter/distal peaks
+        self.construct_peak_annotation(
+            self.processed_data_dir / self.sample_name, 
+            promoter_upstream=promoter_upstream, 
+            promoter_downstream=promoter_downstream, 
+            distal_max=distal_max
+            )
+        
+        ac.tl.add_peak_annotation(self.atac, annotation=str(self.processed_data_dir / self.sample_name / "atac_peak_annotation.tsv"))
+        
+        # Neighbors
+        sc.pp.neighbors(self.atac, n_neighbors=10, n_pcs=30)
+        
+        # Clustering
+        sc.tl.umap(self.atac, spread=1., min_dist=.5, random_state=11)
+        sc.tl.leiden(self.atac, flavor="igraph", n_iterations=2)
+        
+        if fig_dir is not None and fig_dir.exists():
+            sc.pl.umap(self.atac, color=["leiden", "n_genes_by_counts"], legend_loc="on data")
+            plt.savefig(fig_dir / "atac_umap_leiden.png")
+            plt.close()
+                    
+    def nucleosome_signal(
+        self,
+        frag_path: Path,
+        fig_dir: Path|None = None
+    ):
+        index_file = str(frag_path) + ".tbi"
+
+        if Path(index_file).exists():
+            print("Found index:", index_file)
+
+        else:
+            print("Index file not found. Creating index file...")
+            pysam.tabix_index(
+                str(frag_path),
+                preset="bed",
+                force=True
+            )
+            index_file = str(frag_path) + ".tbi"
+
+        tbx = pysam.TabixFile(str(frag_path))
+        print(tbx.contigs[:20])
+
+        # register the fragment file with the ATAC AnnData
+        ac.tl.locate_fragments(self.atac, fragments=str(frag_path))
+
+        self.atac.obs["NS"] = 1
+
+        def find_nonempty_region(tbx, chrom="chr1", window=1_000_000, max_end=200_000_000):
+            for start in range(0, max_end, window):
+                rows = list(tbx.fetch(chrom, start, start + window))
+                if rows:
+                    return f"{chrom}:{start}-{start+window}", rows[0]
+            return None, None
+
+        region, example = find_nonempty_region(tbx, chrom="chr1")
+
+        if fig_dir is not None and fig_dir.exists():
+            ac.pl.fragment_histogram(self.atac, region=region)
+            plt.savefig(fig_dir / "fragment_histogram.png")
+            plt.close()
+            
+        ac.tl.nucleosome_signal(self.atac, n=1e6)
+        
+        if fig_dir is not None and fig_dir.exists():
+            mu.pl.histogram(self.atac, "nucleosome_signal", kde=False)
+            plt.savefig(fig_dir / "nucleosome_signal_histogram.png")
+            plt.close()
+            
+    def tss_enrichment(
+        self, 
+        frag_path: Path, 
+        n_tss: int = 500, 
+        extend_upstream: int = 1000, 
+        extend_downstream: int = 1000,
+        fig_dir: Path|None = None
+        ):
+        if frag_path is not None and frag_path.exists():
+            
+            tss_df = pd.read_csv(
+                self.tss_path,
+                sep="\t",
+                header=None,
+                names=["tss_chrom", "tss_start", "tss_end", "tss_gene"]
+            )
+
+            var = self.rna.var.copy()
+            var["original_var_name"] = var.index
+
+            # Remove any old columns that could collide
+            cols_to_drop = [
+                "tss_chrom", "tss_start", "tss_end", "tss_gene",
+                "Chromosome", "Start", "End", "interval"
+            ]
+            var = var.drop(columns=[c for c in cols_to_drop if c in var.columns], errors="ignore")
+
+            # Merge gene annotations onto var
+            var = (
+                var.merge(
+                    tss_df,
+                    left_index=True,
+                    right_on="tss_gene",
+                    how="left"
+                )
+                .set_index("original_var_name")
+            )
+
+            var["interval"] = pd.NA
+            mask = var["tss_chrom"].notna() & var["tss_start"].notna() & var["tss_end"].notna()
+
+            var.loc[mask, "interval"] = (
+                var.loc[mask, "tss_chrom"].astype(str) + ":" +
+                var.loc[mask, "tss_start"].astype(int).astype(str) + "-" +
+                var.loc[mask, "tss_end"].astype(int).astype(str)
+            )
+
+            var["Chromosome"] = var["tss_chrom"]
+            var["Start"] = var["tss_start"]
+            var["End"] = var["tss_end"]
+
+            self.rna.var = var
+
+            rna_tss = self.rna[:, self.rna.var["interval"].notna()].copy()
+            
+            genes = ac.tl.get_gene_annotation_from_rna(rna_tss)
+            
+            tss = ac.tl.tss_enrichment(
+                self.mdata, 
+                features=genes, 
+                n_tss=n_tss, 
+                extend_upstream=extend_upstream, 
+                extend_downstream=extend_downstream, 
+                random_state=11
+                )
+            
+            if fig_dir is not None and fig_dir.exists():
+                ac.pl.tss_enrichment(tss)
+                plt.savefig(fig_dir / "tss_enrichment.png")
+                plt.close()
+
+
     def save_mdata(self):
-        mu.write(self.sample_processed_data_dir / f"{self.sample_name}.h5mu", self.mdata)
+        mu.write(self.processed_data_dir / self.sample_name / f"{self.sample_name}.h5mu", self.mdata)
 
     def save_rna(self):
         
-        mu.write(self.sample_processed_data_dir / f"{self.sample_name}.h5mu/rna", self.rna)
+        mu.write(self.processed_data_dir / self.sample_name / f"{self.sample_name}.h5mu/rna", self.rna)
         
     def save_atac(self):
-        mu.write(self.sample_processed_data_dir / f"{self.sample_name}.h5mu/atac", self.atac)
-        
-        
+        mu.write(self.processed_data_dir / self.sample_name / f"{self.sample_name}.h5mu/atac", self.atac)
+            
+def integrate_rna_atac(
+    mdata: ad.AnnData, 
+    sample_processed_data_dir: Path, 
+    sample_name: str,
+    fig_dir: Path|None = None
+    ):
+    if fig_dir is not None:
+        fig_dir.mkdir(parents=True, exist_ok=True)
     
+    # Restrict to cells passing QC in both modalities
+    mu.pp.intersect_obs(mdata)
+    
+    # Perform MOFA+ integration
+    mu.tl.mofa(mdata, outfile=sample_processed_data_dir / f"{sample_name}_rna_atac.h5mu")
+    
+    sc.pp.neighbors(mdata, use_rep="X_mofa")
+    sc.tl.umap(mdata)
+    sc.tl.umap(mdata, min_dist=.2, spread=1., random_state=10)
+    sc.tl.leiden(mdata, flavor="igraph", n_iterations=2)
 
+    if fig_dir is not None and fig_dir.exists():
+        # Plot the UMAP colored by MOFA clusters
+        sc.pl.umap(mdata, color=["leiden"])
+        plt.savefig(fig_dir / "mofa_umap_leiden.png")
+        plt.close()
+        
+        # Plot the first 4 MOFA factors in pairwise scatter plots
+        df = pd.DataFrame(mdata.obsm["X_mofa"])
+        df.columns = [f"Factor {i+1}" for i in range(df.shape[1])]
+
+        plot_scatter = lambda i, ax: sns.scatterplot(data=df, x=f"Factor {i+1}", y=f"Factor {i+2}", color="black", linewidth=0, s=3, ax=ax)
+
+        fig, axes = plt.subplots(2, 2)
+        for i in range(4):
+            plot_scatter(i, axes[i%2][i//2])
+            
+        plt.tight_layout()
+        plt.savefig(fig_dir / "mofa_factor_scatter.png")
+        plt.close()
+        
+    # Ranking genes and peaks
+    mdata["rna"].obs["leiden_joint"] = mdata.obs["leiden"]
+    mdata["atac"].obs["leiden_joint"] = mdata.obs["leiden"]
+    
+    sc.tl.rank_genes_groups(mdata['rna'], 'leiden_joint', method='t-test_overestim_var')
+    ac.tl.rank_peaks_groups(mdata['atac'], 'leiden_joint', method='t-test_overestim_var')
+    
+def save_processed_data(mdata: ad.AnnData, sample_processed_data_dir: Path):
+    def _adata_to_feature_by_cell_df(adata: ad.AnnData) -> pd.DataFrame:
+        """
+        Convert an AnnData object from cell x feature to feature x cell DataFrame.
+        Preference order:
+        1. adata.layers["log1p"]
+        2. adata.layers["counts"]
+        3. adata.X
+        """
+        if "log1p" in adata.layers:
+            X = adata.layers["log1p"]   
+        elif "counts" in adata.layers:
+            X = adata.layers["counts"]
+        else:
+            X = adata.X
+
+        if sp.issparse(X):
+            arr = X.T.toarray()
+        else:
+            arr = np.asarray(X, dtype=np.float32).T
+
+        return pd.DataFrame(
+            arr,
+            index=adata.var_names.astype(str),
+            columns=adata.obs_names.astype(str),
+        )
+
+    def standardize_name(name: str) -> str:
+        """Convert gene/motif name to upper style."""
+        if not isinstance(name, str):
+            return name
+        return name.upper()
+
+    processed_rna_file = sample_processed_data_dir / "scRNA_seq_processed.parquet"
+    processed_atac_file = sample_processed_data_dir / "scATAC_seq_processed.parquet"
+
+    adata_rna_file = sample_processed_data_dir / "adata_RNA.h5ad"
+    adata_atac_file = sample_processed_data_dir / "adata_ATAC.h5ad"
+    mdata_file = sample_processed_data_dir / "multiome_processed.h5mu"
+
+    # Pull modalities from MuData
+    adata_rna = mdata["rna"]
+    adata_atac = mdata["atac"]
+
+    # Convert to feature x cell DataFrames
+    processed_rna_df = _adata_to_feature_by_cell_df(adata_rna).astype("float32")
+    processed_atac_df = _adata_to_feature_by_cell_df(adata_atac).astype("float32")
+
+    # Standardize RNA gene names
+    processed_rna_df.index = processed_rna_df.index.astype(str).map(standardize_name)
+
+    # Save parquet outputs
+    processed_rna_df.to_parquet(processed_rna_file, engine="pyarrow", compression="snappy")
+    processed_atac_df.to_parquet(processed_atac_file, engine="pyarrow", compression="snappy")
+
+    # Save modality-level AnnData files
+    adata_rna.write_h5ad(adata_rna_file)
+    adata_atac.write_h5ad(adata_atac_file)
+
+    # Save the full MuData object 
+    mdata.write(mdata_file) 
+    
+def create_metacells(
+    mdata: ad.AnnData, 
+    sample_processed_data_dir: Path, 
+    hops: int = 2,
+    ):
+    """
+    Create metacell-level profiles from RNA and ATAC data matrices.
+
+    Parameters
+    ----------
+    mdata : ad.AnnData
+        The MuData object containing RNA and ATAC data matrices.
+    sample_processed_data_dir : Path
+        The directory where the pseudobulk DataFrames will be saved.
+    hops : int, default=2
+        The number of hops between neighbors to consider when diffusing information.
+
+    Returns
+    -------
+    None
+
+    Notes
+    -----
+    This function creates metacell-level profiles by applying a diffusion operator to the RNA and ATAC data matrices.
+    The diffusion operator is constructed by first extracting the neighbor graph from the MuData object and converting it to a row-normalized sparse matrix.
+    The operator is then applied to the RNA and ATAC data matrices to obtain the metacell-level profiles.
+    The resulting profiles are saved as parquet files in the specified directory.
+    """
+    # Extract the neighbor graph and convert to a row-normalized sparse matrix
+    W = mdata.obsp["connectivities"].tocsr().astype(np.float32)
+    
+    # Add self-connections
+    W = W + sp.diags(np.full(W.shape[0], 1, dtype=np.float32), format="csr")
+    
+    def row_norm(mat: sp.csr_matrix) -> sp.csr_matrix:
+        row_sum = np.asarray(mat.sum(axis=1)).ravel()
+        row_sum[row_sum == 0] = 1.0
+        inv = sp.diags(1.0 / row_sum, dtype=np.float32)
+        return inv @ mat
+
+    W = row_norm(W)
+    
+    # Diffusion based on the number of hops between neighbors. 
+    # Pools information from neighbors up to HOPS distance away, with more weight on closer neighbors.
+    W_h = W
+    for _ in range(1, int(hops)):
+        W_h = W_h @ W 
+        W_h = row_norm(W_h)
+    W = W_h
+
+    # Final row normalization to make sure rows sum to 1
+    W = row_norm(W)
+    
+    # Apply the diffusion operator to the RNA and ATAC data matrices to get metacell-level profiles.
+    X_rna = sp.csr_matrix(np.asarray(mdata["rna"].X, dtype=np.float32, order="C"))
+    X_atac = sp.csr_matrix(np.asarray(mdata["atac"].X, dtype=np.float32, order="C"))
+
+    X_rna_soft = W @ X_rna      # cells × genes
+    X_atac_soft = W @ X_atac    # cells × peaks
+    
+    # Create and save the pseudobulk DataFrames
+    def _standardize_symbols_index(
+        df: pd.DataFrame,
+        *,
+        strip_version_suffix: bool = True,
+        uppercase: bool = True,
+        deduplicate: str = "sum",
+    ) -> pd.DataFrame:
+        x = df.copy()
+        idx = x.index.astype(str).str.strip()
+        if strip_version_suffix:
+            idx = idx.str.replace(r"\.\d+$", "", regex=True)
+        if uppercase:
+            idx = idx.str.upper()
+        x.index = idx
+        if deduplicate:
+            if deduplicate == "sum":
+                x = x.groupby(level=0).sum()
+            elif deduplicate == "mean":
+                x = x.groupby(level=0).mean()
+            elif deduplicate == "first":
+                x = x[~x.index.duplicated(keep="first")]
+            elif deduplicate in {"max", "min", "median"}:
+                x = getattr(x.groupby(level=0), deduplicate)()
+            else:
+                raise ValueError(f"Unknown deduplicate policy: {deduplicate}")
+        return x
+
+    pseudo_bulk_rna_df = pd.DataFrame(
+        X_rna_soft.T.toarray(),
+        index=mdata["rna"].var_names,
+        columns=mdata["rna"].obs_names,
+    ).fillna(0)
+
+    pseudo_bulk_atac_df = pd.DataFrame(
+        X_atac_soft.T.toarray(),
+        index=mdata["atac"].var_names,
+        columns=mdata["atac"].obs_names,
+    ).fillna(0)
+
+    pseudo_bulk_rna_df = _standardize_symbols_index(pseudo_bulk_rna_df)
+    pseudobulk_rna_file = sample_processed_data_dir / "TG_pseudobulk.parquet"
+    pseudobulk_atac_file = sample_processed_data_dir / "RE_pseudobulk.parquet"
+
+    pseudo_bulk_rna_df.to_parquet(pseudobulk_rna_file, engine="pyarrow", compression="snappy")
+    pseudo_bulk_atac_df.to_parquet(pseudobulk_atac_file, engine="pyarrow", compression="snappy")
+    
 if __name__ == "__main__":
     args = parse_args()
 
-    PROJECT_DIR = args.project_dir
-    RAW_DATA_DIR = args.raw_data_dir
-    PROCESSED_DATA_DIR = args.processed_data_dir
+    PROJECT_DIR = Path(args.project_dir)
+    RAW_DATA_DIR = Path(args.raw_data_dir)
+    PROCESSED_DATA_DIR = Path(args.processed_data_dir)
     SAMPLE_NAME = args.sample_name
 
-    tss_path = args.tss_path
-    rna_count_file = args.rna_count_file
-    atac_count_file = args.atac_count_file
-    raw_h5_file = args.raw_h5_file
-    tf_list_file = args.tf_list_file
-    frag_path = args.frag_path
+    tss_path = Path(args.tss_path)
+    rna_count_file = Path(args.rna_count_file) if args.rna_count_file else None
+    atac_count_file = Path(args.atac_count_file) if args.atac_count_file else None
+    raw_h5_file = Path(args.raw_h5_file) if args.raw_h5_file else None
+    tf_list_file = Path(args.tf_list_file) if args.tf_list_file else None
+    frag_path = Path(args.frag_path) if args.frag_path else None
 
     SAMPLE_DATA_DIR = RAW_DATA_DIR / SAMPLE_NAME
     SAMPLE_PROCESSED_DATA_DIR = PROCESSED_DATA_DIR / SAMPLE_NAME
@@ -372,11 +891,80 @@ if __name__ == "__main__":
         
         mdata = construct_from_gene_by_cell_matrices(rna_count_filepath, atac_count_filepath)
         print("Constructed MuData object from count files.")
+        
     elif raw_h5_file is not None:
         mdata = mu.read_10x_h5(raw_h5_file)
+        
     else:
         mdata = mu.read_10x_mtx(SAMPLE_DATA_DIR)
             
     mdata.var_names_make_unique()
 
     mdata.write(SAMPLE_PROCESSED_DATA_DIR / f"{SAMPLE_NAME}.h5mu")
+    
+    data_processor = MudataProcessor(
+        mdata=mdata,
+        processed_data_dir=SAMPLE_PROCESSED_DATA_DIR,
+        sample_name=SAMPLE_NAME,
+        tss_path=tss_path,
+        tf_list_file=tf_list_file
+    )
+    
+    # RNA QC and Preprocessing
+    data_processor.rna_qc_filter(
+        min_cells_per_gene = 20,
+        MIN_GENES_PER_CELL = 500,
+        max_genes_per_cell = 2500,
+        min_total_counts_per_cell = 1000,
+        max_total_counts_per_cell = 5000,
+        max_pct_counts_mt = 20,
+        norm_target_sum = 10000,
+        MIN_RNA_DISP = 0.5,
+        filter_hvgs = True,
+        tf_list_file = None,
+        fig_dir=SAMPLE_PROCESSED_DATA_DIR / "preprocessing" / "rna_qc",
+        )
+    
+    data_processor.rna_pca_and_neighbors(
+        data_processor.rna, 
+        n_pcs=20,
+        n_neighbors=10,
+        fig_dir=SAMPLE_PROCESSED_DATA_DIR / "preprocessing" / "rna_pca",
+        )
+    
+    # ATAC QC and Preprocessing
+    data_processor.atac_qc_filter(
+        min_cells_per_peak=20,
+        min_peaks_per_cell=500,
+        max_peaks_per_cell=2500,
+        min_total_counts_per_cell=1000,
+        max_total_counts_per_cell=5000,
+        min_atac_disp=0.5,
+        promoter_upstream=1000,
+        promoter_downstream=100,
+        distal_max=200_000,
+        filter_hvgs=True,
+        fig_dir=SAMPLE_PROCESSED_DATA_DIR / "preprocessing" / "atac_qc",
+        )
+    
+    data_processor.nucleosome_signal(
+        frag_path=frag_path, 
+        fig_dir=SAMPLE_PROCESSED_DATA_DIR / "preprocessing" / "nucleosome"
+        )
+    data_processor.tss_enrichment(
+        frag_path=frag_path, 
+        n_tss=500, 
+        extend_upstream=1000, 
+        extend_downstream=1000,
+        fig_dir=SAMPLE_PROCESSED_DATA_DIR / "preprocessing" / "tss"
+        )
+    
+    # Save the processed data
+    save_processed_data(data_processor.mdata, SAMPLE_PROCESSED_DATA_DIR)
+    
+    # Integrate the RNA and ATAC modalities using MOFA+
+    integrate_rna_atac(data_processor.mdata, SAMPLE_PROCESSED_DATA_DIR, SAMPLE_NAME, fig_dir=SAMPLE_PROCESSED_DATA_DIR / "integration")
+    
+    # Create metacells
+    create_metacells(data_processor.mdata, SAMPLE_PROCESSED_DATA_DIR, hops=2)
+    
