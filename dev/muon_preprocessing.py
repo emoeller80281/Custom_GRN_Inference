@@ -152,6 +152,18 @@ class MudataProcessor:
             self.rna.var["keep_tf"] = (
                 self.rna.var_names.astype(str).str.strip().str.upper().isin(tf_genes_to_keep)
             )
+            
+    def show_pre_filtering_qc_rna(self):
+        self.rna.var['mt'] = self.rna.var_names.str.upper().str.startswith('MT-')  # annotate the group of mitochondrial genes as 'mt'
+        sc.pp.calculate_qc_metrics(self.rna, qc_vars=['mt'], percent_top=None, log1p=False, inplace=True)
+        
+        sc.pl.violin(self.rna, ['n_genes_by_counts', 'total_counts', 'pct_counts_mt'], jitter=0.4, multi_panel=True)
+        
+    def show_pre_filtering_qc_atac(self):
+        sc.pp.calculate_qc_metrics(self.atac, percent_top=None, log1p=False, inplace=True)
+        
+        sc.pl.violin(self.atac, ['n_genes_by_counts', 'total_counts'], jitter=0.4, multi_panel=True)
+        
     
     def rna_qc_filter(
         self,
