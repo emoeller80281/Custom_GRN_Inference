@@ -2,10 +2,10 @@
 #SBATCH --job-name=grn_experiments
 #SBATCH --output=LOGS/transformer_logs/experiments/%x_%A/%x_%A_%a.log
 #SBATCH --error=LOGS/transformer_logs/experiments/%x_%A/%x_%A_%a.err
-#SBATCH --time=10:00:00
+#SBATCH --time=24:00:00
 #SBATCH -p dense
 #SBATCH -N 1
-#SBATCH --gres=gpu:a100:3
+#SBATCH --gres=gpu:a100:2
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 16
 #SBATCH --mem=192G
@@ -120,7 +120,7 @@ EXPERIMENTS=(
     
     # "muon_preprocessing|iPSC_muon_preprocessing|D_MODEL=128;D_FF=512;BATCH_SIZE=8;SAMPLE_NAMES=CG_D13_rep1_rep2_rep3"
     # "muon_preprocessing|iPSC_muon_preprocessing_WT_D13_rep1|D_MODEL=128;D_FF=512;BATCH_SIZE=8;SAMPLE_NAMES=WT_D13_rep1"
-    "muon_preprocessing|iPSC_muon_preprocessing_CG_D13_rep1_rep2_rep3|D_MODEL=128;D_FF=512;BATCH_SIZE=8;SAMPLE_NAMES=CG_D13_rep1_rep2_rep3"
+    "muon_preprocessing_CG_D25_rep1_rep2_rep3|iPSC_muon_preprocessing_CG_D25_rep1_rep2_rep3|D_MODEL=128;D_FF=512;BATCH_SIZE=16;SAMPLE_NAMES=CG_D25_rep1_rep2_rep3"
 )
 
 
@@ -516,7 +516,7 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
     echo "[INFO] Detected ${SLURM_JOB_PARTITION:-} partition, progressing with model training"
 
     # Build training command
-    TRAIN_CMD="src/multiomic_transformer/scripts/multinode_train_argparse.py \
+    TRAIN_CMD="src/multiomic_transformer/scripts/multinode_train_simplified.py \
         --sample_data_cache_dir ${SAMPLE_DATA_CACHE_DIR} \
         --common_data ${COMMON_DATA} \
         --output_dir ${OUTPUT_DIR} \

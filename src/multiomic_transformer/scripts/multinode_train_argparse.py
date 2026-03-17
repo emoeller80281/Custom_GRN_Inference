@@ -1771,23 +1771,23 @@ def main(rank: int, local_rank: int, world_size: int, save_every: int, total_epo
             use_dataloader=True,
         )
         
-        tf_knockout.run_tf_knockout(
-            training_output_dir,
-            model_for_eval,
-            test_loader,
-            tg_scaler=trainer.tg_scaler,
-            tf_scaler=trainer.tf_scaler,
-            state=state,
-            tf_names=tf_names,
-            tg_names=tg_names,
-            device=rank_device,
-            use_amp=True,
-            rank=rank,
-            world_size=world_size,
-            distributed=torch.distributed.is_initialized(),
-            max_batches=None,
-            use_dataloader=True,
-        )
+        # tf_knockout.run_tf_knockout(
+        #     training_output_dir,
+        #     model_for_eval,
+        #     test_loader,
+        #     tg_scaler=trainer.tg_scaler,
+        #     tf_scaler=trainer.tf_scaler,
+        #     state=state,
+        #     tf_names=tf_names,
+        #     tg_names=tg_names,
+        #     device=rank_device,
+        #     use_amp=True,
+        #     rank=rank,
+        #     world_size=world_size,
+        #     distributed=torch.distributed.is_initialized(),
+        #     max_batches=None,
+        #     use_dataloader=True,
+        # )
     
     finally:
         if dist.is_initialized():

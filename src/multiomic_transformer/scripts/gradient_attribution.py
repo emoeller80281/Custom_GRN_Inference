@@ -248,7 +248,7 @@ def run_gradient_attribution(
                         if tf_scaler is not None
                         else tf_tensor_chunk
                     )
-                    preds_s, _, _ = model(
+                    preds_s = model(
                         atac_wins,
                         tf_scaled,
                         tf_ids=tf_ids,
@@ -257,6 +257,9 @@ def run_gradient_attribution(
                         motif_mask=motif_mask_chunk,
                         return_shortcut_contrib=False,
                     )
+                    if isinstance(preds_s, tuple):
+                        preds_s = preds_s[0]
+                    
                     preds_u = (
                         tg_scaler.inverse_transform(preds_s, tg_ids_chunk)
                         if tg_scaler is not None
@@ -347,7 +350,7 @@ def run_gradient_attribution(
                                 if tf_scaler is not None
                                 else tf_noisy
                             )
-                            preds_s, _, _ = model(
+                            preds_s = model(
                                 atac_wins,
                                 tf_scaled,
                                 tf_ids=tf_ids,
@@ -356,6 +359,9 @@ def run_gradient_attribution(
                                 motif_mask=motif_mask_full,
                                 return_shortcut_contrib=False,
                             )
+                            if isinstance(preds_s, tuple):
+                                preds_s = preds_s[0]
+                            
                             preds_u = (
                                 tg_scaler.inverse_transform(preds_s, tg_ids)
                                 if tg_scaler is not None
@@ -432,7 +438,7 @@ def run_gradient_attribution(
                                 if tf_scaler is not None
                                 else tf_step
                             )
-                            preds_s, _, _ = model(
+                            preds_s = model(
                                 atac_wins,
                                 tf_scaled,
                                 tf_ids=tf_ids,
@@ -441,6 +447,9 @@ def run_gradient_attribution(
                                 motif_mask=motif_mask_full,
                                 return_shortcut_contrib=False,
                             )
+                            if isinstance(preds_s, tuple):
+                                preds_s = preds_s[0]
+                            
                             preds_u = (
                                 tg_scaler.inverse_transform(preds_s, tg_ids)
                                 if tg_scaler is not None

@@ -21,7 +21,7 @@ os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 
 from multiomic_transformer.datasets.dataset_refactor import SimpleScaler
-from multiomic_transformer.models.model import MultiomicTransformer
+from multiomic_transformer.models.model_simplified import MultiomicTransformer
 
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 
@@ -147,18 +147,30 @@ class ExperimentLoader:
         self.state = torch.load(ckpt_path, map_location="cpu", weights_only=False)
         
         # Recreate the model from the training parameters
-        self.model = MultiomicTransformer(
-            d_model=d_model,
-            num_heads=num_heads,
-            num_layers=num_layers,
-            d_ff=d_ff,
-            dropout=dropout,
-            tf_vocab_size=len(self.state["tf_scaler_mean"]),
-            tg_vocab_size=len(self.state["tg_scaler_mean"]),
-            use_bias=use_dist_bias,
-            use_shortcut=use_shortcut,
-            use_motif_mask=use_motif_mask,
-        )
+        if not any(["use_motif_mask", "use_shortcut"]) in self.state:
+            self.model = MultiomicTransformer(
+                d_model=d_model,
+                num_heads=num_heads,
+                num_layers=num_layers,
+                d_ff=d_ff,
+                dropout=dropout,
+                tf_vocab_size=len(self.state["tf_scaler_mean"]),
+                tg_vocab_size=len(self.state["tg_scaler_mean"]),
+                use_bias=use_dist_bias,
+            )
+        else:
+            self.model = MultiomicTransformer(
+                d_model=d_model,
+                num_heads=num_heads,
+                num_layers=num_layers,
+                d_ff=d_ff,
+                dropout=dropout,
+                tf_vocab_size=len(self.state["tf_scaler_mean"]),
+                tg_vocab_size=len(self.state["tg_scaler_mean"]),
+                use_bias=use_dist_bias,
+                use_shortcut=use_shortcut,
+                use_motif_mask=use_motif_mask,
+            )
 
         if isinstance(self.state, dict) and "model_state_dict" in self.state:
             missing, unexpected = self.model.load_state_dict(
@@ -286,6 +298,22 @@ class ExperimentLoader:
         )
         
         def inverse_normal_transform(x):
+            """
+            Applies a rank-based inverse normal transform (INT) to the input data.
+
+            INT is a non-parametric transformation that maps a dataset to a standard normal distribution.
+            The transformation is calculated based on the rank of each data point, and is defined as:
+            INT(x) = Phi^-1((rank(x) - 0.5) / n)
+
+            Where Phi^-1 is the inverse cumulative distribution function of the standard normal distribution,
+            rank(x) is the rank of the data point x, and n is the total number of data points.
+
+            Parameters:
+            x (array_like): Input data.
+
+            Returns:
+            array_like: Transformed data.
+            """
             r = x.rank(method="average")
             n = len(x)
             p = (r - 0.5) / n          # avoids 0 and 1
@@ -359,28 +387,28 @@ class ExperimentLoader:
 
                 metacell_names = [dataset.metacell_names[i] for i in col_indices]
                 
-                atac_wins, tf_tensor, tg_expr_true, bias, tf_ids, tg_ids, motif_mask = batch
+                atac_wins, tf_tensor, tg_expr_true, bias, tf_ids, tg_ids, _ = batch
                 atac_wins    = atac_wins.to(device, non_blocking=True)
                 tf_tensor    = tf_tensor.to(device, non_blocking=True)
                 tg_expr_true = tg_expr_true.to(device, non_blocking=True)
                 bias         = bias.to(device, non_blocking=True)
                 tf_ids       = tf_ids.to(device, non_blocking=True)
                 tg_ids       = tg_ids.to(device, non_blocking=True)
-                motif_mask   = motif_mask.to(device, non_blocking=True)   
                 
                 if getattr(self, "tf_scaler", None) is not None:
                     tf_tensor = self.tf_scaler.transform(tf_tensor, tf_ids)
 
-                out, _, _ = self.model(
+                out = self.model(
                     atac_wins, tf_tensor,
                     tf_ids=tf_ids, tg_ids=tg_ids,
-                    bias=bias, motif_mask=motif_mask,
-                    return_shortcut_contrib=False,
+                    bias=bias
                 )
+                if isinstance(out, tuple):
+                    out = out[0]
 
                 pred = self.tg_scaler.inverse_transform(out, ids=tg_ids).detach().cpu().numpy()
                 true = tg_expr_true.detach().cpu().numpy()
-
+                
                 tg_ids_cpu = tg_ids.detach().cpu().numpy().astype(int)
                 tg_names_batch = [global_tg_names[i] for i in tg_ids_cpu]
 

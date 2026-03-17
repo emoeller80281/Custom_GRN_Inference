@@ -2,11 +2,11 @@
 #SBATCH --job-name=grn_experiments
 #SBATCH --output=LOGS/transformer_logs/experiments/%x_%A/%x_%A_%a.log
 #SBATCH --error=LOGS/transformer_logs/experiments/%x_%A/%x_%A_%a.err
-#SBATCH --time=12:00:00
+#SBATCH --time=24:00:00
 #SBATCH -p dense
-#SBATCH -N 1
+#SBATCH -N 2
 #SBATCH --ntasks-per-node=1
-#SBATCH --gres=gpu:a100:4
+#SBATCH --gres=gpu:v100:4
 #SBATCH -c 16
 #SBATCH --mem=192G
 #SBATCH --array=0%5
@@ -141,7 +141,7 @@ EXPERIMENTS=(
     # "sample_1_best_settings|K562_sample_1_best_settings|HOPS=2;DISTANCE_SCALE_FACTOR=40000;MAX_PEAK_DISTANCE=150000;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=sample_1"
     
     # "small_model_long_training|K562_small_model_long_training|D_MODEL=64;D_FF=256;BATCH_SIZE=256;HOPS=2;PATIENCE=20;TOTAL_EPOCHS=15000;MIN_ATAC_DISP=0.01;MIN_RNA_DISP=0.01;SAMPLE_NAMES=sample_1"
-    "muon_preprocessing|K562_muon_preprocessing|TOTAL_EPOCHS=5000;D_MODEL=128;D_FF=512;BATCH_SIZE=8;RESUME_CHECKPOINT_PATH="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/K562_muon_preprocessing/model_training_001/checkpoint_141.pt";SAMPLE_NAMES=sample_1"
+    "muon_preprocessing|K562_muon_preprocessing|TOTAL_EPOCHS=300;D_MODEL=128;D_FF=512;BATCH_SIZE=8;SAMPLE_NAMES=sample_1"
 
 )
 
@@ -516,7 +516,7 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
     echo "[INFO] Detected compute partition, progressing with model training"
 
     # Build training command
-    TRAIN_CMD="src/multiomic_transformer/scripts/multinode_train_argparse.py \
+    TRAIN_CMD="src/multiomic_transformer/scripts/multinode_train_simplified.py \
         --sample_data_cache_dir ${SAMPLE_DATA_CACHE_DIR} \
         --common_data ${COMMON_DATA} \
         --output_dir ${OUTPUT_DIR} \
