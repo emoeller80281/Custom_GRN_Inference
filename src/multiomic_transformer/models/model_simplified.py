@@ -158,6 +158,7 @@ class MultiomicTransformer(nn.Module):
         # TF and TG embedding tables - generates identities for TFs and TGs
         self.tf_identity_emb = nn.Embedding(tf_vocab_size, d_model)
         self.tg_query_emb = nn.Embedding(tg_vocab_size, d_model)        # 
+        self.tg_identity_emb = nn.Embedding(tg_vocab_size, d_model)
         
         # ATAC windows do not have embeddings, their position and accessibility
         # are used to inform TFs and TGs
@@ -333,7 +334,16 @@ class MultiomicTransformer(nn.Module):
         # with the fused TF-ATAC and ATAC-TF cross attn output
         tg_cross_attn_repr = tg_cross + tf_atac_cross_attn_output
         
-        # Pass the TG cross attention representation through the final dense layer to get a prediction for each TG
-        tg_pred = self.gene_pred_dense(tg_cross_attn_repr).squeeze(-1)
+        # ----- TG identity to Cross-attention output dot product -----
+        # Create TG identity embeddings
+        tg_emb = self.tg_identity_emb(tg_ids)                   # [n_tgs,d_model]
+        
+        # Dot product between teach TG's global context from attention and the TG identity embedding
+        #     If the TG ID embedding and global context agree, supports TG expression
+        tg_similarity_to_attn_output = (tg_cross_attn_repr * tg_emb).sum(dim=-1)     # [batch_size,n_tgs]
+        
+        # Sum the TG similarity score and the per-TG cross attention output
+        # If both similarity and weighted context features are high, predicts higher expression
+        tg_pred = tg_similarity_to_attn_output + self.gene_pred_dense(tg_cross_attn_repr).squeeze(-1)
 
         return tg_pred

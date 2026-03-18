@@ -5,7 +5,7 @@
 #SBATCH --time=24:00:00
 #SBATCH -p dense
 #SBATCH -N 1
-#SBATCH --gres=gpu:a100:2
+#SBATCH --gres=gpu:a100:4
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 16
 #SBATCH --mem=192G
@@ -78,7 +78,7 @@ DEFAULT_USE_SHORTCUT=true
 DEFAULT_USE_MOTIF_MASK=true
 DEFAULT_MOTIF_MASK_THRESH=0.0
 DEFAULT_MOTIF_PRIOR_SCALE=0.0
-DEFAULT_ATTN_BIAS_SCALE=0.0
+DEFAULT_ATTN_BIAS_SCALE=2.0
 DEFAULT_SHORTCUT_L1=0.0
 DEFAULT_SHORTCUT_L2=0.0
 DEFAULT_SHORTCUT_TOPK=""
@@ -119,8 +119,8 @@ EXPERIMENTS=(
     # "3kb_max_dist_600_scale_filter_0.01|iPSC_3kb_max_dist_600_scale_filter_0.01|HOPS=2;MAX_PEAK_DISTANCE=3000;DISTANCE_SCALE_FACTOR=600;MIN_RNA_DISP=0.6;MIN_ATAC_DISP=0.6"
     
     # "muon_preprocessing|iPSC_muon_preprocessing|D_MODEL=128;D_FF=512;BATCH_SIZE=8;SAMPLE_NAMES=CG_D13_rep1_rep2_rep3"
-    # "muon_preprocessing|iPSC_muon_preprocessing_WT_D13_rep1|D_MODEL=128;D_FF=512;BATCH_SIZE=8;SAMPLE_NAMES=WT_D13_rep1"
-    "muon_preprocessing_CG_D25_rep1_rep2_rep3|iPSC_muon_preprocessing_CG_D25_rep1_rep2_rep3|D_MODEL=128;D_FF=512;BATCH_SIZE=16;SAMPLE_NAMES=CG_D25_rep1_rep2_rep3"
+    "muon_preprocessing|iPSC_muon_preprocessing_WT_D13_rep1|D_MODEL=128;D_FF=512;BATCH_SIZE=32;SAMPLE_NAMES=WT_D13_rep1"
+    # "muon_preprocessing_CG_D25_rep1_rep2_rep3|iPSC_muon_preprocessing_CG_D25_rep1_rep2_rep3|D_MODEL=128;D_FF=512;BATCH_SIZE=16;SAMPLE_NAMES=CG_D25_rep1_rep2_rep3"
 )
 
 

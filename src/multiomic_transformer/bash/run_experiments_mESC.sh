@@ -6,7 +6,7 @@
 #SBATCH -p dense
 #SBATCH -N 1
 #SBATCH --ntasks-per-node=1
-#SBATCH --gres=gpu:a100:2
+#SBATCH --gres=gpu:a100:4
 #SBATCH -c 12
 #SBATCH --mem=128G
 #SBATCH --array=0%2
@@ -51,7 +51,7 @@ DEFAULT_RAW_ATAC_FILE="scATAC_seq_raw.parquet"
 # Model training parameters
 DEFAULT_TOTAL_EPOCHS=250
 DEFAULT_BATCH_SIZE=16
-DEFAULT_PATIENCE=8
+DEFAULT_PATIENCE=15
 DEFAULT_SAVE_EVERY_N_EPOCHS=5
 DEFAULT_CORR_LOSS_WEIGHT=1.0
 DEFAULT_EDGE_LOSS_WEIGHT=0.0
@@ -160,7 +160,7 @@ EXPERIMENTS=(
     # E7.5_rep1 dispersion filtering experiments
     # "E7.5_rep1_hvg_filter_only_rna|mESC_E7.5_rep1_hvg_filter_only_rna|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;FILTER_ATAC=false;FILTER_RNA=true;SAMPLE_NAMES=E7.5_rep1"
     # "E7.5_rep1_hvg_filter_disp_0.6|mESC_E7.5_rep1_hvg_filter_disp_0.6|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.6;MIN_RNA_DISP=0.6;SAMPLE_NAMES=E7.5_rep1"
-    # "E7.5_rep1_hvg_filter_disp_0.5|mESC_E7.5_rep1_hvg_filter_disp_0.5|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.5;MIN_RNA_DISP=0.5;SAMPLE_NAMES=E7.5_rep1"
+    "E7.5_rep1_hvg_filter_disp_0.5|mESC_E7.5_rep1_hvg_filter_disp_0.5|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.5;MIN_RNA_DISP=0.5;SAMPLE_NAMES=E7.5_rep1"
     # "E7.5_rep1_hvg_filter_disp_0.4|mESC_E7.5_rep1_hvg_filter_disp_0.4|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.4;MIN_RNA_DISP=0.4;SAMPLE_NAMES=E7.5_rep1"
     # "E7.5_rep1_hvg_filter_disp_0.3|mESC_E7.5_rep1_hvg_filter_disp_0.3|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.3;MIN_RNA_DISP=0.3;SAMPLE_NAMES=E7.5_rep1"
     # "E7.5_rep1_hvg_filter_disp_0.2|mESC_E7.5_rep1_hvg_filter_disp_0.2|D_MODEL=128;D_FF=512;HOPS=2;NEIGHBORS_K=20;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=E7.5_rep1"
@@ -293,7 +293,10 @@ EXPERIMENTS=(
     # "muon_preprocessing|mESC_muon_preprocessing|D_MODEL=128;D_FF=512;SAMPLE_NAMES=E7.5_rep1"
     # "linger_preprocessed_data|mESC_linger_preprocessed_data|D_MODEL=128;D_FF=512;SAMPLE_NAMES=E7.5_rep1"
 
-    "E7.5_rep1_muon_preprocessing|mESC_E7.5_rep1_muon_preprocessing|D_MODEL=128;D_FF=512;SAMPLE_NAMES=E7.5_rep1"
+    # "E7.5_rep1_muon_preprocessing|mESC_E7.5_rep1_muon_preprocessing|D_MODEL=128;D_FF=512;SAMPLE_NAMES=E7.5_rep1"
+    # "E7.5_rep2_muon_preprocessing|mESC_E7.5_rep2_muon_preprocessing|D_MODEL=128;D_FF=512;BATCH_SIZE=32;SAMPLE_NAMES=E7.5_rep2"
+    # "E7.5_rep1_muon_preprocessing_bear_grn|mESC_E7.5_rep1_muon_preprocessing_bear_grn|D_MODEL=128;D_FF=512;SAMPLE_NAMES=E7.5_rep1"
+
 
 )
 

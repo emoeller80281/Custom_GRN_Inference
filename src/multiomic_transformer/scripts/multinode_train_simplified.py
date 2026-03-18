@@ -134,7 +134,7 @@ def parse_training_args():
                         help="Motif mask threshold")
     parser.add_argument("--motif_prior_scale", type=float, default=0.0,
                         help="Scale for motif prior scores")
-    parser.add_argument("--attn_bias_scale", type=float, default=0.0,
+    parser.add_argument("--attn_bias_scale", type=float, default=2.0,
                         help="Scale for attention bias")
     
     # ----- Shortcut Parameters -----
@@ -1166,7 +1166,7 @@ def load_train_objs(run_cfg):
     return dataset, model, optimizer
 
 def prepare_dataloader(dataset, batch_size, world_size=1, rank=0,
-                       num_workers=4, pin_memory=True, seed=42, drop_last=True):
+                       num_workers=0, pin_memory=True, seed=42, drop_last=True):
     """
     Build train/val/test loaders.
 

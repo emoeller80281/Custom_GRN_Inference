@@ -5,10 +5,10 @@
 #SBATCH --time=24:00:00
 #SBATCH -p dense
 #SBATCH -N 1
-#SBATCH --gres=gpu:v100:2
+#SBATCH --gres=gpu:v100:4
 #SBATCH --ntasks-per-node=1
-#SBATCH -c 8
-#SBATCH --mem=64G
+#SBATCH -c 12
+#SBATCH --mem=128G
 #SBATCH --array=0%4
 
 set -eo pipefail
@@ -174,7 +174,7 @@ EXPERIMENT_LIST=(
     # "mESC_E7.5_rep1_disp_0.2_192d|model_training_001|mESC|E7.5_rep1"
     # "mESC_E7.5_rep2_disp_0.2_192d|model_training_001|mESC|E7.5_rep2"
     # "mESC_E8.5_rep1_disp_0.2_192d|model_training_001|mESC|E8.5_rep1"
-    "mESC_E8.5_rep2_disp_0.2_192d|model_training_001|mESC|E8.5_rep2"
+    # "mESC_E8.5_rep2_disp_0.2_192d|model_training_001|mESC|E8.5_rep2"
 
     # "mESC_E7.5_rep1_disp_0.2_256d|model_training_001|mESC|E7.5_rep1"
     # "mESC_E7.5_rep2_disp_0.2_256d|model_training_001|mESC|E7.5_rep2"
@@ -205,10 +205,25 @@ EXPERIMENT_LIST=(
     # "mESC_E7.5_rep2_disp_0.2_5_layer|model_training_001|mESC|E7.5_rep2"
     # "mESC_E8.5_rep1_disp_0.2_5_layer|model_training_001|mESC|E8.5_rep1"
     # "mESC_E8.5_rep2_disp_0.2_5_layer|model_training_001|mESC|E8.5_rep2"
-
     # "mESC_all_sample_disp_0.6|model_training_001|mESC|E7.5_rep1 E7.5_rep2 E8.5_rep1 E8.5_rep2"
     # "mESC_preprocessing_testing|model_training_001|mESC|E7.5_rep1"
+
     # "mESC_muon_preprocessing|model_training_001|mESC|E7.5_rep1"
+
+    # Simplified model with only TG query embedding | Training dist bias 0.2
+    # "mESC_E7.5_rep1_muon_preprocessing|model_training_001|mESC|E7.5_rep1"
+
+    # Original model | Training dist bias 0.2
+    # "mESC_E7.5_rep1_muon_preprocessing|model_training_002|mESC|E7.5_rep1"
+
+    # Simplified model with both TG embeddings | Training dist bias 0.2
+    # "mESC_E7.5_rep1_muon_preprocessing|model_training_003|mESC|E7.5_rep1"
+
+    # Original model | Training dist bias 0.0
+    "mESC_E7.5_rep1_muon_preprocessing|model_training_004|mESC|E7.5_rep1"
+
+
+    # "mESC_E7.5_rep2_muon_preprocessing|model_training_001|mESC|E7.5_rep2"
 )
 
 echo "Host: $(hostname)"
@@ -252,8 +267,9 @@ torchrun --standalone --nnodes=1 --nproc_per_node=1 \
     dev/generate_batch_grad_attrib_and_tf_ko.py \
         --experiment_name "${EXPERIMENT_NAME}" \
         --model_num "${TRAINING_NUM}" \
-        --checkpoint_name "trained_model.pt" \
+        --checkpoint_name "checkpoint_30.pt" \
         --batch_size 64 \
-        --save_every_n_batches 40
+        --save_every_n_batches 40 \
+        --force_recalculate "true"
 
 echo "finished successfully!"

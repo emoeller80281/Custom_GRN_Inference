@@ -16,7 +16,7 @@ if SRC_DIR not in sys.path:
 
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 
-from multiomic_transformer.models.model import MultiomicTransformer
+from multiomic_transformer.models.model_simplified import MultiomicTransformer
 from multiomic_transformer.datasets.dataset_refactor import SimpleScaler
 
 def setup_distributed():
@@ -73,8 +73,8 @@ def load_model(selected_experiment_dir, checkpoint_file, device):
         tf_vocab_size=len(state["tf_scaler_mean"]),
         tg_vocab_size=len(state["tg_scaler_mean"]),
         use_bias=use_dist_bias,
-        use_shortcut=use_shortcut,
-        use_motif_mask=use_motif_mask,
+        # use_shortcut=use_shortcut,
+        # use_motif_mask=use_motif_mask,
 
     )
 
@@ -254,8 +254,8 @@ def run_gradient_attribution(
                         tf_ids=tf_ids,
                         tg_ids=tg_ids_chunk,
                         bias=bias_chunk,
-                        motif_mask=motif_mask_chunk,
-                        return_shortcut_contrib=False,
+                        # motif_mask=motif_mask_chunk,
+                        # return_shortcut_contrib=False,
                     )
                     if isinstance(preds_s, tuple):
                         preds_s = preds_s[0]
@@ -356,8 +356,8 @@ def run_gradient_attribution(
                                 tf_ids=tf_ids,
                                 tg_ids=tg_ids,
                                 bias=bias_full,
-                                motif_mask=motif_mask_full,
-                                return_shortcut_contrib=False,
+                                # motif_mask=motif_mask_full,
+                                # return_shortcut_contrib=False,
                             )
                             if isinstance(preds_s, tuple):
                                 preds_s = preds_s[0]
@@ -444,8 +444,8 @@ def run_gradient_attribution(
                                 tf_ids=tf_ids,
                                 tg_ids=tg_ids,
                                 bias=bias_full,
-                                motif_mask=motif_mask_full,
-                                return_shortcut_contrib=False,
+                                # motif_mask=motif_mask_full,
+                                # return_shortcut_contrib=False,
                             )
                             if isinstance(preds_s, tuple):
                                 preds_s = preds_s[0]

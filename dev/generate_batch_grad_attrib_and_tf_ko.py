@@ -1,6 +1,8 @@
-import sys, json, os, time
+import subprocess
+import sys, json, os, time, csv
 import numpy as np
 import pandas as pd
+from datetime import datetime
 from pathlib import Path
 from collections import Counter
 import matplotlib.pyplot as plt
@@ -50,6 +52,19 @@ def setup_distributed():
         )
     return rank, world_size, local_rank, distributed
 
+def log_gpu(tag="", device=None):
+    if not torch.cuda.is_available():
+        return
+    if device is None:
+        device = torch.cuda.current_device()
+    torch.cuda.synchronize(device)
+    print(
+        f"[{datetime.now()}] {tag} | "
+        f"alloc={torch.cuda.memory_allocated(device)/1024**3:.2f} GB | "
+        f"reserved={torch.cuda.memory_reserved(device)/1024**3:.2f} GB | "
+        f"max_alloc={torch.cuda.max_memory_allocated(device)/1024**3:.2f} GB",
+    flush=True)
+
 def load_ground_truth(ground_truth_file):
     if type(ground_truth_file) == str:
         ground_truth_file = Path(ground_truth_file)
@@ -80,7 +95,7 @@ def load_ground_truth(ground_truth_file):
     gt_lookup = (gt_tfs, gt_tgs, set(gt_pairs))
         
     return ground_truth_df, gt_lookup
-def prepare_dataloader(dataset, batch_size, world_size, rank, num_workers=4, seed=42):
+def prepare_dataloader(dataset, batch_size, world_size, rank, num_workers=0, seed=42):
 
     # ---------- Multi-chromosome path ----------
     if isinstance(dataset, MultiChromosomeDataset):
@@ -171,13 +186,22 @@ def run_gradient_attribution(
         )
 
     batch_grad_dfs = {}
+    
+    if rank == 0:
+        log_gpu("start of attribution", device)
+    
     for b_idx, batch in enumerate(iterator):
+        
         if max_batches is not None and b_idx >= max_batches:
             break
 
         # Manual sharding if the dataloader is not already distributed.
         if not use_dataloader and (b_idx % world_size != rank):
             continue
+        
+        # Log GPU memory every N batches
+        if b_idx % 10 == 0 and rank == 0:
+            log_gpu("before forward pass", device)
 
         atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids, motif_mask = batch
         
@@ -279,15 +303,18 @@ def run_gradient_attribution(
                     else tf_tensor_chunk
                 )
 
-                preds_s, _, _ = model(
+                preds_s = model(
                     atac_wins,
                     tf_scaled,
                     tf_ids=tf_ids,
                     tg_ids=tg_ids_chunk,
                     bias=bias_chunk,
-                    motif_mask=motif_mask_chunk,
-                    return_shortcut_contrib=False,
+                    # motif_mask=motif_mask_chunk,
+                    # return_shortcut_contrib=False,
                 )
+                if type(preds_s) is tuple:
+                    preds_s = preds_s[0]
+                
                 preds_u = (
                     tg_scaler.inverse_transform(preds_s, tg_ids_chunk)
                     if tg_scaler is not None
@@ -552,13 +579,16 @@ def run_tf_knockout(
 
         # ---- Baseline predictions ----
         with torch.amp.autocast(device_type=device.type, enabled=use_amp):
-            preds_base_s, _, _ = model(
+            preds_base_s = model(
                 atac_wins,
                 tf_scaled_base if tf_scaled_base.dim() == 2 else tf_scaled_base_3d,
                 tf_ids=tf_ids, tg_ids=tg_ids,
-                bias=bias, motif_mask=motif_mask,
-                return_shortcut_contrib=False,
+                bias=bias, #motif_mask=motif_mask,
+                # return_shortcut_contrib=False,
             )
+            if type(preds_base_s) is tuple:
+                preds_base_s = preds_base_s[0]
+            
             preds_base_u = tg_scaler.inverse_transform(preds_base_s, tg_ids) if tg_scaler is not None else preds_base_s
 
         preds_base_u = torch.nan_to_num(preds_base_u.float(), nan=0.0, posinf=1e6, neginf=-1e6)  # [B, G_eval]
@@ -650,12 +680,15 @@ def run_tf_knockout(
             tf_scaled_input = tf_scaled_work.squeeze(-1) if tf_tensor.dim() == 2 else tf_scaled_work
 
             with torch.amp.autocast(device_type=device.type, enabled=use_amp):
-                preds_ko_s, _, _ = model(
+                preds_ko_s = model(
                     atac_wins, tf_scaled_input,
                     tf_ids=tf_ids, tg_ids=tg_ids,
-                    bias=bias, motif_mask=motif_mask,
-                    return_shortcut_contrib=False,
+                    bias=bias, #motif_mask=motif_mask,
+                    #return_shortcut_contrib=False,
                 )
+                if type(preds_ko_s) is tuple:
+                    preds_ko_s = preds_ko_s[0]
+                
                 preds_ko_u = tg_scaler.inverse_transform(preds_ko_s, tg_ids) if tg_scaler is not None else preds_ko_s
 
             preds_ko_u = torch.nan_to_num(preds_ko_u.float(), nan=0.0, posinf=1e6, neginf=-1e6)  # [B,G_eval]
@@ -777,7 +810,15 @@ def load_model(selected_experiment_dir, checkpoint_file, device):
     import warnings
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", category=FutureWarning, message=".*torch.load.*weights_only.*")
-        test_loader = torch.load(selected_experiment_dir / "test_loader.pt", weights_only=False)
+        old_loader = torch.load(selected_experiment_dir / "test_loader.pt", weights_only=False)
+
+        test_loader = DataLoader(
+            dataset=old_loader.dataset,
+            batch_sampler=old_loader.batch_sampler,
+            collate_fn=old_loader.collate_fn,
+            num_workers=0,
+            pin_memory=old_loader.pin_memory,
+        )
 
     ckpt_path = os.path.join(selected_experiment_dir, checkpoint_file)
     
@@ -964,7 +1005,7 @@ if __name__ == "__main__":
         selected_experiment_dir = exp.model_training_dir
         selected_experiment_dir.mkdir(parents=True, exist_ok=True)
         
-        if not "gradient_attribution_raw.parquet" in os.listdir(selected_experiment_dir) and not force_recalculate:
+        if not "gradient_attribution_raw.parquet" in os.listdir(selected_experiment_dir) or force_recalculate:
             start_time = time.time()
             grad_attr_df, batch_grad_df_dict = run_gradient_attribution(
                 selected_experiment_dir=selected_experiment_dir,
@@ -985,7 +1026,7 @@ if __name__ == "__main__":
                 disable_shortcut=disable_shortcut,
                 zero_tf_expr=zero_tf_expr,
                 save_every_n_batches=save_every_n_batches,
-                use_dataloader=True,
+                use_dataloader=False,
                 
             )
             end_time = time.time()
