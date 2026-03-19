@@ -220,8 +220,14 @@ EXPERIMENT_LIST=(
     # "mESC_E7.5_rep1_muon_preprocessing|model_training_003|mESC|E7.5_rep1"
 
     # Original model | Training dist bias 0.0
-    "mESC_E7.5_rep1_muon_preprocessing|model_training_004|mESC|E7.5_rep1"
+    # "mESC_E7.5_rep1_muon_preprocessing|model_training_004|mESC|E7.5_rep1"
 
+    # Simplified model
+    # "mESC_E7.5_rep1_hvg_filter_disp_0.5|model_training_002|mESC|E7.5_rep1"
+    # "mESC_muon_preprocessing|model_training_003|mESC|E7.5_rep1"
+    "mESC_muon_preprocessing|model_training_004|mESC|E7.5_rep1"
+
+    # "mESC_E7.5_rep1_muon_preprocessing_bear_grn|model_training_001|mESC|E7.5_rep1"
 
     # "mESC_E7.5_rep2_muon_preprocessing|model_training_001|mESC|E7.5_rep2"
 )
@@ -267,8 +273,8 @@ torchrun --standalone --nnodes=1 --nproc_per_node=1 \
     dev/generate_batch_grad_attrib_and_tf_ko.py \
         --experiment_name "${EXPERIMENT_NAME}" \
         --model_num "${TRAINING_NUM}" \
-        --checkpoint_name "checkpoint_30.pt" \
-        --batch_size 64 \
+        --checkpoint_name "checkpoint_10.pt" \
+        --batch_size 32 \
         --save_every_n_batches 40 \
         --force_recalculate "true"
 
