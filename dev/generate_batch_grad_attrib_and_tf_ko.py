@@ -158,6 +158,7 @@ def run_gradient_attribution(
     disable_shortcut: bool = False,
     zero_tf_expr: bool = False,
     use_dataloader: bool = True,
+    max_tgs_per_batch: int | None = None,
 ):
     
     if max_batches is not None:
@@ -255,9 +256,11 @@ def run_gradient_attribution(
 
         # ---------- METHOD 1: plain saliency (grad * input) ----------
         total_owned = owned_tg_indices.numel()
+        chunk_size = max_tgs_per_batch if max_tgs_per_batch is not None else total_owned
+        chunk_size = max(1, min(chunk_size, total_owned))
 
-        for chunk_start in range(0, total_owned, total_owned):
-            tg_chunk = owned_tg_indices[chunk_start : chunk_start + total_owned]
+        for chunk_start in range(0, total_owned, chunk_size):
+            tg_chunk = owned_tg_indices[chunk_start : chunk_start + chunk_size]
 
             # Slice TG-specific inputs to shrink the attention graph per chunk
             if bias is not None:
@@ -875,6 +878,7 @@ def argparse_args():
     parser.add_argument("--checkpoint_name", type=str, default="trained_model.pt")
     parser.add_argument("--save_every_n_batches", type=int, default=-1)
     parser.add_argument("--force_recalculate", type=str, default="false", help="Whether to force recalculation even if output files already exist. Set to 'true' to enable.")
+    parser.add_argument("--max_tgs_per_batch", type=int, default=-1, help="Chunk size for TGs during gradient attribution. Use to limit attention memory.")
     
     args = parser.parse_args()
     return args
@@ -922,6 +926,10 @@ if __name__ == "__main__":
         save_every_n_batches = args.save_every_n_batches
         if save_every_n_batches < 1:
             save_every_n_batches = None
+
+        max_tgs_per_batch = args.max_tgs_per_batch
+        if max_tgs_per_batch is not None and max_tgs_per_batch < 1:
+            max_tgs_per_batch = None
         
         SAMPLE_DATA_CACHE_DIR = Path(PROJECT_DIR) / "data/training_data_cache" / exp.experiment_name
         CHROM_IDS = exp.experiment_settings_df.set_index("parameter").loc["CHROM_IDS"].value.split(" ")
@@ -1027,6 +1035,7 @@ if __name__ == "__main__":
                 zero_tf_expr=zero_tf_expr,
                 save_every_n_batches=save_every_n_batches,
                 use_dataloader=False,
+                max_tgs_per_batch=max_tgs_per_batch,
                 
             )
             end_time = time.time()

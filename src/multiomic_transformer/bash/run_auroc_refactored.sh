@@ -282,8 +282,12 @@ EXPERIMENT_LIST=(
     # "mESC_E7.5_rep1_muon_preprocessing|model_training_002|mESC|E7.5_rep1"
     # "mESC_E7.5_rep1_muon_preprocessing|model_training_003|mESC|E7.5_rep1"
     # "mESC_E7.5_rep2_muon_preprocessing|model_training_001|mESC|E7.5_rep2"
+    # "mESC_E7.5_rep1_muon_preprocessing|model_training_004|mESC|E7.5_rep1"
+    # "mESC_muon_preprocessing|model_training_004|mESC|E7.5_rep1"
 
-    "mESC_E7.5_rep1_muon_preprocessing_bear_grn|model_training_001|mESC|E7.5_rep1"
+    "mESC_E7.5_rep2_muon_preprocessing|model_training_002|mESC|E7.5_rep2"
+
+    # "mESC_E7.5_rep1_muon_preprocessing_bear_grn|model_training_001|mESC|E7.5_rep1"
     # "mESC_E7.5_rep1_hvg_filter_disp_0.5|model_training_002|mESC|E7.5_rep1"
 
 )

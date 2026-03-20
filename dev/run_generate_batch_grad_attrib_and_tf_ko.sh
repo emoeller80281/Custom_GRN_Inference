@@ -273,9 +273,10 @@ torchrun --standalone --nnodes=1 --nproc_per_node=1 \
     dev/generate_batch_grad_attrib_and_tf_ko.py \
         --experiment_name "${EXPERIMENT_NAME}" \
         --model_num "${TRAINING_NUM}" \
-        --checkpoint_name "checkpoint_10.pt" \
-        --batch_size 32 \
+        --checkpoint_name "checkpoint_30.pt" \
+        --batch_size 16 \
         --save_every_n_batches 40 \
-        --force_recalculate "true"
+        --force_recalculate "true" \
+        --max_tgs_per_batch 128 
 
 echo "finished successfully!"

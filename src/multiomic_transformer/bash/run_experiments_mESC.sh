@@ -9,7 +9,7 @@
 #SBATCH --gres=gpu:a100:3
 #SBATCH -c 12
 #SBATCH --mem=128G
-#SBATCH --array=0%2
+#SBATCH --array=0%1
 
 set -euo pipefail
 
@@ -296,6 +296,8 @@ EXPERIMENTS=(
     # "E7.5_rep1_muon_preprocessing|mESC_E7.5_rep1_muon_preprocessing|D_MODEL=128;D_FF=512;SAMPLE_NAMES=E7.5_rep1"
     "E7.5_rep2_muon_preprocessing|mESC_E7.5_rep2_muon_preprocessing|D_MODEL=128;D_FF=512;SAMPLE_NAMES=E7.5_rep2"
     # "E7.5_rep1_muon_preprocessing_bear_grn|mESC_E7.5_rep1_muon_preprocessing_bear_grn|D_MODEL=128;D_FF=512;SAMPLE_NAMES=E7.5_rep1"
+
+    # "muon_preprocesing_simplified_model|mESC_muon_preprocessing_simplified_model|D_MODEL=128;D_FF=512;SAMPLE_NAMES=E7.5_rep1"
 
 
 )

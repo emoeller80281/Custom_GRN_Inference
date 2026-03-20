@@ -23,7 +23,7 @@ class MultiHeadAttention(nn.Module):
         self.W_v = nn.Linear(d_model, d_model) # Value transformation
         self.W_o = nn.Linear(d_model, d_model) # Output transformation
         
-    def scaled_dot_product_attention(self, Q, K, V, mask=None, attn_bias=None):
+    def scaled_dot_product_attention(self, Q, K, V, attn_bias=None):
         # Expected: Q,K,V = [batch_size,H,L, d_k]
         assert Q.dim() == 4 and K.dim() == 4 and V.dim() == 4, \
             f"Q,K,V must be 4D: got {Q.shape}, {K.shape}, {V.shape}"
@@ -31,58 +31,53 @@ class MultiHeadAttention(nn.Module):
         batch_size,H,Lq,Dq = Q.shape
         Bk,Hk,Lk,Dk = K.shape
         Bv,Hv,Lv,Dv = V.shape
+        
         assert (batch_size,H) == (Bk,Hk) == (Bv,Hv), f"Batch/heads mismatch: Q{(batch_size,H)} K{(Bk,Hk)} V{(Bv,Hv)}"
         assert Dq == Dk == Dv, f"Head dim mismatch: {Dq} vs {Dk} vs {Dv}"
         assert Lk == Lv, f"K/V length mismatch: Lk={Lk}, Lv={Lv}"
         
-        # 0) sanitize inputs early
+        # Handle NaNs and Infs in Q, K, V, and attn_bias to prevent them from propagating through the softmax
         Q = torch.nan_to_num(Q, nan=0.0, posinf=1e4, neginf=-1e4)
         K = torch.nan_to_num(K, nan=0.0, posinf=1e4, neginf=-1e4)
-        V = torch.nan_to_num(V, nan=0.0, posinf=1e4, neginf=-1e4)
-        if attn_bias is not None:
-            attn_bias = torch.nan_to_num(attn_bias, nan=0.0, posinf=1e4, neginf=-1e4)
+        V = torch.nan_to_num(V, nan=0.0, posinf=1e4, neginf=-1e4)            
 
-        # 1) compute logits in fp32 for numeric headroom
+        # Compute logits in fp32 for stability, then cast back to original dtype
         scale = 1.0 / math.sqrt(self.d_k)
         logits = torch.matmul(Q.float(), K.float().transpose(-2, -1)) * scale  # [B,H,Lq,Lk]
 
-        # 2) add bias (clamped)
+        # Add the bias
         if attn_bias is not None:
+            attn_bias = torch.nan_to_num(attn_bias, nan=0.0, posinf=1e4, neginf=-1e4)
             logits = logits + attn_bias.float().clamp_(-1e4, 1e4)
 
-        # 3) apply mask with dtype-aware large negative
-        if mask is not None:
-            large_neg = -1e4  # fp16/bf16-safe (instead of -1e9)
-            # assume mask==0 means "masked"
-            logits = logits.masked_fill(mask == 0, large_neg)
-
-        # 4) softmax in fp32, then cast back to original dtype
+        # Softmax in fp32, then cast back to original dtype
         probs = torch.softmax(logits, dim=-1)
         probs = torch.nan_to_num(probs, nan=0.0)
         out = torch.matmul(probs, V.float()).to(Q.dtype)
         return out
         
-    def split_heads(self, x):
-        # Reshape the input to have num_heads for multi-head attention
-        batch_size, seq_length, d_model = x.size()
-        return x.view(batch_size, seq_length, self.num_heads, self.d_k).transpose(1, 2)
+    def forward(self, Q, K, V, attn_bias=None):
         
-    def combine_heads(self, x):
-        # Combine the multiple heads back to original shape
-        batch_size, _, seq_length, d_k = x.size()
-        return x.transpose(1, 2).contiguous().view(batch_size, seq_length, self.d_model)
+        def _split_heads(x, num_heads, d_k):
+            # Reshape the input to have num_heads for multi-head attention
+            batch_size, seq_length, d_model = x.size()
+            return x.view(batch_size, seq_length, num_heads, d_k).transpose(1, 2)
         
-    def forward(self, Q, K, V, mask=None, attn_bias=None):
+        def _combine_heads(x):
+            # Combine the multiple heads back to original shape
+            batch_size, _, seq_length, d_k = x.size()
+            return x.transpose(1, 2).contiguous().view(batch_size, seq_length, self.d_model)
+        
         # Apply linear transformations and split heads
-        Q = self.split_heads(self.W_q(Q))
-        K = self.split_heads(self.W_k(K))
-        V = self.split_heads(self.W_v(V))
+        Q = _split_heads(self.W_q(Q), self.num_heads, self.d_k)
+        K = _split_heads(self.W_k(K), self.num_heads, self.d_k)
+        V = _split_heads(self.W_v(V), self.num_heads, self.d_k)
         
         # Perform scaled dot-product attention
-        attn_output = self.scaled_dot_product_attention(Q, K, V, mask, attn_bias)
+        attn_output = self.scaled_dot_product_attention(Q, K, V, attn_bias)
         
         # Combine heads and apply output transformation
-        output = self.W_o(self.combine_heads(attn_output))
+        output = self.W_o(_combine_heads(attn_output))
         return output
     
 class PositionalEmbedding(nn.Module):
@@ -95,12 +90,13 @@ class PositionalEmbedding(nn.Module):
         inv_freq = 1 / (10000 ** (torch.arange(0.0, d_model, 2.0) / d_model))
         self.register_buffer('inv_freq', inv_freq)
 
-    def forward(self, pos_seq, bsz=None):
+    def forward(self, pos_seq, batch_size=None):
         sinusoid_inp = torch.ger(pos_seq, self.inv_freq)
         pos_emb = torch.cat([sinusoid_inp.sin(), sinusoid_inp.cos()], dim=-1)
 
-        if bsz is not None:
-            return pos_emb[:,None,:].expand(-1, bsz, -1)
+        # Expand the positional embeddings to match the batch size if provided
+        if batch_size is not None:
+            return pos_emb[:,None,:].expand(-1, batch_size, -1)
         else:
             return pos_emb[:,None,:]
     
@@ -111,12 +107,18 @@ class CrossAttention(nn.Module):
         self.norm = nn.LayerNorm(d_model, eps=1e-6)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, query, key_value, mask=None, attn_bias=None):
-        # query: [batch_size, len_query, d_model]
-        # key_value: [batch_size, len_key_val, d_model]
-        attn_out = self.attn(query, key_value, key_value, mask, attn_bias=attn_bias)
+    def forward(self, query, key_value, attn_bias=None):
+        # Compute attention between the query and key_value, with optional bias
+        attn_out = self.attn(query, key_value, key_value, attn_bias=attn_bias)
         attn_out = torch.nan_to_num(attn_out, nan=0.0, posinf=1e4, neginf=-1e4)
-        res = query + 0.1 * self.dropout(attn_out)
+        
+        # Apply dropout to the attention output before adding it to the residual connection
+        attn_w_dropout = self.dropout(attn_out)
+        
+        # Residual with weighted attention output to help stabilize training
+        res = query + 0.1 * attn_w_dropout
+        
+        # LayerNorm
         out = self.norm(res)
         return out
 
@@ -158,7 +160,7 @@ class MultiomicTransformer(nn.Module):
         # TF and TG embedding tables - generates identities for TFs and TGs
         self.tf_identity_emb = nn.Embedding(tf_vocab_size, d_model)
         self.tg_query_emb = nn.Embedding(tg_vocab_size, d_model)        # 
-        self.tg_identity_emb = nn.Embedding(tg_vocab_size, d_model)
+        # self.tg_identity_emb = nn.Embedding(tg_vocab_size, d_model)
         
         # ATAC windows do not have embeddings, their position and accessibility
         # are used to inform TFs and TGs
@@ -334,16 +336,16 @@ class MultiomicTransformer(nn.Module):
         # with the fused TF-ATAC and ATAC-TF cross attn output
         tg_cross_attn_repr = tg_cross + tf_atac_cross_attn_output
         
-        # ----- TG identity to Cross-attention output dot product -----
-        # Create TG identity embeddings
-        tg_emb = self.tg_identity_emb(tg_ids)                   # [n_tgs,d_model]
+        # # ----- TG identity to Cross-attention output dot product -----
+        # # Create TG identity embeddings
+        # tg_emb = self.tg_identity_emb(tg_ids)                   # [n_tgs,d_model]
         
-        # Dot product between teach TG's global context from attention and the TG identity embedding
-        #     If the TG ID embedding and global context agree, supports TG expression
-        tg_similarity_to_attn_output = (tg_cross_attn_repr * tg_emb).sum(dim=-1)     # [batch_size,n_tgs]
+        # # Dot product between teach TG's global context from attention and the TG identity embedding
+        # #     If the TG ID embedding and global context agree, supports TG expression
+        # tg_similarity_to_attn_output = (tg_cross_attn_repr * tg_emb).sum(dim=-1)     # [batch_size,n_tgs]
         
         # Sum the TG similarity score and the per-TG cross attention output
         # If both similarity and weighted context features are high, predicts higher expression
-        tg_pred = tg_similarity_to_attn_output + self.gene_pred_dense(tg_cross_attn_repr).squeeze(-1)
+        tg_pred = self.gene_pred_dense(tg_cross_attn_repr).squeeze(-1)
 
         return tg_pred

@@ -28,8 +28,6 @@ def format_peaks(peak_ids: Union[pd.Series, pd.Index]) -> pd.DataFrame:
     
     peak_ids = peak_ids.drop_duplicates()
 
-    logging.info(f'  - Formatting {peak_ids.shape[0]} peaks')
-
     # Extract chromosome, start, and end from peak ID strings
     # Try colon-separated format first (chr:start-end)
     try:

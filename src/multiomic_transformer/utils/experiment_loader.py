@@ -10,7 +10,7 @@ from scipy.stats import norm
 import sys
 import logging
 from sklearn.metrics import roc_auc_score, average_precision_score, precision_recall_curve, roc_curve
-from typing import Set, Tuple, Optional
+from typing import Set, Tuple, Optional, Dict
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from tqdm import tqdm
@@ -1152,6 +1152,7 @@ class ExperimentLoader:
         ylim: tuple = (0.3, 0.7),
         sort_by_median: bool = True,
         override_title: Optional[str] = None,
+        method_color_dict: Optional[Dict[str, str]] = None,
         ) -> plt.Figure:
         """
         Plots AUROC boxplots for all GRN inference methods in the provided DataFrame.
@@ -1217,10 +1218,13 @@ class ExperimentLoader:
 
         # Color boxes: light blue for your methods, grey for others
         for box, method in zip(bp["boxes"], method_order):
-            if method in feature_list or override_color:
-                box.set_facecolor(my_color)
+            if method_color_dict and method in method_color_dict:
+                box.set_facecolor(method_color_dict[method])
             else:
-                box.set_facecolor(other_color)
+                if method in feature_list or override_color:
+                    box.set_facecolor(my_color)
+                else:
+                    box.set_facecolor(other_color)
 
         # Medians in black
         for median in bp["medians"]:
@@ -1260,21 +1264,29 @@ class ExperimentLoader:
             # # Annotate the mean value above the mean point
             # ax.text(i, y.max() + 0.015, f"{mean_val:.3f}", ha="center", va="bottom", fontsize=12)
 
-        legend_handles = [
-            Line2D(
-                [0], [0],
-                marker="o",
-                linestyle="None",
-                markerfacecolor=(
-                    my_color if (method in feature_list or override_color) else other_color
-                ),
-                markeredgecolor="k",
-                markersize=7,
-                label=f"{method_name}: {mean_by_method.loc[method]:.3f}"
+        legend_handles = []
+
+        for method in method_order:
+            # Match EXACT box color logic
+            if method_color_dict and method in method_color_dict:
+                color = method_color_dict[method]
+            elif method in feature_list or override_color:
+                color = my_color
+            else:
+                color = other_color
+            label = method.replace(" ", "\n")
+            legend_handles.append(
+                Line2D(
+                    [0], [0],
+                    marker="o",
+                    linestyle="None",
+                    markerfacecolor=color,
+                    markeredgecolor="k",
+                    markersize=7,
+                    label=f"{label}: {mean_by_method.loc[method]:.3f}"
+                )
             )
-            for method in method_order
-            for method_name in [method.replace(" ", "\n")]
-        ]
+            
         
         ax.legend(
             handles=legend_handles,
