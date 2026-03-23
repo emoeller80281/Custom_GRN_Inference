@@ -14,6 +14,8 @@ import random
 import zlib
 import logging
 import argparse
+import types
+import math
 
 PROJECT_DIR = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
 SRC_DIR = str(Path(PROJECT_DIR) / "src")
@@ -22,7 +24,7 @@ if SRC_DIR not in sys.path:
 
 import multiomic_transformer.utils.experiment_loader as experiment_loader
 import multiomic_transformer.datasets.dataset_refactor as dataset_refactor
-import multiomic_transformer.models.model as model_module
+import multiomic_transformer.models.model_simplified as model_module
 from multiomic_transformer.datasets.dataset_refactor import DistributedBatchSampler, MultiChromosomeDataset
 from multiomic_transformer.datasets.dataset_refactor import IndexedChromBucketBatchSampler
 
@@ -137,6 +139,280 @@ def prepare_dataloader(dataset, batch_size, world_size, rank, num_workers=0, see
         )
 
         return full_data_loader
+
+def patched_scaled_dot_product_attention(self, Q, K, V, mask=None, attn_bias=None):
+    Q = torch.nan_to_num(Q, nan=0.0, posinf=1e4, neginf=-1e4)
+    K = torch.nan_to_num(K, nan=0.0, posinf=1e4, neginf=-1e4)
+    V = torch.nan_to_num(V, nan=0.0, posinf=1e4, neginf=-1e4)
+
+    scale = 1.0 / math.sqrt(self.d_k)
+    logits = torch.matmul(Q.float(), K.float().transpose(-2, -1)) * scale
+
+    if mask is not None:
+        logits = logits.masked_fill(mask == 0, -1e9)
+
+    if attn_bias is not None:
+        attn_bias = torch.nan_to_num(attn_bias, nan=0.0, posinf=1e4, neginf=-1e4)
+        logits = logits + attn_bias.float().clamp(-1e4, 1e4)
+
+    probs = torch.softmax(logits, dim=-1)
+    probs = torch.nan_to_num(probs, nan=0.0)
+
+    self.last_logits = logits.detach()
+    self.last_attn_probs = probs.detach()
+
+    out = torch.matmul(probs, V.float()).to(Q.dtype)
+    return out
+
+
+def patch_loaded_model_in_place(model):
+    if hasattr(model, "cross_tf_to_atac") and hasattr(model.cross_tf_to_atac, "attn"):
+        model.cross_tf_to_atac.attn.last_logits = None
+        model.cross_tf_to_atac.attn.last_attn_probs = None
+        model.cross_tf_to_atac.attn.scaled_dot_product_attention = types.MethodType(
+            patched_scaled_dot_product_attention,
+            model.cross_tf_to_atac.attn
+        )
+
+    if hasattr(model, "cross_tg_to_atac") and hasattr(model.cross_tg_to_atac, "attn"):
+        model.cross_tg_to_atac.attn.last_logits = None
+        model.cross_tg_to_atac.attn.last_attn_probs = None
+        model.cross_tg_to_atac.attn.scaled_dot_product_attention = types.MethodType(
+            patched_scaled_dot_product_attention,
+            model.cross_tg_to_atac.attn
+        )
+
+    return model
+
+def run_tf_window_tg_attribution(
+    selected_experiment_dir,
+    model,
+    test_loader,
+    tg_scaler,
+    tf_scaler,
+    state,
+    tf_names,
+    tg_names,
+    device,
+    use_amp,
+    rank,
+    world_size,
+    distributed,
+    max_batches: int = None,
+    use_dataloader: bool = False,
+    max_tgs_per_batch: int = None,
+    top_tfs: int = 25,
+    top_windows: int = 50,
+    use_abs_score: bool = True,
+):
+    if rank is None:
+        rank = 0
+    if distributed is None:
+        distributed = False
+    if world_size is None:
+        world_size = 1
+
+    T_total = len(tf_names)
+    G_total = len(tg_names)
+
+    # Aggregate directly into TF x TG
+    score_sum = torch.zeros(T_total, G_total, device=device, dtype=torch.float32)
+    score_count = torch.zeros_like(score_sum)
+
+    model.to(device).eval()
+
+    iterator = test_loader
+    if rank == 0:
+        iterator = tqdm(
+            test_loader,
+            desc="TF-window-TG attribution",
+            unit="batches",
+            total=max_batches,
+            ncols=100,
+        )
+
+    for b_idx, batch in enumerate(iterator):
+        if max_batches is not None and b_idx >= max_batches:
+            break
+
+        if not use_dataloader and (b_idx % world_size != rank):
+            continue
+
+        atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids, motif_mask = batch
+        atac_wins = atac_wins.to(device)
+        tf_tensor = tf_tensor.to(device)
+        bias = bias.to(device) if bias is not None else None
+        tf_ids = tf_ids.to(device)
+        tg_ids = tg_ids.to(device)
+        motif_mask = motif_mask.to(device) if motif_mask is not None else None
+
+        captured = {}
+
+        def hook_gene_pred_dense(module, inputs, output):
+            captured["tg_cross_attn_repr"] = inputs[0]
+
+        handle = model.gene_pred_dense.register_forward_hook(hook_gene_pred_dense)
+
+        try:
+            with torch.amp.autocast(device_type=device.type, enabled=use_amp):
+                tf_scaled = (
+                    tf_scaler.transform(tf_tensor, tf_ids)
+                    if tf_scaler is not None
+                    else tf_tensor
+                )
+
+                preds_s = model(
+                    atac_wins,
+                    tf_scaled,
+                    tf_ids=tf_ids,
+                    tg_ids=tg_ids,
+                    bias=bias,
+                    # motif_mask=motif_mask,
+                )
+
+                if isinstance(preds_s, tuple):
+                    preds_s = preds_s[0]
+
+                preds_u = (
+                    tg_scaler.inverse_transform(preds_s, tg_ids)
+                    if tg_scaler is not None
+                    else preds_s
+                )
+                preds_u = torch.nan_to_num(
+                    preds_u.float(), nan=0.0, posinf=1e6, neginf=-1e6
+                )
+        finally:
+            handle.remove()
+
+        if "tg_cross_attn_repr" not in captured:
+            raise RuntimeError("Failed to capture tg_cross_attn_repr from gene_pred_dense hook.")
+
+        tg_cross_attn_repr = captured["tg_cross_attn_repr"]   # [B, G, D]
+        tg_cross_attn_repr.retain_grad()
+
+        tf_to_win = model.cross_tf_to_atac.attn.last_attn_probs.mean(dim=1)  # [B, T, W]
+        tg_to_win = model.cross_tg_to_atac.attn.last_attn_probs.mean(dim=1)  # [B, G, W]
+
+        B = preds_u.shape[0]
+        G_eval = preds_u.shape[1]
+
+        owned_tg_indices = torch.arange(G_eval, device=device)
+        if world_size > 1:
+            owned_tg_indices = owned_tg_indices[owned_tg_indices % world_size == rank]
+
+        if owned_tg_indices.numel() == 0:
+            continue
+
+        chunk_size = max_tgs_per_batch if max_tgs_per_batch is not None else owned_tg_indices.numel()
+
+        for chunk_start in range(0, owned_tg_indices.numel(), chunk_size):
+            tg_chunk = owned_tg_indices[chunk_start: chunk_start + chunk_size]
+
+            for local_j, g in enumerate(tg_chunk.tolist()):
+                model.zero_grad(set_to_none=True)
+                if tg_cross_attn_repr.grad is not None:
+                    tg_cross_attn_repr.grad.zero_()
+
+                scalar = preds_u[:, g].sum()
+                scalar.backward(retain_graph=True)
+
+                for b in range(B):
+                    grad_h = tg_cross_attn_repr.grad[b, g].detach().clone()  # [D]
+                    tg_sensitivity = grad_h.abs().mean()
+
+                    tfw = tf_to_win[b]            # [T, W]
+                    tgw = tg_to_win[b, g]         # [W]
+                    tfv = tf_tensor[b]            # [T]
+                    winv = atac_wins[b, :, 0]     # [W]
+
+                    tf_strength = (tfw * tfv.abs().unsqueeze(1)).max(dim=1).values
+                    win_strength = (tgw * winv.abs()).abs()
+
+                    top_tf_idx = torch.topk(
+                        tf_strength,
+                        k=min(top_tfs, tf_strength.numel())
+                    ).indices
+
+                    top_win_idx = torch.topk(
+                        win_strength,
+                        k=min(top_windows, win_strength.numel())
+                    ).indices
+
+                    tfw_sub = tfw[top_tf_idx][:, top_win_idx]    # [T', W']
+                    tfv_sub = tfv[top_tf_idx].unsqueeze(1)       # [T', 1]
+                    tgw_sub = tgw[top_win_idx].unsqueeze(0)      # [1, W']
+                    winv_sub = winv[top_win_idx].unsqueeze(0)    # [1, W']
+
+                    path_score = tfw_sub * tgw_sub
+                    activity_score = path_score * tfv_sub * winv_sub
+                    final_score = activity_score * tg_sensitivity
+
+                    # Collapse windows immediately -> TF score for this TG/sample
+                    tf_tg_scores = final_score.sum(dim=1)   # [T']
+
+                    if use_abs_score:
+                        tf_tg_scores = tf_tg_scores.abs()
+
+                    if tg_ids.dim() == 1:
+                        tg_global = int(tg_ids[g].item())
+                    else:
+                        tg_global = int(tg_ids[b, g].item())
+
+                    col_sum = score_sum[:, tg_global]
+                    col_count = score_count[:, tg_global]
+
+                    col_sum.index_add_(0, top_tf_idx, tf_tg_scores)
+                    col_count.index_add_(0, top_tf_idx, torch.ones_like(tf_tg_scores))
+
+        del (
+            atac_wins,
+            tf_tensor,
+            bias,
+            tf_ids,
+            tg_ids,
+            motif_mask,
+            tf_scaled,
+            preds_s,
+            preds_u,
+            tg_cross_attn_repr,
+            tf_to_win,
+            tg_to_win,
+        )
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+
+    if distributed:
+        dist.barrier()
+        dist.all_reduce(score_sum, op=dist.ReduceOp.SUM)
+        dist.all_reduce(score_count, op=dist.ReduceOp.SUM)
+
+    tf_tg_attr = score_sum / (score_count + 1e-12)
+
+    seen_tf_mask = score_count.sum(dim=1) > 0
+    seen_tg_mask = score_count.sum(dim=0) > 0
+
+    seen_tf_ids = torch.nonzero(seen_tf_mask, as_tuple=True)[0]
+    seen_tg_ids = torch.nonzero(seen_tg_mask, as_tuple=True)[0]
+
+    tf_tg_attr_compact = tf_tg_attr[seen_tf_mask][:, seen_tg_mask]
+    tf_tg_attr_np = np.nan_to_num(tf_tg_attr_compact.detach().cpu().numpy(), nan=0.0)
+
+    seen_tf_ids_np = seen_tf_ids.cpu().numpy()
+    seen_tg_ids_np = seen_tg_ids.cpu().numpy()
+
+    df_wide = pd.DataFrame(
+        tf_tg_attr_np,
+        index=[tf_names[i] for i in seen_tf_ids_np],
+        columns=[tg_names[i] for i in seen_tg_ids_np],
+    )
+
+    if rank == 0:
+        print(f"TF-window-TG attribution: kept {len(seen_tf_ids_np)}/{T_total} TFs, {len(seen_tg_ids_np)}/{G_total} TGs")
+        out_path = selected_experiment_dir / "tf_window_tg_attribution_raw.parquet"
+        df_wide.to_parquet(out_path)
+        logging.info(f"Saved TF-window-TG attribution DataFrame to {out_path}")
+
+    return df_wide
 
 def run_gradient_attribution(
     selected_experiment_dir,
@@ -847,8 +1123,8 @@ def load_model(selected_experiment_dir, checkpoint_file, device):
         tf_vocab_size=len(state["tf_scaler_mean"]),
         tg_vocab_size=len(state["tg_scaler_mean"]),
         use_bias=use_dist_bias,
-        use_shortcut=use_shortcut,
-        use_motif_mask=use_motif_mask,
+        # use_shortcut=use_shortcut,
+        # use_motif_mask=use_motif_mask,
     )
 
     if isinstance(state, dict) and "model_state_dict" in state:
@@ -1013,35 +1289,56 @@ if __name__ == "__main__":
         selected_experiment_dir = exp.model_training_dir
         selected_experiment_dir.mkdir(parents=True, exist_ok=True)
         
-        if not "gradient_attribution_raw.parquet" in os.listdir(selected_experiment_dir) or force_recalculate:
-            start_time = time.time()
-            grad_attr_df, batch_grad_df_dict = run_gradient_attribution(
-                selected_experiment_dir=selected_experiment_dir,
-                model=model,
-                test_loader=test_loader,
-                tg_scaler=tg_scaler,
-                tf_scaler=tf_scaler,
-                tf_names=exp.tf_names,
-                tg_names=exp.tg_names,
-                use_amp=use_amp,
-                max_batches=max_batches,
-                device=device,
-                rank=rank,
-                world_size=world_size,
-                distributed=distributed,
-                disable_bias=disable_bias,
-                disable_motif_mask=disable_motif_mask,
-                disable_shortcut=disable_shortcut,
-                zero_tf_expr=zero_tf_expr,
-                save_every_n_batches=save_every_n_batches,
-                use_dataloader=False,
-                max_tgs_per_batch=max_tgs_per_batch,
+        # if not "gradient_attribution_raw.parquet" in os.listdir(selected_experiment_dir) or force_recalculate:
+        #     start_time = time.time()
+        #     grad_attr_df, batch_grad_df_dict = run_gradient_attribution(
+        #         selected_experiment_dir=selected_experiment_dir,
+        #         model=model,
+        #         test_loader=test_loader,
+        #         tg_scaler=tg_scaler,
+        #         tf_scaler=tf_scaler,
+        #         tf_names=exp.tf_names,
+        #         tg_names=exp.tg_names,
+        #         use_amp=use_amp,
+        #         max_batches=max_batches,
+        #         device=device,
+        #         rank=rank,
+        #         world_size=world_size,
+        #         distributed=distributed,
+        #         disable_bias=disable_bias,
+        #         disable_motif_mask=disable_motif_mask,
+        #         disable_shortcut=disable_shortcut,
+        #         zero_tf_expr=zero_tf_expr,
+        #         save_every_n_batches=save_every_n_batches,
+        #         use_dataloader=False,
+        #         max_tgs_per_batch=max_tgs_per_batch,
                 
-            )
-            end_time = time.time()
-            logging.info(f"  - Gradient attribution finished {max_batches} batches in {end_time - start_time:.2f} seconds.")
-        else:
-            logging.info(f"Gradient attribution results already exist in {selected_experiment_dir}, skipping computation.")
+        #     )
+        #     end_time = time.time()
+        #     logging.info(f"  - Gradient attribution finished {max_batches} batches in {end_time - start_time:.2f} seconds.")
+        # else:
+        #     logging.info(f"Gradient attribution results already exist in {selected_experiment_dir}, skipping computation.")
+        
+        model = patch_loaded_model_in_place(model)
+        
+        run_tf_window_tg_attribution(
+            selected_experiment_dir=selected_experiment_dir,
+            model=model,
+            test_loader=test_loader,
+            tg_scaler=tg_scaler,
+            tf_scaler=tf_scaler,
+            state=state,
+            tf_names=exp.tf_names,
+            tg_names=exp.tg_names,
+            device=device,
+            use_amp=use_amp,
+            rank=rank,
+            world_size=world_size,
+            distributed=distributed,
+            max_batches=max_batches,
+            max_tgs_per_batch=max_tgs_per_batch,
+            use_dataloader=False,
+        )
         
         # if not "tf_knockout_raw.parquet" in os.listdir(selected_experiment_dir) and not force_recalculate:
         #     for ko_mode in ["scaled_k_sigma"]: # "raw_zero", "raw_percentile", 

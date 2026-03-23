@@ -1596,8 +1596,11 @@ def main(rank: int, local_rank: int, world_size: int, save_every: int, total_epo
         else:
             # New experiment
             training_file_iter_format = "model_training_{:03d}"
-            training_output_dir = unique_path(OUTPUT_DIR, training_file_iter_format)
-            logging.info(f"\n=========== EXPERIMENT {training_output_dir.name.upper()} ===========")
+            if rank == 0:
+                training_output_dir = unique_path(OUTPUT_DIR, training_file_iter_format)
+                logging.info(f"\n=========== EXPERIMENT {training_output_dir.name.upper()} ===========")
+            else:
+                training_output_dir = None
 
             run_cfg = {
                 "allowed_samples":      ALLOWED_SAMPLES,
@@ -1622,6 +1625,12 @@ def main(rank: int, local_rank: int, world_size: int, save_every: int, total_epo
                 "lr":                   INITIAL_LEARNING_RATE,
             }
 
+        # Ensure all ranks use the same training output dir
+        if dist.is_available() and dist.is_initialized():
+            dir_list = [str(training_output_dir) if training_output_dir is not None else None]
+            dist.broadcast_object_list(dir_list, src=0)
+            training_output_dir = Path(dir_list[0])
+
         os.makedirs(training_output_dir, exist_ok=True)
 
         dataset, model, optimizer = load_train_objs(run_cfg)
@@ -1643,6 +1652,8 @@ def main(rank: int, local_rank: int, world_size: int, save_every: int, total_epo
         if rank == 0 and not (resume_ckpt and os.path.isfile(resume_ckpt)):
             write_experiment_settings_and_objects(training_output_dir, dataset, test_loader, world_size)
             logging.info("Wrote experiment settings and objects to training output directory")
+        if dist.is_available() and dist.is_initialized():
+            dist.barrier()
 
         if rank == 0:
             logging.info("Creating Trainer")

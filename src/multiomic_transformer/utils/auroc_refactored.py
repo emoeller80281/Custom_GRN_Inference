@@ -25,7 +25,7 @@ def load_other_method_grns(sample_name_list, dataset_type):
     
     other_method_grns = {}
     for sample_name in sample_name_list:
-        logging.info(f"\nProcessing sample: {sample_name}")
+        logging.info(f"\nProcessing sample: {sample_name} | Dataset: {dataset_type}")
         if dataset_type.lower() == "mesc":
             cell_oracle_path  = OTHER_METHOD_DIR / f"{sample_name}/CellOracle/filtered_L2_{sample_name}_out_E7.5_rep1_final_GRN.csv"
             directnet_path    = OTHER_METHOD_DIR / f"{sample_name}/DIRECTNET/{sample_name}_all_cells_Network_links.csv"
@@ -580,7 +580,9 @@ if __name__ == "__main__":
     
     elif dataset_type.lower() == "macrophage":
         ground_truth_file_dict = {
-            "ChIP-Atlas": GROUND_TRUTH_DIR / "chipatlas_macrophage_1Mb.csv",
+            "ChIP-Atlas": GROUND_TRUTH_DIR / "chipatlas_macrophage.csv",
+            # "RN204": GROUND_TRUTH_DIR / "rn204_macrophage_human_chipseq.tsv",
+            
         }
         
     elif "k562" == dataset_type.lower():

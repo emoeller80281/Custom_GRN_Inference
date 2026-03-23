@@ -285,10 +285,16 @@ EXPERIMENT_LIST=(
     # "mESC_E7.5_rep1_muon_preprocessing|model_training_004|mESC|E7.5_rep1"
     # "mESC_muon_preprocessing|model_training_004|mESC|E7.5_rep1"
 
-    "mESC_E7.5_rep2_muon_preprocessing|model_training_002|mESC|E7.5_rep2"
+    # "mESC_E7.5_rep2_muon_preprocessing|model_training_002|mESC|E7.5_rep2"
+
+    # "iPSC_muon_preprocessing_WT_D13_rep1_no_hvg_filter|model_training_001|iPSC|WT_D13_rep1"
 
     # "mESC_E7.5_rep1_muon_preprocessing_bear_grn|model_training_001|mESC|E7.5_rep1"
     # "mESC_E7.5_rep1_hvg_filter_disp_0.5|model_training_002|mESC|E7.5_rep1"
+
+    # "Macrophage_buffer_1_muon_preprocessing_dataset_tgs|model_training_004|macrophage|buffer_1"
+    "mESC_muon_preprocessing_simplified_model|model_training_002|mESC|E7.5_rep1"
+    # "mESC_E7.5_rep2_muon_preprocessing|model_training_003|mESC|E7.5_rep2"
 
 )
 

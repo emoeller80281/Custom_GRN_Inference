@@ -294,11 +294,12 @@ EXPERIMENTS=(
     # "linger_preprocessed_data|mESC_linger_preprocessed_data|D_MODEL=128;D_FF=512;SAMPLE_NAMES=E7.5_rep1"
 
     # "E7.5_rep1_muon_preprocessing|mESC_E7.5_rep1_muon_preprocessing|D_MODEL=128;D_FF=512;SAMPLE_NAMES=E7.5_rep1"
-    "E7.5_rep2_muon_preprocessing|mESC_E7.5_rep2_muon_preprocessing|D_MODEL=128;D_FF=512;SAMPLE_NAMES=E7.5_rep2"
+    # "E7.5_rep2_muon_preprocessing|mESC_E7.5_rep2_muon_preprocessing|D_MODEL=128;D_FF=512;SAMPLE_NAMES=E7.5_rep2"
     # "E7.5_rep1_muon_preprocessing_bear_grn|mESC_E7.5_rep1_muon_preprocessing_bear_grn|D_MODEL=128;D_FF=512;SAMPLE_NAMES=E7.5_rep1"
 
     # "muon_preprocesing_simplified_model|mESC_muon_preprocessing_simplified_model|D_MODEL=128;D_FF=512;SAMPLE_NAMES=E7.5_rep1"
 
+    "E8.5_rep1_muon_preprocessing|mESC_E8.5_rep1_muon_preprocessing|D_MODEL=128;D_FF=512;SAMPLE_NAMES=E8.5_rep1"
 
 )
 

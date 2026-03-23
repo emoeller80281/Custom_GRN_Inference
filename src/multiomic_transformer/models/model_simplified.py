@@ -281,7 +281,7 @@ class MultiomicTransformer(nn.Module):
         
         # Add positional encoding
         pos = torch.arange(n_window, device=device, dtype=torch.float32)
-        win_emb = win_emb + self.posenc(pos, bsz=batch_size).transpose(0, 1)  # [batch_size,n_window,d_model]
+        win_emb = win_emb + self.posenc(pos, batch_size=batch_size).transpose(0, 1)  # [batch_size,n_window,d_model]
         win_emb = self.encoder(win_emb)                               # [batch_size,n_window,d_model]
 
         # ----- TF embeddings -----

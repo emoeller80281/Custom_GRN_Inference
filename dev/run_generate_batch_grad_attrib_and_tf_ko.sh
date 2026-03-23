@@ -3,9 +3,9 @@
 #SBATCH --output=LOGS/transformer_logs/04_testing/%x_%A/%x_%A_%a.log
 #SBATCH --error=LOGS/transformer_logs/04_testing/%x_%A/%x_%A_%a.err
 #SBATCH --time=24:00:00
-#SBATCH -p dense
+#SBATCH -p gpu
 #SBATCH -N 1
-#SBATCH --gres=gpu:v100:4
+#SBATCH --gres=gpu:p100:2
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 12
 #SBATCH --mem=128G
@@ -220,12 +220,15 @@ EXPERIMENT_LIST=(
     # "mESC_E7.5_rep1_muon_preprocessing|model_training_003|mESC|E7.5_rep1"
 
     # Original model | Training dist bias 0.0
-    # "mESC_E7.5_rep1_muon_preprocessing|model_training_004|mESC|E7.5_rep1"
+    "mESC_E7.5_rep1_muon_preprocessing|model_training_004|mESC|E7.5_rep1"
 
     # Simplified model
     # "mESC_E7.5_rep1_hvg_filter_disp_0.5|model_training_002|mESC|E7.5_rep1"
     # "mESC_muon_preprocessing|model_training_003|mESC|E7.5_rep1"
-    "mESC_muon_preprocessing|model_training_004|mESC|E7.5_rep1"
+    # "mESC_muon_preprocessing|model_training_004|mESC|E7.5_rep1"
+    # "mESC_muon_preprocessing_simplified_model|model_training_002|mESC|E7.5_rep1"
+
+    # "iPSC_muon_preprocessing_WT_D13_rep1_no_hvg_filter|model_training_001|iPSC|iPSC_sample"
 
     # "mESC_E7.5_rep1_muon_preprocessing_bear_grn|model_training_001|mESC|E7.5_rep1"
 
@@ -273,10 +276,10 @@ torchrun --standalone --nnodes=1 --nproc_per_node=1 \
     dev/generate_batch_grad_attrib_and_tf_ko.py \
         --experiment_name "${EXPERIMENT_NAME}" \
         --model_num "${TRAINING_NUM}" \
-        --checkpoint_name "checkpoint_30.pt" \
-        --batch_size 16 \
+        --checkpoint_name "trained_model.pt" \
+        --batch_size 64 \
         --save_every_n_batches 40 \
         --force_recalculate "true" \
-        --max_tgs_per_batch 128 
+        --max_tgs_per_batch 192 
 
 echo "finished successfully!"
