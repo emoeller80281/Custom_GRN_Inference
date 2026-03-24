@@ -9,7 +9,7 @@
 #SBATCH --gres=gpu:a100:3
 #SBATCH -c 12
 #SBATCH --mem=128G
-#SBATCH --array=0%1
+#SBATCH --array=0-1%1
 
 set -euo pipefail
 
@@ -300,6 +300,7 @@ EXPERIMENTS=(
     # "muon_preprocesing_simplified_model|mESC_muon_preprocessing_simplified_model|D_MODEL=128;D_FF=512;SAMPLE_NAMES=E7.5_rep1"
 
     "E8.5_rep1_muon_preprocessing|mESC_E8.5_rep1_muon_preprocessing|D_MODEL=128;D_FF=512;SAMPLE_NAMES=E8.5_rep1"
+    "E8.5_rep2_muon_preprocessing|mESC_E8.5_rep2_muon_preprocessing|D_MODEL=128;D_FF=512;SAMPLE_NAMES=E8.5_rep2"
 
 )
 
@@ -898,75 +899,75 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
         echo "[WARNING] SLURM error file not found: ${ERR_FILE_SRC}"
     fi
 
-    # echo ""
+    echo ""
 
-    # # ==========================================
-    # #           PLOTTING & AUROC TESTING
-    # # ==========================================
-    # echo ""
-    # echo "=========================================="
-    # echo "      RUNNING PLOTTING & AUROC TESTING"
-    # echo "=========================================="
-    # echo ""
+    # ==========================================
+    #           PLOTTING & AUROC TESTING
+    # ==========================================
+    echo ""
+    echo "=========================================="
+    echo "      RUNNING PLOTTING & AUROC TESTING"
+    echo "=========================================="
+    echo ""
 
-    # # Find the latest training directory (highest numbered model_training_* that contains MODEL_FILE)
-    # MODEL_FILE="trained_model.pt"
-    # TRAINING_NUM=""
+    # Find the latest training directory (highest numbered model_training_* that contains MODEL_FILE)
+    MODEL_FILE="trained_model.pt"
+    TRAINING_NUM=""
     
-    # for dir in $(ls -d "${OUTPUT_DIR}"/model_training_* 2>/dev/null | sort -V -r); do
-    #     if [ -f "${dir}/${MODEL_FILE}" ]; then
-    #         TRAINING_NUM=$(basename "$dir")
-    #         break
-    #     fi
-    # done
+    for dir in $(ls -d "${OUTPUT_DIR}"/model_training_* 2>/dev/null | sort -V -r); do
+        if [ -f "${dir}/${MODEL_FILE}" ]; then
+            TRAINING_NUM=$(basename "$dir")
+            break
+        fi
+    done
 
-    # # Check if a valid training directory was found
-    # if [ -n "${TRAINING_NUM}" ] && [ -f "${OUTPUT_DIR}/${TRAINING_NUM}/${MODEL_FILE}" ]; then
-    #     echo "[INFO] Selected latest training directory: ${TRAINING_NUM}"
-    #     echo "[INFO] Found trained model at ${OUTPUT_DIR}/${TRAINING_NUM}/${MODEL_FILE}"
+    # Check if a valid training directory was found
+    if [ -n "${TRAINING_NUM}" ] && [ -f "${OUTPUT_DIR}/${TRAINING_NUM}/${MODEL_FILE}" ]; then
+        echo "[INFO] Selected latest training directory: ${TRAINING_NUM}"
+        echo "[INFO] Found trained model at ${OUTPUT_DIR}/${TRAINING_NUM}/${MODEL_FILE}"
     
-    #     echo ""
-    #     echo "Running AUROC Testing..."
-    #     python ./src/multiomic_transformer/utils/auroc_testing.py \
-    #         --experiment "${DATASET_NAME}" \
-    #         --training_num "${TRAINING_NUM}" \
-    #         --experiment_dir "${EXPERIMENT_DIR}" \
-    #         --model_file "${MODEL_FILE}" \
-    #         --dataset_type "mESC" \
-    #         --sample_name_list "${SAMPLE_NAMES}" # E7.5_rep2 E8.5_rep1 E8.5_rep2
+        # echo ""
+        # echo "Running AUROC Testing..."
+        # python ./src/multiomic_transformer/utils/auroc_testing.py \
+        #     --experiment "${DATASET_NAME}" \
+        #     --training_num "${TRAINING_NUM}" \
+        #     --experiment_dir "${EXPERIMENT_DIR}" \
+        #     --model_file "${MODEL_FILE}" \
+        #     --dataset_type "mESC" \
+        #     --sample_name_list "${SAMPLE_NAMES}" # E7.5_rep2 E8.5_rep1 E8.5_rep2
 
-    #     echo "Plotting Training Figures..."
-    #     python ./src/multiomic_transformer/utils/plotting.py \
-    #         --experiment "${DATASET_NAME}" \
-    #         --training_num "${TRAINING_NUM}" \
-    #         --experiment_dir "${EXPERIMENT_DIR}" \
-    #         --model_file "${MODEL_FILE}"
+        # echo "Plotting Training Figures..."
+        # python ./src/multiomic_transformer/utils/plotting.py \
+        #     --experiment "${DATASET_NAME}" \
+        #     --training_num "${TRAINING_NUM}" \
+        #     --experiment_dir "${EXPERIMENT_DIR}" \
+        #     --model_file "${MODEL_FILE}"
 
-    #     echo "Running AUROC Testing Refactored..."
-    #     python ./src/multiomic_transformer/utils/auroc_refactored.py \
-    #         --experiment "${DATASET_NAME}" \
-    #         --training_num "${TRAINING_NUM}" \
-    #         --experiment_dir "${EXPERIMENT_DIR}" \
-    #         --model_file "${MODEL_FILE}" \
-    #         --dataset_type "mESC" \
-    #         --sample_name_list "${SAMPLE_NAMES}"
+        echo "Running AUROC Testing Refactored..."
+        python ./src/multiomic_transformer/utils/auroc_refactored.py \
+            --experiment "${DATASET_NAME}" \
+            --training_num "${TRAINING_NUM}" \
+            --experiment_dir "${EXPERIMENT_DIR}" \
+            --model_file "${MODEL_FILE}" \
+            --dataset_type "mESC" \
+            --sample_name_list "${SAMPLE_NAMES}"
 
-    #     echo ""
-    #     echo "=========================================="
-    #     echo "  EXPERIMENT COMPLETED: ${EXPERIMENT_NAME}"
-    #     echo "  DATASET: ${DATASET_NAME}"
-    #     echo "=========================================="
-    #     echo ""
-    # else
-    #     echo "[WARNING] Trained model not found at ${OUTPUT_DIR}/${TRAINING_NUM}/${MODEL_FILE}"
-    #     echo "[WARNING] Skipping plotting and AUROC testing"
-    #     echo ""
-    #     echo "=========================================="
-    #     echo "  TRAINING COMPLETED (NO POST-PROCESSING): ${EXPERIMENT_NAME}"
-    #     echo "  DATASET: ${DATASET_NAME}"
-    #     echo "=========================================="
-    #     echo ""
-    # fi
+        echo ""
+        echo "=========================================="
+        echo "  EXPERIMENT COMPLETED: ${EXPERIMENT_NAME}"
+        echo "  DATASET: ${DATASET_NAME}"
+        echo "=========================================="
+        echo ""
+    else
+        echo "[WARNING] Trained model not found at ${OUTPUT_DIR}/${TRAINING_NUM}/${MODEL_FILE}"
+        echo "[WARNING] Skipping plotting and AUROC testing"
+        echo ""
+        echo "=========================================="
+        echo "  TRAINING COMPLETED (NO POST-PROCESSING): ${EXPERIMENT_NAME}"
+        echo "  DATASET: ${DATASET_NAME}"
+        echo "=========================================="
+        echo ""
+    fi
 else
     echo ""
     echo "=========================================="

@@ -846,21 +846,21 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
         echo "[INFO] Found trained model at ${OUTPUT_DIR}/${TRAINING_NUM}/${MODEL_FILE}"
 
         echo ""
-        echo "Running AUROC Testing..."
-        python ./src/multiomic_transformer/utils/auroc_testing.py \
-            --experiment "${DATASET_NAME}" \
-            --training_num "${TRAINING_NUM}" \
-            --experiment_dir "${EXPERIMENT_DIR}" \
-            --model_file "${MODEL_FILE}" \
-            --dataset_type "macrophage" \
-            --sample_name_list "${SAMPLE_NAMES}"
+        # echo "Running AUROC Testing..."
+        # python ./src/multiomic_transformer/utils/auroc_testing.py \
+        #     --experiment "${DATASET_NAME}" \
+        #     --training_num "${TRAINING_NUM}" \
+        #     --experiment_dir "${EXPERIMENT_DIR}" \
+        #     --model_file "${MODEL_FILE}" \
+        #     --dataset_type "macrophage" \
+        #     --sample_name_list "${SAMPLE_NAMES}"
 
-        echo "Plotting Training Figures..."
-        python ./src/multiomic_transformer/utils/plotting.py \
-            --experiment "${DATASET_NAME}" \
-            --training_num "${TRAINING_NUM}" \
-            --experiment_dir "${EXPERIMENT_DIR}" \
-            --model_file "${MODEL_FILE}"
+        # echo "Plotting Training Figures..."
+        # python ./src/multiomic_transformer/utils/plotting.py \
+        #     --experiment "${DATASET_NAME}" \
+        #     --training_num "${TRAINING_NUM}" \
+        #     --experiment_dir "${EXPERIMENT_DIR}" \
+        #     --model_file "${MODEL_FILE}"
 
         echo "Running AUROC Testing Refactored..."
         python ./src/multiomic_transformer/utils/auroc_refactored.py \

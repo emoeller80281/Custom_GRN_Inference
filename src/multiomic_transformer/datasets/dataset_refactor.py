@@ -150,6 +150,15 @@ def fit_simple_scalers(
 class IndexedChromBucketBatchSampler(Sampler):
     """
     Batches over a provided {chrom: [indices]} mapping.
+    
+    Each batch contains indices from a single chromosome, and the order of chromosomes and 
+    indices can be shuffled each epoch. This is useful for training on multi-chrom datasets
+    while keeping windows and TGs aligned within each batch.
+    
+    Example:
+      - Batches 0-10: chr1
+      - Batches 11-20: chr2
+      - ...
 
     Guarantees:
       - Only uses the given indices (so you can pre-split train/val/test).
@@ -201,6 +210,68 @@ class IndexedChromBucketBatchSampler(Sampler):
         for _, idxs in self.chrom_to_indices.items():
             n = len(idxs)
             total += (n + self.batch_size - 1) // self.batch_size
+        return total
+
+class InterleavedChromBatchSampler(Sampler):
+    """
+    Create single-chromosome batches and interleave them across chromosomes.
+    Good for getting early coverage from many chromosomes.
+    """
+    def __init__(self, chrom_to_indices, batch_size, shuffle=True, seed=0, drop_last=False):
+        self.chrom_to_indices = {
+            chrom: list(idxs)
+            for chrom, idxs in chrom_to_indices.items()
+            if len(idxs) > 0
+        }
+        self.batch_size = int(batch_size)
+        self.shuffle = bool(shuffle)
+        self.seed = int(seed)
+        self.drop_last = bool(drop_last)
+        self.epoch = 0
+
+    def set_epoch(self, epoch: int):
+        self.epoch = int(epoch)
+
+    def __iter__(self):
+        rng = np.random.RandomState(self.seed + self.epoch)
+
+        chrom_batches = {}
+        chroms = list(self.chrom_to_indices.keys())
+
+        for chrom in chroms:
+            idxs = self.chrom_to_indices[chrom][:]
+            if self.shuffle:
+                rng.shuffle(idxs)
+
+            batches = []
+            for s in range(0, len(idxs), self.batch_size):
+                batch = idxs[s:s + self.batch_size]
+                if len(batch) < self.batch_size and self.drop_last:
+                    continue
+                if batch:
+                    batches.append(batch)
+
+            chrom_batches[chrom] = batches
+
+        if self.shuffle:
+            rng.shuffle(chroms)
+
+        active = True
+        while active:
+            active = False
+            for chrom in chroms:
+                if chrom_batches[chrom]:
+                    active = True
+                    yield chrom_batches[chrom].pop(0)
+
+    def __len__(self):
+        total = 0
+        for idxs in self.chrom_to_indices.values():
+            n = len(idxs)
+            if self.drop_last:
+                total += n // self.batch_size
+            else:
+                total += (n + self.batch_size - 1) // self.batch_size
         return total
 
 class DistributedBatchSampler(torch.utils.data.Sampler):

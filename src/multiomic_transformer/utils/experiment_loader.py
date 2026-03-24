@@ -5,7 +5,6 @@ from matplotlib.ticker import FuncFormatter, MultipleLocator
 import pandas as pd
 import numpy as np
 from pathlib import Path
-import torch
 from scipy.stats import norm
 import sys
 import logging
@@ -20,8 +19,24 @@ os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 
+import torch
+import torch.nn as nn
+import torch.distributed as dist
+from torch.utils.data import DataLoader, random_split
+from torch.utils.data.distributed import DistributedSampler
+
 from multiomic_transformer.datasets.dataset_refactor import SimpleScaler
 from multiomic_transformer.models.model import MultiomicTransformer
+from multiomic_transformer.datasets.dataset_refactor import (
+    MultiomicTransformerDataset,
+    MultiChromosomeDataset,
+    DistributedBatchSampler,
+    fit_simple_scalers,
+    SimpleScaler,
+    IndexedChromBucketBatchSampler,
+    InterleavedChromBatchSampler,
+)
+from multiomic_transformer.scripts.multinode_train_simplified import Trainer
 
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 
@@ -193,6 +208,323 @@ class ExperimentLoader:
             mean=torch.as_tensor(self.state["tf_scaler_mean"], device=self.device, dtype=torch.float32),
             std=torch.as_tensor(self.state["tf_scaler_std"],  device=self.device, dtype=torch.float32),
         )
+    
+    def locate_param_value(self, param_name):
+        """
+        Locate the value of a given parameter in an experiment's settings dataframe.
+
+        Parameters:
+        param_name (str): The name of the parameter to locate
+
+        Returns:
+        value (str or None): The value of the parameter if found, otherwise None
+        """
+        mask = self.experiment_settings_df["parameter"] == param_name
+        
+        if mask.any():
+            return self.experiment_settings_df.loc[mask, "value"].iloc[0]
+        
+        return None
+    
+    def create_new_model(
+        self, 
+        bias_scale=2.0, 
+        batch_size=None,
+        d_model=None,
+        num_heads=None,
+        num_layers=None,
+        d_ff=None,
+        dropout=None,
+        local_rank=0, 
+        rank=0, 
+        world_size=1, 
+        verbose=True
+        ):
+        
+        use_cuda = torch.cuda.is_available()
+        use_ddp = world_size > 1
+
+        if use_cuda:
+            torch.cuda.set_device(local_rank)
+            torch.backends.cuda.enable_flash_sdp(True)
+            device = torch.device(f"cuda:{local_rank}")
+            backend = "nccl"
+        else:
+            device = torch.device("cpu")
+            backend = "gloo"
+            
+        self.device = device
+
+        # Only initialize distributed when actually using multi-process training
+        if use_ddp and not dist.is_initialized():
+            dist.init_process_group(
+                backend=backend,
+                init_method="env://",
+                rank=rank,
+                world_size=world_size,
+            )
+
+        common_data = Path(self.preprocessing_settings["COMMON_DATA"])
+        sample_data_cache_dir = Path(self.preprocessing_settings["SAMPLE_DATA_CACHE_DIR"])
+        chrom_ids = self.preprocessing_settings["CHROM_IDS"]
+        subsample_seed = self.preprocessing_settings.get("SUBSAMPLE_SEED", 42)
+        allowed_samples = ""
+
+        dataset = MultiChromosomeDataset(
+            data_dir=sample_data_cache_dir,
+            chrom_ids=chrom_ids,
+            tf_vocab_path=os.path.join(common_data, "tf_vocab.json"),
+            tg_vocab_path=os.path.join(common_data, "tg_vocab.json"),
+            max_cached=2,
+            subset_seed=subsample_seed,
+            allowed_samples=allowed_samples,
+        )
+
+        tf_vocab_size = int(dataset.tf_ids.numel())
+        tg_vocab_size = int(dataset.tg_ids.numel())
+
+        d_model = int(self.locate_param_value("D_MODEL")) if d_model is None else d_model
+        num_heads = int(self.locate_param_value("NUM_HEADS")) if num_heads is None else num_heads
+        num_layers = int(self.locate_param_value("NUM_LAYERS")) if num_layers is None else num_layers
+        d_ff = int(self.locate_param_value("D_FF")) if d_ff is None else d_ff
+        dropout = float(self.locate_param_value("DROPOUT")) if dropout is None else dropout
+
+        # Safer bool parsing if values come from CSV as strings
+        def as_bool(x):
+            if isinstance(x, bool):
+                return x
+            return str(x).strip().lower() in {"1", "true", "yes", "y"}
+
+        use_shortcut = as_bool(self.locate_param_value("USE_SHORTCUT"))
+        use_dist_bias = as_bool(self.locate_param_value("USE_DIST_BIAS"))
+        use_motif_mask = as_bool(self.locate_param_value("USE_MOTIF_MASK"))
+
+        if verbose:
+            logging.info("Step [1/4] Building new MultiomicTransformer model")
+        model = MultiomicTransformer(
+            d_model=d_model,
+            num_heads=num_heads,
+            num_layers=num_layers,
+            d_ff=d_ff,
+            dropout=dropout,
+            tf_vocab_size=tf_vocab_size,
+            tg_vocab_size=tg_vocab_size,
+            use_bias=use_dist_bias,
+            bias_scale=bias_scale,
+            use_shortcut=use_shortcut,
+            use_motif_mask=use_motif_mask,
+        ).to(device)
+
+        optimizer = torch.optim.Adam(
+            model.parameters(),
+            lr=self.model_training_params.get("learning_rate", 1e-4),
+        )
+        loss_fn = nn.MSELoss()
+
+        batch_size = self.model_training_params.get("batch_size", 32) if batch_size is None else batch_size
+        
+        if verbose:
+            logging.info("Step [2/4] Preparing dataloaders")
+        train_loader, val_loader, test_loader = self.prepare_dataloader(
+            dataset,
+            batch_size=batch_size,
+            world_size=world_size,
+            rank=rank,
+        )
+    
+        T = int(dataset.tf_ids.numel())
+        G = int(dataset.tg_ids.numel())
+        use_ddp_reduce = dist.is_initialized()
+
+        if verbose:
+            logging.info("Step [3/4] Fitting SimpleScalers to the training data")
+        tf_s, tg_s = fit_simple_scalers(
+            train_loader,
+            T_expected=T,
+            G_expected=G,
+            device_for_reduce=device,
+            use_ddp_reduce=use_ddp_reduce,
+        )
+
+        if verbose:
+            logging.info("Step [4/4] Setting up scalers")
+        tf_scaler = SimpleScaler(tf_s.mean.to(device), tf_s.std.to(device))
+        tg_scaler = SimpleScaler(tg_s.mean.to(device), tg_s.std.to(device))
+
+        dataloaders = {
+            "train": train_loader,
+            "val": val_loader,
+            "test": test_loader,
+        }
+        
+        scalers = {
+            "tf_scaler": tf_scaler,
+            "tg_scaler": tg_scaler,
+        }
+
+        return dataloaders, model, scalers, dataset
+    
+    def prepare_dataloader(self, dataset, batch_size, world_size=1, rank=0,
+                        num_workers=0, pin_memory=True, seed=42, drop_last=True):
+        """
+        Build train/val/test loaders.
+
+        For MultiChromosomeDataset:
+        - Use ONE shared dataset instance.
+        - For EACH chromosome:
+            * split its indices into train/val/test subsets
+        - For EACH split:
+            * use an IndexedChromBucketBatchSampler over its per-chrom index subsets
+            * -> every split sees all chromosomes (by indices),
+                but each batch is still single-chromosome (shape-safe).
+
+        For other datasets:
+        - Fallback to legacy random_split + DistributedSampler.
+        """
+        import random
+        import zlib
+        g = torch.Generator()
+        g.manual_seed(seed)
+
+        # ---------- Multi-chromosome path ----------
+        if isinstance(dataset, MultiChromosomeDataset):
+            # 1) Build per-chrom index ranges from dataset._offsets
+            chrom_to_indices = {}
+            for i, chrom in enumerate(dataset.chrom_ids):
+                start = dataset._offsets[i]
+                end = dataset._offsets[i + 1] if i + 1 < len(dataset._offsets) else len(dataset)
+                if end > start:
+                    chrom_to_indices[chrom] = list(range(start, end))
+
+            # 2) For each chrom, split its indices into train/val/test
+            train_map = {}
+            val_map = {}
+            test_map = {}
+
+            for chrom, idxs in chrom_to_indices.items():
+                n = len(idxs)
+                if n == 0:
+                    continue
+
+                # deterministic per-chrom shuffle
+                chrom_hash = zlib.crc32(str(chrom).encode("utf-8")) & 0xFFFFFFFF
+                rnd = random.Random(seed + chrom_hash % 10_000_000)
+                idxs_shuf = idxs[:]
+                rnd.shuffle(idxs_shuf)
+
+                # 70% train, 15% val, 15% test
+                n_train = int(0.70 * n)
+                n_val   = int(0.15 * n)
+                n_test  = n - n_train - n_val
+
+                # ensure we don't drop everything for tiny chromosomes
+                if n_val == 0 and n_train > 1:
+                    n_val += 1
+                    n_train -= 1
+                if n_test == 0 and n_train > 1:
+                    n_test += 1
+                    n_train -= 1
+
+                train_idx = idxs_shuf[:n_train]
+                val_idx   = idxs_shuf[n_train:n_train + n_val]
+                test_idx  = idxs_shuf[n_train + n_val:]
+
+                if train_idx:
+                    train_map[chrom] = train_idx
+                if val_idx:
+                    val_map[chrom] = val_idx
+                if test_idx:
+                    test_map[chrom] = test_idx
+
+            # Split 
+            base_train_bs = InterleavedChromBatchSampler(
+                train_map, batch_size=batch_size, shuffle=True, seed=seed, drop_last=False
+            )
+            base_val_bs = InterleavedChromBatchSampler(
+                val_map, batch_size=batch_size, shuffle=False, seed=seed, drop_last=False
+            )
+            base_test_bs = InterleavedChromBatchSampler(
+                test_map, batch_size=batch_size, shuffle=False, seed=seed, drop_last=False
+            )
+
+            # Creates distributed batch samplers if needed
+            if world_size > 1:
+                train_bs = DistributedBatchSampler(base_train_bs, world_size, rank, drop_last=drop_last)
+                val_bs   = DistributedBatchSampler(base_val_bs,   world_size, rank, drop_last=False)
+                test_bs  = DistributedBatchSampler(base_test_bs,  world_size, rank, drop_last=False)
+            else:
+                train_bs, val_bs, test_bs = base_train_bs, base_val_bs, base_test_bs
+
+            # 5) Single shared dataset; samplers decide which indices belong to which split
+            train_loader = DataLoader(
+                dataset,
+                batch_sampler=train_bs,
+                collate_fn=MultiChromosomeDataset.collate_fn,
+                num_workers=num_workers,
+                pin_memory=pin_memory,
+            )
+            val_loader = DataLoader(
+                dataset,
+                batch_sampler=val_bs,
+                collate_fn=MultiChromosomeDataset.collate_fn,
+                num_workers=num_workers,
+                pin_memory=pin_memory,
+            )
+            test_loader = DataLoader(
+                dataset,
+                batch_sampler=test_bs,
+                collate_fn=MultiChromosomeDataset.collate_fn,
+                num_workers=num_workers,
+                pin_memory=pin_memory,
+            )
+            return train_loader, val_loader, test_loader
+
+        # ---------- Single-chromosome / legacy path (unchanged) ----------
+        n_total = len(dataset)
+        n_train = int(n_total * 0.70)
+        n_val   = int(n_total * 0.15)
+        n_test  = n_total - n_train - n_val
+
+        train_set, val_set, test_set = random_split(dataset, [n_train, n_val, n_test], generator=g)
+
+        train_sampler = val_sampler = test_sampler = None
+        if world_size > 1:
+            train_sampler = DistributedSampler(train_set, num_replicas=world_size, rank=rank, drop_last=drop_last)
+            val_sampler   = DistributedSampler(val_set,   num_replicas=world_size, rank=rank, drop_last=False)
+            test_sampler  = DistributedSampler(test_set,  num_replicas=world_size, rank=rank, drop_last=False)
+
+        train_loader = DataLoader(
+            train_set,
+            batch_size=batch_size,
+            shuffle=(train_sampler is None),
+            sampler=train_sampler,
+            collate_fn=MultiomicTransformerDataset.collate_fn,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            drop_last=drop_last,
+        )
+        val_loader = DataLoader(
+            val_set,
+            batch_size=batch_size,
+            shuffle=False,
+            sampler=val_sampler,
+            collate_fn=MultiomicTransformerDataset.collate_fn,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            drop_last=False,
+        )
+        test_loader = DataLoader(
+            test_set,
+            batch_size=batch_size,
+            shuffle=False,
+            sampler=test_sampler,
+            collate_fn=MultiomicTransformerDataset.collate_fn,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            drop_last=False,
+        )
+        return train_loader, val_loader, test_loader
+        
     
     def load_grn_old(self, method="gradient attribution", zscore_method="median_mad"):
         """

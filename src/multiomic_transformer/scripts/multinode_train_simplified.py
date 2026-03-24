@@ -411,7 +411,7 @@ class Trainer:
         val_data: DataLoader,
         loss_fn: nn.Module,
         optimizer: torch.optim.Optimizer,
-        gpu_id: int,
+        gpu_id: int | None,
         global_rank: int,
         save_every: int,
         patience: int = 20,
@@ -420,45 +420,66 @@ class Trainer:
         use_grad_accumulation: bool = False,
         use_profiler: bool = False,
         profiler_dir: str = None,
-
+        use_ddp: bool = True,
     ) -> None:
         self.gpu_id = gpu_id
         self.global_rank = global_rank
         self.is_main = (global_rank == 0)
-        self.model = model.to(gpu_id)
+
+        # Device selection
+        if gpu_id is not None and torch.cuda.is_available():
+            self.device = torch.device(f"cuda:{gpu_id}")
+        else:
+            self.device = torch.device("cpu")
+
+        self.model = model.to(self.device)
         self.train_data = train_data
         self.val_data = val_data
         self.loss_fn = loss_fn
         self.optimizer = optimizer
         self.save_every = save_every
-        self.model = DDP(model, device_ids=[gpu_id])
         self.stop_requested = False
         self.grad_accum_steps = max(1, grad_accum_steps)
         self.use_grad_accumulation = use_grad_accumulation
+        self.use_ddp = use_ddp
+
         # Loss warmup
-        self.corr_sq_warmup_epochs = 3 
-        
+        self.corr_sq_warmup_epochs = 3
         self.best_val_loss = float("inf")
-        
+
         # Profiler
         self.use_profiler = use_profiler
         self.profiler_dir = profiler_dir
         self.profiler = None
-        
-        self.scaler = GradScaler(init_scale=1024, growth_factor=1.5, backoff_factor=0.5, growth_interval=200)
+
+        # Wrap with DDP only if process group is initialized
+        if self.use_ddp and dist.is_available() and dist.is_initialized():
+            if self.device.type == "cuda":
+                self.model = DDP(self.model, device_ids=[gpu_id], output_device=gpu_id)
+            else:
+                self.model = DDP(self.model)
+
+        # AMP scaler
+        self.scaler = GradScaler(
+            enabled=(self.device.type == "cuda"),
+            init_scale=1024,
+            growth_factor=1.5,
+            backoff_factor=0.5,
+            growth_interval=200,
+        )
 
         # Learning rate scheduler
         self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, 
-            mode=MODE, 
-            factor=SCHEDULER_FACTOR, 
+            self.optimizer,
+            mode=MODE,
+            factor=SCHEDULER_FACTOR,
             patience=SCHEDULER_PATIENCE,
             threshold=THRESHOLD,
             threshold_mode=THRESHOLD_MODE,
             cooldown=COOLDOWN,
             min_lr=MIN_LR,
         )
-        
+
         # Early stopping
         self.patience = patience
         self.min_delta = min_delta
@@ -590,7 +611,7 @@ class Trainer:
         # Forward pass
         # ------------------------------------------------------------------
         with record_function("forward_pass"):
-            with autocast(device_type="cuda"):
+            with autocast(device_type="cuda", enabled=(self.device.type == "cuda")):
                 preds = self.model(
                     atac_wins,
                     tf_tensor,
@@ -973,7 +994,8 @@ class Trainer:
                                 logging.info(f"    Loss did not improve {patience_counter}/{self.patience}")
 
                 # --- Broadcast stop flag from rank 0 to all ranks ---
-                dist.broadcast(stop_tensor, src=0)
+                if dist.is_available() and dist.is_initialized():
+                    dist.broadcast(stop_tensor, src=0)
 
                 # --- All ranks see the same value now ---
                 if stop_tensor.item() == 1:

@@ -220,7 +220,7 @@ EXPERIMENT_LIST=(
     # "mESC_E7.5_rep1_muon_preprocessing|model_training_003|mESC|E7.5_rep1"
 
     # Original model | Training dist bias 0.0
-    "mESC_E7.5_rep1_muon_preprocessing|model_training_004|mESC|E7.5_rep1"
+    # "mESC_E7.5_rep1_muon_preprocessing|model_training_004|mESC|E7.5_rep1"
 
     # Simplified model
     # "mESC_E7.5_rep1_hvg_filter_disp_0.5|model_training_002|mESC|E7.5_rep1"

@@ -8,7 +8,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 4
 #SBATCH --mem=64G
-#SBATCH --array=0%25
+#SBATCH --array=0-1%25
 
 set -eo pipefail
 
@@ -293,7 +293,10 @@ EXPERIMENT_LIST=(
     # "mESC_E7.5_rep1_hvg_filter_disp_0.5|model_training_002|mESC|E7.5_rep1"
 
     # "Macrophage_buffer_1_muon_preprocessing_dataset_tgs|model_training_004|macrophage|buffer_1"
-    "mESC_muon_preprocessing_simplified_model|model_training_002|mESC|E7.5_rep1"
+    "Macrophage_buffer_2_muon_preprocessing_dataset_tgs|model_training_001|macrophage|buffer_2"
+    "Macrophage_buffer_2_muon_preprocessing_1_hop|model_training_001|macrophage|buffer_2"
+
+    # "mESC_muon_preprocessing_simplified_model|model_training_002|mESC|E7.5_rep1"
     # "mESC_E7.5_rep2_muon_preprocessing|model_training_003|mESC|E7.5_rep2"
 
 )

@@ -159,8 +159,7 @@ class MultiomicTransformer(nn.Module):
 
         # TF and TG embedding tables - generates identities for TFs and TGs
         self.tf_identity_emb = nn.Embedding(tf_vocab_size, d_model)
-        self.tg_query_emb = nn.Embedding(tg_vocab_size, d_model)        # 
-        # self.tg_identity_emb = nn.Embedding(tg_vocab_size, d_model)
+        self.tg_query_emb = nn.Embedding(tg_vocab_size, d_model)
         
         # ATAC windows do not have embeddings, their position and accessibility
         # are used to inform TFs and TGs
@@ -323,7 +322,7 @@ class MultiomicTransformer(nn.Module):
                 attn_bias = attn_bias.expand(batch_size, self.num_heads, tg_base.size(1), win_emb.size(1))
                 
             attn_bias = torch.nan_to_num(attn_bias, nan=0.0, posinf=1e4, neginf=-1e4)
-            attn_bias = (self.bias_scale * attn_bias).clamp_(-20.0, 20.0)
+            attn_bias = (self.bias_scale * attn_bias)#.clamp_(-20.0, 20.0)
 
         # TG-ATAC cross attention with distance bias
         tg_cross = self.cross_tg_to_atac(tg_base, win_emb, attn_bias=attn_bias)        
@@ -336,16 +335,7 @@ class MultiomicTransformer(nn.Module):
         # with the fused TF-ATAC and ATAC-TF cross attn output
         tg_cross_attn_repr = tg_cross + tf_atac_cross_attn_output
         
-        # # ----- TG identity to Cross-attention output dot product -----
-        # # Create TG identity embeddings
-        # tg_emb = self.tg_identity_emb(tg_ids)                   # [n_tgs,d_model]
-        
-        # # Dot product between teach TG's global context from attention and the TG identity embedding
-        # #     If the TG ID embedding and global context agree, supports TG expression
-        # tg_similarity_to_attn_output = (tg_cross_attn_repr * tg_emb).sum(dim=-1)     # [batch_size,n_tgs]
-        
-        # Sum the TG similarity score and the per-TG cross attention output
-        # If both similarity and weighted context features are high, predicts higher expression
+        # Pass through a dense layer to get the final TG prediction of shape [batch_size, n_tgs]
         tg_pred = self.gene_pred_dense(tg_cross_attn_repr).squeeze(-1)
 
         return tg_pred
