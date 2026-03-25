@@ -2250,7 +2250,7 @@ def align_to_vocab(names: list[str], vocab: dict[str, int], tensor_all: torch.Te
 
     if not kept_ids:
         raise ValueError(f"No {label} matched the global vocab.")
-
+    
     aligned_tensor = torch.stack(aligned_rows, dim=0)  # [num_kept, num_cells]
 
     return aligned_tensor, kept_names, kept_ids
@@ -2792,7 +2792,7 @@ if __name__ == "__main__":
         # ----- BUILD GLOBAL TG VOCAB FROM THE GENE TSS FILE-----
         dataset_tg_list_file = SAMPLE_PROCESSED_DATA_DIR / "tf_tg_combos" / "tg_list.csv"
         total_dataset_tgs = _read_list(dataset_tg_list_file, "TG")
-        tg_vocab = build_global_tg_vocab(GENE_TSS_FILE, common_tg_vocab_file, total_dataset_tgs)
+        tg_vocab = build_global_tg_vocab(GENE_TSS_FILE, common_tg_vocab_file, dataset_tgs=total_dataset_tgs)
             
         # Aggregate sample-level data for sliding window scores and peak to gene distance
         # sample_level_sliding_window_dfs = []

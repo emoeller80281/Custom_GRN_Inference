@@ -14,6 +14,8 @@ import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from tqdm import tqdm
 import seaborn as sns
+import random
+import zlib
 
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["OMP_NUM_THREADS"] = "1"
@@ -26,12 +28,12 @@ from torch.utils.data import DataLoader, random_split
 from torch.utils.data.distributed import DistributedSampler
 
 from multiomic_transformer.datasets.dataset_refactor import SimpleScaler
-from multiomic_transformer.models.model import MultiomicTransformer
+from multiomic_transformer.models.model_simplified import MultiomicTransformer
 from multiomic_transformer.datasets.dataset_refactor import (
     MultiomicTransformerDataset,
     MultiChromosomeDataset,
     DistributedBatchSampler,
-    fit_simple_scalers,
+    fit_simple_scalers_fast_gpu,
     SimpleScaler,
     IndexedChromBucketBatchSampler,
     InterleavedChromBatchSampler,
@@ -226,23 +228,9 @@ class ExperimentLoader:
         
         return None
     
-    def create_new_model(
-        self, 
-        bias_scale=2.0, 
-        batch_size=None,
-        d_model=None,
-        num_heads=None,
-        num_layers=None,
-        d_ff=None,
-        dropout=None,
-        local_rank=0, 
-        rank=0, 
-        world_size=1, 
-        verbose=True
-        ):
-        
+    def _setup_cuda_ddp(self, local_rank, rank, world_size):
         use_cuda = torch.cuda.is_available()
-        use_ddp = world_size > 1
+        self.use_ddp = world_size > 1
 
         if use_cuda:
             torch.cuda.set_device(local_rank)
@@ -254,16 +242,17 @@ class ExperimentLoader:
             backend = "gloo"
             
         self.device = device
-
+        
         # Only initialize distributed when actually using multi-process training
-        if use_ddp and not dist.is_initialized():
+        if self.use_ddp and not dist.is_initialized():
             dist.init_process_group(
                 backend=backend,
                 init_method="env://",
                 rank=rank,
                 world_size=world_size,
             )
-
+    
+    def create_multichrom_dataset(self):
         common_data = Path(self.preprocessing_settings["COMMON_DATA"])
         sample_data_cache_dir = Path(self.preprocessing_settings["SAMPLE_DATA_CACHE_DIR"])
         chrom_ids = self.preprocessing_settings["CHROM_IDS"]
@@ -279,9 +268,24 @@ class ExperimentLoader:
             subset_seed=subsample_seed,
             allowed_samples=allowed_samples,
         )
-
-        tf_vocab_size = int(dataset.tf_ids.numel())
-        tg_vocab_size = int(dataset.tg_ids.numel())
+        
+        return dataset
+    
+    def create_new_model(
+        self, 
+        dataset,
+        bias_scale=2.0, 
+        d_model=None,
+        num_heads=None,
+        num_layers=None,
+        d_ff=None,
+        dropout=None,
+        local_rank=0, 
+        rank=0, 
+        world_size=1, 
+        ):
+        
+        self._setup_cuda_ddp(local_rank, rank, world_size)
 
         d_model = int(self.locate_param_value("D_MODEL")) if d_model is None else d_model
         num_heads = int(self.locate_param_value("NUM_HEADS")) if num_heads is None else num_heads
@@ -298,9 +302,10 @@ class ExperimentLoader:
         use_shortcut = as_bool(self.locate_param_value("USE_SHORTCUT"))
         use_dist_bias = as_bool(self.locate_param_value("USE_DIST_BIAS"))
         use_motif_mask = as_bool(self.locate_param_value("USE_MOTIF_MASK"))
+        
+        tf_vocab_size = int(dataset.tf_ids.numel())
+        tg_vocab_size = int(dataset.tg_ids.numel())
 
-        if verbose:
-            logging.info("Step [1/4] Building new MultiomicTransformer model")
         model = MultiomicTransformer(
             d_model=d_model,
             num_heads=num_heads,
@@ -311,59 +316,52 @@ class ExperimentLoader:
             tg_vocab_size=tg_vocab_size,
             use_bias=use_dist_bias,
             bias_scale=bias_scale,
-            use_shortcut=use_shortcut,
-            use_motif_mask=use_motif_mask,
-        ).to(device)
+        ).to(self.device)   
 
-        optimizer = torch.optim.Adam(
-            model.parameters(),
-            lr=self.model_training_params.get("learning_rate", 1e-4),
-        )
-        loss_fn = nn.MSELoss()
-
+        return model
+    
+    def create_dataloaders(self, dataset, batch_size, world_size=1, rank=0):
         batch_size = self.model_training_params.get("batch_size", 32) if batch_size is None else batch_size
         
-        if verbose:
-            logging.info("Step [2/4] Preparing dataloaders")
         train_loader, val_loader, test_loader = self.prepare_dataloader(
             dataset,
             batch_size=batch_size,
             world_size=world_size,
             rank=rank,
         )
-    
-        T = int(dataset.tf_ids.numel())
-        G = int(dataset.tg_ids.numel())
-        use_ddp_reduce = dist.is_initialized()
-
-        if verbose:
-            logging.info("Step [3/4] Fitting SimpleScalers to the training data")
-        tf_s, tg_s = fit_simple_scalers(
-            train_loader,
-            T_expected=T,
-            G_expected=G,
-            device_for_reduce=device,
-            use_ddp_reduce=use_ddp_reduce,
-        )
-
-        if verbose:
-            logging.info("Step [4/4] Setting up scalers")
-        tf_scaler = SimpleScaler(tf_s.mean.to(device), tf_s.std.to(device))
-        tg_scaler = SimpleScaler(tg_s.mean.to(device), tg_s.std.to(device))
-
+        
         dataloaders = {
             "train": train_loader,
             "val": val_loader,
             "test": test_loader,
         }
         
+        return dataloaders
+    
+    def create_scalers(self, dataset, dataloader, max_batches: int | None = 100):
+        T = int(dataset.tf_ids.numel())
+        G = int(dataset.tg_ids.numel())
+        use_ddp_reduce = dist.is_initialized()
+
+        tf_s, tg_s = fit_simple_scalers_fast_gpu(
+            dataloader,
+            T_expected=T,
+            G_expected=G,
+            device=self.device,
+            use_ddp_reduce=use_ddp_reduce,
+            max_batches=max_batches,
+        )
+
+        tf_scaler = SimpleScaler(tf_s.mean.to(self.device), tf_s.std.to(self.device))
+        tg_scaler = SimpleScaler(tg_s.mean.to(self.device), tg_s.std.to(self.device))
+        
         scalers = {
             "tf_scaler": tf_scaler,
             "tg_scaler": tg_scaler,
         }
 
-        return dataloaders, model, scalers, dataset
-    
+        return scalers
+
     def prepare_dataloader(self, dataset, batch_size, world_size=1, rank=0,
                         num_workers=0, pin_memory=True, seed=42, drop_last=True):
         """
@@ -381,149 +379,228 @@ class ExperimentLoader:
         For other datasets:
         - Fallback to legacy random_split + DistributedSampler.
         """
-        import random
-        import zlib
         g = torch.Generator()
         g.manual_seed(seed)
 
         # ---------- Multi-chromosome path ----------
-        if isinstance(dataset, MultiChromosomeDataset):
-            # 1) Build per-chrom index ranges from dataset._offsets
-            chrom_to_indices = {}
-            for i, chrom in enumerate(dataset.chrom_ids):
-                start = dataset._offsets[i]
-                end = dataset._offsets[i + 1] if i + 1 < len(dataset._offsets) else len(dataset)
-                if end > start:
-                    chrom_to_indices[chrom] = list(range(start, end))
+        # 1) Build per-chrom index ranges from dataset._offsets
+        chrom_to_indices = {}
+        for i, chrom in enumerate(dataset.chrom_ids):
+            start = dataset._offsets[i]
+            end = dataset._offsets[i + 1] if i + 1 < len(dataset._offsets) else len(dataset)
+            if end > start:
+                chrom_to_indices[chrom] = list(range(start, end))
 
-            # 2) For each chrom, split its indices into train/val/test
-            train_map = {}
-            val_map = {}
-            test_map = {}
+        # 2) For each chrom, split its indices into train/val/test
+        train_map = {}
+        val_map = {}
+        test_map = {}
 
-            for chrom, idxs in chrom_to_indices.items():
-                n = len(idxs)
-                if n == 0:
-                    continue
+        for chrom, idxs in chrom_to_indices.items():
+            n = len(idxs)
+            if n == 0:
+                continue
 
-                # deterministic per-chrom shuffle
-                chrom_hash = zlib.crc32(str(chrom).encode("utf-8")) & 0xFFFFFFFF
-                rnd = random.Random(seed + chrom_hash % 10_000_000)
-                idxs_shuf = idxs[:]
-                rnd.shuffle(idxs_shuf)
+            # deterministic per-chrom shuffle
+            chrom_hash = zlib.crc32(str(chrom).encode("utf-8")) & 0xFFFFFFFF
+            rnd = random.Random(seed + chrom_hash % 10_000_000)
+            idxs_shuf = idxs[:]
+            rnd.shuffle(idxs_shuf)
 
-                # 70% train, 15% val, 15% test
-                n_train = int(0.70 * n)
-                n_val   = int(0.15 * n)
-                n_test  = n - n_train - n_val
+            # 70% train, 15% val, 15% test
+            n_train = int(0.70 * n)
+            n_val   = int(0.15 * n)
+            n_test  = n - n_train - n_val
 
-                # ensure we don't drop everything for tiny chromosomes
-                if n_val == 0 and n_train > 1:
-                    n_val += 1
-                    n_train -= 1
-                if n_test == 0 and n_train > 1:
-                    n_test += 1
-                    n_train -= 1
+            # ensure we don't drop everything for tiny chromosomes
+            if n_val == 0 and n_train > 1:
+                n_val += 1
+                n_train -= 1
+            if n_test == 0 and n_train > 1:
+                n_test += 1
+                n_train -= 1
 
-                train_idx = idxs_shuf[:n_train]
-                val_idx   = idxs_shuf[n_train:n_train + n_val]
-                test_idx  = idxs_shuf[n_train + n_val:]
+            train_idx = idxs_shuf[:n_train]
+            val_idx   = idxs_shuf[n_train:n_train + n_val]
+            test_idx  = idxs_shuf[n_train + n_val:]
 
-                if train_idx:
-                    train_map[chrom] = train_idx
-                if val_idx:
-                    val_map[chrom] = val_idx
-                if test_idx:
-                    test_map[chrom] = test_idx
+            if train_idx:
+                train_map[chrom] = train_idx
+            if val_idx:
+                val_map[chrom] = val_idx
+            if test_idx:
+                test_map[chrom] = test_idx
 
-            # Split 
-            base_train_bs = InterleavedChromBatchSampler(
-                train_map, batch_size=batch_size, shuffle=True, seed=seed, drop_last=False
-            )
-            base_val_bs = InterleavedChromBatchSampler(
-                val_map, batch_size=batch_size, shuffle=False, seed=seed, drop_last=False
-            )
-            base_test_bs = InterleavedChromBatchSampler(
-                test_map, batch_size=batch_size, shuffle=False, seed=seed, drop_last=False
-            )
+        # Split 
+        base_train_bs = InterleavedChromBatchSampler(
+            train_map, batch_size=batch_size, shuffle=True, seed=seed, drop_last=False
+        )
+        base_val_bs = InterleavedChromBatchSampler(
+            val_map, batch_size=batch_size, shuffle=False, seed=seed, drop_last=False
+        )
+        base_test_bs = InterleavedChromBatchSampler(
+            test_map, batch_size=batch_size, shuffle=False, seed=seed, drop_last=False
+        )
 
-            # Creates distributed batch samplers if needed
-            if world_size > 1:
-                train_bs = DistributedBatchSampler(base_train_bs, world_size, rank, drop_last=drop_last)
-                val_bs   = DistributedBatchSampler(base_val_bs,   world_size, rank, drop_last=False)
-                test_bs  = DistributedBatchSampler(base_test_bs,  world_size, rank, drop_last=False)
-            else:
-                train_bs, val_bs, test_bs = base_train_bs, base_val_bs, base_test_bs
-
-            # 5) Single shared dataset; samplers decide which indices belong to which split
-            train_loader = DataLoader(
-                dataset,
-                batch_sampler=train_bs,
-                collate_fn=MultiChromosomeDataset.collate_fn,
-                num_workers=num_workers,
-                pin_memory=pin_memory,
-            )
-            val_loader = DataLoader(
-                dataset,
-                batch_sampler=val_bs,
-                collate_fn=MultiChromosomeDataset.collate_fn,
-                num_workers=num_workers,
-                pin_memory=pin_memory,
-            )
-            test_loader = DataLoader(
-                dataset,
-                batch_sampler=test_bs,
-                collate_fn=MultiChromosomeDataset.collate_fn,
-                num_workers=num_workers,
-                pin_memory=pin_memory,
-            )
-            return train_loader, val_loader, test_loader
-
-        # ---------- Single-chromosome / legacy path (unchanged) ----------
-        n_total = len(dataset)
-        n_train = int(n_total * 0.70)
-        n_val   = int(n_total * 0.15)
-        n_test  = n_total - n_train - n_val
-
-        train_set, val_set, test_set = random_split(dataset, [n_train, n_val, n_test], generator=g)
-
-        train_sampler = val_sampler = test_sampler = None
+        # Creates distributed batch samplers if needed
         if world_size > 1:
-            train_sampler = DistributedSampler(train_set, num_replicas=world_size, rank=rank, drop_last=drop_last)
-            val_sampler   = DistributedSampler(val_set,   num_replicas=world_size, rank=rank, drop_last=False)
-            test_sampler  = DistributedSampler(test_set,  num_replicas=world_size, rank=rank, drop_last=False)
+            train_bs = DistributedBatchSampler(base_train_bs, world_size, rank, drop_last=drop_last)
+            val_bs   = DistributedBatchSampler(base_val_bs,   world_size, rank, drop_last=False)
+            test_bs  = DistributedBatchSampler(base_test_bs,  world_size, rank, drop_last=False)
+        else:
+            train_bs, val_bs, test_bs = base_train_bs, base_val_bs, base_test_bs
 
+        # 5) Single shared dataset; samplers decide which indices belong to which split
         train_loader = DataLoader(
-            train_set,
-            batch_size=batch_size,
-            shuffle=(train_sampler is None),
-            sampler=train_sampler,
-            collate_fn=MultiomicTransformerDataset.collate_fn,
+            dataset,
+            batch_sampler=train_bs,
+            collate_fn=MultiChromosomeDataset.collate_fn,
             num_workers=num_workers,
             pin_memory=pin_memory,
-            drop_last=drop_last,
+            persistent_workers=num_workers > 0,
         )
         val_loader = DataLoader(
-            val_set,
-            batch_size=batch_size,
-            shuffle=False,
-            sampler=val_sampler,
-            collate_fn=MultiomicTransformerDataset.collate_fn,
+            dataset,
+            batch_sampler=val_bs,
+            collate_fn=MultiChromosomeDataset.collate_fn,
             num_workers=num_workers,
             pin_memory=pin_memory,
-            drop_last=False,
+            persistent_workers=num_workers > 0,
         )
         test_loader = DataLoader(
-            test_set,
-            batch_size=batch_size,
-            shuffle=False,
-            sampler=test_sampler,
-            collate_fn=MultiomicTransformerDataset.collate_fn,
+            dataset,
+            batch_sampler=test_bs,
+            collate_fn=MultiChromosomeDataset.collate_fn,
             num_workers=num_workers,
             pin_memory=pin_memory,
-            drop_last=False,
+            persistent_workers=num_workers > 0,
         )
         return train_loader, val_loader, test_loader
+
+    
+    def train(
+        self,
+        model,
+        train_loader,
+        val_loader=None,
+        num_epochs: int = 10,
+        learning_rate: float = 1e-4,
+        verbose: bool = True,
+        validate_every: int = 1,
+        use_amp: bool = True,
+        grad_accum_steps = 4,
+    ):
+        """
+        Simple single-GPU training loop with optional AMP.
+        No DDP, no checkpointing.
+        """
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model = model.to(device)
+
+        optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+        loss_fn = nn.MSELoss()
+
+        tf_scaler = getattr(self, "tf_scaler", None)
+        tg_scaler = getattr(self, "tg_scaler", None)
+
+        amp_enabled = use_amp and device.type == "cuda"
+        scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
+
+        for epoch in range(num_epochs):
+            model.train()
+            total_loss = 0.0
+            n_batches = 0
+
+            optimizer.zero_grad(set_to_none=True)
+            
+            for i, batch in tqdm(enumerate(train_loader), total=len(train_loader), desc=f"Epoch {epoch+1}/{num_epochs}", leave=False):
+                atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids, _ = batch
+
+                atac_wins = atac_wins.to(device, non_blocking=True)
+                tf_tensor = tf_tensor.to(device, non_blocking=True)
+                targets   = targets.to(device, non_blocking=True)
+                # bias      = bias.to(device, non_blocking=True)
+                tf_ids    = tf_ids.to(device, non_blocking=True)
+                tg_ids    = tg_ids.to(device, non_blocking=True)
+
+                if tf_scaler is not None:
+                    tf_tensor = tf_scaler.transform(tf_tensor, tf_ids)
+                if tg_scaler is not None:
+                    targets = tg_scaler.transform(targets, tg_ids)
+
+                with torch.autocast(device_type=device.type, enabled=amp_enabled):
+                    preds = model(
+                        atac_wins,
+                        tf_tensor,
+                        tf_ids=tf_ids,
+                        tg_ids=tg_ids,
+                        bias=None,
+                    )
+                    loss = loss_fn(preds, targets)
+
+                loss_for_backward = loss / grad_accum_steps
+                scaler.scale(loss_for_backward).backward()
+                
+                if (i + 1) % grad_accum_steps == 0:
+                    scaler.step(optimizer)
+                    scaler.update()
+                    optimizer.zero_grad(set_to_none=True)
+
+                total_loss += loss.detach().item()
+                n_batches += 1
+                
+            # handle leftover batches at end of epoch
+            if n_batches % grad_accum_steps != 0:
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad(set_to_none=True)
+
+            avg_loss = total_loss / max(1, n_batches)
+
+            if verbose:
+                print(f"Epoch {epoch+1}/{num_epochs} | Train Loss: {avg_loss:.4f}")
+
+            if val_loader is not None and ((epoch + 1) % validate_every == 0):
+                model.eval()
+                val_loss = 0.0
+                val_batches = 0
+
+                with torch.no_grad():
+                    for batch in val_loader:
+                        atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids, _ = batch
+
+                        atac_wins = atac_wins.to(device, non_blocking=True)
+                        tf_tensor = tf_tensor.to(device, non_blocking=True)
+                        targets   = targets.to(device, non_blocking=True)
+                        bias      = bias.to(device, non_blocking=True)
+                        tf_ids    = tf_ids.to(device, non_blocking=True)
+                        tg_ids    = tg_ids.to(device, non_blocking=True)
+
+                        if tf_scaler is not None:
+                            tf_tensor = tf_scaler.transform(tf_tensor, tf_ids)
+                        if tg_scaler is not None:
+                            targets = tg_scaler.transform(targets, tg_ids)
+
+                        with torch.autocast(device_type=device.type, enabled=amp_enabled):
+                            preds = model(
+                                atac_wins,
+                                tf_tensor,
+                                tf_ids=tf_ids,
+                                tg_ids=tg_ids,
+                                bias=bias,
+                            )
+                            loss = loss_fn(preds, targets)
+
+                        val_loss += loss.detach().item()
+                        val_batches += 1
+
+                val_loss /= max(1, val_batches)
+
+                if verbose:
+                    print(f"                Val Loss: {val_loss:.4f}")
+
+        return model
         
     
     def load_grn_old(self, method="gradient attribution", zscore_method="median_mad"):
@@ -1572,7 +1649,10 @@ class ExperimentLoader:
             x = np.random.normal(loc=i, scale=0.06, size=len(y))
 
             # Match point color to box color
-            point_color = my_color if method in feature_list or override_color else other_color
+            if method_color_dict and method in method_color_dict:
+                point_color = method_color_dict[method]
+            else:
+                point_color = my_color if method in feature_list or override_color else other_color
 
             ax.scatter(
                 x, y,

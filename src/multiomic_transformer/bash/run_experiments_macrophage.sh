@@ -4,12 +4,12 @@
 #SBATCH --error=LOGS/transformer_logs/experiments/%x_%A/%x_%A_%a.err
 #SBATCH --time=10:00:00
 #SBATCH -p dense
-#SBATCH -N 1
-#SBATCH --gres=gpu:v100:4
+#SBATCH -N 2
+#SBATCH --gres=gpu:a100:3
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 16
 #SBATCH --mem=192G
-#SBATCH --array=0%3
+#SBATCH --array=0-1%1
 
 set -euo pipefail
 
@@ -201,9 +201,9 @@ EXPERIMENTS=(
 
     # "buffer_2_small_hvg_filter_disp_0.2|Macrophage_buffer_2_small_hvg_filter_disp_0.2|HOPS=2;BATCH_SIZE=8;FILTER_ATAC=true;FILTER_RNA=true;MIN_ATAC_DISP=0.2;MIN_RNA_DISP=0.2;SAMPLE_NAMES=buffer_2"
     # "buffer_1_muon_preprocessing|Macrophage_buffer_1_muon_preprocessing|TOTAL_EPOCHS=5000;D_MODEL=128;D_FF=512;BATCH_SIZE=8;INITIAL_LEARNING_RATE=1.00e-4;MIN_LR=1.00e-7;PATIENCE=30;SCHEDULER_FACTOR=0.10;SAMPLE_NAMES=buffer_1"
-    # "buffer_1_muon_preprocessing_dataset_tgs|Macrophage_buffer_1_muon_preprocessing_dataset_tgs|TOTAL_EPOCHS=5000;D_MODEL=128;D_FF=512;BATCH_SIZE=8;PATIENCE=30;SCHEDULER_PATIENCE=15;SAMPLE_NAMES=buffer_1"
-    # "buffer_2_muon_preprocessing_dataset_tgs|Macrophage_buffer_2_muon_preprocessing_dataset_tgs|TOTAL_EPOCHS=5000;D_MODEL=128;D_FF=512;BATCH_SIZE=8;PATIENCE=30;SCHEDULER_PATIENCE=15;SAMPLE_NAMES=buffer_2"
-    "buffer_2_muon_preprocessing_1_hop|Macrophage_buffer_2_muon_preprocessing_1_hop|TOTAL_EPOCHS=5000;D_MODEL=128;D_FF=512;BATCH_SIZE=8;PATIENCE=30;SCHEDULER_PATIENCE=15;SAMPLE_NAMES=buffer_2"
+    # "buffer_1_muon_preprocessing|Macrophage_buffer_1_muon_preprocessing_all_tgs|D_MODEL=128;D_FF=512;SAMPLE_NAMES=buffer_1"
+    # "buffer_2_muon_preprocessing|Macrophage_buffer_2_muon_preprocessing_all_tgs|D_MODEL=128;D_FF=512;SAMPLE_NAMES=buffer_2"
+    # "buffer_2_muon_preprocessing_1_hop|Macrophage_buffer_2_muon_preprocessing_1_hop|TOTAL_EPOCHS=5000;D_MODEL=128;D_FF=512;BATCH_SIZE=8;PATIENCE=30;SCHEDULER_PATIENCE=15;SAMPLE_NAMES=buffer_2"
 
 )
 

@@ -146,6 +146,97 @@ def fit_simple_scalers(
 
     return SimpleScaler(tf_mean, tf_std), SimpleScaler(tg_mean, tg_std)
 
+@torch.no_grad()
+def fit_simple_scalers_fast_gpu(
+    train_loader,
+    T_expected: int,
+    G_expected: int,
+    device: Union[str, torch.device] = "cuda",
+    use_ddp_reduce: bool = False,
+    max_batches: int | None = None,
+):
+    device = torch.device(device)
+
+    # --- GPU accumulators (float32) ---
+    tf_sum   = torch.zeros(T_expected, dtype=torch.float32, device=device)
+    tf_sqsum = torch.zeros(T_expected, dtype=torch.float32, device=device)
+    tf_count = torch.zeros(T_expected, dtype=torch.float32, device=device)
+
+    tg_sum   = torch.zeros(G_expected, dtype=torch.float32, device=device)
+    tg_sqsum = torch.zeros(G_expected, dtype=torch.float32, device=device)
+    tg_count = torch.zeros(G_expected, dtype=torch.float32, device=device)
+
+    for batch_idx, batch in enumerate(train_loader):
+        if max_batches is not None and batch_idx >= max_batches:
+            break
+        
+        atac_wins, tf_tensor, tg_tensor, bias, tf_ids, tg_ids, motif_mask = batch
+
+        # --- move to GPU once ---
+        tf_tensor = tf_tensor.to(device=device, dtype=torch.float32, non_blocking=True)
+        tg_tensor = tg_tensor.to(device=device, dtype=torch.float32, non_blocking=True)
+        tf_ids    = tf_ids.to(device=device, dtype=torch.long, non_blocking=True)
+        tg_ids    = tg_ids.to(device=device, dtype=torch.long, non_blocking=True)
+
+        B_tf = tf_tensor.shape[0]
+        B_tg = tg_tensor.shape[0]
+
+        # --- TF accumulation ---
+        tf_sum.index_add_(0, tf_ids, tf_tensor.sum(dim=0))
+        tf_sqsum.index_add_(0, tf_ids, (tf_tensor * tf_tensor).sum(dim=0))
+        tf_count.index_add_(
+            0,
+            tf_ids,
+            torch.full((tf_ids.numel(),), B_tf, dtype=torch.float32, device=device)
+        )
+
+        # --- TG accumulation ---
+        tg_sum.index_add_(0, tg_ids, tg_tensor.sum(dim=0))
+        tg_sqsum.index_add_(0, tg_ids, (tg_tensor * tg_tensor).sum(dim=0))
+        tg_count.index_add_(
+            0,
+            tg_ids,
+            torch.full((tg_ids.numel(),), B_tg, dtype=torch.float32, device=device)
+        )
+
+    # --- DDP all-reduce (already on GPU, so no transfers needed) ---
+    if use_ddp_reduce and torch.distributed.is_initialized():
+        for acc in (tf_sum, tf_sqsum, tf_count, tg_sum, tg_sqsum, tg_count):
+            torch.distributed.all_reduce(acc, op=torch.distributed.ReduceOp.SUM)
+
+    # --- compute TF stats ---
+    tf_mean = torch.zeros(T_expected, dtype=torch.float32, device=device)
+    tf_std  = torch.ones(T_expected, dtype=torch.float32, device=device)
+
+    mask_tf = tf_count > 0
+    tf_mean[mask_tf] = tf_sum[mask_tf] / tf_count[mask_tf]
+
+    tf_var = torch.zeros(T_expected, dtype=torch.float32, device=device)
+    tf_var[mask_tf] = (
+        tf_sqsum[mask_tf] / tf_count[mask_tf]
+        - tf_mean[mask_tf] * tf_mean[mask_tf]
+    )
+    tf_std[mask_tf] = torch.sqrt(torch.clamp(tf_var[mask_tf], min=1e-6))
+
+    # --- compute TG stats ---
+    tg_mean = torch.zeros(G_expected, dtype=torch.float32, device=device)
+    tg_std  = torch.ones(G_expected, dtype=torch.float32, device=device)
+
+    mask_tg = tg_count > 0
+    tg_mean[mask_tg] = tg_sum[mask_tg] / tg_count[mask_tg]
+
+    tg_var = torch.zeros(G_expected, dtype=torch.float32, device=device)
+    tg_var[mask_tg] = (
+        tg_sqsum[mask_tg] / tg_count[mask_tg]
+        - tg_mean[mask_tg] * tg_mean[mask_tg]
+    )
+    tg_std[mask_tg] = torch.sqrt(torch.clamp(tg_var[mask_tg], min=1e-6))
+
+    # --- move back to CPU once ---
+    return (
+        SimpleScaler(tf_mean.cpu(), tf_std.cpu()),
+        SimpleScaler(tg_mean.cpu(), tg_std.cpu()),
+    )
     
 class IndexedChromBucketBatchSampler(Sampler):
     """

@@ -4,12 +4,12 @@
 #SBATCH --error=LOGS/transformer_logs/experiments/%x_%A/%x_%A_%a.err
 #SBATCH --time=42:00:00
 #SBATCH -p dense
-#SBATCH -N 2
+#SBATCH -N 1
 #SBATCH --ntasks-per-node=1
-#SBATCH --gres=gpu:a100:3
+#SBATCH --gres=gpu:v100:4
 #SBATCH -c 12
 #SBATCH --mem=128G
-#SBATCH --array=0-1%1
+#SBATCH --array=0%1
 
 set -euo pipefail
 
@@ -295,12 +295,15 @@ EXPERIMENTS=(
 
     # "E7.5_rep1_muon_preprocessing|mESC_E7.5_rep1_muon_preprocessing|D_MODEL=128;D_FF=512;SAMPLE_NAMES=E7.5_rep1"
     # "E7.5_rep2_muon_preprocessing|mESC_E7.5_rep2_muon_preprocessing|D_MODEL=128;D_FF=512;SAMPLE_NAMES=E7.5_rep2"
+    # "E7.5_rep2_muon_preprocessing_all_genes|mESC_E7.5_rep2_muon_preprocessing_all_genes|D_MODEL=128;D_FF=512;SAMPLE_NAMES=E7.5_rep2"
     # "E7.5_rep1_muon_preprocessing_bear_grn|mESC_E7.5_rep1_muon_preprocessing_bear_grn|D_MODEL=128;D_FF=512;SAMPLE_NAMES=E7.5_rep1"
 
     # "muon_preprocesing_simplified_model|mESC_muon_preprocessing_simplified_model|D_MODEL=128;D_FF=512;SAMPLE_NAMES=E7.5_rep1"
 
-    "E8.5_rep1_muon_preprocessing|mESC_E8.5_rep1_muon_preprocessing|D_MODEL=128;D_FF=512;SAMPLE_NAMES=E8.5_rep1"
-    "E8.5_rep2_muon_preprocessing|mESC_E8.5_rep2_muon_preprocessing|D_MODEL=128;D_FF=512;SAMPLE_NAMES=E8.5_rep2"
+    # "E8.5_rep1_muon_preprocessing|mESC_E8.5_rep1_muon_preprocessing|D_MODEL=128;D_FF=512;SAMPLE_NAMES=E8.5_rep1"
+    # "E8.5_rep2_muon_preprocessing|mESC_E8.5_rep2_muon_preprocessing|D_MODEL=128;D_FF=512;SAMPLE_NAMES=E8.5_rep2"
+
+    "muon_preprocessing_simplified_pooling|mESC_muon_preprocessing_simplified_pooling|D_MODEL=128;D_FF=512;SAMPLE_NAMES=E7.5_rep1"
 
 )
 
@@ -693,7 +696,7 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
     echo "[INFO] Detected ${SLURM_JOB_PARTITION:-} partition, progressing with model training"
 
     # Build training command
-    TRAIN_CMD="src/multiomic_transformer/scripts/multinode_train_argparse.py \
+    TRAIN_CMD="src/multiomic_transformer/scripts/multinode_train_simplified.py \
         --sample_data_cache_dir ${SAMPLE_DATA_CACHE_DIR} \
         --common_data ${COMMON_DATA} \
         --output_dir ${OUTPUT_DIR} \

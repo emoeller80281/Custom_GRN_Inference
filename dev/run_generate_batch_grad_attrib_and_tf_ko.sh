@@ -3,9 +3,9 @@
 #SBATCH --output=LOGS/transformer_logs/04_testing/%x_%A/%x_%A_%a.log
 #SBATCH --error=LOGS/transformer_logs/04_testing/%x_%A/%x_%A_%a.err
 #SBATCH --time=24:00:00
-#SBATCH -p gpu
+#SBATCH -p dense
 #SBATCH -N 1
-#SBATCH --gres=gpu:p100:2
+#SBATCH --gres=gpu:v100:4
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 12
 #SBATCH --mem=128G
@@ -233,6 +233,8 @@ EXPERIMENT_LIST=(
     # "mESC_E7.5_rep1_muon_preprocessing_bear_grn|model_training_001|mESC|E7.5_rep1"
 
     # "mESC_E7.5_rep2_muon_preprocessing|model_training_001|mESC|E7.5_rep2"
+
+    "Macrophage_buffer_2_muon_preprocessing_dataset_tgs|model_training_001|macrophage|buffer_2"
 )
 
 echo "Host: $(hostname)"

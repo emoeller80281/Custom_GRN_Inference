@@ -67,6 +67,17 @@ def load_other_method_grns(sample_name_list, dataset_type):
             scenic_plus_path  = OTHER_METHOD_DIR / f"{sample_name}/SCENIC+/scenic_plus_inferred_grn_K562_K562_human_filtered.tsv"
             tripod_path       = OTHER_METHOD_DIR / f"{sample_name}/TRIPOD/gene_TF_highest_abs_coef.csv"
             
+        elif dataset_type.lower() == "ipsc":
+            cell_oracle_path  = OTHER_METHOD_DIR / f"iPS/CellOracle/CellOracle_Final_Output_iPS_final_GRN.csv"
+            directnet_path    = OTHER_METHOD_DIR / f"iPS/DIRECTNET/DIRECTNET_iPS_Network_links.csv"
+            figr_path         = OTHER_METHOD_DIR / f"iPS/FigR/iPS_FigR_filtered_network.csv"
+            granie_path       = OTHER_METHOD_DIR / f"iPS/GRaNIE/GRN_connections_filtered_sorted_sciPS_uniq.csv"
+            linger_path       = OTHER_METHOD_DIR / f"iPS/LINGER/scNN_iPS_LINGER_cell_type_TF_gene.csv"
+            pando_path        = OTHER_METHOD_DIR / f"iPS/Pando/iPS_Pando_raw_network.csv"
+            scenic_plus_path  = OTHER_METHOD_DIR / f"iPS/SCENIC+/scenic_plus_inferred_grn_iPS_filtered_multiomics_common.tsv"
+            tripod_path       = OTHER_METHOD_DIR / f"iPS/TRIPOD/iPS_TRIPOD_gene_TF_highest_abs_coef.csv"
+            
+            
         method_info = {
             "CellOracle": {"path": cell_oracle_path, "tf_col": "source",    "target_col": "target",    "score_col": "coef_mean"},
             "SCENIC+":    {"path": scenic_plus_path, "tf_col": "Source",    "target_col": "Target",    "score_col": "Score"},
@@ -547,7 +558,7 @@ if __name__ == "__main__":
     arg_parser.add_argument("--experiment", type=str, required=True, help="Name of the experiment to test")
     arg_parser.add_argument("--training_num", type=str, required=False, default="model_training_001", help="Training number folder to test")
     arg_parser.add_argument("--experiment_dir", type=Path, required=True, help="Full path to the experiment directory to test")
-    arg_parser.add_argument("--dataset_type", type=str, required=True, choices=["mESC", "macrophage", "k562", "t_cell"], help="Type of dataset: mESC, macrophage, or k562")
+    arg_parser.add_argument("--dataset_type", type=str, required=True, choices=["mESC", "macrophage", "k562", "iPSC"], help="Type of dataset: mESC, macrophage, k562, or iPSC")
     arg_parser.add_argument("--sample_name_list", type=str, nargs='+', required=False, default=[], help="List of sample names to include in the evaluation (optional)")
     arg_parser.add_argument("--top_k_fracs", type=float, nargs='+', required=False, default=[0.001, 0.005, 0.01, 0.05], help="List of top K fractions for precision@K evaluation")
 
@@ -596,6 +607,11 @@ if __name__ == "__main__":
     elif dataset_type.lower() == "t_cell":
         ground_truth_file_dict = {
             "ChIP-Atlas": GROUND_TRUTH_DIR / "chipatlas_t_cell.csv",
+        }
+        
+    elif dataset_type.lower() == "ipsc":
+        ground_truth_file_dict = {
+            "ChIP-Atlas": GROUND_TRUTH_DIR / "chipatlas_iPSC.csv",
         }
         
     FIG_DIR = Path("/gpfs/Labs/Uzun/RESULTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/FIGURES")

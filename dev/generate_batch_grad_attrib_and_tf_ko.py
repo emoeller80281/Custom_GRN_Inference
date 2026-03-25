@@ -24,7 +24,7 @@ if SRC_DIR not in sys.path:
 
 import multiomic_transformer.utils.experiment_loader as experiment_loader
 import multiomic_transformer.datasets.dataset_refactor as dataset_refactor
-import multiomic_transformer.models.model_simplified as model_module
+import multiomic_transformer.models.model as model_module
 from multiomic_transformer.datasets.dataset_refactor import DistributedBatchSampler, MultiChromosomeDataset
 from multiomic_transformer.datasets.dataset_refactor import IndexedChromBucketBatchSampler
 
@@ -1123,8 +1123,8 @@ def load_model(selected_experiment_dir, checkpoint_file, device):
         tf_vocab_size=len(state["tf_scaler_mean"]),
         tg_vocab_size=len(state["tg_scaler_mean"]),
         use_bias=use_dist_bias,
-        # use_shortcut=use_shortcut,
-        # use_motif_mask=use_motif_mask,
+        use_shortcut=use_shortcut,
+        use_motif_mask=use_motif_mask,
     )
 
     if isinstance(state, dict) and "model_state_dict" in state:
@@ -1289,56 +1289,56 @@ if __name__ == "__main__":
         selected_experiment_dir = exp.model_training_dir
         selected_experiment_dir.mkdir(parents=True, exist_ok=True)
         
-        # if not "gradient_attribution_raw.parquet" in os.listdir(selected_experiment_dir) or force_recalculate:
-        #     start_time = time.time()
-        #     grad_attr_df, batch_grad_df_dict = run_gradient_attribution(
-        #         selected_experiment_dir=selected_experiment_dir,
-        #         model=model,
-        #         test_loader=test_loader,
-        #         tg_scaler=tg_scaler,
-        #         tf_scaler=tf_scaler,
-        #         tf_names=exp.tf_names,
-        #         tg_names=exp.tg_names,
-        #         use_amp=use_amp,
-        #         max_batches=max_batches,
-        #         device=device,
-        #         rank=rank,
-        #         world_size=world_size,
-        #         distributed=distributed,
-        #         disable_bias=disable_bias,
-        #         disable_motif_mask=disable_motif_mask,
-        #         disable_shortcut=disable_shortcut,
-        #         zero_tf_expr=zero_tf_expr,
-        #         save_every_n_batches=save_every_n_batches,
-        #         use_dataloader=False,
-        #         max_tgs_per_batch=max_tgs_per_batch,
+        if not "gradient_attribution_raw.parquet" in os.listdir(selected_experiment_dir) or force_recalculate:
+            start_time = time.time()
+            grad_attr_df, batch_grad_df_dict = run_gradient_attribution(
+                selected_experiment_dir=selected_experiment_dir,
+                model=model,
+                test_loader=test_loader,
+                tg_scaler=tg_scaler,
+                tf_scaler=tf_scaler,
+                tf_names=exp.tf_names,
+                tg_names=exp.tg_names,
+                use_amp=use_amp,
+                max_batches=max_batches,
+                device=device,
+                rank=rank,
+                world_size=world_size,
+                distributed=distributed,
+                disable_bias=disable_bias,
+                disable_motif_mask=disable_motif_mask,
+                disable_shortcut=disable_shortcut,
+                zero_tf_expr=zero_tf_expr,
+                save_every_n_batches=save_every_n_batches,
+                use_dataloader=False,
+                max_tgs_per_batch=max_tgs_per_batch,
                 
-        #     )
-        #     end_time = time.time()
-        #     logging.info(f"  - Gradient attribution finished {max_batches} batches in {end_time - start_time:.2f} seconds.")
-        # else:
-        #     logging.info(f"Gradient attribution results already exist in {selected_experiment_dir}, skipping computation.")
+            )
+            end_time = time.time()
+            logging.info(f"  - Gradient attribution finished {max_batches} batches in {end_time - start_time:.2f} seconds.")
+        else:
+            logging.info(f"Gradient attribution results already exist in {selected_experiment_dir}, skipping computation.")
         
-        model = patch_loaded_model_in_place(model)
+        # model = patch_loaded_model_in_place(model)
         
-        run_tf_window_tg_attribution(
-            selected_experiment_dir=selected_experiment_dir,
-            model=model,
-            test_loader=test_loader,
-            tg_scaler=tg_scaler,
-            tf_scaler=tf_scaler,
-            state=state,
-            tf_names=exp.tf_names,
-            tg_names=exp.tg_names,
-            device=device,
-            use_amp=use_amp,
-            rank=rank,
-            world_size=world_size,
-            distributed=distributed,
-            max_batches=max_batches,
-            max_tgs_per_batch=max_tgs_per_batch,
-            use_dataloader=False,
-        )
+        # run_tf_window_tg_attribution(
+        #     selected_experiment_dir=selected_experiment_dir,
+        #     model=model,
+        #     test_loader=test_loader,
+        #     tg_scaler=tg_scaler,
+        #     tf_scaler=tf_scaler,
+        #     state=state,
+        #     tf_names=exp.tf_names,
+        #     tg_names=exp.tg_names,
+        #     device=device,
+        #     use_amp=use_amp,
+        #     rank=rank,
+        #     world_size=world_size,
+        #     distributed=distributed,
+        #     max_batches=max_batches,
+        #     max_tgs_per_batch=max_tgs_per_batch,
+        #     use_dataloader=False,
+        # )
         
         # if not "tf_knockout_raw.parquet" in os.listdir(selected_experiment_dir) and not force_recalculate:
         #     for ko_mode in ["scaled_k_sigma"]: # "raw_zero", "raw_percentile", 

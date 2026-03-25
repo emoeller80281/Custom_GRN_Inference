@@ -136,6 +136,21 @@ class AttentionPooling(nn.Module):
         pooled = torch.sum(weights * x, dim=1)                   # [batch_size, d_model]
         return pooled, weights
 
+class WindowDownsampler(nn.Module):
+    def __init__(self, in_channels=1, out_channels=32, kernel_size=4, stride=4):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv1d(in_channels, out_channels, kernel_size=kernel_size, stride=stride),
+            nn.GELU(),
+            nn.Conv1d(out_channels, 1, kernel_size=1),
+        )
+
+    def forward(self, atac_wins):
+        # atac_wins: [B, W, 1]
+        x = atac_wins.transpose(1, 2)   # [B, 1, W]
+        x = self.net(x)                 # [B, 1, W_new]
+        return x.transpose(1, 2)        # [B, W_new, 1]
+
 class MultiomicTransformer(nn.Module):
     def __init__(self, 
                 d_model, 
@@ -163,6 +178,7 @@ class MultiomicTransformer(nn.Module):
         
         # ATAC windows do not have embeddings, their position and accessibility
         # are used to inform TFs and TGs
+        self.window_downsampler = WindowDownsampler(kernel_size=4, stride=4)
         
         # TF dense layer - Projects the TF RNA-seq expression data to [n_tfs x d_model]
         self.tf_expr_dense_input_layer = nn.Sequential(
@@ -269,12 +285,15 @@ class MultiomicTransformer(nn.Module):
         bias         : [batch_size, n_tgs, n_window] or None   (distance bias)
         returns      : [batch_size, n_tgs]
         """
+
+        atac_windows = torch.nan_to_num(atac_windows, nan=0.0, posinf=1e6, neginf=-1e6).clamp_(-10.0, 10.0)
+        tf_expr      = torch.nan_to_num(tf_expr,      nan=0.0, posinf=1e6, neginf=-1e6).clamp_(-10.0, 10.0)
+        
+        atac_windows = self.window_downsampler(atac_windows)
+        
         batch_size, n_window, _ = atac_windows.shape
         device = atac_windows.device
         
-        atac_windows = torch.nan_to_num(atac_windows, nan=0.0, posinf=1e6, neginf=-1e6).clamp_(-10.0, 10.0)
-        tf_expr      = torch.nan_to_num(tf_expr,      nan=0.0, posinf=1e6, neginf=-1e6).clamp_(-10.0, 10.0)
-
         # ----- ATAC encoding -----
         win_emb = self.atac_acc_dense_input_layer(atac_windows)       # [batch_size,n_window,d_model]
         
@@ -314,15 +333,27 @@ class MultiomicTransformer(nn.Module):
         # Check for distance bias
         attn_bias = None
         if self.use_bias and (bias is not None):
-            attn_bias = bias
-            if attn_bias.dim() == 3:
-                attn_bias = attn_bias.unsqueeze(1)  # [batch_size,1,n_tgs,n_window]
+            # bias starts as [B, G, W]
+            bias = torch.nan_to_num(bias, nan=0.0, posinf=1e4, neginf=-1e4)
 
-            if attn_bias.shape[1] == 1:
-                attn_bias = attn_bias.expand(batch_size, self.num_heads, tg_base.size(1), win_emb.size(1))
-                
-            attn_bias = torch.nan_to_num(attn_bias, nan=0.0, posinf=1e4, neginf=-1e4)
-            attn_bias = (self.bias_scale * attn_bias)#.clamp_(-20.0, 20.0)
+            # pool over windows first -> [B, G, W_new]
+            bias = F.avg_pool1d(
+                bias,
+                kernel_size=4,
+                stride=4,
+                ceil_mode=True,
+            )
+
+            # now convert to attention bias shape
+            attn_bias = bias.unsqueeze(1)  # [B, 1, G, W_new]
+            attn_bias = attn_bias.expand(
+                batch_size,
+                self.num_heads,
+                tg_base.size(1),
+                win_emb.size(1),
+            )
+
+            attn_bias = self.bias_scale * attn_bias
 
         # TG-ATAC cross attention with distance bias
         tg_cross = self.cross_tg_to_atac(tg_base, win_emb, attn_bias=attn_bias)        
