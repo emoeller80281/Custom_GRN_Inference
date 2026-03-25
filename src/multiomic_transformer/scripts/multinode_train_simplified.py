@@ -1646,7 +1646,9 @@ def main(rank: int, local_rank: int, world_size: int, save_every: int, total_epo
             T = int(dataset.tf_ids.numel())
             G = int(dataset.tg_ids.numel())
             use_ddp_reduce = torch.distributed.is_initialized()
-
+            
+            if rank == 0:
+                logging.info("Fitting scalers on training data")
             tf_s, tg_s = fit_simple_scalers(
                 train_loader,
                 T_expected=T,

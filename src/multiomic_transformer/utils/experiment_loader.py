@@ -514,7 +514,13 @@ class ExperimentLoader:
 
             optimizer.zero_grad(set_to_none=True)
             
-            for i, batch in tqdm(enumerate(train_loader), total=len(train_loader), desc=f"Epoch {epoch+1}/{num_epochs}", leave=False):
+            for i, batch in tqdm(
+                enumerate(train_loader), 
+                total=len(train_loader), 
+                desc=f"Epoch {epoch+1}/{num_epochs}", 
+                leave=False,
+                ncols=100,
+                ):
                 atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids, _ = batch
 
                 atac_wins = atac_wins.to(device, non_blocking=True)
