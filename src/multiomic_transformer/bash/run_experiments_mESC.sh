@@ -4,9 +4,9 @@
 #SBATCH --error=LOGS/transformer_logs/experiments/%x_%A/%x_%A_%a.err
 #SBATCH --time=42:00:00
 #SBATCH -p dense
-#SBATCH -N 1
+#SBATCH -N 2
 #SBATCH --ntasks-per-node=1
-#SBATCH --gres=gpu:v100:4
+#SBATCH --gres=gpu:a100:3
 #SBATCH -c 12
 #SBATCH --mem=128G
 #SBATCH --array=0%1

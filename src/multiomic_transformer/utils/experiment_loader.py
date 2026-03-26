@@ -16,6 +16,7 @@ from tqdm import tqdm
 import seaborn as sns
 import random
 import zlib
+import time
 
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["OMP_NUM_THREADS"] = "1"
@@ -129,6 +130,8 @@ class ExperimentLoader:
         self.gt_labeled_dfs = {}
         self.auroc_auprc_scores = None
         
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
     def load_trained_model(self, checkpoint_file):
         """
         Loads a trained model given a checkpoint file and loads the corresponding model parameters
@@ -173,8 +176,8 @@ class ExperimentLoader:
             tf_vocab_size=len(self.state["tf_scaler_mean"]),
             tg_vocab_size=len(self.state["tg_scaler_mean"]),
             use_bias=use_dist_bias,
-            use_shortcut=use_shortcut,
-            use_motif_mask=use_motif_mask,
+            # use_shortcut=use_shortcut,
+            # use_motif_mask=use_motif_mask,
         )
 
         if isinstance(self.state, dict) and "model_state_dict" in self.state:
@@ -198,7 +201,6 @@ class ExperimentLoader:
             if len(unexpected) > 0:
                 logging.info(f"Unexpected keys: {unexpected}")
 
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model.to(self.device).eval()
 
         # Rebuild the scalers from the training parameters
@@ -280,6 +282,7 @@ class ExperimentLoader:
         num_layers=None,
         d_ff=None,
         dropout=None,
+        window_pool_size=16,
         local_rank=0, 
         rank=0, 
         world_size=1, 
@@ -316,6 +319,7 @@ class ExperimentLoader:
             tg_vocab_size=tg_vocab_size,
             use_bias=use_dist_bias,
             bias_scale=bias_scale,
+            window_pool_size=window_pool_size,
         ).to(self.device)   
 
         return model
@@ -477,6 +481,7 @@ class ExperimentLoader:
         )
         return train_loader, val_loader, test_loader
 
+
     
     def train(
         self,
@@ -508,6 +513,7 @@ class ExperimentLoader:
         scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
 
         for epoch in range(num_epochs):
+            epoch_start_time = time.time()
             model.train()
             total_loss = 0.0
             n_batches = 0
@@ -563,9 +569,10 @@ class ExperimentLoader:
                 optimizer.zero_grad(set_to_none=True)
 
             avg_loss = total_loss / max(1, n_batches)
+            epoch_end_time = time.time()
 
             if verbose:
-                print(f"Epoch {epoch+1}/{num_epochs} | Train Loss: {avg_loss:.4f}")
+                print(f"Epoch {epoch+1}/{num_epochs} | Train Loss: {avg_loss:.4f} | Time: {epoch_end_time - epoch_start_time:.1f}s")
 
             if val_loader is not None and ((epoch + 1) % validate_every == 0):
                 model.eval()
@@ -789,8 +796,8 @@ class ExperimentLoader:
                 out, _, _ = self.model(
                     atac_wins, tf_tensor,
                     tf_ids=tf_ids, tg_ids=tg_ids,
-                    bias=bias, motif_mask=motif_mask,
-                    return_shortcut_contrib=False,
+                    bias=bias#, motif_mask=motif_mask,
+                    #return_shortcut_contrib=False,
                 )
 
                 pred = self.tg_scaler.inverse_transform(out, ids=tg_ids).detach().cpu().numpy()

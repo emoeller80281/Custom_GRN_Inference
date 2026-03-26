@@ -38,7 +38,10 @@ from multiomic_transformer.utils import ewc_utils
 from multiomic_transformer.scripts import gradient_attribution, tf_knockout
 
 warnings.filterwarnings("ignore", message="No device id is provided via `init_process_group`")
-
+warnings.filterwarnings(
+    "ignore",
+    message=r"Grad strides do not match bucket view strides.*",
+)
 STOP_REQUESTED = False
 
 # ----- Argument Parser Setup -----
