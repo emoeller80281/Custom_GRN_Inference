@@ -97,11 +97,27 @@ class ExperimentLoader:
         self.gpu_usage_df, self.gpu_usage_mean_per_sec_df, self.gpu_memory_limit_gib = self._format_gpu_usage_file()
         
         # Load the model training log data
-        self.training_df = pd.read_csv(self.model_training_dir / "training_log.csv")
+        if not (self.model_training_dir / "training_log.csv").exists():
+            if not self.silence_warnings:
+                logging.warning(f"WARNING: Training log file {self.model_training_dir / 'training_log.csv'} does not exist.")
+            self.training_df = None
+        else:
+            self.training_df = pd.read_csv(self.model_training_dir / "training_log.csv")
         
         # Loads the TF and TG names in order by their index
-        self.tf_names = self._load_json(self.model_training_dir / "tf_names_ordered.json")
-        self.tg_names = self._load_json(self.model_training_dir / "tg_names_ordered.json")
+        if not (self.model_training_dir / "tf_names_ordered.json").exists():
+            if not self.silence_warnings:
+                logging.warning(f"WARNING: TF names file {self.model_training_dir / 'tf_names_ordered.json'} does not exist.")
+            self.tf_names = None
+        else:
+            self.tf_names = self._load_json(self.model_training_dir / "tf_names_ordered.json")
+
+        if not (self.model_training_dir / "tg_names_ordered.json").exists():
+            if not self.silence_warnings:
+                logging.warning(f"WARNING: TG names file {self.model_training_dir / 'tg_names_ordered.json'} does not exist.")
+            self.tg_names = None
+        else:
+            self.tg_names = self._load_json(self.model_training_dir / "tg_names_ordered.json")
         
         # Model and training state will be loaded when load_trained_model is called
         self.model = None
@@ -307,9 +323,7 @@ class ExperimentLoader:
                 return x
             return str(x).strip().lower() in {"1", "true", "yes", "y"}
 
-        use_shortcut = as_bool(self.locate_param_value("USE_SHORTCUT"))
         use_dist_bias = as_bool(self.locate_param_value("USE_DIST_BIAS")) if use_dist_bias is not None else False
-        use_motif_mask = as_bool(self.locate_param_value("USE_MOTIF_MASK"))
         
         tf_vocab_size = int(dataset.tf_ids.numel())
         tg_vocab_size = int(dataset.tg_ids.numel())
@@ -347,7 +361,7 @@ class ExperimentLoader:
         
         return dataloaders
     
-    def create_scalers(self, dataset, dataloader, max_batches: int | None = 100):
+    def create_scalers(self, dataset, dataloader, max_batches: int | None = 25):
         T = int(dataset.tf_ids.numel())
         G = int(dataset.tg_ids.numel())
         use_ddp_reduce = dist.is_initialized()
@@ -808,6 +822,8 @@ class ExperimentLoader:
                             "num_tfs": int(tf_tensor.shape[1]),
                             "num_tgs": int(targets.shape[1]),
                         })
+                        batch_profile_df = pd.DataFrame(batch_profile_log)
+                        print(batch_profile_df[["loader_s", "transfer_s", "forward_s", "backward_s", "optim_s"]].mean())
 
                     if monitor_gpu_memory and device.type == "cuda":
                         gpu_mem_log.append({
@@ -981,6 +997,185 @@ class ExperimentLoader:
         avg_loss_unscaled = total_loss_unscaled / max(1, n_batches)
 
         return avg_loss_scaled, avg_loss_unscaled, r2_s, r2_u
+    
+    def run_gradient_attribution(
+        self,
+        selected_experiment_dir,
+        model,
+        test_loader,
+        tf_scaler,
+        tg_scaler,
+        tf_names,
+        tg_names,
+        device,
+        use_amp,
+        max_batches: int = None,
+        save_every_n_batches: int = 20,
+        max_tgs_per_batch = 128,
+        chunk_size = 64,
+        zero_tf_expr: bool = False,
+    ):
+
+        T_total = len(tf_names)
+        G_total = len(tg_names)
+
+        # Creates empty tensors to accumulate gradients across batches. The shape is [TF total, Genes total]
+        grad_sum = torch.zeros(T_total, G_total, device=device, dtype=torch.float32)
+        grad_count = torch.zeros_like(grad_sum)
+
+        model.to(device).eval()
+
+        iterator = tqdm(
+            test_loader,
+            desc=f"Gradient attributions",
+            unit="batches",
+            total=max_batches,
+            ncols=100,
+        )
+
+        batch_grad_dfs = {}
+        for b_idx, batch in enumerate(iterator):
+            if max_batches is not None and b_idx >= max_batches:
+                break
+
+            atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids, motif_mask = batch
+            
+            atac_wins = atac_wins.to(device)
+            tf_tensor = tf_tensor.to(device)
+            bias = bias.to(device) if bias is not None else None
+            tf_ids = tf_ids.to(device)
+            tg_ids = tg_ids.to(device)
+            motif_mask = motif_mask.to(device) if motif_mask is not None else None
+
+            # Shapes
+            if tf_tensor.dim() == 2:
+                B, T_eval = tf_tensor.shape
+                F_dim = 1
+            else:
+                B, T_eval, F_dim = tf_tensor.shape
+                
+            if bias is not None:
+                if bias.dim() == 2:
+                    # [G, W] -> [1, G, W]
+                    bias = bias.unsqueeze(0)
+
+            # Flatten TF IDs over batch for aggregation later
+            if tf_ids.dim() == 1:  # [T_eval]
+                tf_ids_flat = tf_ids.view(1, T_eval).expand(B, T_eval).reshape(-1)
+            else:                  # [B, T_eval]
+                tf_ids_flat = tf_ids.reshape(-1)
+
+            G_eval = tg_ids.shape[-1]
+
+            # Assign TGs to this rank and optionally chunk them to control memory.
+            if G_eval > max_tgs_per_batch:
+                perm = torch.randperm(G_eval, device=device)[:max_tgs_per_batch]
+                owned_tg_indices = perm.sort().values
+            else:
+                owned_tg_indices = torch.arange(G_eval, device=device)
+
+            # ---------- METHOD 1: plain saliency (grad * input) ----------
+            total_owned = owned_tg_indices.numel()
+
+            for chunk_start in range(0, total_owned, chunk_size):
+                tg_chunk = owned_tg_indices[chunk_start : chunk_start + chunk_size]
+
+                if bias is not None:
+                    if bias.dim() == 3:
+                        bias_chunk = bias[:, tg_chunk, :]
+                    elif bias.dim() == 4:
+                        bias_chunk = bias[:, :, tg_chunk, :]
+                    else:
+                        raise ValueError(f"Unexpected bias shape: {tuple(bias.shape)}")
+                else:
+                    bias_chunk = None
+
+                if tg_ids.dim() == 1:
+                    tg_ids_chunk = tg_ids[tg_chunk]
+                else:
+                    tg_ids_chunk = tg_ids[:, tg_chunk]
+
+                if zero_tf_expr:
+                    tf_tensor_chunk = torch.zeros_like(tf_tensor, device=device, requires_grad=True)
+                else:
+                    tf_tensor_chunk = tf_tensor.detach().clone().requires_grad_(True)
+
+                with torch.amp.autocast(device_type=device.type, enabled=use_amp):
+                    tf_scaled = tf_scaler.transform(tf_tensor_chunk, tf_ids) if tf_scaler is not None else tf_tensor_chunk
+                    preds_s = model(
+                        atac_wins,
+                        tf_scaled,
+                        tf_ids=tf_ids,
+                        tg_ids=tg_ids_chunk,
+                        bias=bias_chunk,
+                    )
+                    if isinstance(preds_s, tuple):
+                        preds_s = preds_s[0]
+
+                    preds_u = tg_scaler.inverse_transform(preds_s, tg_ids_chunk) if tg_scaler is not None else preds_s
+                    preds_u = torch.nan_to_num(preds_u.float(), nan=0.0, posinf=1e6, neginf=-1e6)
+
+                grad_output_j = torch.zeros_like(preds_u)
+
+                for offset in range(preds_u.shape[1]):
+                    grad_output_j.zero_()
+                    grad_output_j[:, offset] = 1.0
+
+                    grads = torch.autograd.grad(
+                        outputs=preds_u,
+                        inputs=tf_tensor_chunk,
+                        grad_outputs=grad_output_j,
+                        retain_graph=(offset < preds_u.shape[1] - 1),
+                        create_graph=False,
+                    )[0]
+
+                    grad_abs = grads[..., 0].abs() if grads.dim() == 3 else grads.abs()
+                    grad_flat = grad_abs.reshape(-1)
+
+                    tg_global = int(tg_ids_chunk[offset].item()) if tg_ids_chunk.dim() == 1 else int(tg_ids_chunk[0, offset].item())
+
+                    grad_sum[:, tg_global].index_add_(0, tf_ids_flat, grad_flat)
+                    grad_count[:, tg_global].index_add_(0, tf_ids_flat, torch.ones_like(grad_flat))
+                    
+                # cleanup per chunk
+                del (
+                    preds_u,
+                    preds_s,
+                    tf_scaled,
+                    tf_tensor_chunk,
+                    bias_chunk,
+                    tg_ids_chunk,
+                )
+                    
+            # Inside the loop - periodic saves
+            if save_every_n_batches is not None:
+                if b_idx % save_every_n_batches == 0:
+                    
+                    edge_seen = grad_count > 0
+                    tf_idx, tg_idx = torch.nonzero(edge_seen, as_tuple=True)
+
+                    scores = (grad_sum[tf_idx, tg_idx] / grad_count[tf_idx, tg_idx]).detach().cpu().numpy()
+
+                    batch_df_long = pd.DataFrame({
+                        "Source": [tf_names[i] for i in tf_idx.cpu().numpy()],
+                        "Target": [tg_names[j] for j in tg_idx.cpu().numpy()],
+                        "Score": scores,
+                    })
+                    
+                    batch_grad_dfs[b_idx] = batch_df_long
+        
+        edge_seen = grad_count > 0
+        tf_idx, tg_idx = torch.nonzero(edge_seen, as_tuple=True)
+
+        scores = (grad_sum[tf_idx, tg_idx] / grad_count[tf_idx, tg_idx]).detach().cpu().numpy()
+
+        df_long = pd.DataFrame({
+            "Source": [tf_names[i] for i in tf_idx.cpu().numpy()],
+            "Target": [tg_names[j] for j in tg_idx.cpu().numpy()],
+            "Score": scores,
+        })
+        
+        return df_long, batch_grad_dfs
     
     def load_grn_old(self, method="gradient attribution", zscore_method="median_mad"):
         """

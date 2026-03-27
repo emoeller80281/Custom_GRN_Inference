@@ -788,23 +788,25 @@ class MultiomicTransformerDataset(Dataset):
     def collate_fn(batch):
         """
         Returns:
-          atac_wins: [B, W, 1]
-          tf_tensor: [B, T_eval]
-          tg_tensor: [B, G_eval]
-          bias:      [B, G_eval, W]
-          tf_ids:    [T_eval]
-          tg_ids:    [G_eval]
-          motif_mask:[B, G_eval, T_eval]
+        atac_wins:  [B, W, 1]
+        tf_tensor:  [B, T_eval]
+        tg_tensor:  [B, G_eval]
+        bias:       [G_eval, W]          # shared across batch
+        tf_ids:     [T_eval]
+        tg_ids:     [G_eval]
+        motif_mask: [G_eval, T_eval]     # shared across batch, if also invariant
         """
         atac_list, tf_list, tg_list, bias_list, tf_ids_list, tg_ids_list, mask_list = zip(*batch)
 
         atac_wins = torch.stack(atac_list, dim=0)
         tf_tensor = torch.stack(tf_list,  dim=0)
         tg_tensor = torch.stack(tg_list,  dim=0)
-        bias      = torch.stack(bias_list, dim=0)
 
-        tf_ids     = tf_ids_list[0]
-        tg_ids     = tg_ids_list[0]
+        tf_ids = tf_ids_list[0]
+        tg_ids = tg_ids_list[0]
+
+        # shared across the batch
+        bias = bias_list[0]
         motif_mask = mask_list[0]
 
         return atac_wins, tf_tensor, tg_tensor, bias, tf_ids, tg_ids, motif_mask

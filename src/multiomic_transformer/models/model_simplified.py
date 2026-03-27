@@ -337,33 +337,45 @@ class MultiomicTransformer(nn.Module):
         if self.use_bias and (bias is not None):
             bias = torch.nan_to_num(bias, nan=0.0, posinf=1e4, neginf=-1e4)
 
+            # Allow either:
+            #   [G, W]    shared across batch
+            #   [B, G, W] per-sample
+            if bias.dim() == 2:
+                # [G, W] -> [1, G, W]
+                bias = bias.unsqueeze(0)
+            elif bias.dim() != 3:
+                raise ValueError(f"bias must have shape [G,W] or [B,G,W], got {bias.shape}")
+
             bias = F.avg_pool1d(
                 bias,
                 kernel_size=self.window_pool_size,
                 stride=self.window_pool_size,
                 ceil_mode=False,
-            )
+            )  # [1, G, W_new] or [B, G, W_new]
 
             # final safety alignment
             target_w = win_emb.shape[1]
             if bias.shape[-1] != target_w:
                 bias = bias[..., :target_w]
 
-            attn_bias = bias.unsqueeze(1)  # [B, 1, G, W_new]
+            # [1 or B, G, W_new] -> [1 or B, 1, G, W_new]
+            attn_bias = bias.unsqueeze(1)
+
+            # Expand across heads, and batch if needed
             attn_bias = attn_bias.expand(
                 batch_size,
                 self.num_heads,
                 tg_base.size(1),
                 target_w,
             )
-            
+
             assert attn_bias.shape == (
                 batch_size,
                 self.num_heads,
                 tg_base.size(1),
                 win_emb.size(1),
             ), f"Unexpected attn_bias shape: {attn_bias.shape}"
-                    
+
             attn_bias = self.bias_scale * attn_bias
 
         # TG-ATAC cross attention with distance bias

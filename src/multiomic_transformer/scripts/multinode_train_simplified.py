@@ -1338,6 +1338,7 @@ def write_run_parameters(dataset, out_dir, world_size):
     logging.info(f"Attention Heads:     {NUM_HEADS}")
     logging.info(f"Attention Layers:    {NUM_LAYERS}")
     logging.info(f"Feedforward Layers:  {D_FF}")
+    logging.info(f"Kernel Size:         {KERNEL_SIZE}")
     logging.info(f"Dropout:             {DROPOUT}")
     logging.info(f"TF-TG Shortcut?:     {USE_SHORTCUT}")
     logging.info(f"Dist bias?:          {USE_DISTANCE_BIAS}")
@@ -1361,6 +1362,7 @@ def write_run_parameters(dataset, out_dir, world_size):
         "num_heads": NUM_HEADS,
         "num_layers": NUM_LAYERS,
         "d_ff": D_FF,
+        "kernel_size": KERNEL_SIZE,
         "dropout": DROPOUT,
         "use_shortcut": USE_SHORTCUT,
         "use_dist_bias": USE_DISTANCE_BIAS,

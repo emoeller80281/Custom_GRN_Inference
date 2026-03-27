@@ -304,7 +304,10 @@ EXPERIMENTS=(
     # "E8.5_rep1_muon_preprocessing|mESC_E8.5_rep1_muon_preprocessing|D_MODEL=128;D_FF=512;SAMPLE_NAMES=E8.5_rep1"
     # "E8.5_rep2_muon_preprocessing|mESC_E8.5_rep2_muon_preprocessing|D_MODEL=128;D_FF=512;SAMPLE_NAMES=E8.5_rep2"
 
-    "muon_preprocessing_simplified_pooling|mESC_muon_preprocessing_simplified_pooling|D_MODEL=128;D_FF=512;KERNEL_SIZE=32;SAMPLE_NAMES=E7.5_rep1"
+    # "muon_preprocessing_simplified_pooling|mESC_muon_preprocessing_simplified_pooling|D_MODEL=128;D_FF=512;KERNEL_SIZE=32;SAMPLE_NAMES=E7.5_rep1"
+    "muon_preprocessing_simplified_pooling|mESC_muon_preprocessing_simplified_pooling|D_MODEL=128;D_FF=512;KERNEL_SIZE=64;SAMPLE_NAMES=E7.5_rep1"
+    # "muon_preprocessing_simplified_pooling|mESC_muon_preprocessing_simplified_pooling|D_MODEL=128;D_FF=512;KERNEL_SIZE=128;SAMPLE_NAMES=E7.5_rep1"
+    # "muon_preprocessing_simplified_pooling|mESC_muon_preprocessing_simplified_pooling|D_MODEL=128;D_FF=512;KERNEL_SIZE=256;SAMPLE_NAMES=E7.5_rep1"
 
 )
 
