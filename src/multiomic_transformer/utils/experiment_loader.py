@@ -7,6 +7,7 @@ import numpy as np
 from pathlib import Path
 from scipy.stats import norm
 import sys
+import torch.nn.functional as F
 import logging
 from sklearn.metrics import roc_auc_score, average_precision_score, precision_recall_curve, roc_curve
 from typing import Set, Tuple, Optional, Dict
@@ -132,6 +133,9 @@ class ExperimentLoader:
         
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
+        # GPU memory log will be populated during training if monitor_gpu_memory is True
+        self.gpu_mem_log_df = None
+        
     def load_trained_model(self, checkpoint_file):
         """
         Loads a trained model given a checkpoint file and loads the corresponding model parameters
@@ -254,7 +258,7 @@ class ExperimentLoader:
                 world_size=world_size,
             )
     
-    def create_multichrom_dataset(self):
+    def create_multichrom_dataset(self, max_cached=None):
         common_data = Path(self.preprocessing_settings["COMMON_DATA"])
         sample_data_cache_dir = Path(self.preprocessing_settings["SAMPLE_DATA_CACHE_DIR"])
         chrom_ids = self.preprocessing_settings["CHROM_IDS"]
@@ -266,7 +270,7 @@ class ExperimentLoader:
             chrom_ids=chrom_ids,
             tf_vocab_path=os.path.join(common_data, "tf_vocab.json"),
             tg_vocab_path=os.path.join(common_data, "tg_vocab.json"),
-            max_cached=2,
+            max_cached=len(chrom_ids) if max_cached is None else max_cached,
             subset_seed=subsample_seed,
             allowed_samples=allowed_samples,
         )
@@ -276,6 +280,7 @@ class ExperimentLoader:
     def create_new_model(
         self, 
         dataset,
+        use_dist_bias=None,
         bias_scale=2.0, 
         d_model=None,
         num_heads=None,
@@ -303,7 +308,7 @@ class ExperimentLoader:
             return str(x).strip().lower() in {"1", "true", "yes", "y"}
 
         use_shortcut = as_bool(self.locate_param_value("USE_SHORTCUT"))
-        use_dist_bias = as_bool(self.locate_param_value("USE_DIST_BIAS"))
+        use_dist_bias = as_bool(self.locate_param_value("USE_DIST_BIAS")) if use_dist_bias is not None else False
         use_motif_mask = as_bool(self.locate_param_value("USE_MOTIF_MASK"))
         
         tf_vocab_size = int(dataset.tf_ids.numel())
@@ -494,6 +499,7 @@ class ExperimentLoader:
         validate_every: int = 1,
         use_amp: bool = True,
         grad_accum_steps = 4,
+        monitor_gpu_memory: bool = False,
     ):
         """
         Simple single-GPU training loop with optional AMP.
@@ -512,7 +518,12 @@ class ExperimentLoader:
         amp_enabled = use_amp and device.type == "cuda"
         scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
 
+        gpu_mem_log = []
+        
         for epoch in range(num_epochs):
+            if monitor_gpu_memory and device.type == "cuda":
+                torch.cuda.reset_peak_memory_stats()
+            
             epoch_start_time = time.time()
             model.train()
             total_loss = 0.0
@@ -532,7 +543,7 @@ class ExperimentLoader:
                 atac_wins = atac_wins.to(device, non_blocking=True)
                 tf_tensor = tf_tensor.to(device, non_blocking=True)
                 targets   = targets.to(device, non_blocking=True)
-                # bias      = bias.to(device, non_blocking=True)
+                bias      = bias.to(device, non_blocking=True)
                 tf_ids    = tf_ids.to(device, non_blocking=True)
                 tg_ids    = tg_ids.to(device, non_blocking=True)
 
@@ -547,20 +558,36 @@ class ExperimentLoader:
                         tf_tensor,
                         tf_ids=tf_ids,
                         tg_ids=tg_ids,
-                        bias=None,
+                        bias=bias,
                     )
                     loss = loss_fn(preds, targets)
 
                 loss_for_backward = loss / grad_accum_steps
                 scaler.scale(loss_for_backward).backward()
-                
+
                 if (i + 1) % grad_accum_steps == 0:
                     scaler.step(optimizer)
                     scaler.update()
                     optimizer.zero_grad(set_to_none=True)
 
-                total_loss += loss.detach().item()
-                n_batches += 1
+                    if monitor_gpu_memory and device.type == "cuda":
+                        gpu_mem_log.append({
+                            "epoch": epoch,
+                            "step": i,
+                            "time": time.time(),
+                            "allocated_mb": torch.cuda.memory_allocated() / 1024**2,
+                            "reserved_mb": torch.cuda.memory_reserved() / 1024**2,
+                        })
+
+            # ---- epoch summary ----
+            if monitor_gpu_memory and device.type == "cuda":
+                gpu_mem_log.append({
+                    "epoch": epoch,
+                    "step": -1,
+                    "type": "epoch_summary",
+                    "peak_allocated_mb": torch.cuda.max_memory_allocated() / 1024**2,
+                    "peak_reserved_mb": torch.cuda.max_memory_reserved() / 1024**2,
+                })
                 
             # handle leftover batches at end of epoch
             if n_batches % grad_accum_steps != 0:
@@ -612,9 +639,348 @@ class ExperimentLoader:
 
                 if verbose:
                     print(f"                Val Loss: {val_loss:.4f}")
+    
+        self.gpu_mem_log_df = pd.DataFrame(gpu_mem_log)
+    
+        return model
+
+    def train_timed(
+        self,
+        model,
+        train_loader,
+        val_loader=None,
+        num_epochs: int = 10,
+        learning_rate: float = 1e-4,
+        verbose: bool = True,
+        validate_every: int = 1,
+        max_batches: int | None = None,
+        use_amp: bool = True,
+        grad_accum_steps=4,
+        monitor_gpu_memory: bool = False,
+        profile_batches: bool = False,
+    ):
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model = model.to(device)
+
+        optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+        loss_fn = nn.MSELoss()
+
+        tf_scaler = getattr(self, "tf_scaler", None)
+        tg_scaler = getattr(self, "tg_scaler", None)
+
+        amp_enabled = use_amp and device.type == "cuda"
+        scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
+
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode="min",
+            factor=0.5,
+            patience=2,
+            threshold=1e-4,
+            min_lr=1e-7,
+        )
+
+        gpu_mem_log = []
+        batch_profile_log = []
+        epoch_log = []
+
+        for epoch in range(num_epochs):
+            epoch_start_time = time.time()
+            model.train()
+            total_loss = 0.0
+            n_batches = 0
+
+            optimizer.zero_grad(set_to_none=True)
+
+            data_iter = iter(train_loader)
+            i = 0
+
+            try:
+                total_batches = max_batches if max_batches is not None else len(train_loader)
+            except TypeError:
+                total_batches = max_batches
+
+            with tqdm(total=total_batches, desc=f"Epoch {epoch+1}/{num_epochs}", ncols=100, leave=False) as pbar:
+                while True:
+                    if max_batches is not None and i >= max_batches:
+                        break
+
+                    t0 = time.perf_counter()
+                    try:
+                        batch = next(data_iter)
+                    except StopIteration:
+                        break
+                    t1 = time.perf_counter()
+
+                    atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids, _ = batch
+
+                    if device.type == "cuda":
+                        torch.cuda.synchronize()
+                    t2 = time.perf_counter()
+
+                    atac_wins = atac_wins.to(device, non_blocking=True)
+                    tf_tensor = tf_tensor.to(device, non_blocking=True)
+                    targets   = targets.to(device, non_blocking=True)
+                    bias      = bias.to(device, non_blocking=True) if bias is not None else None
+                    tf_ids    = tf_ids.to(device, non_blocking=True)
+                    tg_ids    = tg_ids.to(device, non_blocking=True)
+
+                    if device.type == "cuda":
+                        torch.cuda.synchronize()
+                    t3 = time.perf_counter()
+
+                    if tf_scaler is not None or tg_scaler is not None:
+                        if device.type == "cuda":
+                            torch.cuda.synchronize()
+                        t4 = time.perf_counter()
+
+                        if tf_scaler is not None:
+                            tf_tensor = tf_scaler.transform(tf_tensor, tf_ids)
+                        if tg_scaler is not None:
+                            targets = tg_scaler.transform(targets, tg_ids)
+
+                        if device.type == "cuda":
+                            torch.cuda.synchronize()
+                        t5 = time.perf_counter()
+                    else:
+                        t4 = t5 = time.perf_counter()
+
+                    if device.type == "cuda":
+                        torch.cuda.synchronize()
+                    t6 = time.perf_counter()
+
+                    with torch.autocast(device_type=device.type, enabled=amp_enabled):
+                        preds = model(
+                            atac_wins,
+                            tf_tensor,
+                            tf_ids=tf_ids,
+                            tg_ids=tg_ids,
+                            bias=bias,
+                        )
+                        loss = loss_fn(preds, targets)
+
+                    if device.type == "cuda":
+                        torch.cuda.synchronize()
+                    t7 = time.perf_counter()
+
+                    if device.type == "cuda":
+                        torch.cuda.synchronize()
+                    t8 = time.perf_counter()
+
+                    loss_for_backward = loss / grad_accum_steps
+                    scaler.scale(loss_for_backward).backward()
+
+                    if device.type == "cuda":
+                        torch.cuda.synchronize()
+                    t9 = time.perf_counter()
+
+                    stepped = False
+                    if (i + 1) % grad_accum_steps == 0:
+                        if device.type == "cuda":
+                            torch.cuda.synchronize()
+                        t10 = time.perf_counter()
+
+                        scaler.step(optimizer)
+                        scaler.update()
+                        optimizer.zero_grad(set_to_none=True)
+                        stepped = True
+
+                        if device.type == "cuda":
+                            torch.cuda.synchronize()
+                        t11 = time.perf_counter()
+                    else:
+                        t10 = t11 = time.perf_counter()
+
+                    if profile_batches:
+                        batch_profile_log.append({
+                            "epoch": epoch,
+                            "step": i,
+                            "loader_s": t1 - t0,
+                            "transfer_s": t3 - t2,
+                            "scaler_s": t5 - t4,
+                            "forward_s": t7 - t6,
+                            "backward_s": t9 - t8,
+                            "optim_s": t11 - t10 if stepped else 0.0,
+                            "total_step_s": (t11 if stepped else t9) - t0,
+                            "loss": float(loss.detach().item()),
+                            "batch_size": int(atac_wins.shape[0]),
+                            "num_windows": int(atac_wins.shape[1]),
+                            "num_tfs": int(tf_tensor.shape[1]),
+                            "num_tgs": int(targets.shape[1]),
+                        })
+
+                    if monitor_gpu_memory and device.type == "cuda":
+                        gpu_mem_log.append({
+                            "epoch": epoch,
+                            "step": i,
+                            "allocated_mb": torch.cuda.memory_allocated() / 1024**2,
+                            "reserved_mb": torch.cuda.memory_reserved() / 1024**2,
+                        })
+
+                    total_loss += loss.detach().item()
+                    n_batches += 1
+                    i += 1
+
+                    pbar.update(1)
+
+            if n_batches % grad_accum_steps != 0:
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad(set_to_none=True)
+
+            avg_loss = total_loss / max(1, n_batches)
+            epoch_end_time = time.time()
+
+            avg_val_mse_scaled = None
+            avg_val_mse_unscaled = None
+            r2_s = None
+            r2_u = None
+
+            if val_loader is not None and ((epoch + 1) % validate_every == 0):
+                avg_val_mse_scaled, avg_val_mse_unscaled, r2_s, r2_u = self._validate_simple(
+                    model=model,
+                    val_loader=val_loader,
+                    device=device,
+                    amp_enabled=amp_enabled,
+                )
+                scheduler.step(avg_val_mse_unscaled)
+
+            current_lr = optimizer.param_groups[0]["lr"]
+
+            epoch_log.append({
+                "epoch": epoch + 1,
+                "train_loss": avg_loss,
+                "val_mse_unscaled": avg_val_mse_unscaled,
+                "r2_unscaled": r2_u,
+                "r2_scaled": r2_s,
+                "lr": current_lr,
+                "epoch_time_s": epoch_end_time - epoch_start_time,
+            })
+
+            if verbose:
+                if avg_val_mse_unscaled is not None:
+                    print(
+                        f"Epoch {epoch+1}/{num_epochs} | "
+                        f"Train Loss: {avg_loss:.4f} | "
+                        f"Val MSE: {avg_val_mse_unscaled:.4f} | "
+                        f"R2 (Unscaled): {r2_u:.3f} | "
+                        f"R2 (Scaled): {r2_s:.3f} | "
+                        f"LR: {current_lr:.2e} | "
+                        f"Time: {epoch_end_time - epoch_start_time:.1f}s"
+                    )
+                else:
+                    print(
+                        f"Epoch {epoch+1}/{num_epochs} | "
+                        f"Train Loss: {avg_loss:.4f} | "
+                        f"LR: {current_lr:.2e} | "
+                        f"Time: {epoch_end_time - epoch_start_time:.1f}s"
+                    )
+
+        self.gpu_mem_log_df = pd.DataFrame(gpu_mem_log)
+        self.batch_profile_df = pd.DataFrame(batch_profile_log)
+        self.epoch_log_df = pd.DataFrame(epoch_log)
 
         return model
-        
+    
+    def _validate_simple(self, model, val_loader, device, amp_enabled):
+        model.eval()
+
+        tf_scaler = getattr(self, "tf_scaler", None)
+        tg_scaler = getattr(self, "tg_scaler", None)
+
+        total_loss_scaled = 0.0
+        total_loss_unscaled = 0.0
+        n_batches = 0
+
+        sse_s = 0.0
+        sumy_s = 0.0
+        sumy2_s = 0.0
+        n_s = 0
+
+        sse_u = 0.0
+        sumy_u = 0.0
+        sumy2_u = 0.0
+        n_u = 0
+
+        with torch.no_grad():
+            for batch in val_loader:
+                atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids, _ = batch
+
+                atac_wins = atac_wins.to(device, non_blocking=True)
+                tf_tensor = tf_tensor.to(device, non_blocking=True)
+                targets   = targets.to(device, non_blocking=True)
+                bias      = bias.to(device, non_blocking=True) if bias is not None else None
+                tf_ids    = tf_ids.to(device, non_blocking=True)
+                tg_ids    = tg_ids.to(device, non_blocking=True)
+
+                if tf_scaler is not None:
+                    tf_tensor = tf_scaler.transform(tf_tensor, tf_ids)
+
+                if tg_scaler is not None:
+                    targets_s = tg_scaler.transform(targets, tg_ids)
+                else:
+                    targets_s = targets
+
+                with torch.autocast(device_type=device.type, enabled=amp_enabled):
+                    preds_s = model(
+                        atac_wins,
+                        tf_tensor,
+                        tf_ids=tf_ids,
+                        tg_ids=tg_ids,
+                        bias=bias,
+                    )
+
+                preds_s = torch.nan_to_num(preds_s.float(), nan=0.0, posinf=1e6, neginf=-1e6)
+                targets_s = torch.nan_to_num(targets_s.float(), nan=0.0, posinf=1e6, neginf=-1e6)
+
+                loss_s = F.mse_loss(preds_s, targets_s)
+                total_loss_scaled += float(loss_s.item())
+
+                y_s = targets_s.reshape(-1)
+                p_s = preds_s.reshape(-1)
+                sse_s += float(torch.sum((y_s - p_s) ** 2).item())
+                sumy_s += float(torch.sum(y_s).item())
+                sumy2_s += float(torch.sum(y_s ** 2).item())
+                n_s += y_s.numel()
+
+                if tg_scaler is not None:
+                    targets_u = tg_scaler.inverse_transform(targets_s, tg_ids)
+                    preds_u = tg_scaler.inverse_transform(preds_s, tg_ids)
+                else:
+                    targets_u, preds_u = targets_s, preds_s
+
+                targets_u = torch.nan_to_num(targets_u.float(), nan=0.0, posinf=1e6, neginf=-1e6)
+                preds_u = torch.nan_to_num(preds_u.float(), nan=0.0, posinf=1e6, neginf=-1e6)
+
+                loss_u = F.mse_loss(preds_u, targets_u)
+                total_loss_unscaled += float(loss_u.item())
+
+                y_u = targets_u.reshape(-1)
+                p_u = preds_u.reshape(-1)
+                sse_u += float(torch.sum((y_u - p_u) ** 2).item())
+                sumy_u += float(torch.sum(y_u).item())
+                sumy2_u += float(torch.sum(y_u ** 2).item())
+                n_u += y_u.numel()
+
+                n_batches += 1
+
+        if n_batches == 0 or n_s == 0 or n_u == 0:
+            return 0.0, 0.0, 0.0, 0.0
+
+        eps = 1e-12
+
+        ybar_s = sumy_s / max(n_s, 1)
+        sst_s = sumy2_s - n_s * (ybar_s ** 2)
+        r2_s = 0.0 if sst_s <= eps else 1.0 - (sse_s / max(sst_s, eps))
+
+        ybar_u = sumy_u / max(n_u, 1)
+        sst_u = sumy2_u - n_u * (ybar_u ** 2)
+        r2_u = 0.0 if sst_u <= eps else 1.0 - (sse_u / max(sst_u, eps))
+
+        avg_loss_scaled = total_loss_scaled / max(1, n_batches)
+        avg_loss_unscaled = total_loss_unscaled / max(1, n_batches)
+
+        return avg_loss_scaled, avg_loss_unscaled, r2_s, r2_u
     
     def load_grn_old(self, method="gradient attribution", zscore_method="median_mad"):
         """
@@ -793,12 +1159,14 @@ class ExperimentLoader:
                 if getattr(self, "tf_scaler", None) is not None:
                     tf_tensor = self.tf_scaler.transform(tf_tensor, tf_ids)
 
-                out, _, _ = self.model(
+                out = self.model(
                     atac_wins, tf_tensor,
                     tf_ids=tf_ids, tg_ids=tg_ids,
                     bias=bias#, motif_mask=motif_mask,
                     #return_shortcut_contrib=False,
                 )
+                if type(out) == tuple:
+                    out = out[0]
 
                 pred = self.tg_scaler.inverse_transform(out, ids=tg_ids).detach().cpu().numpy()
                 true = tg_expr_true.detach().cpu().numpy()

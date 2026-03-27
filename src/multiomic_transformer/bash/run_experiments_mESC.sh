@@ -4,9 +4,9 @@
 #SBATCH --error=LOGS/transformer_logs/experiments/%x_%A/%x_%A_%a.err
 #SBATCH --time=42:00:00
 #SBATCH -p dense
-#SBATCH -N 2
+#SBATCH -N 1
 #SBATCH --ntasks-per-node=1
-#SBATCH --gres=gpu:a100:3
+#SBATCH --gres=gpu:a100:1
 #SBATCH -c 12
 #SBATCH --mem=128G
 #SBATCH --array=0%1
@@ -90,6 +90,7 @@ DEFAULT_FILTER_RNA=true
 DEFAULT_FILTER_ATAC=true
 DEFAULT_MIN_RNA_DISP=0.5
 DEFAULT_MIN_ATAC_DISP=0.5
+DEFAULT_KERNEL_SIZE=16
 DEFAULT_SAMPLE_NAMES="E7.5_rep1" # E7.5_rep2 E7.75_rep1 E8.75_rep2 E8.0_rep1 E8.0_rep2 E8.5_rep1 E8.5_rep2 
 
 
@@ -303,7 +304,7 @@ EXPERIMENTS=(
     # "E8.5_rep1_muon_preprocessing|mESC_E8.5_rep1_muon_preprocessing|D_MODEL=128;D_FF=512;SAMPLE_NAMES=E8.5_rep1"
     # "E8.5_rep2_muon_preprocessing|mESC_E8.5_rep2_muon_preprocessing|D_MODEL=128;D_FF=512;SAMPLE_NAMES=E8.5_rep2"
 
-    "muon_preprocessing_simplified_pooling|mESC_muon_preprocessing_simplified_pooling|D_MODEL=128;D_FF=512;SAMPLE_NAMES=E7.5_rep1"
+    "muon_preprocessing_simplified_pooling|mESC_muon_preprocessing_simplified_pooling|D_MODEL=128;D_FF=512;KERNEL_SIZE=32;SAMPLE_NAMES=E7.5_rep1"
 
 )
 
@@ -405,6 +406,7 @@ SHORTCUT_DROPOUT=${DEFAULT_SHORTCUT_DROPOUT}
 SUBSAMPLE_SEED=${DEFAULT_SUBSAMPLE_SEED}
 ALLOWED_SAMPLES=${DEFAULT_ALLOWED_SAMPLES}
 RESUME_CHECKPOINT_PATH=${DEFAULT_RESUME_CHECKPOINT_PATH}
+KERNEL_SIZE=${DEFAULT_KERNEL_SIZE}
 
 # Apply parameter overrides
 if [ -n "${PARAM_OVERRIDES}" ]; then
@@ -481,6 +483,7 @@ if [ -n "${PARAM_OVERRIDES}" ]; then
                 SUBSAMPLE_SEED) SUBSAMPLE_SEED=$param_value ;;
                 ALLOWED_SAMPLES) ALLOWED_SAMPLES=$param_value ;;
                 RESUME_CHECKPOINT_PATH) RESUME_CHECKPOINT_PATH=$param_value ;;
+                KERNEL_SIZE) KERNEL_SIZE=$param_value ;;
                 *) echo "WARNING: Unknown parameter: $param_name" ;;
             esac
         fi
@@ -578,7 +581,7 @@ write_param_csv_row() {
         USE_DISTANCE_BIAS USE_SHORTCUT USE_MOTIF_MASK
         MOTIF_MASK_THRESH MOTIF_PRIOR_SCALE ATTN_BIAS_SCALE
         SHORTCUT_L1 SHORTCUT_L2 SHORTCUT_TOPK SHORTCUT_DROPOUT
-        SUBSAMPLE_SEED ALLOWED_SAMPLES RESUME_CHECKPOINT_PATH
+        SUBSAMPLE_SEED ALLOWED_SAMPLES RESUME_CHECKPOINT_PATH KERNEL_SIZE
     )
 
     for p in "${PARAM_NAMES[@]}"; do
@@ -723,6 +726,7 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
         --num_layers ${NUM_LAYERS} \
         --d_ff ${D_FF} \
         --dropout ${DROPOUT} \
+        --kernel_size ${KERNEL_SIZE} \
         --motif_mask_thresh ${MOTIF_MASK_THRESH} \
         --motif_prior_scale ${MOTIF_PRIOR_SCALE} \
         --attn_bias_scale ${ATTN_BIAS_SCALE} \
@@ -951,7 +955,6 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
             --experiment "${DATASET_NAME}" \
             --training_num "${TRAINING_NUM}" \
             --experiment_dir "${EXPERIMENT_DIR}" \
-            --model_file "${MODEL_FILE}" \
             --dataset_type "mESC" \
             --sample_name_list "${SAMPLE_NAMES}"
 

@@ -139,6 +139,8 @@ def parse_training_args():
                         help="Scale for motif prior scores")
     parser.add_argument("--attn_bias_scale", type=float, default=2.0,
                         help="Scale for attention bias")
+    parser.add_argument("--kernel_size", type=int, default=16,
+                        help="Size of the kernel for convolutional layers")
     
     # ----- Shortcut Parameters -----
     parser.add_argument("--shortcut_l1", type=float, default=0.0,
@@ -183,7 +185,7 @@ def setup_training_globals(args):
     global TOTAL_EPOCHS, BATCH_SIZE, PATIENCE, SAVE_EVERY_N_EPOCHS
     global CORR_LOSS_WEIGHT, EDGE_LOSS_WEIGHT, COS_WEIGHT, SHORTCUT_REG_WEIGHT
     global GRAD_ACCUM_STEPS, USE_GRAD_ACCUMULATION, USE_GRAD_CHECKPOINTING
-    global MODE, INITIAL_LEARNING_RATE, SCHEDULER_FACTOR, SCHEDULER_PATIENCE
+    global MODE, INITIAL_LEARNING_RATE, SCHEDULER_FACTOR, SCHEDULER_PATIENCE, KERNEL_SIZE
     global THRESHOLD, THRESHOLD_MODE, COOLDOWN, MIN_LR
     global D_MODEL, NUM_HEADS, NUM_LAYERS, D_FF, DROPOUT
     global USE_DISTANCE_BIAS, USE_SHORTCUT, USE_MOTIF_MASK
@@ -242,6 +244,7 @@ def setup_training_globals(args):
     # D_FF defaults to 4 * D_MODEL if not specified
     D_FF = args.d_ff if args.d_ff is not None else (D_MODEL * 4)
     DROPOUT = args.dropout
+    KERNEL_SIZE = args.kernel_size
     
     # ----- Model Features -----
     USE_DISTANCE_BIAS = args.use_distance_bias
@@ -1145,7 +1148,7 @@ def load_train_objs(run_cfg):
         chrom_ids=CHROM_IDS,
         tf_vocab_path=os.path.join(COMMON_DATA, "tf_vocab.json"),
         tg_vocab_path=os.path.join(COMMON_DATA, "tg_vocab.json"),
-        max_cached=2,
+        max_cached=100,
         subset_seed=SUBSAMPLE_SEED,
         allowed_samples=ALLOWED_SAMPLES
     )
@@ -1163,6 +1166,7 @@ def load_train_objs(run_cfg):
         tg_vocab_size=tg_vocab_size,
         bias_scale=ATTN_BIAS_SCALE,
         use_bias=run_cfg["use_dist_bias"],
+        window_pool_size=KERNEL_SIZE,
     )
     
     # Compile model if requested (before DDP wrapping) - GPU-aware
@@ -1191,7 +1195,7 @@ def load_train_objs(run_cfg):
     return dataset, model, optimizer
 
 def prepare_dataloader(dataset, batch_size, world_size=1, rank=0,
-                       num_workers=0, pin_memory=True, seed=42, drop_last=True):
+                       num_workers=4, pin_memory=True, seed=42, drop_last=True):
     """
     Build train/val/test loaders.
 
@@ -1288,6 +1292,7 @@ def prepare_dataloader(dataset, batch_size, world_size=1, rank=0,
             collate_fn=MultiChromosomeDataset.collate_fn,
             num_workers=num_workers,
             pin_memory=pin_memory,
+            persistent_workers=num_workers > 0,
         )
         val_loader = DataLoader(
             dataset,
@@ -1295,6 +1300,7 @@ def prepare_dataloader(dataset, batch_size, world_size=1, rank=0,
             collate_fn=MultiChromosomeDataset.collate_fn,
             num_workers=num_workers,
             pin_memory=pin_memory,
+            persistent_workers=num_workers > 0,
         )
         test_loader = DataLoader(
             dataset,
@@ -1302,54 +1308,10 @@ def prepare_dataloader(dataset, batch_size, world_size=1, rank=0,
             collate_fn=MultiChromosomeDataset.collate_fn,
             num_workers=num_workers,
             pin_memory=pin_memory,
+            persistent_workers=num_workers > 0,
         )
         return train_loader, val_loader, test_loader
 
-    # ---------- Single-chromosome / legacy path (unchanged) ----------
-    n_total = len(dataset)
-    n_train = int(n_total * 0.70)
-    n_val   = int(n_total * 0.15)
-    n_test  = n_total - n_train - n_val
-
-    train_set, val_set, test_set = random_split(dataset, [n_train, n_val, n_test], generator=g)
-
-    train_sampler = val_sampler = test_sampler = None
-    if world_size > 1:
-        train_sampler = DistributedSampler(train_set, num_replicas=world_size, rank=rank, drop_last=drop_last)
-        val_sampler   = DistributedSampler(val_set,   num_replicas=world_size, rank=rank, drop_last=False)
-        test_sampler  = DistributedSampler(test_set,  num_replicas=world_size, rank=rank, drop_last=False)
-
-    train_loader = DataLoader(
-        train_set,
-        batch_size=batch_size,
-        shuffle=(train_sampler is None),
-        sampler=train_sampler,
-        collate_fn=MultiomicTransformerDataset.collate_fn,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
-        drop_last=drop_last,
-    )
-    val_loader = DataLoader(
-        val_set,
-        batch_size=batch_size,
-        shuffle=False,
-        sampler=val_sampler,
-        collate_fn=MultiomicTransformerDataset.collate_fn,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
-        drop_last=False,
-    )
-    test_loader = DataLoader(
-        test_set,
-        batch_size=batch_size,
-        shuffle=False,
-        sampler=test_sampler,
-        collate_fn=MultiomicTransformerDataset.collate_fn,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
-        drop_last=False,
-    )
-    return train_loader, val_loader, test_loader
 
 def write_run_parameters(dataset, out_dir, world_size):
 
