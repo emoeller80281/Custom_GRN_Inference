@@ -700,7 +700,12 @@ class ExperimentLoader:
         batch_profile_log = []
         epoch_log = []
 
-        for epoch in range(num_epochs):
+        epoch_iter = range(num_epochs)
+
+        if not verbose:
+            epoch_iter = tqdm(epoch_iter, desc="Training", ncols=100, unit="epoch", total=num_epochs)
+
+        for epoch in epoch_iter:
             epoch_start_time = time.time()
             model.train()
             total_loss = 0.0
@@ -723,141 +728,149 @@ class ExperimentLoader:
             except TypeError:
                 total_batches = max_batches
 
-            with tqdm(total=total_batches, desc=f"Epoch {epoch+1}/{num_epochs}", ncols=100, leave=False) as pbar:
-                while True:
-                    if max_batches is not None and i >= max_batches:
-                        break
+            if verbose:
+                pbar = tqdm(total=total_batches, desc=f"Epoch {epoch+1}/{num_epochs}", ncols=100, leave=False)
+            else:
+                pbar = None
 
-                    t0 = time.perf_counter()
-                    try:
-                        batch = next(data_iter)
-                    except StopIteration:
-                        break
-                    t1 = time.perf_counter()
+            while True:
+                if max_batches is not None and i >= max_batches:
+                    break
 
-                    atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids, _ = batch
+                t0 = time.perf_counter()
+                try:
+                    batch = next(data_iter)
+                except StopIteration:
+                    break
+                t1 = time.perf_counter()
+
+                atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids, _ = batch
+
+                if device.type == "cuda":
+                    torch.cuda.synchronize()
+                t2 = time.perf_counter()
+
+                atac_wins = atac_wins.to(device, non_blocking=True)
+                tf_tensor = tf_tensor.to(device, non_blocking=True)
+                targets   = targets.to(device, non_blocking=True)
+                bias      = bias.to(device, non_blocking=True) if bias is not None else None
+                tf_ids    = tf_ids.to(device, non_blocking=True)
+                tg_ids    = tg_ids.to(device, non_blocking=True)
+
+                if device.type == "cuda":
+                    torch.cuda.synchronize()
+                t3 = time.perf_counter()
+
+                if tf_scaler is not None or tg_scaler is not None:
+                    if device.type == "cuda":
+                        torch.cuda.synchronize()
+                    t4 = time.perf_counter()
+
+                    if tf_scaler is not None:
+                        tf_tensor = tf_scaler.transform(tf_tensor, tf_ids)
+                    if tg_scaler is not None:
+                        targets = tg_scaler.transform(targets, tg_ids)
 
                     if device.type == "cuda":
                         torch.cuda.synchronize()
-                    t2 = time.perf_counter()
+                    t5 = time.perf_counter()
+                else:
+                    t4 = t5 = time.perf_counter()
 
-                    atac_wins = atac_wins.to(device, non_blocking=True)
-                    tf_tensor = tf_tensor.to(device, non_blocking=True)
-                    targets   = targets.to(device, non_blocking=True)
-                    bias      = bias.to(device, non_blocking=True) if bias is not None else None
-                    tf_ids    = tf_ids.to(device, non_blocking=True)
-                    tg_ids    = tg_ids.to(device, non_blocking=True)
+                if device.type == "cuda":
+                    torch.cuda.synchronize()
+                t6 = time.perf_counter()
+
+                with torch.autocast(device_type=device.type, enabled=amp_enabled):
+                    preds = model(
+                        atac_wins,
+                        tf_tensor,
+                        tf_ids=tf_ids,
+                        tg_ids=tg_ids,
+                        bias=bias,
+                    )
+                    loss = loss_fn(preds, targets)
+
+                if device.type == "cuda":
+                    torch.cuda.synchronize()
+                t7 = time.perf_counter()
+
+                if device.type == "cuda":
+                    torch.cuda.synchronize()
+                t8 = time.perf_counter()
+
+                loss_for_backward = loss / grad_accum_steps
+                scaler.scale(loss_for_backward).backward()
+
+                if device.type == "cuda":
+                    torch.cuda.synchronize()
+                t9 = time.perf_counter()
+
+                stepped = False
+                if (i + 1) % grad_accum_steps == 0:
+                    if device.type == "cuda":
+                        torch.cuda.synchronize()
+                    t10 = time.perf_counter()
+
+                    scaler.step(optimizer)
+                    scaler.update()
+                    optimizer.zero_grad(set_to_none=True)
+                    stepped = True
 
                     if device.type == "cuda":
                         torch.cuda.synchronize()
-                    t3 = time.perf_counter()
+                    t11 = time.perf_counter()
+                else:
+                    t10 = t11 = time.perf_counter()
 
-                    if tf_scaler is not None or tg_scaler is not None:
-                        if device.type == "cuda":
-                            torch.cuda.synchronize()
-                        t4 = time.perf_counter()
+                if profile_batches:
+                    batch_profile_log.append({
+                        "epoch": epoch,
+                        "step": i,
+                        "loader_s": t1 - t0,
+                        "transfer_s": t3 - t2,
+                        "scaler_s": t5 - t4,
+                        "forward_s": t7 - t6,
+                        "backward_s": t9 - t8,
+                        "optim_s": t11 - t10 if stepped else 0.0,
+                        "total_step_s": (t11 if stepped else t9) - t0,
+                        "loss": float(loss.detach().item()),
+                        "batch_size": int(atac_wins.shape[0]),
+                        "num_windows": int(atac_wins.shape[1]),
+                        "num_tfs": int(tf_tensor.shape[1]),
+                        "num_tgs": int(targets.shape[1]),
+                    })
+                    # batch_profile_df = pd.DataFrame(batch_profile_log)
+                    # print(batch_profile_df[["loader_s", "transfer_s", "forward_s", "backward_s", "optim_s"]].mean())
 
-                        if tf_scaler is not None:
-                            tf_tensor = tf_scaler.transform(tf_tensor, tf_ids)
-                        if tg_scaler is not None:
-                            targets = tg_scaler.transform(targets, tg_ids)
+                if monitor_gpu_memory and device.type == "cuda":
+                    free_bytes, total_bytes = torch.cuda.mem_get_info()
+                    allocated_mb = torch.cuda.memory_allocated() / 1024**2
+                    reserved_mb = torch.cuda.memory_reserved() / 1024**2
+                    free_mb = free_bytes / 1024**2
+                    total_mb = total_bytes / 1024**2
 
-                        if device.type == "cuda":
-                            torch.cuda.synchronize()
-                        t5 = time.perf_counter()
-                    else:
-                        t4 = t5 = time.perf_counter()
+                    gpu_mem_log.append({
+                        "epoch": epoch,
+                        "step": i,
+                        "allocated_mb": allocated_mb,
+                        "reserved_mb": reserved_mb,
+                        "free_mb": free_mb,
+                        "total_memory_mb": total_mb,
+                        "allocated_pct_total": 100 * allocated_mb / total_mb,
+                        "reserved_pct_total": 100 * reserved_mb / total_mb,
+                        "free_pct_total": 100 * free_mb / total_mb,
+                    })
 
-                    if device.type == "cuda":
-                        torch.cuda.synchronize()
-                    t6 = time.perf_counter()
-
-                    with torch.autocast(device_type=device.type, enabled=amp_enabled):
-                        preds = model(
-                            atac_wins,
-                            tf_tensor,
-                            tf_ids=tf_ids,
-                            tg_ids=tg_ids,
-                            bias=bias,
-                        )
-                        loss = loss_fn(preds, targets)
-
-                    if device.type == "cuda":
-                        torch.cuda.synchronize()
-                    t7 = time.perf_counter()
-
-                    if device.type == "cuda":
-                        torch.cuda.synchronize()
-                    t8 = time.perf_counter()
-
-                    loss_for_backward = loss / grad_accum_steps
-                    scaler.scale(loss_for_backward).backward()
-
-                    if device.type == "cuda":
-                        torch.cuda.synchronize()
-                    t9 = time.perf_counter()
-
-                    stepped = False
-                    if (i + 1) % grad_accum_steps == 0:
-                        if device.type == "cuda":
-                            torch.cuda.synchronize()
-                        t10 = time.perf_counter()
-
-                        scaler.step(optimizer)
-                        scaler.update()
-                        optimizer.zero_grad(set_to_none=True)
-                        stepped = True
-
-                        if device.type == "cuda":
-                            torch.cuda.synchronize()
-                        t11 = time.perf_counter()
-                    else:
-                        t10 = t11 = time.perf_counter()
-
-                    if profile_batches:
-                        batch_profile_log.append({
-                            "epoch": epoch,
-                            "step": i,
-                            "loader_s": t1 - t0,
-                            "transfer_s": t3 - t2,
-                            "scaler_s": t5 - t4,
-                            "forward_s": t7 - t6,
-                            "backward_s": t9 - t8,
-                            "optim_s": t11 - t10 if stepped else 0.0,
-                            "total_step_s": (t11 if stepped else t9) - t0,
-                            "loss": float(loss.detach().item()),
-                            "batch_size": int(atac_wins.shape[0]),
-                            "num_windows": int(atac_wins.shape[1]),
-                            "num_tfs": int(tf_tensor.shape[1]),
-                            "num_tgs": int(targets.shape[1]),
-                        })
-                        # batch_profile_df = pd.DataFrame(batch_profile_log)
-                        # print(batch_profile_df[["loader_s", "transfer_s", "forward_s", "backward_s", "optim_s"]].mean())
-
-                    if monitor_gpu_memory and device.type == "cuda":
-                        free_bytes, total_bytes = torch.cuda.mem_get_info()
-                        allocated_mb = torch.cuda.memory_allocated() / 1024**2
-                        reserved_mb = torch.cuda.memory_reserved() / 1024**2
-                        free_mb = free_bytes / 1024**2
-                        total_mb = total_bytes / 1024**2
-
-                        gpu_mem_log.append({
-                            "epoch": epoch,
-                            "step": i,
-                            "allocated_mb": allocated_mb,
-                            "reserved_mb": reserved_mb,
-                            "free_mb": free_mb,
-                            "total_memory_mb": total_mb,
-                            "allocated_pct_total": 100 * allocated_mb / total_mb,
-                            "reserved_pct_total": 100 * reserved_mb / total_mb,
-                            "free_pct_total": 100 * free_mb / total_mb,
-                        })
-
-                    total_loss += loss.detach().item()
-                    n_batches += 1
-                    i += 1
-
+                total_loss += loss.detach().item()
+                n_batches += 1
+                i += 1
+                
+                if pbar is not None:
                     pbar.update(1)
+            
+            if pbar is not None:
+                pbar.close()
 
             if n_batches % grad_accum_steps != 0:
                 scaler.step(optimizer)
