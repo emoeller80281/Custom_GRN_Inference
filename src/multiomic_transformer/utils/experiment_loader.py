@@ -710,6 +710,9 @@ class ExperimentLoader:
             model.train()
             total_loss = 0.0
             n_batches = 0
+            
+            if device.type == "cuda":
+                torch.cuda.reset_peak_memory_stats()
 
             optimizer.zero_grad(set_to_none=True)
 
@@ -895,6 +898,13 @@ class ExperimentLoader:
                 scheduler.step(avg_val_mse_unscaled)
 
             current_lr = optimizer.param_groups[0]["lr"]
+            
+            if device.type == "cuda":
+                peak_alloc_mb = torch.cuda.max_memory_allocated() / 1024**2
+                peak_reserved_mb = torch.cuda.max_memory_reserved() / 1024**2
+            else:
+                peak_alloc_mb = None
+                peak_reserved_mb = None
 
             epoch_log.append({
                 "epoch": epoch + 1,

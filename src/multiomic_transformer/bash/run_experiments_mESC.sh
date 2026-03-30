@@ -9,7 +9,7 @@
 #SBATCH --gres=gpu:a100:1
 #SBATCH -c 12
 #SBATCH --mem=128G
-#SBATCH --array=0-5%6
+#SBATCH --array=0-8%1
 
 set -euo pipefail
 
@@ -309,17 +309,15 @@ EXPERIMENTS=(
     # "E8.5_rep1_muon_preprocessing|mESC_E8.5_rep1_muon_preprocessing|D_MODEL=128;D_FF=512;SAMPLE_NAMES=E8.5_rep1"
     # "E8.5_rep2_muon_preprocessing|mESC_E8.5_rep2_muon_preprocessing|D_MODEL=128;D_FF=512;SAMPLE_NAMES=E8.5_rep2"
 
-    # "muon_preprocessing_simplified_pooling|mESC_muon_preprocessing_simplified_pooling|D_MODEL=128;D_FF=512;KERNEL_SIZE=32;SAMPLE_NAMES=E7.5_rep1"
-    # "muon_preprocessing_simplified_pooling|mESC_muon_preprocessing_simplified_pooling|D_MODEL=128;D_FF=512;KERNEL_SIZE=64;SAMPLE_NAMES=E7.5_rep1"
-    # "muon_preprocessing_simplified_pooling|mESC_muon_preprocessing_simplified_pooling|D_MODEL=128;D_FF=512;KERNEL_SIZE=128;SAMPLE_NAMES=E7.5_rep1"
-    # "muon_preprocessing_simplified_pooling|mESC_muon_preprocessing_simplified_pooling|D_MODEL=128;D_FF=512;KERNEL_SIZE=256;SAMPLE_NAMES=E7.5_rep1"
-    "muon_preprocessing_simplified_pooling|mESC_muon_preprocessing_simplified_pooling|D_MODEL=128;D_FF=512;KERNEL_SIZE=32;SAMPLE_NAMES=E7.5_rep1"
-    "muon_preprocessing_simplified_pooling|mESC_muon_preprocessing_simplified_pooling|D_MODEL=128;D_FF=512;KERNEL_SIZE=16;SAMPLE_NAMES=E7.5_rep1"
-    "muon_preprocessing_simplified_pooling|mESC_muon_preprocessing_simplified_pooling|D_MODEL=128;D_FF=512;KERNEL_SIZE=8;SAMPLE_NAMES=E7.5_rep1"
-    "muon_preprocessing_simplified_pooling|mESC_muon_preprocessing_simplified_pooling|D_MODEL=128;D_FF=512;KERNEL_SIZE=4;SAMPLE_NAMES=E7.5_rep1"
-    "muon_preprocessing_simplified_pooling|mESC_muon_preprocessing_simplified_pooling|D_MODEL=128;D_FF=512;KERNEL_SIZE=2;SAMPLE_NAMES=E7.5_rep1"
-    "muon_preprocessing_simplified_pooling|mESC_muon_preprocessing_simplified_pooling|D_MODEL=128;D_FF=512;KERNEL_SIZE=1;SAMPLE_NAMES=E7.5_rep1"
-
+    "muon_preprocessing_simplified_kernel_size|mESC_muon_preprocessing_simplified_kernel_size|D_MODEL=128;D_FF=512;BATCH_SIZE=32;KERNEL_SIZE=256;SAMPLE_NAMES=E7.5_rep1"
+    "muon_preprocessing_simplified_kernel_size|mESC_muon_preprocessing_simplified_kernel_size|D_MODEL=128;D_FF=512;BATCH_SIZE=32;KERNEL_SIZE=128;SAMPLE_NAMES=E7.5_rep1"
+    "muon_preprocessing_simplified_kernel_size|mESC_muon_preprocessing_simplified_kernel_size|D_MODEL=128;D_FF=512;BATCH_SIZE=32;KERNEL_SIZE=64;SAMPLE_NAMES=E7.5_rep1"
+    "muon_preprocessing_simplified_kernel_size|mESC_muon_preprocessing_simplified_kernel_size|D_MODEL=128;D_FF=512;BATCH_SIZE=32;KERNEL_SIZE=32;SAMPLE_NAMES=E7.5_rep1"
+    "muon_preprocessing_simplified_kernel_size|mESC_muon_preprocessing_simplified_kernel_size|D_MODEL=128;D_FF=512;BATCH_SIZE=32;KERNEL_SIZE=16;SAMPLE_NAMES=E7.5_rep1"
+    "muon_preprocessing_simplified_kernel_size|mESC_muon_preprocessing_simplified_kernel_size|D_MODEL=128;D_FF=512;BATCH_SIZE=32;KERNEL_SIZE=8;SAMPLE_NAMES=E7.5_rep1"
+    "muon_preprocessing_simplified_kernel_size|mESC_muon_preprocessing_simplified_kernel_size|D_MODEL=128;D_FF=512;BATCH_SIZE=32;KERNEL_SIZE=4;SAMPLE_NAMES=E7.5_rep1"
+    "muon_preprocessing_simplified_kernel_size|mESC_muon_preprocessing_simplified_kernel_size|D_MODEL=128;D_FF=512;BATCH_SIZE=32;KERNEL_SIZE=2;SAMPLE_NAMES=E7.5_rep1"
+    "muon_preprocessing_simplified_kernel_size|mESC_muon_preprocessing_simplified_kernel_size|D_MODEL=128;D_FF=512;BATCH_SIZE=32;KERNEL_SIZE=1;SAMPLE_NAMES=E7.5_rep1"
 )
 
 
