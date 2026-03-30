@@ -9,9 +9,14 @@
 #SBATCH --gres=gpu:a100:1
 #SBATCH -c 12
 #SBATCH --mem=128G
-#SBATCH --array=0%1
+#SBATCH --array=0-5%6
 
 set -euo pipefail
+
+# Delay to avoid simultaneous start of all jobs in the array
+DELAY=$((SLURM_ARRAY_TASK_ID * 30))
+echo "[INFO] Task ${SLURM_ARRAY_TASK_ID} sleeping ${DELAY}s before start"
+sleep $DELAY
 
 cd /gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER
 module load bedtools
@@ -305,9 +310,15 @@ EXPERIMENTS=(
     # "E8.5_rep2_muon_preprocessing|mESC_E8.5_rep2_muon_preprocessing|D_MODEL=128;D_FF=512;SAMPLE_NAMES=E8.5_rep2"
 
     # "muon_preprocessing_simplified_pooling|mESC_muon_preprocessing_simplified_pooling|D_MODEL=128;D_FF=512;KERNEL_SIZE=32;SAMPLE_NAMES=E7.5_rep1"
-    "muon_preprocessing_simplified_pooling|mESC_muon_preprocessing_simplified_pooling|D_MODEL=128;D_FF=512;KERNEL_SIZE=64;SAMPLE_NAMES=E7.5_rep1"
+    # "muon_preprocessing_simplified_pooling|mESC_muon_preprocessing_simplified_pooling|D_MODEL=128;D_FF=512;KERNEL_SIZE=64;SAMPLE_NAMES=E7.5_rep1"
     # "muon_preprocessing_simplified_pooling|mESC_muon_preprocessing_simplified_pooling|D_MODEL=128;D_FF=512;KERNEL_SIZE=128;SAMPLE_NAMES=E7.5_rep1"
     # "muon_preprocessing_simplified_pooling|mESC_muon_preprocessing_simplified_pooling|D_MODEL=128;D_FF=512;KERNEL_SIZE=256;SAMPLE_NAMES=E7.5_rep1"
+    "muon_preprocessing_simplified_pooling|mESC_muon_preprocessing_simplified_pooling|D_MODEL=128;D_FF=512;KERNEL_SIZE=32;SAMPLE_NAMES=E7.5_rep1"
+    "muon_preprocessing_simplified_pooling|mESC_muon_preprocessing_simplified_pooling|D_MODEL=128;D_FF=512;KERNEL_SIZE=16;SAMPLE_NAMES=E7.5_rep1"
+    "muon_preprocessing_simplified_pooling|mESC_muon_preprocessing_simplified_pooling|D_MODEL=128;D_FF=512;KERNEL_SIZE=8;SAMPLE_NAMES=E7.5_rep1"
+    "muon_preprocessing_simplified_pooling|mESC_muon_preprocessing_simplified_pooling|D_MODEL=128;D_FF=512;KERNEL_SIZE=4;SAMPLE_NAMES=E7.5_rep1"
+    "muon_preprocessing_simplified_pooling|mESC_muon_preprocessing_simplified_pooling|D_MODEL=128;D_FF=512;KERNEL_SIZE=2;SAMPLE_NAMES=E7.5_rep1"
+    "muon_preprocessing_simplified_pooling|mESC_muon_preprocessing_simplified_pooling|D_MODEL=128;D_FF=512;KERNEL_SIZE=1;SAMPLE_NAMES=E7.5_rep1"
 
 )
 

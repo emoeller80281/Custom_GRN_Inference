@@ -1530,6 +1530,7 @@ def main(rank: int, local_rank: int, world_size: int, save_every: int, total_epo
                 "shortcut_topk":        g("shortcut_topk", SHORTCUT_TOPK),
                 "shortcut_dropout":     g("shortcut_dropout", SHORTCUT_DROPOUT),
                 "lr":                   g("lr", INITIAL_LEARNING_RATE),
+                "kernel_size":          g("kernel_size", KERNEL_SIZE),
             }
 
         else:
@@ -1547,6 +1548,7 @@ def main(rank: int, local_rank: int, world_size: int, save_every: int, total_epo
                 "num_layers":           NUM_LAYERS,
                 "num_heads":            NUM_HEADS,
                 "d_ff":                 D_FF,
+                "kernel_size":          KERNEL_SIZE,
                 "dropout":              DROPOUT,
                 "use_grad_ckpt":        USE_GRAD_CHECKPOINTING,
                 "use_shortcut":         USE_SHORTCUT,

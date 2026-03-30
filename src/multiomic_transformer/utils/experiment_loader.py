@@ -54,10 +54,12 @@ class ExperimentLoader:
         self.model_num = model_num
         self.silence_warnings = silence_warnings
         
+        model_str = f"{model_num:03d}"
+
         if "chr19" in [p.name for p in (Path(experiment_dir) / experiment_name).iterdir()]:
-            self.model_training_dir = Path(f"{experiment_dir}/{experiment_name}/chr19/model_training_00{model_num}")
+            self.model_training_dir = Path(f"{experiment_dir}/{experiment_name}/chr19/model_training_{model_str}")
         else:
-            self.model_training_dir = Path(f"{experiment_dir}/{experiment_name}/model_training_00{model_num}")
+            self.model_training_dir = Path(f"{experiment_dir}/{experiment_name}/model_training_{model_str}")
                 
         assert self.model_training_dir.exists(), f"Model training directory {self.model_training_dir} does not exist."
         
@@ -708,6 +710,13 @@ class ExperimentLoader:
 
             data_iter = iter(train_loader)
             i = 0
+            
+            if device.type == "cuda":
+                peak_alloc_mb = torch.cuda.max_memory_allocated() / 1024**2
+                peak_reserved_mb = torch.cuda.max_memory_reserved() / 1024**2
+            else:
+                peak_alloc_mb = None
+                peak_reserved_mb = None
 
             try:
                 total_batches = max_batches if max_batches is not None else len(train_loader)
@@ -822,15 +831,26 @@ class ExperimentLoader:
                             "num_tfs": int(tf_tensor.shape[1]),
                             "num_tgs": int(targets.shape[1]),
                         })
-                        batch_profile_df = pd.DataFrame(batch_profile_log)
-                        print(batch_profile_df[["loader_s", "transfer_s", "forward_s", "backward_s", "optim_s"]].mean())
+                        # batch_profile_df = pd.DataFrame(batch_profile_log)
+                        # print(batch_profile_df[["loader_s", "transfer_s", "forward_s", "backward_s", "optim_s"]].mean())
 
                     if monitor_gpu_memory and device.type == "cuda":
+                        free_bytes, total_bytes = torch.cuda.mem_get_info()
+                        allocated_mb = torch.cuda.memory_allocated() / 1024**2
+                        reserved_mb = torch.cuda.memory_reserved() / 1024**2
+                        free_mb = free_bytes / 1024**2
+                        total_mb = total_bytes / 1024**2
+
                         gpu_mem_log.append({
                             "epoch": epoch,
                             "step": i,
-                            "allocated_mb": torch.cuda.memory_allocated() / 1024**2,
-                            "reserved_mb": torch.cuda.memory_reserved() / 1024**2,
+                            "allocated_mb": allocated_mb,
+                            "reserved_mb": reserved_mb,
+                            "free_mb": free_mb,
+                            "total_memory_mb": total_mb,
+                            "allocated_pct_total": 100 * allocated_mb / total_mb,
+                            "reserved_pct_total": 100 * reserved_mb / total_mb,
+                            "free_pct_total": 100 * free_mb / total_mb,
                         })
 
                     total_loss += loss.detach().item()
@@ -871,6 +891,8 @@ class ExperimentLoader:
                 "r2_scaled": r2_s,
                 "lr": current_lr,
                 "epoch_time_s": epoch_end_time - epoch_start_time,
+                "peak_allocated_mb": peak_alloc_mb,
+                "peak_reserved_mb": peak_reserved_mb,
             })
 
             if verbose:

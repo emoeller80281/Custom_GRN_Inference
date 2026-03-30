@@ -303,7 +303,10 @@ EXPERIMENT_LIST=(
     # "mESC_E8.5_rep2_muon_preprocessing|model_training_001|mESC|E8.5_rep2"
 
     # "iPSC_hvg_filter_disp_0.5|model_training_001|iPSC|WT_D13_rep1"
-    "mESC_muon_preprocessing_simplified_pooling|model_training_006|mESC|E7.5_rep1"
+    # "mESC_muon_preprocessing_simplified_pooling|model_training_006|mESC|E7.5_rep1"
+    # "mESC_muon_preprocessing_simplified_pooling|model_training_011|mESC|E7.5_rep1"
+    "mESC_muon_preprocessing_simplified_pooling|model_training_012|mESC|E7.5_rep1"
+    "mESC_muon_preprocessing_simplified_pooling|model_training_013|mESC|E7.5_rep1"
 
 )
 

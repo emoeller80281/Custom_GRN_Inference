@@ -56,6 +56,7 @@ def load_model(selected_experiment_dir, checkpoint_file, device):
     use_shortcut   = params.get("use_shortcut", False)
     use_dist_bias  = params.get("use_dist_bias", False)
     use_motif_mask = params.get("use_motif_mask", False)
+    window_pool_size = params.get("kernel_size", 256)
 
     # 1) Load test loader and checkpoint
     test_loader = torch.load(selected_experiment_dir / "test_loader.pt", weights_only=False)
@@ -73,6 +74,7 @@ def load_model(selected_experiment_dir, checkpoint_file, device):
         tf_vocab_size=len(state["tf_scaler_mean"]),
         tg_vocab_size=len(state["tg_scaler_mean"]),
         use_bias=use_dist_bias,
+        window_pool_size=window_pool_size,
         # use_shortcut=use_shortcut,
         # use_motif_mask=use_motif_mask,
 
@@ -214,13 +216,15 @@ def run_gradient_attribution(
 
                 # Slice TG-specific inputs to shrink the attention graph per chunk
                 if bias is not None:
-                    bias_idx = tg_chunk
-                    if bias.device != tg_chunk.device:
-                        bias_idx = tg_chunk.to(bias.device)
-                    if bias.dim() == 3:
+                    bias_idx = tg_chunk.to(bias.device, non_blocking=True)
+                    
+                    if bias.dim() == 2:
+                        bias_chunk = bias[bias_idx, :]
+                    elif bias.dim() == 3:
                         bias_chunk = bias[:, bias_idx, :]
                     else:
-                        bias_chunk = bias[:, :, bias_idx, :]
+                        raise ValueError(f"Expected bias to have dim 2 or 3, got shape {bias.shape}")
+                    
                     bias_chunk = bias_chunk.to(device, non_blocking=True)
                 else:
                     bias_chunk = None
