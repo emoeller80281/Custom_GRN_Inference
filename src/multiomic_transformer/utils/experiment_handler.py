@@ -85,8 +85,6 @@ plt.rcParams.update({
 
     # legend
     "legend.frameon": False,
-
-    # color cycle
     "axes.prop_cycle": cycler(color=COLOR_PALETTE.values()),
 })
 
@@ -271,6 +269,9 @@ class ExperimentHandler:
 
         tf_scaler = SimpleScaler(tf_s.mean.to(self.device), tf_s.std.to(self.device))
         tg_scaler = SimpleScaler(tg_s.mean.to(self.device), tg_s.std.to(self.device))
+        
+        self.tf_scaler = tf_scaler
+        self.tg_scaler = tg_scaler
         
         self.scalers = {
             "tf_scaler": tf_scaler,
@@ -790,29 +791,29 @@ class ExperimentHandler:
     def run_gradient_attribution(
         self,
         test_loader,
-        tf_scaler,
-        tg_scaler,
-        device,
-        use_amp,
+        tf_scaler=None,
+        tg_scaler=None,
+        use_amp=True,
         max_batches: int = None,
         save_every_n_batches: int = 20,
         max_tgs_per_batch = 128,
         chunk_size = 64,
     ):
 
-        T_total = len(tf_names)
-        G_total = len(tg_names)
-
-        # Creates empty tensors to accumulate gradients across batches. The shape is [TF total, Genes total]
-        grad_sum = torch.zeros(T_total, G_total, device=device, dtype=torch.float32)
-        grad_count = torch.zeros_like(grad_sum)
-
         model = self.model
         tf_names = self.tf_names
         tg_names = self.tg_names
+        device = self.device
+
+        T_total = len(tf_names)
+        G_total = len(tg_names)
         
-        tf_scaler = self.scalers["tf_scaler"] if tf_scaler is None else tf_scaler
-        tg_scaler = self.scalers["tg_scaler"] if tg_scaler is None else tg_scaler
+        # Creates empty tensors to accumulate gradients across batches. The shape is [TF total, Genes total]
+        grad_sum = torch.zeros(T_total, G_total, device=device, dtype=torch.float32)
+        grad_count = torch.zeros_like(grad_sum)
+        
+        tf_scaler = self.tf_scaler if tf_scaler is None else tf_scaler
+        tg_scaler = self.tg_scaler if tg_scaler is None else tg_scaler
         
         model.to(device).eval()
 
@@ -1360,6 +1361,57 @@ class ExperimentHandler:
         per_tf_df.insert(0, "method", method_name)
 
         return per_tf_df, tf_curves
+    
+    def quick_pooled_auroc(self, labeled_df):
+        balanced = self._balance_pos_neg(labeled_df, random_state=42)
+        y = balanced["_in_gt"].astype(int).to_numpy()
+        s = balanced["Score"].to_numpy()
+        
+        auroc = roc_auc_score(y, s)
+        
+        return auroc
+
+    def quick_per_tf_auroc(self, labeled_df):
+        per_tf_auroc = []
+        
+        for tf, group in labeled_df.groupby("Source"):
+            balanced = self._balance_pos_neg(group, random_state=42)
+            y = balanced["_in_gt"].astype(int).to_numpy()
+            s = balanced["Score"].to_numpy()
+            
+            if len(np.unique(y)) > 1:
+                auroc = roc_auc_score(y, s)
+                per_tf_auroc.append(auroc)
+            else:
+                per_tf_auroc.append(np.nan)  # or some default value for TFs with only pos or neg examples
+        
+        median_per_tf_auroc = np.nanmedian(per_tf_auroc)
+        
+        return median_per_tf_auroc
+
+    def calculate_auroc_all_sample_gts(self, grad_attr_df, ground_truth_dict):    
+        pooled_auroc = []
+        per_tf_auroc = []
+        for gt_name, ground_truth in ground_truth_dict.items():
+            _, gt_lookup = ground_truth
+            
+            labeled_df = self.create_ground_truth_comparison_df(self.grn, gt_lookup, gt_name)
+            
+            gt_pooled_auroc = self.quick_pooled_auroc(labeled_df)
+            gt_per_tf_auroc = self.quick_per_tf_auroc(labeled_df)
+            
+            pooled_auroc.append(gt_pooled_auroc)
+            per_tf_auroc.append(gt_per_tf_auroc)
+
+        pooled_median_auroc = np.median(pooled_auroc)
+        per_tf_median_auroc = np.median(per_tf_auroc)
+            
+        auroc_df = pd.DataFrame({
+            "pooled_median_auroc": pooled_median_auroc,
+            "per_tf_median_auroc": per_tf_median_auroc,
+        }, index=[0])
+        
+        return auroc_df
     
     def plot_auroc_auprc(
         self, 
