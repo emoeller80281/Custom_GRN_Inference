@@ -502,8 +502,6 @@ class ExperimentLoader:
         )
         return train_loader, val_loader, test_loader
 
-
-    
     def train(
         self,
         model,
@@ -674,6 +672,7 @@ class ExperimentLoader:
         grad_accum_steps=4,
         monitor_gpu_memory: bool = False,
         profile_batches: bool = False,
+        silence_tqdm: bool = False,
     ):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         model = model.to(device)
@@ -702,7 +701,7 @@ class ExperimentLoader:
 
         epoch_iter = range(num_epochs)
 
-        if not verbose:
+        if not verbose and not silence_tqdm:
             epoch_iter = tqdm(epoch_iter, desc="Training", ncols=100, unit="epoch", total=num_epochs)
 
         for epoch in epoch_iter:
@@ -731,7 +730,7 @@ class ExperimentLoader:
             except TypeError:
                 total_batches = max_batches
 
-            if verbose:
+            if verbose and not silence_tqdm:
                 pbar = tqdm(total=total_batches, desc=f"Epoch {epoch+1}/{num_epochs}", ncols=100, leave=False)
             else:
                 pbar = None
@@ -1221,73 +1220,6 @@ class ExperimentLoader:
         })
         
         return df_long, batch_grad_dfs
-    
-    def load_grn_old(self, method="gradient attribution", zscore_method="median_mad"):
-        """
-        Loads a GRN dataframe given a method. The dataframe contains the source transcription factor, target gene, and score.
-
-        Parameters:
-        method (str): The method to use. Must be 'Gradient Attribution' or 'TF Knockout'.
-
-        Returns:
-        pd.DataFrame: The GRN dataframe containing the source transcription factor, target gene, and score.
-        """
-        method = method.lower()
-        
-        assert method in ["gradient attribution", "tf knockout"], \
-            f"Invalid GRN method {method}. Must be 'Gradient Attribution' or 'TF Knockout'."        
-        
-        if method == "gradient attribution":
-            score_file = self.model_training_dir / "tf_tg_grad_attribution.npy"
-            
-        elif method == "tf knockout":
-            score_file = self.model_training_dir / "tf_tg_fullmodel_knockout.npy"
-            
-        assert score_file.exists(), f"GRN file for method {method} {score_file} does not exist."
-        
-        score = np.load(score_file).astype(np.float32)
-        assert score.shape == (len(self.tf_names), len(self.tg_names))
-
-        score = np.nan_to_num(score, nan=0.0)
-        score_abs = np.abs(score)
-
-        # Calculate per-TF robust z-score
-        if zscore_method == "median_mad":
-            median_val = np.median(score_abs, axis=1, keepdims=True)
-            mad = np.median(np.abs(score_abs - median_val), axis=1, keepdims=True) + 1e-6
-            score = (score_abs - median_val) / mad
-            
-        elif zscore_method == "mean_std":
-            mean_val = np.mean(score_abs, axis=1, keepdims=True)
-            std_val = np.std(score_abs, axis=1, keepdims=True) + 1e-6
-            score = (score_abs - mean_val) / std_val
-        
-        score = np.clip(score, 0, None)
-        
-        log1p_score = np.log1p(score)
-        log1p_score = np.clip(log1p_score, 1e-12, None)  # ensure > 0
-
-        score_log = np.log10(score_abs)
-        
-        T, G = score.shape
-        tf_idx, tg_idx = np.meshgrid(np.arange(T), np.arange(G), indexing="ij")
-        
-        tf_idx = tf_idx.ravel()
-        tg_idx = tg_idx.ravel()
-
-        df = pd.DataFrame({
-            "Source": np.asarray(self.tf_names, dtype=object)[tf_idx],
-            "Target": np.asarray(self.tg_names, dtype=object)[tg_idx],
-            "Score": score.ravel(),
-        })
-        
-        df["Source"] = df["Source"].astype(str).str.upper()
-        df["Target"] = df["Target"].astype(str).str.upper()
-        
-        # Removes the 1e-12 pseudonumbers used for safe log transformation (originally scores of 0)
-        df = df[df["Score"] > 0]
-        
-        return df
     
     def load_grn(self, method="gradient attribution"):
         method = method.lower()
