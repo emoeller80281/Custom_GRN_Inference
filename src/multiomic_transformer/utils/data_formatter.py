@@ -13,6 +13,7 @@ import numpy as np
 import scipy.sparse as sp
 import pickle
 import random
+import time
 
 import sys
 PROJECT_DIR = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
@@ -66,6 +67,8 @@ class TrainingDataFormatter:
         
         self.peaks = None
         self.peak_locs_df = None
+        
+        self.chrom_processing_time_df = None
 
     
     def load_pseudobulk_rna_df(self, sample_name: str):
@@ -126,8 +129,8 @@ class TrainingDataFormatter:
         """
         total_tg_pseudobulk_path = self.file_paths["processed"]["tg_pseudobulk_global"]
         pseudobulk_chrom_dict_path = self.file_paths["processed"]["base_dir"] / "pseudobulk_chrom_dict.pkl"
-
-        self._aggregate_peak_to_gene_dist()
+        
+        self._aggregate_peak_to_gene_dist(force_recalculate=force_recalculate)
 
         if not self._should_recalculate_pseudobulk(
             total_tg_pseudobulk_path=total_tg_pseudobulk_path,
@@ -311,7 +314,7 @@ class TrainingDataFormatter:
     def _first_dataframes(dfs) -> pd.DataFrame:
         return pd.concat(dfs).groupby(level=0).first()
     
-    def create_chrom_files(self, total_TG_pseudobulk_global, pseudobulk_chrom_dict, force_recalculate=False):
+    def create_chrom_files(self, total_TG_pseudobulk_global, pseudobulk_chrom_dict, force_recalculate=False, verbose=False):
 
         global_tf_tensor_path = self.file_paths["training_cache"]["tf_tensor"]
         global_tf_ids_path = self.file_paths["training_cache"]["tf_ids"]
@@ -340,19 +343,34 @@ class TrainingDataFormatter:
             self.tfs, tf_vocab, tf_tensor_all, label="TF"
         )
         
+        # Create/load genome-wide windows once
+        logging.debug("Loading genome-wide genomic windows")
+        all_genome_windows = self.create_or_load_genomic_windows(
+            window_size=self.window_size,
+            chrom_sizes_file=self.file_paths["genome"]["chrom_sizes"],
+            genome_window_file=self.file_paths["training_cache"]["common"]["genome_windows"],
+            force_recalculate=force_recalculate,
+            chrom_id=None,
+        )
+        
         # Save the TF tensor, TF IDs, TF names, and metacell names for global use across chromosomes
-        torch.save(tf_tensor_all_aligned, global_tf_tensor_path)
-        torch.save(torch.tensor(tf_ids, dtype=torch.long), global_tf_ids_path)
+        if not force_recalculate and all(p.is_file() for p in [global_tf_tensor_path, global_tf_ids_path, global_tf_names_path, global_metacell_path]):
+            logging.info("  - All required global files exist. Skipping preprocessing.")
+        else:
+            torch.save(tf_tensor_all_aligned, global_tf_tensor_path)
+            torch.save(torch.tensor(tf_ids, dtype=torch.long), global_tf_ids_path)
+            
+            self.atomic_json_dump(tf_names_kept, global_tf_names_path)
+            self.atomic_json_dump(total_TG_pseudobulk_global.columns.tolist(), global_metacell_path)
         
-        self.atomic_json_dump(tf_names_kept, global_tf_names_path)
-        self.atomic_json_dump(total_TG_pseudobulk_global.columns.tolist(), global_metacell_path)
-        
-        logging.info(f"Saved TF tensor with {len(tf_names_kept)} TFs and {tf_tensor_all_aligned.shape[1]} metacells.")
         logging.info(f"  - Number of chromosomes: {len(self.chrom_list)}: {self.chrom_list}")
         logging.info(f"  - Processing chromosomes for dataset: {self.dataset_name}")
         
         # Chromosome-specific files
+        chrom_processing_time = {}
         for chrom_id in self.chrom_list:
+            
+            init_time_start = time.time()
             chrom_specific_dir = self.file_paths["training_cache"][chrom_id]["dir"]
             atac_tensor_path = self.file_paths["training_cache"][chrom_id]["atac_tensor"]
             tg_tensor_path = self.file_paths["training_cache"][chrom_id]["tg_tensor"]
@@ -396,27 +414,32 @@ class TrainingDataFormatter:
             
             chrom_peak_ids = set(total_peaks_df["peak_id"].astype(str))
             
-            # Create genome windows
-            logging.debug(f"  - Creating genomic windows for {chrom_id}")
-            genome_windows = self.create_or_load_genomic_windows(
-                window_size=self.window_size,
-                chrom_id=chrom_id,
-                chrom_sizes_file=self.file_paths["genome"]["chrom_sizes"],
-                genome_window_file=self.file_paths["training_cache"][chrom_id]["genome_windows"],
-                force_recalculate=force_recalculate,
-                promoter_only=None
+            # Subset genome-wide windows for this chromosome
+            genome_windows = (
+                all_genome_windows.loc[
+                    all_genome_windows["chrom"] == chrom_id,
+                    ["chrom", "start", "end"]
+                ]
+                .copy()
+                .reset_index(drop=True)
             )
+            genome_windows["win_idx"] = np.arange(len(genome_windows), dtype=np.int32)
             num_windows = int(genome_windows.shape[0])
             
             genes_near_peaks = total_peak_gene_dist_df[total_peak_gene_dist_df["peak_id"].astype(str).isin(chrom_peak_ids)].copy()                
             genes_near_peaks.to_parquet(peak_to_tss_dist_path, engine="pyarrow", compression="snappy")
+            init_time_end = time.time()
+            init_time = init_time_end - init_time_start
             
+            window_map_time_start = time.time()
             window_map = self.make_peak_to_window_map(
                 peaks_bed=total_peaks_df,
                 windows_bed=genome_windows,
-                peaks_as_windows=False,
             )
+            window_map_time_end = time.time()
+            window_map_time = window_map_time_end - window_map_time_start
 
+            input_tensors_time_start = time.time()
             _, tg_tensor_all, atac_window_tensor_all = self.precompute_input_tensors(
                 output_dir=str(chrom_specific_dir),
                 genome_wide_tf_expression=genome_wide_tf_expression,
@@ -425,17 +448,20 @@ class TrainingDataFormatter:
                 window_map=window_map,
                 windows=genome_windows,
             )
+            input_tensors_time_end = time.time()
+            input_tensor_time = input_tensors_time_end - input_tensors_time_start
             
             # Skip this chromosome if no peaks matched
             if tg_tensor_all is None:
                 logging.warning(f"{chrom_id}: No peaks matched between window_map and total_RE_pseudobulk_chr; skipping this chromosome.")
                 continue
             
-            # Match TFs and TGs to global vocab
+            # Match TGs on this chromosome to the global vocab
             tg_tensor_all, tg_names_kept, tg_ids = self.align_to_vocab(chr_tg_names, tg_vocab, tg_tensor_all, label="TG")
             
             # Build distance bias [num_windows x num_tg_kept] aligned to kept TGs
             logging.debug(f"  - Building distance bias")
+            dist_bias_time_start = time.time()
             dist_bias, new_window_map, kept_window_indices = self.build_distance_bias(
                 genes_near_peaks=genes_near_peaks,
                 window_map=window_map,
@@ -452,14 +478,41 @@ class TrainingDataFormatter:
                 genome_windows = genome_windows.iloc[kept_window_indices].reset_index(drop=True)
             else:
                 kept_window_indices = list(range(num_windows))
+            dist_bias_time_end = time.time()
+            distance_bias_time = dist_bias_time_end - dist_bias_time_start
 
             # ----- Writing Output Files -----
+            save_step_start = time.time()
             torch.save(atac_window_tensor_all, atac_tensor_path)
             torch.save(tg_tensor_all, tg_tensor_path)
             self.atomic_json_dump(new_window_map, sample_window_map_file)
             self.atomic_json_dump(tg_names_kept, sample_tg_name_file)
             torch.save(torch.tensor(tg_ids, dtype=torch.long), tg_id_file)
             torch.save(dist_bias, dist_bias_file)
+            save_step_end = time.time()
+            save_step_time = save_step_end - save_step_start
+            
+            total_time_end = time.time()
+            
+            total_time = total_time_end - init_time_start
+            
+            chrom_processing_time = {
+                "chr": chrom_id,
+                "total_time": total_time,
+                "initialization_time": init_time,
+                "window_mapping_time": window_map_time,
+                "input_tensor_time": input_tensor_time,
+                "distance_bias_time": distance_bias_time,
+                "save_time": save_step_time,
+            }
+            
+            if verbose == True:
+                logging.info(f"  - Chromosome {chrom_id} processing time: {total_time:.2f} seconds")
+                logging.info(f"    - Initialization: {init_time:.2f} seconds")
+                logging.info(f"    - Window mapping: {window_map_time:.2f} seconds")
+                logging.info(f"    - Input tensor creation: {input_tensor_time:.2f} seconds")
+                logging.info(f"    - Distance bias creation: {distance_bias_time:.2f} seconds")
+                logging.info(f"    - Saving output files: {save_step_time:.2f} seconds")
             
             # Manifest of general sample info and file paths
             manifest = {
@@ -489,6 +542,8 @@ class TrainingDataFormatter:
                 json.dump(manifest, f, indent=2)
 
         logging.info("Preprocessing complete. Wrote per-sample/per-chrom data for MultiomicTransformerDataset.")
+        
+        self.chrom_processing_time_df = pd.DataFrame(chrom_processing_time, index=[0])
             
     def load_or_dump_common_tf_vocab(self):
         return self._load_or_create_vocab(
@@ -517,64 +572,68 @@ class TrainingDataFormatter:
     def create_or_load_genomic_windows(
         self,
         window_size: int,
-        chrom_id: str,
         genome_window_file: str | Path,
         chrom_sizes_file: str | Path,
         force_recalculate: bool = False,
-        promoter_only: bool = False,
-    ):
+        chrom_id: str | None = None,
+    ) -> pd.DataFrame:
         """
-        Create or load fixed-size genomic windows for a chromosome.
+        Create or load fixed-size genomic windows genome-wide, with optional
+        chromosome filtering.
 
-        When `promoter_only=True`, skip windows entirely and return an empty
-        DataFrame with the expected schema so callers don't break.
+        When `promoter_only=True`, return an empty DataFrame with the expected schema.
 
         Parameters
         ----------
         window_size : int
             Size of genomic windows to create.
-        chrom_id : str
-            Chromosome identifier.
-        genome_window_file : Union[str, Path]
-            Path to save/load genomic windows to/from.
-        chrom_sizes_file : Union[str, Path]
+        genome_window_file : str | Path
+            Path to save/load the genome-wide genomic windows.
+        chrom_sizes_file : str | Path
             Path to chromosome sizes file (e.g. UCSC chrom.sizes.txt).
         force_recalculate : bool, optional
             Whether to recompute genomic windows even if they already exist.
-            Defaults to False.
         promoter_only : bool, optional
             Whether to skip creating genomic windows and return an empty DataFrame.
-            Defaults to False.
+        chrom_id : str | None, optional
+            If provided, return only windows for this chromosome.
 
         Returns
         -------
         pd.DataFrame
-            DataFrame with genomic windows, with columns "chrom", "start", "end", and "win_idx".
+            DataFrame with columns: "chrom", "start", "end", "win_idx".
+            If `chrom_id` is provided, only rows for that chromosome are returned.
         """
-        
-        # Promoter-centric evaluation: no windows needed
-        if promoter_only:
-            return pd.DataFrame(columns=["chrom", "start", "end", "win_idx"])
+        genome_window_file = Path(genome_window_file)
+        chrom_sizes_file = Path(chrom_sizes_file)
 
-        if not os.path.exists(genome_window_file) or force_recalculate:
-            genome_windows = pybedtools.bedtool.BedTool().window_maker(g=chrom_sizes_file, w=window_size)
-            # Ensure consistent column names regardless of BedTool defaults
-            chrom_windows = (
-                genome_windows
-                .filter(lambda x: x.chrom == chrom_id)
-                .saveas(genome_window_file)
-                .to_dataframe(names=["chrom", "start", "end"])
+        if not genome_window_file.exists() or force_recalculate:
+            logging.debug("Creating genome-wide genomic windows")
+            genome_windows = pybedtools.BedTool().window_maker(
+                g=str(chrom_sizes_file),
+                w=window_size,
             )
-            logging.debug(f"  - Created {chrom_windows.shape[0]} windows")
+            all_windows = genome_windows.to_dataframe(names=["chrom", "start", "end"])
+            all_windows.to_csv(genome_window_file, sep="\t", header=False, index=False)
+            logging.debug(f"  - Created {all_windows.shape[0]} total genome-wide windows")
         else:
-            logging.debug("\nLoading existing genomic windows")
-            chrom_windows = pybedtools.BedTool(genome_window_file).to_dataframe(names=["chrom", "start", "end"])
+            logging.debug("Loading existing genome-wide genomic windows")
+            all_windows = pybedtools.BedTool(str(genome_window_file)).to_dataframe(
+                names=["chrom", "start", "end"]
+            )
 
-        chrom_windows = chrom_windows.reset_index(drop=True)
-        chrom_windows["win_idx"] = chrom_windows.index
-        return chrom_windows
+        all_windows = all_windows.reset_index(drop=True)
+        all_windows["win_idx"] = all_windows.index
+
+        if chrom_id is not None:
+            chrom_windows = all_windows.loc[all_windows["chrom"] == chrom_id].copy()
+            chrom_windows = chrom_windows.reset_index(drop=True)
+            logging.debug(f"  - Loaded {chrom_windows.shape[0]} windows for {chrom_id}")
+            return chrom_windows
+
+        return all_windows
         
-    def make_peak_to_window_map(self, peaks_bed: pd.DataFrame, windows_bed: pd.DataFrame, peaks_as_windows: bool = True,) -> dict[str, int]:
+    def make_peak_to_window_map(self, peaks_bed: pd.DataFrame, windows_bed: pd.DataFrame) -> dict[str, int]:
         """
         Map each peak to the window it overlaps the most.
         Ensures the BedTool 'name' field is exactly the `peak_id` column.
@@ -584,8 +643,6 @@ class TrainingDataFormatter:
             DataFrame of peaks, with columns "chrom", "start", "end", "peak_id".
         windows_bed : pd.DataFrame
             DataFrame of genomic windows, with columns "chrom", "start", "end", "win_idx".
-        peaks_as_windows : bool, optional
-            Whether to treat peaks as genomic windows. Defaults to True.
         Returns
         -------
         dict[str, int]
@@ -602,10 +659,6 @@ class TrainingDataFormatter:
         pb["start"] = pb["start"].astype(int)
         pb["end"]   = pb["end"].astype(int)
         pb["peak_id"] = pb["peak_id"].astype(str).str.strip()
-        
-        if peaks_as_windows or windows_bed is None or windows_bed.empty:
-            # stable order mapping: as they appear
-            return {pid: int(i) for i, pid in enumerate(pb["peak_id"].tolist())}
 
         # BedTool uses the 4th column as "name. make it explicitly 'peak_id'
         pb_for_bed = pb[["chrom", "start", "end", "peak_id"]].rename(columns={"peak_id": "name"})
@@ -815,83 +868,137 @@ class TrainingDataFormatter:
         """
         Build a [num_windows x num_tg_kept] (or pruned) distance-bias tensor aligned to the kept TGs.
 
-        If prune_empty_windows is True, windows with no peaks (no entries in genes_near_peaks)
+        If prune_empty_windows is True, windows with no mapped (peak, TG) entries
         are removed and indices are compacted.
 
-        Returns:
-            If prune_empty_windows is False:
-                dist_bias
-            If True:
-                dist_bias, new_window_map, kept_window_indices
+        Returns
+        -------
+        If prune_empty_windows is False:
+            dist_bias
+        If True:
+            dist_bias, new_window_map, kept_window_indices
 
-            where:
-                - dist_bias: [num_kept_windows, num_tg_kept]
-                - new_window_map: peak_id -> new_window_idx (only for kept windows)
-                - kept_window_indices: list mapping new_window_idx -> original_window_idx
+        where:
+            - dist_bias: [num_kept_windows, num_tg_kept]
+            - new_window_map: peak_id -> new_window_idx
+            - kept_window_indices: list mapping new_window_idx -> original_window_idx
         """
+        import numpy as np
+        import pandas as pd
+        import torch
+
         tg_names_kept = list(tg_names_kept)
         num_tg_kept = len(tg_names_kept)
+
+        if num_tg_kept == 0:
+            if prune_empty_windows:
+                empty = torch.zeros((0, 0), dtype=dtype, device=device)
+                return empty, {}, []
+            return torch.zeros((num_windows, 0), dtype=dtype, device=device)
+
+        # Keep only needed columns and avoid mutating caller data
+        df = genes_near_peaks.loc[:, ["peak_id", "target_id", "TSS_dist_score"]].copy()
+
+        # Normalize dtypes for reliable mapping
+        df["peak_id"] = df["peak_id"].astype(str)
+        df["target_id"] = df["target_id"].astype(str)
+        df["TSS_dist_score"] = df["TSS_dist_score"].astype(np.float32)
+
+        # Vectorized mapping instead of row-by-row dict lookups
         tg_index_map = {tg: i for i, tg in enumerate(tg_names_kept)}
+        df["win_idx"] = df["peak_id"].map(window_map)
+        df["tg_idx"] = df["target_id"].map(tg_index_map)
 
-        from collections import defaultdict
-        scores_map = defaultdict(list)
+        # Keep only rows that map to both a window and a kept TG
+        df = df.dropna(subset=["win_idx", "tg_idx"])
+        if df.empty:
+            if prune_empty_windows:
+                empty = torch.zeros((0, num_tg_kept), dtype=dtype, device=device)
+                return empty, {}, []
+            return torch.zeros((num_windows, num_tg_kept), dtype=dtype, device=device)
 
-        # Collect all scores for each (window, TG)
-        for _, row in genes_near_peaks.iterrows():
-            win_idx = window_map.get(row["peak_id"])
-            tg_idx  = tg_index_map.get(row["target_id"])
-            if win_idx is not None and tg_idx is not None:
-                scores_map[(win_idx, tg_idx)].append(float(row["TSS_dist_score"]))
+        df["win_idx"] = df["win_idx"].astype(np.int32)
+        df["tg_idx"] = df["tg_idx"].astype(np.int32)
 
-        # If not pruning, keep all windows regardless of whether they have peaks
+        # Aggregate per (win_idx, tg_idx)
+        if mode == "max":
+            agg = (
+                df.groupby(["win_idx", "tg_idx"], sort=False)["TSS_dist_score"]
+                .max()
+                .reset_index()
+            )
+            values = agg["TSS_dist_score"].to_numpy(dtype=np.float32)
+
+        elif mode == "sum":
+            agg = (
+                df.groupby(["win_idx", "tg_idx"], sort=False)["TSS_dist_score"]
+                .sum()
+                .reset_index()
+            )
+            values = agg["TSS_dist_score"].to_numpy(dtype=np.float32)
+
+        elif mode == "mean":
+            agg = (
+                df.groupby(["win_idx", "tg_idx"], sort=False)["TSS_dist_score"]
+                .mean()
+                .reset_index()
+            )
+            values = agg["TSS_dist_score"].to_numpy(dtype=np.float32)
+
+        elif mode == "logsumexp":
+            # Stable grouped logsumexp:
+            # logsumexp(x) = m + log(sum(exp(x - m)))
+            grouped_max = (
+                df.groupby(["win_idx", "tg_idx"], sort=False)["TSS_dist_score"]
+                .max()
+                .rename("group_max")
+                .reset_index()
+            )
+
+            df2 = df.merge(grouped_max, on=["win_idx", "tg_idx"], how="left", copy=False)
+            df2["exp_shifted"] = np.exp(df2["TSS_dist_score"] - df2["group_max"])
+
+            grouped_sumexp = (
+                df2.groupby(["win_idx", "tg_idx"], sort=False)["exp_shifted"]
+                .sum()
+                .rename("sumexp")
+                .reset_index()
+            )
+
+            agg = grouped_max.merge(grouped_sumexp, on=["win_idx", "tg_idx"], how="left", copy=False)
+            values = (agg["group_max"].to_numpy(np.float32) + np.log(agg["sumexp"].to_numpy(np.float32))).astype(np.float32)
+
+        else:
+            raise ValueError(f"Unknown pooling mode: {mode}")
+
+        win_idx_arr = agg["win_idx"].to_numpy(dtype=np.int64)
+        tg_idx_arr = agg["tg_idx"].to_numpy(dtype=np.int64)
+
         if not prune_empty_windows:
-            dist_bias = torch.zeros((num_windows, num_tg_kept), dtype=dtype, device=device)
-            for (win_idx, tg_idx), scores in scores_map.items():
-                scores_tensor = torch.tensor(scores, dtype=dtype, device=device)
-                if mode == "max":
-                    dist_bias[win_idx, tg_idx] = scores_tensor.max()
-                elif mode == "sum":
-                    dist_bias[win_idx, tg_idx] = scores_tensor.sum()
-                elif mode == "mean":
-                    dist_bias[win_idx, tg_idx] = scores_tensor.mean()
-                elif mode == "logsumexp":
-                    dist_bias[win_idx, tg_idx] = torch.logsumexp(scores_tensor, dim=0)
-                else:
-                    raise ValueError(f"Unknown pooling mode: {mode}")
-            return dist_bias
+            dist_bias_np = np.zeros((num_windows, num_tg_kept), dtype=np.float32)
+            dist_bias_np[win_idx_arr, tg_idx_arr] = values
+            return torch.as_tensor(dist_bias_np, dtype=dtype, device=device)
 
-        # --- Pruned version: only keep windows that appear in scores_map ---
-        used_windows = sorted({win for (win, _) in scores_map.keys()})
-        num_kept = len(used_windows)
-        old2new = {w: i for i, w in enumerate(used_windows)}
+        # Prune to only used windows
+        used_windows = np.sort(np.unique(win_idx_arr))
+        old2new_arr = np.full(num_windows, -1, dtype=np.int64)
+        old2new_arr[used_windows] = np.arange(len(used_windows), dtype=np.int64)
 
-        dist_bias = torch.zeros((num_kept, num_tg_kept), dtype=dtype, device=device)
+        new_win_idx_arr = old2new_arr[win_idx_arr]
 
-        for (win_idx, tg_idx), scores in scores_map.items():
-            new_win_idx = old2new[win_idx]
-            scores_tensor = torch.tensor(scores, dtype=dtype, device=device)
+        dist_bias_np = np.zeros((len(used_windows), num_tg_kept), dtype=np.float32)
+        dist_bias_np[new_win_idx_arr, tg_idx_arr] = values
 
-            if mode == "max":
-                dist_bias[new_win_idx, tg_idx] = scores_tensor.max()
-            elif mode == "sum":
-                dist_bias[new_win_idx, tg_idx] = scores_tensor.sum()
-            elif mode == "mean":
-                dist_bias[new_win_idx, tg_idx] = scores_tensor.mean()
-            elif mode == "logsumexp":
-                dist_bias[new_win_idx, tg_idx] = torch.logsumexp(scores_tensor, dim=0)
-            else:
-                raise ValueError(f"Unknown pooling mode: {mode}")
+        used_window_set = set(int(w) for w in used_windows.tolist())
+        new_window_map = {
+            str(peak_id): int(old2new_arr[old_idx])
+            for peak_id, old_idx in window_map.items()
+            if 0 <= old_idx < num_windows and old_idx in used_window_set
+        }
 
-        # Build a new window_map in the compressed index space
-        new_window_map: Dict[str, int] = {}
-        used_set = set(used_windows)
-        for peak_id, old_idx in window_map.items():
-            if old_idx in used_set:
-                new_window_map[peak_id] = old2new[old_idx]
+        kept_window_indices = used_windows.tolist()
 
-        kept_window_indices = used_windows
-
-        return dist_bias, new_window_map, kept_window_indices
+        return torch.as_tensor(dist_bias_np, dtype=dtype, device=device), new_window_map, kept_window_indices
     
     @staticmethod
     def normalize_peak_format(peak_id: str) -> str:
@@ -1007,12 +1114,14 @@ class TrainingDataFormatter:
                     "dir": common_data,
                     "tf_vocab": common_data / "tf_vocab.json",
                     "tg_vocab": common_data / "tg_vocab.json",
+                    "genome_windows": sample_cache_dir / "genome_windows.bed",
             },
             "tf_tensor": sample_cache_dir / "tf_tensor_all.pt",
             "tf_names": sample_cache_dir / "tf_names.json",
             "tf_ids": sample_cache_dir / "tf_ids.pt",
             "metacell_names": sample_cache_dir / "metacell_names.json",
             "peak_to_gene_dist_global": sample_cache_dir / "peak_to_gene_dist_global.parquet",
+            
         }
         
         if not self.file_paths["training_cache"]["common"]["dir"].is_dir():
@@ -1288,8 +1397,12 @@ class TrainingDataFormatter:
                 self.peak_locs_df[["chrom", "start", "end", "peak_id"]]
             ).saveas(peak_bed_file)
     
-    def _aggregate_peak_to_gene_dist(self):
+    def _aggregate_peak_to_gene_dist(self, force_recalculate=False):
         total_peak_gene_dist_file = self.file_paths["training_cache"]["peak_to_gene_dist_global"]
+        
+        if total_peak_gene_dist_file.is_file() and not force_recalculate:
+            return pd.read_parquet(total_peak_gene_dist_file, engine="pyarrow")
+        
         sample_level_peak_to_gene_dist_dfs = []
         for sample_name in self.sample_names:
             peak_to_gene_dist_file = self.file_paths["samples"][sample_name]["peak_to_gene_dist"]
