@@ -17,6 +17,9 @@ import zlib
 import importlib
 from cycler import cycler
 from scipy.stats import norm
+import logging
+
+logging.basicConfig(level=logging.INFO, format='%(message)s')
 
 PROJECT_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER")
 SRC_DIR = str(Path(PROJECT_DIR) / "src")
@@ -403,12 +406,12 @@ def determine_experiment_differences(experiment_dict, index, num_experiments):
             curr = experiment_dict[key][index]
 
             if prev != curr:
-                print(f"{key:<{max_key_len}} : {str(prev):<{max_val_len}} -> {curr}")
+                logging.info(f"{key:<{max_key_len}} : {str(prev):<{max_val_len}} -> {curr}")
             else:
-                print(f"{key:<{max_key_len}} : {curr}")
+                logging.info(f"{key:<{max_key_len}} : {curr}")
     else:
         for key in experiment_dict.keys():
-            print(f"{key:<{max_key_len}} : {experiment_dict[key][index]}")
+            logging.info(f"{key:<{max_key_len}} : {experiment_dict[key][index]}")
 
 def aggregate_results(
     experiment_dict, 
@@ -514,6 +517,8 @@ def aggregate_results(
         "allocated_pct_total",
         "reserved_pct_total",
         "free_pct_total",
+        
+        "replicate",
     ]
 
     full_summary_df = full_summary_df[ordered_cols]
@@ -536,6 +541,7 @@ def save_summary_df(full_summary_df, summary_save_path):
         "grad_attrib_tgs_per_batch",
         "dataloader_workers",
         "max_cached",
+        "replicate",
     ]
 
     def get_safe_path(base_path: Path):
@@ -570,11 +576,11 @@ def save_summary_df(full_summary_df, summary_save_path):
             full_summary_df = merged_df
 
         except Exception as e:
-            print(f"Merge failed: {e}")
+            logging.info(f"Merge failed: {e}")
             save_path_to_use = get_safe_path(summary_save_path)
 
     full_summary_df.to_csv(save_path_to_use, index=False)
-    print(f"Saved experiment summary to: {save_path_to_use.parent}/{save_path_to_use.name}")
+    logging.info(f"Saved experiment summary to: {save_path_to_use.parent}/{save_path_to_use.name}")
 
 def plot_gpu_memory(gpu_mem_df):
     df = gpu_mem_df.copy()
@@ -728,19 +734,40 @@ def _run_experiments_on_gpu(
     sample_type,
     gt_by_dataset_dict,
 ):
+    # Restrict this worker to a single GPU BEFORE any CUDA calls.
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
     if torch.cuda.is_available():
-        torch.cuda.set_device(gpu_id)
+        torch.cuda.set_device(0)
+
+    if torch.cuda.is_available():
+        device_name = torch.cuda.get_device_name(0)
+        current_device = torch.cuda.current_device()
+    else:
+        device_name = "cpu"
+        current_device = "cpu"
+
+    logging.debug(
+        f"[Worker pid={os.getpid()}] gpu_id={gpu_id} "
+        f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')} "
+        f"current_device={current_device}"
+    )
 
     exp = experiment_loader.ExperimentLoader(
         experiment_dir = "/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/",
         experiment_name="mESC_muon_preprocessing_simplified_kernel_size",
         model_num=1,
+        silence_warnings=True,
     )
+    if torch.cuda.is_available():
+        exp.device = torch.device("cuda:0")
 
     previous_experiments_df = pd.read_csv(summary_save_path) if summary_save_path.exists() else None
 
     for i in experiment_indices:
-        print(f"[Experiment {i+1}/{num_experiments}] Starting experiment with GPU {gpu_id}...")
+        logging.info(
+            f"[Experiment {i+1}/{num_experiments}] Starting experiment with GPU {gpu_id} "
+            f"(pid={os.getpid()})..."
+        )
 
         batch_size = experiment_dict["batch_size"][i]
         epochs = experiment_dict["epochs"][i]
@@ -774,7 +801,7 @@ def _run_experiments_on_gpu(
             )
 
             if config_match.any():
-                print(f"[Experiment {i+1}] Experiment with this configuration already exists. Skipping...")
+                logging.info(f"[Experiment {i+1}] Experiment with this configuration already exists. Skipping...")
                 continue
 
         dataset = exp.create_multichrom_dataset(
@@ -804,7 +831,7 @@ def _run_experiments_on_gpu(
             d_ff=d_ff,
             window_pool_size=kernel_size,
         )
-
+        train_start_time = time.time()
         model = exp.train_timed(
             model,
             train_loader,
@@ -817,8 +844,11 @@ def _run_experiments_on_gpu(
             verbose=False,
             silence_tqdm=True,
         )
+        train_end_time = time.time()
+        logging.info(f"[Experiment {i+1}] Training finished in {train_end_time - train_start_time:.2f} seconds.")
 
-        start_time = time.time()
+
+        grad_attrib_start_time = time.time()
         grad_attr_df, grad_batch_dfs = run_gradient_attribution(
             selected_experiment_dir=exp.model_training_dir,
             model=model,
@@ -834,8 +864,8 @@ def _run_experiments_on_gpu(
             max_tgs_per_batch=grad_attrib_tgs_per_batch,
         )
 
-        end_time = time.time()
-        print(f"[Experiment {i+1}] Gradient attribution finished {grad_attrib_batches} batches in {end_time - start_time:.2f} seconds.")
+        grad_attrib_end_time = time.time()
+        logging.info(f"[Experiment {i+1}] Gradient attribution finished {grad_attrib_batches} batches in {grad_attrib_end_time - grad_attrib_start_time:.2f} seconds.")
 
         auroc_df = calculate_auroc_all_sample_gts(exp, grad_attr_df, gt_by_dataset_dict[sample_type])
 
@@ -852,7 +882,7 @@ def _run_experiments_on_gpu(
         exp.batch_profile_df = update_dfs_with_experiment_params(exp.batch_profile_df)
         exp.epoch_log_df = update_dfs_with_experiment_params(exp.epoch_log_df)
 
-        print(f"[Experiment {i+1}] Aggregating results...")
+        logging.info(f"[Experiment {i+1}] Aggregating results...")
         full_summary_df = aggregate_results(
             experiment_dict,
             auroc_df,
@@ -861,7 +891,7 @@ def _run_experiments_on_gpu(
             exp.epoch_log_df,
         )
 
-        print(f"[Experiment {i+1}] Saving results...")
+        logging.info(f"[Experiment {i+1}] Saving results...")
         with lock:
             save_summary_df(full_summary_df, summary_save_path)
 
@@ -870,12 +900,12 @@ if __name__ == "__main__":
     sample_type = "mESC"
     benchmarking_experiment_name = "mESC_auroc_by_kernel_size"
 
-    print(f"Running benchmarking experiment: {benchmarking_experiment_name} on sample type: {sample_type}")
-    print("Loading ground truth datasets...")
+    logging.info(f"Running benchmarking experiment: {benchmarking_experiment_name} on sample type: {sample_type}")
+    logging.info("Loading ground truth datasets...")
     gt_by_dataset_dict = load_ground_truth_dict()
 
     experiment_dict = {
-        "batch_size": [128],
+        "batch_size": [64],
         "epochs": [50],
         "bias_scale": [0.0],
         "num_layers": [3],
@@ -892,10 +922,9 @@ if __name__ == "__main__":
 
     experiment_dict = expand_experiment_dict_grid(experiment_dict)
     num_experiments = [max(len(v) for v in experiment_dict.values())][0]
-    print(f"Total experiments to run: {num_experiments}")
+    logging.info(f"Total experiments to run: {num_experiments}")
 
     summary_save_path = PROJECT_DIR / "dev" / "notebooks" / "benchmarking_results" / f"{benchmarking_experiment_name}.csv"
-
 
     if torch.cuda.is_available():
         available_gpus = list(range(torch.cuda.device_count()))

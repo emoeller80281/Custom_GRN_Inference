@@ -180,6 +180,7 @@ class ExperimentLoader:
         use_shortcut   = params.get("use_shortcut", False)
         use_dist_bias  = params.get("use_dist_bias", False)
         use_motif_mask = params.get("use_motif_mask", False)
+        kernel_size = params.get("kernel_size", 4)
 
         # Load test loader
         self.test_loader = torch.load(self.model_training_dir / "test_loader.pt", weights_only=False)
@@ -198,6 +199,7 @@ class ExperimentLoader:
             tf_vocab_size=len(self.state["tf_scaler_mean"]),
             tg_vocab_size=len(self.state["tg_scaler_mean"]),
             use_bias=use_dist_bias,
+            window_pool_size=kernel_size,
             # use_shortcut=use_shortcut,
             # use_motif_mask=use_motif_mask,
         )
