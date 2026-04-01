@@ -30,6 +30,7 @@ import torch.distributed as dist
 from torch.utils.data import DataLoader, random_split
 from torch.utils.data.distributed import DistributedSampler
 
+import multiomic_transformer.utils.data_formatter as data_formatter
 from multiomic_transformer.datasets.dataset_refactor import SimpleScaler
 from multiomic_transformer.models.model_simplified import MultiomicTransformer
 from multiomic_transformer.datasets.dataset_refactor import (
@@ -91,28 +92,51 @@ plt.rcParams.update({
 order = ["LINGER", "SCENIC+", "CellOracle", "GRaNIE", "Pando", "TRIPOD", "FigR"]
 
 class ExperimentHandler:
-    def __init__(self, experiment_dir: str, experiment_name: str, model_num: int, silence_warnings: bool = False):
+    def __init__(
+        self, 
+        training_data_formatter: data_formatter.TrainingDataFormatter,
+        experiment_dir: None | str = None, 
+        model_num: None | int = None, 
+        silence_warnings: bool = False
+        ):
+        
+        self.tdf = training_data_formatter
         
         assert os.path.exists(experiment_dir), f"Experiment directory {experiment_dir} does not exist."
         
-        self.experiment_dir = Path(experiment_dir)
-        self.experiment_name = experiment_name
+        # Set up experiment directory to store model checkpoints, results, and figures
+        if experiment_dir is None:
+            self.experiment_dir = self.tdf.project_dir / "experiments"
+            
+            if not os.path.exists(self.experiment_dir):
+                logging.info(f"Experiment directory {self.experiment_dir} does not exist. Creating it.")
+                self.experiment_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            self.experiment_dir = Path(experiment_dir)
+            
+        self.experiment_name = self.tdf.experiment_name
         self.model_num = model_num
         self.silence_warnings = silence_warnings
         
-        model_str = f"{model_num:03d}"
-
-        self.model_training_dir = Path(f"{experiment_dir}/{experiment_name}/model_training_{model_str}")
-        if not self.model_training_dir.exists():
+        # Either load an existing model training directory or set up a new one if no number is provided
+        if model_num is not None:
+            model_str = f"{model_num:03d}"
+            self.model_training_dir = Path(f"{self.experiment_dir}/{self.experiment_name}/model_training_{model_str}")
+            if not self.model_training_dir.exists():
+                if not self.silence_warnings:
+                    logging.warning(f"WARNING: Model training directory {self.model_training_dir} does not exist.")
+        else:
+            self._create_model_training_dir(allow_overwrite=False)
             if not self.silence_warnings:
-                logging.warning(f"WARNING: Model training directory {self.model_training_dir} does not exist.")
+                logging.info(f"No model_num provided. Created new model training directory: {self.model_training_dir}")
+
         
         # Set up blank file paths
-        self.common_data_dir = None
-        self.data_cache_dir = None
-        self.chrom_ids = None
-        self.tf_names = None
-        self.tg_names = None
+        self.common_data_dir = self.tdf.file_paths["training_cache"]["common"]["dir"]
+        self.data_cache_dir = self.tdf.file_paths["training_cache"]["dataset_dir"]
+        self.chrom_ids = self.tdf.chrom_list
+        self.tf_names = self.tdf.tf_names
+        self.tg_names = self.tdf.tg_names
         
         # Default training parameters
         self.epochs = 250
@@ -1970,23 +1994,19 @@ class ExperimentHandler:
         return rng.uniform(arr.min(), arr.max(), size=arr.shape[0])
     
     def _create_model_training_dir(self, allow_overwrite=False):
-        if allow_overwrite:
-            self.model_training_dir = self.experiment_dir / self.experiment_name / f"model_training_00{self.model_num}"
-            self.model_training_dir.mkdir(parents=True, exist_ok=True)
-        
-        else:
-            incremented_train_num = False
-            while True:
-                if self.model_training_dir.exists():
-                    self.model_num += 1
-                    self.model_training_dir = self.experiment_dir / self.experiment_name / f"model_training_00{self.model_num}"
-                    incremented_train_num = True
+        if self.model_num is None:
+            self.model_num = 1
 
-                else:
-                    self.model_training_dir.mkdir(parents=True, exist_ok=True)
-                    break
-                
-            if incremented_train_num:
-                logging.info(f"Model training directory already exists, incrementing model_num to {self.model_num}")
-        
-        
+        while True:
+            model_str = f"{self.model_num:03d}"
+            candidate_dir = self.experiment_dir / self.experiment_name / f"model_training_{model_str}"
+
+            if allow_overwrite or not candidate_dir.exists():
+                self.model_training_dir = candidate_dir
+                self.model_training_dir.mkdir(parents=True, exist_ok=True)
+                break
+            else:
+                self.model_num += 1
+
+        if not allow_overwrite:
+            logging.info(f"Using model_num={self.model_num} at {self.model_training_dir}")

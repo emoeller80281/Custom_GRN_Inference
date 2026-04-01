@@ -31,28 +31,31 @@ class TrainingDataFormatter:
     def __init__(
         self, 
         project_dir: Path,
-        dataset_name: str,
+        experiment_name: str,
         organism_code: str,
         sample_names: list[str],
         chrom_list: list[str],
         processed_data_dir: Path | None = None,
         output_dir: Path | None = None,
+        silence_warnings: bool = True,
+        silence_logs: bool = False,
         ):
         
         self.project_dir = project_dir
-        self.dataset_name = dataset_name
+        self.experiment_name = experiment_name
         self.organism_code = organism_code
         self.sample_names = sample_names
         self.chrom_list = chrom_list
         self.processed_data_dir = processed_data_dir
         self.output_dir = output_dir
-
+        self.silence_warnings = silence_warnings
+        self.silence_logs = silence_logs
         self.canon = None
         
-        self.window_size_kb = 1
         self.window_size = 1000
         self.distance_scale_factor = 20000
         self.max_peak_tg_distance = 100000
+        self.filter_to_nearest_gene = True
         
         self._setup_file_paths()
         self._ensure_genome_info_files_exist()
@@ -61,16 +64,70 @@ class TrainingDataFormatter:
         
         self._handle_assertions()
         
+        self.settings_path = self.file_paths["processed"]["settings"]
+        
+        if not self.settings_path.is_file():
+            self.save_settings()
+        else:
+            self.load_settings()
+            if not self.silence_logs:
+                logging.info(f"Loaded existing settings from {self.settings_path}")
+        
         self.genes = None
-        self.tfs = None
-        self.tgs = None
+        self.tf_names = None
+        self.tg_names = None
         
         self.peaks = None
         self.peak_locs_df = None
         
         self.chrom_processing_time_df = None
+        
+    def save_settings(self):
+        settings = {
+            "project_dir": str(self.project_dir),
+            "experiment_name": self.experiment_name,
+            "organism_code": self.organism_code,
+            "sample_names": self.sample_names,
+            "chrom_list": self.chrom_list,
+            "processed_data_dir": str(self.processed_data_dir),
+            "output_dir": str(self.output_dir),
+            "window_size": self.window_size,
+            "distance_scale_factor": self.distance_scale_factor,
+            "max_peak_tg_distance": self.max_peak_tg_distance,
+            "filter_to_nearest_gene": self.filter_to_nearest_gene,
+            "silence_warnings": self.silence_warnings,
+            "silence_logs": self.silence_logs,
+        }
+        with open(self.settings_path, "w") as f:
+            json.dump(settings, f, indent=2)
+            
+    def load_settings(self):
+        settings = self.load_json(self.settings_path)
+            
+        self.project_dir = Path(settings["project_dir"])
+        self.experiment_name = settings["experiment_name"]
+        self.organism_code = settings["organism_code"]
+        self.sample_names = settings["sample_names"]
+        self.chrom_list = settings["chrom_list"]
+        self.processed_data_dir = Path(settings["processed_data_dir"])
+        self.output_dir = Path(settings["output_dir"])
+        self.window_size = settings["window_size"]
+        self.distance_scale_factor = settings["distance_scale_factor"]
+        self.max_peak_tg_distance = settings["max_peak_tg_distance"]
+        self.filter_to_nearest_gene = settings["filter_to_nearest_gene"]
+        self.silence_warnings = settings["silence_warnings"]
+        self.silence_logs = settings["silence_logs"]
+        
+        gene_file = self.file_paths["processed"]["total_genes"]
+        tf_name_file = self.file_paths["processed"]["tf_list"]
+        tg_name_file = self.file_paths["processed"]["tg_list"]
+        peak_file = self.file_paths["processed"]["peak_list"]
+        
+        self.genes = self.load_json(gene_file, allow_none=True) if gene_file.is_file() else None
+        self.tf_names = self.load_json(tf_name_file, allow_none=True) if tf_name_file.is_file() else None
+        self.tg_names = self.load_json(tg_name_file, allow_none=True) if tg_name_file.is_file() else None
+        self.peaks = self.load_json(peak_file, allow_none=True) if peak_file.is_file() else None
 
-    
     def load_pseudobulk_rna_df(self, sample_name: str):
         assert sample_name in self.sample_names, \
             f"Sample name {sample_name} not in provided sample names: {self.sample_names}"
@@ -86,7 +143,7 @@ class TrainingDataFormatter:
         self.genes = rna_df.index.tolist()
         
         # Creates the TF and TG files and stores the TF and TG names as a list
-        self.tfs, self.tgs = self.split_genes_into_tfs_and_tgs(self.genes)
+        self.tf_names, self.tg_names = self.split_genes_into_tfs_and_tgs(self.genes)
         
         return rna_df
     
@@ -105,6 +162,8 @@ class TrainingDataFormatter:
         atac_df.index = atac_df.index.map(self.normalize_peak_format)
         
         self.peaks = atac_df.index.tolist()
+        
+        self.atomic_json_dump(self.peaks, self.file_paths["processed"]["peak_list"])
         
         # Formats the peak locations and create a BED file for calculating peak-gene distances.
         self.create_peak_bed_file(atac_df, sample_name)
@@ -137,15 +196,17 @@ class TrainingDataFormatter:
             pseudobulk_chrom_dict_path=pseudobulk_chrom_dict_path,
             force_recalculate=force_recalculate,
         ):
-            logging.info("  - Found existing global and per-chrom pseudobulk; loading...")
+            if not self.silence_logs:
+                logging.info("  - Found existing global and per-chrom pseudobulk; loading...")
             return self._load_pseudobulk_aggregates(
                 total_tg_pseudobulk_path,
                 pseudobulk_chrom_dict_path,
             )
 
-        logging.info("  - Loading processed pseudobulk datasets:")
-        logging.info(f"   - Sample names: {self.sample_names}")
-        logging.info(f"   - Looking for processed samples in {self.file_paths['processed']['base_dir']}")
+        if not self.silence_logs:
+            logging.info("  - Loading processed pseudobulk datasets:")
+            logging.info(f"   - Sample names: {self.sample_names}")
+            logging.info(f"   - Looking for processed samples in {self.file_paths['processed']['base_dir']}")
 
         per_sample_tg = self._load_per_sample_tg_pseudobulk()
         total_tg_pseudobulk_global = self._sum_dataframes(per_sample_tg.values())
@@ -221,9 +282,11 @@ class TrainingDataFormatter:
     ) -> dict[str, dict]:
         pseudobulk_chrom_dict: dict[str, dict] = {}
 
-        logging.info("  - Aggregating per-chromosome pseudobulk datasets:")
+        if not self.silence_logs:
+            logging.info("  - Aggregating per-chromosome pseudobulk datasets:")
         for chrom_id in self.chrom_list:
-            logging.info(f"   - Aggregating data for {chrom_id}")
+            if not self.silence_logs:
+                logging.info(f"   - Aggregating data for {chrom_id}")
             pseudobulk_chrom_dict[chrom_id] = self._aggregate_single_chromosome(
                 chrom_id=chrom_id,
                 per_sample_tg=per_sample_tg,
@@ -329,7 +392,7 @@ class TrainingDataFormatter:
         # genome-wide TF expression for all metacells (columns)
         genome_wide_tf_expression = (
             total_TG_pseudobulk_global
-            .reindex(self.tfs)           # ensure row order matches your TF list
+            .reindex(self.tf_names)           # ensure row order matches your TF list
             .fillna(0)
             .values.astype("float32")
         )
@@ -337,10 +400,10 @@ class TrainingDataFormatter:
         
         tf_vocab = self.load_or_dump_common_tf_vocab()
         tg_vocab = self.load_or_dump_common_tg_vocab()
-
+        
         # align TF tensor to vocab order (and get kept names/ids)
         tf_tensor_all_aligned, tf_names_kept, tf_ids = self.align_to_vocab(
-            self.tfs, tf_vocab, tf_tensor_all, label="TF"
+            self.tf_names, tf_vocab, tf_tensor_all, label="TF"
         )
         
         # Create/load genome-wide windows once
@@ -355,7 +418,8 @@ class TrainingDataFormatter:
         
         # Save the TF tensor, TF IDs, TF names, and metacell names for global use across chromosomes
         if not force_recalculate and all(p.is_file() for p in [global_tf_tensor_path, global_tf_ids_path, global_tf_names_path, global_metacell_path]):
-            logging.info("  - All required global files exist. Skipping preprocessing.")
+            if not self.silence_logs:
+                logging.info("  - All required global files exist. Skipping preprocessing.")
         else:
             torch.save(tf_tensor_all_aligned, global_tf_tensor_path)
             torch.save(torch.tensor(tf_ids, dtype=torch.long), global_tf_ids_path)
@@ -363,8 +427,9 @@ class TrainingDataFormatter:
             self.atomic_json_dump(tf_names_kept, global_tf_names_path)
             self.atomic_json_dump(total_TG_pseudobulk_global.columns.tolist(), global_metacell_path)
         
-        logging.info(f"  - Number of chromosomes: {len(self.chrom_list)}: {self.chrom_list}")
-        logging.info(f"  - Processing chromosomes for dataset: {self.dataset_name}")
+        if not self.silence_logs:
+            logging.info(f"  - Number of chromosomes: {len(self.chrom_list)}: {self.chrom_list}")
+            logging.info(f"  - Processing chromosomes for dataset: {self.experiment_name}")
         
         # Chromosome-specific files
         chrom_processing_time = {}
@@ -398,12 +463,14 @@ class TrainingDataFormatter:
             ]
             
             if not force_recalculate and all(os.path.isfile(f) for f in required_files):
-                logging.info(f"  - All required output files exist for {chrom_id}. Skipping preprocessing.")
+                if not self.silence_logs:
+                    logging.info(f"  - All required output files exist for {chrom_id}. Skipping preprocessing.")
                 continue
             
             chrom_specific_dir.mkdir(parents=True, exist_ok=True)
             
-            logging.info(f"Creating chromosome-specific files for {chrom_id}")
+            if not self.silence_logs:
+                logging.info(f"Creating chromosome-specific files for {chrom_id}")
             total_TG_pseudobulk_chr = pseudobulk_chrom_dict[chrom_id]["total_TG_pseudobulk_chr"]
             total_RE_pseudobulk_chr = pseudobulk_chrom_dict[chrom_id]["total_RE_pseudobulk_chr"]
             total_peaks_df = pseudobulk_chrom_dict[chrom_id]["total_peaks_df"]
@@ -453,14 +520,16 @@ class TrainingDataFormatter:
             
             # Skip this chromosome if no peaks matched
             if tg_tensor_all is None:
-                logging.warning(f"{chrom_id}: No peaks matched between window_map and total_RE_pseudobulk_chr; skipping this chromosome.")
+                if not self.silence_logs:
+                    logging.warning(f"{chrom_id}: No peaks matched between window_map and total_RE_pseudobulk_chr; skipping this chromosome.")
                 continue
             
             # Match TGs on this chromosome to the global vocab
             tg_tensor_all, tg_names_kept, tg_ids = self.align_to_vocab(chr_tg_names, tg_vocab, tg_tensor_all, label="TG")
-            
+                        
             # Build distance bias [num_windows x num_tg_kept] aligned to kept TGs
-            logging.debug(f"  - Building distance bias")
+            if not self.silence_logs:
+                logging.debug(f"  - Building distance bias")
             dist_bias_time_start = time.time()
             dist_bias, new_window_map, kept_window_indices = self.build_distance_bias(
                 genes_near_peaks=genes_near_peaks,
@@ -506,17 +575,17 @@ class TrainingDataFormatter:
                 "save_time": save_step_time,
             }
             
-            if verbose == True:
-                logging.info(f"  - Chromosome {chrom_id} processing time: {total_time:.2f} seconds")
-                logging.info(f"    - Initialization: {init_time:.2f} seconds")
-                logging.info(f"    - Window mapping: {window_map_time:.2f} seconds")
-                logging.info(f"    - Input tensor creation: {input_tensor_time:.2f} seconds")
-                logging.info(f"    - Distance bias creation: {distance_bias_time:.2f} seconds")
-                logging.info(f"    - Saving output files: {save_step_time:.2f} seconds")
-            
+            if verbose == True and not self.silence_logs:
+                    logging.info(f"  - Chromosome {chrom_id} processing time: {total_time:.2f} seconds")
+                    logging.info(f"    - Initialization: {init_time:.2f} seconds")
+                    logging.info(f"    - Window mapping: {window_map_time:.2f} seconds")
+                    logging.info(f"    - Input tensor creation: {input_tensor_time:.2f} seconds")
+                    logging.info(f"    - Distance bias creation: {distance_bias_time:.2f} seconds")
+                    logging.info(f"    - Saving output files: {save_step_time:.2f} seconds")
+
             # Manifest of general sample info and file paths
             manifest = {
-                "dataset_name": self.dataset_name,
+                "dataset_name": self.experiment_name,
                 "chrom": chrom_id,
                 "num_windows": len(kept_window_indices),
                 "num_tfs": int(len(tf_names_kept)),
@@ -541,21 +610,23 @@ class TrainingDataFormatter:
             with open(manifest_file, "w") as f:
                 json.dump(manifest, f, indent=2)
 
-        logging.info("Preprocessing complete. Wrote per-sample/per-chrom data for MultiomicTransformerDataset.")
+        if not self.silence_logs:
+            logging.info("Preprocessing complete. Wrote per-sample/per-chrom data for MultiomicTransformerDataset.")
         
         self.chrom_processing_time_df = pd.DataFrame(chrom_processing_time, index=[0])
+        self.chrom_processing_time_df.to_csv(self.file_paths["training_cache"]["chrom_processing_time"], index=False)
             
     def load_or_dump_common_tf_vocab(self):
         return self._load_or_create_vocab(
             self.file_paths["training_cache"]["common"]["tf_vocab"],
-            self.tfs,
+            self.tf_names,
             "TF",
         )
         
     def load_or_dump_common_tg_vocab(self):
         return self._load_or_create_vocab(
             self.file_paths["training_cache"]["common"]["tg_vocab"],
-            self.tgs,
+            self.tg_names,
             "TG",
         )
             
@@ -563,11 +634,11 @@ class TrainingDataFormatter:
         if not path.exists():
             vocab = {name: i for i, name in enumerate(names)}
             self.atomic_json_dump(vocab, path)
-            logging.info(f"Initialized {label} vocab with {len(vocab)} entries")
+            if not self.silence_logs:
+                logging.info(f"Initialized {label} vocab with {len(vocab)} entries")
             return vocab
 
-        with open(path) as f:
-            return json.load(f)
+        return self.load_json(path)
 
     def create_or_load_genomic_windows(
         self,
@@ -803,19 +874,26 @@ class TrainingDataFormatter:
     def create_peak_to_tg_distance_file(
         self, 
         sample_name: str,
-        max_peak_distance=1e6, 
-        distance_factor_scale=25000, 
+        max_peak_distance=None, 
+        distance_scale_factor=None, 
         force_recalculate=False,
         filter_to_nearest_gene=False,
         promoter_bp=None
         ) -> pd.DataFrame:
         
         if not force_recalculate and self.file_paths["samples"][sample_name]["peak_to_gene_dist"].is_file():
-            logging.info(f"Peak to TSS distance file already exists for sample {sample_name} at {self.file_paths['samples'][sample_name]['peak_to_gene_dist']}. Skipping recalculation.")
+            if not self.silence_logs:
+                logging.info(f"  - Loading saved peak to TSS distance file")
             return pd.read_parquet(self.file_paths["samples"][sample_name]["peak_to_gene_dist"])
         
         else:
-            logging.info(f"Calculating peak to TSS distances for sample {sample_name} and saving to {self.file_paths['samples'][sample_name]['peak_to_gene_dist']}.")
+            if max_peak_distance is None:
+                max_peak_distance = self.max_peak_tg_distance
+            if distance_scale_factor is None:
+                distance_scale_factor = self.distance_scale_factor
+            
+            if not self.silence_logs:
+                logging.info(f"Calculating peak to TSS distances for sample {sample_name} and saving to {self.file_paths['samples'][sample_name]['peak_to_gene_dist']}.")
             peak_bed_file = self.file_paths["samples"][sample_name]["peaks"]
             tss_bed_file = self.file_paths["genome"]["gene_tss"]
             
@@ -832,7 +910,7 @@ class TrainingDataFormatter:
                 raise ValueError("Expected column 'TSS_dist' missing from find_genes_near_peaks output.")
             
             # Step 4: Compute the distance score
-            genes_near_peaks["TSS_dist_score"] = np.exp(-genes_near_peaks["TSS_dist"] / float(distance_factor_scale))
+            genes_near_peaks["TSS_dist_score"] = np.exp(-genes_near_peaks["TSS_dist"] / float(distance_scale_factor))
             
             # Step 5: Drop rows where the peak is too far from the gene
             genes_near_peaks = genes_near_peaks[genes_near_peaks["TSS_dist"] <= max_peak_distance]
@@ -1045,7 +1123,9 @@ class TrainingDataFormatter:
             names = sorted(tss_genes & dataset_tgs)
         else:
             names = sorted(tss_genes)
-        logging.info(f"  - Writing global TG vocab with {len(names)} genes")
+            
+        if not self.silence_logs:
+            logging.info(f"  - Writing global TG vocab with {len(names)} genes")
 
         # 3) Build fresh contiguous mapping
         vocab = {name: i for i, name in enumerate(names)}
@@ -1060,13 +1140,14 @@ class TrainingDataFormatter:
 
     def _setup_file_paths(self):
         if self.output_dir is None:
-            self.output_dir = self.project_dir / "output" / self.dataset_name
+            self.output_dir = self.project_dir / "output" / self.experiment_name
 
-        assert self.dataset_name in self.output_dir.name, \
-            f"Output directory {self.output_dir} must contain the dataset name {self.dataset_name}"
+        assert self.experiment_name in self.output_dir.name, \
+            f"Output directory {self.output_dir} must contain the dataset name {self.experiment_name}"
 
         if not self.output_dir.is_dir():
-            logging.info(f"Creating output directory: {self.output_dir}")
+            if not self.silence_logs:
+                logging.info(f"Creating output directory: {self.output_dir}")
             os.makedirs(self.output_dir)
 
         # Initialize dictionary
@@ -1092,16 +1173,21 @@ class TrainingDataFormatter:
 
         # ----- PROCESSED DATA DIRECTORY -----
         if self.processed_data_dir is None:
-            self.processed_data_dir = self.project_dir / "data" / "processed" / self.dataset_name
+            self.processed_data_dir = self.project_dir / "data" / "processed" / self.experiment_name
 
         self.file_paths["processed"] = {
             "base_dir": self.processed_data_dir,
-            "tg_pseudobulk_global": self.processed_data_dir / "total_TG_pseudobulk_global.parquet"
+            "tg_pseudobulk_global": self.processed_data_dir / "total_TG_pseudobulk_global.parquet",
+            "total_genes": self.processed_data_dir / "total_genes.csv",
+            "tf_list": self.processed_data_dir / "tf_list.csv",
+            "tg_list": self.processed_data_dir / "tg_list.csv",
+            "peak_list": self.processed_data_dir / "peak_list.csv",
+            "settings": self.processed_data_dir / "settings.json",
         }
 
         # ----- TRAINING CACHE -----
         training_data_cache = self.project_dir / "data" / "training_data_cache"
-        sample_cache_dir = training_data_cache / self.dataset_name
+        sample_cache_dir = training_data_cache / self.experiment_name
         common_data = sample_cache_dir / "common"
         
         if not sample_cache_dir.is_dir():
@@ -1121,6 +1207,7 @@ class TrainingDataFormatter:
             "tf_ids": sample_cache_dir / "tf_ids.pt",
             "metacell_names": sample_cache_dir / "metacell_names.json",
             "peak_to_gene_dist_global": sample_cache_dir / "peak_to_gene_dist_global.parquet",
+            "chrom_processing_time": sample_cache_dir / "chrom_processing_time.csv",
             
         }
         
@@ -1133,13 +1220,6 @@ class TrainingDataFormatter:
         
         if not tf_tg_combos_dir.is_dir():
             os.makedirs(tf_tg_combos_dir)
-
-        self.file_paths["processed"]["tf_tg_combos"] = {
-            "dir": tf_tg_combos_dir,
-            "total_genes": tf_tg_combos_dir / "total_genes.csv",
-            "tf_list": tf_tg_combos_dir / "tf_list.csv",
-            "tg_list": tf_tg_combos_dir / "tg_list.csv",
-        }
 
         # ----- SAMPLE-LEVEL FILES -----
         for sample_name in self.sample_names:
@@ -1269,7 +1349,8 @@ class TrainingDataFormatter:
         gc.load_ncbi_gene_info(str(ncbi_file), species_taxid=species_taxid)
         
         self.canon = gc
-        logging.info(f"Map sizes: {gc.coverage_report()}")
+        if not self.silence_logs:
+            logging.info(f"Map sizes: {gc.coverage_report()}")
 
     def atomic_json_dump(self, obj, path: Path):
         """Safe JSON dump, avoids race conditions by making a tmp file first, then updating the name"""
@@ -1282,6 +1363,16 @@ class TrainingDataFormatter:
         with open(tmp, "w") as f:
             json.dump(obj, f, indent=2, default=convert)
         os.replace(tmp, path)
+        
+    def load_json(self, path: Path, allow_none: bool = False):
+        try:
+            with open(path, "r") as f:
+                return json.load(f)
+        except json.JSONDecodeError as e:
+            if allow_none:
+                return None
+            else:
+                raise e
     
     def canonicalize_gene_names(self, rna_df):
         rna_df.index = pd.Index(
@@ -1289,7 +1380,8 @@ class TrainingDataFormatter:
         )
     
     def check_cached_file_exist(self):
-        missing_files = []
+        missing_file_dict = {"sample": [], "chromosome": {}}
+        total_missing = 0
         
         # Check if all required output files exist
         sample_specific_required_files = [
@@ -1302,7 +1394,8 @@ class TrainingDataFormatter:
         ]
         for file in sample_specific_required_files:
             if not file.is_file():
-                missing_files.append(file.name)
+                missing_file_dict["sample"] = missing_file_dict.get("sample", []) + [file.name]
+                total_missing += 1
         
         for chrom_id in self.chrom_list:
             chrom_cache_dir = self.file_paths["training_cache"]["dataset_dir"] / chrom_id
@@ -1319,14 +1412,27 @@ class TrainingDataFormatter:
             ]
             for file in chrom_specific_required_files:
                 if not file.is_file():
-                    missing_files.append(file.name)
+                    missing_file_dict["sample"] = missing_file_dict.get("sample", []) + [file.name]
+                    missing_file_dict["chromosome"][chrom_id] = missing_file_dict["chromosome"].get(chrom_id, []) + [file.name]
+                    total_missing += 1
         
-        if len(missing_files) > 0:
-            logging.info(f"Missing required files: {missing_files}")
-            return missing_files
+        if total_missing > 0:
+            if not self.silence_warnings:
+                logging.warning(f"Missing {total_missing} required files")
+                for file in missing_file_dict["sample"]:
+                    logging.warning(f"  - {file.name}")
+                
+                logging.warning(f"Missing files by chromosome: {missing_file_dict['chromosome']}")
+                for chrom_id, files in missing_file_dict["chromosome"].items():
+                    logging.warning(f"  - Chromosome {chrom_id} is missing {len(files)} files:")
+                    for file in files:
+                        logging.warning(f"    - {file.name}")
+                
+            return total_missing, missing_file_dict
         else:
-            logging.info("All required files are present.")
-            return missing_files
+            if not self.silence_logs:
+                logging.info("All required files are present.")
+            return total_missing, missing_file_dict
     
     def split_genes_into_tfs_and_tgs(self, genes):
         """Creates TF and TG combo files based on the provided gene list and the reference TF list."""
@@ -1365,9 +1471,9 @@ class TrainingDataFormatter:
         tfs_new = sorted(set(genes_norm) & known_tfs)
         tgs_new = sorted(set(genes_norm) - set(tfs_new))
 
-        total_file = self.file_paths["processed"]["tf_tg_combos"]["total_genes"]
-        tf_file    = self.file_paths["processed"]["tf_tg_combos"]["tf_list"]
-        tg_file    = self.file_paths["processed"]["tf_tg_combos"]["tg_list"]
+        total_file = self.file_paths["processed"]["total_genes"]
+        tf_file    = self.file_paths["processed"]["tf_list"]
+        tg_file    = self.file_paths["processed"]["tg_list"]
 
         total_existing = self._read_list(total_file, "Gene")
         tf_existing    = self._read_list(tf_file, "TF")
@@ -1386,11 +1492,11 @@ class TrainingDataFormatter:
 
         return tfs, tgs
     
-    def create_peak_bed_file(self, atac_df, sample_name):
+    def create_peak_bed_file(self, atac_df, sample_name, force_recalculate=False):
         self.peak_locs_df = format_peaks(pd.Series(atac_df.index)).rename(columns={"chromosome": "chrom"})
         peak_bed_file = self.file_paths["samples"][sample_name]["peaks"]
         
-        if not os.path.isfile(peak_bed_file):
+        if not os.path.isfile(peak_bed_file) or force_recalculate:
             # Write the peak BED file
             peak_bed_file.parent.mkdir(parents=True, exist_ok=True)
             pybedtools.BedTool.from_dataframe(
@@ -1496,10 +1602,66 @@ class TrainingDataFormatter:
         return df
 
     def _handle_assertions(self):
-        tf_file = self.file_paths["genome"]["tf_info"]
+        tf_info_file = self.file_paths["genome"]["tf_info"]
         
         assert self.project_dir is not None, "Project directory is not specified"
         assert self.organism_code is not None, "Organism code is not specified. Please specify 'mm10' or 'hg38'"
         assert self.organism_code in ["mm10", "hg38"], f"Unsupported organism code: {self.organism_code}"
-        assert tf_file.is_file(), f"TF information file not found: {tf_file}"
+        assert tf_info_file.is_file(), f"TF information file not found: {tf_info_file}"
         assert self.processed_data_dir.is_dir(), f"Processed data directory not found: {self.processed_data_dir}"
+        
+    def create_or_load_data_cache(self, sample_name, force_recalculate=False):
+        n_missing, _ = self.check_cached_file_exist()
+        if n_missing == 0 and not force_recalculate:
+            if not self.silence_logs:
+                logging.info("Skipping data cache creation.")
+            return
+        
+        else:
+            # Load the pseudobulk dataframes and set the self.tf_names, self.tg_names, and self.peaks
+            if not self.silence_logs:
+                logging.info(f"[0/4] Creating or loading pseudobulk data")
+            self.load_pseudobulk_rna_df(sample_name)
+            pseudobulk_atac_df = self.load_pseudobulk_atac_df(sample_name)
+            
+            # Load or create the peak bed file
+            if not self.silence_logs:
+                logging.info(f"\n[1/4] Creating or loading peak BED file")
+            self.create_peak_bed_file(
+                pseudobulk_atac_df, 
+                sample_name,
+                force_recalculate=force_recalculate
+                )
+            
+            # Load or create the peak_to_tg_distance file
+            if not self.silence_logs:
+                logging.info(f"\n[2/4] Creating or loading peak-to-target gene distance file")
+            self.create_peak_to_tg_distance_file(
+                sample_name=sample_name,
+                force_recalculate=force_recalculate,
+                filter_to_nearest_gene=self.filter_to_nearest_gene,
+            )
+            
+            # Aggregate the per-sample datasets into one global dataset
+            if not self.silence_logs:
+                logging.info(f"\n[3/4] Aggregating sample-level pseudobulk datasets into global dataset")
+            total_TG_pseudobulk_global, pseudobulk_chrom_dict = self.aggregate_pseudobulk_datasets(
+                force_recalculate=force_recalculate
+                )
+            
+            # Create or load the chromosome-specific data files for model training
+            if not self.silence_logs:
+                logging.info(f"\n[4/4] Creating or loading chromosome-specific data files for model training")
+            self.create_chrom_files(
+                total_TG_pseudobulk_global, 
+                pseudobulk_chrom_dict, 
+                force_recalculate=force_recalculate
+                )
+            
+            # Ensure that all of the required cached files exist
+            num_missing, _ = self.check_cached_file_exist()
+            
+            if num_missing != 0 and not self.silence_warnings:
+                logging.warning(f"After attempted creation, {num_missing} required files are still missing.")
+        
+        
