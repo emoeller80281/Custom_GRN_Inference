@@ -118,8 +118,7 @@ def download_genome_fasta(organism_code: str, save_dir: Union[str, Path]) -> Pat
         logging.info(f"Downloading {organism_code} genome from:\n  {url}")
         _download_with_progress(url, gz_path, desc=gz_path.name)
         logging.info(f"  - Download complete: {gz_path}")
-    else:
-        logging.info(f"  - Found existing genome file: {gz_path}")
+
         
     def _is_bgzf(path: Path) -> bool:
         """
@@ -212,18 +211,15 @@ def download_genome_fasta(organism_code: str, save_dir: Union[str, Path]) -> Pat
             
             tmp_bgzf.replace(gz_path)
             logging.info(f"  - Conversion complete")
-    else:
-        logging.info(f"  - {gz_path.name} is already BGZF; skipping transcode")
 
     # 3) Index the BGZF FASTA (.fai + .gzi)
     if fai_path.exists() and gzi_path.exists():
-        logging.info(f"  - Index already exists: {fai_path.name}, {gzi_path.name}")
+        return gz_path
     else:
         logging.info(f"Indexing {gz_path.name} with pysam.faidx …")
         pysam.faidx(str(gz_path))
         logging.info(f"  - Index created: {fai_path.name} (and {gzi_path.name})")
 
-    logging.info(f"Genome ready: {gz_path}")
     return gz_path
 
 def download_chrom_sizes(organism_code: str, save_dir: Union[str, Path]) -> Path:
@@ -245,7 +241,6 @@ def download_chrom_sizes(organism_code: str, save_dir: Union[str, Path]) -> Path
     out_path = save_dir / f"{organism_code}.chrom.sizes"
 
     if out_path.exists():
-        logging.info(f"Found existing chrom.sizes: {out_path}")
         return out_path
 
     logging.info(f"Downloading chrom.sizes:\n  {url}")
@@ -463,7 +458,6 @@ def download_ncbi_gene_info(organism_code: str, out_path: Optional[Union[str, Pa
             dest = Path.cwd() / dest
 
     if dest.exists():
-        logging.info(f"Found existing gene_info: {dest}")
         return dest
 
     logging.info(f"Downloading NCBI Gene Info for {info['species']}:\n  {url}")
@@ -547,9 +541,7 @@ def download_ensembl_gtf(
     dest_gz = out_dir / fn_gz
     dest_gtf = dest_gz.with_suffix("")  # drop .gz -> .gtf
 
-    if dest_gz.exists():
-        logging.info(f"Found existing GTF: {dest_gz}")
-    else:
+    if not dest_gz.exists():
         logging.info(f"Downloading Ensembl GTF for {species_name}:\n  {url}")
         _stream_download(url, dest_gz, desc=dest_gz.name)
         logging.info(f"Saved: {dest_gz}")

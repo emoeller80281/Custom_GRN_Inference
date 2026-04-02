@@ -20,6 +20,7 @@ import random
 import zlib
 import time
 from cycler import cycler
+import pickle
 
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["OMP_NUM_THREADS"] = "1"
@@ -93,6 +94,29 @@ plt.rcParams.update({
 
 order = ["LINGER", "SCENIC+", "CellOracle", "GRaNIE", "Pando", "TRIPOD", "FigR"]
 
+def load_experiment_handler(
+    tdf_settings_path: str | Path,
+    experiment_dir: str | Path,
+    model_num: int | None = None,
+    silence_warnings: bool = False,
+    ):
+    """
+    Utility function to load an existing ExperimentHandler from disk.
+    """
+    tdf = data_formatter.load_tdf(Path(tdf_settings_path))
+        
+    # Load the ExperimentHandler settings and state from disk
+    exp_handler = ExperimentHandler(
+        training_data_formatter=tdf,
+        experiment_dir=experiment_dir,
+        model_num=model_num,
+        silence_warnings=silence_warnings,
+    )
+    
+    exp_handler.load_handler()
+    
+    return exp_handler
+
 class ExperimentHandler:
     def __init__(
         self, 
@@ -138,6 +162,8 @@ class ExperimentHandler:
         self.chrom_ids = self.tdf.chrom_list
         self.tf_names = self.tdf.tf_names
         self.tg_names = self.tdf.tg_names
+        self.num_windows = self.tdf.num_windows
+        self.num_metacells = self.tdf.num_metacells
         
         # Default training parameters
         self.epochs = 250
@@ -149,7 +175,7 @@ class ExperimentHandler:
         self.num_heads = 4
         self.num_layers = 3
         self.d_ff = 512
-        self.kernel_size = 256
+        self.kernel_size = 64
         self.dropout = 0.1
         self.bias_scale = 2.0
         self.use_dist_bias = True
@@ -157,7 +183,6 @@ class ExperimentHandler:
         self.starting_epoch = None
         
         self.dataset = None
-        self.scalers = None
         
         # Model and training state will be loaded when load_trained_model is called
         self.model = None
@@ -167,7 +192,7 @@ class ExperimentHandler:
         self.test_loader = None
         self.tg_scaler = None
         self.tf_scaler = None
-        
+                
         self.scheduler_reduction_factor = 0.5
         self.scheduler_patience_epochs = 5
         self.scheduler_cooldown_epochs = 2
@@ -186,10 +211,9 @@ class ExperimentHandler:
         self.per_tf_summary_df = None
         
         # Model evaluation metric results with ground truth
-        self.df_with_ground_truth = None
-        self.gt_labeled_dfs = {}
         self.auroc_auprc_scores = None
         self.gpu_mem_log_df = None
+        self.batch_profile_log_df = None
         
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")        
         
@@ -205,7 +229,114 @@ class ExperimentHandler:
             "FigR": "#FDA7BB",
             "GRaNIE": "#F98637"
             }
+        
+    def save_handler(self):
+        self.tdf.save_settings()
+        
+        settings = {
+            "experiment_dir": str(self.experiment_dir),
+            "experiment_name": self.experiment_name,
+            "model_training_dir": str(self.model_training_dir),
+            "common_data_dir": str(self.common_data_dir),
+            "data_cache_dir": str(self.data_cache_dir),
+            "chrom_ids": self.chrom_ids,
+            "tf_names": self.tf_names,
+            "tg_names": self.tg_names,
+            "num_windows": self.num_windows,
+            "num_metacells": self.num_metacells,
+            "epochs": self.epochs,
+            "batch_size": self.batch_size,
+            "grad_accum_steps": self.grad_accum_steps,
+            "use_grad_accum": self.use_grad_accum,
+            "use_grad_ckpt": self.use_grad_ckpt,
+            "d_model": self.d_model,
+            "num_heads": self.num_heads,
+            "num_layers": self.num_layers,
+            "d_ff": self.d_ff,
+            "kernel_size": self.kernel_size,
+            "dropout": self.dropout,
+            "bias_scale": self.bias_scale,
+            "use_dist_bias": self.use_dist_bias,
+            "initial_lr": self.initial_lr,
+            "scheduler_reduction_factor": self.scheduler_reduction_factor,
+            "scheduler_patience_epochs": self.scheduler_patience_epochs,
+            "scheduler_cooldown_epochs": self.scheduler_cooldown_epochs,
+        }
+        
+        # Save the settings to disk
+        self.tdf.atomic_json_dump(settings, self.model_training_dir / "experiment_handler_save.json")
+        
+        if self.tf_scaler is not None:
+            scaler_state = {
+                "tf_scaler_mean": self.tf_scaler.mean.detach().cpu().tolist(),
+                "tf_scaler_std": self.tf_scaler.std.detach().cpu().tolist(),
+                "tg_scaler_mean": self.tg_scaler.mean.detach().cpu().tolist(),
+                "tg_scaler_std": self.tg_scaler.std.detach().cpu().tolist(),
+            }
+            scaler_state_path = self.model_training_dir / "scaler_state.pt"
+            torch.save(scaler_state, scaler_state_path)
+        
+        # Save the loaders to disk
+        if self.train_loader is not None:
+            torch.save(self.train_loader, self.model_training_dir / "train_loader.pt")
+        if self.val_loader is not None:
+            torch.save(self.val_loader, self.model_training_dir / "val_loader.pt")
+        if self.test_loader is not None:
+            torch.save(self.test_loader, self.model_training_dir / "test_loader.pt")
     
+    def load_handler(self):
+        # Load the settings from disk
+        settings_path = self.model_training_dir / "experiment_handler_save.json"
+        if not settings_path.exists():
+            logging.warning(f"Settings file {settings_path} does not exist. Cannot load ExperimentHandler state.")
+            return
+        
+        with open(settings_path, "r") as f:
+            settings = json.load(f)
+        
+        # Load the settings into the ExperimentHandler instance
+        for key, value in settings.items():
+            setattr(self, key, value)
+        
+        self.experiment_dir = Path(self.experiment_dir)
+        self.model_training_dir = Path(self.model_training_dir)
+        self.common_data_dir = Path(self.common_data_dir)
+        self.data_cache_dir = Path(self.data_cache_dir)
+        
+        self.train_loader = torch.load(self.model_training_dir / "train_loader.pt", weights_only=False)
+        self.val_loader = torch.load(self.model_training_dir / "val_loader.pt", weights_only=False)
+        self.test_loader = torch.load(self.model_training_dir / "test_loader.pt", weights_only=False)
+        
+        scaler_state_path = self.model_training_dir / "scaler_state.pt"
+        if scaler_state_path.exists():
+            scaler_state = torch.load(scaler_state_path)
+        
+            # Rebuild the scalers from the training parameters
+            self.tg_scaler = SimpleScaler(
+                mean=torch.as_tensor(scaler_state["tg_scaler_mean"], device=self.device, dtype=torch.float32),
+                std=torch.as_tensor(scaler_state["tg_scaler_std"],  device=self.device, dtype=torch.float32),
+            )
+            self.tf_scaler = SimpleScaler(
+                mean=torch.as_tensor(scaler_state["tf_scaler_mean"], device=self.device, dtype=torch.float32),
+                std=torch.as_tensor(scaler_state["tf_scaler_std"],  device=self.device, dtype=torch.float32),
+            )
+            
+        if (self.model_training_dir / "inferred_grn.csv").is_file():
+            self.grn = self.load_grn()
+        
+        # Load the model from disk
+        if (self.model_training_dir / "trained_model.pt").exists():
+            self.load_model()
+        
+        if (self.model_training_dir / "epoch_log.csv").is_file():
+            self.epoch_log_df = pd.read_csv(self.model_training_dir / "epoch_log.csv")
+        
+        if (self.model_training_dir / "gpu_memory_log.csv").is_file():
+            self.gpu_mem_log_df = pd.read_csv(self.model_training_dir / "gpu_memory_log.csv")
+        
+        if (self.model_training_dir / "batch_profile.log.csv").is_file():
+            self.batch_profile_log_df = pd.read_csv(self.model_training_dir / "batch_profile.log.csv")
+
     def _setup_cuda_ddp(self, local_rank, rank, world_size):
         use_cuda = torch.cuda.is_available()
         self.use_ddp = world_size > 1
@@ -251,7 +382,7 @@ class ExperimentHandler:
         num_layers=None,
         d_ff=None,
         dropout=None,
-        window_pool_size=16,
+        kernel_size=None,
         local_rank=0, 
         rank=0, 
         world_size=1, 
@@ -264,8 +395,9 @@ class ExperimentHandler:
         num_layers = int(self.num_layers) if num_layers is None else num_layers
         d_ff = int(self.d_ff) if d_ff is None else d_ff
         dropout = float(self.dropout) if dropout is None else dropout
-        bias_scale = float(self.bias_scale) if bias_scale is not None else None
-        use_dist_bias = bool(self.use_dist_bias) if use_dist_bias is not None else False
+        bias_scale = float(self.bias_scale) if bias_scale is None else bias_scale
+        use_dist_bias = bool(self.use_dist_bias) if use_dist_bias is None else use_dist_bias
+        kernel_size = int(self.kernel_size) if kernel_size is None else kernel_size
         
         tf_vocab_size = int(self.dataset.tf_ids.numel())
         tg_vocab_size = int(self.dataset.tg_ids.numel())
@@ -280,7 +412,7 @@ class ExperimentHandler:
             tg_vocab_size=tg_vocab_size,
             use_bias=use_dist_bias,
             bias_scale=bias_scale,
-            window_pool_size=window_pool_size,
+            window_pool_size=kernel_size,
         ).to(self.device)   
 
         return self.model
@@ -290,17 +422,19 @@ class ExperimentHandler:
         if not model_path.exists():
             logging.warning(f"WARNING: Trained model file {model_path} does not exist.")
             return None
-        
+                
         state_dict = torch.load(model_path, map_location=self.device)
-        
         model_params = self.tdf.load_json(self.model_training_dir / "model_params.json")
         training_state = self.tdf.load_json(self.model_training_dir / "training_state.json")
         
+        # Set the starting epoch and initial learning rate for continuing training
         self.starting_epoch = training_state.get("last_epoch", 0)
         self.initial_lr = training_state.get("last_lr", self.initial_lr)
         
+        # Create a new model with the model parameters
         self.model = MultiomicTransformer(**model_params).to(self.device)
         
+        # Load the saved model weights
         self.model.load_state_dict(state_dict)
         self.model.to(self.device)
         
@@ -322,16 +456,9 @@ class ExperimentHandler:
 
         tf_scaler = SimpleScaler(tf_s.mean.to(self.device), tf_s.std.to(self.device))
         tg_scaler = SimpleScaler(tg_s.mean.to(self.device), tg_s.std.to(self.device))
-        
+                
         self.tf_scaler = tf_scaler
         self.tg_scaler = tg_scaler
-        
-        self.scalers = {
-            "tf_scaler": tf_scaler,
-            "tg_scaler": tg_scaler,
-        }
-
-        return self.scalers
 
     def prepare_dataloader(self, batch_size=None, world_size=1, rank=0,
                         num_workers=4, pin_memory=True, seed=42, drop_last=True):
@@ -382,9 +509,9 @@ class ExperimentHandler:
             idxs_shuf = idxs[:]
             rnd.shuffle(idxs_shuf)
 
-            # 75% train, 10% val, 15% test
-            n_train = int(0.75 * n)
-            n_val   = int(0.10 * n)
+            # 70% train, 15% val, 15% test
+            n_train = int(0.70 * n)
+            n_val   = int(0.15 * n)
             n_test  = n - n_train - n_val
 
             # ensure we don't drop everything for tiny chromosomes
@@ -432,7 +559,7 @@ class ExperimentHandler:
             collate_fn=MultiChromosomeDataset.collate_fn,
             num_workers=num_workers,
             pin_memory=pin_memory,
-            persistent_workers=num_workers > 0,
+            persistent_workers=False,
         )
         val_loader = DataLoader(
             dataset,
@@ -450,7 +577,7 @@ class ExperimentHandler:
             pin_memory=pin_memory,
             persistent_workers=False,
         )
-        
+
         self.train_loader = train_loader
         self.val_loader = val_loader
         self.test_loader = test_loader
@@ -513,7 +640,7 @@ class ExperimentHandler:
         best_r2 = float("-inf")
         no_improvement_epochs = 0
         
-        logging.info("\n===== Training Started =====")
+        logging.info(f"\n===== Model {self.model_num} Training Started =====")
         for epoch in epoch_iter:
             epoch_start_time = time.time()
             model.train()
@@ -1331,6 +1458,29 @@ class ExperimentHandler:
         overlap_info_df["Pct of GRN in GT"] = pct(overlap_info_df["Overlap (Score DF in GT)"], overlap_info_df["GRN"]).round(2)
         overlap_info_df["Pct of GT in GRN"] = pct(overlap_info_df["Overlap (Score DF in GT)"], overlap_info_df[f"Ground Truth {ground_truth_name}"]).round(2)
         return overlap_info_df
+    
+    def report_grn_overlap_with_gt(self, ground_truth_name, gt_by_dataset_dict):
+        ground_truth_df, gt_lookup = gt_by_dataset_dict[ground_truth_name]
+        labeled_df = self.create_ground_truth_comparison_df(self.grn, gt_lookup, ground_truth_name)
+        unlabeled_df = self.grn
+
+        grn_unique_tfs = unlabeled_df["Source"].nunique()
+        grn_unique_tgs = unlabeled_df["Target"].nunique()
+        grn_unique_edges = len(unlabeled_df)
+
+        gt_unique_tfs = ground_truth_df["Source"].nunique()
+        gt_unique_tgs = ground_truth_df["Target"].nunique()
+        gt_unique_edges = len(ground_truth_df)
+
+        overlap_tfs = labeled_df["Source"].nunique()
+        overlap_tgs = labeled_df["Target"].nunique()
+        overlap_edges = len(labeled_df)
+
+        logging.info(f"\n----- GRN Overlap with Ground Truth -----")
+        logging.info(ground_truth_name)
+        logging.info(f"  - TF Overlap: {overlap_tfs:,} ({gt_unique_tfs:,} in GT)")
+        logging.info(f"  - TG Overlap: {overlap_tgs:,} ({gt_unique_tgs:,} in GT)")
+        logging.info(f"  - Edge Overlap: {overlap_edges:,} ({gt_unique_edges:,} in GT)")
     
     def generate_pooled_metrics(
         self,
@@ -2352,3 +2502,4 @@ class ExperimentHandler:
 
         if not allow_overwrite:
             logging.info(f"Using model_num={self.model_num} at {self.model_training_dir}")
+            

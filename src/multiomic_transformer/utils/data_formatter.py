@@ -27,6 +27,29 @@ from multiomic_transformer.utils.peaks import format_peaks, find_genes_near_peak
 
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 
+def load_tdf(settings_path: Path):
+    if not settings_path.is_file():
+        raise FileNotFoundError(f"Settings file not found at {settings_path}")
+    
+    with open(settings_path, "r") as f:
+        settings = json.load(f)
+    
+    tdf = TrainingDataFormatter(
+        project_dir=Path(settings["project_dir"]),
+        experiment_name=settings["experiment_name"],
+        organism_code=settings["organism_code"],
+        sample_names=settings["sample_names"],
+        chrom_list=settings["chrom_list"],
+        processed_data_dir=Path(settings["processed_data_dir"]),
+        output_dir=Path(settings["output_dir"]),
+        silence_warnings=settings.get("silence_warnings", True),
+        silence_logs=settings.get("silence_logs", False),
+    )
+    
+    tdf.load_settings()
+    
+    return tdf
+
 class TrainingDataFormatter:
     def __init__(
         self, 
@@ -65,6 +88,15 @@ class TrainingDataFormatter:
         self._handle_assertions()
         
         self.settings_path = self.file_paths["processed"]["settings"]
+
+        self.genes = None
+        self.tf_names = None
+        self.tg_names = None
+        
+        self.num_windows = None
+        self.num_metacells = None
+        
+        self.peaks = None
         
         if not self.settings_path.is_file():
             self.save_settings()
@@ -72,12 +104,7 @@ class TrainingDataFormatter:
             self.load_settings()
             if not self.silence_logs:
                 logging.info(f"Loaded existing settings from {self.settings_path}")
-        
-        self.genes = None
-        self.tf_names = None
-        self.tg_names = None
-        
-        self.peaks = None
+
         self.peak_locs_df = None
         
         self.chrom_processing_time_df = None
@@ -92,6 +119,8 @@ class TrainingDataFormatter:
             "processed_data_dir": str(self.processed_data_dir),
             "output_dir": str(self.output_dir),
             "window_size": self.window_size,
+            "num_windows": self.num_windows,
+            "num_metacells": self.num_metacells,
             "distance_scale_factor": self.distance_scale_factor,
             "max_peak_tg_distance": self.max_peak_tg_distance,
             "filter_to_nearest_gene": self.filter_to_nearest_gene,
@@ -112,6 +141,8 @@ class TrainingDataFormatter:
         self.processed_data_dir = Path(settings["processed_data_dir"])
         self.output_dir = Path(settings["output_dir"])
         self.window_size = settings["window_size"]
+        self.num_windows = settings["num_windows"]
+        self.num_metacells = settings["num_metacells"]
         self.distance_scale_factor = settings["distance_scale_factor"]
         self.max_peak_tg_distance = settings["max_peak_tg_distance"]
         self.filter_to_nearest_gene = settings["filter_to_nearest_gene"]
@@ -433,6 +464,7 @@ class TrainingDataFormatter:
         
         # Chromosome-specific files
         chrom_processing_time = {}
+        total_windows = 0
         for chrom_id in self.chrom_list:
             
             init_time_start = time.time()
@@ -552,6 +584,9 @@ class TrainingDataFormatter:
             dist_bias_time_end = time.time()
             distance_bias_time = dist_bias_time_end - dist_bias_time_start
             
+            num_chrom_windows = len(kept_window_indices)
+            total_windows += num_chrom_windows
+            
             chrom_windows = pybedtools.BedTool.from_dataframe(genome_windows[["chrom", "start", "end"]])
             
             # ----- Writing Output Files -----
@@ -620,6 +655,9 @@ class TrainingDataFormatter:
         
         self.chrom_processing_time_df = pd.DataFrame(chrom_processing_time, index=[0])
         self.chrom_processing_time_df.to_csv(self.file_paths["training_cache"]["chrom_processing_time"], index=False)
+        
+        self.num_windows = total_windows
+        self.num_metacells = total_TG_pseudobulk_global.shape[1]
             
     def load_or_dump_common_tf_vocab(self):
         return self._load_or_create_vocab(
@@ -1354,8 +1392,6 @@ class TrainingDataFormatter:
         gc.load_ncbi_gene_info(str(ncbi_file), species_taxid=species_taxid)
         
         self.canon = gc
-        if not self.silence_logs:
-            logging.info(f"Map sizes: {gc.coverage_report()}")
 
     def atomic_json_dump(self, obj, path: Path):
         """Safe JSON dump, avoids race conditions by making a tmp file first, then updating the name"""

@@ -205,7 +205,7 @@ class MultiomicTransformer(nn.Module):
         
         # ATAC positional embedding - Adds a positional embedding to the windows so the model can learn how the relative 
         # position of each window in the sequence affects a TG
-        self.posenc = PositionalEmbedding(d_model)
+        # self.posenc = PositionalEmbedding(d_model)
         
         # ATAC encoder - Model learns to pick up on patterns of ATAC accessibility
         self.encoder = nn.TransformerEncoder(
@@ -297,14 +297,14 @@ class MultiomicTransformer(nn.Module):
         atac_windows = self.window_downsampler(atac_windows)
         
         batch_size, n_window, _ = atac_windows.shape
-        device = atac_windows.device
+        # device = atac_windows.device
         
         # ----- ATAC encoding -----
         win_emb = self.atac_acc_dense_input_layer(atac_windows)       # [batch_size,n_window,d_model]
         
         # Add positional encoding
-        pos = torch.arange(n_window, device=device, dtype=torch.float32)
-        win_emb = win_emb + self.posenc(pos, batch_size=batch_size).transpose(0, 1)  # [batch_size,n_window,d_model]
+        # pos = torch.arange(n_window, device=device, dtype=torch.float32)
+        # win_emb = win_emb + self.posenc(pos, batch_size=batch_size).transpose(0, 1)  # [batch_size,n_window,d_model]
         win_emb = self.encoder(win_emb)                               # [batch_size,n_window,d_model]
 
         # ----- TF embeddings -----
