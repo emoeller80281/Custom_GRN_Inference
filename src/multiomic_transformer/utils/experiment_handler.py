@@ -1,6 +1,7 @@
 import json
 import os
 import random
+import re
 from matplotlib.ticker import FuncFormatter, MultipleLocator
 import pandas as pd
 import numpy as np
@@ -43,6 +44,7 @@ from multiomic_transformer.datasets.dataset_refactor import (
     InterleavedChromBatchSampler,
 )
 from multiomic_transformer.scripts.multinode_train_simplified import Trainer
+import multiomic_transformer.utils.auroc_refactored as auroc_utils
 
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 
@@ -160,12 +162,18 @@ class ExperimentHandler:
         # Model and training state will be loaded when load_trained_model is called
         self.model = None
         self.state = None
+        self.train_loader = None
+        self.val_loader = None
         self.test_loader = None
         self.tg_scaler = None
         self.tf_scaler = None
         
+        self.scheduler_reduction_factor = 0.5
+        self.scheduler_patience_epochs = 5
+        self.scheduler_cooldown_epochs = 2
+        
         # Gradient Attribution dataframe will be loaded when load_gradient_attribution is called
-        self.gradient_attribution_df = None
+        self.grn = None
         
         # Model forward pass predictions vs true values
         self.tg_prediction_df = None
@@ -374,9 +382,9 @@ class ExperimentHandler:
             idxs_shuf = idxs[:]
             rnd.shuffle(idxs_shuf)
 
-            # 70% train, 15% val, 15% test
-            n_train = int(0.70 * n)
-            n_val   = int(0.15 * n)
+            # 75% train, 10% val, 15% test
+            n_train = int(0.75 * n)
+            n_val   = int(0.10 * n)
             n_test  = n - n_train - n_val
 
             # ensure we don't drop everything for tiny chromosomes
@@ -442,6 +450,11 @@ class ExperimentHandler:
             pin_memory=pin_memory,
             persistent_workers=False,
         )
+        
+        self.train_loader = train_loader
+        self.val_loader = val_loader
+        self.test_loader = test_loader
+        
         return train_loader, val_loader, test_loader
 
     def train(
@@ -479,9 +492,9 @@ class ExperimentHandler:
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,
             mode="min",
-            factor=0.5,
-            patience=5,
-            cooldown=2, 
+            factor=self.scheduler_reduction_factor,
+            patience=self.scheduler_patience_epochs,
+            cooldown=self.scheduler_cooldown_epochs, 
             threshold=1e-4,
             min_lr=1e-7,
         )
@@ -711,7 +724,6 @@ class ExperimentHandler:
                 self.save_model(epoch_log=epoch_log, model_name=chkpt_name, verbose=False)
                 chkpt_saved = True
                 
-            
             epoch_log.append({
                 "epoch": epoch,
                 "train_loss": avg_loss,
@@ -911,7 +923,7 @@ class ExperimentHandler:
         use_amp=True,
         max_batches: int | None = None,
         save_every_n_batches: int = 20,
-        max_tgs_per_batch = 128,
+        max_tgs_per_batch: int | None = None,
         chunk_size = 64,
     ):
 
@@ -921,6 +933,9 @@ class ExperimentHandler:
         tf_names = self.tf_names
         tg_names = self.tg_names
         device = self.device
+        
+        max_tgs_per_batch = len(tg_names) if max_tgs_per_batch is None else max_tgs_per_batch
+        max_tgs_per_batch = min(max_tgs_per_batch, len(tg_names))
 
         T_total = len(tf_names)
         G_total = len(tg_names)
@@ -1083,6 +1098,8 @@ class ExperimentHandler:
         
         self.grn = self.format_grn(df_long)
         
+        self.grn.to_csv(self.model_training_dir / "inferred_grn.csv", index=False)
+        
         return self.grn, batch_grad_dfs
     
     def format_grn(self, df):
@@ -1102,6 +1119,16 @@ class ExperimentHandler:
         df["Target"] = df["Target"].astype(str).str.upper()
         
         return df
+    
+    def load_grn(self):
+        grn_path = self.model_training_dir / "inferred_grn.csv"
+        if not grn_path.exists():
+            if self.silence_warnings is not None:
+                logging.warning(f"GRN file not found at {grn_path}. Please run run_gradient_attribution() first to generate the GRN.")
+            return None
+        
+        self.grn = pd.read_csv(grn_path)
+        return self.grn
     
     def load_eval_results(self):      
         eval_files = [
@@ -1525,6 +1552,43 @@ class ExperimentHandler:
         
         return auroc_df
     
+    def calculate_auroc_all_methods(self, sample_list, dataset_type, ground_truth_dict, grn=None):        
+        grn = self.grn if grn is None else grn
+        
+        assert grn is not None, "GRN must be provided either through argument or by running gradient attribution first"
+        
+        # Loop through each ground truth dataset and load each file
+        ground_truth_edges_dict = {gt: auroc_utils.prep_gt_edges(df) for gt, (df, _) in ground_truth_dict.items()}
+        
+        # Load the other method GRNs (TF-TG scores averaged across samples)
+        standardized_method_dict = auroc_utils.load_other_method_grns(sample_list, dataset_type)
+        
+        standardized_method_dict["Gradient Attribution"] = grn
+            
+        # Pooled AUROC/AUPRC
+        logging.info("\nEvaluating pooled methods across samples")
+        results_df, raw_results_df = auroc_utils.calculate_pooled_auroc(
+            standardized_method_dict, ground_truth_edges_dict, 
+            per_tf_methods={"Gradient Attribution"}
+            )
+        
+        logging.info(results_df.groupby("method")["auroc"].median().sort_values(ascending=False))
+
+        # Per-TF AUROC/AUPRC
+        logging.info("\nPer-TF evaluation of pooled methods across samples")
+        per_tf_all_df, per_tf_summary_df = auroc_utils.calculate_per_tf_auroc(
+            standardized_method_dict, ground_truth_edges_dict, [0.001, 0.01, 0.1], 
+            per_tf_methods={"Gradient Attribution"}
+            )    
+        
+        logging.info(per_tf_summary_df.groupby("method")["median_per_tf_auroc"].median().sort_values(ascending=False))
+        
+        # Save results
+        raw_results_df.to_csv(self.model_training_dir / "pooled_auroc_auprc_raw_results.csv", index=False)
+        results_df.to_csv(self.model_training_dir / "pooled_auroc_auprc_results.csv", index=False)
+        per_tf_all_df.to_csv(self.model_training_dir / "per_tf_auroc_auprc_results.csv", index=False)
+        per_tf_summary_df.to_csv(self.model_training_dir / "per_tf_auroc_auprc_summary.csv", index=False)
+    
     def plot_auroc_auprc(
         self, 
         score_df: pd.DataFrame, 
@@ -1748,6 +1812,43 @@ class ExperimentHandler:
 
         return fig
     
+    def plot_relative_improvement(self, per_tf_plot_df, experiment_name, override_title=None):
+        median_per_tf_score = per_tf_plot_df.groupby(["method"])["auroc"].median().reset_index()
+        median_per_tf_score["diff_from_ga"] = median_per_tf_score.loc[median_per_tf_score["method"] == "Gradient Attribution", "auroc"].values[0] - median_per_tf_score["auroc"]
+
+        median_per_tf_score = median_per_tf_score.drop(median_per_tf_score[median_per_tf_score["method"] == "Gradient Attribution"].index)
+        median_per_tf_score = median_per_tf_score.drop(median_per_tf_score[median_per_tf_score["method"] == "TF Knockout"].index)
+
+
+        median_per_tf_score["method"] = pd.Categorical(
+            median_per_tf_score["method"],
+            categories=order,
+            ordered=True
+        )
+
+        median_per_tf_score = median_per_tf_score.sort_values("method", ascending=False)
+
+        colors = [self.method_color_dict.get(m, "#BBBBBB") for m in median_per_tf_score["method"]]
+
+        name = re.sub(r"_hvg_filter_disp_.*", "", experiment_name).replace("_", " ")
+
+        fig = plt.figure(figsize=(4, 4.5))
+        plt.barh(median_per_tf_score["method"], median_per_tf_score["diff_from_ga"], color=colors)
+        ax = plt.gca()
+        ax.axvline(0, color=self.color_palette["grey_light"], linestyle="--", linewidth=1)
+        plt.xlabel("AUROC Improvement")
+        
+        if max(median_per_tf_score["diff_from_ga"]) > 0.15 or min(median_per_tf_score["diff_from_ga"]) < -0.15:
+            plt.xlim(-0.3, 0.3)
+        else:
+            plt.xlim(-0.15, 0.15)
+        if override_title is not None:
+            plt.title(override_title)
+        else:
+            plt.title(f"{name}\nPer-TF AUROC Improvement")
+        plt.tight_layout()
+        return fig
+    
     def plot_true_vs_predicted_tg_expression(
         self, 
         num_batches: int=15, 
@@ -1759,7 +1860,7 @@ class ExperimentHandler:
 
         if self.tg_prediction_df is None or self.tg_true_df is None or rerun_forward_pass:
             logging.info("Running forward pass to get predicted vs true TG expression for a subset of test batches...")
-            self.tg_prediction_df, self.tg_true_df, _ = self.run_forward_pass(num_batches=num_batches)
+            self.tg_prediction_df, self.tg_true_df = self.run_forward_pass(num_batches=num_batches)
         
         x = self.tg_true_df.median(axis=1).values
         y = self.tg_prediction_df.median(axis=1).values
@@ -1883,6 +1984,159 @@ class ExperimentHandler:
             ylim=ylim,
             )
         
+        return fig
+    
+    def plot_top_n_tf_roc_curves(
+        self,
+        score_df, 
+        gt_df, 
+        ground_truth_name, 
+        exp, 
+        method_name="Gradient Attribution", 
+        num_top_tfs_to_plot=25,
+        min_edges=10,
+        min_pos=1,
+        balance=True,
+        name_clean=None,
+        override_title=None,
+        ):
+        per_tf_df, tf_curves = self.generate_per_tf_metrics(
+            method_name=method_name, 
+            score_df=score_df, 
+            ground_truth=gt_df, 
+            ground_truth_name=ground_truth_name, 
+            top_fracs=(0.001, 0.005, 0.01, 0.05),
+            min_edges=min_edges,
+            min_pos=min_pos,
+            balance=balance,
+            )
+        
+        fig = plt.figure(figsize=(5,4))
+
+        top_tfs = per_tf_df.sort_values("auroc", ascending=False)["tf"].unique()[:num_top_tfs_to_plot]
+        tf_curves_subset = {tf: curves for tf, curves in tf_curves.items() if tf in top_tfs}
+        tf_curves_sorted = dict(sorted(tf_curves_subset.items(), key=lambda item: per_tf_df.set_index("tf").loc[item[0], "auroc"], reverse=True))
+
+        if name_clean is not None:
+            name = name_clean
+        else:
+            name = exp.experiment_name
+        
+        for i, tf in enumerate(tf_curves_sorted.keys()):
+            if i < 11:
+                label = f"{tf} (AUROC={per_tf_df.set_index('tf').loc[tf, 'auroc']:.3f})"
+            else:
+                label = None  # Only label the top 10 for clarity
+                
+            plt.plot(
+                tf_curves_sorted[tf]["fpr"], 
+                tf_curves_sorted[tf]["tpr"], 
+                lw=1.5, 
+                label=label,
+                alpha=per_tf_df.set_index("tf").loc[tf, "auroc"])
+            plt.xlabel("False Positive Rate")
+            plt.ylabel("True Positive Rate")
+            if override_title is not None:
+                plt.title(override_title)
+            else:
+                plt.title(f"{name} vs {ground_truth_name}\n{method_name} Top {num_top_tfs_to_plot} Per-TF AUROC")
+            
+        plt.plot([0, 1], [0, 1], color="gray", lw=2, linestyle="--")
+            
+        fig.legend(
+            bbox_to_anchor=(1.0, 0.5), 
+            loc="center left", 
+            borderaxespad=0.0, 
+            title=f"Top 10 TFs:", 
+        )
+
+        return fig, per_tf_df, tf_curves
+    
+    def plot_method_gt_heatmap(
+        self,
+        df: pd.DataFrame, 
+        metric: str = "auroc", 
+        per_tf: bool = False,
+        x_scale: float = 1.5,
+        y_scale: float = 0.6,
+        override_title: str | None = None,
+        ) -> plt.Figure:
+        """
+        Plot a heatmap of METHOD (rows) x GROUND TRUTH (cols) for AUROC or AUPRC.
+
+        Rows are sorted by the median metric across all ground truth datasets.
+        """
+        metric = metric.lower()
+        if metric not in ("auroc", "auprc"):
+            raise ValueError(f"metric must be 'auroc' or 'auprc', got {metric}")
+
+        metric_col = metric  # 'auroc' or 'auprc'
+        
+        df["method"] = df["method"].str.replace(" ", "\n")
+
+        # 1) Order methods by median metric across all GTs (descending)
+        method_order = (
+            df.groupby("method")[metric_col]
+            .median()
+            .sort_values(ascending=False)
+            .index
+            .tolist()
+        )
+        
+        # 2) Pivot to METHOD x GT matrix
+        heat_df = (
+            df
+            .pivot_table(index="method", columns="gt", values=metric_col)
+            .loc[method_order]  # apply sorted method order
+        )
+
+        # 3) Plot heatmap with better sizing
+        n_methods = len(heat_df.index)
+        n_gts = len(heat_df.columns)
+        
+        fig, ax = plt.subplots(
+            figsize=(
+                max(n_gts * x_scale, 4),      # Width: 1.5 inches per GT, min 6
+                max(n_methods * y_scale, 3),  # Height: 0.5 inches per method, min 4
+            )
+        )
+        
+        sns.heatmap(
+            heat_df,
+            annot=True,
+            fmt=".3f",
+            cmap="viridis",
+            vmin=0.3,
+            vmax=0.7,
+            cbar_kws={"label": metric.upper()},
+            ax=ax,
+        )
+        
+        plt.xlabel(None)
+        plt.ylabel(None)
+        
+        if override_title is not None:
+            ax.set_title(override_title, pad=10)
+        
+        else:
+            if per_tf == True:
+                ax.set_title(
+                    f"Median per-TF {metric.upper()} score × ground truth\n"
+                    f"(methods sorted by Median {metric.upper()} across GTs)",
+                    pad=10,
+                )
+            else:
+                ax.set_title(
+                    f"Median Pooled {metric.upper()} score × ground truth\n"
+                    f"(methods sorted by Median {metric.upper()} across GTs)",
+                    pad=10,
+                )
+        
+        # Improve tick label readability
+        plt.xticks(rotation=45, ha='right')
+        plt.yticks(rotation=0)
+        
+        fig.tight_layout()
         return fig
     
     def _plot_all_results_auroc_boxplot(
