@@ -137,7 +137,7 @@ class GeneCanonicalizer:
                         if ens:
                             self.ens2sym[ens] = sym
 
-    def canonicalize_series(self, s: pd.Series, batch_size: int = 1000) -> pd.Series:
+    def canonicalize_series(self, s: pd.Series, batch_size: int = 5000) -> pd.Series:
         """Fast path: local maps first; optional batched MyGene fallback for unresolved."""
         # 1) normalize input
         s_norm = s.astype(str).map(_norm_symbol)

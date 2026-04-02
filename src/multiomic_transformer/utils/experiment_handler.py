@@ -123,8 +123,7 @@ class ExperimentHandler:
             model_str = f"{model_num:03d}"
             self.model_training_dir = Path(f"{self.experiment_dir}/{self.experiment_name}/model_training_{model_str}")
             if not self.model_training_dir.exists():
-                if not self.silence_warnings:
-                    logging.warning(f"WARNING: Model training directory {self.model_training_dir} does not exist.")
+                self._create_model_training_dir(allow_overwrite=False)
         else:
             self._create_model_training_dir(allow_overwrite=False)
             if not self.silence_warnings:
@@ -153,6 +152,7 @@ class ExperimentHandler:
         self.bias_scale = 2.0
         self.use_dist_bias = True
         self.initial_lr = 0.00025
+        self.starting_epoch = None
         
         self.dataset = None
         self.scalers = None
@@ -275,6 +275,27 @@ class ExperimentHandler:
             window_pool_size=window_pool_size,
         ).to(self.device)   
 
+        return self.model
+    
+    def load_model(self, model_name: str = "trained_model.pt"):
+        model_path = self.model_training_dir / model_name
+        if not model_path.exists():
+            logging.warning(f"WARNING: Trained model file {model_path} does not exist.")
+            return None
+        
+        state_dict = torch.load(model_path, map_location=self.device)
+        
+        model_params = self.tdf.load_json(self.model_training_dir / "model_params.json")
+        training_state = self.tdf.load_json(self.model_training_dir / "training_state.json")
+        
+        self.starting_epoch = training_state.get("last_epoch", 0)
+        self.initial_lr = training_state.get("last_lr", self.initial_lr)
+        
+        self.model = MultiomicTransformer(**model_params).to(self.device)
+        
+        self.model.load_state_dict(state_dict)
+        self.model.to(self.device)
+        
         return self.model
     
     def create_scalers(self, dataloader, max_batches: int | None = 25):
@@ -411,7 +432,7 @@ class ExperimentHandler:
             collate_fn=MultiChromosomeDataset.collate_fn,
             num_workers=num_workers,
             pin_memory=pin_memory,
-            persistent_workers=num_workers > 0,
+            persistent_workers=False,
         )
         test_loader = DataLoader(
             dataset,
@@ -419,7 +440,7 @@ class ExperimentHandler:
             collate_fn=MultiChromosomeDataset.collate_fn,
             num_workers=num_workers,
             pin_memory=pin_memory,
-            persistent_workers=num_workers > 0,
+            persistent_workers=False,
         )
         return train_loader, val_loader, test_loader
 
@@ -430,18 +451,20 @@ class ExperimentHandler:
         num_epochs: int = 10,
         learning_rate: float | None = None,
         verbose: bool = True,
-        validate_every: int = 1,
+        improvement_patience: int = 10,
         max_batches: int | None = None,
         use_amp: bool = True,
         grad_accum_steps=4,
+        save_every_n_epochs: int = 5,
         monitor_gpu_memory: bool = False,
         profile_batches: bool = False,
         silence_tqdm: bool = False,
         allow_overwrite: bool = False,
     ):
         learning_rate = self.initial_lr if learning_rate is None else learning_rate
-        model = self.model.to(self.device)
+        starting_epoch = self.starting_epoch if self.starting_epoch is not None else 0
         
+        model = self.model.to(self.device)
         self._create_model_training_dir(allow_overwrite)
 
         optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
@@ -457,7 +480,8 @@ class ExperimentHandler:
             optimizer,
             mode="min",
             factor=0.5,
-            patience=2,
+            patience=5,
+            cooldown=2, 
             threshold=1e-4,
             min_lr=1e-7,
         )
@@ -466,11 +490,17 @@ class ExperimentHandler:
         batch_profile_log = []
         epoch_log = []
 
-        epoch_iter = range(num_epochs)
+        final_epoch = starting_epoch + num_epochs
+        epoch_iter = range(starting_epoch, final_epoch)
 
         if not verbose and not silence_tqdm:
             epoch_iter = tqdm(epoch_iter, desc="Training", ncols=100, unit="epoch", total=num_epochs)
 
+        best_loss = float("inf")
+        best_r2 = float("-inf")
+        no_improvement_epochs = 0
+        
+        logging.info("\n===== Training Started =====")
         for epoch in epoch_iter:
             epoch_start_time = time.time()
             model.train()
@@ -498,7 +528,7 @@ class ExperimentHandler:
                 total_batches = max_batches
 
             if verbose and not silence_tqdm:
-                pbar = tqdm(total=total_batches, desc=f"Epoch {epoch+1}/{num_epochs}", ncols=100, leave=False)
+                pbar = tqdm(total=total_batches, desc=f"Epoch {epoch+1}/{final_epoch}", ncols=100, leave=False)
             else:
                 pbar = None
 
@@ -652,14 +682,13 @@ class ExperimentHandler:
             r2_s = None
             r2_u = None
 
-            if val_loader is not None and ((epoch + 1) % validate_every == 0):
-                avg_val_mse_scaled, avg_val_mse_unscaled, r2_s, r2_u = self._validate_simple(
-                    model=model,
-                    val_loader=val_loader,
-                    device=self.device,
-                    amp_enabled=amp_enabled,
-                )
-                scheduler.step(avg_val_mse_unscaled)
+            avg_val_mse_scaled, avg_val_mse_unscaled, r2_s, r2_u = self._validate_simple(
+                model=model,
+                val_loader=val_loader,
+                device=self.device,
+                amp_enabled=amp_enabled,
+            )
+            scheduler.step(avg_val_mse_unscaled)
 
             current_lr = optimizer.param_groups[0]["lr"]
             
@@ -669,9 +698,22 @@ class ExperimentHandler:
             else:
                 peak_alloc_mb = None
                 peak_reserved_mb = None
-
+                
+            if avg_val_mse_unscaled < best_loss:
+                best_loss = avg_val_mse_unscaled
+                no_improvement_epochs = 0
+            else:
+                no_improvement_epochs += 1
+            
+            chkpt_saved = False
+            if epoch % save_every_n_epochs == 0:
+                chkpt_name = f"checkpoint_{epoch:03d}.pt"
+                self.save_model(epoch_log=epoch_log, model_name=chkpt_name, verbose=False)
+                chkpt_saved = True
+                
+            
             epoch_log.append({
-                "epoch": epoch + 1,
+                "epoch": epoch,
                 "train_loss": avg_loss,
                 "val_mse_unscaled": avg_val_mse_unscaled,
                 "r2_unscaled": r2_u,
@@ -682,35 +724,83 @@ class ExperimentHandler:
                 "peak_reserved_mb": peak_reserved_mb,
             })
 
+            chkpt_saved_str = "Checkpoint Saved" if chkpt_saved else ""
+            
             if verbose:
-                if avg_val_mse_unscaled is not None:
-                    print(
-                        f"Epoch {epoch+1}/{num_epochs} | "
-                        f"Train Loss: {avg_loss:.4f} | "
-                        f"Val MSE: {avg_val_mse_unscaled:.4f} | "
-                        f"R2 (Unscaled): {r2_u:.3f} | "
-                        f"R2 (Scaled): {r2_s:.3f} | "
-                        f"LR: {current_lr:.2e} | "
-                        f"Time: {epoch_end_time - epoch_start_time:.1f}s"
-                    )
-                else:
-                    print(
-                        f"Epoch {epoch+1}/{num_epochs} | "
-                        f"Train Loss: {avg_loss:.4f} | "
-                        f"LR: {current_lr:.2e} | "
-                        f"Time: {epoch_end_time - epoch_start_time:.1f}s"
-                    )
+                logging.info(
+                    f"Epoch {epoch}/{final_epoch} | "
+                    f"Train Loss: {avg_loss:.4f} | "
+                    f"Val MSE: {avg_val_mse_unscaled:.4f} | "
+                    f"R2 (Unscaled): {r2_u:.3f} | "
+                    f"R2 (Scaled): {r2_s:.3f} | "
+                    f"LR: {current_lr:.2e} | "
+                    f"Time: {epoch_end_time - epoch_start_time:.1f}s | "
+                    f"Last Improved: {no_improvement_epochs} epochs ago | "
+                    f"{chkpt_saved_str}"
+                )
 
-        
+            if no_improvement_epochs >= improvement_patience:
+                if verbose:
+                    logging.info(f"No improvement in validation loss for {no_improvement_epochs} epochs. Stopping early.")
+                break
+            
         self.gpu_mem_log_df = pd.DataFrame(gpu_mem_log)
         self.batch_profile_df = pd.DataFrame(batch_profile_log)
         self.epoch_log_df = pd.DataFrame(epoch_log)
         
+        # If resuming from a previous training run, concatenate the new logs with the old ones so we have a complete history
+        if starting_epoch != 0:
+            def _concat_logs(new_df, log_filename):
+                previous_log_path = self.model_training_dir / log_filename
+                if previous_log_path.exists():
+                    previous_log_df = pd.read_csv(previous_log_path)
+                    return pd.concat([previous_log_df, new_df], ignore_index=True)
+                else:
+                    return new_df
+            self.epoch_log_df = _concat_logs(self.epoch_log_df, "epoch_log.csv")
+            self.gpu_mem_log_df = _concat_logs(self.gpu_mem_log_df, "gpu_memory_log.csv")
+            self.batch_profile_df = _concat_logs(self.batch_profile_df, "batch_profile_log.csv")
+        
         self.gpu_mem_log_df.to_csv(self.model_training_dir / "gpu_memory_log.csv", index=False)
         self.batch_profile_df.to_csv(self.model_training_dir / "batch_profile_log.csv", index=False)
         self.epoch_log_df.to_csv(self.model_training_dir / "epoch_log.csv", index=False)
+        
+        logging.info(f"\nTraining Complete. Saving final model")
+        self.save_model(epoch_log=epoch_log, model_name="trained_model.pt")
 
         return model
+    
+    def save_model(self, epoch_log, model_name: str = "trained_model.pt", verbose: bool = True):
+        if self.model is None:
+            logging.warning("WARNING: No model to save.")
+            return
+        
+        model_path = self.model_training_dir / model_name
+        torch.save(self.model.state_dict(), model_path)
+        
+        model_params = {
+            "d_model": self.model.d_model,
+            "num_heads": self.model.num_heads,
+            "num_layers": self.model.num_layers,
+            "d_ff": self.model.d_ff,
+            "dropout": self.model.dropout,
+            "tf_vocab_size": self.model.tf_vocab_size,
+            "tg_vocab_size": self.model.tg_vocab_size,
+            "use_bias": self.model.use_bias,
+            "bias_scale": self.model.bias_scale,
+            "window_pool_size": self.model.window_pool_size,
+        }
+                
+        training_state = {
+            "last_epoch": epoch_log[-1]["epoch"] if epoch_log else None,
+            "last_lr": epoch_log[-1]["lr"] if epoch_log else None
+        }
+
+        self.tdf.atomic_json_dump(training_state, self.model_training_dir / "training_state.json")
+        self.tdf.atomic_json_dump(model_params, self.model_training_dir / "model_params.json")
+        
+        if verbose:
+            logging.info(f"Model saved to {model_path}")
     
     def _validate_simple(self, model, val_loader, device, amp_enabled):
         model.eval()
@@ -815,16 +905,19 @@ class ExperimentHandler:
     def run_gradient_attribution(
         self,
         test_loader,
+        model=None,
         tf_scaler=None,
         tg_scaler=None,
         use_amp=True,
-        max_batches: int = None,
+        max_batches: int | None = None,
         save_every_n_batches: int = 20,
         max_tgs_per_batch = 128,
         chunk_size = 64,
     ):
 
-        model = self.model
+        model = self.model if model is None else model
+        max_batches = len(test_loader) if max_batches is None else max_batches
+        
         tf_names = self.tf_names
         tg_names = self.tg_names
         device = self.device
@@ -992,12 +1085,7 @@ class ExperimentHandler:
         
         return self.grn, batch_grad_dfs
     
-    def format_grn(self, df_wide):
-        df = (
-            df_wide
-            .reset_index(names="Source")
-            .melt(id_vars="Source", var_name="Target", value_name="Score")
-        )
+    def format_grn(self, df):
         
         def inverse_normal_transform(x):
             r = x.rank(method="average")

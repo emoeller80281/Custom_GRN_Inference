@@ -168,16 +168,18 @@ class MultiomicTransformer(nn.Module):
         
         self.d_model = d_model
         self.num_heads = num_heads
+        self.num_layers = num_layers
         self.d_ff = d_ff
         self.dropout = dropout
+        self.tf_vocab_size = tf_vocab_size
+        self.tg_vocab_size = tg_vocab_size
         self.use_bias = use_bias
         self.bias_scale = bias_scale
         self.window_pool_size = window_pool_size
 
-
         # TF and TG embedding tables - generates identities for TFs and TGs
-        self.tf_identity_emb = nn.Embedding(tf_vocab_size, d_model)
-        self.tg_query_emb = nn.Embedding(tg_vocab_size, d_model)
+        self.tf_identity_emb = nn.Embedding(self.tf_vocab_size, d_model)
+        self.tg_query_emb = nn.Embedding(self.tg_vocab_size, d_model)
         
         # ATAC windows do not have embeddings, their position and accessibility
         # are used to inform TFs and TGs
@@ -215,7 +217,7 @@ class MultiomicTransformer(nn.Module):
                 batch_first=True,
                 norm_first=True
             ),
-            num_layers=num_layers,
+            num_layers=self.num_layers,
             enable_nested_tensor=False
         )
         # ----- TF-ATAC and ATAC-TF Cross Attention

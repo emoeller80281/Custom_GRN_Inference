@@ -445,6 +445,7 @@ class TrainingDataFormatter:
             sample_window_map_file = self.file_paths["training_cache"][chrom_id]["window_map"]
             peak_to_tss_dist_path = self.file_paths["training_cache"][chrom_id]["peak_to_tss_dist"]
             manifest_file = self.file_paths["training_cache"][chrom_id]["manifest"]
+            window_bed_file = self.file_paths["training_cache"][chrom_id]["genome_windows"]
             
             # Check if all required output files exist
             required_files = [
@@ -460,6 +461,7 @@ class TrainingDataFormatter:
                 dist_bias_file,
                 tg_id_file,
                 manifest_file,
+                window_bed_file,
             ]
             
             if not force_recalculate and all(os.path.isfile(f) for f in required_files):
@@ -549,13 +551,16 @@ class TrainingDataFormatter:
                 kept_window_indices = list(range(num_windows))
             dist_bias_time_end = time.time()
             distance_bias_time = dist_bias_time_end - dist_bias_time_start
-
+            
+            chrom_windows = pybedtools.BedTool.from_dataframe(genome_windows[["chrom", "start", "end"]])
+            
             # ----- Writing Output Files -----
             save_step_start = time.time()
             torch.save(atac_window_tensor_all, atac_tensor_path)
             torch.save(tg_tensor_all, tg_tensor_path)
             self.atomic_json_dump(new_window_map, sample_window_map_file)
             self.atomic_json_dump(tg_names_kept, sample_tg_name_file)
+            chrom_windows.saveas(window_bed_file)
             torch.save(torch.tensor(tg_ids, dtype=torch.long), tg_id_file)
             torch.save(dist_bias, dist_bias_file)
             save_step_end = time.time()

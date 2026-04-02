@@ -4,8 +4,8 @@
 #SBATCH --error=LOGS/transformer_logs/experiments/%x_%A/%x_%A_%a.err
 #SBATCH --time=10:00:00
 #SBATCH -p dense
-#SBATCH -N 2
-#SBATCH --gres=gpu:a100:3
+#SBATCH -N 1
+#SBATCH --gres=gpu:a100:1
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 16
 #SBATCH --mem=192G
@@ -94,6 +94,7 @@ DEFAULT_FILTER_RNA=true
 DEFAULT_FILTER_ATAC=true
 DEFAULT_MIN_RNA_DISP=0.5
 DEFAULT_MIN_ATAC_DISP=0.5
+DEFAULT_KERNEL_SIZE=16
 DEFAULT_SAMPLE_NAMES="buffer_1" # buffer_2 buffer_3 buffer_4
 
 
@@ -205,6 +206,8 @@ EXPERIMENTS=(
     # "buffer_2_muon_preprocessing|Macrophage_buffer_2_muon_preprocessing_all_tgs|D_MODEL=128;D_FF=512;SAMPLE_NAMES=buffer_2"
     # "buffer_2_muon_preprocessing_1_hop|Macrophage_buffer_2_muon_preprocessing_1_hop|TOTAL_EPOCHS=5000;D_MODEL=128;D_FF=512;BATCH_SIZE=8;PATIENCE=30;SCHEDULER_PATIENCE=15;SAMPLE_NAMES=buffer_2"
 
+    "buffer_1_raw_muon_preprocessing|Macrophage_buffer_1_raw_muon_preprocessing|D_MODEL=128;D_FF=512;SAMPLE_NAMES=buffer_1"
+
 )
 
 
@@ -308,6 +311,7 @@ SUBSAMPLE_MAX_CELLS=${DEFAULT_SUBSAMPLE_MAX_CELLS}
 SUBSAMPLE_SEED=${DEFAULT_SUBSAMPLE_SEED}
 ALLOWED_SAMPLES=${DEFAULT_ALLOWED_SAMPLES}
 RESUME_CHECKPOINT_PATH=${DEFAULT_RESUME_CHECKPOINT_PATH}
+KERNEL_SIZE=${DEFAULT_KERNEL_SIZE}
 
 # Apply parameter overrides
 if [ -n "${PARAM_OVERRIDES}" ]; then
@@ -388,6 +392,7 @@ if [ -n "${PARAM_OVERRIDES}" ]; then
                 SUBSAMPLE_SEED) SUBSAMPLE_SEED=$param_value ;;
                 ALLOWED_SAMPLES) ALLOWED_SAMPLES=$param_value ;;
                 RESUME_CHECKPOINT_PATH) RESUME_CHECKPOINT_PATH=$param_value ;;
+                KERNEL_SIZE) KERNEL_SIZE=$param_value ;;
                 *) echo "WARNING: Unknown parameter: $param_name" ;;
             esac
         fi
@@ -481,7 +486,7 @@ write_param_csv_row() {
         MOTIF_MASK_THRESH MOTIF_PRIOR_SCALE ATTN_BIAS_SCALE
         SHORTCUT_L1 SHORTCUT_L2 SHORTCUT_TOPK SHORTCUT_DROPOUT
         SUBSAMPLE_MAX_TFS SUBSAMPLE_MAX_TGS SUBSAMPLE_MAX_WINDOWS_PER_CHROM SUBSAMPLE_MAX_CELLS
-        SUBSAMPLE_SEED ALLOWED_SAMPLES RESUME_CHECKPOINT_PATH
+        SUBSAMPLE_SEED ALLOWED_SAMPLES RESUME_CHECKPOINT_PATH KERNEL_SIZE
     )
 
     for p in "${PARAM_NAMES[@]}"; do
@@ -600,7 +605,7 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
     echo "[INFO] Detected ${SLURM_JOB_PARTITION:-} partition, progressing with model training"
 
     # Build training command
-    TRAIN_CMD="src/multiomic_transformer/scripts/multinode_train_argparse.py \
+    TRAIN_CMD="src/multiomic_transformer/scripts/multinode_train_simplified.py \
         --sample_data_cache_dir ${SAMPLE_DATA_CACHE_DIR} \
         --common_data ${COMMON_DATA} \
         --output_dir ${OUTPUT_DIR} \
@@ -627,6 +632,7 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
         --num_layers ${NUM_LAYERS} \
         --d_ff ${D_FF} \
         --dropout ${DROPOUT} \
+        --kernel_size ${KERNEL_SIZE} \
         --motif_mask_thresh ${MOTIF_MASK_THRESH} \
         --motif_prior_scale ${MOTIF_PRIOR_SCALE} \
         --attn_bias_scale ${ATTN_BIAS_SCALE} \
@@ -867,7 +873,6 @@ if [[ "${SLURM_JOB_PARTITION:-}" == "dense" ]] || [[ "${SLURM_JOB_PARTITION:-}" 
             --experiment "${DATASET_NAME}" \
             --training_num "${TRAINING_NUM}" \
             --experiment_dir "${EXPERIMENT_DIR}" \
-            --model_file "${MODEL_FILE}" \
             --dataset_type "macrophage" \
             --sample_name_list "${SAMPLE_NAMES}"
 
