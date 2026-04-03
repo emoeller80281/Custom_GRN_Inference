@@ -2071,6 +2071,8 @@ class ExperimentHandler:
         ax.set_xlabel("True Expression", fontsize=13)
         ax.set_ylabel("Predicted Expression", fontsize=13)
         
+        plt.tight_layout()
+        
         return fig
     
     def plot_per_tf_auroc_boxplot(self, agg_by_gt: bool = True, ylim: tuple = (0.3, 0.7)):
@@ -2120,6 +2122,8 @@ class ExperimentHandler:
             per_tf=True,
             ylim=ylim
             )
+        
+        fig.tight_layout()
         return fig
         
     def plot_pooled_auroc_boxplot(self, ylim: tuple = (0.3, 0.7)):
@@ -2133,6 +2137,7 @@ class ExperimentHandler:
             per_tf=False,
             ylim=ylim,
             )
+        fig.tight_layout()
         
         return fig
     
@@ -2199,6 +2204,7 @@ class ExperimentHandler:
             borderaxespad=0.0, 
             title=f"Top 10 TFs:", 
         )
+        plt.tight_layout()
 
         return fig, per_tf_df, tf_curves
     

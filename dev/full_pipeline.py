@@ -7,6 +7,7 @@ import importlib
 from pathlib import Path
 import numpy as np
 import random
+import matplotlib.pyplot as plt
 
 import sys
 PROJECT_DIR = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
@@ -28,22 +29,22 @@ if __name__ == "__main__":
     # Path to the training output directory. Used to store the preprocessing config
     output_dir = Path("/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments")
 
+    # List of samples in the training datset. 
+    # Each of these should have its own subdirectory in the processed data directory
+    sample_names = ["buffer_2"]
+    
     # Name of the dataset / experiment to run
-    experiment_name = "Macrophage_buffer_1_raw_muon_preprocessing_new_cache"
+    experiment_name = f"Macrophage_{sample_names[0]}_raw_muon_preprocessing"
 
     # Organism code for the dataset. Supports either "mm10" or "hg38"
     organism_code = "hg38"
-
-    # List of samples in the training datset. 
-    # Each of these should have its own subdirectory in the processed data directory
-    sample_names = ["buffer_1"]
     
     sample_type = "Macrophage"
     ground_truth_name = "ChIP-Atlas macrophage"
 
     # List of chromosomes. Used to split the data by chromsome for caching and training.
     # Should be in the format "chr1", "chr2", etc. and should match the chromosome names in the processed data files.
-    chrom_list = [f"chr{i}" for i in range(1, 21)]
+    chrom_list = [f"chr{i}" for i in range(1, 22)]
 
     logging.info("Initializing training data formatter...")
     tdf = data_formatter.TrainingDataFormatter(
@@ -61,13 +62,13 @@ if __name__ == "__main__":
     
     # Verify that the data cache files exist. If not, this method will create them.
     logging.info("Creating or verifying loading cache data files...")
-    tdf.create_or_load_data_cache(sample_name=sample_names[0], force_recalculate=False)
+    tdf.create_or_load_data_cache(sample_name=sample_names[0], force_recalculate=True)
 
     logging.info("Initializing ExperimentHandler...")
     exp = experiment_handler.ExperimentHandler(
         training_data_formatter=tdf,
         experiment_dir="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/",
-        model_num=3,
+        model_num=1,
         silence_warnings=False,
     )
     
@@ -90,7 +91,7 @@ if __name__ == "__main__":
     # batches from each chromosome in each set.
     logging.info("Preparing DataLoader...")
     train_loader, val_loader, test_loader = exp.prepare_dataloader(
-        batch_size=64,
+        batch_size=32,
         num_workers=8
     )
 
@@ -101,7 +102,7 @@ if __name__ == "__main__":
     # Creates a new MultiomicTransformer model. Model attributes can be set to change
     # the hyperparameters of the model.
     logging.info("Creating model")
-    exp.create_new_model()
+    exp.create_new_model(kernel_size=64)
 
     # Runs model training and returns the trained model.
     logging.info("Training model")
@@ -110,7 +111,8 @@ if __name__ == "__main__":
         val_loader=val_loader, 
         num_epochs=500,
         max_batches=None,
-        improvement_patience=10,
+        grad_accum_steps=1,
+        improvement_patience=15,
         save_every_n_epochs=10,
         monitor_gpu_memory=True,
         profile_batches=True,
@@ -162,22 +164,6 @@ if __name__ == "__main__":
 
     exp.report_grn_overlap_with_gt(ground_truth_name, gt_by_dataset_dict)
 
-    name = exp.experiment_name.replace("_", " ")
-    fig, per_tf_df, tf_curves = exp.plot_top_n_tf_roc_curves(
-        exp.grn, 
-        gt_by_dataset_dict[ground_truth_name], 
-        ground_truth_name, 
-        exp, 
-        method_name="Gradient Attribution", 
-        num_top_tfs_to_plot=10,
-        min_edges=500,
-        min_pos=50,
-        balance=True,
-        name_clean=name,
-        override_title=f"Top 10 Per-TF AUROC"
-        )
-    fig.show()
-
     logging.info(f"\n----- AUROC -----")
     per_tf_df_all =  pd.read_csv(exp.model_training_dir / "per_tf_auroc_auprc_results.csv")
     pooled_df_all = pd.read_csv(exp.model_training_dir / "pooled_auroc_auprc_results.csv")
@@ -196,57 +182,81 @@ if __name__ == "__main__":
     logging.info(f"Median Pooled AUROC: {pooled_df_median_auroc:.3f}")
     logging.info(f"Median Per-TF AUROC: {per_tf_median_auroc:.3f}")
 
-    logging.info(exp.experiment_name)
+    fig_dir = exp.model_training_dir / "figures"
+    fig_dir.mkdir(exist_ok=True)
+    
+    name = exp.experiment_name.replace("_", " ")
+    per_tf_plot, per_tf_df, tf_curves = exp.plot_top_n_tf_roc_curves(
+        exp.grn, 
+        gt_by_dataset_dict[ground_truth_name], 
+        ground_truth_name, 
+        exp, 
+        method_name="Gradient Attribution", 
+        num_top_tfs_to_plot=10,
+        min_edges=500,
+        min_pos=50,
+        balance=True,
+        name_clean=name,
+        override_title=f"Top 10 Per-TF AUROC"
+        )
+    per_tf_plot.savefig(fig_dir / f"top_10_per_tf_auroc.png", dpi=250)
+    plt.close(per_tf_plot)
 
-    fig = exp._plot_all_results_auroc_boxplot(
+    pooled_auroc_boxplot_fig = exp._plot_all_results_auroc_boxplot(
         pooled_df_all,
         per_tf=False,
         ylim=(0.2, 0.8),
         override_title=f"Pooled AUROC per Method",
         method_color_dict=exp.method_color_dict
     )
-    fig.show()
+    pooled_auroc_boxplot_fig.savefig(fig_dir / f"pooled_auroc_boxplot.png", dpi=250)
+    plt.close(pooled_auroc_boxplot_fig)
 
-    fig = exp._plot_all_results_auroc_boxplot(
+    per_tf_auroc_boxplot_fig = exp._plot_all_results_auroc_boxplot(
         per_tf_plot_df, 
         per_tf=True,
         ylim=(0.2, 0.8),
         override_title=f"Per-TF AUROC per Method",
         method_color_dict=exp.method_color_dict
         )
-    fig.show()
+    per_tf_auroc_boxplot_fig.savefig(fig_dir / f"per_tf_auroc_boxplot.png", dpi=250)
+    plt.close(per_tf_auroc_boxplot_fig)
 
-    fig = exp.plot_relative_improvement(
+    relative_improvement_fig = exp.plot_relative_improvement(
         per_tf_plot_df, 
         exp.experiment_name,
         override_title=f"Per-TF AUROC Improvement",
         )
-    fig.show()
+    relative_improvement_fig.savefig(fig_dir / f"relative_improvement.png", dpi=250)
+    plt.close(relative_improvement_fig)
 
-    fig = exp.plot_method_gt_heatmap(
+    pooled_auroc_heatmap_fig = exp.plot_method_gt_heatmap(
         pooled_df_all, 
         per_tf=False,
         x_scale=1.2,
         y_scale=0.6,
         override_title=f"Pooled AUROC by Method and GT"
         )
-    fig.show()
+    pooled_auroc_heatmap_fig.savefig(fig_dir / f"pooled_auroc_heatmap.png", dpi=250)
+    plt.close(pooled_auroc_heatmap_fig)
 
-    fig = exp.plot_method_gt_heatmap(
+    per_tf_auroc_heatmap_fig = exp.plot_method_gt_heatmap(
         per_tf_plot_df, 
         per_tf=True,
         x_scale=1.2,
         y_scale=0.6,
         override_title=f"Per-TF AUROC by Method and GT"
         )
-    fig.show()
+    per_tf_auroc_heatmap_fig.savefig(fig_dir / f"per_tf_auroc_heatmap.png", dpi=250)
+    plt.close(per_tf_auroc_heatmap_fig)
 
-    fig = exp.plot_true_vs_predicted_tg_expression(
+    true_vs_predicted_fig = exp.plot_true_vs_predicted_tg_expression(
         num_batches=50, 
         set_axis_logscale=False,
         title=f"Predicted vs True TG Expression"
         )
-    fig.show()
+    true_vs_predicted_fig.savefig(fig_dir / f"true_vs_predicted.png", dpi=250)
+    plt.close(true_vs_predicted_fig)
 
     logging.info(f"\n----- Saving Experiment -----")
     exp.save_handler()

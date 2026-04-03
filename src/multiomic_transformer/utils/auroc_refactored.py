@@ -56,6 +56,16 @@ def load_other_method_grns(sample_name_list, dataset_type):
                 pando_path        = OTHER_METHOD_DIR / f"Macrophage_S2/Pando/Macrophage_buffer2_filtered_network.csv"
                 scenic_plus_path  = OTHER_METHOD_DIR / f"Macrophage_S2/SCENIC+/scenic_plus_inferred_grn_macrophage_macrophage_buffer2_filtered.tsv"
                 tripod_path       = OTHER_METHOD_DIR / f"Macrophage_S2/TRIPOD/gene_TF_highest_abs_coef.csv"
+                
+            else:
+                cell_oracle_path  = OTHER_METHOD_DIR / f"Macrophage_S1/CellOracle/Macrophase_buffer1_filtered_out_E7.5_rep1_final_GRN.csv"
+                directnet_path    = OTHER_METHOD_DIR / f"Macrophage_S1/DIRECTNET/Network_links.csv"
+                figr_path         = OTHER_METHOD_DIR / f"Macrophage_S1/FigR/Buffer1_filtered_network.csv"
+                granie_path       = OTHER_METHOD_DIR / f"Macrophage_S1/GRaNIE/GRN_connections_filtered_sorted_scBuffer1_uniq.csv"
+                linger_path       = OTHER_METHOD_DIR / f"Macrophage_S1/LINGER/cell_type_TF_gene.csv"
+                pando_path        = OTHER_METHOD_DIR / f"Macrophage_S1/Pando/Macrophage_buffer1_raw_network.csv"
+                scenic_plus_path  = OTHER_METHOD_DIR / f"Macrophage_S1/SCENIC+/scenic_plus_inferred_grn_macrophage_macrophage_buffer1_filtered.tsv"
+                tripod_path       = OTHER_METHOD_DIR / f"Macrophage_S1/TRIPOD/gene_TF_highest_abs_coef.csv"
         
         elif dataset_type.lower() == "k562":
             cell_oracle_path  = OTHER_METHOD_DIR / f"{sample_name}/CellOracle/K562_human_filtered_out_E7.5_rep1_final_GRN.csv"
