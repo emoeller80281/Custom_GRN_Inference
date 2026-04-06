@@ -16,12 +16,12 @@ source activate my_env
 PROJECT_DIR="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/"
 
 DATASET_NAME="iPSC_10x_raw"
-PROCESSED_DATA_NAME="iPSC_muon_preprocessing_CG_D25_rep1_rep2_rep3"
-SAMPLE_NAME="CG_D25_rep1_rep2_rep3"
+SAMPLE_NAME="WT_D25_rep1"
+PROCESSED_DATA_NAME="iPSC_${SAMPLE_NAME}_muon_preprocessing"
 ORGANISM_CODE="hg38"
 
 TSS_PATH="${PROJECT_DIR}/data/genome_data/genome_annotation/${ORGANISM_CODE}/gene_tss.bed"
-TF_LIST_FILE="${PROJECT_DIR}/data/ground_truth_files/chipatlas_iPSC_1mb.csv"
+TF_LIST_FILE=""
 
 RAW_DATA_DIR="${PROJECT_DIR}/data/raw/${DATASET_NAME}/"
 PROCESSED_DATA_DIR="${PROJECT_DIR}/data/processed/${PROCESSED_DATA_NAME}"

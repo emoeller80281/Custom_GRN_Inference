@@ -235,6 +235,9 @@ class MudataProcessor:
             sc.pl.violin(self.rna, ['n_genes_by_counts', 'total_counts', 'pct_counts_mt'], jitter=0.4, multi_panel=True)
             plt.savefig(fig_dir / "qc_violin_plots_post_filtering.png")
             plt.close()
+            
+        # Save raw counts
+        self.rna.layers["counts"] = self.rna.X.copy()
     
         # Normalize and log-transform
         sc.pp.normalize_total(self.rna, target_sum=norm_target_sum)
@@ -466,6 +469,9 @@ class MudataProcessor:
         if filter_hvgs:
             keep_peaks = self.atac.var['highly_variable']
             self.atac = self.atac[:, keep_peaks]
+            
+        # Save original counts
+        self.atac.layers["counts"] = self.atac.X.copy()
         
         # Scaling
         self.atac.raw = self.atac
@@ -858,6 +864,12 @@ def create_metacells(
     pseudo_bulk_rna_df.to_parquet(pseudobulk_rna_file, engine="pyarrow", compression="snappy")
     pseudo_bulk_atac_df.to_parquet(pseudobulk_atac_file, engine="pyarrow", compression="snappy")
     
+def get_threshold(setting_name):
+    setting_value = sample_filtering_settings[setting_name].values[0]
+    print(f"{setting_name}: {setting_value}")
+    
+    return setting_value
+    
 if __name__ == "__main__":
     args = parse_args()
 
@@ -875,6 +887,24 @@ if __name__ == "__main__":
 
     SAMPLE_DATA_DIR = RAW_DATA_DIR / SAMPLE_NAME
     SAMPLE_PROCESSED_DATA_DIR = PROCESSED_DATA_DIR / SAMPLE_NAME
+    
+    filtering_setting_df = pd.read_csv(PROJECT_DIR / "dev" / "notebooks" / "muon_preprocessing" /"qc_filtering_settings.tsv", sep="\t")
+    sample_filtering_settings = filtering_setting_df[filtering_setting_df["Sample"] == SAMPLE_NAME]    
+    
+    # ----- RNA QC thresholds -----
+    MIN_CELLS_PER_GENE = get_threshold("Min Cells per Gene")
+    MIN_GENES_PER_CELL = get_threshold("Min Genes per Cell")
+    MAX_GENES_PER_CELL = get_threshold("Max Genes per Cell")
+    MIN_TOTAL_COUNTS = get_threshold("Min Total Counts")
+    MAX_TOTAL_COUNTS = get_threshold("Max Total Counts")
+    MAX_PCT_COUNTS_MT = get_threshold("Max Pct MT")
+
+    # ----- ATAC QC thresholds -----
+    MIN_CELLS_PER_PEAK = get_threshold("Min Cells per Peak")
+    MIN_PEAKS_PER_CELL = get_threshold("Min Peaks per Cell")
+    MAX_PEAKS_PER_CELL = get_threshold("Max Peaks per Cell")
+    MIN_TOTAL_PEAK_COUNTS = get_threshold("Min Total Peak Counts")
+    MAX_TOTAL_PEAK_COUNTS = get_threshold("Max Total Peak Counts")
 
     if not SAMPLE_PROCESSED_DATA_DIR.exists():
         SAMPLE_PROCESSED_DATA_DIR.mkdir(parents=True)
@@ -924,15 +954,15 @@ if __name__ == "__main__":
     
     # RNA QC and Preprocessing
     data_processor.rna_qc_filter(
-        min_cells_per_gene = 20,
-        MIN_GENES_PER_CELL = 500,
-        max_genes_per_cell = 2500,
-        min_total_counts_per_cell = 1000,
-        max_total_counts_per_cell = 5000,
-        max_pct_counts_mt = 20,
-        norm_target_sum = 10000,
-        MIN_RNA_DISP = 0.5,
-        filter_hvgs = True,
+        min_cells_per_gene = MIN_CELLS_PER_GENE,
+        min_genes_per_cell = MIN_GENES_PER_CELL,
+        max_genes_per_cell = MAX_GENES_PER_CELL,
+        min_total_counts_per_cell = MIN_TOTAL_COUNTS,
+        max_total_counts_per_cell = MAX_TOTAL_COUNTS,
+        max_pct_counts_mt = MAX_PCT_COUNTS_MT,
+        norm_target_sum = 1e4,
+        min_rna_disp = 0.5,
+        filter_hvgs = False,
         tf_list_file = None,
         fig_dir=SAMPLE_PROCESSED_DATA_DIR / "preprocessing" / "rna_qc",
         )
@@ -946,16 +976,16 @@ if __name__ == "__main__":
     
     # ATAC QC and Preprocessing
     data_processor.atac_qc_filter(
-        min_cells_per_peak=20,
-        min_peaks_per_cell=500,
-        max_peaks_per_cell=2500,
-        min_total_counts_per_cell=1000,
-        max_total_counts_per_cell=5000,
+        min_cells_per_peak=MIN_CELLS_PER_PEAK,
+        min_peaks_per_cell=MIN_PEAKS_PER_CELL,
+        max_peaks_per_cell=MAX_PEAKS_PER_CELL,
+        min_total_counts_per_cell=MIN_TOTAL_PEAK_COUNTS,
+        max_total_counts_per_cell=MAX_TOTAL_PEAK_COUNTS,
         min_atac_disp=0.5,
         promoter_upstream=1000,
         promoter_downstream=100,
         distal_max=200_000,
-        filter_hvgs=True,
+        filter_hvgs=False,
         fig_dir=SAMPLE_PROCESSED_DATA_DIR / "preprocessing" / "atac_qc",
         )
     
