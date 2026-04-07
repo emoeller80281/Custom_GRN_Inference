@@ -17,10 +17,7 @@ import scanpy as sc
 import seaborn as sns
 from muon import atac as ac  # the module containing function for scATAC data processing
 import matplotlib.pyplot as plt
-
-from config.settings_hpc import MIN_GENES_PER_CELL
-from grn_inference.pipeline import data_processing
-from multiomic_transformer.data.preprocess_argparse import MIN_RNA_DISP
+from matplotlib.axes import Axes
 
 # Setting figure parameters
 sc.settings.verbosity = 0
@@ -38,6 +35,48 @@ def parse_args():
     parser.add_argument("--tf-list-file", type=str, required=True)
     parser.add_argument("--frag-path", type=str, required=True)
     return parser.parse_args()
+
+def load_raw_data(
+    sample_name: str, 
+    sample_data_dir: Path, 
+    rna_count_file: Path | None = None, 
+    atac_count_file: Path | None = None, 
+    raw_h5_file: Path | None = None
+    ):
+
+    # Print all files in the sample data directory.
+    print(f"Loading data for sample {sample_name} from {sample_data_dir}...")
+    # print all files in the data directory
+    for file in sample_data_dir.glob("*"):
+        file_name = file.name
+        print(f"  - {file_name}")
+        if file_name.endswith("barcodes.tsv.gz"):
+            file.rename(sample_data_dir / f"barcodes.tsv.gz")
+        elif file_name.endswith("features.tsv.gz"):
+            file.rename(sample_data_dir / f"features.tsv.gz")
+        elif file_name.endswith("matrix.mtx.gz"):
+            file.rename(sample_data_dir / f"matrix.mtx.gz")
+        elif file_name.endswith("fragments.tsv.gz"):
+            file.rename(sample_data_dir / f"fragments.tsv.gz")
+        elif file_name.endswith("fragments.tsv.gz.tbi.gz"):
+            file.rename(sample_data_dir / f"fragments.tsv.gz.tbi.gz")
+        
+    if rna_count_file is not None and atac_count_file is not None:
+        rna_count_filepath = sample_data_dir / rna_count_file
+        atac_count_filepath = sample_data_dir / atac_count_file
+        
+        mdata = construct_from_gene_by_cell_matrices(rna_count_filepath, atac_count_filepath)
+        print("Constructed MuData object from count files.")
+        
+    elif raw_h5_file is not None:
+        mdata = mu.read_10x_h5(raw_h5_file)
+        
+    else:
+        mdata = mu.read_10x_mtx(sample_data_dir)
+            
+    mdata.var_names_make_unique()
+    
+    return mdata
 
 def normalize_peak_format(peak_id: str) -> str:
     """
@@ -131,10 +170,11 @@ class MudataProcessor:
         tf_list_file=None,
         ):
         
-        self.mdata = mdata
+        self.raw_mdata = mdata
+        self.mdata = self.raw_mdata.copy()
         self.tss_path = tss_path
-        self.rna = mdata.mod['rna']
-        self.atac = mdata.mod['atac']
+        self.rna = self.mdata.mod['rna']
+        self.atac = self.mdata.mod['atac']
         self.tf_list_file = tf_list_file
         self.processed_data_dir = processed_data_dir
         self.sample_name = sample_name
@@ -211,20 +251,20 @@ class MudataProcessor:
         
         if fig_dir is not None:
             fig_dir.mkdir(parents=True, exist_ok=True)
+            sc.settings.figdir = fig_dir
         
         self.rna.var['mt'] = self.rna.var_names.str.upper().str.startswith('MT-')  # annotate the group of mitochondrial genes as 'mt'
         sc.pp.calculate_qc_metrics(self.rna, qc_vars=['mt'], percent_top=None, log1p=False, inplace=True)
         
         if fig_dir is not None and fig_dir.exists():
-            sc.pl.violin(self.rna, ['n_genes_by_counts', 'total_counts', 'pct_counts_mt'], jitter=0.4, multi_panel=True)
-            plt.savefig(fig_dir / "qc_violin_plots_pre_filtering.png")
-            plt.close()
+            sc.pl.violin(self.rna, ['n_genes_by_counts', 'total_counts', 'pct_counts_mt'], jitter=0.4, multi_panel=True, save="_pre_qc_filtering_rna.png")
 
         # Filter
         if tf_list_file is not None and tf_list_file.exists():
             self.flag_tfs_to_keep()
-        else:
             mu.pp.filter_var(self.rna, 'n_cells_by_counts', lambda x: (x >= min_cells_per_gene) | self.rna.var['keep_tf'].to_numpy(dtype=bool))
+        else:
+            mu.pp.filter_var(self.rna, 'n_cells_by_counts', lambda x: (x >= min_cells_per_gene))
 
             
         mu.pp.filter_obs(self.rna, 'n_genes_by_counts', lambda x: (x >= min_genes_per_cell) & (x <= max_genes_per_cell))
@@ -232,8 +272,7 @@ class MudataProcessor:
         mu.pp.filter_obs(self.rna, 'pct_counts_mt', lambda x: x <= max_pct_counts_mt)
         
         if fig_dir is not None and fig_dir.exists():
-            sc.pl.violin(self.rna, ['n_genes_by_counts', 'total_counts', 'pct_counts_mt'], jitter=0.4, multi_panel=True)
-            plt.savefig(fig_dir / "qc_violin_plots_post_filtering.png")
+            sc.pl.violin(self.rna, ['n_genes_by_counts', 'total_counts', 'pct_counts_mt'], jitter=0.4, multi_panel=True, save="_post_qc_filtering_rna.png")
             plt.close()
             
         # Save raw counts
@@ -247,17 +286,22 @@ class MudataProcessor:
         sc.pp.highly_variable_genes(self.rna, min_mean=0.02, max_mean=4, min_disp=min_rna_disp)
         
         if fig_dir is not None and fig_dir.exists():
-            sc.pl.highly_variable_genes(self.rna)
-            plt.savefig(fig_dir / "highly_variable_genes.png")
-            plt.close()
+            sc.pl.highly_variable_genes(self.rna, save="_rna.png")
             
         if filter_hvgs:
-            keep_genes = self.rna.var['highly_variable'] | self.rna.var['keep_tf']
+            if tf_list_file is not None and tf_list_file.exists():
+                keep_genes = self.rna.var['highly_variable'] | self.rna.var['keep_tf']
+            else:
+                keep_genes = self.rna.var['highly_variable']
             self.rna = self.rna[:, keep_genes]
             
+        self.rna.layers["counts"] = self.rna.X.copy()
+        
         # Scaling
         self.rna.raw = self.rna
         sc.pp.scale(self.rna, max_value=10)
+        
+        mu.write(str(self.processed_data_dir / f"{self.sample_name}.h5mu/rna"), self.rna)
     
     def rna_pca_and_neighbors(self, rna, n_pcs=20, n_neighbors=10, fig_dir: Path|None = None):
         """
@@ -283,19 +327,16 @@ class MudataProcessor:
         """
         if fig_dir is not None:
             fig_dir.mkdir(parents=True, exist_ok=True)
+            sc.settings.figdir = fig_dir
         
         sc.tl.pca(rna, svd_solver='arpack')
 
         if fig_dir is not None and fig_dir.exists():
             if "highly_variable" in rna.var.columns:
                 first_three_hvg_genes = rna.var[rna.var.highly_variable].index[:3].to_list()
-                sc.pl.pca(rna, color=first_three_hvg_genes)
-                plt.savefig(fig_dir / "pca_hvgs.png")
-                plt.close()
+                sc.pl.pca(rna, color=first_three_hvg_genes, save="_pca_hvgs.png")
                 
-            sc.pl.pca_variance_ratio(rna, log=True)
-            plt.savefig(fig_dir / "pca_variance_ratio.png")
-            plt.close()
+            sc.pl.pca_variance_ratio(rna, log=True, save="_pca_variance_ratio_rna.png")
             
         sc.pp.neighbors(rna, n_neighbors=n_neighbors, n_pcs=n_pcs)
         
@@ -303,9 +344,7 @@ class MudataProcessor:
         sc.tl.leiden(rna, flavor="igraph", n_iterations=2)
         
         if fig_dir is not None and fig_dir.exists():
-            sc.pl.umap(rna, color=["leiden"])
-            plt.savefig(fig_dir / "umap_leiden.png")
-            plt.close()
+            sc.pl.umap(rna, color=["leiden"], save="_umap_leiden_rna.png")
     
     def construct_peak_annotation(
         self, 
@@ -438,41 +477,40 @@ class MudataProcessor:
         filter_hvgs: bool = True,
         fig_dir: Path|None = None
         ):
+        if fig_dir is not None and fig_dir.exists():
+            sc.settings.figdir = fig_dir
+        
         sc.pp.calculate_qc_metrics(self.atac, percent_top=None, log1p=False, inplace=True)
         
         if fig_dir is not None and fig_dir.exists():
-            sc.pl.violin(self.atac, ['n_genes_by_counts', 'total_counts'], jitter=0.4, multi_panel=True)            
-            plt.savefig(fig_dir / "atac_qc_violin_plots_pre_filtering.png")
-            plt.close()
+            sc.pl.violin(self.atac, ['n_genes_by_counts', 'total_counts'], jitter=0.4, multi_panel=True, save="_pre_qc_filtering_atac.png")                    
         
-        
-        ac.pp.filter_var(self.atac, 'n_cells_by_counts', lambda x: x >= min_cells_per_peak)
-        ac.pp.filter_obs(self.atac, 'n_genes_by_counts', lambda x: (x >= min_peaks_per_cell) & (x <= max_peaks_per_cell))
-        ac.pp.filter_obs(self.atac, 'total_counts', lambda x: (x >= min_total_counts_per_cell) & (x <= max_total_counts_per_cell))
+        mu.pp.filter_var(self.atac, 'n_cells_by_counts', lambda x: x >= min_cells_per_peak)
+        mu.pp.filter_obs(self.atac, 'n_genes_by_counts', lambda x: (x >= min_peaks_per_cell) & (x <= max_peaks_per_cell))
+        mu.pp.filter_obs(self.atac, 'total_counts', lambda x: (x >= min_total_counts_per_cell) & (x <= max_total_counts_per_cell))
         
         if fig_dir is not None and fig_dir.exists():
-            sc.pl.violin(self.atac, ['n_genes_by_counts', 'total_counts'], jitter=0.4, multi_panel=True)            
-            plt.savefig(fig_dir / "atac_qc_violin_plots_post_filtering.png")
-            plt.close()
-            
-            mu.pl.histogram(self.atac, ['n_genes_by_counts', 'total_counts'])
-            plt.savefig(fig_dir / "atac_qc_peak_histogram_post_filtering.png")
-            plt.close()
-            
-        sc.pp.highly_variable_genes(self.atac, min_mean=0.05, max_mean=1.5, min_disp=min_atac_disp)
+            sc.pl.violin(self.atac, ['n_genes_by_counts', 'total_counts'], jitter=0.4, multi_panel=True, save="_post_qc_filtering_atac.png")         
+            mu.pl.histogram(self.atac, ['n_genes_by_counts', 'total_counts'], save="_qc_histograms_atac.png")
+        
 
+        # Save original counts
+        self.atac.layers["counts"] = self.atac.X.copy()
+        
+        ac.pp.tfidf(self.atac, scale_factor=1e4)
+        
+        sc.pp.normalize_per_cell(self.atac, counts_per_cell_after=1e4)
+        sc.pp.log1p(self.atac)
+        
+        sc.pp.highly_variable_genes(self.atac, min_mean=0.05, max_mean=1.5, min_disp=min_atac_disp)
+        
         if fig_dir is not None and fig_dir.exists():
-            sc.pl.highly_variable_genes(self.atac)
-            plt.savefig(fig_dir / "atac_highly_variable_peaks.png")
-            plt.close()
+            sc.pl.highly_variable_genes(self.atac, save="_peaks.png")
             
         if filter_hvgs:
             keep_peaks = self.atac.var['highly_variable']
             self.atac = self.atac[:, keep_peaks]
             
-        # Save original counts
-        self.atac.layers["counts"] = self.atac.X.copy()
-        
         # Scaling
         self.atac.raw = self.atac
         
@@ -491,9 +529,7 @@ class MudataProcessor:
         sc.tl.pca(self.atac)
         
         if fig_dir is not None and fig_dir.exists():
-            sc.pl.pca(self.atac, color=["n_genes_by_counts", "n_counts"])
-            plt.savefig(fig_dir / "atac_pca.png")
-            plt.close()
+            sc.pl.pca(self.atac, color=["n_genes_by_counts", "n_counts"], save="_pca_qc_atac.png")
         
         # Annotate peaks as promoter/distal/intergenic based on TSS proximity
         # assign gene names and distances for promoter/distal peaks
@@ -514,9 +550,9 @@ class MudataProcessor:
         sc.tl.leiden(self.atac, flavor="igraph", n_iterations=2)
         
         if fig_dir is not None and fig_dir.exists():
-            sc.pl.umap(self.atac, color=["leiden", "n_genes_by_counts"], legend_loc="on data")
-            plt.savefig(fig_dir / "atac_umap_leiden.png")
-            plt.close()
+            sc.pl.umap(self.atac, color=["leiden", "n_genes_by_counts"], legend_loc="on data", save="_umap_leiden_atac.png")
+            
+        mu.write(str(self.processed_data_dir / f"{self.sample_name}.h5mu/atac"), self.atac)
                     
     def nucleosome_signal(
         self,
@@ -555,16 +591,13 @@ class MudataProcessor:
         region, example = find_nonempty_region(tbx, chrom="chr1")
 
         if fig_dir is not None and fig_dir.exists():
-            ac.pl.fragment_histogram(self.atac, region=region)
-            plt.savefig(fig_dir / "fragment_histogram.png")
-            plt.close()
+            sc.settings.figdir = fig_dir
+            ac.pl.fragment_histogram(self.atac, region=region, save="_fragment_histogram.png")
             
         ac.tl.nucleosome_signal(self.atac, n=1e6)
         
         if fig_dir is not None and fig_dir.exists():
-            mu.pl.histogram(self.atac, "nucleosome_signal", kde=False)
-            plt.savefig(fig_dir / "nucleosome_signal_histogram.png")
-            plt.close()
+            mu.pl.histogram(self.atac, "nucleosome_signal", kde=False, save="_nucleosome_signal.png")
             
     def tss_enrichment(
         self, 
@@ -633,10 +666,55 @@ class MudataProcessor:
                 )
             
             if fig_dir is not None and fig_dir.exists():
-                ac.pl.tss_enrichment(tss)
-                plt.savefig(fig_dir / "tss_enrichment.png")
-                plt.close()
+                self.tss_enrichment_plot(tss, save=str(fig_dir / "tss_enrichment.png"))
 
+    def tss_enrichment_plot(
+        self,
+        data: AnnData,
+        color: str | None = None,
+        title: str = "TSS Enrichment",
+        ax: Axes | None = None,
+        save: str = None
+    ):
+        """
+        Plot relative enrichment scores around a TSS.
+
+        Parameters
+        ----------
+        data
+            AnnData object with cell x TSS_position matrix as generated by `muon.atac.tl.tss_enrichment`.
+        color
+            Column name of .obs slot of the AnnData object which to group TSS signals by.
+        title
+            Plot title.
+        ax
+            A matplotlib axes object.
+        """
+        ax = ax or plt.gca()
+
+        if color is not None:
+            if isinstance(color, str):
+                color = [color]
+
+            groups = data.obs.groupby(color)
+
+            for name, group in groups:
+                ad = data[group.index]
+                ac.pl._tss_enrichment_single(ad, ax, label=name)
+        else:
+            ac.pl._tss_enrichment_single(data, ax)
+
+        # TODO Not sure how to best deal with plot returning/showing
+        ax.set_title(title)
+        ax.set_xlabel("Distance from TSS, bp")
+        ax.set_ylabel("Average TSS enrichment score")
+        if color:
+            ax.legend(loc="upper right", title=", ".join(color))
+        if save:
+            plt.savefig(save, dpi=150)
+        
+        plt.show()
+        return None
 
     def save_mdata(self):
         mu.write(self.processed_data_dir / self.sample_name / f"{self.sample_name}.h5mu", self.mdata)
@@ -656,6 +734,7 @@ def integrate_rna_atac(
     ):
     if fig_dir is not None:
         fig_dir.mkdir(parents=True, exist_ok=True)
+        sc.settings.figdir = fig_dir
     
     # Restrict to cells passing QC in both modalities
     mu.pp.intersect_obs(mdata)
@@ -670,9 +749,7 @@ def integrate_rna_atac(
 
     if fig_dir is not None and fig_dir.exists():
         # Plot the UMAP colored by MOFA clusters
-        sc.pl.umap(mdata, color=["leiden"])
-        plt.savefig(fig_dir / "mofa_umap_leiden.png")
-        plt.close()
+        sc.pl.umap(mdata, color=["leiden"], save="mofa_umap_leiden.png")
         
         # Plot the first 4 MOFA factors in pairwise scatter plots
         df = pd.DataFrame(mdata.obsm["X_mofa"])
@@ -685,7 +762,7 @@ def integrate_rna_atac(
             plot_scatter(i, axes[i%2][i//2])
             
         plt.tight_layout()
-        plt.savefig(fig_dir / "mofa_factor_scatter.png")
+        plt.savefig(fig_dir / "mofa_factor_scatter.png", dpi=150)
         plt.close()
         
     # Ranking genes and peaks
@@ -864,7 +941,7 @@ def create_metacells(
     pseudo_bulk_rna_df.to_parquet(pseudobulk_rna_file, engine="pyarrow", compression="snappy")
     pseudo_bulk_atac_df.to_parquet(pseudobulk_atac_file, engine="pyarrow", compression="snappy")
     
-def get_threshold(setting_name):
+def get_threshold(sample_filtering_settings, setting_name):
     setting_value = sample_filtering_settings[setting_name].values[0]
     print(f"{setting_name}: {setting_value}")
     
@@ -892,55 +969,24 @@ if __name__ == "__main__":
     sample_filtering_settings = filtering_setting_df[filtering_setting_df["Sample"] == SAMPLE_NAME]    
     
     # ----- RNA QC thresholds -----
-    MIN_CELLS_PER_GENE = get_threshold("Min Cells per Gene")
-    MIN_GENES_PER_CELL = get_threshold("Min Genes per Cell")
-    MAX_GENES_PER_CELL = get_threshold("Max Genes per Cell")
-    MIN_TOTAL_COUNTS = get_threshold("Min Total Counts")
-    MAX_TOTAL_COUNTS = get_threshold("Max Total Counts")
-    MAX_PCT_COUNTS_MT = get_threshold("Max Pct MT")
+    MIN_CELLS_PER_GENE = get_threshold(sample_filtering_settings, "Min Cells per Gene")
+    MIN_GENES_PER_CELL = get_threshold(sample_filtering_settings, "Min Genes per Cell")
+    MAX_GENES_PER_CELL = get_threshold(sample_filtering_settings, "Max Genes per Cell")
+    MIN_TOTAL_COUNTS = get_threshold(sample_filtering_settings, "Min Total Counts")
+    MAX_TOTAL_COUNTS = get_threshold(sample_filtering_settings, "Max Total Counts")
+    MAX_PCT_COUNTS_MT = get_threshold(sample_filtering_settings, "Max Pct MT")
 
     # ----- ATAC QC thresholds -----
-    MIN_CELLS_PER_PEAK = get_threshold("Min Cells per Peak")
-    MIN_PEAKS_PER_CELL = get_threshold("Min Peaks per Cell")
-    MAX_PEAKS_PER_CELL = get_threshold("Max Peaks per Cell")
-    MIN_TOTAL_PEAK_COUNTS = get_threshold("Min Total Peak Counts")
-    MAX_TOTAL_PEAK_COUNTS = get_threshold("Max Total Peak Counts")
+    MIN_CELLS_PER_PEAK = get_threshold(sample_filtering_settings, "Min Cells per Peak")
+    MIN_PEAKS_PER_CELL = get_threshold(sample_filtering_settings, "Min Peaks per Cell")
+    MAX_PEAKS_PER_CELL = get_threshold(sample_filtering_settings, "Max Peaks per Cell")
+    MIN_TOTAL_PEAK_COUNTS = get_threshold(sample_filtering_settings, "Min Total Peak Counts")
+    MAX_TOTAL_PEAK_COUNTS = get_threshold(sample_filtering_settings, "Max Total Peak Counts")
 
     if not SAMPLE_PROCESSED_DATA_DIR.exists():
         SAMPLE_PROCESSED_DATA_DIR.mkdir(parents=True)
-
-    # Print all files in the sample data directory.
-    print(f"Loading data for sample {SAMPLE_NAME} from {RAW_DATA_DIR}...")
-    # print all files in the data directory
-    for file in SAMPLE_DATA_DIR.glob("*"):
-        print(f"  - {file.name}")
-        file_end = file.name.split("_")[-1]
-        print(file_end)
-        if file_end.endswith("barcodes.tsv.gz"):
-            file.rename(SAMPLE_DATA_DIR / f"barcodes.tsv.gz")
-        elif file_end.endswith("features.tsv.gz"):
-            file.rename(SAMPLE_DATA_DIR / f"features.tsv.gz")
-        elif file_end.endswith("matrix.mtx.gz"):
-            file.rename(SAMPLE_DATA_DIR / f"matrix.mtx.gz")
-        elif file_end.endswith("fragments.tsv.gz"):
-            file.rename(SAMPLE_DATA_DIR / f"fragments.tsv.gz")
-        elif file_end.endswith("fragments.tsv.gz.tbi.gz"):
-            file.rename(SAMPLE_DATA_DIR / f"fragments.tsv.gz.tbi.gz")
-        
-    if rna_count_file is not None and atac_count_file is not None:
-        rna_count_filepath = SAMPLE_DATA_DIR / rna_count_file
-        atac_count_filepath = SAMPLE_DATA_DIR / atac_count_file
-        
-        mdata = construct_from_gene_by_cell_matrices(rna_count_filepath, atac_count_filepath)
-        print("Constructed MuData object from count files.")
-        
-    elif raw_h5_file is not None:
-        mdata = mu.read_10x_h5(raw_h5_file)
-        
-    else:
-        mdata = mu.read_10x_mtx(SAMPLE_DATA_DIR)
-            
-    mdata.var_names_make_unique()
+    
+    mdata = load_raw_data(SAMPLE_NAME, SAMPLE_DATA_DIR, rna_count_file, atac_count_file, raw_h5_file)
 
     mdata.write(SAMPLE_PROCESSED_DATA_DIR / f"{SAMPLE_NAME}.h5mu")
     
@@ -964,14 +1010,14 @@ if __name__ == "__main__":
         min_rna_disp = 0.5,
         filter_hvgs = False,
         tf_list_file = None,
-        fig_dir=SAMPLE_PROCESSED_DATA_DIR / "preprocessing" / "rna_qc",
+        fig_dir=SAMPLE_PROCESSED_DATA_DIR / "preprocessing_figures" / "rna_qc",
         )
     
     data_processor.rna_pca_and_neighbors(
         data_processor.rna, 
         n_pcs=20,
         n_neighbors=10,
-        fig_dir=SAMPLE_PROCESSED_DATA_DIR / "preprocessing" / "rna_pca",
+        fig_dir=SAMPLE_PROCESSED_DATA_DIR / "preprocessing_figures" / "rna_qc",
         )
     
     # ATAC QC and Preprocessing
@@ -986,19 +1032,19 @@ if __name__ == "__main__":
         promoter_downstream=100,
         distal_max=200_000,
         filter_hvgs=False,
-        fig_dir=SAMPLE_PROCESSED_DATA_DIR / "preprocessing" / "atac_qc",
+        fig_dir=SAMPLE_PROCESSED_DATA_DIR / "preprocessing_figures" / "atac_qc",
         )
     
     data_processor.nucleosome_signal(
         frag_path=frag_path, 
-        fig_dir=SAMPLE_PROCESSED_DATA_DIR / "preprocessing" / "nucleosome"
+        fig_dir=SAMPLE_PROCESSED_DATA_DIR / "preprocessing_figures" / "atac_qc"
         )
     data_processor.tss_enrichment(
         frag_path=frag_path, 
         n_tss=500, 
         extend_upstream=1000, 
         extend_downstream=1000,
-        fig_dir=SAMPLE_PROCESSED_DATA_DIR / "preprocessing" / "tss"
+        fig_dir=SAMPLE_PROCESSED_DATA_DIR / "preprocessing_figures" / "atac_qc"
         )
     
     # Save the processed data
