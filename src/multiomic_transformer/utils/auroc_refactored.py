@@ -14,6 +14,7 @@ import logging
 PROJECT_DIR = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
 GROUND_TRUTH_DIR = Path(PROJECT_DIR, "data/ground_truth_files")
 OTHER_METHOD_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.GRN_BENCHMARKING.MOELLER/testing_bear_grn/INFERRED.GRNS")
+OTHER_METHOD_MUON_DIR = Path("/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/other_method_grns")
 
 SRC_DIR = str(Path(PROJECT_DIR) / "src")
 if SRC_DIR not in sys.path:
@@ -97,6 +98,51 @@ def load_other_method_grns(sample_name_list, dataset_type):
             "TRIPOD":     {"path": tripod_path,      "tf_col": "TF",        "target_col": "gene",      "score_col": "abs_coef"},
             "GRaNIE":     {"path": granie_path,      "tf_col": "TF.name",   "target_col": "gene.name", "score_col": "TF_gene.r"},
             # "DirectNet":   {"path": directnet_path,   "tf_col": "TF",        "target_col": "Gene",    "score_col": "types"},
+        }
+                
+        standardized_method_dict = {}
+
+        other_method_grns[sample_name] = {}
+        for method_name, info in method_info.items():
+            logging.info(f"  - Loading {method_name}")
+            df_std = load_and_standardize_method(method_name, info)
+            other_method_grns[sample_name][method_name] = df_std.copy()
+    
+    # Calculate the mean TF-TG score across samples for each method
+    standardized_method_dict = {}
+    for method_name in method_info.keys():
+        dfs = []
+        for sample_name in sample_name_list:
+            df = other_method_grns[sample_name][method_name]
+            
+            df_sample = (
+                df.groupby(["Source", "Target"], as_index=False)["Score"]
+                .mean()
+            )
+            
+            dfs.append(df_sample)
+        
+        # Concatenate all dataframes
+        combined_df = pd.concat(dfs, ignore_index=True)
+        
+        # Group by Source and Target to calculate mean Score
+        df_std = combined_df.groupby(['Source', 'Target'], as_index=False)['Score'].mean()
+        
+        standardized_method_dict[method_name] = df_std
+            
+    return standardized_method_dict
+
+def load_other_method_muon_grns(sample_name_list, dataset_type):
+    other_method_grns = {}
+    for sample_name in sample_name_list:
+        logging.info(f"\nProcessing sample: {sample_name} | Dataset: {dataset_type}")
+        
+        linger_path       = OTHER_METHOD_MUON_DIR / "LINGER_muon" / f"linger_{dataset_type}_{sample_name}.tsv"
+        scenic_plus_path  = OTHER_METHOD_MUON_DIR / "SCENIC_muon" / f"scenic_plus_{dataset_type}_{sample_name}.tsv"
+        
+        method_info = {
+            "SCENIC+":    {"path": scenic_plus_path, "tf_col": "Source",    "target_col": "Target",    "score_col": "Score"},
+            "LINGER":     {"path": linger_path,      "tf_col": "Source",    "target_col": "Target",    "score_col": "Score"},
         }
                 
         standardized_method_dict = {}
@@ -650,7 +696,7 @@ if __name__ == "__main__":
     ground_truth_edges_dict = {gt: prep_gt_edges(df) for gt, df in ground_truth_df_dict.items()}
     
     # Load the other method GRNs (TF-TG scores averaged across samples)
-    standardized_method_dict = load_other_method_grns(sample_name_list, dataset_type)
+    standardized_method_dict = load_other_method_muon_grns(sample_name_list, dataset_type)
     
     grad_df, tf_ko_df = load_grad_and_tf_ko_df(
         selected_experiment_dir=EXPERIMENT_DIR,

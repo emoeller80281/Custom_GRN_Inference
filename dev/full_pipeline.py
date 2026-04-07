@@ -31,20 +31,20 @@ if __name__ == "__main__":
 
     # List of samples in the training datset. 
     # Each of these should have its own subdirectory in the processed data directory
-    sample_names = ["buffer_2"]
+    sample_names = ["E7.5_rep1"]
     
     # Name of the dataset / experiment to run
-    experiment_name = f"Macrophage_{sample_names[0]}_raw_muon_preprocessing"
+    experiment_name = f"mESC_{sample_names[0]}_muon_class_test"
 
     # Organism code for the dataset. Supports either "mm10" or "hg38"
-    organism_code = "hg38"
+    organism_code = "mm10"
     
-    sample_type = "Macrophage"
-    ground_truth_name = "ChIP-Atlas macrophage"
+    sample_type = "mESC"
+    ground_truth_name = "ChIP-Atlas mESC"
 
     # List of chromosomes. Used to split the data by chromsome for caching and training.
     # Should be in the format "chr1", "chr2", etc. and should match the chromosome names in the processed data files.
-    chrom_list = [f"chr{i}" for i in range(1, 22)]
+    chrom_list = [f"chr{i}" for i in range(1, 20)]
 
     logging.info("Initializing training data formatter...")
     tdf = data_formatter.TrainingDataFormatter(
@@ -62,7 +62,7 @@ if __name__ == "__main__":
     
     # Verify that the data cache files exist. If not, this method will create them.
     logging.info("Creating or verifying loading cache data files...")
-    tdf.create_or_load_data_cache(sample_name=sample_names[0], force_recalculate=True)
+    tdf.create_or_load_data_cache(sample_name=sample_names[0], force_recalculate=False)
 
     logging.info("Initializing ExperimentHandler...")
     exp = experiment_handler.ExperimentHandler(
@@ -71,14 +71,6 @@ if __name__ == "__main__":
         model_num=1,
         silence_warnings=False,
     )
-    
-
-    logging.info("Loading ground truth datasets...")
-    GROUND_TRUTH_DIR = Path(PROJECT_DIR) / "data" / "ground_truth_files"
-    
-    gt_by_dataset_dict = {
-        "ChIP-Atlas macrophage": exp.load_ground_truth(GROUND_TRUTH_DIR / "chipatlas_macrophage.csv"),
-    }
     
     # Creates a MultiChromosomeDataset dataset class, which handles loading data for one chromosome
     # at a time and caching it in memory. The max_cached argument controls how many chromosomes worth 
@@ -127,6 +119,33 @@ if __name__ == "__main__":
         max_batches=None,
         max_tgs_per_batch=None,
         )
+    
+    logging.info("\nLoading ground truth datasets...")
+    GROUND_TRUTH_DIR = Path(PROJECT_DIR) / "data" / "ground_truth_files"
+    
+    gt_by_dataset_dict_all = {
+        "Macrophage": {
+            # "RN204": load_ground_truth(GROUND_TRUTH_DIR / "rn204_macrophage_human_chipseq.tsv"),
+            "ChIP-Atlas macrophage": exp.load_ground_truth(GROUND_TRUTH_DIR / "chipatlas_macrophage.csv"),
+        },
+        "mESC": {
+            "ChIP-Atlas mESC": exp.load_ground_truth(GROUND_TRUTH_DIR / "chip_atlas_tf_peak_tg_dist.csv"),
+            "RN111": exp.load_ground_truth(GROUND_TRUTH_DIR / "RN111.tsv"),
+            "RN112": exp.load_ground_truth(GROUND_TRUTH_DIR / "RN112.tsv"),
+            "RN114": exp.load_ground_truth(GROUND_TRUTH_DIR / "RN114.tsv"),
+            "RN116": exp.load_ground_truth(GROUND_TRUTH_DIR / "RN116.tsv"),        
+        },
+        "K562": {
+            "ChIP-Atlas K562": exp.load_ground_truth(GROUND_TRUTH_DIR / "chipatlas_K562.csv"),
+            "RN117": exp.load_ground_truth(GROUND_TRUTH_DIR / "RN117.tsv"),        
+        },
+        "iPSC": {
+            # "ChIP-Atlas iPSC": exp.load_ground_truth(GROUND_TRUTH_DIR / "chipatlas_iPSC.csv"),
+            "ChIP-Atlas iPSC (1 Mb)": exp.load_ground_truth(GROUND_TRUTH_DIR / "chipatlas_iPSC_1mb.csv"),
+            # "ChIP-Atlas iPSC (100 kb)": exp.load_ground_truth(GROUND_TRUTH_DIR / "chipatlas_iPSC_100kb.csv"),
+        }
+    }
+    gt_by_dataset_dict = gt_by_dataset_dict_all[sample_type]
 
     # Calculates the AUROC of the predicted GRN against multiple ground truth datasets.
     logging.info("\nCalculating AUROC")
@@ -162,7 +181,9 @@ if __name__ == "__main__":
     logging.info(f"Number of unique TGs: {num_tgs:,}")
     logging.info(f"Number of edges: {num_edges:,}")
 
-    exp.report_grn_overlap_with_gt(ground_truth_name, gt_by_dataset_dict)
+    logging.info(f"\n----- GRN Overlap with Ground Truth -----")
+    for ground_truth_name, ground_truth in gt_by_dataset_dict.items():
+        exp.report_grn_overlap_with_gt(ground_truth_name, ground_truth)
 
     logging.info(f"\n----- AUROC -----")
     per_tf_df_all =  pd.read_csv(exp.model_training_dir / "per_tf_auroc_auprc_results.csv")

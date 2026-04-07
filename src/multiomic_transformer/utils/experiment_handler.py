@@ -440,7 +440,7 @@ class ExperimentHandler:
         
         return self.model
     
-    def create_scalers(self, dataloader, max_batches: int | None = 25):
+    def create_scalers(self, dataloader, max_batches: int | None = None):
         T = int(self.dataset.tf_ids.numel())
         G = int(self.dataset.tg_ids.numel())
         use_ddp_reduce = dist.is_initialized()
@@ -1476,7 +1476,7 @@ class ExperimentHandler:
         overlap_tgs = labeled_df["Target"].nunique()
         overlap_edges = len(labeled_df)
 
-        logging.info(f"\n----- GRN Overlap with Ground Truth -----")
+        
         logging.info(ground_truth_name)
         logging.info(f"  - TF Overlap: {overlap_tfs:,} ({gt_unique_tfs:,} in GT)")
         logging.info(f"  - TG Overlap: {overlap_tgs:,} ({gt_unique_tgs:,} in GT)")
@@ -1711,7 +1711,7 @@ class ExperimentHandler:
         ground_truth_edges_dict = {gt: auroc_utils.prep_gt_edges(df) for gt, (df, _) in ground_truth_dict.items()}
         
         # Load the other method GRNs (TF-TG scores averaged across samples)
-        standardized_method_dict = auroc_utils.load_other_method_grns(sample_list, dataset_type)
+        standardized_method_dict = auroc_utils.load_other_method_muon_grns(sample_list, dataset_type)
         
         standardized_method_dict["Gradient Attribution"] = grn
             
