@@ -1459,8 +1459,8 @@ class ExperimentHandler:
         overlap_info_df["Pct of GT in GRN"] = pct(overlap_info_df["Overlap (Score DF in GT)"], overlap_info_df[f"Ground Truth {ground_truth_name}"]).round(2)
         return overlap_info_df
     
-    def report_grn_overlap_with_gt(self, ground_truth_name, gt_by_dataset_dict):
-        ground_truth_df, gt_lookup = gt_by_dataset_dict[ground_truth_name]
+    def report_grn_overlap_with_gt(self, ground_truth_name, ground_truth):
+        ground_truth_df, gt_lookup = ground_truth
         labeled_df = self.create_ground_truth_comparison_df(self.grn, gt_lookup, ground_truth_name)
         unlabeled_df = self.grn
 

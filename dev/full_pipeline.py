@@ -8,12 +8,19 @@ from pathlib import Path
 import numpy as np
 import random
 import matplotlib.pyplot as plt
+import argparse
 
 import sys
 PROJECT_DIR = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
 SRC_DIR = str(Path(PROJECT_DIR) / "src")
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
+    
+DEV_DIR = str(Path(PROJECT_DIR) / "dev")
+if DEV_DIR not in sys.path:
+    sys.path.insert(0, DEV_DIR)
+    
+import muon_preprocessing as muon_prep
 
 import multiomic_transformer.utils.data_formatter as data_formatter
 import multiomic_transformer.utils.experiment_handler as experiment_handler
@@ -22,30 +29,163 @@ random.seed(1337)
 np.random.seed(1337)
 torch.manual_seed(1337)
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Run the full training and evaluation pipeline for the MultiomicTransformer model.")
+    parser.add_argument("--experiment_name", type=str, required=True, help="Name of the experiment to run. If not provided, a default name will be generated based on the sample names.")
+    parser.add_argument("--sample_name", type=str, required=True, help="Name of the sample to include in the training dataset.")
+    parser.add_argument("--organism_code", type=str, required=True, choices=["mm10", "hg38"], help="Organism code for the dataset. Should be either 'mm10' or 'hg38'.")
+    parser.add_argument("--sample_type", type=str, required=True, choices=["mESC", "Macrophage", "K562", "iPSC"], help="Type of sample being used. This is used to determine which ground truth datasets to compare against. Should be one of 'mESC', 'Macrophage', 'K562', or 'iPSC'.")
+    parser.add_argument("--raw_data_dir", type=str, required=True, help="Directory containing the raw data files.")
+    parser.add_argument("--processed_data_dir", type=str, required=True, help="Directory containing the processed data files. Each sample should have its own subdirectory in this directory.")
+    parser.add_argument("--experiment_output_dir", type=str, required=True, help="Directory to save the experiment outputs.")
+    args = parser.parse_args()
+    
+    return args
+
 if __name__ == "__main__":
+    args = parse_args()
+    
     # Path to the project directory (same as Git repository root)
     project_dir = Path(PROJECT_DIR)
-
+    raw_data_dir = Path(args.raw_data_dir)
+    processed_data_dir = Path(args.processed_data_dir)
+    
     # Path to the training output directory. Used to store the preprocessing config
-    output_dir = Path("/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments")
+    output_dir = Path(args.experiment_output_dir)
 
     # List of samples in the training datset. 
     # Each of these should have its own subdirectory in the processed data directory
-    sample_names = ["E7.5_rep1"]
+    sample_names = [args.sample_name]
+    sample_name = sample_names[0]
     
     # Name of the dataset / experiment to run
-    experiment_name = f"mESC_{sample_names[0]}_muon_class_test"
+    experiment_name = args.experiment_name
 
     # Organism code for the dataset. Supports either "mm10" or "hg38"
-    organism_code = "mm10"
+    organism_code = args.organism_code
     
-    sample_type = "mESC"
-    ground_truth_name = "ChIP-Atlas mESC"
+    sample_type = args.sample_type
+    
+    # Path to the list of gene TSS locations, used to locate the nearest gene to each ATAC peak.
+    tss_path=f"{project_dir}/data/genome_data/genome_annotation/{organism_code}/gene_tss.bed"
 
     # List of chromosomes. Used to split the data by chromsome for caching and training.
     # Should be in the format "chr1", "chr2", etc. and should match the chromosome names in the processed data files.
-    chrom_list = [f"chr{i}" for i in range(1, 20)]
+    if organism_code == "mm10":
+        chrom_list = [f"chr{i}" for i in range(1, 20)]
+    elif organism_code == "hg38":
+        chrom_list = [f"chr{i}" for i in range(1, 23)]
+    
+    # ===== MUON DATA PREPROCESSING =====
+    # Create the processed data directory for the experiment if it doesn't already exist
+    processed_data_dir = processed_data_dir / experiment_name
+    if not processed_data_dir.is_dir():
+        processed_data_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Create the processed data directory for the sample if it doesn't already exist
+    sample_processed_data_dir = processed_data_dir / sample_name
+    sample_raw_data_dir = raw_data_dir / sample_name
+    
+    def missing_preprocessing_files(sample_processed_data_dir: Path):
+        required_preprocessing_files = ["RE_pseudobulk.parquet","TG_pseudobulk.parquet"]
+        
+        for file_name in required_preprocessing_files:
+            if not (sample_processed_data_dir / file_name).is_file():
+                return True
+            
+    run_muon = False
+    if not sample_processed_data_dir.exists():
+        sample_processed_data_dir.mkdir(parents=True, exist_ok=True)
+        run_muon = True
+        
+    if run_muon == False:
+        if missing_preprocessing_files(sample_processed_data_dir):
+            run_muon = True
+    
+    if run_muon:
+        logging.info(f"Preprocessing data for sample {sample_name} using muon...")
+        filtering_setting_df = pd.read_csv(project_dir / "dev" / "notebooks" / "muon_preprocessing" /"qc_filtering_settings.tsv", sep="\t")
+        sample_filtering_settings = filtering_setting_df[filtering_setting_df["Sample"] == sample_name]    
 
+        # ----- RNA QC thresholds -----
+        MIN_CELLS_PER_GENE = muon_prep.get_threshold(sample_filtering_settings, "Min Cells per Gene")
+        MIN_GENES_PER_CELL = muon_prep.get_threshold(sample_filtering_settings, "Min Genes per Cell")
+        MAX_GENES_PER_CELL = muon_prep.get_threshold(sample_filtering_settings, "Max Genes per Cell")
+        MIN_TOTAL_COUNTS = muon_prep.get_threshold(sample_filtering_settings, "Min Total Counts")
+        MAX_TOTAL_COUNTS = muon_prep.get_threshold(sample_filtering_settings, "Max Total Counts")
+        MAX_PCT_COUNTS_MT = muon_prep.get_threshold(sample_filtering_settings, "Max Pct MT")
+
+        # ----- ATAC QC thresholds -----
+        MIN_CELLS_PER_PEAK = muon_prep.get_threshold(sample_filtering_settings, "Min Cells per Peak")
+        MIN_PEAKS_PER_CELL = muon_prep.get_threshold(sample_filtering_settings, "Min Peaks per Cell")
+        MAX_PEAKS_PER_CELL = muon_prep.get_threshold(sample_filtering_settings, "Max Peaks per Cell")
+        MIN_TOTAL_PEAK_COUNTS = muon_prep.get_threshold(sample_filtering_settings, "Min Total Peak Counts")
+        MAX_TOTAL_PEAK_COUNTS = muon_prep.get_threshold(sample_filtering_settings, "Max Total Peak Counts")
+
+        # Load the raw data using the types of files found in the sample raw data directory.
+        mdata, frag_path = muon_prep.load_raw_data(sample_name, sample_raw_data_dir)
+
+        # Write the loaded data to the processed data directory
+        mdata.write(sample_processed_data_dir / f"{sample_name}.h5mu")
+        
+        data_processor = muon_prep.MudataProcessor(
+            mdata=mdata,
+            processed_data_dir=sample_processed_data_dir,
+            sample_name=sample_name,
+            tss_path=tss_path,
+        )
+        
+        # RNA QC and Preprocessing
+        data_processor.rna_qc_filter(
+            min_cells_per_gene = MIN_CELLS_PER_GENE,
+            min_genes_per_cell = MIN_GENES_PER_CELL,
+            max_genes_per_cell = MAX_GENES_PER_CELL,
+            min_total_counts_per_cell = MIN_TOTAL_COUNTS,
+            max_total_counts_per_cell = MAX_TOTAL_COUNTS,
+            max_pct_counts_mt = MAX_PCT_COUNTS_MT,
+            norm_target_sum = 1e4,
+            min_rna_disp = 0.5,
+            filter_hvgs = False,
+            tf_list_file = None,
+            fig_dir=sample_processed_data_dir / "preprocessing_figures" / "rna_qc",
+            )
+        
+        data_processor.rna_pca_and_neighbors(
+            data_processor.rna, 
+            n_pcs=20,
+            n_neighbors=10,
+            fig_dir=sample_processed_data_dir / "preprocessing_figures" / "rna_qc",
+            )
+        
+        data_processor.nucleosome_signal(
+            frag_path=frag_path, 
+            fig_dir=sample_processed_data_dir / "preprocessing_figures" / "atac_qc"
+            )
+        
+        data_processor.tss_enrichment(
+            frag_path=frag_path, 
+            n_tss=500, 
+            extend_upstream=1000, 
+            extend_downstream=1000,
+            fig_dir=sample_processed_data_dir / "preprocessing_figures" / "atac_qc"
+            )
+        
+        # Save the processed data
+        muon_prep.save_processed_data(data_processor.mdata, sample_processed_data_dir)
+        
+        # Integrate the RNA and ATAC modalities using MOFA+
+        muon_prep.integrate_rna_atac(
+            data_processor.mdata, 
+            sample_processed_data_dir, 
+            sample_name, 
+            fig_dir=sample_processed_data_dir / "integration"
+            )
+        
+        # Create metacells
+        muon_prep.create_metacells(data_processor.mdata, sample_processed_data_dir, hops=2)
+    
+
+    # ===== DATA CACHE CREATION =====
     logging.info("Initializing training data formatter...")
     tdf = data_formatter.TrainingDataFormatter(
         project_dir=project_dir,
@@ -64,10 +204,11 @@ if __name__ == "__main__":
     logging.info("Creating or verifying loading cache data files...")
     tdf.create_or_load_data_cache(sample_name=sample_names[0], force_recalculate=False)
 
+    # ===== MODEL TRAINING =====
     logging.info("Initializing ExperimentHandler...")
     exp = experiment_handler.ExperimentHandler(
         training_data_formatter=tdf,
-        experiment_dir="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/",
+        experiment_dir=output_dir,
         model_num=1,
         silence_warnings=False,
     )
@@ -112,6 +253,7 @@ if __name__ == "__main__":
         silence_tqdm=True,
         )
 
+    # ===== GRADIENT ATTRIBUTION =====
     # Runs gradient attribution to calculate the gradients between each TF input and each TG output.
     logging.info("\nRunning Gradient Attribution")
     exp.run_gradient_attribution(
@@ -120,6 +262,7 @@ if __name__ == "__main__":
         max_tgs_per_batch=None,
         )
     
+    # ===== GROUND TRUTH LOADING AND AUROC CALCULATION =====
     logging.info("\nLoading ground truth datasets...")
     GROUND_TRUTH_DIR = Path(PROJECT_DIR) / "data" / "ground_truth_files"
     

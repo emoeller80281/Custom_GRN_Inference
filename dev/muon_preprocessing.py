@@ -46,37 +46,62 @@ def load_raw_data(
 
     # Print all files in the sample data directory.
     print(f"Loading data for sample {sample_name} from {sample_data_dir}...")
+    
+    found_barcode = False
+    found_features = False
+    found_matrix = False
+    
+    frag_path = None
+    
     # print all files in the data directory
     for file in sample_data_dir.glob("*"):
         file_name = file.name
         print(f"  - {file_name}")
         if file_name.endswith("barcodes.tsv.gz"):
             file.rename(sample_data_dir / f"barcodes.tsv.gz")
-        elif file_name.endswith("features.tsv.gz"):
+            found_barcode = True
+        if file_name.endswith("features.tsv.gz"):
             file.rename(sample_data_dir / f"features.tsv.gz")
-        elif file_name.endswith("matrix.mtx.gz"):
+            found_features = True
+        if file_name.endswith("matrix.mtx.gz"):
             file.rename(sample_data_dir / f"matrix.mtx.gz")
-        elif file_name.endswith("fragments.tsv.gz"):
+            found_matrix = True
+        if file_name.endswith("fragments.tsv.gz"):
             file.rename(sample_data_dir / f"fragments.tsv.gz")
-        elif file_name.endswith("fragments.tsv.gz.tbi.gz"):
+            frag_path = file
+        if file_name.endswith("fragments.tsv.gz.tbi.gz"):
             file.rename(sample_data_dir / f"fragments.tsv.gz.tbi.gz")
-        
+
+    if not (found_barcode and found_features and found_matrix):
+        for file in sample_data_dir.glob("*"):
+            file_name = file.name
+            if file_name.suffix == ".h5" or file_name.suffixes == [".h5", ".gz"]:
+                print(f"Found h5 file: {file_name}")
+                raw_h5_file = file
+    
+    # If raw count files are passed in, use them above any other file formats
     if rna_count_file is not None and atac_count_file is not None:
         rna_count_filepath = sample_data_dir / rna_count_file
         atac_count_filepath = sample_data_dir / atac_count_file
         
         mdata = construct_from_gene_by_cell_matrices(rna_count_filepath, atac_count_filepath)
-        print("Constructed MuData object from count files.")
+        mdata.var_names_make_unique()
+        return mdata, frag_path
         
+    # If no count files are passed in, use the h5 file if it exists
     elif raw_h5_file is not None:
         mdata = mu.read_10x_h5(raw_h5_file)
+        mdata.var_names_make_unique()
+        return mdata, frag_path
         
-    else:
+    # If no h5 file is found, look for the 10x mtx files. If they exist, load them using muon.
+    elif found_barcode and found_features and found_matrix:
         mdata = mu.read_10x_mtx(sample_data_dir)
-            
-    mdata.var_names_make_unique()
+        mdata.var_names_make_unique()
+        return mdata, frag_path
     
-    return mdata
+    else:
+        raise FileNotFoundError(f"Could not find the necessary files to load the data for sample {sample_name}. Please ensure that the sample directory contains either a raw h5 file or the 10x mtx files (barcodes.tsv.gz, features.tsv.gz, matrix.mtx.gz).")
 
 def normalize_peak_format(peak_id: str) -> str:
     """
