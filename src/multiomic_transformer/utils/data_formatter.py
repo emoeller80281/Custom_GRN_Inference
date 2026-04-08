@@ -59,6 +59,7 @@ class TrainingDataFormatter:
         sample_names: list[str],
         chrom_list: list[str],
         processed_data_dir: Path | None = None,
+        training_data_cache: Path | None = None,
         output_dir: Path | None = None,
         silence_warnings: bool = True,
         silence_logs: bool = False,
@@ -70,6 +71,7 @@ class TrainingDataFormatter:
         self.sample_names = sample_names
         self.chrom_list = chrom_list
         self.processed_data_dir = processed_data_dir
+        self.training_data_cache = training_data_cache
         self.output_dir = output_dir
         self.silence_warnings = silence_warnings
         self.silence_logs = silence_logs
@@ -1229,15 +1231,17 @@ class TrainingDataFormatter:
         }
 
         # ----- TRAINING CACHE -----
-        training_data_cache = self.project_dir / "data" / "training_data_cache"
-        sample_cache_dir = training_data_cache / self.experiment_name
+        if self.training_data_cache is None:
+            self.training_data_cache = self.project_dir / "data" / "training_data_cache"
+            
+        sample_cache_dir = self.training_data_cache / self.experiment_name
         common_data = sample_cache_dir / "common"
         
         if not sample_cache_dir.is_dir():
             os.makedirs(sample_cache_dir)
 
         self.file_paths["training_cache"] = {
-            "base_dir": training_data_cache,
+            "base_dir": self.training_data_cache,
             "dataset_dir": sample_cache_dir,
             "common": {
                     "dir": common_data,

@@ -502,8 +502,10 @@ class MudataProcessor:
         filter_hvgs: bool = True,
         fig_dir: Path|None = None
         ):
-        if fig_dir is not None and fig_dir.exists():
+        if fig_dir is not None:
             sc.settings.figdir = fig_dir
+            if not fig_dir.exists():
+                fig_dir.mkdir(parents=True, exist_ok=True)
         
         sc.pp.calculate_qc_metrics(self.atac, percent_top=None, log1p=False, inplace=True)
         

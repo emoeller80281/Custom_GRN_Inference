@@ -37,6 +37,7 @@ def parse_args():
     parser.add_argument("--sample_type", type=str, required=True, choices=["mESC", "Macrophage", "K562", "iPSC"], help="Type of sample being used. This is used to determine which ground truth datasets to compare against. Should be one of 'mESC', 'Macrophage', 'K562', or 'iPSC'.")
     parser.add_argument("--raw_data_dir", type=str, required=True, help="Directory containing the raw data files.")
     parser.add_argument("--processed_data_dir", type=str, required=True, help="Directory containing the processed data files. Each sample should have its own subdirectory in this directory.")
+    parser.add_argument("--training_data_cache_dir", type=str, required=True, help="Directory to use for caching the training data.")
     parser.add_argument("--experiment_output_dir", type=str, required=True, help="Directory to save the experiment outputs.")
     args = parser.parse_args()
     
@@ -49,9 +50,10 @@ if __name__ == "__main__":
     project_dir = Path(PROJECT_DIR)
     raw_data_dir = Path(args.raw_data_dir)
     processed_data_dir = Path(args.processed_data_dir)
+    training_data_cache_dir = Path(args.training_data_cache_dir)
     
     # Path to the training output directory. Used to store the preprocessing config
-    output_dir = Path(args.experiment_output_dir)
+    experiment_dir = Path(args.experiment_output_dir)
 
     # List of samples in the training datset. 
     # Each of these should have its own subdirectory in the processed data directory
@@ -84,7 +86,7 @@ if __name__ == "__main__":
     
     # Create the processed data directory for the sample if it doesn't already exist
     sample_processed_data_dir = processed_data_dir / sample_name
-    sample_raw_data_dir = raw_data_dir / sample_name
+    sample_raw_data_dir = raw_data_dir / f"{sample_type}_10x_raw" / sample_name
     
     def missing_preprocessing_files(sample_processed_data_dir: Path):
         required_preprocessing_files = ["RE_pseudobulk.parquet","TG_pseudobulk.parquet"]
@@ -103,6 +105,7 @@ if __name__ == "__main__":
             run_muon = True
     
     if run_muon:
+        logging.info("\n----- MUON PREPROCESSING -----")
         logging.info(f"Preprocessing data for sample {sample_name} using muon...")
         filtering_setting_df = pd.read_csv(project_dir / "dev" / "notebooks" / "muon_preprocessing" /"qc_filtering_settings.tsv", sep="\t")
         sample_filtering_settings = filtering_setting_df[filtering_setting_df["Sample"] == sample_name]    
@@ -136,6 +139,7 @@ if __name__ == "__main__":
         )
         
         # RNA QC and Preprocessing
+        logging.info("  - Calculating RNA QC metrics and filtering...")
         data_processor.rna_qc_filter(
             min_cells_per_gene = MIN_CELLS_PER_GENE,
             min_genes_per_cell = MIN_GENES_PER_CELL,
@@ -150,6 +154,7 @@ if __name__ == "__main__":
             fig_dir=sample_processed_data_dir / "preprocessing_figures" / "rna_qc",
             )
         
+        logging.info("  - Calculating RNA PCA and neighbors...")
         data_processor.rna_pca_and_neighbors(
             data_processor.rna, 
             n_pcs=20,
@@ -157,11 +162,29 @@ if __name__ == "__main__":
             fig_dir=sample_processed_data_dir / "preprocessing_figures" / "rna_qc",
             )
         
+        # ATAC QC and Preprocessing
+        logging.info("  - Calculating ATAC QC metrics and filtering...")
+        data_processor.atac_qc_filter(
+            min_cells_per_peak=MIN_CELLS_PER_PEAK,
+            min_peaks_per_cell=MIN_PEAKS_PER_CELL,
+            max_peaks_per_cell=MAX_PEAKS_PER_CELL,
+            min_total_counts_per_cell=MIN_TOTAL_PEAK_COUNTS,
+            max_total_counts_per_cell=MAX_TOTAL_PEAK_COUNTS,
+            min_atac_disp=0.5,
+            promoter_upstream=1000,
+            promoter_downstream=100,
+            distal_max=200_000,
+            filter_hvgs=False,
+            fig_dir=sample_processed_data_dir / "preprocessing_figures" / "atac_qc",
+            )
+        
+        logging.info("  - Calculating ATAC QC metrics...")
         data_processor.nucleosome_signal(
             frag_path=frag_path, 
             fig_dir=sample_processed_data_dir / "preprocessing_figures" / "atac_qc"
             )
         
+        logging.info("  - Calculating TSS enrichment...")
         data_processor.tss_enrichment(
             frag_path=frag_path, 
             n_tss=500, 
@@ -171,44 +194,52 @@ if __name__ == "__main__":
             )
         
         # Save the processed data
+        logging.info("  - Saving processed data...")
         muon_prep.save_processed_data(data_processor.mdata, sample_processed_data_dir)
         
         # Integrate the RNA and ATAC modalities using MOFA+
+        logging.info("  - Integrating RNA and ATAC modalities using MOFA+...")
         muon_prep.integrate_rna_atac(
             data_processor.mdata, 
             sample_processed_data_dir, 
             sample_name, 
-            fig_dir=sample_processed_data_dir / "integration"
+            fig_dir=sample_processed_data_dir / "integration_figures"
             )
         
         # Create metacells
+        logging.info("  - Creating metacells...")
         muon_prep.create_metacells(data_processor.mdata, sample_processed_data_dir, hops=2)
-    
+        logging.info("Muon Preprocessing complete.")
+    else:
+        logging.info(f"Processed data for sample {sample_name} already exists. Skipping muon preprocessing.")
 
     # ===== DATA CACHE CREATION =====
-    logging.info("Initializing training data formatter...")
+    logging.info("\n----- DATA CACHE CREATION -----")
+    logging.info("  - Initializing training data formatter...")
     tdf = data_formatter.TrainingDataFormatter(
         project_dir=project_dir,
         experiment_name=experiment_name,
         organism_code=organism_code,
         sample_names=sample_names,
         chrom_list=chrom_list,
-        output_dir=output_dir / experiment_name,
+        output_dir=experiment_dir / experiment_name,
+        processed_data_dir=processed_data_dir,
+        training_data_cache=training_data_cache_dir
     )
     
     if tdf.settings_path.is_file():
-        logging.info(f"Loading existing preprocessing config from {tdf.settings_path}...")
+        logging.info(f"  - Loading existing preprocessing config from {tdf.settings_path}...")
         tdf.load_settings()
     
     # Verify that the data cache files exist. If not, this method will create them.
-    logging.info("Creating or verifying loading cache data files...")
-    tdf.create_or_load_data_cache(sample_name=sample_names[0], force_recalculate=False)
+    logging.info("  - Creating or verifying loading cache data files...")
+    tdf.create_or_load_data_cache(sample_name=sample_name, force_recalculate=False)
 
-    # ===== MODEL TRAINING =====
-    logging.info("Initializing ExperimentHandler...")
+    logging.info("\n----- MODEL TRAINING -----")
+    logging.info("  - Initializing ExperimentHandler...")
     exp = experiment_handler.ExperimentHandler(
         training_data_formatter=tdf,
-        experiment_dir=output_dir,
+        experiment_dir=experiment_dir / experiment_name,
         model_num=1,
         silence_warnings=False,
     )
@@ -217,28 +248,28 @@ if __name__ == "__main__":
     # at a time and caching it in memory. The max_cached argument controls how many chromosomes worth 
     # of data can be cached in memory at once. Each batch only contains TG and window data from one chromosome.
     # The chromosomes are loaded sequentially, starting with the first chromosome in the chrom_list.
-    logging.info("Creating dataset...")
+    logging.info("  - Creating dataset...")
     exp.create_multichrom_dataset(max_cached=100)
 
     # Prepares the Train/Val/Test dataloaders, being careful to balance the number of 
     # batches from each chromosome in each set.
-    logging.info("Preparing DataLoader...")
+    logging.info("  - Preparing DataLoader...")
     train_loader, val_loader, test_loader = exp.prepare_dataloader(
         batch_size=32,
         num_workers=8
     )
 
     # Creates scalers for the RNA and ATAC data based on the training split.
-    logging.info("Creating scalers...")
+    logging.info("  - Creating scalers...")
     exp.create_scalers(train_loader)
 
     # Creates a new MultiomicTransformer model. Model attributes can be set to change
     # the hyperparameters of the model.
-    logging.info("Creating model")
+    logging.info("  - Creating model")
     exp.create_new_model(kernel_size=64)
 
     # Runs model training and returns the trained model.
-    logging.info("Training model")
+    logging.info("  - Training model")
     model = exp.train(
         train_loader=train_loader, 
         val_loader=val_loader, 
@@ -249,13 +280,13 @@ if __name__ == "__main__":
         save_every_n_epochs=10,
         monitor_gpu_memory=True,
         profile_batches=True,
-        allow_overwrite=True,
+        allow_overwrite=False,
         silence_tqdm=True,
         )
 
-    # ===== GRADIENT ATTRIBUTION =====
+    logging.info("\n\n----- GRADIENT ATTRIBUTION -----")
     # Runs gradient attribution to calculate the gradients between each TF input and each TG output.
-    logging.info("\nRunning Gradient Attribution")
+    logging.info("  - Running Gradient Attribution")
     exp.run_gradient_attribution(
         test_loader,
         max_batches=None,
@@ -263,7 +294,8 @@ if __name__ == "__main__":
         )
     
     # ===== GROUND TRUTH LOADING AND AUROC CALCULATION =====
-    logging.info("\nLoading ground truth datasets...")
+    logging.info("\n\n----- GROUND TRUTH LOADING AND AUROC CALCULATION -----")
+    logging.info("  - Loading ground truth datasets...")
     GROUND_TRUTH_DIR = Path(PROJECT_DIR) / "data" / "ground_truth_files"
     
     gt_by_dataset_dict_all = {
@@ -291,7 +323,7 @@ if __name__ == "__main__":
     gt_by_dataset_dict = gt_by_dataset_dict_all[sample_type]
 
     # Calculates the AUROC of the predicted GRN against multiple ground truth datasets.
-    logging.info("\nCalculating AUROC")
+    logging.info("  - Calculating AUROC")
     auroc_df = exp.calculate_auroc_all_sample_gts(exp.grn, gt_by_dataset_dict)     
     logging.info(f"Pooled Median AUROC: {auroc_df['pooled_median_auroc'].iloc[0]:.3f}")       
     logging.info(f"Per-TF Median AUROC: {auroc_df['per_tf_median_auroc'].iloc[0]:.3f}")
@@ -308,7 +340,7 @@ if __name__ == "__main__":
     final_r2s = exp.epoch_log_df.iloc[-1]["r2_scaled"]
     avg_epoch_time = exp.epoch_log_df["epoch_time_s"].mean()
 
-    logging.info(f"\n--- Model Training Summary ---")
+    logging.info(f"\n\n--- Model Training Summary ---")
     logging.info(f"Final R2 (unscaled): {final_r2u:.4f}")
     logging.info(f"Final R2 (scaled): {final_r2s:.4f}")
     logging.info(f"Average Epoch Time: {avg_epoch_time:.2f} seconds")
