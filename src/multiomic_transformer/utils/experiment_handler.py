@@ -292,6 +292,7 @@ class ExperimentHandler:
             return
         
         with open(settings_path, "r") as f:
+            logging.info(f"Loading ExperimentHandler state from {settings_path}...")
             settings = json.load(f)
         
         # Load the settings into the ExperimentHandler instance
@@ -605,7 +606,6 @@ class ExperimentHandler:
         starting_epoch = self.starting_epoch if self.starting_epoch is not None else 0
         
         model = self.model.to(self.device)
-        self._create_model_training_dir(allow_overwrite)
 
         optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
         loss_fn = nn.MSELoss()

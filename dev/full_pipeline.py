@@ -9,6 +9,7 @@ import numpy as np
 import random
 import matplotlib.pyplot as plt
 import argparse
+from PIL import Image
 
 import sys
 PROJECT_DIR = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
@@ -28,6 +29,77 @@ import multiomic_transformer.utils.experiment_handler as experiment_handler
 random.seed(1337)
 np.random.seed(1337)
 torch.manual_seed(1337)
+
+def combine_images_with_scaling(columns, space, image_scales, fig_dir, output_name="combined_images.png"):
+    """
+    Combine images into a grid, scaling each image by its own factor.
+
+    Parameters
+    ----------
+    columns : int
+        Number of columns in the output grid.
+    space : int
+        Pixels between images.
+    image_scales : dict
+        Dictionary mapping image path -> scale factor
+        Example: {Path("a.png"): 1.0, Path("b.png"): 0.8, Path("c.png"): 1.2}
+    fig_dir : Path
+        Output directory.
+    output_name : str
+        Output filename.
+    """
+    image_paths = list(image_scales.keys())
+    scaled_images = []
+
+    for image_path in image_paths:
+        scale = image_scales[image_path]
+        img = Image.open(image_path).convert("RGBA")
+
+        new_width = max(1, int(img.width * scale))
+        new_height = max(1, int(img.height * scale))
+
+        resized = img.resize((new_width, new_height), Image.LANCZOS)
+        scaled_images.append((image_path, resized))
+
+    # Split into rows
+    rows = []
+    for i in range(0, len(scaled_images), columns):
+        rows.append(scaled_images[i:i + columns])
+
+    # Compute per-row heights
+    row_heights = [max(img.height for _, img in row) for row in rows]
+
+    # Compute per-column widths
+    n_cols = min(columns, max(len(row) for row in rows))
+    col_widths = []
+    for col_idx in range(n_cols):
+        max_width = 0
+        for row in rows:
+            if col_idx < len(row):
+                _, img = row[col_idx]
+                max_width = max(max_width, img.width)
+        col_widths.append(max_width)
+
+    # Create canvas
+    background_width = sum(col_widths) + space * (n_cols - 1)
+    background_height = sum(row_heights) + space * (len(rows) - 1)
+
+    background = Image.new("RGBA", (background_width, background_height), (255, 255, 255, 255))
+
+    # Paste images centered in each grid cell
+    y = 0
+    for row_idx, row in enumerate(rows):
+        x = 0
+        for col_idx, (_, img) in enumerate(row):
+            x_offset = (col_widths[col_idx] - img.width) // 2
+            y_offset = (row_heights[row_idx] - img.height) // 2
+            background.paste(img, (x + x_offset, y + y_offset), img)
+            x += col_widths[col_idx] + space
+        y += row_heights[row_idx] + space
+
+    output_path = fig_dir / output_name
+    background.save(output_path)
+    return output_path
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run the full training and evaluation pipeline for the MultiomicTransformer model.")
@@ -239,7 +311,7 @@ if __name__ == "__main__":
     logging.info("  - Initializing ExperimentHandler...")
     exp = experiment_handler.ExperimentHandler(
         training_data_formatter=tdf,
-        experiment_dir=experiment_dir / experiment_name,
+        experiment_dir=experiment_dir,
         model_num=1,
         silence_warnings=False,
     )
@@ -395,7 +467,7 @@ if __name__ == "__main__":
         name_clean=name,
         override_title=f"Top 10 Per-TF AUROC"
         )
-    per_tf_plot.savefig(fig_dir / f"top_10_per_tf_auroc.png", dpi=250)
+    per_tf_plot.savefig(fig_dir / f"top_10_per_tf_auroc.png", dpi=250, bbox_inches="tight")
     plt.close(per_tf_plot)
 
     pooled_auroc_boxplot_fig = exp._plot_all_results_auroc_boxplot(
@@ -405,7 +477,7 @@ if __name__ == "__main__":
         override_title=f"Pooled AUROC per Method",
         method_color_dict=exp.method_color_dict
     )
-    pooled_auroc_boxplot_fig.savefig(fig_dir / f"pooled_auroc_boxplot.png", dpi=250)
+    pooled_auroc_boxplot_fig.savefig(fig_dir / f"pooled_auroc_boxplot.png", dpi=250, bbox_inches="tight")
     plt.close(pooled_auroc_boxplot_fig)
 
     per_tf_auroc_boxplot_fig = exp._plot_all_results_auroc_boxplot(
@@ -415,7 +487,7 @@ if __name__ == "__main__":
         override_title=f"Per-TF AUROC per Method",
         method_color_dict=exp.method_color_dict
         )
-    per_tf_auroc_boxplot_fig.savefig(fig_dir / f"per_tf_auroc_boxplot.png", dpi=250)
+    per_tf_auroc_boxplot_fig.savefig(fig_dir / f"per_tf_auroc_boxplot.png", dpi=250, bbox_inches="tight")
     plt.close(per_tf_auroc_boxplot_fig)
 
     relative_improvement_fig = exp.plot_relative_improvement(
@@ -423,7 +495,7 @@ if __name__ == "__main__":
         exp.experiment_name,
         override_title=f"Per-TF AUROC Improvement",
         )
-    relative_improvement_fig.savefig(fig_dir / f"relative_improvement.png", dpi=250)
+    relative_improvement_fig.savefig(fig_dir / f"relative_improvement.png", dpi=250, bbox_inches="tight")
     plt.close(relative_improvement_fig)
 
     pooled_auroc_heatmap_fig = exp.plot_method_gt_heatmap(
@@ -433,7 +505,7 @@ if __name__ == "__main__":
         y_scale=0.6,
         override_title=f"Pooled AUROC by Method and GT"
         )
-    pooled_auroc_heatmap_fig.savefig(fig_dir / f"pooled_auroc_heatmap.png", dpi=250)
+    pooled_auroc_heatmap_fig.savefig(fig_dir / f"pooled_auroc_heatmap.png", dpi=250, bbox_inches="tight")
     plt.close(pooled_auroc_heatmap_fig)
 
     per_tf_auroc_heatmap_fig = exp.plot_method_gt_heatmap(
@@ -443,7 +515,7 @@ if __name__ == "__main__":
         y_scale=0.6,
         override_title=f"Per-TF AUROC by Method and GT"
         )
-    per_tf_auroc_heatmap_fig.savefig(fig_dir / f"per_tf_auroc_heatmap.png", dpi=250)
+    per_tf_auroc_heatmap_fig.savefig(fig_dir / f"per_tf_auroc_heatmap.png", dpi=250, bbox_inches="tight")
     plt.close(per_tf_auroc_heatmap_fig)
 
     true_vs_predicted_fig = exp.plot_true_vs_predicted_tg_expression(
@@ -451,9 +523,26 @@ if __name__ == "__main__":
         set_axis_logscale=False,
         title=f"Predicted vs True TG Expression"
         )
-    true_vs_predicted_fig.savefig(fig_dir / f"true_vs_predicted.png", dpi=250)
+    true_vs_predicted_fig.savefig(fig_dir / f"true_vs_predicted.png", dpi=250, bbox_inches="tight")
     plt.close(true_vs_predicted_fig)
 
     logging.info(f"\n----- Saving Experiment -----")
     exp.save_handler()
     logging.info(f"Experiment saved to {exp.experiment_dir}")
+    
+    image_scales = {
+        fig_dir / "top_10_per_tf_auroc.png": 1.0,
+        fig_dir / "pooled_auroc_boxplot.png": 0.9,
+        fig_dir / "pooled_auroc_heatmap.png": 1.0,
+        fig_dir / "true_vs_predicted.png": 0.85,
+        fig_dir / "relative_improvement.png": 0.85,
+        fig_dir / "per_tf_auroc_boxplot.png": 0.9,
+        fig_dir / "per_tf_auroc_heatmap.png": 1.0,
+    }
+
+    combine_images_with_scaling(
+        columns=4,
+        space=20,
+        image_scales=image_scales,
+        fig_dir=fig_dir
+    )

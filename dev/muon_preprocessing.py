@@ -68,7 +68,7 @@ def load_raw_data(
             found_matrix = True
         if file_name.endswith("fragments.tsv.gz"):
             file.rename(sample_data_dir / f"fragments.tsv.gz")
-            frag_path = file
+            frag_path = sample_data_dir / f"fragments.tsv.gz"
         if file_name.endswith("fragments.tsv.gz.tbi.gz"):
             file.rename(sample_data_dir / f"fragments.tsv.gz.tbi.gz")
 
