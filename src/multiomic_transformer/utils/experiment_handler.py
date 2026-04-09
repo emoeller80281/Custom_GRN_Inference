@@ -1702,7 +1702,7 @@ class ExperimentHandler:
         
         return auroc_df
     
-    def calculate_auroc_all_methods(self, sample_list, dataset_type, ground_truth_dict, grn=None):        
+    def calculate_auroc_all_methods(self, sample_list, dataset_type, ground_truth_dict, grn=None, use_muon_grn=True):        
         grn = self.grn if grn is None else grn
         
         assert grn is not None, "GRN must be provided either through argument or by running gradient attribution first"
@@ -1711,7 +1711,10 @@ class ExperimentHandler:
         ground_truth_edges_dict = {gt: auroc_utils.prep_gt_edges(df) for gt, (df, _) in ground_truth_dict.items()}
         
         # Load the other method GRNs (TF-TG scores averaged across samples)
-        standardized_method_dict = auroc_utils.load_other_method_muon_grns(sample_list, dataset_type)
+        if use_muon_grn:
+            standardized_method_dict = auroc_utils.load_other_method_muon_grns(sample_list, dataset_type)
+        else:
+            standardized_method_dict = auroc_utils.load_other_method_grns(sample_list, dataset_type)
         
         standardized_method_dict["Gradient Attribution"] = grn
             
