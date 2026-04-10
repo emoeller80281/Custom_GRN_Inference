@@ -528,7 +528,7 @@ def _run_experiments_on_gpu(
     
     for i in experiment_indices:
         logging.info(
-            f"[Experiment {i+1}/{num_experiments}] Starting experiment with GPU {gpu_id} "
+            f"\n[Experiment {i+1}/{num_experiments}] Starting experiment with GPU {gpu_id} "
             f"(pid={os.getpid()})..."
         )
 
@@ -566,8 +566,11 @@ def _run_experiments_on_gpu(
             if config_match.any():
                 logging.info(f"[Experiment {i+1}] Experiment with this configuration already exists. Skipping...")
                 continue
-
-        dataset = exp.create_multichrom_dataset(
+        
+        exp.model_num = i + 1
+        exp._create_model_training_dir(allow_overwrite=True)
+        
+        exp.create_multichrom_dataset(
             max_cached=max_cached,
         )
 
@@ -580,25 +583,31 @@ def _run_experiments_on_gpu(
         )
 
         exp.create_scalers(
-            dataset=dataset,
             dataloader=train_loader,
         )
 
         exp.create_new_model(
-            dataset=dataset,
+            use_dist_bias=True,
             bias_scale=bias_scale,
             d_model=d_model,
             num_heads=num_heads,
             num_layers=num_layers,
             d_ff=d_ff,
-            window_pool_size=kernel_size,
+            dropout=0.1,
+            kernel_size=kernel_size,
+            local_rank=0,
+            rank=0,
+            world_size=1,
         )
+        
+        logging.info(f"[Experiment {i+1}] Starting Training")
         train_start_time = time.time()
         exp.train(
             train_loader=train_loader, 
             val_loader=val_loader, 
             num_epochs=epochs,
             max_batches=None,
+            verbose=False,
             grad_accum_steps=1,
             improvement_patience=15,
             save_every_n_epochs=10,
@@ -796,7 +805,7 @@ if __name__ == "__main__":
     logging.info(f"  - Raw Data Directory: {raw_data_dir}")
     logging.info(f"  - Processed Data Directory: {processed_data_dir}")
     logging.info(f"  - Experiment Directory: {experiment_dir}")
-    logging.info(f"  - Training Cache Directory: {training_cache_dir}")
+    logging.info(f"  - Training Cache Directory: {training_cache_dir}\n")
     
     exp_processed_data_dir = processed_data_dir / experiment_name
     if not exp_processed_data_dir.is_dir():
@@ -811,7 +820,8 @@ if __name__ == "__main__":
         for file_name in required_preprocessing_files:
             if not (sample_processed_data_dir / file_name).is_file():
                 return True
-            
+    
+    # Determine if we need to run the Muon preprocessing
     run_muon = False
     if not sample_processed_data_dir.exists():
         sample_processed_data_dir.mkdir(parents=True, exist_ok=True)
@@ -821,15 +831,17 @@ if __name__ == "__main__":
         if missing_preprocessing_files(sample_processed_data_dir):
             run_muon = True
     
-    run_muon_preprocessing(
-        sample_name=sample_name,
-        sample_raw_data_dir=sample_raw_data_dir,
-        sample_processed_data_dir=sample_processed_data_dir,
-        tss_path=PROJECT_DIR / "data" / "genome_data" /"genome_annotation" / organism_code / f"gene_tss.bed",
-        project_dir=PROJECT_DIR,
-    )
+    # Run Muon preprocessing if needed
+    if run_muon == True:
+        run_muon_preprocessing(
+            sample_name=sample_name,
+            sample_raw_data_dir=sample_raw_data_dir,
+            sample_processed_data_dir=sample_processed_data_dir,
+            tss_path=PROJECT_DIR / "data" / "genome_data" /"genome_annotation" / organism_code / f"gene_tss.bed",
+            project_dir=PROJECT_DIR,
+        )
     
-    
+    # Create or load the training data cache for this sample
     tdf = data_formatter.TrainingDataFormatter(
         project_dir=PROJECT_DIR,
         experiment_name=experiment_name,
@@ -842,13 +854,11 @@ if __name__ == "__main__":
     )
     
     if tdf.settings_path.is_file():
-        logging.info(f"  - Loading existing preprocessing config from {tdf.settings_path}...")
         tdf.load_settings()
     
     tdf.create_or_load_data_cache(sample_name=sample_name, force_recalculate=False)
 
-    logging.info(f"Running benchmarking experiment: {experiment_name} on sample type: {sample_type}")
-    logging.info("Loading ground truth datasets...")
+    logging.info("\nLoading ground truth datasets...")
     gt_by_dataset_dict = load_ground_truth_dict()
 
     experiment_dict = {

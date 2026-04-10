@@ -21,6 +21,7 @@ from matplotlib.axes import Axes
 
 # Setting figure parameters
 sc.settings.verbosity = 0
+TQDM_DISABLE=1
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run Muon preprocessing with configurable file paths.")

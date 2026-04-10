@@ -7,8 +7,8 @@
 #SBATCH -N 1
 #SBATCH --gres=gpu:v100:4
 #SBATCH --ntasks-per-node=1
-#SBATCH -c 12
-#SBATCH --mem=64G
+#SBATCH -c 48
+#SBATCH --mem=128G
 #SBATCH --array=0-9%4
 
 set -eo pipefail

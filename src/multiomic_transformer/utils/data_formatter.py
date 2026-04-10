@@ -1260,13 +1260,6 @@ class TrainingDataFormatter:
         
         if not self.file_paths["training_cache"]["common"]["dir"].is_dir():
             os.makedirs(self.file_paths["training_cache"]["common"]["dir"])
-        
-
-        # ----- TF-TG COMBO FILES -----
-        tf_tg_combos_dir = self.processed_data_dir / "tf_tg_combos"
-        
-        if not tf_tg_combos_dir.is_dir():
-            os.makedirs(tf_tg_combos_dir)
 
         # ----- SAMPLE-LEVEL FILES -----
         for sample_name in self.sample_names:
@@ -1313,7 +1306,7 @@ class TrainingDataFormatter:
                 }
             })
             
-        self.atomic_json_dump(self.file_paths, self.output_dir / "file_paths.json")
+        self.atomic_json_dump(self.file_paths, self.processed_data_dir / "file_paths.json")
 
         self._file_setup_done = True
 

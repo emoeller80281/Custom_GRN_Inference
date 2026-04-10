@@ -122,7 +122,7 @@ class ExperimentHandler:
         self, 
         training_data_formatter: data_formatter.TrainingDataFormatter,
         experiment_dir: None | str = None, 
-        model_num: None | int = None, 
+        model_num: None | int = 1, 
         silence_warnings: bool = False
         ):
         
@@ -145,16 +145,10 @@ class ExperimentHandler:
         self.silence_warnings = silence_warnings
         
         # Either load an existing model training directory or set up a new one if no number is provided
-        if model_num is not None:
-            model_str = f"{model_num:03d}"
-            self.model_training_dir = Path(f"{self.experiment_dir}/{self.experiment_name}/model_training_{model_str}")
-            if not self.model_training_dir.exists():
-                self._create_model_training_dir(allow_overwrite=False)
-        else:
+        model_str = f"{model_num:03d}"
+        self.model_training_dir = Path(f"{self.experiment_dir}/{self.experiment_name}/model_training_{model_str}")
+        if not self.model_training_dir.exists():
             self._create_model_training_dir(allow_overwrite=False)
-            if not self.silence_warnings:
-                logging.info(f"No model_num provided. Created new model training directory: {self.model_training_dir}")
-
         
         # Set up blank file paths
         self.common_data_dir = self.tdf.file_paths["training_cache"]["common"]["dir"]
@@ -169,7 +163,6 @@ class ExperimentHandler:
         self.epochs = 250
         self.batch_size = 32
         self.grad_accum_steps = 1
-        self.use_grad_accum = True
         self.use_grad_ckpt = True
         self.d_model = 128
         self.num_heads = 4
@@ -247,7 +240,6 @@ class ExperimentHandler:
             "epochs": self.epochs,
             "batch_size": self.batch_size,
             "grad_accum_steps": self.grad_accum_steps,
-            "use_grad_accum": self.use_grad_accum,
             "use_grad_ckpt": self.use_grad_ckpt,
             "d_model": self.d_model,
             "num_heads": self.num_heads,
@@ -391,29 +383,29 @@ class ExperimentHandler:
         
         self._setup_cuda_ddp(local_rank, rank, world_size)
 
-        d_model = int(self.d_model) if d_model is None else d_model
-        num_heads = int(self.num_heads) if num_heads is None else num_heads
-        num_layers = int(self.num_layers) if num_layers is None else num_layers
-        d_ff = int(self.d_ff) if d_ff is None else d_ff
-        dropout = float(self.dropout) if dropout is None else dropout
-        bias_scale = float(self.bias_scale) if bias_scale is None else bias_scale
-        use_dist_bias = bool(self.use_dist_bias) if use_dist_bias is None else use_dist_bias
-        kernel_size = int(self.kernel_size) if kernel_size is None else kernel_size
-        
+        self.d_model = int(self.d_model) if d_model is None else d_model
+        self.num_heads = int(self.num_heads) if num_heads is None else num_heads
+        self.num_layers = int(self.num_layers) if num_layers is None else num_layers
+        self.d_ff = int(self.d_ff) if d_ff is None else d_ff
+        self.dropout = float(self.dropout) if dropout is None else dropout
+        self.bias_scale = float(self.bias_scale) if bias_scale is None else bias_scale
+        self.use_dist_bias = bool(self.use_dist_bias) if use_dist_bias is None else use_dist_bias
+        self.kernel_size = int(self.kernel_size) if kernel_size is None else kernel_size
+
         tf_vocab_size = int(self.dataset.tf_ids.numel())
         tg_vocab_size = int(self.dataset.tg_ids.numel())
 
         self.model = MultiomicTransformer(
-            d_model=d_model,
-            num_heads=num_heads,
-            num_layers=num_layers,
-            d_ff=d_ff,
-            dropout=dropout,
+            d_model=self.d_model,
+            num_heads=self.num_heads,
+            num_layers=self.num_layers,
+            d_ff=self.d_ff,
+            dropout=self.dropout,
             tf_vocab_size=tf_vocab_size,
             tg_vocab_size=tg_vocab_size,
-            use_bias=use_dist_bias,
-            bias_scale=bias_scale,
-            window_pool_size=kernel_size,
+            use_bias=self.use_dist_bias,
+            bias_scale=self.bias_scale,
+            window_pool_size=self.kernel_size,
         ).to(self.device)   
 
         return self.model
@@ -481,7 +473,7 @@ class ExperimentHandler:
         g = torch.Generator()
         g.manual_seed(seed)
         
-        batch_size = self.batch_size if batch_size is None else batch_size
+        self.batch_size = self.batch_size if batch_size is None else batch_size
         
         dataset = self.dataset
 
@@ -536,13 +528,13 @@ class ExperimentHandler:
 
         # Split 
         base_train_bs = InterleavedChromBatchSampler(
-            train_map, batch_size=batch_size, shuffle=True, seed=seed, drop_last=False
+            train_map, batch_size=self.batch_size, shuffle=True, seed=seed, drop_last=False
         )
         base_val_bs = InterleavedChromBatchSampler(
-            val_map, batch_size=batch_size, shuffle=False, seed=seed, drop_last=False
+            val_map, batch_size=self.batch_size, shuffle=False, seed=seed, drop_last=False
         )
         base_test_bs = InterleavedChromBatchSampler(
-            test_map, batch_size=batch_size, shuffle=False, seed=seed, drop_last=False
+            test_map, batch_size=self.batch_size, shuffle=False, seed=seed, drop_last=False
         )
 
         # Creates distributed batch samplers if needed
@@ -602,12 +594,20 @@ class ExperimentHandler:
         silence_tqdm: bool = False,
         allow_overwrite: bool = False,
     ):
-        learning_rate = self.initial_lr if learning_rate is None else learning_rate
-        starting_epoch = self.starting_epoch if self.starting_epoch is not None else 0
+        self.initial_lr = self.initial_lr if learning_rate is None else learning_rate
+        self.starting_epoch = self.starting_epoch if self.starting_epoch is not None else 0
+        self.epochs = num_epochs
+        self.grad_accum_steps = grad_accum_steps
         
         model = self.model.to(self.device)
+        
+        if "trained_model.pt" in os.listdir(self.model_training_dir) and not allow_overwrite:
+            self._create_model_training_dir(allow_overwrite=False)
+            logging.info(f"Creating model in new training directory: {self.model_training_dir}")
+            
+        self.save_handler()
 
-        optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+        optimizer = torch.optim.Adam(model.parameters(), lr=self.initial_lr)
         loss_fn = nn.MSELoss()
 
         tf_scaler = getattr(self, "tf_scaler", None)
@@ -630,8 +630,8 @@ class ExperimentHandler:
         batch_profile_log = []
         epoch_log = []
 
-        final_epoch = starting_epoch + num_epochs
-        epoch_iter = range(starting_epoch, final_epoch)
+        final_epoch = self.starting_epoch + num_epochs
+        epoch_iter = range(self.starting_epoch, final_epoch)
 
         if not verbose and not silence_tqdm:
             epoch_iter = tqdm(epoch_iter, desc="Training", ncols=100, unit="epoch", total=num_epochs)
@@ -640,7 +640,8 @@ class ExperimentHandler:
         best_r2 = float("-inf")
         no_improvement_epochs = 0
         
-        logging.info(f"\n===== Model {self.model_num} Training Started =====")
+        if verbose:
+            logging.info(f"\n===== Model {self.model_num} Training Started =====")
         for epoch in epoch_iter:
             epoch_start_time = time.time()
             model.train()
@@ -888,7 +889,7 @@ class ExperimentHandler:
         self.epoch_log_df = pd.DataFrame(epoch_log)
         
         # If resuming from a previous training run, concatenate the new logs with the old ones so we have a complete history
-        if starting_epoch != 0:
+        if self.starting_epoch != 0:
             def _concat_logs(new_df, log_filename):
                 previous_log_path = self.model_training_dir / log_filename
                 if previous_log_path.exists():
@@ -1481,6 +1482,111 @@ class ExperimentHandler:
         logging.info(f"  - TF Overlap: {overlap_tfs:,} ({gt_unique_tfs:,} in GT)")
         logging.info(f"  - TG Overlap: {overlap_tgs:,} ({gt_unique_tgs:,} in GT)")
         logging.info(f"  - Edge Overlap: {overlap_edges:,} ({gt_unique_edges:,} in GT)")
+    
+    def evaluate_single_method_setwise(
+        self,
+        method_name: str,
+        score_df: pd.DataFrame,
+        ground_truth: tuple[pd.DataFrame, dict[str, set[str]]],
+        ground_truth_name: str,
+        max_edges: int = 10000,
+    ) -> dict | None:
+        """
+        Mimics the R evaluate_single_method() logic:
+
+        1. Uppercase TF/target names
+        2. Filter inferred network to GT TFs and GT targets
+        3. Take top max_edges edges overall
+        4. Compare inferred edge set to GT edge set
+        5. Compute precision, recall, F1
+
+        Returns
+        -------
+        dict with:
+            - metrics: dict(precision, recall, f1)
+            - summary: one-row DataFrame
+            - final_edges: filtered top-edge DataFrame
+        """
+        ground_truth_df, gt_lookup = ground_truth
+
+        if score_df is None or len(score_df) == 0:
+            return None
+
+        # ---- Build GT TF/target sets ----
+        gt_tfs = set(ground_truth_df["Source"].astype(str).str.upper())
+        gt_targets = set(ground_truth_df["Target"].astype(str).str.upper())
+
+        # GT edge pairs as strings, matching the R behavior
+        gt_pairs = set(
+            ground_truth_df["Source"].astype(str).str.upper()
+            + "_"
+            + ground_truth_df["Target"].astype(str).str.upper()
+        )
+
+        # ---- Filter inferred network by GT TFs and GT targets ----
+        df_filtered = score_df.copy()
+        df_filtered["source_upper"] = df_filtered["Source"].astype(str).str.upper()
+        df_filtered["target_upper"] = df_filtered["Target"].astype(str).str.upper()
+
+        df_filtered = df_filtered[
+            df_filtered["source_upper"].isin(gt_tfs)
+            & df_filtered["target_upper"].isin(gt_targets)
+        ].copy()
+
+        # ---- Sort by score descending before taking top max_edges ----
+        if "Score" in df_filtered.columns:
+            df_filtered = df_filtered.sort_values("Score", ascending=False, kind="stable")
+
+        n_edges = min(max_edges, len(df_filtered))
+        if n_edges == 0:
+            print(f"    {method_name}: No edges after filtering, skipping")
+            return None
+
+        df_final = df_filtered.head(n_edges).copy()
+
+        # ---- Create inferred edge pairs ----
+        inferred_pairs = set(
+            df_final["source_upper"].astype(str) + "_" + df_final["target_upper"].astype(str)
+        )
+
+        # ---- Set-based evaluation ----
+        tp = inferred_pairs.intersection(gt_pairs)
+        fp = inferred_pairs.difference(gt_pairs)
+        fn = gt_pairs.difference(inferred_pairs)
+
+        tp_n = len(tp)
+        fp_n = len(fp)
+        fn_n = len(fn)
+
+        precision = tp_n / (tp_n + fp_n) if (tp_n + fp_n) > 0 else 0.0
+        recall = tp_n / (tp_n + fn_n) if (tp_n + fn_n) > 0 else 0.0
+        f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
+
+        inferred_tfs = set(df_final["source_upper"].unique())
+        inferred_targets = set(df_final["target_upper"].unique())
+
+        summary_df = pd.DataFrame([{
+            "Method": method_name,
+            "GT_name": ground_truth_name,
+            "GT_total_edges": len(gt_pairs),
+            "GT_TFs": len(gt_tfs),
+            "GT_targets": len(gt_targets),
+            "Original_network_size": len(score_df),
+            "Filtered_network_size": len(df_filtered),
+            "Final_network_size": len(df_final),
+            "Inferred_TFs": len(inferred_tfs),
+            "Inferred_targets": len(inferred_targets),
+            "TP": tp_n,
+            "FP": fp_n,
+            "FN": fn_n,
+            "Precision": round(precision, 4),
+            "Recall": round(recall, 4),
+            "F1_score": round(f1, 4),
+            "Common_TFs": len(gt_tfs.intersection(inferred_tfs)),
+            "Common_targets": len(gt_targets.intersection(inferred_targets)),
+        }])
+
+        return summary_df
     
     def generate_pooled_metrics(
         self,
@@ -2495,9 +2601,6 @@ class ExperimentHandler:
         return rng.uniform(arr.min(), arr.max(), size=arr.shape[0])
     
     def _create_model_training_dir(self, allow_overwrite=False):
-        if self.model_num is None:
-            self.model_num = 1
-
         while True:
             model_str = f"{self.model_num:03d}"
             candidate_dir = self.experiment_dir / self.experiment_name / f"model_training_{model_str}"
