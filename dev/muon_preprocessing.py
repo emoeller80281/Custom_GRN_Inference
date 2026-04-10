@@ -36,6 +36,36 @@ def parse_args():
     parser.add_argument("--frag-path", type=str, required=True)
     return parser.parse_args()
 
+
+def filter_to_human(mdata):
+    """
+    Filter a barnyard MuData object to hg38 ATAC peaks only,
+    then strip the 'hg38.' prefix from peak IDs.
+    """
+    if "hg38" in mdata["atac"].var_names[0]:
+        # annotate species from interval
+        mdata["atac"].var["species"] = (
+            mdata["atac"].var["interval"].str.split(".", n=1).str[0]
+        )
+
+        # keep only hg38 peaks
+        hg38_mask = mdata["atac"].var["species"] == "hg38"
+        mdata.mod["atac"] = mdata["atac"][:, hg38_mask].copy()
+
+        # strip prefix from identifiers
+        mdata.mod["atac"].var_names = (
+            mdata.mod["atac"].var_names.str.replace(r"^hg38\.", "", regex=True)
+        )
+        mdata.mod["atac"].var["gene_ids"] = (
+            mdata.mod["atac"].var["gene_ids"].str.replace(r"^hg38\.", "", regex=True)
+        )
+        mdata.mod["atac"].var["interval"] = (
+            mdata.mod["atac"].var["interval"].str.replace(r"^hg38\.", "", regex=True)
+        )
+        mdata = mu.MuData(mdata.mod)
+
+    return mdata
+
 def load_raw_data(
     sample_name: str, 
     sample_data_dir: Path, 
@@ -75,7 +105,7 @@ def load_raw_data(
     if not (found_barcode and found_features and found_matrix):
         for file in sample_data_dir.glob("*"):
             file_name = file.name
-            if file_name.suffix == ".h5" or file_name.suffixes == [".h5", ".gz"]:
+            if file_name.endswith(".h5"):
                 print(f"Found h5 file: {file_name}")
                 raw_h5_file = file
     
@@ -92,6 +122,8 @@ def load_raw_data(
     elif raw_h5_file is not None:
         mdata = mu.read_10x_h5(raw_h5_file)
         mdata.var_names_make_unique()
+        if any(mdata.var["interval"].str.startswith("hg38.")):
+            mdata = filter_to_human(mdata)
         return mdata, frag_path
         
     # If no h5 file is found, look for the 10x mtx files. If they exist, load them using muon.
@@ -156,35 +188,6 @@ def construct_from_gene_by_cell_matrices(rna_count_file, atac_count_file):
 
     return mdata
 
-def filter_to_human(mdata):
-    """
-    Filter a barnyard MuData object to hg38 ATAC peaks only,
-    then strip the 'hg38.' prefix from peak IDs.
-    """
-    if "hg38" in mdata["atac"].var_names[0]:
-        # annotate species from interval
-        mdata["atac"].var["species"] = (
-            mdata["atac"].var["interval"].str.split(".", n=1).str[0]
-        )
-
-        # keep only hg38 peaks
-        hg38_mask = mdata["atac"].var["species"] == "hg38"
-        mdata.mod["atac"] = mdata["atac"][:, hg38_mask].copy()
-
-        # strip prefix from identifiers
-        mdata.mod["atac"].var_names = (
-            mdata.mod["atac"].var_names.str.replace(r"^hg38\.", "", regex=True)
-        )
-        mdata.mod["atac"].var["gene_ids"] = (
-            mdata.mod["atac"].var["gene_ids"].str.replace(r"^hg38\.", "", regex=True)
-        )
-        mdata.mod["atac"].var["interval"] = (
-            mdata.mod["atac"].var["interval"].str.replace(r"^hg38\.", "", regex=True)
-        )
-        mdata = mu.MuData(mdata.mod)
-
-    return mdata
-    
 class MudataProcessor:
     def __init__(
         self, 

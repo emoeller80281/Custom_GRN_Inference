@@ -9,7 +9,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 12
 #SBATCH --mem=64G
-#SBATCH --array=0-8%4
+#SBATCH --array=0-9%4
 
 set -eo pipefail
 
@@ -23,7 +23,7 @@ EXPERIMENT_OUTPUT_DIR="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERE
 TRAINING_DATA_CACHE_DIR="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/TRAINING_DATA_CACHE"
 
 EXPERIMENT_LIST=(
-    # "mESC_E7.5_rep1_full_pipeline|E7.5_rep1|mm10|mESC"
+    "mESC_E7.5_rep1_full_pipeline|E7.5_rep1|mm10|mESC"
     "mESC_E7.5_rep2_full_pipeline|E7.5_rep2|mm10|mESC"
     "mESC_E8.5_rep1_full_pipeline|E8.5_rep1|mm10|mESC"
     "mESC_E8.5_rep2_full_pipeline|E8.5_rep2|mm10|mESC"

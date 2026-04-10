@@ -30,72 +30,186 @@ random.seed(1337)
 np.random.seed(1337)
 torch.manual_seed(1337)
 
-def combine_images_with_scaling(columns, space, image_scales, fig_dir, output_name="combined_images.png"):
+def combine_images_with_spans(
+    layout,
+    space,
+    fig_dir,
+    output_name="combined_images.png",
+    bg_color=(255, 255, 255, 255),
+):
     """
-    Combine images into a grid, scaling each image by its own factor.
+    Combine images into a manually positioned grid with optional row/column spanning.
 
     Parameters
     ----------
-    columns : int
-        Number of columns in the output grid.
+    layout : dict
+        Dictionary mapping image path -> config dict
+
+        Required keys per image:
+            row : int
+            col : int
+
+        Optional keys per image:
+            scale : float, default 1.0
+            rowspan : int, default 1
+            colspan : int, default 1
+
+        Example:
+        {
+            Path("a.png"): {"row": 0, "col": 0, "scale": 1.0, "rowspan": 1, "colspan": 2},
+            Path("b.png"): {"row": 0, "col": 2, "scale": 0.8},
+            Path("c.png"): {"row": 1, "col": 0, "scale": 1.1, "rowspan": 2, "colspan": 2},
+        }
+
     space : int
-        Pixels between images.
-    image_scales : dict
-        Dictionary mapping image path -> scale factor
-        Example: {Path("a.png"): 1.0, Path("b.png"): 0.8, Path("c.png"): 1.2}
+        Pixels between grid cells.
     fig_dir : Path
         Output directory.
     output_name : str
         Output filename.
+    bg_color : tuple
+        RGBA background color.
+
+    Returns
+    -------
+    Path
+        Path to the saved combined image.
     """
-    image_paths = list(image_scales.keys())
-    scaled_images = []
+    items = []
 
-    for image_path in image_paths:
-        scale = image_scales[image_path]
+    # Load images and parse layout
+    for image_path, cfg in layout.items():
+        row = cfg["row"]
+        col = cfg["col"]
+        scale = cfg.get("scale", 1.0)
+        rowspan = cfg.get("rowspan", 1)
+        colspan = cfg.get("colspan", 1)
+
+        if rowspan < 1 or colspan < 1:
+            raise ValueError(f"{image_path}: rowspan and colspan must be >= 1")
+
         img = Image.open(image_path).convert("RGBA")
-
         new_width = max(1, int(img.width * scale))
         new_height = max(1, int(img.height * scale))
+        img_resized = img.resize((new_width, new_height), Image.LANCZOS)
 
-        resized = img.resize((new_width, new_height), Image.LANCZOS)
-        scaled_images.append((image_path, resized))
+        items.append({
+            "path": image_path,
+            "row": row,
+            "col": col,
+            "rowspan": rowspan,
+            "colspan": colspan,
+            "img": img_resized,
+            "width": new_width,
+            "height": new_height,
+        })
 
-    # Split into rows
-    rows = []
-    for i in range(0, len(scaled_images), columns):
-        rows.append(scaled_images[i:i + columns])
+    if not items:
+        raise ValueError("Layout is empty.")
 
-    # Compute per-row heights
-    row_heights = [max(img.height for _, img in row) for row in rows]
+    n_rows = max(item["row"] + item["rowspan"] for item in items)
+    n_cols = max(item["col"] + item["colspan"] for item in items)
 
-    # Compute per-column widths
-    n_cols = min(columns, max(len(row) for row in rows))
-    col_widths = []
-    for col_idx in range(n_cols):
-        max_width = 0
-        for row in rows:
-            if col_idx < len(row):
-                _, img = row[col_idx]
-                max_width = max(max_width, img.width)
-        col_widths.append(max_width)
+    # Check for overlapping occupied cells
+    occupied = {}
+    for item in items:
+        for r in range(item["row"], item["row"] + item["rowspan"]):
+            for c in range(item["col"], item["col"] + item["colspan"]):
+                key = (r, c)
+                if key in occupied:
+                    raise ValueError(
+                        f"Overlap detected: {item['path']} overlaps with {occupied[key]} at cell {key}"
+                    )
+                occupied[key] = item["path"]
 
-    # Create canvas
+    # Compute minimum column widths and row heights
+    # Start from single-cell requirements
+    col_widths = [0] * n_cols
+    row_heights = [0] * n_rows
+
+    for item in items:
+        if item["colspan"] == 1:
+            col_widths[item["col"]] = max(col_widths[item["col"]], item["width"])
+        if item["rowspan"] == 1:
+            row_heights[item["row"]] = max(row_heights[item["row"]], item["height"])
+
+    # Expand widths/heights as needed for spanned items
+    # A simple iterative pass is usually enough for plotting layouts
+    for _ in range(10):
+        changed = False
+
+        for item in items:
+            # Width across spanned columns, including inter-column spaces inside the span
+            current_span_width = (
+                sum(col_widths[item["col"]: item["col"] + item["colspan"]])
+                + space * (item["colspan"] - 1)
+            )
+            if current_span_width < item["width"]:
+                deficit = item["width"] - current_span_width
+                add_per_col = deficit / item["colspan"]
+                for c in range(item["col"], item["col"] + item["colspan"]):
+                    new_val = int(round(col_widths[c] + add_per_col))
+                    if new_val > col_widths[c]:
+                        col_widths[c] = new_val
+                        changed = True
+
+            # Height across spanned rows, including inter-row spaces inside the span
+            current_span_height = (
+                sum(row_heights[item["row"]: item["row"] + item["rowspan"]])
+                + space * (item["rowspan"] - 1)
+            )
+            if current_span_height < item["height"]:
+                deficit = item["height"] - current_span_height
+                add_per_row = deficit / item["rowspan"]
+                for r in range(item["row"], item["row"] + item["rowspan"]):
+                    new_val = int(round(row_heights[r] + add_per_row))
+                    if new_val > row_heights[r]:
+                        row_heights[r] = new_val
+                        changed = True
+
+        if not changed:
+            break
+
+    # Compute canvas size
     background_width = sum(col_widths) + space * (n_cols - 1)
-    background_height = sum(row_heights) + space * (len(rows) - 1)
+    background_height = sum(row_heights) + space * (n_rows - 1)
 
-    background = Image.new("RGBA", (background_width, background_height), (255, 255, 255, 255))
+    background = Image.new("RGBA", (background_width, background_height), bg_color)
 
-    # Paste images centered in each grid cell
+    # Precompute grid start coordinates
+    col_starts = []
+    x = 0
+    for w in col_widths:
+        col_starts.append(x)
+        x += w + space
+
+    row_starts = []
     y = 0
-    for row_idx, row in enumerate(rows):
-        x = 0
-        for col_idx, (_, img) in enumerate(row):
-            x_offset = (col_widths[col_idx] - img.width) // 2
-            y_offset = (row_heights[row_idx] - img.height) // 2
-            background.paste(img, (x + x_offset, y + y_offset), img)
-            x += col_widths[col_idx] + space
-        y += row_heights[row_idx] + space
+    for h in row_heights:
+        row_starts.append(y)
+        y += h + space
+
+    # Paste each image centered within its spanned rectangle
+    for item in items:
+        x0 = col_starts[item["col"]]
+        y0 = row_starts[item["row"]]
+
+        span_width = (
+            sum(col_widths[item["col"]: item["col"] + item["colspan"]])
+            + space * (item["colspan"] - 1)
+        )
+        span_height = (
+            sum(row_heights[item["row"]: item["row"] + item["rowspan"]])
+            + space * (item["rowspan"] - 1)
+        )
+
+        x_offset = (span_width - item["width"]) // 2
+        y_offset = (span_height - item["height"]) // 2
+
+        paste_x = x0 + x_offset
+        paste_y = y0 + y_offset
+
+        background.paste(item["img"], (paste_x, paste_y), item["img"])
 
     output_path = fig_dir / output_name
     background.save(output_path)
@@ -404,7 +518,8 @@ if __name__ == "__main__":
         sample_names, 
         sample_type, 
         gt_by_dataset_dict, 
-        grn=exp.grn
+        grn=exp.grn,
+        use_muon_grn=True,
     )    
     
     exp.epoch_log_df.iloc[-1]
@@ -530,19 +645,19 @@ if __name__ == "__main__":
     exp.save_handler()
     logging.info(f"Experiment saved to {exp.experiment_dir}")
     
-    image_scales = {
-        fig_dir / "top_10_per_tf_auroc.png": 1.0,
-        fig_dir / "pooled_auroc_boxplot.png": 0.9,
-        fig_dir / "pooled_auroc_heatmap.png": 1.0,
-        fig_dir / "true_vs_predicted.png": 0.85,
-        fig_dir / "relative_improvement.png": 0.85,
-        fig_dir / "per_tf_auroc_boxplot.png": 0.9,
-        fig_dir / "per_tf_auroc_heatmap.png": 1.0,
+    layout = {
+        fig_dir / "top_10_per_tf_auroc.png": {"row": 0, "col": 0, "scale": 0.9, "rowspan": 1, "colspan": 2},
+        fig_dir / "pooled_auroc_boxplot.png": {"row": 0, "col": 2, "scale": 0.9},
+        fig_dir / "pooled_auroc_heatmap.png": {"row": 0, "col": 3, "scale": 1.0},
+        fig_dir / "true_vs_predicted.png": {"row": 1, "col": 0, "scale": 0.85},
+        fig_dir / "relative_improvement.png": {"row": 1, "col": 1, "scale": 0.85},
+        fig_dir / "per_tf_auroc_boxplot.png": {"row": 1, "col": 2, "scale": 0.9},
+        fig_dir / "per_tf_auroc_heatmap.png": {"row": 1, "col": 3, "scale": 1.0},
     }
 
-    combine_images_with_scaling(
-        columns=4,
-        space=20,
-        image_scales=image_scales,
-        fig_dir=fig_dir
+    combine_images_with_spans(
+        layout=layout,
+        space=50,
+        fig_dir=fig_dir,
+        output_name="combined_images.png",
     )
