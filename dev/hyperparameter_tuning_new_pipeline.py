@@ -37,6 +37,7 @@ from multiomic_transformer.datasets.dataset_refactor import (
 import muon_preprocessing as muon_prep
 
 DATA_DIR = Path("/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER")
+GROUND_TRUTH_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data/ground_truth_files")
 
 color_palette = {
   "blue_light": "#18A6ED",
@@ -492,6 +493,7 @@ def _run_experiments_on_gpu(
     summary_save_path,
     sample_type,
     gt_by_dataset_dict,
+    experiment_dir,
 ):
     # Restrict this worker to a single GPU BEFORE any CUDA calls.
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
@@ -513,7 +515,7 @@ def _run_experiments_on_gpu(
 
     exp = experiment_handler.ExperimentHandler(
         training_data_formatter=tdf,
-        experiment_dir=EXPERIMENT_DIR,
+        experiment_dir=experiment_dir,
         model_num=1,
         silence_warnings=False,
     )
@@ -522,6 +524,8 @@ def _run_experiments_on_gpu(
 
     previous_experiments_df = pd.read_csv(summary_save_path) if summary_save_path.exists() else None
 
+    experiment_dict["d_ff"] = [experiment_dict["d_model"][i] * 4 for i in range(num_experiments)]
+    
     for i in experiment_indices:
         logging.info(
             f"[Experiment {i+1}/{num_experiments}] Starting experiment with GPU {gpu_id} "
@@ -593,7 +597,7 @@ def _run_experiments_on_gpu(
         exp.train(
             train_loader=train_loader, 
             val_loader=val_loader, 
-            num_epochs=500,
+            num_epochs=epochs,
             max_batches=None,
             grad_accum_steps=1,
             improvement_patience=15,
@@ -610,8 +614,8 @@ def _run_experiments_on_gpu(
         grad_attrib_start_time = time.time()
         exp.run_gradient_attribution(
             test_loader,
-            max_batches=None,
-            max_tgs_per_batch=None,
+            max_batches=grad_attrib_batches,
+            max_tgs_per_batch=grad_attrib_tgs_per_batch,
             )
 
         grad_attrib_end_time = time.time()
@@ -680,7 +684,7 @@ def run_muon_preprocessing(sample_name, sample_raw_data_dir, sample_processed_da
     )
     
     # RNA QC and Preprocessing
-    logging.info("  - Calculating RNA QC metrics and filtering...")
+    logging.info("  - Processing RNA")
     data_processor.rna_qc_filter(
         min_cells_per_gene = MIN_CELLS_PER_GENE,
         min_genes_per_cell = MIN_GENES_PER_CELL,
@@ -695,7 +699,6 @@ def run_muon_preprocessing(sample_name, sample_raw_data_dir, sample_processed_da
         fig_dir=sample_processed_data_dir / "preprocessing_figures" / "rna_qc",
         )
     
-    logging.info("  - Calculating RNA PCA and neighbors...")
     data_processor.rna_pca_and_neighbors(
         data_processor.rna, 
         n_pcs=20,
@@ -704,7 +707,7 @@ def run_muon_preprocessing(sample_name, sample_raw_data_dir, sample_processed_da
         )
     
     # ATAC QC and Preprocessing
-    logging.info("  - Calculating ATAC QC metrics and filtering...")
+    logging.info("  - Processing ATAC")
     data_processor.atac_qc_filter(
         min_cells_per_peak=MIN_CELLS_PER_PEAK,
         min_peaks_per_cell=MIN_PEAKS_PER_CELL,
@@ -719,13 +722,12 @@ def run_muon_preprocessing(sample_name, sample_raw_data_dir, sample_processed_da
         fig_dir=sample_processed_data_dir / "preprocessing_figures" / "atac_qc",
         )
     
-    logging.info("  - Calculating ATAC QC metrics...")
     data_processor.nucleosome_signal(
         frag_path=frag_path, 
         fig_dir=sample_processed_data_dir / "preprocessing_figures" / "atac_qc"
         )
     
-    logging.info("  - Calculating TSS enrichment...")
+    logging.info("  - Calculating TSS enrichment")
     data_processor.tss_enrichment(
         frag_path=frag_path, 
         n_tss=500, 
@@ -735,11 +737,11 @@ def run_muon_preprocessing(sample_name, sample_raw_data_dir, sample_processed_da
         )
     
     # Save the processed data
-    logging.info("  - Saving processed data...")
+    logging.info("  - Saving processed data")
     muon_prep.save_processed_data(data_processor.mdata, sample_processed_data_dir)
     
     # Integrate the RNA and ATAC modalities using MOFA+
-    logging.info("  - Integrating RNA and ATAC modalities using MOFA+...")
+    logging.info("  - Integrating RNA and ATAC modalities using MOFA+")
     muon_prep.integrate_rna_atac(
         data_processor.mdata, 
         sample_processed_data_dir, 
@@ -748,7 +750,7 @@ def run_muon_preprocessing(sample_name, sample_raw_data_dir, sample_processed_da
         )
     
     # Create metacells
-    logging.info("  - Creating metacells...")
+    logging.info("  - Creating metacells")
     muon_prep.create_metacells(data_processor.mdata, sample_processed_data_dir, hops=2)
     logging.info("Muon Preprocessing complete.")
 
@@ -851,18 +853,17 @@ if __name__ == "__main__":
 
     experiment_dict = {
         "batch_size": [64],
-        "epochs": [50],
-        "bias_scale": [0.0],
-        "num_layers": [3],
-        "num_heads": [4],
-        "d_model": [128],
-        "d_ff": [512],
-        "kernel_size": [64, 128, 256, 512],
+        "epochs": [250],
+        "bias_scale": [0.0, 1.0, 2.0],
+        "num_layers": [1, 2, 3],
+        "num_heads": [2, 4, 8],
+        "d_model": [128, 192],
+        "kernel_size": [64, 128],
         "dataloader_workers": [8],
         "max_cached": [100],
-        "grad_attrib_batches": [25],
-        "grad_attrib_tgs_per_batch": [128],
-        "replicates": [1, 2, 3],
+        "grad_attrib_batches": [None],
+        "grad_attrib_tgs_per_batch": [None],
+        "replicates": [1],
     }
 
     experiment_dict = expand_experiment_dict_grid(experiment_dict)
@@ -903,6 +904,7 @@ if __name__ == "__main__":
                 summary_save_path,
                 sample_type,
                 gt_by_dataset_dict,
+                experiment_dir,
             ),
         )
         p.start()

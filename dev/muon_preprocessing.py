@@ -177,11 +177,11 @@ def construct_from_gene_by_cell_matrices(rna_count_file, atac_count_file):
     atac_features_df = pd.DataFrame(index=atac_count_matrix.index)
     
     adata_rna = ad.AnnData(X=rna_matrix, obs=rna_metadata_df, var=rna_features_df)
-    adata_rna.var["feature_types"] = "Gene Expression"
+    adata_rna.var["feature_types"] = pd.Categorical(["Gene Expression"] * adata_rna.n_vars)
     adata_rna.var["gene_ids"] = adata_rna.var_names
 
     adata_atac = ad.AnnData(X=atac_matrix, obs=atac_metadata_df, var=atac_features_df)
-    adata_atac.var["feature_types"] = "Peaks"
+    adata_atac.var["feature_types"] = pd.Categorical(["Peaks"] * adata_atac.n_vars)
     adata_atac.var["gene_ids"] = adata_atac.var_names
 
     mdata = mu.MuData({'rna': adata_rna, 'atac': adata_atac})
