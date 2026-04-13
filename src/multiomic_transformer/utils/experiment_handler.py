@@ -1155,6 +1155,11 @@ class ExperimentHandler:
 
         batch_grad_dfs = {}
         for b_idx, batch in enumerate(iterator):
+            
+            if not show_tqdm:
+                if b_idx % 10 == 0:
+                    logging.info(f"batch {b_idx} / {max_batches}")
+            
             if max_batches is not None and b_idx >= max_batches:
                 break
 

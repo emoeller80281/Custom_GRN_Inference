@@ -185,7 +185,7 @@ def aggregate_results(
 
     epoch_log_df_all_grouped = (
         epoch_log_df_all
-        .groupby(group_cols)
+        .groupby(group_cols, dropna=False)
         .agg({
             "r2_unscaled": "max",
             "r2_scaled": "max",
@@ -198,7 +198,7 @@ def aggregate_results(
 
     batch_profile_df_all_grouped = (
         batch_profile_df_all
-        .groupby(group_cols)
+        .groupby(group_cols, dropna=False)
         .agg({
             "total_step_s": "mean",
             "loader_s": "mean",
@@ -212,7 +212,7 @@ def aggregate_results(
 
     gpu_mem_df_all_grouped = (
         gpu_mem_df_all
-        .groupby(group_cols)
+        .groupby(group_cols, dropna=False)
         .agg({
             "allocated_mb": "mean",
             "reserved_mb": "mean",
@@ -580,7 +580,6 @@ def _run_experiments_on_gpu(
 
     experiment_dict["d_ff"] = [experiment_dict["d_model"][i] * 4 for i in range(num_experiments)]
     
-    logging.info("\n")
     for i in experiment_indices:
         try:
             logging.info(
@@ -747,6 +746,9 @@ def _run_experiments_on_gpu(
                 auroc_df = exp.calculate_auroc_all_sample_gts(exp.grn, gt_by_dataset_dict[sample_type])    
 
                 def update_dfs_with_experiment_params(df):
+                    if df is None:
+                        return None
+                    df = df.copy()
                     df["experiment_name"] = exp.experiment_name
                     df["sample_type"] = sample_type
                     df["replicate"] = replicate
@@ -756,8 +758,8 @@ def _run_experiments_on_gpu(
                 
                 if (exp.model_training_dir / "gpu_memory_log.csv").exists():
                     exp.gpu_mem_log_df = pd.read_csv(exp.model_training_dir / "gpu_memory_log.csv")
-                if (exp.model_training_dir / "batch_profile_log_df.csv").exists():
-                    exp.batch_profile_log_df = pd.read_csv(exp.model_training_dir / "batch_profile_log_df.csv")
+                if (exp.model_training_dir / "batch_profile_log.csv").exists():
+                    exp.batch_profile_log_df = pd.read_csv(exp.model_training_dir / "batch_profile_log.csv")
                 if (exp.model_training_dir / "epoch_log.csv").exists():
                     exp.epoch_log_df = pd.read_csv(exp.model_training_dir / "epoch_log.csv")
 
@@ -1019,16 +1021,16 @@ if __name__ == "__main__":
         "grad_attrib_batches": [None],
         "grad_attrib_tgs_per_batch": [None],
         "norm_target_sum": [1e4],
-        "min_rna_disp": [0.1],
-        "min_atac_disp": [0.1],
+        "min_rna_disp": [0.5],
+        "min_atac_disp": [0.5],
         "rna_pcs": [20],
         "rna_neighbors": [10],
         "atac_pcs": [20],
         "atac_neighbors": [10],
         "min_atac_hvg_mean": [0.01],
         "max_atac_hvg_mean": [10],
-        "filter_rna_hvgs": [False, True],
-        "filter_atac_hvgs": [False, True],
+        "filter_rna_hvgs": [False],
+        "filter_atac_hvgs": [False],
         "tf_list_file": [None],
         "promoter_upstream": [1000],
         "promoter_downstream": [100],

@@ -91,6 +91,9 @@ def load_raw_data(
     
     frag_path = None
     
+    if raw_h5_file:
+        mdata = mu.read_h5mu(raw_h5_file)
+    
     # logging.info all files in the data directory
     for file in sample_data_dir.glob("*"):
         file_name = file.name

@@ -216,17 +216,81 @@ def combine_images_with_spans(
     return output_path
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Run the full training and evaluation pipeline for the MultiomicTransformer model.")
-    parser.add_argument("--experiment_name", type=str, required=True, help="Name of the experiment to run. If not provided, a default name will be generated based on the sample names.")
-    parser.add_argument("--sample_name", type=str, required=True, help="Name of the sample to include in the training dataset.")
-    parser.add_argument("--organism_code", type=str, required=True, choices=["mm10", "hg38"], help="Organism code for the dataset. Should be either 'mm10' or 'hg38'.")
-    parser.add_argument("--sample_type", type=str, required=True, choices=["mESC", "Macrophage", "K562", "iPSC"], help="Type of sample being used. This is used to determine which ground truth datasets to compare against. Should be one of 'mESC', 'Macrophage', 'K562', or 'iPSC'.")
-    parser.add_argument("--raw_data_dir", type=str, required=True, help="Directory containing the raw data files.")
-    parser.add_argument("--processed_data_dir", type=str, required=True, help="Directory containing the processed data files. Each sample should have its own subdirectory in this directory.")
-    parser.add_argument("--training_data_cache_dir", type=str, required=True, help="Directory to use for caching the training data.")
-    parser.add_argument("--experiment_output_dir", type=str, required=True, help="Directory to save the experiment outputs.")
+    parser = argparse.ArgumentParser(
+        description="Run the full training and evaluation pipeline for the MultiomicTransformer model."
+    )
+
+    # Core experiment config
+    parser.add_argument(
+        "--experiment_name",
+        type=str,
+        required=True,
+        help="Name of the experiment (should be unique per run)."
+    )
+    parser.add_argument(
+        "--sample_name",
+        type=str,
+        required=True,
+        help="Sample name."
+    )
+    parser.add_argument(
+        "--organism_code",
+        type=str,
+        required=True,
+        choices=["mm10", "hg38"],
+        help="Organism code."
+    )
+    parser.add_argument(
+        "--sample_type",
+        type=str,
+        required=True,
+        choices=["mESC", "Macrophage", "K562", "iPSC"],
+        help="Sample type (used for ground truth selection)."
+    )
+
+    # Data inputs
+    parser.add_argument(
+        "--raw_data_dir",
+        type=str,
+        default=None,
+        help="Directory containing raw data (used if raw_h5_data_file is NOT provided)."
+    )
+
+    parser.add_argument(
+        "--raw_h5_data_file",
+        type=str,
+        default=None,
+        help="Path to a specific .h5mu file (e.g., subsample). Overrides raw_data_dir."
+    )
+
+    # Output / cache
+    parser.add_argument(
+        "--processed_data_dir",
+        type=str,
+        required=True,
+        help="Directory for processed data."
+    )
+    parser.add_argument(
+        "--training_data_cache_dir",
+        type=str,
+        required=True,
+        help="Directory for caching training data."
+    )
+    parser.add_argument(
+        "--experiment_output_dir",
+        type=str,
+        required=True,
+        help="Directory to save experiment outputs."
+    )
+
     args = parser.parse_args()
-    
+
+    if args.raw_h5_data_file is None and args.raw_data_dir is None:
+        raise ValueError("You must provide either --raw_h5_data_file OR --raw_data_dir")
+
+    if args.raw_h5_data_file is not None and args.raw_data_dir is not None:
+        print("WARNING: Both raw_h5_data_file and raw_data_dir provided. Using raw_h5_data_file.")
+
     return args
 
 if __name__ == "__main__":
@@ -237,7 +301,7 @@ if __name__ == "__main__":
     raw_data_dir = Path(args.raw_data_dir)
     processed_data_dir = Path(args.processed_data_dir)
     training_data_cache_dir = Path(args.training_data_cache_dir)
-    
+    raw_h5_data_file = Path(args.raw_h5_data_file) if args.raw_h5_data_file is not None else None
     # Path to the training output directory. Used to store the preprocessing config
     experiment_dir = Path(args.experiment_output_dir)
 
