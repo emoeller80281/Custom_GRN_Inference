@@ -77,11 +77,13 @@ def load_raw_data(
     sample_data_dir: Path, 
     rna_count_file: Path | None = None, 
     atac_count_file: Path | None = None, 
-    raw_h5_file: Path | None = None
+    raw_h5_file: Path | None = None,
+    verbose: bool = True,
     ):
 
     # logging.info all files in the sample data directory.
-    logging.info(f"Loading data for sample {sample_name} from {sample_data_dir}...")
+    if verbose:
+        logging.info(f"Loading data for sample {sample_name} from {sample_data_dir}...")
     
     found_barcode = False
     found_features = False
@@ -92,7 +94,8 @@ def load_raw_data(
     # logging.info all files in the data directory
     for file in sample_data_dir.glob("*"):
         file_name = file.name
-        logging.info(f"  - {file_name}")
+        if verbose:
+            logging.info(f"  - {file_name}")
         if file_name.endswith("barcodes.tsv.gz"):
             file.rename(sample_data_dir / f"barcodes.tsv.gz")
             found_barcode = True
@@ -111,7 +114,7 @@ def load_raw_data(
     if not (found_barcode and found_features and found_matrix):
         for file in sample_data_dir.glob("*"):
             file_name = file.name
-            if file_name.endswith(".h5"):
+            if file_name.endswith(".h5") and verbose:
                 logging.info(f"Found h5 file: {file_name}")
                 raw_h5_file = file
     
@@ -128,7 +131,7 @@ def load_raw_data(
     elif raw_h5_file is not None:
         mdata = mu.read_10x_h5(raw_h5_file)
         mdata.var_names_make_unique()
-        if any(mdata.var["interval"].str.startswith("hg38.")):
+        if "interval" in mdata.var.columns and any(mdata.var["interval"].str.startswith("hg38.")):
             mdata = filter_to_human(mdata)
         return mdata, frag_path
         
@@ -237,6 +240,32 @@ class MudataProcessor:
         sc.pp.calculate_qc_metrics(self.atac, percent_top=None, log1p=False, inplace=True)
         
         sc.pl.violin(self.atac, ['n_genes_by_counts', 'total_counts'], jitter=0.4, multi_panel=True)
+        
+    def save_stability_subsamplings(
+        self,
+        raw_mdata: mu.MuData,
+        subsampling_dir: Path,
+        pct_subsample: float = 0.7,
+        num_subsamples: int = 10,
+    ):
+        subsampling_dir.mkdir(parents=True, exist_ok=True)
+
+        mdata = raw_mdata.copy()
+        mu.pp.intersect_obs(mdata)
+
+        for i in range(num_subsamples):
+            subsample_path = subsampling_dir / f"{int(pct_subsample * 100)}pct_subsample_{i+1}.h5mu"
+            if subsample_path.exists():
+                logging.info(f"Subsample {i+1} already exists at {subsample_path}. Skipping subsampling.")
+                continue
+
+            logging.info(f"Creating subsample {i+1} with {pct_subsample*100:.0f}% of the cells...")
+
+            sampled_obs_names = mdata.obs.sample(frac=pct_subsample, replace=False).index
+            subsampled_mdata = mdata[sampled_obs_names, :].copy()
+
+            mu.write(subsample_path, subsampled_mdata)
+            logging.info(f"Saved subsample {i+1} to {subsample_path}.")
         
     
     def rna_qc_filter(
@@ -681,6 +710,7 @@ class MudataProcessor:
             )
 
             var["interval"] = pd.NA
+
             mask = var["tss_chrom"].notna() & var["tss_start"].notna() & var["tss_end"].notna()
 
             var.loc[mask, "interval"] = (
@@ -689,9 +719,9 @@ class MudataProcessor:
                 var.loc[mask, "tss_end"].astype(int).astype(str)
             )
 
-            var["Chromosome"] = var["tss_chrom"].astype(str)
-            var["Start"] = var["tss_start"].astype(int)
-            var["End"] = var["tss_end"].astype(int)
+            var["Chromosome"] = var["tss_chrom"].astype(str) 
+            var["Start"] = var["tss_start"]
+            var["End"] = var["tss_end"]
 
             self.rna.var = var
 
@@ -984,9 +1014,10 @@ def create_metacells(
     pseudo_bulk_rna_df.to_parquet(pseudobulk_rna_file, engine="pyarrow", compression="snappy")
     pseudo_bulk_atac_df.to_parquet(pseudobulk_atac_file, engine="pyarrow", compression="snappy")
     
-def get_threshold(sample_filtering_settings, setting_name):
+def get_threshold(sample_filtering_settings, setting_name, verbose=True):
     setting_value = sample_filtering_settings[setting_name].values[0]
-    logging.info(f"{setting_name}: {setting_value}")
+    if verbose:
+        logging.info(f"{setting_name}: {setting_value}")
     
     return setting_value
     

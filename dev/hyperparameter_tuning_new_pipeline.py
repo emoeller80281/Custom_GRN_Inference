@@ -580,6 +580,7 @@ def _run_experiments_on_gpu(
 
     experiment_dict["d_ff"] = [experiment_dict["d_model"][i] * 4 for i in range(num_experiments)]
     
+    logging.info("\n")
     for i in experiment_indices:
         try:
             logging.info(
@@ -1007,7 +1008,7 @@ if __name__ == "__main__":
     
     experiment_dict = {
         "batch_size": [64],
-        "epochs": [250],
+        "epochs": [200],
         "bias_scale": [0.0, 2.0],
         "num_layers": [3],
         "num_heads": [4, 8],
@@ -1018,16 +1019,16 @@ if __name__ == "__main__":
         "grad_attrib_batches": [None],
         "grad_attrib_tgs_per_batch": [None],
         "norm_target_sum": [1e4],
-        "min_rna_disp": [0.5],
-        "min_atac_disp": [0.5],
+        "min_rna_disp": [0.1],
+        "min_atac_disp": [0.1],
         "rna_pcs": [20],
         "rna_neighbors": [10],
         "atac_pcs": [20],
         "atac_neighbors": [10],
         "min_atac_hvg_mean": [0.01],
         "max_atac_hvg_mean": [10],
-        "filter_rna_hvgs": [False],
-        "filter_atac_hvgs": [False],
+        "filter_rna_hvgs": [False, True],
+        "filter_atac_hvgs": [False, True],
         "tf_list_file": [None],
         "promoter_upstream": [1000],
         "promoter_downstream": [100],
