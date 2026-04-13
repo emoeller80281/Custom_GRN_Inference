@@ -252,7 +252,7 @@ def parse_args():
     parser.add_argument(
         "--raw_data_dir",
         type=str,
-        default=None,
+        required=True,
         help="Directory containing raw data (used if raw_h5_data_file is NOT provided)."
     )
 
@@ -375,8 +375,12 @@ if __name__ == "__main__":
         MIN_TOTAL_PEAK_COUNTS = muon_prep.get_threshold(sample_filtering_settings, "Min Total Peak Counts")
         MAX_TOTAL_PEAK_COUNTS = muon_prep.get_threshold(sample_filtering_settings, "Max Total Peak Counts")
 
-        # Load the raw data using the types of files found in the sample raw data directory.
-        mdata, frag_path = muon_prep.load_raw_data(sample_name, sample_raw_data_dir)
+        # Load either explicit raw_h5_data_file (preferred for stability runs) or scan sample directory files.
+        mdata, frag_path = muon_prep.load_raw_data(
+            sample_name=sample_name,
+            sample_data_dir=sample_raw_data_dir,
+            raw_h5_file=raw_h5_data_file,
+        )
 
         # Write the loaded data to the processed data directory
         mdata.write(sample_processed_data_dir / f"{sample_name}.h5mu")
@@ -428,20 +432,21 @@ if __name__ == "__main__":
             fig_dir=sample_processed_data_dir / "preprocessing_figures" / "atac_qc",
             )
         
-        logging.info("  - Calculating ATAC QC metrics...")
-        data_processor.nucleosome_signal(
-            frag_path=frag_path, 
-            fig_dir=sample_processed_data_dir / "preprocessing_figures" / "atac_qc"
-            )
-        
-        logging.info("  - Calculating TSS enrichment...")
-        data_processor.tss_enrichment(
-            frag_path=frag_path, 
-            n_tss=500, 
-            extend_upstream=1000, 
-            extend_downstream=1000,
-            fig_dir=sample_processed_data_dir / "preprocessing_figures" / "atac_qc"
-            )
+        if frag_path is None:
+            logging.info("  - Calculating ATAC QC metrics...")
+            data_processor.nucleosome_signal(
+                frag_path=frag_path, 
+                fig_dir=sample_processed_data_dir / "preprocessing_figures" / "atac_qc"
+                )
+            
+            logging.info("  - Calculating TSS enrichment...")
+            data_processor.tss_enrichment(
+                frag_path=frag_path, 
+                n_tss=500, 
+                extend_upstream=1000, 
+                extend_downstream=1000,
+                fig_dir=sample_processed_data_dir / "preprocessing_figures" / "atac_qc"
+                )
         
         # Save the processed data
         logging.info("  - Saving processed data...")

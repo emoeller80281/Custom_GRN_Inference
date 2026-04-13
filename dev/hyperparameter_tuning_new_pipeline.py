@@ -182,6 +182,25 @@ def aggregate_results(
     epoch_log_df_all
     ):
     group_cols = list(experiment_dict.keys())
+    nullable_group_cols = [
+        k for k, values in experiment_dict.items()
+        if any(v is None for v in values)
+    ]
+
+    def _normalize_nullable_group_cols(df: pd.DataFrame) -> pd.DataFrame:
+        if df is None:
+            return None
+        df = df.copy()
+        for col in nullable_group_cols:
+            if col in df.columns:
+                df[col] = df[col].astype(object)
+                df[col] = df[col].where(pd.notna(df[col]), None)
+        return df
+
+    auroc_df_all = _normalize_nullable_group_cols(auroc_df_all)
+    gpu_mem_df_all = _normalize_nullable_group_cols(gpu_mem_df_all)
+    batch_profile_df_all = _normalize_nullable_group_cols(batch_profile_df_all)
+    epoch_log_df_all = _normalize_nullable_group_cols(epoch_log_df_all)
 
     epoch_log_df_all_grouped = (
         epoch_log_df_all
@@ -224,6 +243,10 @@ def aggregate_results(
         })
         .reset_index()
     )
+
+    epoch_log_df_all_grouped = _normalize_nullable_group_cols(epoch_log_df_all_grouped)
+    batch_profile_df_all_grouped = _normalize_nullable_group_cols(batch_profile_df_all_grouped)
+    gpu_mem_df_all_grouped = _normalize_nullable_group_cols(gpu_mem_df_all_grouped)
 
     full_summary_df = (
         auroc_df_all
