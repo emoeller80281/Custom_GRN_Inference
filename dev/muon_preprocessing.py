@@ -1,4 +1,7 @@
 # Single-cell packages
+import os
+os.environ["TQDM_DISABLE"] = "1"
+
 import argparse
 import matplotlib.pyplot as plt
 import muon as mu
@@ -18,10 +21,12 @@ import seaborn as sns
 from muon import atac as ac  # the module containing function for scATAC data processing
 import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
+import logging
+
+logging.basicConfig(level=logging.INFO, format='%(message)s')
 
 # Setting figure parameters
 sc.settings.verbosity = 0
-TQDM_DISABLE=1
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run Muon preprocessing with configurable file paths.")
@@ -75,8 +80,8 @@ def load_raw_data(
     raw_h5_file: Path | None = None
     ):
 
-    # Print all files in the sample data directory.
-    print(f"Loading data for sample {sample_name} from {sample_data_dir}...")
+    # logging.info all files in the sample data directory.
+    logging.info(f"Loading data for sample {sample_name} from {sample_data_dir}...")
     
     found_barcode = False
     found_features = False
@@ -84,10 +89,10 @@ def load_raw_data(
     
     frag_path = None
     
-    # print all files in the data directory
+    # logging.info all files in the data directory
     for file in sample_data_dir.glob("*"):
         file_name = file.name
-        print(f"  - {file_name}")
+        logging.info(f"  - {file_name}")
         if file_name.endswith("barcodes.tsv.gz"):
             file.rename(sample_data_dir / f"barcodes.tsv.gz")
             found_barcode = True
@@ -107,7 +112,7 @@ def load_raw_data(
         for file in sample_data_dir.glob("*"):
             file_name = file.name
             if file_name.endswith(".h5"):
-                print(f"Found h5 file: {file_name}")
+                logging.info(f"Found h5 file: {file_name}")
                 raw_h5_file = file
     
     # If raw count files are passed in, use them above any other file formats
@@ -134,7 +139,7 @@ def load_raw_data(
         return mdata, frag_path
     
     else:
-        raise FileNotFoundError(f"Could not find the necessary files to load the data for sample {sample_name}. Please ensure that the sample directory contains either a raw h5 file or the 10x mtx files (barcodes.tsv.gz, features.tsv.gz, matrix.mtx.gz).")
+        raise FileNotFoundError(f"Could not find the necessary files to load the data for sample {sample_name} in {sample_data_dir}. Please ensure that the sample directory contains either a raw h5 file or the 10x mtx files (barcodes.tsv.gz, features.tsv.gz, matrix.mtx.gz).")
 
 def normalize_peak_format(peak_id: str) -> str:
     """
@@ -244,6 +249,8 @@ class MudataProcessor:
         max_pct_counts_mt: int = 20,
         norm_target_sum: float = 1e4,
         min_rna_disp: float = 0.5,
+        min_rna_hvg_mean: float = 0.02,
+        max_rna_hvg_mean: float = 4,
         filter_hvgs: bool = True,
         tf_list_file: Path|None = None,
         fig_dir: Path|None = None,
@@ -312,13 +319,13 @@ class MudataProcessor:
         sc.pp.log1p(self.rna)
         
         # Select highly variable genes
-        sc.pp.highly_variable_genes(self.rna, min_mean=0.02, max_mean=4, min_disp=min_rna_disp)
+        sc.pp.highly_variable_genes(self.rna, min_mean=min_rna_hvg_mean, max_mean=max_rna_hvg_mean, min_disp=min_rna_disp)
         
         if fig_dir is not None and fig_dir.exists():
             sc.pl.highly_variable_genes(self.rna, save="_rna.png")
             
         if filter_hvgs:
-            if tf_list_file is not None and tf_list_file.exists():
+            if tf_list_file is not None and tf_list_file.exists() and 'keep_tf' in self.rna.var.columns:
                 keep_genes = self.rna.var['highly_variable'] | self.rna.var['keep_tf']
             else:
                 keep_genes = self.rna.var['highly_variable']
@@ -499,11 +506,16 @@ class MudataProcessor:
         max_peaks_per_cell=2500, 
         min_total_counts_per_cell=1000, 
         max_total_counts_per_cell=5000,
+        scale_factor=1e4,
         min_atac_disp=0.5,
+        min_atac_hvg_mean=0.05,
+        max_atac_hvg_mean=1.5,
         promoter_upstream=1000,
         promoter_downstream=100,
         distal_max=200_000,
         filter_hvgs: bool = True,
+        n_neighbors: int = 10,
+        n_pcs: int = 30,
         fig_dir: Path|None = None
         ):
         if fig_dir is not None:
@@ -528,12 +540,12 @@ class MudataProcessor:
         # Save original counts
         self.atac.layers["counts"] = self.atac.X.copy()
         
-        ac.pp.tfidf(self.atac, scale_factor=1e4)
+        ac.pp.tfidf(self.atac, scale_factor=scale_factor)
         
-        sc.pp.normalize_per_cell(self.atac, counts_per_cell_after=1e4)
+        sc.pp.normalize_per_cell(self.atac, counts_per_cell_after=scale_factor)
         sc.pp.log1p(self.atac)
         
-        sc.pp.highly_variable_genes(self.atac, min_mean=0.05, max_mean=1.5, min_disp=min_atac_disp)
+        sc.pp.highly_variable_genes(self.atac, min_mean=min_atac_hvg_mean, max_mean=max_atac_hvg_mean, min_disp=min_atac_disp)
         
         if fig_dir is not None and fig_dir.exists():
             sc.pl.highly_variable_genes(self.atac, save="_peaks.png")
@@ -553,7 +565,7 @@ class MudataProcessor:
         self.atac.uns["lsi"]["stdev"] = self.atac.uns["lsi"]["stdev"][1:]
         
         # Neighbors
-        sc.pp.neighbors(self.atac, use_rep="X_lsi", n_neighbors=10, n_pcs=30)
+        sc.pp.neighbors(self.atac, use_rep="X_lsi", n_neighbors=n_neighbors, n_pcs=n_pcs)
         
         # PCA
         sc.pp.scale(self.atac)
@@ -574,7 +586,7 @@ class MudataProcessor:
         ac.tl.add_peak_annotation(self.atac, annotation=str(self.processed_data_dir / self.sample_name / "atac_peak_annotation.tsv"))
         
         # Neighbors
-        sc.pp.neighbors(self.atac, n_neighbors=10, n_pcs=30)
+        sc.pp.neighbors(self.atac, n_neighbors=n_neighbors, n_pcs=n_pcs)
         
         # Clustering
         sc.tl.umap(self.atac, spread=1., min_dist=.5, random_state=11)
@@ -593,10 +605,10 @@ class MudataProcessor:
         index_file = str(frag_path) + ".tbi"
 
         if Path(index_file).exists():
-            print("Found index:", index_file)
+            logging.info(f"Found index: {index_file}")
 
         else:
-            print("Index file not found. Creating index file...")
+            logging.info("Index file not found. Creating index file...")
             pysam.tabix_index(
                 str(frag_path),
                 preset="bed",
@@ -605,7 +617,7 @@ class MudataProcessor:
             index_file = str(frag_path) + ".tbi"
 
         tbx = pysam.TabixFile(str(frag_path))
-        print(tbx.contigs[:20])
+        logging.info(tbx.contigs[:20])
 
         # register the fragment file with the ATAC AnnData
         ac.tl.locate_fragments(self.atac, fragments=str(frag_path))
@@ -677,9 +689,9 @@ class MudataProcessor:
                 var.loc[mask, "tss_end"].astype(int).astype(str)
             )
 
-            var["Chromosome"] = var["tss_chrom"]
-            var["Start"] = var["tss_start"]
-            var["End"] = var["tss_end"]
+            var["Chromosome"] = var["tss_chrom"].astype(str)
+            var["Start"] = var["tss_start"].astype(int)
+            var["End"] = var["tss_end"].astype(int)
 
             self.rna.var = var
 
@@ -974,7 +986,7 @@ def create_metacells(
     
 def get_threshold(sample_filtering_settings, setting_name):
     setting_value = sample_filtering_settings[setting_name].values[0]
-    print(f"{setting_name}: {setting_value}")
+    logging.info(f"{setting_name}: {setting_value}")
     
     return setting_value
     

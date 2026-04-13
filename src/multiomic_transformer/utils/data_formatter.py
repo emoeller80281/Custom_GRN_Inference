@@ -28,7 +28,7 @@ from multiomic_transformer.utils.peaks import format_peaks, find_genes_near_peak
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 
 def load_tdf(settings_path: Path):
-    if not settings_path.is_file():
+    if not Path(settings_path).is_file():
         raise FileNotFoundError(f"Settings file not found at {settings_path}")
     
     with open(settings_path, "r") as f:
@@ -131,7 +131,7 @@ class TrainingDataFormatter:
         }
         with open(self.settings_path, "w") as f:
             json.dump(settings, f, indent=2)
-            
+
     def load_settings(self):
         settings = self.load_json(self.settings_path)
             
@@ -156,10 +156,10 @@ class TrainingDataFormatter:
         tg_name_file = self.file_paths["processed"]["tg_list"]
         peak_file = self.file_paths["processed"]["peak_list"]
         
-        self.genes = self.load_json(gene_file, allow_none=True) if gene_file.is_file() else None
-        self.tf_names = self.load_json(tf_name_file, allow_none=True) if tf_name_file.is_file() else None
-        self.tg_names = self.load_json(tg_name_file, allow_none=True) if tg_name_file.is_file() else None
-        self.peaks = self.load_json(peak_file, allow_none=True) if peak_file.is_file() else None
+        self.genes = self.load_json(gene_file)
+        self.tf_names = self.load_json(tf_name_file)
+        self.tg_names = self.load_json(tg_name_file)
+        self.peaks = self.load_json(peak_file)
 
     def load_pseudobulk_rna_df(self, sample_name: str):
         assert sample_name in self.sample_names, \
@@ -1223,10 +1223,10 @@ class TrainingDataFormatter:
         self.file_paths["processed"] = {
             "base_dir": self.processed_data_dir,
             "tg_pseudobulk_global": self.processed_data_dir / "total_TG_pseudobulk_global.parquet",
-            "total_genes": self.processed_data_dir / "total_genes.csv",
-            "tf_list": self.processed_data_dir / "tf_list.csv",
-            "tg_list": self.processed_data_dir / "tg_list.csv",
-            "peak_list": self.processed_data_dir / "peak_list.csv",
+            "total_genes": self.processed_data_dir / "total_genes.json",
+            "tf_list": self.processed_data_dir / "tf_list.json",
+            "tg_list": self.processed_data_dir / "tg_list.json",
+            "peak_list": self.processed_data_dir / "peak_list.json",
             "settings": self.processed_data_dir / "settings.json",
         }
 
@@ -1429,9 +1429,14 @@ class TrainingDataFormatter:
             self.file_paths["training_cache"]["metacell_names"],
             self.file_paths["training_cache"]["common"]["tf_vocab"],
             self.file_paths["training_cache"]["common"]["tg_vocab"],
+            self.file_paths["processed"]["tg_pseudobulk_global"],
+            self.file_paths["processed"]["total_genes"],
+            self.file_paths["processed"]["tf_list"],
+            self.file_paths["processed"]["tg_list"],
+            self.file_paths["processed"]["peak_list"],
         ]
         for file in sample_specific_required_files:
-            if not file.is_file():
+            if not Path(file).is_file():
                 missing_file_dict["sample"] = missing_file_dict.get("sample", []) + [file.name]
                 total_missing += 1
         
@@ -1449,7 +1454,7 @@ class TrainingDataFormatter:
                 chrom_cache_dir / f"manifest_{chrom_id}.json",
             ]
             for file in chrom_specific_required_files:
-                if not file.is_file():
+                if not Path(file).is_file():
                     missing_file_dict["sample"] = missing_file_dict.get("sample", []) + [file.name]
                     missing_file_dict["chromosome"][chrom_id] = missing_file_dict["chromosome"].get(chrom_id, []) + [file.name]
                     total_missing += 1
@@ -1524,9 +1529,9 @@ class TrainingDataFormatter:
         tfs = sorted(set(self.canon.canonicalize_series(pd.Series(tfs)).tolist()))
         tgs = sorted(set(self.canon.canonicalize_series(pd.Series(tgs)).tolist()))
 
-        pd.DataFrame({"Gene": total}).to_csv(total_file, index=False)
-        pd.DataFrame({"TF": tfs}).to_csv(tf_file, index=False)
-        pd.DataFrame({"TG": tgs}).to_csv(tg_file, index=False)
+        self.atomic_json_dump(total, total_file)
+        self.atomic_json_dump(tfs, tf_file)
+        self.atomic_json_dump(tgs, tg_file)
 
         return tfs, tgs
     

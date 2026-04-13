@@ -21,6 +21,7 @@ import zlib
 import time
 from cycler import cycler
 import pickle
+from contextlib import contextmanager
 
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["OMP_NUM_THREADS"] = "1"
@@ -268,13 +269,18 @@ class ExperimentHandler:
             scaler_state_path = self.model_training_dir / "scaler_state.pt"
             torch.save(scaler_state, scaler_state_path)
         
-        # Save the loaders to disk
-        if self.train_loader is not None:
-            torch.save(self.train_loader, self.model_training_dir / "train_loader.pt")
-        if self.val_loader is not None:
-            torch.save(self.val_loader, self.model_training_dir / "val_loader.pt")
-        if self.test_loader is not None:
-            torch.save(self.test_loader, self.model_training_dir / "test_loader.pt")
+        # Save the loader metadata to disk
+        loader_state = {
+            "has_train_loader": self.train_loader is not None,
+            "has_val_loader": self.val_loader is not None,
+            "has_test_loader": self.test_loader is not None,
+            "batch_size": getattr(self, "batch_size", None),
+            "dataloader_workers": getattr(self, "dataloader_workers", None),
+            "pin_memory": getattr(self, "pin_memory", None),
+            "persistent_workers": getattr(self, "persistent_workers", None),
+            "grad_accum_steps": getattr(self, "grad_accum_steps", None),
+        }
+        torch.save(loader_state, self.model_training_dir / "loader_state.pt")
     
     def load_handler(self):
         # Load the settings from disk
@@ -296,10 +302,24 @@ class ExperimentHandler:
         self.common_data_dir = Path(self.common_data_dir)
         self.data_cache_dir = Path(self.data_cache_dir)
         
-        self.train_loader = torch.load(self.model_training_dir / "train_loader.pt", weights_only=False)
-        self.val_loader = torch.load(self.model_training_dir / "val_loader.pt", weights_only=False)
-        self.test_loader = torch.load(self.model_training_dir / "test_loader.pt", weights_only=False)
-        
+        loader_state_path = self.model_training_dir / "loader_state.pt"
+        if loader_state_path.exists():
+            loader_state = torch.load(loader_state_path, weights_only=False)
+
+            # Restore lightweight loader-related attributes if they exist
+            self.dataloader_workers = loader_state.get("dataloader_workers", getattr(self, "dataloader_workers", 4))
+            self.pin_memory = loader_state.get("pin_memory", getattr(self, "pin_memory", True))
+            self.persistent_workers = loader_state.get("persistent_workers", getattr(self, "persistent_workers", True))
+
+            self.create_multichrom_dataset(max_cached=100)
+            
+            self.train_loader, self.val_loader, self.test_loader = self.prepare_dataloader(
+                batch_size=self.batch_size,
+                num_workers=4,
+                pin_memory=True,
+                persistent_workers=True,
+            )
+            
         scaler_state_path = self.model_training_dir / "scaler_state.pt"
         if scaler_state_path.exists():
             scaler_state = torch.load(scaler_state_path)
@@ -327,8 +347,8 @@ class ExperimentHandler:
         if (self.model_training_dir / "gpu_memory_log.csv").is_file():
             self.gpu_mem_log_df = pd.read_csv(self.model_training_dir / "gpu_memory_log.csv")
         
-        if (self.model_training_dir / "batch_profile.log.csv").is_file():
-            self.batch_profile_log_df = pd.read_csv(self.model_training_dir / "batch_profile.log.csv")
+        if (self.model_training_dir / "batch_profile_log.csv").is_file():
+            self.batch_profile_log_df = pd.read_csv(self.model_training_dir / "batch_profile_log.csv")
 
     def _setup_cuda_ddp(self, local_rank, rank, world_size):
         use_cuda = torch.cuda.is_available()
@@ -454,7 +474,8 @@ class ExperimentHandler:
         self.tg_scaler = tg_scaler
 
     def prepare_dataloader(self, batch_size=None, world_size=1, rank=0,
-                        num_workers=4, pin_memory=True, seed=42, drop_last=True):
+                        num_workers=4, pin_memory=True, seed=42, drop_last=True,
+                        persistent_workers=False):
         """
         Build train/val/test loaders.
 
@@ -474,6 +495,9 @@ class ExperimentHandler:
         g.manual_seed(seed)
         
         self.batch_size = self.batch_size if batch_size is None else batch_size
+        self.pin_memory = pin_memory
+        self.persistent_workers = persistent_workers
+        self.dataloader_workers = num_workers
         
         dataset = self.dataset
 
@@ -544,6 +568,11 @@ class ExperimentHandler:
             test_bs  = DistributedBatchSampler(base_test_bs,  world_size, rank, drop_last=False)
         else:
             train_bs, val_bs, test_bs = base_train_bs, base_val_bs, base_test_bs
+        
+        if persistent_workers:
+            persistent_workers = True if num_workers > 1 else False
+            
+
 
         # 5) Single shared dataset; samplers decide which indices belong to which split
         train_loader = DataLoader(
@@ -552,7 +581,7 @@ class ExperimentHandler:
             collate_fn=MultiChromosomeDataset.collate_fn,
             num_workers=num_workers,
             pin_memory=pin_memory,
-            persistent_workers=False,
+            persistent_workers=persistent_workers,
         )
         val_loader = DataLoader(
             dataset,
@@ -560,7 +589,7 @@ class ExperimentHandler:
             collate_fn=MultiChromosomeDataset.collate_fn,
             num_workers=num_workers,
             pin_memory=pin_memory,
-            persistent_workers=False,
+            persistent_workers=persistent_workers,
         )
         test_loader = DataLoader(
             dataset,
@@ -568,7 +597,7 @@ class ExperimentHandler:
             collate_fn=MultiChromosomeDataset.collate_fn,
             num_workers=num_workers,
             pin_memory=pin_memory,
-            persistent_workers=False,
+            persistent_workers=persistent_workers,
         )
 
         self.train_loader = train_loader
@@ -577,6 +606,32 @@ class ExperimentHandler:
         
         return train_loader, val_loader, test_loader
 
+    @staticmethod
+    @contextmanager
+    def temp_log_file(log_file):
+        """Yield a dedicated, non-propagating logger for verbose training logs."""
+        if log_file is None:
+            yield None
+            return
+
+        log_path = Path(log_file)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+
+        logger_name = f"train_verbose.{os.getpid()}.{int(time.time() * 1e6)}"
+        train_logger = logging.getLogger(logger_name)
+        train_logger.setLevel(logging.INFO)
+        train_logger.propagate = False
+
+        handler = logging.FileHandler(log_path)
+        handler.setFormatter(logging.Formatter('%(message)s'))
+        train_logger.addHandler(handler)
+
+        try:
+            yield train_logger
+        finally:
+            train_logger.removeHandler(handler)
+            handler.close()
+    
     def train(
         self,
         train_loader,
@@ -593,281 +648,291 @@ class ExperimentHandler:
         profile_batches: bool = False,
         silence_tqdm: bool = False,
         allow_overwrite: bool = False,
+        log_file: str | None = None,
     ):
-        self.initial_lr = self.initial_lr if learning_rate is None else learning_rate
-        self.starting_epoch = self.starting_epoch if self.starting_epoch is not None else 0
-        self.epochs = num_epochs
-        self.grad_accum_steps = grad_accum_steps
-        
-        model = self.model.to(self.device)
-        
-        if "trained_model.pt" in os.listdir(self.model_training_dir) and not allow_overwrite:
-            self._create_model_training_dir(allow_overwrite=False)
-            logging.info(f"Creating model in new training directory: {self.model_training_dir}")
-            
-        self.save_handler()
 
-        optimizer = torch.optim.Adam(model.parameters(), lr=self.initial_lr)
-        loss_fn = nn.MSELoss()
 
-        tf_scaler = getattr(self, "tf_scaler", None)
-        tg_scaler = getattr(self, "tg_scaler", None)
-
-        amp_enabled = use_amp and self.device.type == "cuda"
-        scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
-
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer,
-            mode="min",
-            factor=self.scheduler_reduction_factor,
-            patience=self.scheduler_patience_epochs,
-            cooldown=self.scheduler_cooldown_epochs, 
-            threshold=1e-4,
-            min_lr=1e-7,
-        )
-
-        gpu_mem_log = []
-        batch_profile_log = []
-        epoch_log = []
-
-        final_epoch = self.starting_epoch + num_epochs
-        epoch_iter = range(self.starting_epoch, final_epoch)
-
-        if not verbose and not silence_tqdm:
-            epoch_iter = tqdm(epoch_iter, desc="Training", ncols=100, unit="epoch", total=num_epochs)
-
-        best_loss = float("inf")
-        best_r2 = float("-inf")
-        no_improvement_epochs = 0
-        
-        if verbose:
-            logging.info(f"\n===== Model {self.model_num} Training Started =====")
-        for epoch in epoch_iter:
-            epoch_start_time = time.time()
-            model.train()
-            total_loss = 0.0
-            n_batches = 0
-            
-            if self.device.type == "cuda":
-                torch.cuda.reset_peak_memory_stats()
-
-            optimizer.zero_grad(set_to_none=True)
-
-            data_iter = iter(train_loader)
-            i = 0
-            
-            if self.device.type == "cuda":
-                peak_alloc_mb = torch.cuda.max_memory_allocated() / 1024**2
-                peak_reserved_mb = torch.cuda.max_memory_reserved() / 1024**2
-            else:
-                peak_alloc_mb = None
-                peak_reserved_mb = None
-
-            try:
-                total_batches = max_batches if max_batches is not None else len(train_loader)
-            except TypeError:
-                total_batches = max_batches
-
-            if verbose and not silence_tqdm:
-                pbar = tqdm(total=total_batches, desc=f"Epoch {epoch+1}/{final_epoch}", ncols=100, leave=False)
-            else:
-                pbar = None
-
-            while True:
-                if max_batches is not None and i >= max_batches:
-                    break
-
-                t0 = time.perf_counter()
-                try:
-                    batch = next(data_iter)
-                except StopIteration:
-                    break
-                t1 = time.perf_counter()
-
-                atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids, _ = batch
-
-                if self.device.type == "cuda":
-                    torch.cuda.synchronize()
-                t2 = time.perf_counter()
-
-                atac_wins = atac_wins.to(self.device, non_blocking=True)
-                tf_tensor = tf_tensor.to(self.device, non_blocking=True)
-                targets   = targets.to(self.device, non_blocking=True)
-                bias      = bias.to(self.device, non_blocking=True) if bias is not None else None
-                tf_ids    = tf_ids.to(self.device, non_blocking=True)
-                tg_ids    = tg_ids.to(self.device, non_blocking=True)
-
-                if self.device.type == "cuda":
-                    torch.cuda.synchronize()
-                t3 = time.perf_counter()
-
-                if tf_scaler is not None or tg_scaler is not None:
-                    if self.device.type == "cuda":
-                        torch.cuda.synchronize()
-                    t4 = time.perf_counter()
-
-                    if tf_scaler is not None:
-                        tf_tensor = tf_scaler.transform(tf_tensor, tf_ids)
-                    if tg_scaler is not None:
-                        targets = tg_scaler.transform(targets, tg_ids)
-
-                    if self.device.type == "cuda":
-                        torch.cuda.synchronize()
-                    t5 = time.perf_counter()
+        with self.temp_log_file(log_file) as train_logger:
+            def _log_train(msg: str):
+                if not verbose:
+                    return
+                if train_logger is not None:
+                    train_logger.info(msg)
                 else:
-                    t4 = t5 = time.perf_counter()
+                    logging.info(msg)
+
+            self.initial_lr = self.initial_lr if learning_rate is None else learning_rate
+            self.starting_epoch = self.starting_epoch if self.starting_epoch is not None else 0
+            self.epochs = num_epochs
+            self.grad_accum_steps = grad_accum_steps
+
+            model = self.model.to(self.device)
+
+            if "trained_model.pt" in os.listdir(self.model_training_dir) and not allow_overwrite:
+                self._create_model_training_dir(allow_overwrite=False)
+                logging.info(f"Creating model in new training directory: {self.model_training_dir}")
+
+            self.save_handler()
+
+            optimizer = torch.optim.Adam(model.parameters(), lr=self.initial_lr)
+            loss_fn = nn.MSELoss()
+
+            tf_scaler = getattr(self, "tf_scaler", None)
+            tg_scaler = getattr(self, "tg_scaler", None)
+
+            amp_enabled = use_amp and self.device.type == "cuda"
+            scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
+
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer,
+                mode="min",
+                factor=self.scheduler_reduction_factor,
+                patience=self.scheduler_patience_epochs,
+                cooldown=self.scheduler_cooldown_epochs,
+                threshold=1e-4,
+                min_lr=1e-7,
+            )
+
+            gpu_mem_log = []
+            batch_profile_log = []
+            epoch_log = []
+
+            final_epoch = self.starting_epoch + num_epochs
+            epoch_iter = range(self.starting_epoch, final_epoch)
+
+            if not verbose and not silence_tqdm:
+                epoch_iter = tqdm(epoch_iter, desc="Training", ncols=100, unit="epoch", total=num_epochs)
+
+            best_loss = float("inf")
+            best_r2 = float("-inf")
+            no_improvement_epochs = 0
+
+            _log_train(f"\n===== Model {self.model_num} Training Started =====")
+            for epoch in epoch_iter:
+                epoch_start_time = time.time()
+                model.train()
+                total_loss = 0.0
+                n_batches = 0
 
                 if self.device.type == "cuda":
-                    torch.cuda.synchronize()
-                t6 = time.perf_counter()
+                    torch.cuda.reset_peak_memory_stats()
 
-                with torch.autocast(device_type=self.device.type, enabled=amp_enabled):
-                    preds = model(
-                        atac_wins,
-                        tf_tensor,
-                        tf_ids=tf_ids,
-                        tg_ids=tg_ids,
-                        bias=bias,
-                    )
-                    loss = loss_fn(preds, targets)
+                optimizer.zero_grad(set_to_none=True)
+
+                data_iter = iter(train_loader)
+                i = 0
 
                 if self.device.type == "cuda":
-                    torch.cuda.synchronize()
-                t7 = time.perf_counter()
+                    peak_alloc_mb = torch.cuda.max_memory_allocated() / 1024**2
+                    peak_reserved_mb = torch.cuda.max_memory_reserved() / 1024**2
+                else:
+                    peak_alloc_mb = None
+                    peak_reserved_mb = None
 
-                if self.device.type == "cuda":
-                    torch.cuda.synchronize()
-                t8 = time.perf_counter()
+                try:
+                    total_batches = max_batches if max_batches is not None else len(train_loader)
+                except TypeError:
+                    total_batches = max_batches
 
-                loss_for_backward = loss / grad_accum_steps
-                scaler.scale(loss_for_backward).backward()
+                if verbose and not silence_tqdm:
+                    pbar = tqdm(total=total_batches, desc=f"Epoch {epoch+1}/{final_epoch}", ncols=100, leave=False)
+                else:
+                    pbar = None
 
-                if self.device.type == "cuda":
-                    torch.cuda.synchronize()
-                t9 = time.perf_counter()
+                while True:
+                    if max_batches is not None and i >= max_batches:
+                        break
 
-                stepped = False
-                if (i + 1) % grad_accum_steps == 0:
+                    t0 = time.perf_counter()
+                    try:
+                        batch = next(data_iter)
+                    except StopIteration:
+                        break
+                    t1 = time.perf_counter()
+
+                    atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids, _ = batch
+
                     if self.device.type == "cuda":
                         torch.cuda.synchronize()
-                    t10 = time.perf_counter()
+                    t2 = time.perf_counter()
 
+                    atac_wins = atac_wins.to(self.device, non_blocking=True)
+                    tf_tensor = tf_tensor.to(self.device, non_blocking=True)
+                    targets   = targets.to(self.device, non_blocking=True)
+                    bias      = bias.to(self.device, non_blocking=True) if bias is not None else None
+                    tf_ids    = tf_ids.to(self.device, non_blocking=True)
+                    tg_ids    = tg_ids.to(self.device, non_blocking=True)
+
+                    if self.device.type == "cuda":
+                        torch.cuda.synchronize()
+                    t3 = time.perf_counter()
+
+                    if tf_scaler is not None or tg_scaler is not None:
+                        if self.device.type == "cuda":
+                            torch.cuda.synchronize()
+                        t4 = time.perf_counter()
+
+                        if tf_scaler is not None:
+                            tf_tensor = tf_scaler.transform(tf_tensor, tf_ids)
+                        if tg_scaler is not None:
+                            targets = tg_scaler.transform(targets, tg_ids)
+
+                        if self.device.type == "cuda":
+                            torch.cuda.synchronize()
+                        t5 = time.perf_counter()
+                    else:
+                        t4 = t5 = time.perf_counter()
+
+                    if self.device.type == "cuda":
+                        torch.cuda.synchronize()
+                    t6 = time.perf_counter()
+
+                    with torch.autocast(device_type=self.device.type, enabled=amp_enabled):
+                        preds = model(
+                            atac_wins,
+                            tf_tensor,
+                            tf_ids=tf_ids,
+                            tg_ids=tg_ids,
+                            bias=bias,
+                        )
+                        loss = loss_fn(preds, targets)
+
+                    if self.device.type == "cuda":
+                        torch.cuda.synchronize()
+                    t7 = time.perf_counter()
+
+                    if self.device.type == "cuda":
+                        torch.cuda.synchronize()
+                    t8 = time.perf_counter()
+
+                    loss_for_backward = loss / grad_accum_steps
+                    scaler.scale(loss_for_backward).backward()
+
+                    if self.device.type == "cuda":
+                        torch.cuda.synchronize()
+                    t9 = time.perf_counter()
+
+                    stepped = False
+                    if (i + 1) % grad_accum_steps == 0:
+                        if self.device.type == "cuda":
+                            torch.cuda.synchronize()
+                        t10 = time.perf_counter()
+
+                        scaler.step(optimizer)
+                        scaler.update()
+                        optimizer.zero_grad(set_to_none=True)
+                        stepped = True
+
+                        if self.device.type == "cuda":
+                            torch.cuda.synchronize()
+                        t11 = time.perf_counter()
+                    else:
+                        t10 = t11 = time.perf_counter()
+
+                    if profile_batches:
+                        batch_profile_log.append({
+                            "epoch": epoch,
+                            "step": i,
+                            "loader_s": t1 - t0,
+                            "transfer_s": t3 - t2,
+                            "scaler_s": t5 - t4,
+                            "forward_s": t7 - t6,
+                            "backward_s": t9 - t8,
+                            "optim_s": t11 - t10 if stepped else 0.0,
+                            "total_step_s": (t11 if stepped else t9) - t0,
+                            "loss": float(loss.detach().item()),
+                            "batch_size": int(atac_wins.shape[0]),
+                            "num_windows": int(atac_wins.shape[1]),
+                            "num_tfs": int(tf_tensor.shape[1]),
+                            "num_tgs": int(targets.shape[1]),
+                        })
+
+                    if monitor_gpu_memory and self.device.type == "cuda":
+                        free_bytes, total_bytes = torch.cuda.mem_get_info()
+                        allocated_mb = torch.cuda.memory_allocated() / 1024**2
+                        reserved_mb = torch.cuda.memory_reserved() / 1024**2
+                        free_mb = free_bytes / 1024**2
+                        total_mb = total_bytes / 1024**2
+
+                        gpu_mem_log.append({
+                            "epoch": epoch,
+                            "step": i,
+                            "allocated_mb": allocated_mb,
+                            "reserved_mb": reserved_mb,
+                            "free_mb": free_mb,
+                            "total_memory_mb": total_mb,
+                            "allocated_pct_total": 100 * allocated_mb / total_mb,
+                            "reserved_pct_total": 100 * reserved_mb / total_mb,
+                            "free_pct_total": 100 * free_mb / total_mb,
+                        })
+
+                    total_loss += loss.detach().item()
+                    n_batches += 1
+                    i += 1
+
+                    if pbar is not None:
+                        pbar.update(1)
+
+                if pbar is not None:
+                    pbar.close()
+
+                if n_batches % grad_accum_steps != 0:
                     scaler.step(optimizer)
                     scaler.update()
                     optimizer.zero_grad(set_to_none=True)
-                    stepped = True
 
-                    if self.device.type == "cuda":
-                        torch.cuda.synchronize()
-                    t11 = time.perf_counter()
+                avg_loss = total_loss / max(1, n_batches)
+                epoch_end_time = time.time()
+
+                avg_val_mse_scaled = None
+                avg_val_mse_unscaled = None
+                r2_s = None
+                r2_u = None
+
+                avg_val_mse_scaled, avg_val_mse_unscaled, r2_s, r2_u = self._validate_simple(
+                    model=model,
+                    val_loader=val_loader,
+                    device=self.device,
+                    amp_enabled=amp_enabled,
+                )
+                scheduler.step(avg_val_mse_unscaled)
+
+                current_lr = optimizer.param_groups[0]["lr"]
+
+                if self.device.type == "cuda":
+                    peak_alloc_mb = torch.cuda.max_memory_allocated() / 1024**2
+                    peak_reserved_mb = torch.cuda.max_memory_reserved() / 1024**2
                 else:
-                    t10 = t11 = time.perf_counter()
+                    peak_alloc_mb = None
+                    peak_reserved_mb = None
 
-                if profile_batches:
-                    batch_profile_log.append({
-                        "epoch": epoch,
-                        "step": i,
-                        "loader_s": t1 - t0,
-                        "transfer_s": t3 - t2,
-                        "scaler_s": t5 - t4,
-                        "forward_s": t7 - t6,
-                        "backward_s": t9 - t8,
-                        "optim_s": t11 - t10 if stepped else 0.0,
-                        "total_step_s": (t11 if stepped else t9) - t0,
-                        "loss": float(loss.detach().item()),
-                        "batch_size": int(atac_wins.shape[0]),
-                        "num_windows": int(atac_wins.shape[1]),
-                        "num_tfs": int(tf_tensor.shape[1]),
-                        "num_tgs": int(targets.shape[1]),
-                    })
+                if avg_val_mse_unscaled < best_loss:
+                    best_loss = avg_val_mse_unscaled
+                    no_improvement_epochs = 0
+                else:
+                    no_improvement_epochs += 1
 
-                if monitor_gpu_memory and self.device.type == "cuda":
-                    free_bytes, total_bytes = torch.cuda.mem_get_info()
-                    allocated_mb = torch.cuda.memory_allocated() / 1024**2
-                    reserved_mb = torch.cuda.memory_reserved() / 1024**2
-                    free_mb = free_bytes / 1024**2
-                    total_mb = total_bytes / 1024**2
+                chkpt_saved = False
+                if epoch % save_every_n_epochs == 0:
+                    chkpt_name = f"checkpoint_{epoch:03d}.pt"
+                    self.save_model(epoch_log=epoch_log, model_name=chkpt_name, verbose=False)
+                    chkpt_saved = True
 
-                    gpu_mem_log.append({
-                        "epoch": epoch,
-                        "step": i,
-                        "allocated_mb": allocated_mb,
-                        "reserved_mb": reserved_mb,
-                        "free_mb": free_mb,
-                        "total_memory_mb": total_mb,
-                        "allocated_pct_total": 100 * allocated_mb / total_mb,
-                        "reserved_pct_total": 100 * reserved_mb / total_mb,
-                        "free_pct_total": 100 * free_mb / total_mb,
-                    })
+                epoch_log.append({
+                    "epoch": epoch,
+                    "train_loss": avg_loss,
+                    "val_mse_unscaled": avg_val_mse_unscaled,
+                    "r2_unscaled": r2_u,
+                    "r2_scaled": r2_s,
+                    "lr": current_lr,
+                    "epoch_time_s": epoch_end_time - epoch_start_time,
+                    "peak_allocated_mb": peak_alloc_mb,
+                    "peak_reserved_mb": peak_reserved_mb,
+                })
 
-                total_loss += loss.detach().item()
-                n_batches += 1
-                i += 1
-                
-                if pbar is not None:
-                    pbar.update(1)
-            
-            if pbar is not None:
-                pbar.close()
+                chkpt_saved_str = "Checkpoint Saved" if chkpt_saved else ""
 
-            if n_batches % grad_accum_steps != 0:
-                scaler.step(optimizer)
-                scaler.update()
-                optimizer.zero_grad(set_to_none=True)
-
-            avg_loss = total_loss / max(1, n_batches)
-            epoch_end_time = time.time()
-
-            avg_val_mse_scaled = None
-            avg_val_mse_unscaled = None
-            r2_s = None
-            r2_u = None
-
-            avg_val_mse_scaled, avg_val_mse_unscaled, r2_s, r2_u = self._validate_simple(
-                model=model,
-                val_loader=val_loader,
-                device=self.device,
-                amp_enabled=amp_enabled,
-            )
-            scheduler.step(avg_val_mse_unscaled)
-
-            current_lr = optimizer.param_groups[0]["lr"]
-            
-            if self.device.type == "cuda":
-                peak_alloc_mb = torch.cuda.max_memory_allocated() / 1024**2
-                peak_reserved_mb = torch.cuda.max_memory_reserved() / 1024**2
-            else:
-                peak_alloc_mb = None
-                peak_reserved_mb = None
-                
-            if avg_val_mse_unscaled < best_loss:
-                best_loss = avg_val_mse_unscaled
-                no_improvement_epochs = 0
-            else:
-                no_improvement_epochs += 1
-            
-            chkpt_saved = False
-            if epoch % save_every_n_epochs == 0:
-                chkpt_name = f"checkpoint_{epoch:03d}.pt"
-                self.save_model(epoch_log=epoch_log, model_name=chkpt_name, verbose=False)
-                chkpt_saved = True
-                
-            epoch_log.append({
-                "epoch": epoch,
-                "train_loss": avg_loss,
-                "val_mse_unscaled": avg_val_mse_unscaled,
-                "r2_unscaled": r2_u,
-                "r2_scaled": r2_s,
-                "lr": current_lr,
-                "epoch_time_s": epoch_end_time - epoch_start_time,
-                "peak_allocated_mb": peak_alloc_mb,
-                "peak_reserved_mb": peak_reserved_mb,
-            })
-
-            chkpt_saved_str = "Checkpoint Saved" if chkpt_saved else ""
-            
-            if verbose:
-                logging.info(
+                _log_train(
                     f"Epoch {epoch}/{final_epoch} | "
                     f"Train Loss: {avg_loss:.4f} | "
                     f"Val MSE: {avg_val_mse_unscaled:.4f} | "
@@ -879,36 +944,35 @@ class ExperimentHandler:
                     f"{chkpt_saved_str}"
                 )
 
-            if no_improvement_epochs >= improvement_patience:
-                if verbose:
-                    logging.info(f"No improvement in validation loss for {no_improvement_epochs} epochs. Stopping early.")
-                break
-            
-        self.gpu_mem_log_df = pd.DataFrame(gpu_mem_log)
-        self.batch_profile_df = pd.DataFrame(batch_profile_log)
-        self.epoch_log_df = pd.DataFrame(epoch_log)
-        
-        # If resuming from a previous training run, concatenate the new logs with the old ones so we have a complete history
-        if self.starting_epoch != 0:
-            def _concat_logs(new_df, log_filename):
-                previous_log_path = self.model_training_dir / log_filename
-                if previous_log_path.exists():
-                    previous_log_df = pd.read_csv(previous_log_path)
-                    return pd.concat([previous_log_df, new_df], ignore_index=True)
-                else:
-                    return new_df
-            self.epoch_log_df = _concat_logs(self.epoch_log_df, "epoch_log.csv")
-            self.gpu_mem_log_df = _concat_logs(self.gpu_mem_log_df, "gpu_memory_log.csv")
-            self.batch_profile_df = _concat_logs(self.batch_profile_df, "batch_profile_log.csv")
-        
-        self.gpu_mem_log_df.to_csv(self.model_training_dir / "gpu_memory_log.csv", index=False)
-        self.batch_profile_df.to_csv(self.model_training_dir / "batch_profile_log.csv", index=False)
-        self.epoch_log_df.to_csv(self.model_training_dir / "epoch_log.csv", index=False)
-        
-        logging.info(f"\nTraining Complete. Saving final model")
-        self.save_model(epoch_log=epoch_log, model_name="trained_model.pt")
+                if no_improvement_epochs >= improvement_patience:
+                    _log_train(f"No improvement in validation loss for {no_improvement_epochs} epochs. Stopping early.")
+                    break
 
-        return model
+            self.gpu_mem_log_df = pd.DataFrame(gpu_mem_log)
+            self.batch_profile_df = pd.DataFrame(batch_profile_log)
+            self.epoch_log_df = pd.DataFrame(epoch_log)
+
+            # If resuming from a previous training run, concatenate the new logs with the old ones so we have a complete history
+            if self.starting_epoch != 0:
+                def _concat_logs(new_df, log_filename):
+                    previous_log_path = self.model_training_dir / log_filename
+                    if previous_log_path.exists():
+                        previous_log_df = pd.read_csv(previous_log_path)
+                        return pd.concat([previous_log_df, new_df], ignore_index=True)
+                    else:
+                        return new_df
+                self.epoch_log_df = _concat_logs(self.epoch_log_df, "epoch_log.csv")
+                self.gpu_mem_log_df = _concat_logs(self.gpu_mem_log_df, "gpu_memory_log.csv")
+                self.batch_profile_df = _concat_logs(self.batch_profile_df, "batch_profile_log.csv")
+
+            self.gpu_mem_log_df.to_csv(self.model_training_dir / "gpu_memory_log.csv", index=False)
+            self.batch_profile_df.to_csv(self.model_training_dir / "batch_profile_log.csv", index=False)
+            self.epoch_log_df.to_csv(self.model_training_dir / "epoch_log.csv", index=False)
+
+            _log_train("\nTraining Complete. Saving final model")
+            self.save_model(epoch_log=epoch_log, model_name="trained_model.pt", verbose=False)
+
+            return model
     
     def save_model(self, epoch_log, model_name: str = "trained_model.pt", verbose: bool = True):
         if self.model is None:
@@ -1053,6 +1117,7 @@ class ExperimentHandler:
         save_every_n_batches: int = 20,
         max_tgs_per_batch: int | None = None,
         chunk_size = 64,
+        show_tqdm: bool = True,
     ):
 
         model = self.model if model is None else model
@@ -1077,13 +1142,16 @@ class ExperimentHandler:
         
         model.to(device).eval()
 
-        iterator = tqdm(
-            test_loader,
-            desc=f"Gradient attributions",
-            unit="batches",
-            total=max_batches,
-            ncols=100,
-        )
+        if show_tqdm:
+            iterator = tqdm(
+                test_loader,
+                desc=f"Gradient attributions",
+                unit="batches",
+                total=max_batches,
+                ncols=100,
+            )
+        else:
+            iterator = test_loader
 
         batch_grad_dfs = {}
         for b_idx, batch in enumerate(iterator):

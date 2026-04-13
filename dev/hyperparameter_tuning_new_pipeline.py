@@ -20,8 +20,10 @@ from cycler import cycler
 from scipy.stats import norm
 import logging
 import argparse
+from contextlib import contextmanager
 
 logging.basicConfig(level=logging.INFO, format='%(message)s')
+TQDM_DISABLE=1
 
 PROJECT_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER")
 SRC_DIR = str(Path(PROJECT_DIR) / "src")
@@ -250,6 +252,27 @@ def aggregate_results(
         "grad_attrib_tgs_per_batch",
         "dataloader_workers",
         "max_cached",
+
+        # --- Preprocessing params ---
+        "norm_target_sum",
+        "min_rna_disp",
+        "min_atac_disp",
+        "rna_pcs",
+        "rna_neighbors",
+        "atac_pcs",
+        "atac_neighbors",
+        "min_atac_hvg_mean",
+        "max_atac_hvg_mean",
+        "filter_rna_hvgs",
+        "filter_atac_hvgs",
+        "tf_list_file",
+        "promoter_upstream",
+        "promoter_downstream",
+        "distal_max",
+        "n_tss",
+        "extend_upstream",
+        "extend_downstream",
+        "hops",
         
         # --- Performance ---
         "pooled_median_auroc",
@@ -300,6 +323,25 @@ def save_summary_df(full_summary_df, summary_save_path):
         "grad_attrib_tgs_per_batch",
         "dataloader_workers",
         "max_cached",
+        "norm_target_sum",
+        "min_rna_disp",
+        "min_atac_disp",
+        "rna_pcs",
+        "rna_neighbors",
+        "atac_pcs",
+        "atac_neighbors",
+        "min_atac_hvg_mean",
+        "max_atac_hvg_mean",
+        "filter_rna_hvgs",
+        "filter_atac_hvgs",
+        "tf_list_file",
+        "promoter_upstream",
+        "promoter_downstream",
+        "distal_max",
+        "n_tss",
+        "extend_upstream",
+        "extend_downstream",
+        "hops",
         "replicate",
     ]
 
@@ -457,31 +499,42 @@ def plot_auroc_by_kernel_size(auroc_df_all):
     plt.legend(bbox_to_anchor=(1.05, 0.5), loc='center left', borderaxespad=0.)
     return fig
 
-def load_ground_truth_dict():
-    gt_by_dataset_dict = {
-        # "Macrophage": {
-        #     # "RN204": load_ground_truth(GROUND_TRUTH_DIR / "rn204_macrophage_human_chipseq.tsv"),
-        #     "ChIP-Atlas macrophage": load_ground_truth(GROUND_TRUTH_DIR / "chipatlas_macrophage.csv"),
-        # },
-        "mESC": {
-            "ChIP-Atlas mESC": load_ground_truth(GROUND_TRUTH_DIR / "chip_atlas_tf_peak_tg_dist.csv"),
-            "RN111": load_ground_truth(GROUND_TRUTH_DIR / "RN111.tsv"),
-            "RN112": load_ground_truth(GROUND_TRUTH_DIR / "RN112.tsv"),
-            "RN114": load_ground_truth(GROUND_TRUTH_DIR / "RN114.tsv"),
-            "RN116": load_ground_truth(GROUND_TRUTH_DIR / "RN116.tsv"),        
-        },
-        # "K562": {
-        #     "ChIP-Atlas K562": load_ground_truth(GROUND_TRUTH_DIR / "chipatlas_K562.csv"),
-        #     "RN117": load_ground_truth(GROUND_TRUTH_DIR / "RN117.tsv"),        
-        # },
-        # "iPSC": {
-        #     # "ChIP-Atlas iPSC": load_ground_truth(GROUND_TRUTH_DIR / "chipatlas_iPSC.csv"),
-        #     "ChIP-Atlas iPSC (1 Mb)": load_ground_truth(GROUND_TRUTH_DIR / "chipatlas_iPSC_1mb.csv"),
-        #     # "ChIP-Atlas iPSC (100 kb)": load_ground_truth(GROUND_TRUTH_DIR / "chipatlas_iPSC_100kb.csv"),
-        # }
-    }
+def load_ground_truth_dict(sample_type):
+    if sample_type == "Macrophage":
+        gt_by_dataset_dict = {
+            "Macrophage": {
+                # "RN204": load_ground_truth(GROUND_TRUTH_DIR / "rn204_macrophage_human_chipseq.tsv"),
+                "ChIP-Atlas macrophage": load_ground_truth(GROUND_TRUTH_DIR / "chipatlas_macrophage.csv"),
+            }
+        }
+    elif sample_type == "mESC":
+        gt_by_dataset_dict = {
+            "mESC": {
+                "ChIP-Atlas mESC": load_ground_truth(GROUND_TRUTH_DIR / "chip_atlas_tf_peak_tg_dist.csv"),
+                "RN111": load_ground_truth(GROUND_TRUTH_DIR / "RN111.tsv"),
+                "RN112": load_ground_truth(GROUND_TRUTH_DIR / "RN112.tsv"),
+                "RN114": load_ground_truth(GROUND_TRUTH_DIR / "RN114.tsv"),
+                "RN116": load_ground_truth(GROUND_TRUTH_DIR / "RN116.tsv"),        
+            }
+        }
+    elif sample_type == "K562":
+        gt_by_dataset_dict = {
+            "K562": {
+                "ChIP-Atlas K562": load_ground_truth(GROUND_TRUTH_DIR / "chipatlas_K562.csv"),
+                "RN117": load_ground_truth(GROUND_TRUTH_DIR / "RN117.tsv"),        
+            }
+        }
+    elif sample_type == "iPSC":
+        gt_by_dataset_dict = {
+            "iPSC": {
+                # "ChIP-Atlas iPSC": load_ground_truth(GROUND_TRUTH_DIR / "chipatlas_iPSC.csv"),
+                "ChIP-Atlas iPSC (1 Mb)": load_ground_truth(GROUND_TRUTH_DIR / "chipatlas_iPSC_1mb.csv"),
+                # "ChIP-Atlas iPSC (100 kb)": load_ground_truth(GROUND_TRUTH_DIR / "chipatlas_iPSC_100kb.csv"),
+            }
+        }
     
     return gt_by_dataset_dict
+
 
 def _run_experiments_on_gpu(
     tdf,
@@ -494,6 +547,7 @@ def _run_experiments_on_gpu(
     sample_type,
     gt_by_dataset_dict,
     experiment_dir,
+    log_dir
 ):
     # Restrict this worker to a single GPU BEFORE any CUDA calls.
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
@@ -527,143 +581,239 @@ def _run_experiments_on_gpu(
     experiment_dict["d_ff"] = [experiment_dict["d_model"][i] * 4 for i in range(num_experiments)]
     
     for i in experiment_indices:
-        logging.info(
-            f"\n[Experiment {i+1}/{num_experiments}] Starting experiment with GPU {gpu_id} "
-            f"(pid={os.getpid()})..."
-        )
-
-        batch_size = experiment_dict["batch_size"][i]
-        epochs = experiment_dict["epochs"][i]
-        bias_scale = experiment_dict["bias_scale"][i]
-        num_layers = experiment_dict["num_layers"][i]
-        num_heads = experiment_dict["num_heads"][i]
-        d_model = experiment_dict["d_model"][i]
-        d_ff = experiment_dict["d_ff"][i]
-        kernel_size = experiment_dict["kernel_size"][i]
-        dataloader_workers = experiment_dict["dataloader_workers"][i]
-        max_cached = experiment_dict["max_cached"][i]
-        grad_attrib_batches = experiment_dict["grad_attrib_batches"][i]
-        grad_attrib_tgs_per_batch = experiment_dict["grad_attrib_tgs_per_batch"][i]
-        replicate = experiment_dict["replicates"][i]
-
-        if previous_experiments_df is not None:
-            config_match = (
-                (previous_experiments_df["batch_size"] == batch_size) &
-                (previous_experiments_df["epochs"] == epochs) &
-                (previous_experiments_df["bias_scale"] == bias_scale) &
-                (previous_experiments_df["num_layers"] == num_layers) &
-                (previous_experiments_df["num_heads"] == num_heads) &
-                (previous_experiments_df["d_model"] == d_model) &
-                (previous_experiments_df["d_ff"] == d_ff) &
-                (previous_experiments_df["kernel_size"] == kernel_size) &
-                (previous_experiments_df["dataloader_workers"] == dataloader_workers) &
-                (previous_experiments_df["max_cached"] == max_cached) &
-                (previous_experiments_df["grad_attrib_batches"] == grad_attrib_batches) &
-                (previous_experiments_df["grad_attrib_tgs_per_batch"] == grad_attrib_tgs_per_batch) &
-                (previous_experiments_df["replicate"] == replicate)
+        try:
+            logging.info(
+                f"[Experiment {i+1}/{num_experiments}] Starting experiment with GPU {gpu_id} "
+                f"(pid={os.getpid()})..."
             )
 
-            if config_match.any():
-                logging.info(f"[Experiment {i+1}] Experiment with this configuration already exists. Skipping...")
-                continue
-        
-        exp.model_num = i + 1
-        exp._create_model_training_dir(allow_overwrite=True)
-        
-        exp.create_multichrom_dataset(
-            max_cached=max_cached,
-        )
+            log_file = log_dir / exp.experiment_name / f"model_training_{i+1:03d}.log"
+            with exp.temp_log_file(log_file) as train_logger:
+                def _log_train(msg: str):
+                    if train_logger is not None:
+                        train_logger.info(msg)
+                    else:
+                        logging.info(msg)
+                        
+                batch_size = experiment_dict["batch_size"][i]
+                epochs = experiment_dict["epochs"][i]
+                bias_scale = experiment_dict["bias_scale"][i]
+                num_layers = experiment_dict["num_layers"][i]
+                num_heads = experiment_dict["num_heads"][i]
+                d_model = experiment_dict["d_model"][i]
+                d_ff = experiment_dict["d_ff"][i]
+                kernel_size = experiment_dict["kernel_size"][i]
+                dataloader_workers = experiment_dict["dataloader_workers"][i]
+                max_cached = experiment_dict["max_cached"][i]
+                grad_attrib_batches = experiment_dict["grad_attrib_batches"][i]
+                grad_attrib_tgs_per_batch = experiment_dict["grad_attrib_tgs_per_batch"][i]
+                replicate = experiment_dict["replicates"][i]
 
-        train_loader, val_loader, test_loader = exp.prepare_dataloader(
-            batch_size=batch_size,
-            world_size=1,
-            rank=0,
-            num_workers=dataloader_workers,
-            pin_memory=True,
-        )
+                if previous_experiments_df is not None:
+                    config_cols = [
+                        "batch_size",
+                        "epochs",
+                        "bias_scale",
+                        "num_layers",
+                        "num_heads",
+                        "d_model",
+                        "d_ff",
+                        "kernel_size",
+                        "dataloader_workers",
+                        "max_cached",
+                        "grad_attrib_batches",
+                        "grad_attrib_tgs_per_batch",
+                        "norm_target_sum",
+                        "min_rna_disp",
+                        "min_atac_disp",
+                        "rna_pcs",
+                        "rna_neighbors",
+                        "atac_pcs",
+                        "atac_neighbors",
+                        "min_atac_hvg_mean",
+                        "max_atac_hvg_mean",
+                        "filter_rna_hvgs",
+                        "filter_atac_hvgs",
+                        "tf_list_file",
+                        "promoter_upstream",
+                        "promoter_downstream",
+                        "distal_max",
+                        "n_tss",
+                        "extend_upstream",
+                        "extend_downstream",
+                        "hops",
+                        "replicate",
+                    ]
 
-        exp.create_scalers(
-            dataloader=train_loader,
-        )
+                    if all(col in previous_experiments_df.columns for col in config_cols):
+                        config_match = np.ones(len(previous_experiments_df), dtype=bool)
+                        for col in config_cols:
+                            if col == "replicate":
+                                current_val = replicate
+                            else:
+                                current_val = experiment_dict[col][i]
+                            config_match &= (previous_experiments_df[col] == current_val)
 
-        exp.create_new_model(
-            use_dist_bias=True,
-            bias_scale=bias_scale,
-            d_model=d_model,
-            num_heads=num_heads,
-            num_layers=num_layers,
-            d_ff=d_ff,
-            dropout=0.1,
-            kernel_size=kernel_size,
-            local_rank=0,
-            rank=0,
-            world_size=1,
-        )
-        
-        logging.info(f"[Experiment {i+1}] Starting Training")
-        train_start_time = time.time()
-        exp.train(
-            train_loader=train_loader, 
-            val_loader=val_loader, 
-            num_epochs=epochs,
-            max_batches=None,
-            verbose=False,
-            grad_accum_steps=1,
-            improvement_patience=15,
-            save_every_n_epochs=10,
-            monitor_gpu_memory=True,
-            profile_batches=True,
-            allow_overwrite=False,
-            silence_tqdm=True,
-            )
-        train_end_time = time.time()
-        logging.info(f"[Experiment {i+1}] Training finished in {train_end_time - train_start_time:.2f} seconds.")
+                        if config_match.any():
+                            logging.info(f"[Experiment {i+1}] Experiment with this configuration already exists. Skipping...")
+                            continue
+                
+                _log_train(f"Creating MultiChromDataset with max_cached={max_cached}...")
+                exp.create_multichrom_dataset(
+                    max_cached=max_cached,
+                )
 
+                _log_train(f"Preparing dataloaders with batch_size={batch_size}, num_workers={dataloader_workers}...")
+                train_loader, val_loader, test_loader = exp.prepare_dataloader(
+                    batch_size=batch_size,
+                    world_size=1,
+                    rank=0,
+                    num_workers=dataloader_workers,
+                    pin_memory=True,
+                    persistent_workers=True,
+                )
 
-        grad_attrib_start_time = time.time()
-        exp.run_gradient_attribution(
-            test_loader,
-            max_batches=grad_attrib_batches,
-            max_tgs_per_batch=grad_attrib_tgs_per_batch,
-            )
+                _log_train(f"Creating scalers...")
+                exp.create_scalers(
+                    dataloader=train_loader,
+                )
 
-        grad_attrib_end_time = time.time()
-        logging.info(f"[Experiment {i+1}] Gradient attribution finished {grad_attrib_batches} batches in {grad_attrib_end_time - grad_attrib_start_time:.2f} seconds.")
+                _log_train(f"Creating new model...")
+                exp.create_new_model(
+                    use_dist_bias=True,
+                    bias_scale=bias_scale,
+                    d_model=d_model,
+                    num_heads=num_heads,
+                    num_layers=num_layers,
+                    d_ff=d_ff,
+                    dropout=0.1,
+                    kernel_size=kernel_size,
+                    local_rank=0,
+                    rank=0,
+                    world_size=1,
+                )
+                
+                _log_train(f"Starting Training")
+                
+                exp.model_num = i + 1
+                exp.model_training_dir = exp.experiment_dir / exp.experiment_name / f"model_training_{exp.model_num:03d}"
+                
+                
+                if exp.model_training_dir.is_dir() and "trained_model.pt" in os.listdir(exp.model_training_dir):
+                    _log_train(f"Trained model already exists. Skipping training...")
+                    exp.load_model()
+                    exp.load_handler()
+                
+                else:
+                    exp._create_model_training_dir(allow_overwrite=True)
+                    
+                    train_start_time = time.time()
+                    exp.train(
+                        train_loader=train_loader, 
+                        val_loader=val_loader, 
+                        num_epochs=epochs,
+                        max_batches=None,
+                        verbose=True,
+                        grad_accum_steps=1,
+                        improvement_patience=15,
+                        save_every_n_epochs=10,
+                        monitor_gpu_memory=True,
+                        profile_batches=True,
+                        allow_overwrite=False,
+                        silence_tqdm=True,
+                        log_file=log_file
+                        )
+                    train_end_time = time.time()
+                    _log_train(f"Training finished in {train_end_time - train_start_time:.2f} seconds.")
 
-        auroc_df = exp.calculate_auroc_all_sample_gts(exp.grn, gt_by_dataset_dict)    
+                if "inferred_grn.csv" in os.listdir(exp.model_training_dir):
+                    _log_train(f"Inferred GRN already exists. Skipping gradient attribution...")
+                    exp.grn = exp.load_grn()
+                else:
+                    _log_train(f"Starting gradient attribution for GRN inference")
+                    grad_attrib_start_time = time.time()
+                    exp.run_gradient_attribution(
+                        test_loader,
+                        max_batches=grad_attrib_batches,
+                        max_tgs_per_batch=grad_attrib_tgs_per_batch,
+                        show_tqdm=False,
+                        )
 
-        def update_dfs_with_experiment_params(df):
-            df["experiment_name"] = exp.experiment_name
-            df["sample_type"] = sample_type
-            df["replicate"] = replicate
-            for param, value in experiment_dict.items():
-                df[param] = value[i]
-            return df
+                    grad_attrib_end_time = time.time()
+                    _log_train(f"Gradient attribution finished {grad_attrib_batches} batches in {grad_attrib_end_time - grad_attrib_start_time:.2f} seconds.")
+                
+                _log_train(f"Calculating AUROC against ground truth...")
+                auroc_df = exp.calculate_auroc_all_sample_gts(exp.grn, gt_by_dataset_dict[sample_type])    
 
-        auroc_df = update_dfs_with_experiment_params(auroc_df)
-        exp.gpu_mem_log_df = update_dfs_with_experiment_params(exp.gpu_mem_log_df)
-        exp.batch_profile_df = update_dfs_with_experiment_params(exp.batch_profile_df)
-        exp.epoch_log_df = update_dfs_with_experiment_params(exp.epoch_log_df)
+                def update_dfs_with_experiment_params(df):
+                    df["experiment_name"] = exp.experiment_name
+                    df["sample_type"] = sample_type
+                    df["replicate"] = replicate
+                    for param, value in experiment_dict.items():
+                        df[param] = value[i]
+                    return df
+                
+                if (exp.model_training_dir / "gpu_memory_log.csv").exists():
+                    exp.gpu_mem_log_df = pd.read_csv(exp.model_training_dir / "gpu_memory_log.csv")
+                if (exp.model_training_dir / "batch_profile_log_df.csv").exists():
+                    exp.batch_profile_log_df = pd.read_csv(exp.model_training_dir / "batch_profile_log_df.csv")
+                if (exp.model_training_dir / "epoch_log.csv").exists():
+                    exp.epoch_log_df = pd.read_csv(exp.model_training_dir / "epoch_log.csv")
 
-        logging.info(f"[Experiment {i+1}] Aggregating results...")
-        full_summary_df = aggregate_results(
-            experiment_dict,
-            auroc_df,
-            exp.gpu_mem_log_df,
-            exp.batch_profile_df,
-            exp.epoch_log_df,
-        )
+                auroc_df = update_dfs_with_experiment_params(auroc_df)
+                exp.gpu_mem_log_df = update_dfs_with_experiment_params(exp.gpu_mem_log_df)
+                exp.batch_profile_log_df = update_dfs_with_experiment_params(exp.batch_profile_log_df)
+                exp.epoch_log_df = update_dfs_with_experiment_params(exp.epoch_log_df)
 
-        logging.info(f"[Experiment {i+1}] Saving results...")
-        with lock:
-            save_summary_df(full_summary_df, summary_save_path)
+                _log_train(f"[Experiment {i+1}] Aggregating results...")
+                full_summary_df = aggregate_results(
+                    experiment_dict,
+                    auroc_df,
+                    exp.gpu_mem_log_df,
+                    exp.batch_profile_log_df,
+                    exp.epoch_log_df,
+                )
 
-def run_muon_preprocessing(sample_name, sample_raw_data_dir, sample_processed_data_dir, tss_path, project_dir):
+                _log_train(f"[Experiment {i+1}] Saving results...")
+                with lock:
+                    save_summary_df(full_summary_df, summary_save_path)
+            logging.info(f"[Experiment {i+1}] Completed successfully.")
+                    
+        except Exception as e:
+            logging.exception(f"Experiment {i+1} failed: {e}")
+            continue
+
+def run_muon_preprocessing(
+    sample_name: str, 
+    sample_raw_data_dir: Path, 
+    sample_processed_data_dir: Path, 
+    tss_path: Path, 
+    project_dir: Path,
+    norm_target_sum: float = 1e4,
+    min_rna_disp: float = 0.5,
+    min_atac_disp: float = 0.5,
+    rna_pcs: int = 20,
+    rna_neighbors: int = 10,
+    atac_pcs: int = 20,
+    atac_neighbors: int = 10,
+    min_atac_hvg_mean: float = 0.01,
+    max_atac_hvg_mean: float = 10,
+    filter_rna_hvgs: bool = False,
+    filter_atac_hvgs: bool = False,
+    tf_list_file: str = None,
+    promoter_upstream: int = 1000,
+    promoter_downstream: int = 1000,
+    distal_max: int = 200_000,
+    n_tss: int = 500,
+    extend_upstream: int = 1000,
+    extend_downstream: int = 1000,
+    hops: int = 2,
+    ):
     logging.info("\n----- MUON PREPROCESSING -----")
     logging.info(f"Preprocessing data for sample {sample_name} using muon...")
-    filtering_setting_df = pd.read_csv(project_dir / "dev" / "notebooks" / "muon_preprocessing" /"qc_filtering_settings.tsv", sep="\t")
+    filtering_setting_df = pd.read_csv(Path(project_dir) / "dev" / "notebooks" / "muon_preprocessing" /"qc_filtering_settings.tsv", sep="\t")
     sample_filtering_settings = filtering_setting_df[filtering_setting_df["Sample"] == sample_name]    
-
+    
     # ----- RNA QC thresholds -----
     MIN_CELLS_PER_GENE = muon_prep.get_threshold(sample_filtering_settings, "Min Cells per Gene")
     MIN_GENES_PER_CELL = muon_prep.get_threshold(sample_filtering_settings, "Min Genes per Cell")
@@ -701,17 +851,17 @@ def run_muon_preprocessing(sample_name, sample_raw_data_dir, sample_processed_da
         min_total_counts_per_cell = MIN_TOTAL_COUNTS,
         max_total_counts_per_cell = MAX_TOTAL_COUNTS,
         max_pct_counts_mt = MAX_PCT_COUNTS_MT,
-        norm_target_sum = 1e4,
-        min_rna_disp = 0.5,
-        filter_hvgs = False,
-        tf_list_file = None,
+        norm_target_sum = norm_target_sum,
+        min_rna_disp = min_rna_disp,
+        filter_hvgs = filter_rna_hvgs,
+        tf_list_file = tf_list_file,
         fig_dir=sample_processed_data_dir / "preprocessing_figures" / "rna_qc",
         )
     
     data_processor.rna_pca_and_neighbors(
         data_processor.rna, 
-        n_pcs=20,
-        n_neighbors=10,
+        n_pcs=rna_pcs,
+        n_neighbors=rna_neighbors,
         fig_dir=sample_processed_data_dir / "preprocessing_figures" / "rna_qc",
         )
     
@@ -723,11 +873,15 @@ def run_muon_preprocessing(sample_name, sample_raw_data_dir, sample_processed_da
         max_peaks_per_cell=MAX_PEAKS_PER_CELL,
         min_total_counts_per_cell=MIN_TOTAL_PEAK_COUNTS,
         max_total_counts_per_cell=MAX_TOTAL_PEAK_COUNTS,
-        min_atac_disp=0.5,
-        promoter_upstream=1000,
-        promoter_downstream=100,
-        distal_max=200_000,
-        filter_hvgs=False,
+        min_atac_disp=min_atac_disp,
+        min_atac_hvg_mean=min_atac_hvg_mean,
+        max_atac_hvg_mean=max_atac_hvg_mean,
+        promoter_upstream=promoter_upstream,
+        promoter_downstream=promoter_downstream,
+        distal_max=distal_max,
+        filter_hvgs=filter_atac_hvgs,
+        n_neighbors=atac_neighbors,
+        n_pcs=atac_pcs,
         fig_dir=sample_processed_data_dir / "preprocessing_figures" / "atac_qc",
         )
     
@@ -739,9 +893,9 @@ def run_muon_preprocessing(sample_name, sample_raw_data_dir, sample_processed_da
     logging.info("  - Calculating TSS enrichment")
     data_processor.tss_enrichment(
         frag_path=frag_path, 
-        n_tss=500, 
-        extend_upstream=1000, 
-        extend_downstream=1000,
+        n_tss=n_tss, 
+        extend_upstream=extend_upstream, 
+        extend_downstream=extend_downstream,
         fig_dir=sample_processed_data_dir / "preprocessing_figures" / "atac_qc"
         )
     
@@ -760,8 +914,50 @@ def run_muon_preprocessing(sample_name, sample_raw_data_dir, sample_processed_da
     
     # Create metacells
     logging.info("  - Creating metacells")
-    muon_prep.create_metacells(data_processor.mdata, sample_processed_data_dir, hops=2)
+    muon_prep.create_metacells(data_processor.mdata, sample_processed_data_dir, hops=hops)
     logging.info("Muon Preprocessing complete.")
+
+
+PREPROCESSING_PARAM_KEYS = [
+    "norm_target_sum",
+    "min_rna_disp",
+    "min_atac_disp",
+    "rna_pcs",
+    "rna_neighbors",
+    "atac_pcs",
+    "atac_neighbors",
+    "min_atac_hvg_mean",
+    "max_atac_hvg_mean",
+    "filter_rna_hvgs",
+    "filter_atac_hvgs",
+    "tf_list_file",
+    "promoter_upstream",
+    "promoter_downstream",
+    "distal_max",
+    "n_tss",
+    "extend_upstream",
+    "extend_downstream",
+    "hops",
+]
+
+
+def _build_preprocessing_signature(preprocessing_params):
+    encoded = json.dumps(preprocessing_params, sort_keys=True, default=str)
+    return f"prep_{zlib.crc32(encoded.encode('utf-8')):08x}"
+
+
+def group_experiments_by_preprocessing(experiment_dict, num_experiments):
+    grouped = {}
+    for idx in range(num_experiments):
+        params = {key: experiment_dict[key][idx] for key in PREPROCESSING_PARAM_KEYS}
+        signature = _build_preprocessing_signature(params)
+        if signature not in grouped:
+            grouped[signature] = {
+                "params": params,
+                "indices": [],
+            }
+        grouped[signature]["indices"].append(idx)
+    return grouped
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run hyperparameter tuning experiments for multiomic transformer.")
@@ -774,7 +970,8 @@ def parse_args():
     parser.add_argument("--processed_data_dir", type=str, required=True, help="Path to the processed data directory")
     parser.add_argument("--experiment_dir", type=str, required=True, help="Path to the experiment directory where results will be saved")
     parser.add_argument("--training_cache_dir", type=str, required=True, help="Path to the training data cache directory")
-    
+    parser.add_argument("--log_dir", type=str, required=True, help="Path to the log directory")
+
     args = parser.parse_args()
 
     return args
@@ -791,6 +988,7 @@ if __name__ == "__main__":
     raw_data_dir = Path(args.raw_data_dir)
     experiment_dir = Path(args.experiment_dir)
     training_cache_dir = Path(args.training_cache_dir)
+    log_dir = Path(args.log_dir)
     
     experiment_name = f"{sample_type}_{sample_name}_{experiment_header}"
     chrom_list = [f"chr{i}" for i in list(range(1,n_chroms+1))]
@@ -807,72 +1005,37 @@ if __name__ == "__main__":
     logging.info(f"  - Experiment Directory: {experiment_dir}")
     logging.info(f"  - Training Cache Directory: {training_cache_dir}\n")
     
-    exp_processed_data_dir = processed_data_dir / experiment_name
-    if not exp_processed_data_dir.is_dir():
-        exp_processed_data_dir.mkdir(parents=True, exist_ok=True)
-    
-    sample_processed_data_dir = exp_processed_data_dir / sample_name
-    sample_raw_data_dir = raw_data_dir / f"{sample_type}_10x_raw" / sample_name
-    
-    def missing_preprocessing_files(sample_processed_data_dir: Path):
-        required_preprocessing_files = ["RE_pseudobulk.parquet","TG_pseudobulk.parquet"]
-        
-        for file_name in required_preprocessing_files:
-            if not (sample_processed_data_dir / file_name).is_file():
-                return True
-    
-    # Determine if we need to run the Muon preprocessing
-    run_muon = False
-    if not sample_processed_data_dir.exists():
-        sample_processed_data_dir.mkdir(parents=True, exist_ok=True)
-        run_muon = True
-        
-    if run_muon == False:
-        if missing_preprocessing_files(sample_processed_data_dir):
-            run_muon = True
-    
-    # Run Muon preprocessing if needed
-    if run_muon == True:
-        run_muon_preprocessing(
-            sample_name=sample_name,
-            sample_raw_data_dir=sample_raw_data_dir,
-            sample_processed_data_dir=sample_processed_data_dir,
-            tss_path=PROJECT_DIR / "data" / "genome_data" /"genome_annotation" / organism_code / f"gene_tss.bed",
-            project_dir=PROJECT_DIR,
-        )
-    
-    # Create or load the training data cache for this sample
-    tdf = data_formatter.TrainingDataFormatter(
-        project_dir=PROJECT_DIR,
-        experiment_name=experiment_name,
-        organism_code=organism_code,
-        sample_names=[sample_name],
-        chrom_list=chrom_list,
-        output_dir=experiment_dir / experiment_name,
-        processed_data_dir=exp_processed_data_dir,
-        training_data_cache=training_cache_dir,
-    )
-    
-    if tdf.settings_path.is_file():
-        tdf.load_settings()
-    
-    tdf.create_or_load_data_cache(sample_name=sample_name, force_recalculate=False)
-
-    logging.info("\nLoading ground truth datasets...")
-    gt_by_dataset_dict = load_ground_truth_dict()
-
     experiment_dict = {
         "batch_size": [64],
         "epochs": [250],
-        "bias_scale": [0.0, 1.0, 2.0],
-        "num_layers": [1, 2, 3],
-        "num_heads": [2, 4, 8],
+        "bias_scale": [0.0, 2.0],
+        "num_layers": [3],
+        "num_heads": [4, 8],
         "d_model": [128, 192],
         "kernel_size": [64, 128],
-        "dataloader_workers": [8],
-        "max_cached": [100],
+        "dataloader_workers": [4],
+        "max_cached": [250],
         "grad_attrib_batches": [None],
         "grad_attrib_tgs_per_batch": [None],
+        "norm_target_sum": [1e4],
+        "min_rna_disp": [0.5],
+        "min_atac_disp": [0.5],
+        "rna_pcs": [20],
+        "rna_neighbors": [10],
+        "atac_pcs": [20],
+        "atac_neighbors": [10],
+        "min_atac_hvg_mean": [0.01],
+        "max_atac_hvg_mean": [10],
+        "filter_rna_hvgs": [False],
+        "filter_atac_hvgs": [False],
+        "tf_list_file": [None],
+        "promoter_upstream": [1000],
+        "promoter_downstream": [100],
+        "distal_max": [200_000],
+        "n_tss": [500],
+        "extend_upstream": [1000],
+        "extend_downstream": [1000],
+        "hops": [2],
         "replicates": [1],
     }
 
@@ -881,6 +1044,17 @@ if __name__ == "__main__":
     logging.info(f"Total experiments to run: {num_experiments}")
 
     summary_save_path = PROJECT_DIR / "dev" / "notebooks" / "benchmarking_results" / f"{experiment_name}.csv"
+    sample_raw_data_dir = raw_data_dir / f"{sample_type}_10x_raw" / sample_name
+
+    def missing_preprocessing_files(sample_processed_data_dir: Path):
+        required_preprocessing_files = ["RE_pseudobulk.parquet","TG_pseudobulk.parquet"]
+        
+        for file_name in required_preprocessing_files:
+            if not (sample_processed_data_dir / file_name).is_file():
+                return True
+
+    logging.info("\nLoading ground truth datasets...")
+    gt_by_dataset_dict = load_ground_truth_dict(sample_type)
 
     if torch.cuda.is_available():
         available_gpus = list(range(torch.cuda.device_count()))
@@ -890,36 +1064,88 @@ if __name__ == "__main__":
     if len(available_gpus) == 0:
         raise RuntimeError("No GPUs detected. Multiprocessing GPU assignment requires CUDA devices.")
 
-    assignments = {gpu_id: [] for gpu_id in available_gpus}
-    for idx in range(num_experiments):
-        assignments[available_gpus[idx % len(available_gpus)]].append(idx)
-
     mp.set_start_method("spawn", force=True)
     manager = mp.Manager()
     lock = manager.Lock()
-    processes = []
 
-    for gpu_id, indices in assignments.items():
-        if not indices:
-            continue
-        p = mp.Process(
-            target=_run_experiments_on_gpu,
-            args=(
-                tdf,
-                gpu_id,
-                indices,
-                lock,
-                experiment_dict,
-                num_experiments,
-                summary_save_path,
-                sample_type,
-                gt_by_dataset_dict,
-                experiment_dir,
-            ),
+    grouped_experiments = group_experiments_by_preprocessing(experiment_dict, num_experiments)
+    logging.info(f"Unique preprocessing parameter combinations: {len(grouped_experiments)}")
+
+    # Group experiments by their preprocessing parameters to avoid redundant preprocessing runs
+    # Generates a unique signature for each combination of preprocessing parameters
+    for prep_signature, prep_group in grouped_experiments.items():
+        prep_params = prep_group["params"]
+        prep_indices = prep_group["indices"]
+        logging.info(
+            f"\n===== PREPROCESSING GROUP {prep_signature} "
+            f"({len(prep_indices)} experiments) ====="
         )
-        p.start()
-        processes.append(p)
 
-    for p in processes:
-        p.join()
+        exp_processed_data_dir = processed_data_dir / experiment_name / prep_signature
+        exp_processed_data_dir.mkdir(parents=True, exist_ok=True)
+        sample_processed_data_dir = exp_processed_data_dir / sample_name
+        sample_processed_data_dir.mkdir(parents=True, exist_ok=True)
+
+        # Determines if the Muon preprocessing has been completed for this combination of parameters
+        run_muon = False
+        if missing_preprocessing_files(sample_processed_data_dir):
+            run_muon = True
+
+        if run_muon:
+            run_muon_preprocessing(
+                sample_name=sample_name,
+                sample_raw_data_dir=sample_raw_data_dir,
+                sample_processed_data_dir=sample_processed_data_dir,
+                tss_path=PROJECT_DIR / "data" / "genome_data" /"genome_annotation" / organism_code / f"gene_tss.bed",
+                project_dir=PROJECT_DIR,
+                **prep_params,
+            )
+        else:
+            logging.info(f"Reusing existing preprocessing outputs for {prep_signature}.")
+
+        # Create a directory for caching training data for this preprocessing combination
+        combo_training_cache_dir = training_cache_dir / experiment_name / prep_signature
+        combo_training_cache_dir.mkdir(parents=True, exist_ok=True)
+
+        tdf = data_formatter.TrainingDataFormatter(
+            project_dir=PROJECT_DIR,
+            experiment_name=experiment_name,
+            organism_code=organism_code,
+            sample_names=[sample_name],
+            chrom_list=chrom_list,
+            output_dir=experiment_dir / experiment_name,
+            processed_data_dir=exp_processed_data_dir,
+            training_data_cache=combo_training_cache_dir,
+        )
+        tdf.create_or_load_data_cache(sample_name=sample_name, force_recalculate=False)
+
+        assignments = {gpu_id: [] for gpu_id in available_gpus}
+        for idx in prep_indices:
+            assignments[available_gpus[idx % len(available_gpus)]].append(idx)
+
+        processes = []
+        for gpu_id, indices in assignments.items():
+            if not indices:
+                continue
+            p = mp.Process(
+                target=_run_experiments_on_gpu,
+                args=(
+                    tdf,
+                    gpu_id,
+                    indices,
+                    lock,
+                    experiment_dict,
+                    num_experiments,
+                    summary_save_path,
+                    sample_type,
+                    gt_by_dataset_dict,
+                    experiment_dir,
+                    log_dir,
+                ),
+            )
+            p.start()
+            processes.append(p)
+
+        for p in processes:
+            p.join()
 
