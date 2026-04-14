@@ -404,7 +404,7 @@ def save_summary_df(full_summary_df, summary_save_path):
             save_path_to_use = get_safe_path(summary_save_path)
 
     full_summary_df.to_csv(save_path_to_use, index=False)
-    logging.info(f"Saved experiment summary to: {save_path_to_use.parent}/{save_path_to_use.name}")
+    # logging.info(f"Saved experiment summary to: {save_path_to_use.parent}/{save_path_to_use.name}")
 
 def plot_gpu_memory(gpu_mem_df):
     df = gpu_mem_df.copy()
@@ -924,6 +924,7 @@ def run_muon_preprocessing(
         fig_dir=sample_processed_data_dir / "preprocessing_figures" / "atac_qc"
         )
     
+        
     # Save the processed data
     logging.info("  - Saving processed data")
     muon_prep.save_processed_data(data_processor.mdata, sample_processed_data_dir)
@@ -941,6 +942,7 @@ def run_muon_preprocessing(
     logging.info("  - Creating metacells")
     muon_prep.create_metacells(data_processor.mdata, sample_processed_data_dir, hops=hops)
     logging.info("Muon Preprocessing complete.")
+
 
 
 PREPROCESSING_PARAM_KEYS = [
@@ -1031,20 +1033,20 @@ if __name__ == "__main__":
     logging.info(f"  - Training Cache Directory: {training_cache_dir}\n")
     
     experiment_dict = {
-        "batch_size": [64],
-        "epochs": [200],
+        "batch_size": [128],
+        "epochs": [400],
         "bias_scale": [0.0, 2.0],
         "num_layers": [3],
         "num_heads": [4, 8],
         "d_model": [128, 192],
-        "kernel_size": [64, 128],
+        "kernel_size": [128, 192],
         "dataloader_workers": [4],
         "max_cached": [250],
         "grad_attrib_batches": [None],
         "grad_attrib_tgs_per_batch": [None],
         "norm_target_sum": [1e4],
-        "min_rna_disp": [0.5],
-        "min_atac_disp": [0.5],
+        "min_rna_disp": [0.1],
+        "min_atac_disp": [0.1],
         "rna_pcs": [20],
         "rna_neighbors": [10],
         "atac_pcs": [20],
@@ -1060,7 +1062,7 @@ if __name__ == "__main__":
         "n_tss": [500],
         "extend_upstream": [1000],
         "extend_downstream": [1000],
-        "hops": [2],
+        "hops": [1, 2, 3],
         "replicates": [1],
     }
 

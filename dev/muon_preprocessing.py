@@ -38,7 +38,6 @@ def parse_args():
     parser.add_argument("--rna-count-file", type=str, default=None)
     parser.add_argument("--atac-count-file", type=str, default=None)
     parser.add_argument("--raw-h5-file", type=str, default=None)
-    parser.add_argument("--tenx-h5-file", type=str, default=None)
     parser.add_argument("--tf-list-file", type=str, required=True)
     parser.add_argument("--frag-path", type=str, required=True)
     return parser.parse_args()
@@ -79,7 +78,6 @@ def load_raw_data(
     rna_count_file: Path | None = None, 
     atac_count_file: Path | None = None, 
     raw_h5_file: Path | None = None,
-    tenx_h5_file: Path | None = None,
     verbose: bool = True,
     ):
 
@@ -133,14 +131,6 @@ def load_raw_data(
             
             mdata = construct_from_gene_by_cell_matrices(rna_count_filepath, atac_count_filepath)
             mdata.var_names_make_unique()
-            return mdata, frag_path
-            
-        # If no count files are passed in, use the h5 file if it exists
-        elif tenx_h5_file is not None:
-            mdata = mu.read_10x_h5(tenx_h5_file)
-            mdata.var_names_make_unique()
-            if "interval" in mdata.var.columns and any(mdata.var["interval"].str.startswith("hg38.")):
-                mdata = filter_to_human(mdata)
             return mdata, frag_path
             
         # If no h5 file is found, look for the 10x mtx files. If they exist, load them using muon.
@@ -366,7 +356,9 @@ class MudataProcessor:
                 keep_genes = self.rna.var['highly_variable'] | self.rna.var['keep_tf']
             else:
                 keep_genes = self.rna.var['highly_variable']
-            self.rna = self.rna[:, keep_genes]
+            self.rna = self.rna[:, keep_genes].copy()
+            
+        self.mdata.mod["rna"] = self.rna
             
         self.rna.layers["counts"] = self.rna.X.copy()
         
@@ -589,7 +581,9 @@ class MudataProcessor:
             
         if filter_hvgs:
             keep_peaks = self.atac.var['highly_variable']
-            self.atac = self.atac[:, keep_peaks]
+            self.atac = self.atac[:, keep_peaks].copy()
+            
+        self.mdata.mod["atac"] = self.atac
             
         # Scaling
         self.atac.raw = self.atac
@@ -614,13 +608,13 @@ class MudataProcessor:
         # Annotate peaks as promoter/distal/intergenic based on TSS proximity
         # assign gene names and distances for promoter/distal peaks
         self.construct_peak_annotation(
-            self.processed_data_dir / self.sample_name, 
+            self.processed_data_dir, 
             promoter_upstream=promoter_upstream, 
             promoter_downstream=promoter_downstream, 
             distal_max=distal_max
             )
         
-        ac.tl.add_peak_annotation(self.atac, annotation=str(self.processed_data_dir / self.sample_name / "atac_peak_annotation.tsv"))
+        ac.tl.add_peak_annotation(self.atac, annotation=str(self.processed_data_dir / "atac_peak_annotation.tsv"))
         
         # Neighbors
         sc.pp.neighbors(self.atac, n_neighbors=n_neighbors, n_pcs=n_pcs)
@@ -819,6 +813,46 @@ def integrate_rna_atac(
     
     # Restrict to cells passing QC in both modalities
     mu.pp.intersect_obs(mdata)
+
+    # MOFA expects feature dimensions to match loadings exactly.
+    # Guard each modality (RNA + ATAC) for non-finite, all-zero, and zero-variance
+    # features to avoid MOFA internally dropping columns and desynchronizing shapes.
+    for mod_name in mdata.mod:
+        adata_mod = mdata.mod[mod_name]
+        adata_mod.var_names_make_unique()
+
+        if sp.issparse(adata_mod.X):
+            bad_vals = ~np.isfinite(adata_mod.X.data)
+            if bad_vals.any():
+                adata_mod.X.data[bad_vals] = 0.0
+                adata_mod.X.eliminate_zeros()
+
+            n_obs = max(int(adata_mod.n_obs), 1)
+            mean = np.asarray(adata_mod.X.sum(axis=0)).ravel() / n_obs
+            mean_sq = np.asarray(adata_mod.X.power(2).sum(axis=0)).ravel() / n_obs
+            var = mean_sq - np.square(mean)
+            nonzero_per_feature = np.asarray((adata_mod.X != 0).sum(axis=0)).ravel()
+        else:
+            X = np.asarray(adata_mod.X)
+            X[~np.isfinite(X)] = 0.0
+            adata_mod.X = X
+            var = np.var(X, axis=0)
+            nonzero_per_feature = np.count_nonzero(X, axis=0)
+
+        keep_features = (nonzero_per_feature > 0) & np.isfinite(var) & (var > 0)
+        n_before = adata_mod.n_vars
+        if not np.all(keep_features):
+            adata_mod = adata_mod[:, keep_features].copy()
+            mdata.mod[mod_name] = adata_mod
+        logging.info(f"  - {mod_name}: kept {adata_mod.n_vars}/{n_before} features after MOFA precheck")
+
+    # Ensure MuData global annotations stay in sync with updated modalities.
+    if hasattr(mdata, "update"):
+        mdata.update()
+    logging.info(
+        f"  - post-update dims: RNA={mdata.mod['rna'].n_vars}, "
+        f"ATAC={mdata.mod['atac'].n_vars}, total={mdata.mod['rna'].n_vars + mdata.mod['atac'].n_vars}"
+    )
     
     # Perform MOFA+ integration
     mu.tl.mofa(mdata, outfile=sample_processed_data_dir / f"{sample_name}_rna_atac.h5mu")
@@ -905,15 +939,15 @@ def save_processed_data(mdata: ad.AnnData, sample_processed_data_dir: Path):
     processed_rna_df.index = processed_rna_df.index.astype(str).map(standardize_name)
 
     # Save parquet outputs
-    processed_rna_df.to_parquet(processed_rna_file, engine="pyarrow", compression="snappy")
-    processed_atac_df.to_parquet(processed_atac_file, engine="pyarrow", compression="snappy")
+    # processed_rna_df.to_parquet(processed_rna_file, engine="pyarrow", compression="snappy")
+    # processed_atac_df.to_parquet(processed_atac_file, engine="pyarrow", compression="snappy")
 
     # Save modality-level AnnData files
-    adata_rna.write_h5ad(adata_rna_file)
-    adata_atac.write_h5ad(adata_atac_file)
+    # adata_rna.write_h5ad(adata_rna_file)
+    # adata_atac.write_h5ad(adata_atac_file)
 
     # Save the full MuData object 
-    mdata.write(mdata_file) 
+    # mdata.write(mdata_file) 
     
 def create_metacells(
     mdata: ad.AnnData, 
@@ -1041,7 +1075,6 @@ if __name__ == "__main__":
     rna_count_file = Path(args.rna_count_file) if args.rna_count_file else None
     atac_count_file = Path(args.atac_count_file) if args.atac_count_file else None
     raw_h5_file = Path(args.raw_h5_file) if args.raw_h5_file else None
-    tenx_h5_file = Path(args.tenx_h5_file) if args.tenx_h5_file else None
     tf_list_file = Path(args.tf_list_file) if args.tf_list_file else None
     frag_path = Path(args.frag_path) if args.frag_path else None
 
@@ -1133,11 +1166,10 @@ if __name__ == "__main__":
             )
     
     # Save the processed data
-    save_processed_data(data_processor.mdata, SAMPLE_PROCESSED_DATA_DIR)
+    # save_processed_data(data_processor.mdata, SAMPLE_PROCESSED_DATA_DIR)
     
     # Integrate the RNA and ATAC modalities using MOFA+
     integrate_rna_atac(data_processor.mdata, SAMPLE_PROCESSED_DATA_DIR, SAMPLE_NAME, fig_dir=SAMPLE_PROCESSED_DATA_DIR / "integration")
     
     # Create metacells
-    create_metacells(data_processor.mdata, SAMPLE_PROCESSED_DATA_DIR, hops=2)
-    
+    create_metacells(data_processor.mdata, SAMPLE_PROCESSED_DATA_DIR, hops=2)    

@@ -5,11 +5,11 @@
 #SBATCH --time=24:00:00
 #SBATCH -p dense
 #SBATCH -N 1
-#SBATCH --gres=gpu:2
+#SBATCH --gres=gpu:1
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 48
 #SBATCH --mem=128G
-#SBATCH --array=0%5
+#SBATCH --array=0-9%10
 
 set -eo pipefail
 
@@ -28,23 +28,23 @@ mkdir -p "$PROCESSED_DATA_DIR"
 mkdir -p "$EXPERIMENT_OUTPUT_DIR"
 mkdir -p "$TRAINING_DATA_CACHE_DIR"
 
-EXPERIMENT_NAME="auroc_by_kernel_size"
+EXPERIMENT_NAME="hyperparam_test_01"
 MM10_N_CHROMS=19
 HG38_N_CHROMS=21
 
 # sample_type|sample_name|experiment_header|n_chroms|organism_code
 EXPERIMENT_LIST=(
-    # "mESC|E7.5_rep1|${EXPERIMENT_NAME}|${MM10_N_CHROMS}|mm10"
-    # "mESC|E7.5_rep2|${EXPERIMENT_NAME}|${MM10_N_CHROMS}|mm10"
-    # "mESC|E8.5_rep1|${EXPERIMENT_NAME}|${MM10_N_CHROMS}|mm10"
-    # "mESC|E8.5_rep2|${EXPERIMENT_NAME}|${MM10_N_CHROMS}|mm10"
+    "mESC|E7.5_rep1|${EXPERIMENT_NAME}|${MM10_N_CHROMS}|mm10"
+    "mESC|E7.5_rep2|${EXPERIMENT_NAME}|${MM10_N_CHROMS}|mm10"
+    "mESC|E8.5_rep1|${EXPERIMENT_NAME}|${MM10_N_CHROMS}|mm10"
+    "mESC|E8.5_rep2|${EXPERIMENT_NAME}|${MM10_N_CHROMS}|mm10"
 
-    # "Macrophage|buffer_1|${EXPERIMENT_NAME}|${HG38_N_CHROMS}|hg38"
-    # "Macrophage|buffer_2|${EXPERIMENT_NAME}|${HG38_N_CHROMS}|hg38"
-    # "Macrophage|buffer_3|${EXPERIMENT_NAME}|${HG38_N_CHROMS}|hg38"
-    # "Macrophage|buffer_4|${EXPERIMENT_NAME}|${HG38_N_CHROMS}|hg38"
+    "Macrophage|buffer_1|${EXPERIMENT_NAME}|${HG38_N_CHROMS}|hg38"
+    "Macrophage|buffer_2|${EXPERIMENT_NAME}|${HG38_N_CHROMS}|hg38"
+    "Macrophage|buffer_3|${EXPERIMENT_NAME}|${HG38_N_CHROMS}|hg38"
+    "Macrophage|buffer_4|${EXPERIMENT_NAME}|${HG38_N_CHROMS}|hg38"
 
-    # "iPSC|WT_D13_rep1|${EXPERIMENT_NAME}|${HG38_N_CHROMS}|hg38"
+    "iPSC|WT_D13_rep1|${EXPERIMENT_NAME}|${HG38_N_CHROMS}|hg38"
 
     "K562|sample_1|${EXPERIMENT_NAME}|${HG38_N_CHROMS}|hg38"
 )
