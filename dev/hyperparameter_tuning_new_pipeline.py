@@ -590,15 +590,6 @@ def _run_experiments_on_gpu(
         f"current_device={current_device}"
     )
 
-    exp = experiment_handler.ExperimentHandler(
-        training_data_formatter=tdf,
-        experiment_dir=experiment_dir,
-        model_num=1,
-        silence_warnings=False,
-    )
-    if torch.cuda.is_available():
-        exp.device = torch.device("cuda:0")
-
     previous_experiments_df = pd.read_csv(summary_save_path) if summary_save_path.exists() else None
 
     experiment_dict["d_ff"] = [experiment_dict["d_model"][i] * 4 for i in range(num_experiments)]
@@ -609,6 +600,18 @@ def _run_experiments_on_gpu(
                 f"[Experiment {i+1}/{num_experiments}] Starting experiment with GPU {gpu_id} "
                 f"(pid={os.getpid()})..."
             )
+            
+            exp = experiment_handler.ExperimentHandler(
+                training_data_formatter=tdf,
+                experiment_dir=experiment_dir,
+                model_num=1,
+                silence_warnings=False,
+            )
+            if torch.cuda.is_available():
+                exp.device = torch.device("cuda:0")
+                
+            exp.model_num = i + 1
+            exp.model_training_dir = exp.experiment_dir / exp.experiment_name / f"model_training_{exp.model_num:03d}"
 
             log_file = log_dir / exp.experiment_name / f"model_training_{i+1:03d}.log"
             with exp.temp_log_file(log_file) as train_logger:
@@ -717,10 +720,6 @@ def _run_experiments_on_gpu(
                 )
                 
                 _log_train(f"Starting Training")
-                
-                exp.model_num = i + 1
-                exp.model_training_dir = exp.experiment_dir / exp.experiment_name / f"model_training_{exp.model_num:03d}"
-                
                 
                 if exp.model_training_dir.is_dir() and "trained_model.pt" in os.listdir(exp.model_training_dir):
                     _log_train(f"Trained model already exists. Skipping training...")

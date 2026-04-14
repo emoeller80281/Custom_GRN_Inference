@@ -432,7 +432,7 @@ if __name__ == "__main__":
             fig_dir=sample_processed_data_dir / "preprocessing_figures" / "atac_qc",
             )
         
-        if frag_path is None:
+        if frag_path is not None:
             logging.info("  - Calculating ATAC QC metrics...")
             data_processor.nucleosome_signal(
                 frag_path=frag_path, 
@@ -481,10 +481,6 @@ if __name__ == "__main__":
         processed_data_dir=processed_data_dir,
         training_data_cache=training_data_cache_dir
     )
-    
-    if tdf.settings_path.is_file():
-        logging.info(f"  - Loading existing preprocessing config from {tdf.settings_path}...")
-        tdf.load_settings()
     
     # Verify that the data cache files exist. If not, this method will create them.
     logging.info("  - Creating or verifying loading cache data files...")

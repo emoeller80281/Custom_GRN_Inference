@@ -1118,17 +1118,19 @@ if __name__ == "__main__":
         fig_dir=SAMPLE_PROCESSED_DATA_DIR / "preprocessing_figures" / "atac_qc",
         )
     
-    data_processor.nucleosome_signal(
-        frag_path=frag_path, 
-        fig_dir=SAMPLE_PROCESSED_DATA_DIR / "preprocessing_figures" / "atac_qc"
-        )
-    data_processor.tss_enrichment(
-        frag_path=frag_path, 
-        n_tss=500, 
-        extend_upstream=1000, 
-        extend_downstream=1000,
-        fig_dir=SAMPLE_PROCESSED_DATA_DIR / "preprocessing_figures" / "atac_qc"
-        )
+    if frag_path is not None and frag_path.exists():
+        data_processor.nucleosome_signal(
+            frag_path=frag_path, 
+            fig_dir=SAMPLE_PROCESSED_DATA_DIR / "preprocessing_figures" / "atac_qc"
+            )
+        
+        data_processor.tss_enrichment(
+            frag_path=frag_path, 
+            n_tss=500, 
+            extend_upstream=1000, 
+            extend_downstream=1000,
+            fig_dir=SAMPLE_PROCESSED_DATA_DIR / "preprocessing_figures" / "atac_qc"
+            )
     
     # Save the processed data
     save_processed_data(data_processor.mdata, SAMPLE_PROCESSED_DATA_DIR)

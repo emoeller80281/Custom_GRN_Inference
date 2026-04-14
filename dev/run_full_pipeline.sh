@@ -23,17 +23,17 @@ EXPERIMENT_OUTPUT_DIR="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERE
 TRAINING_DATA_CACHE_DIR="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/TRAINING_DATA_CACHE"
 
 EXPERIMENT_LIST=(
-    "mESC_E7.5_rep1_full_pipeline|E7.5_rep1|mm10|mESC"
-    "mESC_E7.5_rep2_full_pipeline|E7.5_rep2|mm10|mESC"
-    "mESC_E8.5_rep1_full_pipeline|E8.5_rep1|mm10|mESC"
-    "mESC_E8.5_rep2_full_pipeline|E8.5_rep2|mm10|mESC"
+    # "mESC_E7.5_rep1_full_pipeline|E7.5_rep1|mm10|mESC"
+    # "mESC_E7.5_rep2_full_pipeline|E7.5_rep2|mm10|mESC"
+    # "mESC_E8.5_rep1_full_pipeline|E8.5_rep1|mm10|mESC"
+    # "mESC_E8.5_rep2_full_pipeline|E8.5_rep2|mm10|mESC"
 
-    "Macrophage_buffer_1_full_pipeline|buffer_1|hg38|Macrophage"
-    "Macrophage_buffer_2_full_pipeline|buffer_2|hg38|Macrophage"
-    "Macrophage_buffer_3_full_pipeline|buffer_3|hg38|Macrophage"
-    "Macrophage_buffer_4_full_pipeline|buffer_4|hg38|Macrophage"
+    # "Macrophage_buffer_1_full_pipeline|buffer_1|hg38|Macrophage"
+    # "Macrophage_buffer_2_full_pipeline|buffer_2|hg38|Macrophage"
+    # "Macrophage_buffer_3_full_pipeline|buffer_3|hg38|Macrophage"
+    # "Macrophage_buffer_4_full_pipeline|buffer_4|hg38|Macrophage"
 
-    "iPSC_WT_D13_rep1_full_pipeline|WT_D13_rep1|hg38|iPSC"
+    # "iPSC_WT_D13_rep1_full_pipeline|WT_D13_rep1|hg38|iPSC"
 
     "K562_sample_1_full_pipeline|sample_1|hg38|K562"
 )

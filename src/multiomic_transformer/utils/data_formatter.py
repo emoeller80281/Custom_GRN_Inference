@@ -156,10 +156,14 @@ class TrainingDataFormatter:
         tg_name_file = self.file_paths["processed"]["tg_list"]
         peak_file = self.file_paths["processed"]["peak_list"]
         
-        self.genes = self.load_json(gene_file)
-        self.tf_names = self.load_json(tf_name_file)
-        self.tg_names = self.load_json(tg_name_file)
-        self.peaks = self.load_json(peak_file)
+        if Path(gene_file).is_file():
+            self.genes = self.load_json(gene_file) 
+        if Path(tf_name_file).is_file():
+            self.tf_names = self.load_json(tf_name_file)
+        if Path(tg_name_file).is_file():
+            self.tg_names = self.load_json(tg_name_file)
+        if Path(peak_file).is_file():
+            self.peaks = self.load_json(peak_file)
 
     def load_pseudobulk_rna_df(self, sample_name: str):
         assert sample_name in self.sample_names, \

@@ -2,14 +2,14 @@
 #SBATCH --job-name=hyperparameter_tuning
 #SBATCH --output=LOGS/transformer_logs/hyperparameter_tuning/%x_%A/%x_%A_%a.log
 #SBATCH --error=LOGS/transformer_logs/hyperparameter_tuning/%x_%A/%x_%A_%a.err
-#SBATCH --time=12:00:00
+#SBATCH --time=24:00:00
 #SBATCH -p dense
 #SBATCH -N 1
-#SBATCH --gres=gpu:4
+#SBATCH --gres=gpu:2
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 48
 #SBATCH --mem=128G
-#SBATCH --array=0%4
+#SBATCH --array=0%5
 
 set -eo pipefail
 
@@ -39,12 +39,12 @@ EXPERIMENT_LIST=(
     # "mESC|E8.5_rep1|${EXPERIMENT_NAME}|${MM10_N_CHROMS}|mm10"
     # "mESC|E8.5_rep2|${EXPERIMENT_NAME}|${MM10_N_CHROMS}|mm10"
 
-    "Macrophage|buffer_1|${EXPERIMENT_NAME}|${HG38_N_CHROMS}|hg38"
-    "Macrophage|buffer_2|${EXPERIMENT_NAME}|${HG38_N_CHROMS}|hg38"
-    "Macrophage|buffer_3|${EXPERIMENT_NAME}|${HG38_N_CHROMS}|hg38"
-    "Macrophage|buffer_4|${EXPERIMENT_NAME}|${HG38_N_CHROMS}|hg38"
+    # "Macrophage|buffer_1|${EXPERIMENT_NAME}|${HG38_N_CHROMS}|hg38"
+    # "Macrophage|buffer_2|${EXPERIMENT_NAME}|${HG38_N_CHROMS}|hg38"
+    # "Macrophage|buffer_3|${EXPERIMENT_NAME}|${HG38_N_CHROMS}|hg38"
+    # "Macrophage|buffer_4|${EXPERIMENT_NAME}|${HG38_N_CHROMS}|hg38"
 
-    "iPSC|WT_D13_rep1|${EXPERIMENT_NAME}|${HG38_N_CHROMS}|hg38"
+    # "iPSC|WT_D13_rep1|${EXPERIMENT_NAME}|${HG38_N_CHROMS}|hg38"
 
     "K562|sample_1|${EXPERIMENT_NAME}|${HG38_N_CHROMS}|hg38"
 )
@@ -87,7 +87,7 @@ SLURM_LOG_FILE="${PROJECT_SCRIPT_DIR}/LOGS/transformer_logs/hyperparameter_tunin
 SLURM_LOG_DIR="$(dirname "$SLURM_LOG_FILE")"
 
 # Keep model-training logs colocated with the SLURM task logs, but isolated per sample.
-MODEL_LOG_DIR="${SLURM_LOG_DIR}/${EXPERIMENT_HEADER}_${SAMPLE_NAME}"
+MODEL_LOG_DIR="${SLURM_LOG_DIR}"
 mkdir -p "$MODEL_LOG_DIR"
 
 echo "SLURM resolved log file: $SLURM_LOG_FILE"
