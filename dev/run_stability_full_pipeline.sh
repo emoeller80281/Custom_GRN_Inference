@@ -2,14 +2,14 @@
 #SBATCH --job-name=stability_full_pipeline
 #SBATCH --output=LOGS/transformer_logs/pipeline_logs/%x_%A/%x_%A_%a.log
 #SBATCH --error=LOGS/transformer_logs/pipeline_logs/%x_%A/%x_%A_%a.err
-#SBATCH --time=36:00:00
+#SBATCH --time=18:00:00
 #SBATCH -p dense
 #SBATCH -N 1
 #SBATCH --gres=gpu:a100:1
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 12
 #SBATCH --mem=64G
-#SBATCH --array=0-99%3
+#SBATCH --array=3-99%4
 
 set -eo pipefail
 
@@ -25,8 +25,8 @@ TRAINING_DATA_CACHE_DIR="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFE
 
 EXPERIMENT_LIST=(
     "mESC_E7.5_rep1_full_pipeline|E7.5_rep1|mm10|mESC"
-    "mESC_E7.5_rep2_full_pipeline|E7.5_rep2|mm10|mESC"
-    "mESC_E8.5_rep1_full_pipeline|E8.5_rep1|mm10|mESC"
+    # "mESC_E7.5_rep2_full_pipeline|E7.5_rep2|mm10|mESC"
+    # "mESC_E8.5_rep1_full_pipeline|E8.5_rep1|mm10|mESC"
     "mESC_E8.5_rep2_full_pipeline|E8.5_rep2|mm10|mESC"
 
     "Macrophage_buffer_1_full_pipeline|buffer_1|hg38|Macrophage"

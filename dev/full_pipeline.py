@@ -518,31 +518,41 @@ if __name__ == "__main__":
     # the hyperparameters of the model.
     logging.info("  - Creating model")
     exp.create_new_model(kernel_size=64)
+    
+    if exp.model_training_dir.is_dir() and "trained_model.pt" in os.listdir(exp.model_training_dir):
+        logging.info(f"Trained model already exists. Skipping training...")
+        exp.load_model()
+        exp.load_handler()
 
-    # Runs model training and returns the trained model.
-    logging.info("  - Training model")
-    model = exp.train(
-        train_loader=train_loader, 
-        val_loader=val_loader, 
-        num_epochs=500,
-        max_batches=None,
-        grad_accum_steps=1,
-        improvement_patience=15,
-        save_every_n_epochs=10,
-        monitor_gpu_memory=True,
-        profile_batches=True,
-        allow_overwrite=False,
-        silence_tqdm=True,
-        )
+    else:
+        exp._create_model_training_dir(allow_overwrite=True)
+        
+        exp.train(
+            train_loader=train_loader, 
+            val_loader=val_loader, 
+            num_epochs=500,
+            max_batches=None,
+            verbose=True,
+            grad_accum_steps=1,
+            improvement_patience=15,
+            save_every_n_epochs=10,
+            monitor_gpu_memory=True,
+            profile_batches=True,
+            allow_overwrite=False,
+            silence_tqdm=True,
+            )
 
-    logging.info("\n\n----- GRADIENT ATTRIBUTION -----")
-    # Runs gradient attribution to calculate the gradients between each TF input and each TG output.
-    logging.info("  - Running Gradient Attribution")
-    exp.run_gradient_attribution(
-        test_loader,
-        max_batches=None,
-        max_tgs_per_batch=None,
-        )
+    if "inferred_grn.csv" in os.listdir(exp.model_training_dir):
+        logging.info(f"Inferred GRN already exists. Skipping gradient attribution...")
+        exp.grn = exp.load_grn()
+    else:
+        logging.info("\n\n----- GRADIENT ATTRIBUTION -----")
+        logging.info(f"Starting gradient attribution for GRN inference")
+        exp.run_gradient_attribution(
+            test_loader,
+            max_batches=None,
+            max_tgs_per_batch=None,
+            )
     
     # ===== GROUND TRUTH LOADING AND AUROC CALCULATION =====
     logging.info("\n\n----- GROUND TRUTH LOADING AND AUROC CALCULATION -----")

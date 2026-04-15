@@ -943,8 +943,6 @@ def run_muon_preprocessing(
     muon_prep.create_metacells(data_processor.mdata, sample_processed_data_dir, hops=hops)
     logging.info("Muon Preprocessing complete.")
 
-
-
 PREPROCESSING_PARAM_KEYS = [
     "norm_target_sum",
     "min_rna_disp",
@@ -1037,9 +1035,9 @@ if __name__ == "__main__":
         "epochs": [400],
         "bias_scale": [0.0, 2.0],
         "num_layers": [3],
-        "num_heads": [4, 8],
-        "d_model": [128, 192],
-        "kernel_size": [128, 192],
+        "num_heads": [4],
+        "d_model": [128],
+        "kernel_size": [128],
         "dataloader_workers": [4],
         "max_cached": [250],
         "grad_attrib_batches": [None],
@@ -1053,8 +1051,8 @@ if __name__ == "__main__":
         "atac_neighbors": [10],
         "min_atac_hvg_mean": [0.01],
         "max_atac_hvg_mean": [10],
-        "filter_rna_hvgs": [False],
-        "filter_atac_hvgs": [False],
+        "filter_rna_hvgs": [False, True],
+        "filter_atac_hvgs": [False, True],
         "tf_list_file": [None],
         "promoter_upstream": [1000],
         "promoter_downstream": [100],
@@ -1069,6 +1067,12 @@ if __name__ == "__main__":
     experiment_dict = expand_experiment_dict_grid(experiment_dict)
     num_experiments = [max(len(v) for v in experiment_dict.values())][0]
     logging.info(f"Total experiments to run: {num_experiments}")
+    
+    # Save the experiment configuration to a CSV for reference
+    experiment_df = pd.DataFrame(experiment_dict)
+    hyperparam_grid_path = PROJECT_DIR / "dev" / "notebooks" / "benchmarking_results" / "hyperparameter_grids" / f"{experiment_name}_hyperparam_grid.csv"
+    hyperparam_grid_path.parent.mkdir(parents=True, exist_ok=True)
+    experiment_df.to_csv(hyperparam_grid_path, index=False)
 
     summary_save_path = PROJECT_DIR / "dev" / "notebooks" / "benchmarking_results" / f"{experiment_name}.csv"
     sample_raw_data_dir = raw_data_dir / f"{sample_type}_10x_raw" / sample_name
