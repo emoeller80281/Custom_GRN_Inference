@@ -346,6 +346,13 @@ class ExperimentHandler:
         # Load the model from disk
         if (self.model_training_dir / "trained_model.pt").exists():
             self.load_model()
+
+        # Prefer the ordered TF/TG name lists that match the global id space used by tf_ids/tg_ids.
+        tf_names_ordered_path = self.model_training_dir / "tf_names_ordered.json"
+        tg_names_ordered_path = self.model_training_dir / "tg_names_ordered.json"
+        if tf_names_ordered_path.exists() and tg_names_ordered_path.exists():
+            self.tf_names = self._load_json(tf_names_ordered_path)
+            self.tg_names = self._load_json(tg_names_ordered_path)
         
         if (self.model_training_dir / "epoch_log.csv").is_file():
             self.epoch_log_df = pd.read_csv(self.model_training_dir / "epoch_log.csv")
@@ -1134,9 +1141,16 @@ class ExperimentHandler:
 
         model = self.model if model is None else model
         max_batches = len(test_loader) if max_batches is None else max_batches
-        
+
         tf_names = self.tf_names
         tg_names = self.tg_names
+
+        tf_names_ordered_path = self.model_training_dir / "tf_names_ordered.json"
+        tg_names_ordered_path = self.model_training_dir / "tg_names_ordered.json"
+        if tf_names_ordered_path.exists() and tg_names_ordered_path.exists():
+            tf_names = self._load_json(tf_names_ordered_path)
+            tg_names = self._load_json(tg_names_ordered_path)
+
         device = self.device
         
         max_tgs_per_batch = len(tg_names) if max_tgs_per_batch is None else max_tgs_per_batch
@@ -1144,6 +1158,9 @@ class ExperimentHandler:
 
         T_total = len(tf_names)
         G_total = len(tg_names)
+
+        if T_total == 0 or G_total == 0:
+            raise ValueError("TF/TG name lists are empty; cannot run gradient attribution.")
         
         # Creates empty tensors to accumulate gradients across batches. The shape is [TF total, Genes total]
         grad_sum = torch.zeros(T_total, G_total, device=device, dtype=torch.float32)
@@ -1245,6 +1262,9 @@ class ExperimentHandler:
                     preds_u = tg_scaler.inverse_transform(preds_s, tg_ids_chunk) if tg_scaler is not None else preds_s
                     preds_u = torch.nan_to_num(preds_u.float(), nan=0.0, posinf=1e6, neginf=-1e6)
 
+                if device.type == "cuda":
+                    torch.cuda.synchronize()
+
                 grad_output_j = torch.zeros_like(preds_u)
 
                 for offset in range(preds_u.shape[1]):
@@ -1262,7 +1282,24 @@ class ExperimentHandler:
                     grad_abs = grads[..., 0].abs() if grads.dim() == 3 else grads.abs()
                     grad_flat = grad_abs.reshape(-1)
 
+                    if tf_ids_flat.numel() != grad_flat.numel():
+                        raise ValueError(
+                            f"TF gradient length mismatch: tf_ids_flat has {tf_ids_flat.numel()} elements, "
+                            f"but grad_flat has {grad_flat.numel()} elements"
+                        )
+
+                    tf_min = int(tf_ids_flat.min().item()) if tf_ids_flat.numel() > 0 else 0
+                    tf_max = int(tf_ids_flat.max().item()) if tf_ids_flat.numel() > 0 else -1
+                    if tf_min < 0 or tf_max >= T_total:
+                        raise IndexError(
+                            f"tf_ids_flat out of range for grad_sum with size {T_total}: min={tf_min}, max={tf_max}"
+                        )
+
                     tg_global = int(tg_ids_chunk[offset].item()) if tg_ids_chunk.dim() == 1 else int(tg_ids_chunk[0, offset].item())
+                    if tg_global < 0 or tg_global >= G_total:
+                        raise IndexError(
+                            f"tg_global out of range for grad_sum with size {G_total}: tg_global={tg_global}"
+                        )
 
                     grad_sum[:, tg_global].index_add_(0, tf_ids_flat, grad_flat)
                     grad_count[:, tg_global].index_add_(0, tf_ids_flat, torch.ones_like(grad_flat))
