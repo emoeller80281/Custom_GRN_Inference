@@ -169,7 +169,10 @@ class ExperimentHandler:
         self.num_heads = 4
         self.num_layers = 3
         self.d_ff = 512
-        self.kernel_size = 64
+        self.layer_1_kernel_size = 64
+        self.layer_1_stride = 32
+        self.layer_2_kernel_size = 32
+        self.layer_2_stride = 16
         self.dropout = 0.1
         self.bias_scale = 2.0
         self.use_dist_bias = True
@@ -246,7 +249,10 @@ class ExperimentHandler:
             "num_heads": self.num_heads,
             "num_layers": self.num_layers,
             "d_ff": self.d_ff,
-            "kernel_size": self.kernel_size,
+            "layer_1_kernel_size": self.layer_1_kernel_size,
+            "layer_1_stride": self.layer_1_stride,
+            "layer_2_kernel_size": self.layer_2_kernel_size,
+            "layer_2_stride": self.layer_2_stride,
             "dropout": self.dropout,
             "bias_scale": self.bias_scale,
             "use_dist_bias": self.use_dist_bias,
@@ -425,7 +431,10 @@ class ExperimentHandler:
             tg_vocab_size=tg_vocab_size,
             use_bias=self.use_dist_bias,
             bias_scale=self.bias_scale,
-            window_pool_size=self.kernel_size,
+            layer_1_kernel_size=128,
+            layer_1_stride=64,
+            layer_2_kernel_size=64,
+            layer_2_stride=32
         ).to(self.device)   
 
         return self.model
@@ -700,7 +709,7 @@ class ExperimentHandler:
             final_epoch = self.starting_epoch + num_epochs
             epoch_iter = range(self.starting_epoch, final_epoch)
 
-            if not verbose and not silence_tqdm:
+            if verbose and not silence_tqdm:
                 epoch_iter = tqdm(epoch_iter, desc="Training", ncols=100, unit="epoch", total=num_epochs)
 
             best_loss = float("inf")
@@ -750,7 +759,7 @@ class ExperimentHandler:
                         break
                     t1 = time.perf_counter()
 
-                    atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids, _ = batch
+                    atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids = batch
 
                     if self.device.type == "cuda":
                         torch.cuda.synchronize()
@@ -992,7 +1001,10 @@ class ExperimentHandler:
             "tg_vocab_size": self.model.tg_vocab_size,
             "use_bias": self.model.use_bias,
             "bias_scale": self.model.bias_scale,
-            "window_pool_size": self.model.window_pool_size,
+            "layer_1_kernel_size": self.model.layer_1_kernel_size,
+            "layer_1_stride": self.model.layer_1_stride,
+            "layer_2_kernel_size": self.model.layer_2_kernel_size,
+            "layer_2_stride": self.model.layer_2_stride,
         }
                 
         training_state = {
@@ -1028,7 +1040,7 @@ class ExperimentHandler:
 
         with torch.no_grad():
             for batch in val_loader:
-                atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids, _ = batch
+                atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids = batch
 
                 atac_wins = atac_wins.to(device, non_blocking=True)
                 tf_tensor = tf_tensor.to(device, non_blocking=True)
@@ -1160,14 +1172,13 @@ class ExperimentHandler:
             if max_batches is not None and b_idx >= max_batches:
                 break
 
-            atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids, motif_mask = batch
+            atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids = batch
             
             atac_wins = atac_wins.to(device)
             tf_tensor = tf_tensor.to(device)
             bias = bias.to(device) if bias is not None else None
             tf_ids = tf_ids.to(device)
             tg_ids = tg_ids.to(device)
-            motif_mask = motif_mask.to(device) if motif_mask is not None else None
 
             # Shapes
             if tf_tensor.dim() == 2:
@@ -1383,14 +1394,13 @@ class ExperimentHandler:
 
                 metacell_names = [dataset.metacell_names[i] for i in col_indices]
                 
-                atac_wins, tf_tensor, tg_expr_true, bias, tf_ids, tg_ids, motif_mask = batch
+                atac_wins, tf_tensor, tg_expr_true, bias, tf_ids, tg_ids = batch
                 atac_wins    = atac_wins.to(device, non_blocking=True)
                 tf_tensor    = tf_tensor.to(device, non_blocking=True)
                 tg_expr_true = tg_expr_true.to(device, non_blocking=True)
                 bias         = bias.to(device, non_blocking=True)
                 tf_ids       = tf_ids.to(device, non_blocking=True)
                 tg_ids       = tg_ids.to(device, non_blocking=True)
-                motif_mask   = motif_mask.to(device, non_blocking=True)   
                 
                 if getattr(self, "tf_scaler", None) is not None:
                     tf_tensor = self.tf_scaler.transform(tf_tensor, tf_ids)

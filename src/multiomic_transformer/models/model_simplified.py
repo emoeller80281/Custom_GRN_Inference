@@ -137,19 +137,53 @@ class AttentionPooling(nn.Module):
         return pooled, weights
 
 class WindowDownsampler(nn.Module):
-    def __init__(self, in_channels=1, out_channels=32, kernel_size=4, stride=4):
+    def __init__(
+        self, 
+        in_channels=1, 
+        layer_1_kernel_size=128, 
+        layer_1_stride=64,
+        intermediate_channels=256,
+        layer_2_kernel_size=64,
+        layer_2_stride=32,
+        out_channels=128,
+        ):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Conv1d(in_channels, out_channels, kernel_size=kernel_size, stride=stride),
+            nn.Conv1d(
+                in_channels, 
+                intermediate_channels, 
+                kernel_size=layer_1_kernel_size, 
+                stride=layer_1_stride
+                ),
             nn.GELU(),
-            nn.Conv1d(out_channels, 1, kernel_size=1),
+            nn.Conv1d(
+                intermediate_channels, 
+                out_channels, 
+                kernel_size=layer_2_kernel_size, 
+                stride=layer_2_stride
+                ),   
+            
         )
 
     def forward(self, atac_wins):
+        # Accept [W], [W, 1], [B, W], or [B, W, 1] and normalize to [B, W, 1].
+        if atac_wins.dim() == 1:
+            atac_wins = atac_wins.unsqueeze(0).unsqueeze(-1)
+        elif atac_wins.dim() == 2:
+            if atac_wins.size(-1) == 1:
+                atac_wins = atac_wins.unsqueeze(0)
+            else:
+                atac_wins = atac_wins.unsqueeze(-1)
+        elif atac_wins.dim() != 3:
+            raise ValueError(f"atac_wins must have shape [W], [W, 1], [B, W], or [B, W, 1], got {tuple(atac_wins.shape)}")
+
+        if atac_wins.size(-1) != 1:
+            raise ValueError(f"Expected a single ATAC channel in the last dimension, got {tuple(atac_wins.shape)}")
+
         # atac_wins: [B, W, 1]
         x = atac_wins.transpose(1, 2).contiguous()   # [B, 1, W]
-        x = self.net(x)                 # [B, 1, W_new]
-        return x.transpose(1, 2).contiguous()        # [B, W_new, 1]
+        x = self.net(x)                                # [B, C_out, W_new]
+        return x.transpose(1, 2).contiguous()         # [B, W_new, C_out]
 
 class MultiomicTransformer(nn.Module):
     def __init__(self, 
@@ -162,7 +196,10 @@ class MultiomicTransformer(nn.Module):
                 tg_vocab_size, 
                 bias_scale=2.0,
                 use_bias=True,
-                window_pool_size=4,
+                layer_1_kernel_size=4,
+                layer_1_stride=4,
+                layer_2_kernel_size=4,
+                layer_2_stride=4,
                  ):
         super().__init__()
         
@@ -175,7 +212,10 @@ class MultiomicTransformer(nn.Module):
         self.tg_vocab_size = tg_vocab_size
         self.use_bias = use_bias
         self.bias_scale = bias_scale
-        self.window_pool_size = window_pool_size
+        self.layer_1_kernel_size = layer_1_kernel_size
+        self.layer_1_stride = layer_1_stride
+        self.layer_2_kernel_size = layer_2_kernel_size
+        self.layer_2_stride = layer_2_stride
 
         # TF and TG embedding tables - generates identities for TFs and TGs
         self.tf_identity_emb = nn.Embedding(self.tf_vocab_size, d_model)
@@ -183,20 +223,19 @@ class MultiomicTransformer(nn.Module):
         
         # ATAC windows do not have embeddings, their position and accessibility
         # are used to inform TFs and TGs
-        self.window_downsampler = WindowDownsampler(kernel_size=self.window_pool_size, stride=self.window_pool_size)
-        
+        self.window_downsampler = WindowDownsampler(
+            in_channels=1, 
+            layer_1_kernel_size=self.layer_1_kernel_size, 
+            layer_1_stride=self.layer_1_stride,
+            intermediate_channels=2*d_model,
+            layer_2_kernel_size=self.layer_2_kernel_size,
+            layer_2_stride=self.layer_2_stride,
+            out_channels=d_model,
+            )
+
         # TF dense layer - Projects the TF RNA-seq expression data to [n_tfs x d_model]
         self.tf_expr_dense_input_layer = nn.Sequential(
             nn.Linear(1, d_ff),        # Projects each TF independently
-            nn.SiLU(),
-            nn.Dropout(dropout),
-            nn.Linear(d_ff, d_model, bias=False),
-            nn.LayerNorm(d_model)
-        )
-        
-        # ATAC dense layer - Projects the ATAC window accessibility to [n_windows x d_model]
-        self.atac_acc_dense_input_layer = nn.Sequential(
-            nn.Linear(1, d_ff), 
             nn.SiLU(),
             nn.Dropout(dropout),
             nn.Linear(d_ff, d_model, bias=False),
@@ -300,7 +339,8 @@ class MultiomicTransformer(nn.Module):
         device = atac_windows.device
         
         # ----- ATAC encoding -----
-        win_emb = self.atac_acc_dense_input_layer(atac_windows)       # [batch_size,n_window,d_model]
+        # WindowDownsampler acts as both sequence downsampler and ATAC embedding layer.
+        win_emb = atac_windows                                         # [batch_size,n_window,d_model]
         
         # Add positional encoding
         pos = torch.arange(n_window, device=device, dtype=torch.float32)
@@ -348,12 +388,8 @@ class MultiomicTransformer(nn.Module):
             elif bias.dim() != 3:
                 raise ValueError(f"bias must have shape [G,W] or [B,G,W], got {bias.shape}")
 
-            bias = F.avg_pool1d(
-                bias,
-                kernel_size=self.window_pool_size,
-                stride=self.window_pool_size,
-                ceil_mode=False,
-            )  # [1, G, W_new] or [B, G, W_new]
+            # Match bias length to downsampled ATAC length regardless of pooling factor.
+            bias = F.adaptive_avg_pool1d(bias, win_emb.shape[1])  # [1, G, W_new] or [B, G, W_new]
 
             # final safety alignment
             target_w = win_emb.shape[1]

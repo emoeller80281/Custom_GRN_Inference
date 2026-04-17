@@ -90,7 +90,7 @@ def fit_simple_scalers(
 
     for batch in train_loader:
         # unpack like your collate_fn returns
-        atac_wins, tf_tensor, tg_tensor, bias, tf_ids, tg_ids, motif_mask = batch
+        atac_wins, tf_tensor, tg_tensor, bias, tf_ids, tg_ids = batch
         
         # move minimal things to GPU to sum efficiently, then bring back to CPU
         tf_tensor = tf_tensor.to(device_for_reduce, non_blocking=True)   # [B,T_eval]
@@ -170,7 +170,7 @@ def fit_simple_scalers_fast_gpu(
         if max_batches is not None and batch_idx >= max_batches:
             break
         
-        atac_wins, tf_tensor, tg_tensor, bias, tf_ids, tg_ids, motif_mask = batch
+        atac_wins, tf_tensor, tg_tensor, bias, tf_ids, tg_ids = batch
 
         # --- move to GPU once ---
         tf_tensor = tf_tensor.to(device=device, dtype=torch.float32, non_blocking=True)
@@ -650,7 +650,6 @@ class MultiomicTransformerDataset(Dataset):
         tf_names_json   = self.data_dir / f"tf_names.json"
         tg_names_json   = chrom_dir / f"tg_names_{chrom_id}.json"
         metacell_names_path = self.data_dir / "metacell_names.json"
-        motif_mask_path = chrom_dir / f"motif_mask_{chrom_id}.pt"
 
         required = [
             tf_path, tg_path, atac_path,
@@ -698,12 +697,6 @@ class MultiomicTransformerDataset(Dataset):
                 raise ValueError(f"dist_bias_{chrom_id}.pt shape mismatch: {tuple(bias_WG.shape)}")
         else:
             self.dist_bias_tensor = None
-            
-        # Load Motif Mask tensor
-        if motif_mask_path.exists():
-            self.motif_mask_tensor = torch.load(motif_mask_path, weights_only=True).bool()
-        else:
-            self.motif_mask_tensor = torch.zeros((self.tg_ids.numel(), self.tf_ids.numel()), dtype=torch.float32)
 
         # Optional: restrict to a subset of cells (column indices)
         if cell_idx is not None:
@@ -728,12 +721,6 @@ class MultiomicTransformerDataset(Dataset):
             dist_bias = self.dist_bias_tensor                     # [G_eval, W]
         else:
             dist_bias = torch.zeros((self.tg_ids.numel(), self.num_windows), dtype=torch.float32)
-            
-        # Motif mask
-        if self.motif_mask_tensor is not None:
-            motif_mask = self.motif_mask_tensor                       # [G_eval, T_eval]
-        else:
-            motif_mask = torch.zeros((self.tg_ids.numel(), self.tf_ids.numel()), dtype=torch.float32)
 
         return (
             atac_wins,
@@ -742,7 +729,6 @@ class MultiomicTransformerDataset(Dataset):
             dist_bias,
             self.tf_ids,
             self.tg_ids,
-            motif_mask,
         )
 
     def set_cell_idx(self, cell_idx: np.ndarray):
@@ -794,9 +780,8 @@ class MultiomicTransformerDataset(Dataset):
         bias:       [G_eval, W]          # shared across batch
         tf_ids:     [T_eval]
         tg_ids:     [G_eval]
-        motif_mask: [G_eval, T_eval]     # shared across batch, if also invariant
         """
-        atac_list, tf_list, tg_list, bias_list, tf_ids_list, tg_ids_list, mask_list = zip(*batch)
+        atac_list, tf_list, tg_list, bias_list, tf_ids_list, tg_ids_list = zip(*batch)
 
         atac_wins = torch.stack(atac_list, dim=0)
         tf_tensor = torch.stack(tf_list,  dim=0)
@@ -807,9 +792,8 @@ class MultiomicTransformerDataset(Dataset):
 
         # shared across the batch
         bias = bias_list[0]
-        motif_mask = mask_list[0]
 
-        return atac_wins, tf_tensor, tg_tensor, bias, tf_ids, tg_ids, motif_mask
+        return atac_wins, tf_tensor, tg_tensor, bias, tf_ids, tg_ids
     
     def standardize_name(self, name: str) -> str:
         """Convert gene/motif name to capitalization style (e.g. 'Hoxa2')."""

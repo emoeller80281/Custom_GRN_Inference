@@ -443,16 +443,6 @@ class TrainingDataFormatter:
             self.tf_names, tf_vocab, tf_tensor_all, label="TF"
         )
         
-        # Create/load genome-wide windows once
-        logging.debug("Loading genome-wide genomic windows")
-        all_genome_windows = self.create_or_load_genomic_windows(
-            window_size=self.window_size,
-            chrom_sizes_file=self.file_paths["genome"]["chrom_sizes"],
-            genome_window_file=self.file_paths["training_cache"]["common"]["genome_windows"],
-            force_recalculate=force_recalculate,
-            chrom_id=None,
-        )
-        
         # Save the TF tensor, TF IDs, TF names, and metacell names for global use across chromosomes
         if not force_recalculate and all(p.is_file() for p in [global_tf_tensor_path, global_tf_ids_path, global_tf_names_path, global_metacell_path]):
             if not self.silence_logs:
@@ -463,6 +453,16 @@ class TrainingDataFormatter:
             
             self.atomic_json_dump(tf_names_kept, global_tf_names_path)
             self.atomic_json_dump(total_TG_pseudobulk_global.columns.tolist(), global_metacell_path)
+            
+        # Create/load genome-wide windows once
+        logging.info("  - Loading genome-wide genomic windows")
+        all_genome_windows = self.create_or_load_genomic_windows(
+            window_size=self.window_size,
+            chrom_sizes_file=self.file_paths["genome"]["chrom_sizes"],
+            genome_window_file=self.file_paths["training_cache"]["common"]["genome_windows"],
+            force_recalculate=force_recalculate,
+            chrom_id=None,
+        )
         
         if not self.silence_logs:
             logging.info(f"  - Number of chromosomes: {len(self.chrom_list)}: {self.chrom_list}")
@@ -543,6 +543,12 @@ class TrainingDataFormatter:
                 peaks_bed=total_peaks_df,
                 windows_bed=genome_windows,
             )
+            # build_distance_bias expects one window index per peak_id
+            window_map_for_bias = {
+                peak_id: win_list[0]
+                for peak_id, win_list in window_map.items()
+                if len(win_list) > 0
+            }
             window_map_time_end = time.time()
             window_map_time = window_map_time_end - window_map_time_start
 
@@ -573,7 +579,7 @@ class TrainingDataFormatter:
             dist_bias_time_start = time.time()
             dist_bias, new_window_map, kept_window_indices = self.build_distance_bias(
                 genes_near_peaks=genes_near_peaks,
-                window_map=window_map,
+                window_map=window_map_for_bias,
                 tg_names_kept=tg_names_kept,
                 num_windows=num_windows,
                 dtype=torch.float32,
@@ -753,9 +759,9 @@ class TrainingDataFormatter:
 
         return all_windows
         
-    def make_peak_to_window_map(self, peaks_bed: pd.DataFrame, windows_bed: pd.DataFrame) -> dict[str, int]:
+    def make_peak_to_window_map(self, peaks_bed: pd.DataFrame, windows_bed: pd.DataFrame) -> dict[str, list[int]]:
         """
-        Map each peak to the window it overlaps the most.
+        Map each peak to all windows it overlaps.
         Ensures the BedTool 'name' field is exactly the `peak_id` column.
         Parameters
         ----------
@@ -765,8 +771,8 @@ class TrainingDataFormatter:
             DataFrame of genomic windows, with columns "chrom", "start", "end", "win_idx".
         Returns
         -------
-        dict[str, int]
-            Mapping of peak_id to win_idx, with the peak_id as key and the win_idx as value.
+        dict[str, list[int]]
+            Mapping of peak_id to a list of overlapping win_idx values.
         """
         
         pb = peaks_bed.copy()
@@ -796,7 +802,7 @@ class TrainingDataFormatter:
         wb["win_idx"] = wb["win_idx"].astype(int)
         bedtool_windows = pybedtools.BedTool.from_dataframe(wb[["chrom", "start", "end", "win_idx"]])
 
-        overlaps = {}
+        overlaps: dict[str, set[int]] = {}
         for iv in bedtool_peaks.intersect(bedtool_windows, wa=True, wb=True):
             # left fields (peak): chrom, start, end, name
             peak_id = iv.name  # guaranteed to be the 'name' we set = peak_id
@@ -809,16 +815,13 @@ class TrainingDataFormatter:
 
             if overlap_len <= 0:
                 continue
-            overlaps.setdefault(peak_id, []).append((overlap_len, win_idx))
+            overlaps.setdefault(str(peak_id), set()).add(int(win_idx))
 
-        # resolve ties by max-overlap then random
-        mapping = {}
-        for pid, lst in overlaps.items():
-            if not lst: 
-                continue
-            max_ol = max(lst, key=lambda x: x[0])[0]
-            candidates = [w for ol, w in lst if ol == max_ol]
-            mapping[str(pid)] = int(random.choice(candidates))
+        mapping: dict[str, list[int]] = {
+            pid: sorted(win_idxs)
+            for pid, win_idxs in overlaps.items()
+            if len(win_idxs) > 0
+        }
 
         return mapping
    
@@ -875,10 +878,19 @@ class TrainingDataFormatter:
         peak_to_idx = {p: i for i, p in enumerate(total_RE_pseudobulk_chr.index)}
         for peak_id, win_idx in window_map.items():
             peak_idx = peak_to_idx.get(peak_id)
-            if peak_idx is not None and 0 <= win_idx < num_windows:
-                rows.append(win_idx)
-                cols.append(peak_idx)
-                vals.append(1.0)
+            if peak_idx is None:
+                continue
+
+            if isinstance(win_idx, (list, tuple, set, np.ndarray)):
+                win_indices = win_idx
+            else:
+                win_indices = [win_idx]
+
+            for w in set(int(x) for x in win_indices):
+                if 0 <= w < num_windows:
+                    rows.append(w)
+                    cols.append(peak_idx)
+                    vals.append(1.0)
 
         if not rows:
             logging.warning("No peaks from window_map matched rows in total_RE_pseudobulk_chr. Returning None.")
@@ -886,7 +898,15 @@ class TrainingDataFormatter:
             return None, None, None
 
         W = sp.csr_matrix((vals, (rows, cols)), shape=(num_windows, num_peaks))
-        atac_window = W @ total_RE_pseudobulk_chr.values  # [num_windows, num_cells]
+        atac_window_sum = W @ total_RE_pseudobulk_chr.values  # [num_windows, num_cells]
+
+        # Average over intersecting peaks per window to preserve scale.
+        window_peak_counts = np.asarray(W.sum(axis=1)).reshape(-1, 1)
+        nonzero = window_peak_counts[:, 0] > 0
+        atac_window = np.zeros_like(atac_window_sum, dtype=np.float32)
+        atac_window[nonzero] = (
+            atac_window_sum[nonzero] / window_peak_counts[nonzero, :]
+        ).astype(np.float32)
 
         atac_window_tensor_all = torch.as_tensor(
             atac_window.astype(np.float32), dtype=dtype
@@ -991,7 +1011,7 @@ class TrainingDataFormatter:
         device: Optional[torch.device] = None,
         mode: str = "logsumexp",   # "max" | "sum" | "mean" | "logsumexp"
         prune_empty_windows: bool = True,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, int], List[int]]]:
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, int], Optional[List[int]]]]:
         """
         Build a [num_windows x num_tg_kept] (or pruned) distance-bias tensor aligned to the kept TGs.
 
@@ -1104,28 +1124,35 @@ class TrainingDataFormatter:
         if not prune_empty_windows:
             dist_bias_np = np.zeros((num_windows, num_tg_kept), dtype=np.float32)
             dist_bias_np[win_idx_arr, tg_idx_arr] = values
-            return torch.as_tensor(dist_bias_np, dtype=dtype, device=device)
 
-        # Prune to only used windows
-        used_windows = np.sort(np.unique(win_idx_arr))
-        old2new_arr = np.full(num_windows, -1, dtype=np.int64)
-        old2new_arr[used_windows] = np.arange(len(used_windows), dtype=np.int64)
+            # Keep original window coordinates: no remapping, no subsetting.
+            new_window_map = {
+                str(peak_id): int(old_idx)
+                for peak_id, old_idx in window_map.items()
+                if 0 <= old_idx < num_windows
+            }
+            return torch.as_tensor(dist_bias_np, dtype=dtype, device=device), new_window_map, None
+        else:
+            # Prune to only used windows
+            used_windows = np.sort(np.unique(win_idx_arr))
+            old2new_arr = np.full(num_windows, -1, dtype=np.int64)
+            old2new_arr[used_windows] = np.arange(len(used_windows), dtype=np.int64)
 
-        new_win_idx_arr = old2new_arr[win_idx_arr]
+            new_win_idx_arr = old2new_arr[win_idx_arr]
 
-        dist_bias_np = np.zeros((len(used_windows), num_tg_kept), dtype=np.float32)
-        dist_bias_np[new_win_idx_arr, tg_idx_arr] = values
+            dist_bias_np = np.zeros((len(used_windows), num_tg_kept), dtype=np.float32)
+            dist_bias_np[new_win_idx_arr, tg_idx_arr] = values
 
-        used_window_set = set(int(w) for w in used_windows.tolist())
-        new_window_map = {
-            str(peak_id): int(old2new_arr[old_idx])
-            for peak_id, old_idx in window_map.items()
-            if 0 <= old_idx < num_windows and old_idx in used_window_set
-        }
+            used_window_set = set(int(w) for w in used_windows.tolist())
+            new_window_map = {
+                str(peak_id): int(old2new_arr[old_idx])
+                for peak_id, old_idx in window_map.items()
+                if 0 <= old_idx < num_windows and old_idx in used_window_set
+            }
 
-        kept_window_indices = used_windows.tolist()
+            kept_window_indices = used_windows.tolist()
 
-        return torch.as_tensor(dist_bias_np, dtype=dtype, device=device), new_window_map, kept_window_indices
+            return torch.as_tensor(dist_bias_np, dtype=dtype, device=device), new_window_map, kept_window_indices
     
     @staticmethod
     def normalize_peak_format(peak_id: str) -> str:
@@ -1223,6 +1250,7 @@ class TrainingDataFormatter:
         # ----- PROCESSED DATA DIRECTORY -----
         if self.processed_data_dir is None:
             self.processed_data_dir = self.project_dir / "data" / "processed" / self.experiment_name
+        self.processed_data_dir.mkdir(parents=True, exist_ok=True)
 
         self.file_paths["processed"] = {
             "base_dir": self.processed_data_dir,
@@ -1237,7 +1265,7 @@ class TrainingDataFormatter:
         # ----- TRAINING CACHE -----
         if self.training_data_cache is None:
             self.training_data_cache = self.project_dir / "data" / "training_data_cache"
-            
+        self.training_data_cache.mkdir(parents=True, exist_ok=True)
         sample_cache_dir = self.training_data_cache / self.experiment_name
         common_data = sample_cache_dir / "common"
         
