@@ -484,7 +484,7 @@ if __name__ == "__main__":
     
     # Verify that the data cache files exist. If not, this method will create them.
     logging.info("  - Creating or verifying loading cache data files...")
-    tdf.create_or_load_data_cache(sample_name=sample_name, force_recalculate=True)
+    tdf.create_or_load_data_cache(sample_name=sample_name, force_recalculate=False)
 
     logging.info("\n----- MODEL TRAINING -----")
     logging.info("  - Initializing ExperimentHandler...")

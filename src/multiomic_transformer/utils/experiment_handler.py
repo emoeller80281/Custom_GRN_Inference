@@ -1125,8 +1125,9 @@ class ExperimentHandler:
         model = self.model if model is None else model
         max_batches = len(test_loader) if max_batches is None else max_batches
         
-        tf_names = self.tf_names
-        tg_names = self.tg_names
+        dataset = getattr(test_loader, "dataset", None)
+        tf_names = getattr(dataset, "tf_names", self.tf_names)
+        tg_names = getattr(dataset, "tg_names", self.tg_names)
         device = self.device
         
         max_tgs_per_batch = len(tg_names) if max_tgs_per_batch is None else max_tgs_per_batch
@@ -1183,11 +1184,34 @@ class ExperimentHandler:
                     # [G, W] -> [1, G, W]
                     bias = bias.unsqueeze(0)
 
-            # Flatten TF IDs over batch for aggregation later
-            if tf_ids.dim() == 1:  # [T_eval]
-                tf_ids_flat = tf_ids.view(1, T_eval).expand(B, T_eval).reshape(-1)
-            else:                  # [B, T_eval]
-                tf_ids_flat = tf_ids.reshape(-1)
+            # Normalize ID tensors to 1D global vocab indices.
+            tf_ids_flat = tf_ids.reshape(-1).long()
+            tg_ids_flat = tg_ids.reshape(-1).long()
+
+            if tf_ids_flat.numel() != T_eval:
+                raise ValueError(
+                    f"Unexpected TF id count: got {tf_ids_flat.numel()} ids for T_eval={T_eval}"
+                )
+            if tg_ids_flat.numel() != tg_ids.shape[-1]:
+                raise ValueError(
+                    f"Unexpected TG id count: got {tg_ids_flat.numel()} ids for G_eval={tg_ids.shape[-1]}"
+                )
+
+            if tf_ids_flat.numel() > 0:
+                tf_min = int(tf_ids_flat.min().item())
+                tf_max = int(tf_ids_flat.max().item())
+                if tf_min < 0 or tf_max >= T_total:
+                    raise ValueError(
+                        f"TF ids out of range for attribution: min={tf_min}, max={tf_max}, expected [0, {T_total - 1}]"
+                    )
+
+            if tg_ids_flat.numel() > 0:
+                tg_min = int(tg_ids_flat.min().item())
+                tg_max = int(tg_ids_flat.max().item())
+                if tg_min < 0 or tg_max >= G_total:
+                    raise ValueError(
+                        f"TG ids out of range for attribution: min={tg_min}, max={tg_max}, expected [0, {G_total - 1}]"
+                    )
 
             G_eval = tg_ids.shape[-1]
 
@@ -1214,10 +1238,7 @@ class ExperimentHandler:
                 else:
                     bias_chunk = None
 
-                if tg_ids.dim() == 1:
-                    tg_ids_chunk = tg_ids[tg_chunk]
-                else:
-                    tg_ids_chunk = tg_ids[:, tg_chunk]
+                tg_ids_chunk = tg_ids_flat.index_select(0, tg_chunk)
 
                 tf_tensor_chunk = tf_tensor.detach().clone().requires_grad_(True)
 
@@ -1251,12 +1272,26 @@ class ExperimentHandler:
                     )[0]
 
                     grad_abs = grads[..., 0].abs() if grads.dim() == 3 else grads.abs()
-                    grad_flat = grad_abs.reshape(-1)
 
-                    tg_global = int(tg_ids_chunk[offset].item()) if tg_ids_chunk.dim() == 1 else int(tg_ids_chunk[0, offset].item())
+                    # Aggregate over batch so source length matches TF id vector length [T_eval].
+                    if grad_abs.dim() == 2:
+                        grad_per_tf = grad_abs.sum(dim=0)
+                        count_per_tf = torch.full(
+                            (grad_per_tf.numel(),),
+                            float(grad_abs.shape[0]),
+                            device=device,
+                            dtype=grad_count.dtype,
+                        )
+                    elif grad_abs.dim() == 1:
+                        grad_per_tf = grad_abs
+                        count_per_tf = torch.ones_like(grad_per_tf, dtype=grad_count.dtype)
+                    else:
+                        raise ValueError(f"Unexpected gradient shape in attribution: {tuple(grad_abs.shape)}")
 
-                    grad_sum[:, tg_global].index_add_(0, tf_ids_flat, grad_flat)
-                    grad_count[:, tg_global].index_add_(0, tf_ids_flat, torch.ones_like(grad_flat))
+                    tg_global = int(tg_ids_chunk[offset].item())
+
+                    grad_sum[:, tg_global].index_add_(0, tf_ids_flat, grad_per_tf)
+                    grad_count[:, tg_global].index_add_(0, tf_ids_flat, count_per_tf)
                     
                 # cleanup per chunk
                 del (
