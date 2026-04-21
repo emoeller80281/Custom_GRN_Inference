@@ -27,28 +27,7 @@ from multiomic_transformer.utils.peaks import format_peaks, find_genes_near_peak
 
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 
-def load_tdf(settings_path: Path):
-    if not Path(settings_path).is_file():
-        raise FileNotFoundError(f"Settings file not found at {settings_path}")
-    
-    with open(settings_path, "r") as f:
-        settings = json.load(f)
-    
-    tdf = TrainingDataFormatter(
-        project_dir=Path(settings["project_dir"]),
-        experiment_name=settings["experiment_name"],
-        organism_code=settings["organism_code"],
-        sample_names=settings["sample_names"],
-        chrom_list=settings["chrom_list"],
-        processed_data_dir=Path(settings["processed_data_dir"]),
-        output_dir=Path(settings["output_dir"]),
-        silence_warnings=settings.get("silence_warnings", True),
-        silence_logs=settings.get("silence_logs", False),
-    )
-    
-    tdf.load_settings()
-    
-    return tdf
+
 
 class TrainingDataFormatter:
     def __init__(
@@ -105,7 +84,7 @@ class TrainingDataFormatter:
         else:
             self.load_settings()
             if not self.silence_logs:
-                logging.info(f"Loaded existing settings from {self.settings_path}")
+                logging.info(f"{self.experiment_name}: Loaded existing settings")
 
         self.peak_locs_df = None
         
@@ -372,7 +351,12 @@ class TrainingDataFormatter:
 
     def _load_re_pseudobulk(self, sample_name: str) -> pd.DataFrame:
         re_path = self.file_paths["processed"]["base_dir"] / sample_name / "RE_pseudobulk.parquet"
-        return pd.read_parquet(re_path, engine="pyarrow")
+        re_df = pd.read_parquet(re_path, engine="pyarrow")
+
+        if not re_df.empty:
+            re_df.index = re_df.index.map(self.normalize_peak_format)
+        
+        return re_df
 
 
     def _get_genes_on_chromosome(self, chrom_id: str) -> list[str]:
@@ -394,15 +378,10 @@ class TrainingDataFormatter:
 
 
     def _build_peaks_df(self, peak_index: pd.Index) -> pd.DataFrame:
-        peaks_df = (
-            peak_index.to_series()
-            .str.split("[-:]", n=2, expand=True, regex=True)
-            .rename(columns={0: "chrom", 1: "start", 2: "end"})
-        )
-        peaks_df["start"] = peaks_df["start"].astype(int)
-        peaks_df["end"] = peaks_df["end"].astype(int)
-        peaks_df["peak_id"] = peak_index.astype(str)
-        return peaks_df
+        if len(peak_index) == 0:
+            return pd.DataFrame(columns=["chrom", "start", "end", "peak_id"])
+
+        return self._build_peak_locs_from_index(peak_index)
 
 
     @staticmethod
@@ -1130,11 +1109,26 @@ class TrainingDataFormatter:
     @staticmethod
     def normalize_peak_format(peak_id: str) -> str:
         """
-        Normalize peak format from chrN-start-end or chrN:start:end to chrN:start-end.
-        Handles both formats as input and always outputs chrN:start-end.
+        Normalize peak format to chr:start-end.
+
+        Handles inputs like:
+        - hg38.chr1:100-200
+        - hg38.chr1-100-200
+        - chr1:100-200
+        - chr1-100-200
+
+        Always returns the canonical chr:start-end form.
         """
         if not isinstance(peak_id, str):
             return peak_id
+
+        peak_id = peak_id.strip()
+
+        # Remove assembly prefixes like 'hg38.' or 'mm10.' if present.
+        if "." in peak_id:
+            prefix, rest = peak_id.split(".", 1)
+            if rest.startswith("chr"):
+                peak_id = rest
         
         # Try to parse chr-start-end format (with dashes)
         parts = peak_id.split('-')
@@ -1711,4 +1705,33 @@ class TrainingDataFormatter:
             if num_missing != 0 and not self.silence_warnings:
                 logging.warning(f"After attempted creation, {num_missing} required files are still missing.")
         
-        
+
+def load_tdf(settings_path: Path, verbose: bool = True):
+    if not Path(settings_path).is_file():
+        raise FileNotFoundError(f"Settings file not found at {settings_path}")
+    
+    with open(settings_path, "r") as f:
+        settings = json.load(f)
+    
+    if verbose:
+        silence_logs = settings.get("silence_logs", False)
+    else:
+        silence_logs = True
+    
+    tdf = TrainingDataFormatter(
+        project_dir=Path(settings["project_dir"]),
+        experiment_name=settings["experiment_name"],
+        organism_code=settings["organism_code"],
+        sample_names=settings["sample_names"],
+        chrom_list=settings["chrom_list"],
+        processed_data_dir=Path(settings["processed_data_dir"]),
+        output_dir=Path(settings["output_dir"]),
+        silence_warnings=settings.get("silence_warnings", True),
+        silence_logs=silence_logs,
+    )
+    
+    tdf.load_settings()
+    
+    tdf.silence_logs = settings.get("silence_logs", False)
+    
+    return tdf

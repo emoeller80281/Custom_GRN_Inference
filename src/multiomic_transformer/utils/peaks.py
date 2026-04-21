@@ -26,35 +26,45 @@ def format_peaks(peak_ids: Union[pd.Series, pd.Index]) -> pd.DataFrame:
     if peak_ids.empty:
         raise ValueError("Input peak ID list is empty.")
     
-    peak_ids = peak_ids.drop_duplicates()
+    peak_ids = pd.Series(peak_ids).drop_duplicates().astype(str).str.strip()
 
-    # Extract chromosome, start, and end from peak ID strings
-    # Try colon-separated format first (chr:start-end)
-    try:
-        chromosomes = peak_ids.str.extract(r'([^:]+):')[0]
-        starts = peak_ids.str.extract(r':(\d+)-')[0]
-        ends = peak_ids.str.extract(r'-(\d+)$')[0]
-    except Exception as e:
-        raise ValueError(f"Error parsing 'peak_id' values: {e}")
+    # Keep only canonical chromosomes/records that contain "chr".
+    peak_ids = peak_ids[peak_ids.str.contains("chr", regex=False)]
+    if peak_ids.empty:
+        raise ValueError("No peak IDs containing 'chr' were found after filtering.")
 
-    # If colon format didn't work, try dash-separated format (chr-start-end)
-    if chromosomes.isnull().any():
-        try:
-            # For format like "chr1-10112-10254"
-            chromosomes = peak_ids.str.extract(r'^([^-]+)')[0]
-            starts = peak_ids.str.extract(r'^[^-]+-(\d+)-')[0]
-            ends = peak_ids.str.extract(r'-(\d+)$')[0]
-        except Exception as e:
-            raise ValueError(f"Error parsing 'peak_id' values with dash format: {e}")
+    # Primary parse: supports strings containing a canonical peak token anywhere,
+    # such as "chr1:100-200", "hg38.chr1:100-200", or "hg38.chr1-100-200".
+    parsed = peak_ids.str.extract(
+        r'.*?(?P<chromosome>chr[^\s:-]+)(?::|-)(?P<start>\d+)-(?P<end>\d+)\s*$'
+    )
 
-    if chromosomes.isnull().any() or starts.isnull().any() or ends.isnull().any():
-        raise ValueError("Malformed peak IDs. Expect format 'chr:start-end' or 'chr-start-end'.")
+    # Fallback parse: BED-like row strings, e.g. "hg38.chr1 100 200 ...".
+    missing = parsed["chromosome"].isnull() | parsed["start"].isnull() | parsed["end"].isnull()
+    if missing.any():
+        bed_like = peak_ids[missing].str.extract(
+            r'^\s*(?P<chromosome>\S+)\s+(?P<start>\d+)\s+(?P<end>\d+)(?:\s|$)'
+        )
+        parsed.loc[missing, ["chromosome", "start", "end"]] = bed_like[["chromosome", "start", "end"]].values
+
+    # Normalize chromosomes like "hg38.chr1" to "chr1" by removing any prefix before "chr".
+    parsed["chromosome"] = parsed["chromosome"].str.extract(r'(chr[^\s:]*)$', expand=False)
+
+    if parsed["chromosome"].isnull().any() or parsed["start"].isnull().any() or parsed["end"].isnull().any():
+        bad_examples = peak_ids[
+            parsed["chromosome"].isnull() | parsed["start"].isnull() | parsed["end"].isnull()
+        ].head(3).tolist()
+        raise ValueError(
+            "Malformed peak IDs. Expect one of: 'chr:start-end', 'chr-start-end', "
+            "or BED-like 'chrom start end ...'. "
+            f"Examples that failed parsing: {bad_examples}"
+        )
 
     peak_df = pd.DataFrame({
         # "peak_id": [f"peak{i + 1}" for i in range(len(peak_ids))],
-        "chromosome": chromosomes,
-        "start": pd.to_numeric(starts, errors='coerce').astype(int),
-        "end": pd.to_numeric(ends, errors='coerce').astype(int),
+        "chromosome": parsed["chromosome"],
+        "start": pd.to_numeric(parsed["start"], errors='coerce').astype(int),
+        "end": pd.to_numeric(parsed["end"], errors='coerce').astype(int),
         "strand": ["."] * len(peak_ids)
     })
     

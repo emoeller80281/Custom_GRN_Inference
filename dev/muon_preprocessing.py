@@ -5,6 +5,7 @@ os.environ["TQDM_DISABLE"] = "1"
 import argparse
 import matplotlib.pyplot as plt
 import muon as mu
+import mudata as md
 import numpy as np
 import anndata as ad
 import pysam
@@ -27,6 +28,9 @@ logging.basicConfig(level=logging.INFO, format='%(message)s')
 
 # Setting figure parameters
 sc.settings.verbosity = 0
+
+# disable automatic pulling of data from MuData objects to avoid unintended side effects during preprocessing steps
+md.set_options(pull_on_update=False)
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run Muon preprocessing with configurable file paths.")
@@ -262,8 +266,8 @@ class MudataProcessor:
             sampled_obs_names = mdata.obs.sample(frac=pct_subsample, replace=False).index
             subsampled_mdata = mdata[sampled_obs_names, :].copy()
 
-            mu.write(subsample_path, subsampled_mdata)
-            logging.info(f"Saved subsample {i+1} to {subsample_path}.")
+            mu.write(str(subsample_path), subsampled_mdata)
+            logging.info(f"  - Saved subsample {i+1} to {subsample_path}.")
         
     
     def rna_qc_filter(

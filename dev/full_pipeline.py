@@ -484,7 +484,7 @@ if __name__ == "__main__":
     
     # Verify that the data cache files exist. If not, this method will create them.
     logging.info("  - Creating or verifying loading cache data files...")
-    tdf.create_or_load_data_cache(sample_name=sample_name, force_recalculate=False)
+    tdf.create_or_load_data_cache(sample_name=sample_name, force_recalculate=True)
 
     logging.info("\n----- MODEL TRAINING -----")
     logging.info("  - Initializing ExperimentHandler...")
@@ -506,7 +506,7 @@ if __name__ == "__main__":
     # batches from each chromosome in each set.
     logging.info("  - Preparing DataLoader...")
     train_loader, val_loader, test_loader = exp.prepare_dataloader(
-        batch_size=32,
+        batch_size=64,
         num_workers=8
     )
 
@@ -517,7 +517,7 @@ if __name__ == "__main__":
     # Creates a new MultiomicTransformer model. Model attributes can be set to change
     # the hyperparameters of the model.
     logging.info("  - Creating model")
-    exp.create_new_model(kernel_size=64)
+    exp.create_new_model(kernel_size=128)
     
     if exp.model_training_dir.is_dir() and "trained_model.pt" in os.listdir(exp.model_training_dir):
         logging.info(f"Trained model already exists. Skipping training...")

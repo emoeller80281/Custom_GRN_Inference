@@ -99,12 +99,13 @@ def load_experiment_handler(
     tdf_settings_path: str | Path,
     experiment_dir: str | Path,
     model_num: int | None = None,
+    verbose: bool = True,
     silence_warnings: bool = False,
     ):
     """
     Utility function to load an existing ExperimentHandler from disk.
     """
-    tdf = data_formatter.load_tdf(Path(tdf_settings_path))
+    tdf = data_formatter.load_tdf(Path(tdf_settings_path), verbose=verbose)
         
     # Load the ExperimentHandler settings and state from disk
     exp_handler = ExperimentHandler(
@@ -114,7 +115,7 @@ def load_experiment_handler(
         silence_warnings=silence_warnings,
     )
     
-    exp_handler.load_handler()
+    exp_handler.load_handler(verbose=verbose)
     
     return exp_handler
 
@@ -282,7 +283,7 @@ class ExperimentHandler:
         }
         torch.save(loader_state, self.model_training_dir / "loader_state.pt")
     
-    def load_handler(self):
+    def load_handler(self, verbose: bool = True):
         # Load the settings from disk
         settings_path = self.model_training_dir / "experiment_handler_save.json"
         if not settings_path.exists():
@@ -290,7 +291,8 @@ class ExperimentHandler:
             return
         
         with open(settings_path, "r") as f:
-            logging.info(f"Loading ExperimentHandler state from {settings_path}...")
+            if verbose:
+                logging.info(f"Loading ExperimentHandler state from {settings_path}...")
             settings = json.load(f)
         
         # Load the settings into the ExperimentHandler instance
