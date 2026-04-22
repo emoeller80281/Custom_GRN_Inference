@@ -9,7 +9,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 12
 #SBATCH --mem=64G
-#SBATCH --array=0-9%4
+#SBATCH --array=0-3%4
 
 set -eo pipefail
 
@@ -23,10 +23,10 @@ EXPERIMENT_OUTPUT_DIR="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERE
 TRAINING_DATA_CACHE_DIR="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/TRAINING_DATA_CACHE"
 
 EXPERIMENT_LIST=(
-    # "mESC_E7.5_rep1_full_pipeline|E7.5_rep1|mm10|mESC"
-    # "mESC_E7.5_rep2_full_pipeline|E7.5_rep2|mm10|mESC"
-    # "mESC_E8.5_rep1_full_pipeline|E8.5_rep1|mm10|mESC"
-    # "mESC_E8.5_rep2_full_pipeline|E8.5_rep2|mm10|mESC"
+    "mESC_E7.5_rep1_same_filtering|E7.5_rep1|mm10|mESC"
+    "mESC_E7.5_rep2_same_filtering|E7.5_rep2|mm10|mESC"
+    "mESC_E8.5_rep1_same_filtering|E8.5_rep1|mm10|mESC"
+    "mESC_E8.5_rep2_same_filtering|E8.5_rep2|mm10|mESC"
 
     # "Macrophage_buffer_1_full_pipeline|buffer_1|hg38|Macrophage"
     # "Macrophage_buffer_2_full_pipeline|buffer_2|hg38|Macrophage"
@@ -35,7 +35,7 @@ EXPERIMENT_LIST=(
 
     # "iPSC_WT_D13_rep1_full_pipeline|WT_D13_rep1|hg38|iPSC"
 
-    "K562_sample_1_full_pipeline|sample_1|hg38|K562"
+    # "K562_sample_1_full_pipeline|sample_1|hg38|K562"
 )
 
 # ------------------------------------------------------------

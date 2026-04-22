@@ -1,7 +1,7 @@
 #!/bin/bash -l
 #SBATCH --job-name=stability_full_pipeline
-#SBATCH --output=LOGS/transformer_logs/pipeline_logs/%x_%A/%x_%A_%a.log
-#SBATCH --error=LOGS/transformer_logs/pipeline_logs/%x_%A/%x_%A_%a.err
+#SBATCH --output=LOGS/transformer_logs/stability_logs/%x_%A/%x_%A_%a.log
+#SBATCH --error=LOGS/transformer_logs/stability_logs/%x_%A/%x_%A_%a.err
 #SBATCH --time=18:00:00
 #SBATCH -p dense
 #SBATCH -N 1

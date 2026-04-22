@@ -139,10 +139,12 @@ def load_other_method_muon_grns(sample_name_list, dataset_type):
         
         linger_path       = OTHER_METHOD_MUON_DIR / "LINGER_muon" / f"linger_{dataset_type}_{sample_name}.tsv"
         scenic_plus_path  = OTHER_METHOD_MUON_DIR / "SCENIC_muon" / f"scenic_plus_{dataset_type}_{sample_name}.tsv"
+        cell_oracle_path  = OTHER_METHOD_MUON_DIR / "CellOracle_muon" / f"cell_oracle_{dataset_type}_{sample_name}.tsv"
         
         method_info = {
             "SCENIC+":    {"path": scenic_plus_path, "tf_col": "Source",    "target_col": "Target",    "score_col": "Score"},
             "LINGER":     {"path": linger_path,      "tf_col": "Source",    "target_col": "Target",    "score_col": "Score"},
+            "CellOracle": {"path": cell_oracle_path, "tf_col": "source",    "target_col": "target",    "score_col": "coef_mean"},
         }
                 
         standardized_method_dict = {}
@@ -648,6 +650,7 @@ if __name__ == "__main__":
     elif dataset_type.lower() == "macrophage":
         ground_truth_file_dict = {
             "ChIP-Atlas": GROUND_TRUTH_DIR / "chipatlas_macrophage.csv",
+            "Perturb-seq macrophage": GROUND_TRUTH_DIR / "macrophage_perturbations.csv",
             # "RN204": GROUND_TRUTH_DIR / "rn204_macrophage_human_chipseq.tsv",
             
         }

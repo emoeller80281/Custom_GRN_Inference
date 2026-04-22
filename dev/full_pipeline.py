@@ -517,7 +517,15 @@ if __name__ == "__main__":
     # Creates a new MultiomicTransformer model. Model attributes can be set to change
     # the hyperparameters of the model.
     logging.info("  - Creating model")
-    exp.create_new_model(kernel_size=128)
+    exp.create_new_model(
+        d_model=128,
+        d_ff=512,
+        num_heads=4,
+        num_layers=2,
+        use_dist_bias=False,
+        kernel_size=128,
+        dropout=0.1,
+        )
     
     if exp.model_training_dir.is_dir() and "trained_model.pt" in os.listdir(exp.model_training_dir):
         logging.info(f"Trained model already exists. Skipping training...")
@@ -525,7 +533,7 @@ if __name__ == "__main__":
         exp.load_handler()
 
     else:
-        exp._create_model_training_dir(allow_overwrite=True)
+        exp._create_model_training_dir(allow_overwrite=False)
         
         exp.train(
             train_loader=train_loader, 
