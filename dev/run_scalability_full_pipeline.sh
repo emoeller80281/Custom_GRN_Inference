@@ -9,7 +9,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 16
 #SBATCH --mem=92G
-#SBATCH --array=0%4
+#SBATCH --array=1-5%4
 
 set -eo pipefail
 
@@ -18,13 +18,13 @@ cd /gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER
 source activate my_env
 
 RAW_DATA_DIR="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/RAW_DATA"
-SCALABILITY_RAW_DATASETS_DIR="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/SCALABILITY_RAW_DATASETS"
+SCALABILITY_RAW_DATASETS_DIR="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/SCALABILITY_PROCESSED_DATASETS"
 PROCESSED_DATA_DIR="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/PROCESSED_DATA/SCALABILITY"
 EXPERIMENT_OUTPUT_DIR="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/EXPERIMENTS/SCALABILITY"
 TRAINING_DATA_CACHE_DIR="/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/TRAINING_DATA_CACHE"
 
 EXPERIMENT_LIST=(
-    "mESC_E7.5_rep1_full_pipeline|E7.5_rep1|mm10|mESC|1,2,3,4,5"
+    "mESC_E7.5|E7.5_rep1|mm10|mESC"
     # "mESC_E7.5_rep2_full_pipeline|E7.5_rep2|mm10|mESC|1"
     # "mESC_E8.5_rep1_full_pipeline|E8.5_rep1|mm10|mESC|1,2"
     # "mESC_E8.5_rep2_full_pipeline|E8.5_rep2|mm10|mESC|1,2,3,4"
@@ -83,7 +83,7 @@ CELL_NUMBER=$((SUBSAMPLE_NUM * 1000))
 EXPERIMENT_NAME="${BASE_EXPERIMENT_NAME}_${CELL_NUMBER}_cell_scalability"
 
 # Build raw h5mu path
-RAW_H5_DATA_FILE="${SCALABILITY_RAW_DATASETS_DIR}/${SAMPLE_TYPE}_10x_raw/${SAMPLE_NAME}/${CELL_NUMBER}_cell_subsample.h5mu"
+RAW_H5_DATA_FILE="${SCALABILITY_RAW_DATASETS_DIR}/${SAMPLE_TYPE}/${SAMPLE_NAME}/${CELL_NUMBER}_cell_subsample.h5mu"
 
 echo "----------------------------------------"
 echo "Experiment index: ${EXPERIMENT_IDX}"
@@ -109,10 +109,10 @@ sleep $((SUBSAMPLE_IDX * 5))
 # ------------------------------------------------------------
 # Run full pipeline
 # ------------------------------------------------------------
-torchrun --standalone --nnodes=1 --nproc_per_node=1 dev/full_pipeline.py \
+torchrun --standalone --nnodes=1 --nproc_per_node=1 dev/scalability_pipeline.py \
     --experiment_name "${EXPERIMENT_NAME}" \
     --sample_name "${SAMPLE_NAME}" \
-    --raw_data_dir "${RAW_DATA_DIR}" \
+    --raw_data_dir "${SCALABILITY_RAW_DATASETS_DIR}" \
     --organism_code "${ORGANISM_CODE}" \
     --sample_type "${SAMPLE_TYPE}" \
     --processed_data_dir "${PROCESSED_DATA_DIR}" \

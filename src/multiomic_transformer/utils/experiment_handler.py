@@ -1582,13 +1582,23 @@ class ExperimentHandler:
 
         overlap_tfs = labeled_df["Source"].nunique()
         overlap_tgs = labeled_df["Target"].nunique()
-        overlap_edges = len(labeled_df)
+        
+        gt_pairs = gt_lookup[2]
+        
+        df = labeled_df.copy()
+        df["Source"] = df["Source"].astype(str).str.upper()
+        df["Target"] = df["Target"].astype(str).str.upper()
+        
+        true_edge_overlap = sum(
+            (s, t) in gt_pairs
+            for s, t in zip(df["Source"], df["Target"])
+        )
 
         
         logging.info(ground_truth_name)
         logging.info(f"  - TF Overlap: {overlap_tfs:,} ({gt_unique_tfs:,} in GT)")
         logging.info(f"  - TG Overlap: {overlap_tgs:,} ({gt_unique_tgs:,} in GT)")
-        logging.info(f"  - Edge Overlap: {overlap_edges:,} ({gt_unique_edges:,} in GT)")
+        logging.info(f"  - Edge Overlap: {true_edge_overlap:,} ({gt_unique_edges:,} in GT)")
     
     def evaluate_single_method_setwise(
         self,

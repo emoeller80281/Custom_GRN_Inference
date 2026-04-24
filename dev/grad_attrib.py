@@ -20,12 +20,11 @@ if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
 from datetime import datetime
-from config.settings_hpc import *
 
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 
 from multiomic_transformer.models.model import MultiomicTransformer
-from multiomic_transformer.datasets.dataset import MultiChromosomeDataset, SimpleScaler, fit_simple_scalers
+from multiomic_transformer.datasets.dataset_refactor import MultiChromosomeDataset, SimpleScaler, fit_simple_scalers
 
 def setup_distributed():
     """Initialize distributed env if launched with torchrun; otherwise run in single-process mode."""

@@ -138,13 +138,13 @@ def load_other_method_muon_grns(sample_name_list, dataset_type):
         logging.info(f"\nProcessing sample: {sample_name} | Dataset: {dataset_type}")
         
         linger_path       = OTHER_METHOD_MUON_DIR / "LINGER_muon" / f"linger_{dataset_type}_{sample_name}.tsv"
-        scenic_plus_path  = OTHER_METHOD_MUON_DIR / "SCENIC_muon" / f"scenic_plus_{dataset_type}_{sample_name}.tsv"
-        cell_oracle_path  = OTHER_METHOD_MUON_DIR / "CellOracle_muon" / f"cell_oracle_{dataset_type}_{sample_name}.tsv"
+        scenic_plus_path  = OTHER_METHOD_MUON_DIR / "SCENIC_muon" / f"scenicplus_{dataset_type}_{sample_name}.tsv"
+        cell_oracle_path  = OTHER_METHOD_MUON_DIR / "CellOracle_muon" / f"celloracle_{dataset_type}_{sample_name}.tsv"
         
         method_info = {
             "SCENIC+":    {"path": scenic_plus_path, "tf_col": "Source",    "target_col": "Target",    "score_col": "Score"},
             "LINGER":     {"path": linger_path,      "tf_col": "Source",    "target_col": "Target",    "score_col": "Score"},
-            "CellOracle": {"path": cell_oracle_path, "tf_col": "source",    "target_col": "target",    "score_col": "coef_mean"},
+            "CellOracle": {"path": cell_oracle_path, "tf_col": "Source",    "target_col": "Target",    "score_col": "Score"},
         }
                 
         standardized_method_dict = {}
@@ -569,8 +569,8 @@ def calculate_per_tf_auroc(standardized_method_dict, ground_truth_edges_dict, to
                 d_eval, 
                 gt_edges, 
                 top_fracs=top_k_fracs, 
-                min_edges=50, 
-                min_pos=10,
+                min_edges=10, 
+                min_pos=5,
                 balance=True
                 )
             

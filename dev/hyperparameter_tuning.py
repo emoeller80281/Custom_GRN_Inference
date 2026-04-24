@@ -1,3 +1,4 @@
+from math import exp
 import sys, json, os, time, re
 import multiprocessing as mp
 import numpy as np
@@ -18,23 +19,27 @@ import importlib
 from cycler import cycler
 from scipy.stats import norm
 import logging
+import argparse
+from contextlib import contextmanager
 
 logging.basicConfig(level=logging.INFO, format='%(message)s')
+TQDM_DISABLE=1
 
 PROJECT_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER")
 SRC_DIR = str(Path(PROJECT_DIR) / "src")
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
+from multiomic_transformer.utils import data_formatter, experiment_handler
 import multiomic_transformer.utils.experiment_loader as experiment_loader
 from multiomic_transformer.models.model_simplified import MultiomicTransformer
 from multiomic_transformer.datasets.dataset_refactor import (
     SimpleScaler,
 )
+import muon_preprocessing as muon_prep
 
-GROUND_TRUTH_DIR = PROJECT_DIR / "data" / "ground_truth_files"
-PROCESSED_DATA_DIR = PROJECT_DIR / "data" / "processed"
-TRAINING_CACHE_DIR = PROJECT_DIR / "data" / "training_data_cache" 
+DATA_DIR = Path("/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER")
+GROUND_TRUTH_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data/ground_truth_files")
 
 color_palette = {
   "blue_light": "#18A6ED",
@@ -95,180 +100,6 @@ light_colors = [v for k,v in color_palette.items() if "light" in k]
 
 order = ["LINGER", "SCENIC+", "CellOracle", "GRaNIE", "Pando", "TRIPOD", "FigR"]
 
-def run_gradient_attribution(
-    selected_experiment_dir,
-    model,
-    test_loader,
-    tf_scaler,
-    tg_scaler,
-    tf_names,
-    tg_names,
-    device,
-    use_amp,
-    max_batches: int = None,
-    save_every_n_batches: int = 20,
-    max_tgs_per_batch = 128,
-    chunk_size = 64,
-    zero_tf_expr: bool = False,
-):
-
-    T_total = len(tf_names)
-    G_total = len(tg_names)
-
-    # Creates empty tensors to accumulate gradients across batches. The shape is [TF total, Genes total]
-    grad_sum = torch.zeros(T_total, G_total, device=device, dtype=torch.float32)
-    grad_count = torch.zeros_like(grad_sum)
-
-    model.to(device).eval()
-
-    batch_grad_dfs = {}
-    for b_idx, batch in enumerate(test_loader):
-        if max_batches is not None and b_idx >= max_batches:
-            break
-
-        atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids, motif_mask = batch
-        
-        atac_wins = atac_wins.to(device)
-        tf_tensor = tf_tensor.to(device)
-        bias = bias.to(device) if bias is not None else None
-        tf_ids = tf_ids.to(device)
-        tg_ids = tg_ids.to(device)
-        motif_mask = motif_mask.to(device) if motif_mask is not None else None
-
-        # Shapes
-        if tf_tensor.dim() == 2:
-            B, T_eval = tf_tensor.shape
-            F_dim = 1
-        else:
-            B, T_eval, F_dim = tf_tensor.shape
-            
-        if bias is not None:
-            if bias.dim() == 2:
-                # [G, W] -> [1, G, W]
-                bias = bias.unsqueeze(0)
-
-        # Flatten TF IDs over batch for aggregation later
-        if tf_ids.dim() == 1:  # [T_eval]
-            tf_ids_flat = tf_ids.view(1, T_eval).expand(B, T_eval).reshape(-1)
-        else:                  # [B, T_eval]
-            tf_ids_flat = tf_ids.reshape(-1)
-
-        G_eval = tg_ids.shape[-1]
-
-        # Assign TGs to this rank and optionally chunk them to control memory.
-        if G_eval > max_tgs_per_batch:
-            perm = torch.randperm(G_eval, device=device)[:max_tgs_per_batch]
-            owned_tg_indices = perm.sort().values
-        else:
-            owned_tg_indices = torch.arange(G_eval, device=device)
-
-        # ---------- METHOD 1: plain saliency (grad * input) ----------
-        total_owned = owned_tg_indices.numel()
-
-        for chunk_start in range(0, total_owned, chunk_size):
-            tg_chunk = owned_tg_indices[chunk_start : chunk_start + chunk_size]
-
-            if bias is not None:
-                bias_idx = tg_chunk.to(bias.device, non_blocking=True)
-                
-                if bias.dim() == 2:
-                    bias_chunk = bias[bias_idx, :]
-                elif bias.dim() == 3:
-                    bias_chunk = bias[:, bias_idx, :]
-                else:
-                    raise ValueError(f"Expected bias to have dim 2 or 3, got shape {bias.shape}")
-                
-                bias_chunk = bias_chunk.to(device, non_blocking=True)
-            else:
-                bias_chunk = None
-
-            if tg_ids.dim() == 1:
-                tg_ids_chunk = tg_ids[tg_chunk]
-            else:
-                tg_ids_chunk = tg_ids[:, tg_chunk]
-
-            if zero_tf_expr:
-                tf_tensor_chunk = torch.zeros_like(tf_tensor, device=device, requires_grad=True)
-            else:
-                tf_tensor_chunk = tf_tensor.detach().clone().requires_grad_(True)
-
-            with torch.amp.autocast(device_type=device.type, enabled=use_amp):
-                tf_scaled = tf_scaler.transform(tf_tensor_chunk, tf_ids) if tf_scaler is not None else tf_tensor_chunk
-                preds_s = model(
-                    atac_wins,
-                    tf_scaled,
-                    tf_ids=tf_ids,
-                    tg_ids=tg_ids_chunk,
-                    bias=bias_chunk,
-                )
-                if isinstance(preds_s, tuple):
-                    preds_s = preds_s[0]
-
-                preds_u = tg_scaler.inverse_transform(preds_s, tg_ids_chunk) if tg_scaler is not None else preds_s
-                preds_u = torch.nan_to_num(preds_u.float(), nan=0.0, posinf=1e6, neginf=-1e6)
-
-            grad_output_j = torch.zeros_like(preds_u)
-
-            for offset in range(preds_u.shape[1]):
-                grad_output_j.zero_()
-                grad_output_j[:, offset] = 1.0
-
-                grads = torch.autograd.grad(
-                    outputs=preds_u,
-                    inputs=tf_tensor_chunk,
-                    grad_outputs=grad_output_j,
-                    retain_graph=(offset < preds_u.shape[1] - 1),
-                    create_graph=False,
-                )[0]
-
-                grad_abs = grads[..., 0].abs() if grads.dim() == 3 else grads.abs()
-                grad_flat = grad_abs.reshape(-1)
-
-                tg_global = int(tg_ids_chunk[offset].item()) if tg_ids_chunk.dim() == 1 else int(tg_ids_chunk[0, offset].item())
-
-                grad_sum[:, tg_global].index_add_(0, tf_ids_flat, grad_flat)
-                grad_count[:, tg_global].index_add_(0, tf_ids_flat, torch.ones_like(grad_flat))
-                
-            # cleanup per chunk
-            del (
-                preds_u,
-                preds_s,
-                tf_scaled,
-                tf_tensor_chunk,
-                bias_chunk,
-                tg_ids_chunk,
-            )
-                
-        # Inside the loop - periodic saves
-        if save_every_n_batches is not None:
-            if b_idx % save_every_n_batches == 0:
-                
-                edge_seen = grad_count > 0
-                tf_idx, tg_idx = torch.nonzero(edge_seen, as_tuple=True)
-
-                scores = (grad_sum[tf_idx, tg_idx] / grad_count[tf_idx, tg_idx]).detach().cpu().numpy()
-
-                batch_df_long = pd.DataFrame({
-                    "Source": [tf_names[i] for i in tf_idx.cpu().numpy()],
-                    "Target": [tg_names[j] for j in tg_idx.cpu().numpy()],
-                    "Score": scores,
-                })
-                 
-                batch_grad_dfs[b_idx] = batch_df_long
-    
-    edge_seen = grad_count > 0
-    tf_idx, tg_idx = torch.nonzero(edge_seen, as_tuple=True)
-
-    scores = (grad_sum[tf_idx, tg_idx] / grad_count[tf_idx, tg_idx]).detach().cpu().numpy()
-
-    df_long = pd.DataFrame({
-        "Source": [tf_names[i] for i in tf_idx.cpu().numpy()],
-        "Target": [tg_names[j] for j in tg_idx.cpu().numpy()],
-        "Score": scores,
-    })
-    
-    return df_long, batch_grad_dfs
-
 def load_ground_truth(ground_truth_file):
     if type(ground_truth_file) == str:
         ground_truth_file = Path(ground_truth_file)
@@ -322,76 +153,6 @@ def expand_experiment_dict_grid(experiment_dict):
 
     return expanded
 
-def format_grn(df):
-    def inverse_normal_transform(x):
-        r = x.rank(method="average")
-        n = len(x)
-        p = (r - 0.5) / n          # avoids 0 and 1
-        return norm.ppf(p)
-    
-    # Apply rank-based inverse normal transform (INT)
-    df["Score"] = df.groupby("Source")["Score"].transform(inverse_normal_transform)
-    
-    df = df.dropna()
-    
-    df["Source"] = df["Source"].astype(str).str.upper()
-    df["Target"] = df["Target"].astype(str).str.upper()
-    
-    return df
-
-def quick_pooled_auroc(exp, labeled_df):
-    balanced = exp._balance_pos_neg(labeled_df, random_state=42)
-    y = balanced["_in_gt"].astype(int).to_numpy()
-    s = balanced["Score"].to_numpy()
-    
-    auroc = roc_auc_score(y, s)
-    
-    return auroc
-
-def quick_per_tf_auroc(exp, labeled_df):
-    per_tf_auroc = []
-    
-    for tf, group in labeled_df.groupby("Source"):
-        balanced = exp._balance_pos_neg(group, random_state=42)
-        y = balanced["_in_gt"].astype(int).to_numpy()
-        s = balanced["Score"].to_numpy()
-        
-        if len(np.unique(y)) > 1:
-            auroc = roc_auc_score(y, s)
-            per_tf_auroc.append(auroc)
-        else:
-            per_tf_auroc.append(np.nan)  # or some default value for TFs with only pos or neg examples
-    
-    median_per_tf_auroc = np.nanmedian(per_tf_auroc)
-    
-    return median_per_tf_auroc
-
-def calculate_auroc_all_sample_gts(exp, grad_attr_df, ground_truth_dict):
-    df = format_grn(grad_attr_df)[["Source", "Target", "Score"]].copy()
-    
-    pooled_auroc = []
-    per_tf_auroc = []
-    for ground_truth in ground_truth_dict.values():
-        _, gt_lookup = ground_truth
-        
-        labeled_df = exp.create_ground_truth_comparison_df(df, gt_lookup, "ChIP-Atlas macrophage")
-        
-        gt_pooled_auroc = quick_pooled_auroc(exp, labeled_df)
-        gt_per_tf_auroc = quick_per_tf_auroc(exp, labeled_df)
-        
-        pooled_auroc.append(gt_pooled_auroc)
-        per_tf_auroc.append(gt_per_tf_auroc)
-
-    pooled_median_auroc = np.median(pooled_auroc)
-    per_tf_median_auroc = np.median(per_tf_auroc)
-        
-    auroc_df = pd.DataFrame({
-        "pooled_median_auroc": pooled_median_auroc,
-        "per_tf_median_auroc": per_tf_median_auroc,
-    }, index=[0])
-    
-    return auroc_df
-
 def determine_experiment_differences(experiment_dict, index, num_experiments):
     max_key_len = max(len(key) for key in experiment_dict.keys())
     max_val_len = max(
@@ -421,10 +182,29 @@ def aggregate_results(
     epoch_log_df_all
     ):
     group_cols = list(experiment_dict.keys())
+    nullable_group_cols = [
+        k for k, values in experiment_dict.items()
+        if any(v is None for v in values)
+    ]
+
+    def _normalize_nullable_group_cols(df: pd.DataFrame) -> pd.DataFrame:
+        if df is None:
+            return None
+        df = df.copy()
+        for col in nullable_group_cols:
+            if col in df.columns:
+                df[col] = df[col].astype(object)
+                df[col] = df[col].where(pd.notna(df[col]), None)
+        return df
+
+    auroc_df_all = _normalize_nullable_group_cols(auroc_df_all)
+    gpu_mem_df_all = _normalize_nullable_group_cols(gpu_mem_df_all)
+    batch_profile_df_all = _normalize_nullable_group_cols(batch_profile_df_all)
+    epoch_log_df_all = _normalize_nullable_group_cols(epoch_log_df_all)
 
     epoch_log_df_all_grouped = (
         epoch_log_df_all
-        .groupby(group_cols)
+        .groupby(group_cols, dropna=False)
         .agg({
             "r2_unscaled": "max",
             "r2_scaled": "max",
@@ -437,7 +217,7 @@ def aggregate_results(
 
     batch_profile_df_all_grouped = (
         batch_profile_df_all
-        .groupby(group_cols)
+        .groupby(group_cols, dropna=False)
         .agg({
             "total_step_s": "mean",
             "loader_s": "mean",
@@ -451,7 +231,7 @@ def aggregate_results(
 
     gpu_mem_df_all_grouped = (
         gpu_mem_df_all
-        .groupby(group_cols)
+        .groupby(group_cols, dropna=False)
         .agg({
             "allocated_mb": "mean",
             "reserved_mb": "mean",
@@ -463,6 +243,10 @@ def aggregate_results(
         })
         .reset_index()
     )
+
+    epoch_log_df_all_grouped = _normalize_nullable_group_cols(epoch_log_df_all_grouped)
+    batch_profile_df_all_grouped = _normalize_nullable_group_cols(batch_profile_df_all_grouped)
+    gpu_mem_df_all_grouped = _normalize_nullable_group_cols(gpu_mem_df_all_grouped)
 
     full_summary_df = (
         auroc_df_all
@@ -491,6 +275,27 @@ def aggregate_results(
         "grad_attrib_tgs_per_batch",
         "dataloader_workers",
         "max_cached",
+
+        # --- Preprocessing params ---
+        "norm_target_sum",
+        "min_rna_disp",
+        "min_atac_disp",
+        "rna_pcs",
+        "rna_neighbors",
+        "atac_pcs",
+        "atac_neighbors",
+        "min_atac_hvg_mean",
+        "max_atac_hvg_mean",
+        "filter_rna_hvgs",
+        "filter_atac_hvgs",
+        "tf_list_file",
+        "promoter_upstream",
+        "promoter_downstream",
+        "distal_max",
+        "n_tss",
+        "extend_upstream",
+        "extend_downstream",
+        "hops",
         
         # --- Performance ---
         "pooled_median_auroc",
@@ -541,6 +346,25 @@ def save_summary_df(full_summary_df, summary_save_path):
         "grad_attrib_tgs_per_batch",
         "dataloader_workers",
         "max_cached",
+        "norm_target_sum",
+        "min_rna_disp",
+        "min_atac_disp",
+        "rna_pcs",
+        "rna_neighbors",
+        "atac_pcs",
+        "atac_neighbors",
+        "min_atac_hvg_mean",
+        "max_atac_hvg_mean",
+        "filter_rna_hvgs",
+        "filter_atac_hvgs",
+        "tf_list_file",
+        "promoter_upstream",
+        "promoter_downstream",
+        "distal_max",
+        "n_tss",
+        "extend_upstream",
+        "extend_downstream",
+        "hops",
         "replicate",
     ]
 
@@ -580,7 +404,7 @@ def save_summary_df(full_summary_df, summary_save_path):
             save_path_to_use = get_safe_path(summary_save_path)
 
     full_summary_df.to_csv(save_path_to_use, index=False)
-    logging.info(f"Saved experiment summary to: {save_path_to_use.parent}/{save_path_to_use.name}")
+    # logging.info(f"Saved experiment summary to: {save_path_to_use.parent}/{save_path_to_use.name}")
 
 def plot_gpu_memory(gpu_mem_df):
     df = gpu_mem_df.copy()
@@ -698,33 +522,45 @@ def plot_auroc_by_kernel_size(auroc_df_all):
     plt.legend(bbox_to_anchor=(1.05, 0.5), loc='center left', borderaxespad=0.)
     return fig
 
-def load_ground_truth_dict():
-    gt_by_dataset_dict = {
-        # "Macrophage": {
-        #     # "RN204": load_ground_truth(GROUND_TRUTH_DIR / "rn204_macrophage_human_chipseq.tsv"),
-        #     "ChIP-Atlas macrophage": load_ground_truth(GROUND_TRUTH_DIR / "chipatlas_macrophage.csv"),
-        # },
-        "mESC": {
-            "ChIP-Atlas mESC": load_ground_truth(GROUND_TRUTH_DIR / "chip_atlas_tf_peak_tg_dist.csv"),
-            "RN111": load_ground_truth(GROUND_TRUTH_DIR / "RN111.tsv"),
-            "RN112": load_ground_truth(GROUND_TRUTH_DIR / "RN112.tsv"),
-            "RN114": load_ground_truth(GROUND_TRUTH_DIR / "RN114.tsv"),
-            "RN116": load_ground_truth(GROUND_TRUTH_DIR / "RN116.tsv"),        
-        },
-        # "K562": {
-        #     "ChIP-Atlas K562": load_ground_truth(GROUND_TRUTH_DIR / "chipatlas_K562.csv"),
-        #     "RN117": load_ground_truth(GROUND_TRUTH_DIR / "RN117.tsv"),        
-        # },
-        # "iPSC": {
-        #     # "ChIP-Atlas iPSC": load_ground_truth(GROUND_TRUTH_DIR / "chipatlas_iPSC.csv"),
-        #     "ChIP-Atlas iPSC (1 Mb)": load_ground_truth(GROUND_TRUTH_DIR / "chipatlas_iPSC_1mb.csv"),
-        #     # "ChIP-Atlas iPSC (100 kb)": load_ground_truth(GROUND_TRUTH_DIR / "chipatlas_iPSC_100kb.csv"),
-        # }
-    }
+def load_ground_truth_dict(sample_type):
+    if sample_type == "Macrophage":
+        gt_by_dataset_dict = {
+            "Macrophage": {
+                # "RN204": load_ground_truth(GROUND_TRUTH_DIR / "rn204_macrophage_human_chipseq.tsv"),
+                "ChIP-Atlas macrophage": load_ground_truth(GROUND_TRUTH_DIR / "chipatlas_macrophage.csv"),
+            }
+        }
+    elif sample_type == "mESC":
+        gt_by_dataset_dict = {
+            "mESC": {
+                "ChIP-Atlas mESC": load_ground_truth(GROUND_TRUTH_DIR / "chip_atlas_tf_peak_tg_dist.csv"),
+                "RN111": load_ground_truth(GROUND_TRUTH_DIR / "RN111.tsv"),
+                "RN112": load_ground_truth(GROUND_TRUTH_DIR / "RN112.tsv"),
+                "RN114": load_ground_truth(GROUND_TRUTH_DIR / "RN114.tsv"),
+                "RN116": load_ground_truth(GROUND_TRUTH_DIR / "RN116.tsv"),        
+            }
+        }
+    elif sample_type == "K562":
+        gt_by_dataset_dict = {
+            "K562": {
+                "ChIP-Atlas K562": load_ground_truth(GROUND_TRUTH_DIR / "chipatlas_K562.csv"),
+                "RN117": load_ground_truth(GROUND_TRUTH_DIR / "RN117.tsv"),        
+            }
+        }
+    elif sample_type == "iPSC":
+        gt_by_dataset_dict = {
+            "iPSC": {
+                # "ChIP-Atlas iPSC": load_ground_truth(GROUND_TRUTH_DIR / "chipatlas_iPSC.csv"),
+                "ChIP-Atlas iPSC (1 Mb)": load_ground_truth(GROUND_TRUTH_DIR / "chipatlas_iPSC_1mb.csv"),
+                # "ChIP-Atlas iPSC (100 kb)": load_ground_truth(GROUND_TRUTH_DIR / "chipatlas_iPSC_100kb.csv"),
+            }
+        }
     
     return gt_by_dataset_dict
 
+
 def _run_experiments_on_gpu(
+    tdf,
     gpu_id,
     experiment_indices,
     lock,
@@ -733,6 +569,8 @@ def _run_experiments_on_gpu(
     summary_save_path,
     sample_type,
     gt_by_dataset_dict,
+    experiment_dir,
+    log_dir
 ):
     # Restrict this worker to a single GPU BEFORE any CUDA calls.
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
@@ -752,179 +590,502 @@ def _run_experiments_on_gpu(
         f"current_device={current_device}"
     )
 
-    exp = experiment_loader.ExperimentLoader(
-        experiment_dir = "/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/experiments/",
-        experiment_name="mESC_muon_preprocessing_simplified_kernel_size",
-        model_num=1,
-        silence_warnings=True,
-    )
-    if torch.cuda.is_available():
-        exp.device = torch.device("cuda:0")
-
     previous_experiments_df = pd.read_csv(summary_save_path) if summary_save_path.exists() else None
 
+    experiment_dict["d_ff"] = [experiment_dict["d_model"][i] * 4 for i in range(num_experiments)]
+    
     for i in experiment_indices:
-        logging.info(
-            f"[Experiment {i+1}/{num_experiments}] Starting experiment with GPU {gpu_id} "
-            f"(pid={os.getpid()})..."
-        )
-
-        batch_size = experiment_dict["batch_size"][i]
-        epochs = experiment_dict["epochs"][i]
-        bias_scale = experiment_dict["bias_scale"][i]
-        num_layers = experiment_dict["num_layers"][i]
-        num_heads = experiment_dict["num_heads"][i]
-        d_model = experiment_dict["d_model"][i]
-        d_ff = experiment_dict["d_ff"][i]
-        kernel_size = experiment_dict["kernel_size"][i]
-        dataloader_workers = experiment_dict["dataloader_workers"][i]
-        max_cached = experiment_dict["max_cached"][i]
-        grad_attrib_batches = experiment_dict["grad_attrib_batches"][i]
-        grad_attrib_tgs_per_batch = experiment_dict["grad_attrib_tgs_per_batch"][i]
-        replicate = experiment_dict["replicates"][i]
-
-        if previous_experiments_df is not None:
-            config_match = (
-                (previous_experiments_df["batch_size"] == batch_size) &
-                (previous_experiments_df["epochs"] == epochs) &
-                (previous_experiments_df["bias_scale"] == bias_scale) &
-                (previous_experiments_df["num_layers"] == num_layers) &
-                (previous_experiments_df["num_heads"] == num_heads) &
-                (previous_experiments_df["d_model"] == d_model) &
-                (previous_experiments_df["d_ff"] == d_ff) &
-                (previous_experiments_df["kernel_size"] == kernel_size) &
-                (previous_experiments_df["dataloader_workers"] == dataloader_workers) &
-                (previous_experiments_df["max_cached"] == max_cached) &
-                (previous_experiments_df["grad_attrib_batches"] == grad_attrib_batches) &
-                (previous_experiments_df["grad_attrib_tgs_per_batch"] == grad_attrib_tgs_per_batch) &
-                (previous_experiments_df["replicate"] == replicate)
+        try:
+            logging.info(
+                f"[Experiment {i+1}/{num_experiments}] Starting experiment with GPU {gpu_id} "
+                f"(pid={os.getpid()})..."
             )
+            
+            exp = experiment_handler.ExperimentHandler(
+                training_data_formatter=tdf,
+                experiment_dir=experiment_dir,
+                model_num=1,
+                silence_warnings=False,
+            )
+            if torch.cuda.is_available():
+                exp.device = torch.device("cuda:0")
+                
+            exp.model_num = i + 1
+            exp.model_training_dir = exp.experiment_dir / exp.experiment_name / f"model_training_{exp.model_num:03d}"
 
-            if config_match.any():
-                logging.info(f"[Experiment {i+1}] Experiment with this configuration already exists. Skipping...")
-                continue
+            log_file = log_dir / exp.experiment_name / f"model_training_{i+1:03d}.log"
+            with exp.temp_log_file(log_file) as train_logger:
+                def _log_train(msg: str):
+                    if train_logger is not None:
+                        train_logger.info(msg)
+                    else:
+                        logging.info(msg)
+                        
+                batch_size = experiment_dict["batch_size"][i]
+                epochs = experiment_dict["epochs"][i]
+                bias_scale = experiment_dict["bias_scale"][i]
+                num_layers = experiment_dict["num_layers"][i]
+                num_heads = experiment_dict["num_heads"][i]
+                d_model = experiment_dict["d_model"][i]
+                d_ff = experiment_dict["d_ff"][i]
+                kernel_size = experiment_dict["kernel_size"][i]
+                dataloader_workers = experiment_dict["dataloader_workers"][i]
+                max_cached = experiment_dict["max_cached"][i]
+                grad_attrib_batches = experiment_dict["grad_attrib_batches"][i]
+                grad_attrib_tgs_per_batch = experiment_dict["grad_attrib_tgs_per_batch"][i]
+                replicate = experiment_dict["replicates"][i]
 
-        dataset = exp.create_multichrom_dataset(
-            max_cached=max_cached,
+                if previous_experiments_df is not None:
+                    config_cols = [
+                        "batch_size",
+                        "epochs",
+                        "bias_scale",
+                        "num_layers",
+                        "num_heads",
+                        "d_model",
+                        "d_ff",
+                        "kernel_size",
+                        "dataloader_workers",
+                        "max_cached",
+                        "grad_attrib_batches",
+                        "grad_attrib_tgs_per_batch",
+                        "norm_target_sum",
+                        "min_rna_disp",
+                        "min_atac_disp",
+                        "rna_pcs",
+                        "rna_neighbors",
+                        "atac_pcs",
+                        "atac_neighbors",
+                        "min_atac_hvg_mean",
+                        "max_atac_hvg_mean",
+                        "filter_rna_hvgs",
+                        "filter_atac_hvgs",
+                        "tf_list_file",
+                        "promoter_upstream",
+                        "promoter_downstream",
+                        "distal_max",
+                        "n_tss",
+                        "extend_upstream",
+                        "extend_downstream",
+                        "hops",
+                        "replicate",
+                    ]
+
+                    if all(col in previous_experiments_df.columns for col in config_cols):
+                        config_match = np.ones(len(previous_experiments_df), dtype=bool)
+                        for col in config_cols:
+                            if col == "replicate":
+                                current_val = replicate
+                            else:
+                                current_val = experiment_dict[col][i]
+                            config_match &= (previous_experiments_df[col] == current_val)
+
+                        if config_match.any():
+                            logging.info(f"[Experiment {i+1}] Experiment with this configuration already exists. Skipping...")
+                            continue
+                
+                _log_train(f"Creating MultiChromDataset with max_cached={max_cached}...")
+                exp.create_multichrom_dataset(
+                    max_cached=max_cached,
+                )
+
+                _log_train(f"Preparing dataloaders with batch_size={batch_size}, num_workers={dataloader_workers}...")
+                train_loader, val_loader, test_loader = exp.prepare_dataloader(
+                    batch_size=batch_size,
+                    world_size=1,
+                    rank=0,
+                    num_workers=dataloader_workers,
+                    pin_memory=True,
+                    persistent_workers=True,
+                )
+
+                _log_train(f"Creating scalers...")
+                exp.create_scalers(
+                    dataloader=train_loader,
+                )
+
+                _log_train(f"Creating new model...")
+                exp.create_new_model(
+                    use_dist_bias=True,
+                    bias_scale=bias_scale,
+                    d_model=d_model,
+                    num_heads=num_heads,
+                    num_layers=num_layers,
+                    d_ff=d_ff,
+                    dropout=0.1,
+                    kernel_size=kernel_size,
+                    local_rank=0,
+                    rank=0,
+                    world_size=1,
+                )
+                
+                _log_train(f"Starting Training")
+                
+                if exp.model_training_dir.is_dir() and "trained_model.pt" in os.listdir(exp.model_training_dir):
+                    _log_train(f"Trained model already exists. Skipping training...")
+                    exp.load_model()
+                    exp.load_handler()
+                
+                else:
+                    exp._create_model_training_dir(allow_overwrite=True)
+                    
+                    train_start_time = time.time()
+                    exp.train(
+                        train_loader=train_loader, 
+                        val_loader=val_loader, 
+                        num_epochs=epochs,
+                        max_batches=None,
+                        verbose=True,
+                        grad_accum_steps=1,
+                        improvement_patience=15,
+                        save_every_n_epochs=10,
+                        monitor_gpu_memory=True,
+                        profile_batches=True,
+                        allow_overwrite=False,
+                        silence_tqdm=True,
+                        log_file=log_file
+                        )
+                    train_end_time = time.time()
+                    _log_train(f"Training finished in {train_end_time - train_start_time:.2f} seconds.")
+
+                if "inferred_grn.csv" in os.listdir(exp.model_training_dir):
+                    _log_train(f"Inferred GRN already exists. Skipping gradient attribution...")
+                    exp.grn = exp.load_grn()
+                else:
+                    _log_train(f"Starting gradient attribution for GRN inference")
+                    grad_attrib_start_time = time.time()
+                    exp.run_gradient_attribution(
+                        test_loader,
+                        max_batches=grad_attrib_batches,
+                        max_tgs_per_batch=grad_attrib_tgs_per_batch,
+                        show_tqdm=False,
+                        )
+
+                    grad_attrib_end_time = time.time()
+                    _log_train(f"Gradient attribution finished {grad_attrib_batches} batches in {grad_attrib_end_time - grad_attrib_start_time:.2f} seconds.")
+                
+                _log_train(f"Calculating AUROC against ground truth...")
+                auroc_df = exp.calculate_auroc_all_sample_gts(exp.grn, gt_by_dataset_dict[sample_type])    
+
+                def update_dfs_with_experiment_params(df):
+                    if df is None:
+                        return None
+                    df = df.copy()
+                    df["experiment_name"] = exp.experiment_name
+                    df["sample_type"] = sample_type
+                    df["replicate"] = replicate
+                    for param, value in experiment_dict.items():
+                        df[param] = value[i]
+                    return df
+                
+                if (exp.model_training_dir / "gpu_memory_log.csv").exists():
+                    exp.gpu_mem_log_df = pd.read_csv(exp.model_training_dir / "gpu_memory_log.csv")
+                if (exp.model_training_dir / "batch_profile_log.csv").exists():
+                    exp.batch_profile_log_df = pd.read_csv(exp.model_training_dir / "batch_profile_log.csv")
+                if (exp.model_training_dir / "epoch_log.csv").exists():
+                    exp.epoch_log_df = pd.read_csv(exp.model_training_dir / "epoch_log.csv")
+
+                auroc_df = update_dfs_with_experiment_params(auroc_df)
+                exp.gpu_mem_log_df = update_dfs_with_experiment_params(exp.gpu_mem_log_df)
+                exp.batch_profile_log_df = update_dfs_with_experiment_params(exp.batch_profile_log_df)
+                exp.epoch_log_df = update_dfs_with_experiment_params(exp.epoch_log_df)
+
+                _log_train(f"[Experiment {i+1}] Aggregating results...")
+                full_summary_df = aggregate_results(
+                    experiment_dict,
+                    auroc_df,
+                    exp.gpu_mem_log_df,
+                    exp.batch_profile_log_df,
+                    exp.epoch_log_df,
+                )
+
+                _log_train(f"[Experiment {i+1}] Saving results...")
+                with lock:
+                    save_summary_df(full_summary_df, summary_save_path)
+            logging.info(f"[Experiment {i+1}] Completed successfully.")
+                    
+        except Exception as e:
+            logging.exception(f"Experiment {i+1} failed: {e}")
+            continue
+
+def run_muon_preprocessing(
+    sample_name: str, 
+    sample_raw_data_dir: Path, 
+    sample_processed_data_dir: Path, 
+    tss_path: Path, 
+    project_dir: Path,
+    norm_target_sum: float = 1e4,
+    min_rna_disp: float = 0.5,
+    min_atac_disp: float = 0.5,
+    rna_pcs: int = 20,
+    rna_neighbors: int = 10,
+    atac_pcs: int = 20,
+    atac_neighbors: int = 10,
+    min_atac_hvg_mean: float = 0.01,
+    max_atac_hvg_mean: float = 10,
+    filter_rna_hvgs: bool = False,
+    filter_atac_hvgs: bool = False,
+    tf_list_file: str = None,
+    promoter_upstream: int = 1000,
+    promoter_downstream: int = 1000,
+    distal_max: int = 200_000,
+    n_tss: int = 500,
+    extend_upstream: int = 1000,
+    extend_downstream: int = 1000,
+    hops: int = 2,
+    ):
+    logging.info("\n----- MUON PREPROCESSING -----")
+    logging.info(f"Preprocessing data for sample {sample_name} using muon...")
+    filtering_setting_df = pd.read_csv(Path(project_dir) / "dev" / "notebooks" / "muon_preprocessing" /"qc_filtering_settings.tsv", sep="\t")
+    sample_filtering_settings = filtering_setting_df[filtering_setting_df["Sample"] == sample_name]    
+    
+    # ----- RNA QC thresholds -----
+    MIN_CELLS_PER_GENE = muon_prep.get_threshold(sample_filtering_settings, "Min Cells per Gene")
+    MIN_GENES_PER_CELL = muon_prep.get_threshold(sample_filtering_settings, "Min Genes per Cell")
+    MAX_GENES_PER_CELL = muon_prep.get_threshold(sample_filtering_settings, "Max Genes per Cell")
+    MIN_TOTAL_COUNTS = muon_prep.get_threshold(sample_filtering_settings, "Min Total Counts")
+    MAX_TOTAL_COUNTS = muon_prep.get_threshold(sample_filtering_settings, "Max Total Counts")
+    MAX_PCT_COUNTS_MT = muon_prep.get_threshold(sample_filtering_settings, "Max Pct MT")
+
+    # ----- ATAC QC thresholds -----
+    MIN_CELLS_PER_PEAK = muon_prep.get_threshold(sample_filtering_settings, "Min Cells per Peak")
+    MIN_PEAKS_PER_CELL = muon_prep.get_threshold(sample_filtering_settings, "Min Peaks per Cell")
+    MAX_PEAKS_PER_CELL = muon_prep.get_threshold(sample_filtering_settings, "Max Peaks per Cell")
+    MIN_TOTAL_PEAK_COUNTS = muon_prep.get_threshold(sample_filtering_settings, "Min Total Peak Counts")
+    MAX_TOTAL_PEAK_COUNTS = muon_prep.get_threshold(sample_filtering_settings, "Max Total Peak Counts")
+
+    # Load the raw data using the types of files found in the sample raw data directory.
+    mdata, frag_path = muon_prep.load_raw_data(sample_name, sample_raw_data_dir)
+
+    # Write the loaded data to the processed data directory
+    mdata.write(sample_processed_data_dir / f"{sample_name}.h5mu")
+    
+    data_processor = muon_prep.MudataProcessor(
+        mdata=mdata,
+        processed_data_dir=sample_processed_data_dir,
+        sample_name=sample_name,
+        tss_path=tss_path,
+    )
+    
+    # RNA QC and Preprocessing
+    logging.info("  - Processing RNA")
+    data_processor.rna_qc_filter(
+        min_cells_per_gene = MIN_CELLS_PER_GENE,
+        min_genes_per_cell = MIN_GENES_PER_CELL,
+        max_genes_per_cell = MAX_GENES_PER_CELL,
+        min_total_counts_per_cell = MIN_TOTAL_COUNTS,
+        max_total_counts_per_cell = MAX_TOTAL_COUNTS,
+        max_pct_counts_mt = MAX_PCT_COUNTS_MT,
+        norm_target_sum = norm_target_sum,
+        min_rna_disp = min_rna_disp,
+        filter_hvgs = filter_rna_hvgs,
+        tf_list_file = tf_list_file,
+        fig_dir=sample_processed_data_dir / "preprocessing_figures" / "rna_qc",
         )
-
-        train_loader, val_loader, test_loader = exp.prepare_dataloader(
-            dataset,
-            batch_size=batch_size,
-            world_size=1,
-            rank=0,
-            num_workers=dataloader_workers,
-            pin_memory=True,
+    
+    data_processor.rna_pca_and_neighbors(
+        data_processor.rna, 
+        n_pcs=rna_pcs,
+        n_neighbors=rna_neighbors,
+        fig_dir=sample_processed_data_dir / "preprocessing_figures" / "rna_qc",
         )
-
-        scalers = exp.create_scalers(
-            dataset=dataset,
-            dataloader=train_loader,
+    
+    # ATAC QC and Preprocessing
+    logging.info("  - Processing ATAC")
+    data_processor.atac_qc_filter(
+        min_cells_per_peak=MIN_CELLS_PER_PEAK,
+        min_peaks_per_cell=MIN_PEAKS_PER_CELL,
+        max_peaks_per_cell=MAX_PEAKS_PER_CELL,
+        min_total_counts_per_cell=MIN_TOTAL_PEAK_COUNTS,
+        max_total_counts_per_cell=MAX_TOTAL_PEAK_COUNTS,
+        min_atac_disp=min_atac_disp,
+        min_atac_hvg_mean=min_atac_hvg_mean,
+        max_atac_hvg_mean=max_atac_hvg_mean,
+        promoter_upstream=promoter_upstream,
+        promoter_downstream=promoter_downstream,
+        distal_max=distal_max,
+        filter_hvgs=filter_atac_hvgs,
+        n_neighbors=atac_neighbors,
+        n_pcs=atac_pcs,
+        fig_dir=sample_processed_data_dir / "preprocessing_figures" / "atac_qc",
         )
-
-        model = exp.create_new_model(
-            dataset=dataset,
-            bias_scale=bias_scale,
-            d_model=d_model,
-            num_heads=num_heads,
-            num_layers=num_layers,
-            d_ff=d_ff,
-            window_pool_size=kernel_size,
+    
+    data_processor.nucleosome_signal(
+        frag_path=frag_path, 
+        fig_dir=sample_processed_data_dir / "preprocessing_figures" / "atac_qc"
         )
-        train_start_time = time.time()
-        model = exp.train_timed(
-            model,
-            train_loader,
-            val_loader,
-            num_epochs=epochs,
-            validate_every=1,
-            max_batches=None,
-            monitor_gpu_memory=True,
-            profile_batches=True,
-            verbose=False,
-            silence_tqdm=True,
+    
+    logging.info("  - Calculating TSS enrichment")
+    data_processor.tss_enrichment(
+        frag_path=frag_path, 
+        n_tss=n_tss, 
+        extend_upstream=extend_upstream, 
+        extend_downstream=extend_downstream,
+        fig_dir=sample_processed_data_dir / "preprocessing_figures" / "atac_qc"
         )
-        train_end_time = time.time()
-        logging.info(f"[Experiment {i+1}] Training finished in {train_end_time - train_start_time:.2f} seconds.")
-
-
-        grad_attrib_start_time = time.time()
-        grad_attr_df, grad_batch_dfs = run_gradient_attribution(
-            selected_experiment_dir=exp.model_training_dir,
-            model=model,
-            test_loader=test_loader,
-            tf_scaler=scalers["tf_scaler"],
-            tg_scaler=scalers["tg_scaler"],
-            tf_names = exp.tf_names,
-            tg_names = exp.tg_names,
-            use_amp=False,
-            max_batches=grad_attrib_batches,
-            device=exp.device,
-            save_every_n_batches=1,
-            max_tgs_per_batch=grad_attrib_tgs_per_batch,
+    
+        
+    # Save the processed data
+    logging.info("  - Saving processed data")
+    muon_prep.save_processed_data(data_processor.mdata, sample_processed_data_dir)
+    
+    # Integrate the RNA and ATAC modalities using MOFA+
+    logging.info("  - Integrating RNA and ATAC modalities using MOFA+")
+    muon_prep.integrate_rna_atac(
+        data_processor.mdata, 
+        sample_processed_data_dir, 
+        sample_name, 
+        fig_dir=sample_processed_data_dir / "integration_figures"
         )
+    
+    # Create metacells
+    logging.info("  - Creating metacells")
+    muon_prep.create_metacells(data_processor.mdata, sample_processed_data_dir, hops=hops)
+    logging.info("Muon Preprocessing complete.")
 
-        grad_attrib_end_time = time.time()
-        logging.info(f"[Experiment {i+1}] Gradient attribution finished {grad_attrib_batches} batches in {grad_attrib_end_time - grad_attrib_start_time:.2f} seconds.")
+PREPROCESSING_PARAM_KEYS = [
+    "norm_target_sum",
+    "min_rna_disp",
+    "min_atac_disp",
+    "rna_pcs",
+    "rna_neighbors",
+    "atac_pcs",
+    "atac_neighbors",
+    "min_atac_hvg_mean",
+    "max_atac_hvg_mean",
+    "filter_rna_hvgs",
+    "filter_atac_hvgs",
+    "tf_list_file",
+    "promoter_upstream",
+    "promoter_downstream",
+    "distal_max",
+    "n_tss",
+    "extend_upstream",
+    "extend_downstream",
+    "hops",
+]
 
-        auroc_df = calculate_auroc_all_sample_gts(exp, grad_attr_df, gt_by_dataset_dict[sample_type])
 
-        def update_dfs_with_experiment_params(df):
-            df["experiment_name"] = exp.experiment_name
-            df["sample_type"] = sample_type
-            df["replicate"] = replicate
-            for param, value in experiment_dict.items():
-                df[param] = value[i]
-            return df
+def _build_preprocessing_signature(preprocessing_params):
+    encoded = json.dumps(preprocessing_params, sort_keys=True, default=str)
+    return f"prep_{zlib.crc32(encoded.encode('utf-8')):08x}"
 
-        auroc_df = update_dfs_with_experiment_params(auroc_df)
-        exp.gpu_mem_log_df = update_dfs_with_experiment_params(exp.gpu_mem_log_df)
-        exp.batch_profile_df = update_dfs_with_experiment_params(exp.batch_profile_df)
-        exp.epoch_log_df = update_dfs_with_experiment_params(exp.epoch_log_df)
 
-        logging.info(f"[Experiment {i+1}] Aggregating results...")
-        full_summary_df = aggregate_results(
-            experiment_dict,
-            auroc_df,
-            exp.gpu_mem_log_df,
-            exp.batch_profile_df,
-            exp.epoch_log_df,
-        )
+def group_experiments_by_preprocessing(experiment_dict, num_experiments):
+    grouped = {}
+    for idx in range(num_experiments):
+        params = {key: experiment_dict[key][idx] for key in PREPROCESSING_PARAM_KEYS}
+        signature = _build_preprocessing_signature(params)
+        if signature not in grouped:
+            grouped[signature] = {
+                "params": params,
+                "indices": [],
+            }
+        grouped[signature]["indices"].append(idx)
+    return grouped
 
-        logging.info(f"[Experiment {i+1}] Saving results...")
-        with lock:
-            save_summary_df(full_summary_df, summary_save_path)
+def parse_args():
+    parser = argparse.ArgumentParser(description="Run hyperparameter tuning experiments for multiomic transformer.")
+    parser.add_argument("--sample_type", type=str, default="mESC", help="Type of sample to run experiments on (e.g. mESC, Macrophage)")
+    parser.add_argument("--sample_name", type=str, default="E7.5_rep1", help="Name of the sample to run experiments on (e.g. E7.5_rep1)")
+    parser.add_argument("--experiment_header", type=str, default="auroc_by_kernel_size", help="Header to identify the experiment (e.g. auroc_by_kernel_size)")
+    parser.add_argument("--n_chroms", type=int, default=19, help="Number of chromosomes to include in the dataset (default: 19 for mouse)")
+    parser.add_argument("--organism_code", type=str, default="mm10", help="Organism code for genome annotation (default: mm10)")
+    parser.add_argument("--raw_data_dir", type=str, required=True, help="Path to the raw data directory")
+    parser.add_argument("--processed_data_dir", type=str, required=True, help="Path to the processed data directory")
+    parser.add_argument("--experiment_dir", type=str, required=True, help="Path to the experiment directory where results will be saved")
+    parser.add_argument("--training_cache_dir", type=str, required=True, help="Path to the training data cache directory")
+    parser.add_argument("--log_dir", type=str, required=True, help="Path to the log directory")
 
+    args = parser.parse_args()
+
+    return args
 
 if __name__ == "__main__":
-    sample_type = "mESC"
-    benchmarking_experiment_name = "mESC_auroc_by_kernel_size"
-
-    logging.info(f"Running benchmarking experiment: {benchmarking_experiment_name} on sample type: {sample_type}")
-    logging.info("Loading ground truth datasets...")
-    gt_by_dataset_dict = load_ground_truth_dict()
-
+    args = parse_args()
+    sample_type = args.sample_type
+    sample_name = args.sample_name
+    experiment_header = args.experiment_header
+    n_chroms = args.n_chroms
+    organism_code = args.organism_code
+    
+    processed_data_dir = Path(args.processed_data_dir)
+    raw_data_dir = Path(args.raw_data_dir)
+    experiment_dir = Path(args.experiment_dir)
+    training_cache_dir = Path(args.training_cache_dir)
+    log_dir = Path(args.log_dir)
+    
+    experiment_name = f"{sample_type}_{sample_name}_{experiment_header}"
+    chrom_list = [f"chr{i}" for i in list(range(1,n_chroms+1))]
+    
+    logging.info("===== EXPERIMENT CONFIGURATION =====")
+    logging.info(f"Experiment Name: {experiment_name}")
+    logging.info(f"  - Sample Type: {sample_type}")
+    logging.info(f"  - Sample Name: {sample_name}")
+    logging.info(f"  - Experiment Header: {experiment_header}")
+    logging.info(f"  - Number of Chromosomes: {n_chroms}")
+    logging.info(f"  - Organism Code: {organism_code}")
+    logging.info(f"  - Raw Data Directory: {raw_data_dir}")
+    logging.info(f"  - Processed Data Directory: {processed_data_dir}")
+    logging.info(f"  - Experiment Directory: {experiment_dir}")
+    logging.info(f"  - Training Cache Directory: {training_cache_dir}\n")
+    
     experiment_dict = {
-        "batch_size": [64],
-        "epochs": [50],
-        "bias_scale": [0.0],
+        "batch_size": [128],
+        "epochs": [400],
+        "bias_scale": [0.0, 2.0],
         "num_layers": [3],
         "num_heads": [4],
         "d_model": [128],
-        "d_ff": [512],
-        "kernel_size": [64, 128, 256, 512],
-        "dataloader_workers": [8],
-        "max_cached": [100],
-        "grad_attrib_batches": [25],
-        "grad_attrib_tgs_per_batch": [128],
-        "replicates": [1, 2, 3],
+        "kernel_size": [128],
+        "dataloader_workers": [4],
+        "max_cached": [250],
+        "grad_attrib_batches": [None],
+        "grad_attrib_tgs_per_batch": [None],
+        "norm_target_sum": [1e4],
+        "min_rna_disp": [0.1, 0.5],
+        "min_atac_disp": [0.1, 0.5],
+        "rna_pcs": [10, 20],
+        "rna_neighbors": [10, 15],
+        "atac_pcs": [10, 20],
+        "atac_neighbors": [10, 15],
+        "min_atac_hvg_mean": [0.01],
+        "max_atac_hvg_mean": [10],
+        "filter_rna_hvgs": [True],
+        "filter_atac_hvgs": [True],
+        "tf_list_file": [None],
+        "promoter_upstream": [1000],
+        "promoter_downstream": [100],
+        "distal_max": [200_000],
+        "n_tss": [500],
+        "extend_upstream": [1000],
+        "extend_downstream": [1000],
+        "hops": [2],
+        "replicates": [1],
     }
 
     experiment_dict = expand_experiment_dict_grid(experiment_dict)
     num_experiments = [max(len(v) for v in experiment_dict.values())][0]
     logging.info(f"Total experiments to run: {num_experiments}")
+    
+    # Save the experiment configuration to a CSV for reference
+    experiment_df = pd.DataFrame(experiment_dict)
+    hyperparam_grid_path = PROJECT_DIR / "dev" / "notebooks" / "benchmarking_results" / "hyperparameter_grids" / f"{experiment_name}_hyperparam_grid.csv"
+    hyperparam_grid_path.parent.mkdir(parents=True, exist_ok=True)
+    experiment_df.to_csv(hyperparam_grid_path, index=False)
 
-    summary_save_path = PROJECT_DIR / "dev" / "notebooks" / "benchmarking_results" / f"{benchmarking_experiment_name}.csv"
+    summary_save_path = PROJECT_DIR / "dev" / "notebooks" / "benchmarking_results" / f"{experiment_name}.csv"
+    sample_raw_data_dir = raw_data_dir / f"{sample_type}_10x_raw" / sample_name
+
+    def missing_preprocessing_files(sample_processed_data_dir: Path):
+        required_preprocessing_files = ["RE_pseudobulk.parquet","TG_pseudobulk.parquet"]
+        
+        for file_name in required_preprocessing_files:
+            if not (sample_processed_data_dir / file_name).is_file():
+                return True
+
+    logging.info("\nLoading ground truth datasets...")
+    gt_by_dataset_dict = load_ground_truth_dict(sample_type)
 
     if torch.cuda.is_available():
         available_gpus = list(range(torch.cuda.device_count()))
@@ -934,34 +1095,88 @@ if __name__ == "__main__":
     if len(available_gpus) == 0:
         raise RuntimeError("No GPUs detected. Multiprocessing GPU assignment requires CUDA devices.")
 
-    assignments = {gpu_id: [] for gpu_id in available_gpus}
-    for idx in range(num_experiments):
-        assignments[available_gpus[idx % len(available_gpus)]].append(idx)
-
     mp.set_start_method("spawn", force=True)
     manager = mp.Manager()
     lock = manager.Lock()
-    processes = []
 
-    for gpu_id, indices in assignments.items():
-        if not indices:
-            continue
-        p = mp.Process(
-            target=_run_experiments_on_gpu,
-            args=(
-                gpu_id,
-                indices,
-                lock,
-                experiment_dict,
-                num_experiments,
-                summary_save_path,
-                sample_type,
-                gt_by_dataset_dict,
-            ),
+    grouped_experiments = group_experiments_by_preprocessing(experiment_dict, num_experiments)
+    logging.info(f"Unique preprocessing parameter combinations: {len(grouped_experiments)}")
+
+    # Group experiments by their preprocessing parameters to avoid redundant preprocessing runs
+    # Generates a unique signature for each combination of preprocessing parameters
+    for prep_signature, prep_group in grouped_experiments.items():
+        prep_params = prep_group["params"]
+        prep_indices = prep_group["indices"]
+        logging.info(
+            f"\n===== PREPROCESSING GROUP {prep_signature} "
+            f"({len(prep_indices)} experiments) ====="
         )
-        p.start()
-        processes.append(p)
 
-    for p in processes:
-        p.join()
+        exp_processed_data_dir = processed_data_dir / experiment_name / prep_signature
+        exp_processed_data_dir.mkdir(parents=True, exist_ok=True)
+        sample_processed_data_dir = exp_processed_data_dir / sample_name
+        sample_processed_data_dir.mkdir(parents=True, exist_ok=True)
+
+        # Determines if the Muon preprocessing has been completed for this combination of parameters
+        run_muon = False
+        if missing_preprocessing_files(sample_processed_data_dir):
+            run_muon = True
+
+        if run_muon:
+            run_muon_preprocessing(
+                sample_name=sample_name,
+                sample_raw_data_dir=sample_raw_data_dir,
+                sample_processed_data_dir=sample_processed_data_dir,
+                tss_path=PROJECT_DIR / "data" / "genome_data" /"genome_annotation" / organism_code / f"gene_tss.bed",
+                project_dir=PROJECT_DIR,
+                **prep_params,
+            )
+        else:
+            logging.info(f"Reusing existing preprocessing outputs for {prep_signature}.")
+
+        # Create a directory for caching training data for this preprocessing combination
+        combo_training_cache_dir = training_cache_dir / experiment_name / prep_signature
+        combo_training_cache_dir.mkdir(parents=True, exist_ok=True)
+
+        tdf = data_formatter.TrainingDataFormatter(
+            project_dir=PROJECT_DIR,
+            experiment_name=experiment_name,
+            organism_code=organism_code,
+            sample_names=[sample_name],
+            chrom_list=chrom_list,
+            output_dir=experiment_dir / experiment_name,
+            processed_data_dir=exp_processed_data_dir,
+            training_data_cache=combo_training_cache_dir,
+        )
+        tdf.create_or_load_data_cache(sample_name=sample_name, force_recalculate=False)
+
+        assignments = {gpu_id: [] for gpu_id in available_gpus}
+        for idx in prep_indices:
+            assignments[available_gpus[idx % len(available_gpus)]].append(idx)
+
+        processes = []
+        for gpu_id, indices in assignments.items():
+            if not indices:
+                continue
+            p = mp.Process(
+                target=_run_experiments_on_gpu,
+                args=(
+                    tdf,
+                    gpu_id,
+                    indices,
+                    lock,
+                    experiment_dict,
+                    num_experiments,
+                    summary_save_path,
+                    sample_type,
+                    gt_by_dataset_dict,
+                    experiment_dir,
+                    log_dir,
+                ),
+            )
+            p.start()
+            processes.append(p)
+
+        for p in processes:
+            p.join()
 

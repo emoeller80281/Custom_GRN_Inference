@@ -337,7 +337,7 @@ if __name__ == "__main__":
     
     # Create the processed data directory for the sample if it doesn't already exist
     sample_processed_data_dir = processed_data_dir / sample_name
-    sample_raw_data_dir = raw_data_dir / f"{sample_type}_10x_raw" / sample_name
+    sample_raw_data_dir = raw_data_dir / sample_type / sample_name
     
     def missing_preprocessing_files(sample_processed_data_dir: Path):
         required_preprocessing_files = ["RE_pseudobulk.parquet","TG_pseudobulk.parquet"]
@@ -386,7 +386,7 @@ if __name__ == "__main__":
         # # Write the loaded data to the processed data directory
         # mdata.write(sample_processed_data_dir / f"{sample_name}.h5mu")
         
-        mdata = mu.read_h5mu(sample_raw_data_dir / sample_name / f"{sample_name}.h5mu")
+        mdata = mu.read_h5mu(raw_h5_data_file)
         
         data_processor = muon_prep.MudataProcessor(
             mdata=mdata,
