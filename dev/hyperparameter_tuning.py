@@ -36,7 +36,7 @@ from multiomic_transformer.models.model_simplified import MultiomicTransformer
 from multiomic_transformer.datasets.dataset_refactor import (
     SimpleScaler,
 )
-import muon_preprocessing as muon_prep
+import multiomic_transformer.utils.muon_preprocessing as muon_prep
 
 DATA_DIR = Path("/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER")
 GROUND_TRUTH_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data/ground_truth_files")
