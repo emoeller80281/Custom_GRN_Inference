@@ -45,7 +45,6 @@ from multiomic_transformer.datasets.dataset_refactor import (
     IndexedChromBucketBatchSampler,
     InterleavedChromBatchSampler,
 )
-from multiomic_transformer.scripts.multinode_train_simplified import Trainer
 import multiomic_transformer.utils.auroc_refactored as auroc_utils
 
 logging.basicConfig(level=logging.INFO, format='%(message)s')
@@ -1366,6 +1365,7 @@ class ExperimentHandler:
 
         max_tgs_per_batch = len(tg_names) if max_tgs_per_batch is None else max_tgs_per_batch
         max_tgs_per_batch = min(max_tgs_per_batch, len(tg_names))
+        print(len(tg_names))
 
         # 2. Accumulate gradients sized [W_total, G_total]
         grad_sum = torch.zeros(W_total, G_total, device=device, dtype=torch.float32)
@@ -1376,7 +1376,7 @@ class ExperimentHandler:
         model.to(device).eval()
 
         iterator = tqdm(test_loader, desc="ATAC Gradient attributions", total=max_batches, ncols=100) if show_tqdm else test_loader
-        batch_grad_dfs = {}
+        atac_batch_grad_dfs = {}
 
         for b_idx, (batch_indices, batch) in enumerate(zip(test_loader.batch_sampler, test_loader)):
             if max_batches is not None and b_idx >= max_batches: break
@@ -1429,6 +1429,9 @@ class ExperimentHandler:
                     preds_s = preds_s[0] if isinstance(preds_s, tuple) else preds_s
                     preds_u = tg_scaler.inverse_transform(preds_s, tg_ids_chunk) if tg_scaler is not None else preds_s
                     preds_u = torch.nan_to_num(preds_u.float(), nan=0.0, posinf=1e6, neginf=-1e6)
+                    if b_idx == 0:
+                        print(f"Preds shape: {preds_u.shape}")
+                        print(f"tg_ids shape: {tg_ids.shape}")
 
                 grad_output_j = torch.zeros_like(preds_u)
 
@@ -1463,8 +1466,6 @@ class ExperimentHandler:
                 
             # 5. Store "Source" data based on window names
             if save_every_n_batches is not None and b_idx % save_every_n_batches == 0:
-                if show_tqdm:
-                    iterator.update(b_idx - iterator.n)
                 
                 edge_seen = grad_count > 0
                 win_idx, tg_idx = torch.nonzero(edge_seen, as_tuple=True)
@@ -1475,6 +1476,8 @@ class ExperimentHandler:
                     "Target": [tg_names[j] for j in tg_idx.cpu().numpy()],
                     "Score": scores,
                 })
+            if show_tqdm:
+                iterator.update(b_idx - iterator.n)
 
         if show_tqdm:
             iterator.close()
@@ -1521,6 +1524,17 @@ class ExperimentHandler:
         
         self.grn = pd.read_csv(grn_path)
         return self.grn
+    
+    def load_atac_grn(self):
+        grn_path = self.model_training_dir / "inferred_atac_grn.csv"
+        if not grn_path.exists():
+            if self.silence_warnings is not None:
+                logging.warning(f"ATAC GRN file not found at {grn_path}. Please run run_gradient_attribution() first to generate the GRN.")
+            return None
+        
+        self.atac_grn = pd.read_csv(grn_path)
+        return self.atac_grn
+        
     
     def load_eval_results(self):      
         eval_files = [
@@ -2123,22 +2137,6 @@ class ExperimentHandler:
         per_tf_summary_df.to_csv(self.model_training_dir / "per_tf_auroc_auprc_summary.csv", index=False)
     
     def print_model_settings(self):
-        # Default training parameters
-        self.epochs = 250
-        self.batch_size = 32
-        self.grad_accum_steps = 1
-        self.use_grad_ckpt = True
-        self.d_model = 128
-        self.num_heads = 4
-        self.num_layers = 3
-        self.d_ff = 512
-        self.kernel_size = 64
-        self.dropout = 0.1
-        self.bias_scale = 2.0
-        self.use_dist_bias = True
-        self.initial_lr = 0.00025
-        self.starting_epoch = None
-        
         model_setting_dict = {
             "Epochs (epochs)": self.epochs,
             "Batch Size (batch_size)": self.batch_size,

@@ -8,6 +8,7 @@ transformer_data
 macrophage_output/
 reference_networks/
 .venv/
+homer_results/
 poster_results/
 checkpoint.pt
 .pybiomart
