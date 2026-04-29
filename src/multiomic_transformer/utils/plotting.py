@@ -22,7 +22,7 @@ if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
 from multiomic_transformer.datasets.dataset_refactor import SimpleScaler
-from multiomic_transformer.models.model import MultiomicTransformer
+from multiomic_transformer.models.model_simplified import MultiomicTransformer
 
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 

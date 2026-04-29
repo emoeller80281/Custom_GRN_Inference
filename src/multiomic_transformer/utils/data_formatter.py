@@ -27,8 +27,6 @@ from multiomic_transformer.utils.peaks import format_peaks, find_genes_near_peak
 
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 
-
-
 class TrainingDataFormatter:
     def __init__(
         self, 

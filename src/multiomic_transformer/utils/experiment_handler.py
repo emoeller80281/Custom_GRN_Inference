@@ -390,13 +390,13 @@ class ExperimentHandler:
     
     def create_new_model(
         self, 
-        use_dist_bias=None,
-        bias_scale=None, 
         d_model=None,
         num_heads=None,
         num_layers=None,
         d_ff=None,
         dropout=None,
+        use_dist_bias=None,
+        bias_scale=None, 
         kernel_size=None,
         local_rank=0, 
         rank=0, 
@@ -573,8 +573,6 @@ class ExperimentHandler:
         
         if persistent_workers:
             persistent_workers = True if num_workers > 1 else False
-            
-
 
         # 5) Single shared dataset; samplers decide which indices belong to which split
         train_loader = DataLoader(
@@ -1337,6 +1335,165 @@ class ExperimentHandler:
         
         return self.grn, batch_grad_dfs
     
+    def run_atac_gradient_attribution(
+        self,
+        test_loader,
+        model=None,
+        tf_scaler=None,
+        tg_scaler=None,
+        use_amp=True,
+        max_batches: int | None = None,
+        save_every_n_batches: int = 20,
+        max_tgs_per_batch: int | None = None,
+        chunk_size: int = 64,
+        show_tqdm: bool = True,
+    ):
+        model = self.model if model is None else model
+        max_batches = len(test_loader) if max_batches is None else max_batches
+        device = self.device
+
+        dataset = getattr(test_loader, "dataset", None)
+        tg_names = getattr(dataset, "tg_names", self.tg_names)
+        
+        # 1. Map ATAC window indices back to their peak names
+        window_map = getattr(dataset, "window_map", {})
+        W_total = dataset.num_windows
+        G_total = len(tg_names)
+        
+        window_names = [""] * W_total
+        for peak_name, w_idx in window_map.items():
+            window_names[w_idx] = peak_name
+
+        max_tgs_per_batch = len(tg_names) if max_tgs_per_batch is None else max_tgs_per_batch
+        max_tgs_per_batch = min(max_tgs_per_batch, len(tg_names))
+
+        # 2. Accumulate gradients sized [W_total, G_total]
+        grad_sum = torch.zeros(W_total, G_total, device=device, dtype=torch.float32)
+        grad_count = torch.zeros_like(grad_sum)
+
+        tf_scaler = self.tf_scaler if tf_scaler is None else tf_scaler
+        tg_scaler = self.tg_scaler if tg_scaler is None else tg_scaler
+        model.to(device).eval()
+
+        iterator = tqdm(test_loader, desc="ATAC Gradient attributions", total=max_batches, ncols=100) if show_tqdm else test_loader
+        batch_grad_dfs = {}
+
+        for b_idx, (batch_indices, batch) in enumerate(zip(test_loader.batch_sampler, test_loader)):
+            if max_batches is not None and b_idx >= max_batches: break
+            
+            # Determine which chrom this batch belongs to by fetching the first index
+            if hasattr(dataset, "_locate"):
+                chrom, _ = dataset._locate(batch_indices[0])
+                chrom_window_offsets = getattr(dataset, "chrom_window_offsets", {})
+                win_offset = chrom_window_offsets.get(chrom, 0)
+            else:
+                win_offset = 0
+
+            atac_wins, tf_tensor, targets, bias, tf_ids, tg_ids, motif_mask = batch
+            
+            atac_wins = atac_wins.to(device)
+            tf_tensor = tf_tensor.to(device)
+            bias = bias.to(device) if bias is not None else None
+            tf_ids = tf_ids.to(device)
+            tg_ids = tg_ids.to(device)
+
+            if bias is not None and bias.dim() == 2:
+                bias = bias.unsqueeze(0)
+
+            tg_ids_flat = tg_ids.reshape(-1).long()
+            G_eval = tg_ids.shape[-1]
+            
+            if G_eval > max_tgs_per_batch:
+                perm = torch.randperm(G_eval, device=device)[:max_tgs_per_batch]
+                owned_tg_indices = perm.sort().values
+            else:
+                owned_tg_indices = torch.arange(G_eval, device=device)
+
+            for chunk_start in range(0, owned_tg_indices.numel(), chunk_size):
+                tg_chunk = owned_tg_indices[chunk_start : chunk_start + chunk_size]
+                bias_chunk = bias[:, tg_chunk, :] if bias is not None and bias.dim() == 3 else (bias[:, :, tg_chunk, :] if bias is not None else None)
+                tg_ids_chunk = tg_ids_flat.index_select(0, tg_chunk)
+
+                # 3. Add requires_grad_ to the ATAC windows instead of TF expressions
+                atac_wins_chunk = atac_wins.detach().clone().requires_grad_(True)
+
+                with torch.amp.autocast(device_type=device.type, enabled=use_amp):
+                    tf_scaled = tf_scaler.transform(tf_tensor, tf_ids) if tf_scaler is not None else tf_tensor
+                    preds_s = model(
+                        atac_wins_chunk,
+                        tf_scaled,
+                        tf_ids=tf_ids,
+                        tg_ids=tg_ids_chunk,
+                        bias=bias_chunk,
+                    )
+                    preds_s = preds_s[0] if isinstance(preds_s, tuple) else preds_s
+                    preds_u = tg_scaler.inverse_transform(preds_s, tg_ids_chunk) if tg_scaler is not None else preds_s
+                    preds_u = torch.nan_to_num(preds_u.float(), nan=0.0, posinf=1e6, neginf=-1e6)
+
+                grad_output_j = torch.zeros_like(preds_u)
+
+                for offset in range(preds_u.shape[1]):
+                    grad_output_j.zero_()
+                    grad_output_j[:, offset] = 1.0
+
+                    # 4. Point torch.autograd.grad toward atac_wins_chunk
+                    grads = torch.autograd.grad(
+                        outputs=preds_u,
+                        inputs=atac_wins_chunk,
+                        grad_outputs=grad_output_j,
+                        retain_graph=(offset < preds_u.shape[1] - 1),
+                        create_graph=False,
+                    )[0]
+
+                    # grads matches atac_wins_chunk shape [B, W, 1]. Drop trailing feature dim.
+                    grad_abs = grads.abs().squeeze(-1) 
+                    
+                    # The gradient per batch is summed up [W]
+                    grad_per_win = grad_abs.sum(dim=0)
+                    count_per_win = torch.full_like(grad_per_win, float(grad_abs.shape[0]))
+
+                    tg_global = int(tg_ids_chunk[offset].item())
+
+                    # Add gradient values for the target windows (aligning using win_offset)
+                    num_wins_batch = grad_per_win.shape[0]
+                    grad_sum[win_offset : win_offset + num_wins_batch, tg_global] += grad_per_win
+                    grad_count[win_offset : win_offset + num_wins_batch, tg_global] += count_per_win
+
+                del preds_u, preds_s, tf_scaled, atac_wins_chunk, bias_chunk, tg_ids_chunk
+                
+            # 5. Store "Source" data based on window names
+            if save_every_n_batches is not None and b_idx % save_every_n_batches == 0:
+                if show_tqdm:
+                    iterator.update(b_idx - iterator.n)
+                
+                edge_seen = grad_count > 0
+                win_idx, tg_idx = torch.nonzero(edge_seen, as_tuple=True)
+                scores = (grad_sum[win_idx, tg_idx] / grad_count[win_idx, tg_idx]).detach().cpu().numpy()
+
+                atac_batch_grad_dfs[b_idx] = pd.DataFrame({
+                    "Source": [window_names[i] for i in win_idx.cpu().numpy()],
+                    "Target": [tg_names[j] for j in tg_idx.cpu().numpy()],
+                    "Score": scores,
+                })
+
+        if show_tqdm:
+            iterator.close()
+            
+        edge_seen = grad_count > 0
+        win_idx, tg_idx = torch.nonzero(edge_seen, as_tuple=True)
+        scores = (grad_sum[win_idx, tg_idx] / grad_count[win_idx, tg_idx]).detach().cpu().numpy()
+
+        df_long = pd.DataFrame({
+            "Source": [window_names[i] for i in win_idx.cpu().numpy()],
+            "Target": [tg_names[j] for j in tg_idx.cpu().numpy()],
+            "Score": scores,
+        })
+        
+        self.atac_grn = self.format_grn(df_long)
+        self.atac_grn.to_csv(self.model_training_dir / "inferred_atac_grn.csv", index=False)
+        
+        return self.atac_grn, atac_batch_grad_dfs
+    
     def format_grn(self, df):
         
         def inverse_normal_transform(x):
@@ -1964,6 +2121,43 @@ class ExperimentHandler:
         results_df.to_csv(self.model_training_dir / "pooled_auroc_auprc_results.csv", index=False)
         per_tf_all_df.to_csv(self.model_training_dir / "per_tf_auroc_auprc_results.csv", index=False)
         per_tf_summary_df.to_csv(self.model_training_dir / "per_tf_auroc_auprc_summary.csv", index=False)
+    
+    def print_model_settings(self):
+        # Default training parameters
+        self.epochs = 250
+        self.batch_size = 32
+        self.grad_accum_steps = 1
+        self.use_grad_ckpt = True
+        self.d_model = 128
+        self.num_heads = 4
+        self.num_layers = 3
+        self.d_ff = 512
+        self.kernel_size = 64
+        self.dropout = 0.1
+        self.bias_scale = 2.0
+        self.use_dist_bias = True
+        self.initial_lr = 0.00025
+        self.starting_epoch = None
+        
+        model_setting_dict = {
+            "Epochs (epochs)": self.epochs,
+            "Batch Size (batch_size)": self.batch_size,
+            "Gradient Accumulation Steps (grad_accum_steps)": self.grad_accum_steps,
+            "Use Gradient Checkpointing (use_grad_ckpt)": self.use_grad_ckpt,
+            "Model Dimension (d_model)": self.d_model,
+            "Number of Heads (num_heads)": self.num_heads,
+            "Number of Layers (num_layers)": self.num_layers,
+            "Feed-Forward Dimension (d_ff)": self.d_ff,
+            "Kernel Size (kernel_size)": self.kernel_size,
+            "Dropout (dropout)": self.dropout,
+            "Bias Scale (bias_scale)": self.bias_scale,
+            "Use Distance Bias (use_dist_bias)": self.use_dist_bias,
+            "Initial Learning Rate (initial_lr)": self.initial_lr,
+        }
+        
+        logging.info(f"Model settings for {self.experiment_name}:")
+        for key, value in model_setting_dict.items():
+            logging.info(f"  {key}: {value}")
     
     def plot_auroc_auprc(
         self, 
@@ -2731,4 +2925,5 @@ class ExperimentHandler:
 
         if not allow_overwrite:
             logging.info(f"Using model_num={self.model_num} at {self.model_training_dir}")
+            
             

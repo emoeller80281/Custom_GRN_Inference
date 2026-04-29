@@ -29,7 +29,7 @@ from multiomic_transformer.datasets.dataset_refactor import (
     MultiomicTransformerDataset,
     MultiChromosomeDataset,
     DistributedBatchSampler,
-    fit_simple_scalers,
+    fit_simple_scalers_fast_gpu,
     SimpleScaler,
     IndexedChromBucketBatchSampler,
 )
@@ -1618,11 +1618,11 @@ def main(rank: int, local_rank: int, world_size: int, save_every: int, total_epo
             
             if rank == 0:
                 logging.info("Fitting scalers on training data")
-            tf_s, tg_s = fit_simple_scalers(
+            tf_s, tg_s = fit_simple_scalers_fast_gpu(
                 train_loader,
                 T_expected=T,
                 G_expected=G,
-                device_for_reduce=rank_device,
+                device=rank_device,
                 use_ddp_reduce=use_ddp_reduce,
             )
             trainer.tf_scaler = SimpleScaler(tf_s.mean.to(rank_device), tf_s.std.to(rank_device))

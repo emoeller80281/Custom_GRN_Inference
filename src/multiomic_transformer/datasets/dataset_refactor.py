@@ -65,88 +65,6 @@ class SimpleScaler:
         return x * sig + mu
 
 @torch.no_grad()
-def fit_simple_scalers(
-    train_loader,
-    T_expected: int,
-    G_expected: int,
-    device_for_reduce: Union[str, torch.device] = "cuda",
-    use_ddp_reduce: bool = False,
-):
-    """
-    Fits SimpleScaler objects for TF and TG data from a DataLoader. 
-    
-    Different chromosomes may have different subsets of TFs/TGs, so we need to
-    accumulate sums, squared sums, and counts for each TF/TG across batches,
-    then compute means and stds at the end.
-    """
-    # global accumulators on CPU (memory-light, avoids GPU growth)
-    tf_sum   = torch.zeros(T_expected, dtype=torch.float64, device="cpu")
-    tf_sqsum = torch.zeros(T_expected, dtype=torch.float64, device="cpu")
-    tf_count = torch.zeros(T_expected, dtype=torch.float64, device="cpu")
-
-    tg_sum   = torch.zeros(G_expected, dtype=torch.float64, device="cpu")
-    tg_sqsum = torch.zeros(G_expected, dtype=torch.float64, device="cpu")
-    tg_count = torch.zeros(G_expected, dtype=torch.float64, device="cpu")
-
-    for batch in train_loader:
-        # unpack like your collate_fn returns
-        atac_wins, tf_tensor, tg_tensor, bias, tf_ids, tg_ids, motif_mask = batch
-        
-        # move minimal things to GPU to sum efficiently, then bring back to CPU
-        tf_tensor = tf_tensor.to(device_for_reduce, non_blocking=True)   # [B,T_eval]
-        tg_tensor = tg_tensor.to(device_for_reduce, non_blocking=True)   # [B,G_eval]
-        tf_ids    = tf_ids.to(device_for_reduce, non_blocking=True)      # [T_eval] global ids 0..T'-1
-        tg_ids    = tg_ids.to(device_for_reduce, non_blocking=True)      # [G_eval] global ids 0..G'-1
-
-        # per-batch reductions over batch dimension
-        tf_batch_sum   = tf_tensor.sum(dim=0)                # [T_eval]
-        tf_batch_sqsum = (tf_tensor**2).sum(dim=0)           # [T_eval]
-        tf_batch_cnt   = torch.full_like(tf_batch_sum, fill_value=tf_tensor.shape[0], dtype=torch.float64)
-
-        tg_batch_sum   = tg_tensor.sum(dim=0)                # [G_eval]
-        tg_batch_sqsum = (tg_tensor**2).sum(dim=0)           # [G_eval]
-        tg_batch_cnt   = torch.full_like(tg_batch_sum, fill_value=tg_tensor.shape[0], dtype=torch.float64)
-
-        # move to CPU for index_add_
-        tf_ids_cpu = tf_ids.to("cpu")
-        tg_ids_cpu = tg_ids.to("cpu")
-
-        tf_sum.index_add_(0, tf_ids_cpu, tf_batch_sum.to("cpu", dtype=torch.float64))
-        tf_sqsum.index_add_(0, tf_ids_cpu, tf_batch_sqsum.to("cpu", dtype=torch.float64))
-        tf_count.index_add_(0, tf_ids_cpu, tf_batch_cnt.to("cpu", dtype=torch.float64))
-
-        tg_sum.index_add_(0, tg_ids_cpu, tg_batch_sum.to("cpu", dtype=torch.float64))
-        tg_sqsum.index_add_(0, tg_ids_cpu, tg_batch_sqsum.to("cpu", dtype=torch.float64))
-        tg_count.index_add_(0, tg_ids_cpu, tg_batch_cnt.to("cpu", dtype=torch.float64))
-
-    # Optionally all-reduce across DDP ranks (sum the accumulators)
-    if use_ddp_reduce and torch.distributed.is_initialized():
-        for acc in (tf_sum, tf_sqsum, tf_count, tg_sum, tg_sqsum, tg_count):
-            acc_cuda = acc.to(device_for_reduce)
-            torch.distributed.all_reduce(acc_cuda, op=torch.distributed.ReduceOp.SUM)
-            acc.copy_(acc_cuda.to("cpu"))
-
-    # Calculate the TF means/stds (only for TFs in the dataset with nonzero counts)
-    tf_mean = torch.zeros(T_expected, dtype=torch.float32)
-    tf_std  = torch.ones(T_expected,  dtype=torch.float32)
-    mask_tf = tf_count > 0
-    tf_mean[mask_tf] = (tf_sum[mask_tf] / tf_count[mask_tf]).to(torch.float32)
-    tf_var = torch.zeros_like(tf_mean)
-    tf_var[mask_tf] = (tf_sqsum[mask_tf] / tf_count[mask_tf]).to(torch.float32) - tf_mean[mask_tf]**2
-    tf_std = torch.sqrt(torch.clamp(tf_var, min=1e-6))
-
-    # Calculate the TG means/stds (only for TGs in the dataset with nonzero counts)
-    tg_mean = torch.zeros(G_expected, dtype=torch.float32)
-    tg_std  = torch.ones(G_expected,  dtype=torch.float32)
-    mask_tg = tg_count > 0
-    tg_mean[mask_tg] = (tg_sum[mask_tg] / tg_count[mask_tg]).to(torch.float32)
-    tg_var = torch.zeros_like(tg_mean)
-    tg_var[mask_tg] = (tg_sqsum[mask_tg] / tg_count[mask_tg]).to(torch.float32) - tg_mean[mask_tg]**2
-    tg_std = torch.sqrt(torch.clamp(tg_var, min=1e-6))
-
-    return SimpleScaler(tf_mean, tf_std), SimpleScaler(tg_mean, tg_std)
-
-@torch.no_grad()
 def fit_simple_scalers_fast_gpu(
     train_loader,
     T_expected: int,
@@ -466,6 +384,8 @@ class MultiChromosomeDataset(Dataset):
         self._length = running
         
         self._windows_per_chrom = {}
+        self.window_map = {}
+        self.chrom_window_offsets = {}
         _total_windows = 0
         _total_tgs = 0
         _total_tfs = 0
@@ -474,6 +394,11 @@ class MultiChromosomeDataset(Dataset):
             ds = self._load_chrom(cid)   # uses cache + applies global sub-vocab + max_windows_per_chrom
             w = int(ds.num_windows)
             self._windows_per_chrom[cid] = w
+            self.chrom_window_offsets[cid] = _total_windows
+            
+            for peak_name, local_idx in ds.window_map.items():
+                self.window_map[peak_name] = local_idx + _total_windows
+                
             _total_windows += w
             _total_tgs += int(ds.num_tgs)
             _total_tfs = int(ds.num_tfs)

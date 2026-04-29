@@ -1169,9 +1169,6 @@ if __name__ == "__main__":
             fig_dir=SAMPLE_PROCESSED_DATA_DIR / "preprocessing_figures" / "atac_qc"
             )
     
-    # Save the processed data
-    # save_processed_data(data_processor.mdata, SAMPLE_PROCESSED_DATA_DIR)
-    
     # Integrate the RNA and ATAC modalities using MOFA+
     integrate_rna_atac(data_processor.mdata, SAMPLE_PROCESSED_DATA_DIR, SAMPLE_NAME, fig_dir=SAMPLE_PROCESSED_DATA_DIR / "integration")
     
