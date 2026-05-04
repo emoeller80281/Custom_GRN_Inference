@@ -14,7 +14,7 @@ module load blat # Homer uses this to remove duplicate peaks
 
 BASE_DIR="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
 OUTPUT_DIR="$BASE_DIR/dev/Homer/"
-SPECIES="hg38"
+SPECIES="mm10"
 NUM_CPU=64
 
 cd "$OUTPUT_DIR"
@@ -24,20 +24,20 @@ echo "Adding the 'homer/bin' directory to PATH"
 export PATH="$BASE_DIR/data/homer/bin:$PATH"
 # export PERL5LIB="$BASE_DIR/data/homer/bin:$PERL5LIB"
 
-echo "Running findMotifsGenome.pl"
-mkdir -p "$OUTPUT_DIR/homer_results"
-perl "$BASE_DIR/data/homer/bin/findMotifsGenome.pl" \
-    "$OUTPUT_DIR/tmp/homer_peaks.txt" \
-    "$SPECIES" "$OUTPUT_DIR/homer_results/" \
-    -size 200 \
-    -p $NUM_CPU \
-    -nomotif
-    # -redundant 0.5 \
-echo "    Done!"
+# echo "Running findMotifsGenome.pl"
+# mkdir -p "$OUTPUT_DIR/homer_results"
+# perl "$BASE_DIR/data/homer/bin/findMotifsGenome.pl" \
+#     "$OUTPUT_DIR/tmp/homer_peaks.txt" \
+#     "$SPECIES" "$OUTPUT_DIR/homer_results/" \
+#     -size 200 \
+#     -p $NUM_CPU \
+#     -nomotif
+#     # -redundant 0.5 \
+# echo "    Done!"
 
-echo ""
-echo "----- Homer annotatePeaks.pl -----"
-echo "[INFO] Starting motif file processing"
+# echo ""
+# echo "----- Homer annotatePeaks.pl -----"
+# echo "[INFO] Starting motif file processing"
 
 load_parallel() {
     # Handle GNU parallel
@@ -79,12 +79,12 @@ echo "[INFO] Found $file_count motif files to process."
 PROCESSED_MOTIF_DIR="$OUTPUT_DIR/homer_results/homer_tf_motif_scores"
 mkdir -p "$PROCESSED_MOTIF_DIR"
 
-# Process files in parallel
-echo "Running annotatePeaks.pl"
-echo "$motif_files" | /usr/bin/time -v parallel -j "$NUM_CPU" \
-    "perl $BASE_DIR/data/homer/bin/annotatePeaks.pl $OUTPUT_DIR/tmp/homer_peaks.txt '$SPECIES' -m {} > $PROCESSED_MOTIF_DIR/{/}_tf_motifs.txt"
+# # Process files in parallel
+# echo "Running annotatePeaks.pl"
+# echo "$motif_files" | /usr/bin/time -v parallel -j "$NUM_CPU" \
+#     "perl $BASE_DIR/data/homer/bin/annotatePeaks.pl $OUTPUT_DIR/tmp/homer_peaks.txt '$SPECIES' -m {} > $PROCESSED_MOTIF_DIR/{/}_tf_motifs.txt"
 
-module unload parallel
+# module unload parallel
 
 PYTHON_SCRIPT_DIR="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/src/grn_inference"
 

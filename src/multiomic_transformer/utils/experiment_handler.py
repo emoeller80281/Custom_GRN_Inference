@@ -1365,7 +1365,6 @@ class ExperimentHandler:
 
         max_tgs_per_batch = len(tg_names) if max_tgs_per_batch is None else max_tgs_per_batch
         max_tgs_per_batch = min(max_tgs_per_batch, len(tg_names))
-        print(len(tg_names))
 
         # 2. Accumulate gradients sized [W_total, G_total]
         grad_sum = torch.zeros(W_total, G_total, device=device, dtype=torch.float32)
@@ -1429,9 +1428,6 @@ class ExperimentHandler:
                     preds_s = preds_s[0] if isinstance(preds_s, tuple) else preds_s
                     preds_u = tg_scaler.inverse_transform(preds_s, tg_ids_chunk) if tg_scaler is not None else preds_s
                     preds_u = torch.nan_to_num(preds_u.float(), nan=0.0, posinf=1e6, neginf=-1e6)
-                    if b_idx == 0:
-                        print(f"Preds shape: {preds_u.shape}")
-                        print(f"tg_ids shape: {tg_ids.shape}")
 
                 grad_output_j = torch.zeros_like(preds_u)
 

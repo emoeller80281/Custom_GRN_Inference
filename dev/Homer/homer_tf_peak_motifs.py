@@ -67,7 +67,19 @@ def process_TF_motif_file(path_to_file: str, output_dir: str) -> Union[str,None]
         motif_to_peak['peak_id'] = motif_to_peak['Chr'] + ':' + motif_to_peak['Start'] + '-' + motif_to_peak['End']
         
         # Extract the motif column
-        motif_column = motif_to_peak.columns[-2]
+        motif_candidates = [
+            c for c in motif_to_peak.columns
+            if "Distance From Peak(sequence,strand,conservation)" in c
+        ]
+
+        if len(motif_candidates) != 1:
+            raise ValueError(
+                f"Expected exactly one motif column, found {len(motif_candidates)}. "
+                f"Candidates: {motif_candidates}. "
+                f"Last columns: {motif_to_peak.columns[-6:].tolist()}"
+            )
+
+        motif_column = motif_candidates[0]
         
         # Extract the TF name from the motif column name; chain splits to remove extraneous info
         TF_name = motif_column.split('/')[0].split('(')[0].split(':')[0]
@@ -93,7 +105,7 @@ def process_TF_motif_file(path_to_file: str, output_dir: str) -> Union[str,None]
         total_tf_binding_sites = motif_to_peak['tf_motifs_in_peak'].sum()
         
         # Calculate homer_binding_score for each peak
-        motif_to_peak['homer_binding_score'] = motif_to_peak['tf_motifs_in_peak'] / total_tf_binding_sites
+        motif_to_peak['homer_binding_score'] = motif_to_peak['tf_motifs_in_peak']
         
         # Select only the columns of interest and drop any rows with missing values
         df = motif_to_peak[['peak_id', 'source_id', 'homer_binding_score']].dropna()
