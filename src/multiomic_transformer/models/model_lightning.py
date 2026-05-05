@@ -191,17 +191,7 @@ class LitMultiomicTransformer(pl.LightningModule):
 
     def on_train_epoch_end(self):
         if len(self.epoch_step_times) > 0:
-            avg_step_time = float(np.mean(self.epoch_step_times))
             total_step_time = float(np.sum(self.epoch_step_times))
-
-            self.log(
-                "train/avg_step_time_sec",
-                avg_step_time,
-                on_step=False,
-                on_epoch=True,
-                prog_bar=False,
-                sync_dist=True,
-            )
 
             self.log(
                 "train/total_train_time_sec",
@@ -234,7 +224,7 @@ class LitMultiomicTransformer(pl.LightningModule):
             "optimizer": optimizer,
             "lr_scheduler": {
                 "scheduler": scheduler,
-                "monitor": "val/mse_unscaled",   # or "val/mse_scaled"
+                "monitor": "val/mse_unscaled",
                 "interval": "epoch",
                 "frequency": 1,
                 "strict": True,
