@@ -2185,11 +2185,51 @@ class ExperimentHandler:
         
         auroc = roc_auc_score(y, s)
         fpr, tpr, _ = roc_curve(y, s)
-        rand_fpr, rand_tpr, _ = roc_curve(y, self._create_random_distribution(s))
+        rand_scores = self._create_random_distribution(s)
+        rand_fpr, rand_tpr, _ = roc_curve(y, rand_scores)
+        rand_auroc = roc_auc_score(y, rand_scores)
         
-        auprc = average_precision_score(y, s)
-        prec, rec, _ = precision_recall_curve(y, s)
-        rand_prec, rand_rec, _ = precision_recall_curve(y, self._create_random_distribution(s))
+        full_universe = auroc_utils.build_full_universe_from_gt(
+            method_df=score_df,
+            gt_edges=ground_truth_df,
+            use_abs_scores=True,
+        )
+        
+        def sample_auprc_10x_negatives(full_universe, random_state=42):
+            positives = full_universe[full_universe["_in_gt"] == 1]
+            negatives = full_universe[full_universe["_in_gt"] == 0]
+
+            n_pos = len(positives)
+            n_neg_sample = min(n_pos * 10, len(negatives))
+
+            if n_pos == 0 or n_neg_sample == 0:
+                return full_universe.iloc[0:0].copy()
+
+            neg_sampled = negatives.sample(
+                n=n_neg_sample,
+                replace=False,
+                random_state=random_state,
+            )
+
+            auprc_df = pd.concat([positives, neg_sampled], axis=0)
+
+            # Optional: shuffle, not required for sklearn metrics
+            auprc_df = auprc_df.sample(frac=1.0, random_state=random_state).reset_index(drop=True)
+
+            return auprc_df
+        
+        auprc_df = sample_auprc_10x_negatives(full_universe, random_state=42)
+
+        y_auprc = auprc_df["_in_gt"].astype(int).to_numpy()
+        s_auprc = auprc_df["Score"].to_numpy()
+
+        auprc = average_precision_score(y_auprc, s_auprc) if y_auprc.sum() > 0 else np.nan                
+        prec, rec, _ = precision_recall_curve(y_auprc, s_auprc)
+        
+        rand_scores = self._create_random_distribution(s_auprc)
+        rand_prec, rand_rec, _ = precision_recall_curve(y_auprc, rand_scores)
+        
+        rand_auprc = average_precision_score(y_auprc, rand_scores)
         
         metric_df = pd.DataFrame({
             "experiment": self.experiment_name,
@@ -2207,31 +2247,77 @@ class ExperimentHandler:
         if not no_fig:
             # ROC plot
             fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(7, 4))
-            ax[0].plot(rand_fpr, rand_tpr, color="#747474", linestyle="--", lw=2)
-            ax[0].plot(fpr, tpr, lw=2, color="#4195df", label=f"AUROC = {auroc:.3f}")
-            ax[0].plot([0, 1], [0, 1], "k--", lw=1, alpha=0.5)
+
+            roc_line, = ax[0].plot(
+                fpr, tpr,
+                lw=2,
+                color="#4195df",
+                label=f"AUROC = {auroc:.3f}",
+                zorder=3,
+            )
+
+            rand_roc_line, = ax[0].plot(
+                rand_fpr, rand_tpr,
+                color="#747474",
+                linestyle="--",
+                lw=2,
+                label=f"Random = {rand_auroc:.3f}",
+                zorder=2,
+            )
+
+            diag_line, = ax[0].plot(
+                [0, 1], [0, 1],
+                "k--",
+                lw=1,
+                alpha=0.5,
+                zorder=1,
+            )
+
             ax[0].set_xlabel("False Positive Rate", fontsize=12)
             ax[0].set_ylabel("True Positive Rate", fontsize=12)
-            ax[0].set_title(f"AUROC", fontsize=12)
+            ax[0].set_title("AUROC", fontsize=12)
+
             ax[0].legend(
+                handles=[roc_line, rand_roc_line],
+                labels=[f"AUROC = {auroc:.3f}", f"Random = {rand_auroc:.3f}"],
                 bbox_to_anchor=(0.5, -0.28),
                 loc="upper center",
-                borderaxespad=0.0
+                borderaxespad=0.0,
             )
+
             ax[0].set_xlim(0, 1)
             ax[0].set_ylim(0, 1)
             
             # Precision-Recall plot
-            ax[1].plot(rand_rec, rand_prec, color="#747474", linestyle="--", lw=2)
-            ax[1].plot(rec, prec, lw=2, color="#4195df", label=f"AUPRC = {auprc:.3f}")
+            pr_line, = ax[1].plot(
+                rec, prec,
+                lw=2,
+                color="#4195df",
+                label=f"AUPRC = {auprc:.3f}",
+                zorder=3,
+            )
+
+            rand_pr_line, = ax[1].plot(
+                rand_rec, rand_prec,
+                color="#747474",
+                linestyle="--",
+                lw=2,
+                label=f"Random = {rand_auprc:.3f}",
+                zorder=2,
+            )
+
             ax[1].set_xlabel("Recall", fontsize=12)
             ax[1].set_ylabel("Precision", fontsize=12)
-            ax[1].set_title(f"AUPRC", fontsize=12)
+            ax[1].set_title("AUPRC", fontsize=12)
+
             ax[1].legend(
+                handles=[pr_line, rand_pr_line],
+                labels=[f"AUPRC = {auprc:.3f}", f"Random = {rand_auprc:.3f}"],
                 bbox_to_anchor=(0.5, -0.28),
                 loc="upper center",
-                borderaxespad=0.0
+                borderaxespad=0.0,
             )
+
             ax[1].set_ylim(0, 1.0)
             ax[1].set_xlim(0, 1.0)
             plt.suptitle(f"{self.experiment_name} vs {ground_truth_name}", fontsize=14)

@@ -140,11 +140,15 @@ def load_other_method_muon_grns(sample_name_list, dataset_type):
         linger_path       = OTHER_METHOD_MUON_DIR / "LINGER_muon" / f"linger_{dataset_type}_{sample_name}.tsv"
         scenic_plus_path  = OTHER_METHOD_MUON_DIR / "SCENIC_muon" / f"scenicplus_{dataset_type}_{sample_name}.tsv"
         cell_oracle_path  = OTHER_METHOD_MUON_DIR / "CellOracle_muon" / f"celloracle_{dataset_type}_{sample_name}.tsv"
+        pando_path        = OTHER_METHOD_MUON_DIR / "Pando_muon" / f"pando_{dataset_type}_{sample_name}.tsv"
+        figr_path         = OTHER_METHOD_MUON_DIR / "FigR_muon" / f"figr_{dataset_type}_{sample_name}.tsv"
         
         method_info = {
             "SCENIC+":    {"path": scenic_plus_path, "tf_col": "Source",    "target_col": "Target",    "score_col": "Score"},
             "LINGER":     {"path": linger_path,      "tf_col": "Source",    "target_col": "Target",    "score_col": "Score"},
             "CellOracle": {"path": cell_oracle_path, "tf_col": "Source",    "target_col": "Target",    "score_col": "Score"},
+            "Pando":      {"path": pando_path,       "tf_col": "Source",    "target_col": "Target",    "score_col": "Score"},
+            "FigR":       {"path": figr_path,        "tf_col": "Source",    "target_col": "Target",    "score_col": "Score"},
         }
                 
         standardized_method_dict = {}
@@ -212,6 +216,51 @@ def prep_gt_edges(gt_df: pd.DataFrame) -> pd.DataFrame:
     gt["_in_gt"] = 1
     return gt
 
+def build_full_universe_from_gt(method_df, gt_edges, use_abs_scores=True, missing_score=0.0):
+    universe_tfs = gt_edges["Source"].dropna().unique()
+    universe_tgs = gt_edges["Target"].dropna().unique()
+
+    gt_pairs = set(zip(gt_edges["Source"], gt_edges["Target"]))
+
+    full_universe = (
+        pd.MultiIndex
+        .from_product([universe_tfs, universe_tgs], names=["Source", "Target"])
+        .to_frame(index=False)
+    )
+
+    full_universe["_in_gt"] = [
+        1 if pair in gt_pairs else 0
+        for pair in zip(full_universe["Source"], full_universe["Target"])
+    ]
+
+    method_scores = method_df[["Source", "Target", "Score"]].copy()
+
+    if use_abs_scores:
+        method_scores["Score"] = method_scores["Score"].abs()
+
+    # If method has duplicate Source-Target edges, keep strongest score
+    method_scores = (
+        method_scores
+        .sort_values("Score", ascending=False)
+        .drop_duplicates(["Source", "Target"], keep="first")
+    )
+
+    full_universe = full_universe.merge(
+        method_scores,
+        on=["Source", "Target"],
+        how="left",
+    )
+
+    full_universe["Score"] = full_universe["Score"].fillna(missing_score)
+
+    # print(f"Complete TF-target universe size: {len(full_universe):,}")
+    # print(
+    #     f"Positives in universe: {(full_universe['_in_gt'] == 1).sum():,}"
+    #     f" | Negatives: {(full_universe['_in_gt'] == 0).sum():,}"
+    # )
+
+    return full_universe
+
 def eval_method_vs_gt(
     method_df: pd.DataFrame, 
     gt_edges: pd.DataFrame, 
@@ -257,6 +306,8 @@ def eval_method_vs_gt(
         balanced = pd.concat([pos_sample, neg_sample], axis=0)
         return balanced.sample(frac=1.0, random_state=random_state).reset_index(drop=True)
     
+    
+    
     if balance == True:
         d = balance_pos_neg(d, random_state=42)
     
@@ -265,11 +316,23 @@ def eval_method_vs_gt(
     
     if use_abs_scores:
         s = np.abs(s)
+        
+    full_universe = build_full_universe_from_gt(
+        method_df=method_df,
+        gt_edges=gt_edges,
+        use_abs_scores=use_abs_scores,
+        missing_score=0.0,
+    )
+    
+    y_full = full_universe["_in_gt"].astype(int).to_numpy()
+    s_full = full_universe["Score"].to_numpy()
     
     # Calculate AUROC and AUPRC scores
     auroc = roc_auc_score(y, s) if np.unique(y).size == 2 else np.nan
     auprc = average_precision_score(y, s) if y.sum() > 0 else np.nan
     pos_rate = y.mean()
+    
+    auprc_full = average_precision_score(y_full, s_full) if y_full.sum() > 0 else np.nan
 
     # Pre-sort once for precision@K
     order = np.argsort(s)[::-1]
@@ -294,6 +357,7 @@ def eval_method_vs_gt(
         "auprc": float(auprc) if auprc == auprc else np.nan,
         "pos_rate": float(pos_rate) if pos_rate == pos_rate else np.nan,
         "lift_auprc": float(auprc / pos_rate) if (pos_rate > 0 and auprc == auprc) else np.nan,
+        "auprc_full": float(auprc_full) if auprc_full == auprc_full else np.nan,
         **prec_at
     }, d
 
