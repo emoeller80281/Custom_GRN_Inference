@@ -83,8 +83,8 @@ def download_genome_fasta(organism_code: str, save_dir: Union[str, Path]) -> Pat
     """
     Download a UCSC genome FASTA, overwrite gzip with BGZF (still .gz), and index via pysam.faidx.
     """
-    assert organism_code in ("mm10", "hg38"), \
-        f"Organism code '{organism_code}' not supported (valid: 'mm10', 'hg38')."
+    # assert organism_code in ("mm10", "hg38"), \
+    #     f"Organism code '{organism_code}' not supported (valid: 'mm10', 'hg38')."
 
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
