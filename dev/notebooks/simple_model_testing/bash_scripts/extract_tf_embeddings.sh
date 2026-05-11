@@ -3,7 +3,8 @@
 #SBATCH --output=LOGS/extract_tf_embeddings/%x_%j.log
 #SBATCH --error=LOGS/extract_tf_embeddings/%x_%j.err
 #SBATCH --time=12:00:00
-#SBATCH -p compute
+#SBATCH -p dense
+#SBATCH --gres=gpu:a100:1
 #SBATCH -N 1
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 16
@@ -17,7 +18,9 @@ PROJECT_DIR="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOE
 
 cd ${PROJECT_DIR}
 
-python ${PROJECT_DIR}/extract_tf_embeddings.py \
+python ${PROJECT_DIR}/scripts/extract_tf_embeddings.py \
   --aa_dir ${PROJECT_DIR}/data/tf_data/tf_sequences \
   --di_fasta ${PROJECT_DIR}/data/tf_data/tf_3di_output/tf_proteins_3di.fasta \
-  --out_dir ${PROJECT_DIR}/data/tf_data/tf_embeddings/
+  --out_dir ${PROJECT_DIR}/data/tf_data/tf_embeddings/ \
+  --d_model 128 \
+  --device cuda

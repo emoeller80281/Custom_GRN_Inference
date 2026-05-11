@@ -13,26 +13,9 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 
-def embedding_features(seq_1d, seq_3di, device):
+def embedding_features(tokenizer, model, seq_1d, seq_3di, d_model, device):
     d1 = len(seq_1d)
     d2 = len(seq_3di)
-
-    tokenizer = T5Tokenizer.from_pretrained(
-        "Rostlab/ProstT5",
-        revision="refs/pr/2",
-        do_lower_case=False,
-    )
-
-    model = T5EncoderModel.from_pretrained(
-        "Rostlab/ProstT5",
-        revision="refs/pr/2",
-        use_safetensors=True,
-    ).to(device)
-
-    if device.type == "cpu":
-        model.float()
-    else:
-        model.half()
 
     # preprocess sequences
     seq_1d = " ".join(list(re.sub(r"[UZOB]", "X", seq_1d)))
@@ -50,10 +33,11 @@ def embedding_features(seq_1d, seq_3di, device):
         return_tensors="pt",
     ).to(device)
 
-    with torch.no_grad():
-        outputs = model(
-            ids.input_ids, attention_mask=ids.attention_mask
-        )
+    with torch.inference_mode():
+        with torch.autocast(device_type=device.type, dtype=torch.float16):
+            outputs = model(
+                ids.input_ids, attention_mask=ids.attention_mask
+            )
 
     emb_aa = outputs.last_hidden_state[0, 1 : d1 + 1]
     emb_3di = outputs.last_hidden_state[1, 1 : d2 + 1]
@@ -63,11 +47,11 @@ def embedding_features(seq_1d, seq_3di, device):
         [emb_aa[:L], emb_3di[:L]], dim=-1
     ).float()
 
-    # 2048 → 512 projection
+    # 2048 → d_model projection
     proj = torch.nn.Sequential(
         torch.nn.Linear(2048, 1024),
         torch.nn.GELU(),
-        torch.nn.Linear(1024, 512),
+        torch.nn.Linear(1024, d_model),
     ).to(device)
 
     with torch.no_grad():
@@ -95,6 +79,9 @@ def main():
         "--out_dir", required=True, help="Output directory"
     )
     parser.add_argument(
+        "--d_model", type=int, default=512, help="Output embedding dimension (default: 512)"
+    )
+    parser.add_argument(
         "--device", default="cuda", help="cuda or cpu"
     )
 
@@ -109,15 +96,43 @@ def main():
     # Load all 3Di sequences
     logging.info(f"Loading 3Di sequences from {args.di_fasta}")
     di_dict = {}
+    
+    tokenizer = T5Tokenizer.from_pretrained(
+        "Rostlab/ProstT5",
+        revision="refs/pr/2",
+        do_lower_case=False,
+    )
+
+    model = T5EncoderModel.from_pretrained(
+        "Rostlab/ProstT5",
+        revision="refs/pr/2",
+        use_safetensors=True,
+    ).to(device)
+    
+    if device.type == "cpu":
+        model.float()
+    else:
+        model.half()
+    
     for rec in SeqIO.parse(args.di_fasta, "fasta"):
         header = f"{rec.id} {rec.description}"
         acc = extract_np_accession(header) or rec.id.split()[0]
         di_dict[acc] = str(rec.seq)
+        
+
     for fname in os.listdir(args.aa_dir):
         if not fname.endswith(".fasta"):
             continue
 
         tf_id = fname.replace(".fasta", "")
+        out_path = os.path.join(
+            args.out_dir, f"{tf_id}_embedding.pt"
+        )
+        
+        if os.path.exists(out_path):
+            logging.info(f"Embedding for {tf_id} already exists at {out_path}, skipping")
+            continue        
+        
         aa_path = os.path.join(args.aa_dir, fname)
 
         aa_rec = next(SeqIO.parse(aa_path, "fasta"))
@@ -131,11 +146,9 @@ def main():
         aa_seq = str(aa_rec.seq)
         di_seq = di_dict[acc]
 
-        emb = embedding_features(aa_seq, di_seq, device)
+        emb = embedding_features(tokenizer, model, aa_seq, di_seq, args.d_model, device)
 
-        out_path = os.path.join(
-            args.out_dir, f"{tf_id}_embedding.pt"
-        )
+
         torch.save(emb, out_path)
 
         logging.info(f"Saved {tf_id}: {tuple(emb.shape)} → {out_path}")

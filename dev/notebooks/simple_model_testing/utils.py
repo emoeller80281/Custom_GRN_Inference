@@ -1,12 +1,20 @@
 import numpy as np
 import pandas as pd
-from random import sample
 import pyfaidx
 from pathlib import Path
 from tqdm import tqdm
 import re
 import time
 from Bio import Entrez, SeqIO
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
+
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
 
 def parse_peak(peak):
     """
@@ -49,6 +57,21 @@ def onehot_dna_sequence(seq):
     return onehot
 
 def load_peak_sequence(genome_fasta, selected_peak):
+    """
+    Load the DNA sequence for a given peak.
+
+    Parameters
+    ----------
+    genome_fasta : str | Path
+        Path to the genome fasta file.
+    selected_peak : str
+        Peak string in the format "chrom:start-end".
+
+    Returns
+    -------
+    str
+        The DNA sequence for the peak.
+    """
     peak_chrom, peak_start, peak_end = parse_peak(selected_peak)
 
     # Load peak sequence using the genome fasta file
@@ -56,81 +79,303 @@ def load_peak_sequence(genome_fasta, selected_peak):
         peak_sequence = genome[peak_chrom][peak_start:peak_end].seq.upper()
         
     return peak_sequence
-        
-    
 
-def get_centered_peak_sequence(
-    genome_fasta: str | Path,
-    peak,
-    chrom_sizes: dict[str, int],
-    flank_size=None,
-    pad_out_of_bounds=True,
-):
+def load_chrom_sizes(chromsizes_file):
     """
-    Extract a fixed-width sequence centered on a peak.
+    Load chromosome sizes from a chrom.sizes file.
 
-    If the requested window extends beyond chromosome bounds, pad with N's.
-    N's become all-zero rows during one-hot encoding.
+    Parameters
+    ----------
+    chromsizes_file : str | Path
+        Path to the chrom.sizes file.
+
+    Returns
+    -------
+    dict
+        Dictionary mapping chromosome names to sizes.
     """
+    chrom_sizes = {}
     
-    assert Path(genome_fasta).exists(), \
-        f"Genome fasta file not found: {genome_fasta}"
+    with open(chromsizes_file, "r") as f:
+        for line in f:
+            chrom, size_str = line.strip().split("\t")
+            chrom_sizes[chrom] = int(size_str)
     
-    chrom, coords = peak.split(":")
-    peak_start, peak_end = map(int, coords.split("-"))
+    return chrom_sizes
 
-    peak_center = (peak_start + peak_end) // 2
-    seq_start = peak_center - flank_size
-    seq_end = peak_center + flank_size
-    target_len = 2 * flank_size
+def _encode_centered_peak_onehot(args):
+    peak_id, genome_fasta, chrom_sizes, flank_size, pad_out_of_bounds, dtype = args
 
-    chrom_size = chrom_sizes.get(chrom)
+    with pyfaidx.Fasta(str(genome_fasta)) as genome:
+        chrom, peak_start, peak_end = parse_peak(peak_id)
 
-    fetch_start = seq_start
-    fetch_end = seq_end
+        if chrom not in chrom_sizes:
+            raise KeyError(
+                f"Chromosome {chrom!r} not found in chrom_sizes. "
+                f"Peak: {peak_id}"
+            )
 
-    left_pad = 0
-    right_pad = 0
+        chrom_size = chrom_sizes[chrom]
 
-    if fetch_start < 0:
-        left_pad = -fetch_start
-        fetch_start = 0
+        peak_center = (peak_start + peak_end) // 2
+        seq_start = peak_center - flank_size
+        seq_end = peak_center + flank_size
+        target_len = 2 * flank_size
 
-    if fetch_end > chrom_size:
-        right_pad = fetch_end - chrom_size
-        fetch_end = chrom_size
+        fetch_start = seq_start
+        fetch_end = seq_end
 
-    if fetch_end < fetch_start:
-        fetch_end = fetch_start
-        
-    with pyfaidx.Fasta(genome_fasta) as genome:
+        left_pad = 0
+        right_pad = 0
+
+        if fetch_start < 0:
+            left_pad = -fetch_start
+            fetch_start = 0
+
+        if fetch_end > chrom_size:
+            right_pad = fetch_end - chrom_size
+            fetch_end = chrom_size
+
+        if fetch_end < fetch_start:
+            fetch_end = fetch_start
+
         seq = genome[chrom][fetch_start:fetch_end].seq.upper()
 
-    if pad_out_of_bounds:
-        seq = ("N" * left_pad) + seq + ("N" * right_pad)
+        if pad_out_of_bounds:
+            seq = ("N" * left_pad) + seq + ("N" * right_pad)
 
-        if len(seq) < target_len:
-            seq = seq + ("N" * (target_len - len(seq)))
-        elif len(seq) > target_len:
-            seq = seq[:target_len]
+            if len(seq) < target_len:
+                seq = seq + ("N" * (target_len - len(seq)))
+            elif len(seq) > target_len:
+                seq = seq[:target_len]
+        else:
+            if len(seq) != target_len:
+                raise ValueError(
+                    f"Peak {peak_id} produced sequence length {len(seq)}, "
+                    f"but expected {target_len}. Use pad_out_of_bounds=True "
+                    f"for fixed-length output."
+                )
 
-    return seq
+        onehot = onehot_dna_sequence(seq).astype(dtype)
 
+        if onehot.shape != (target_len, 4):
+            raise ValueError(
+                f"Peak {peak_id} produced one-hot shape {onehot.shape}, "
+                f"but expected {(target_len, 4)}."
+            )
 
+    return peak_id, onehot
+
+def create_centered_peak_onehot_array(
+    peak_ids: list[str],
+    genome_fasta: str | Path,
+    chrom_sizes: dict[str, int],
+    peak_id_to_idx: dict[str, int],
+    flank_size: int,
+    dtype=np.float32,
+    pad_out_of_bounds: bool = True,
+    show_progress: bool = True,
+    num_workers: int = 1,
+):
+    """
+    Create a stacked one-hot encoded DNA array using an existing peak_id_to_idx map.
+
+    Parameters
+    ----------
+    peak_ids : list[str]
+        Peak IDs to encode. These should all exist in peak_id_to_idx.
+    genome_fasta : str | Path
+        Path to genome FASTA.
+    chrom_sizes : dict[str, int]
+        Dictionary mapping chromosome names to chromosome sizes.
+    peak_id_to_idx : dict[str, int]
+        Existing mapping from peak_id -> row index.
+    flank_size : int
+        Number of bases on each side of the peak center.
+        Output length is 2 * flank_size.
+    dtype : numpy dtype
+        Output dtype.
+    pad_out_of_bounds : bool
+        Whether to pad with N if the requested window goes out of bounds.
+    show_progress : bool
+        Whether to show tqdm progress bar.
+    num_workers : int
+        Number of worker processes to use. Use 1 to run serially.
+
+    Returns
+    -------
+    np.ndarray
+        Array of shape [len(peak_id_to_idx), 2 * flank_size, 4].
+    """
+
+    genome_fasta = Path(genome_fasta)
+
+    if not genome_fasta.exists():
+        raise FileNotFoundError(f"Genome FASTA file not found: {genome_fasta}")
+
+    if flank_size is None:
+        raise ValueError("flank_size must be provided for a stacked array.")
+
+    peak_ids = list(peak_ids)
+
+    missing_peaks = [peak_id for peak_id in peak_ids if peak_id not in peak_id_to_idx]
+    if len(missing_peaks) > 0:
+        raise KeyError(
+            f"{len(missing_peaks)} peak_ids are missing from peak_id_to_idx. "
+            f"Example: {missing_peaks[:5]}"
+        )
+
+    seq_len = 2 * flank_size
+    num_peaks = len(peak_id_to_idx)
+
+    peak_onehot_array = np.zeros(
+        (num_peaks, seq_len, 4),
+        dtype=dtype,
+    )
+
+    if num_workers <= 1:
+        with pyfaidx.Fasta(str(genome_fasta)) as genome:
+            num_peaks = len(peak_ids)
+            min_iters = max(num_peaks // 100, 1)
+            for peak_id in tqdm(
+                peak_ids,
+                desc="Creating centered peak one-hot array",
+                disable=not show_progress,
+                ncols=100,
+                miniters=min_iters,
+                mininterval=0,
+                dynamic_miniters=False,
+            ):
+                peak_idx = peak_id_to_idx[peak_id]
+
+                chrom, peak_start, peak_end = parse_peak(peak_id)
+
+                if chrom not in chrom_sizes:
+                    raise KeyError(
+                        f"Chromosome {chrom!r} not found in chrom_sizes. "
+                        f"Peak: {peak_id}"
+                    )
+
+                chrom_size = chrom_sizes[chrom]
+
+                peak_center = (peak_start + peak_end) // 2
+
+                seq_start = peak_center - flank_size
+                seq_end = peak_center + flank_size
+                target_len = seq_len
+
+                fetch_start = seq_start
+                fetch_end = seq_end
+
+                left_pad = 0
+                right_pad = 0
+
+                if fetch_start < 0:
+                    left_pad = -fetch_start
+                    fetch_start = 0
+
+                if fetch_end > chrom_size:
+                    right_pad = fetch_end - chrom_size
+                    fetch_end = chrom_size
+
+                if fetch_end < fetch_start:
+                    fetch_end = fetch_start
+
+                seq = genome[chrom][fetch_start:fetch_end].seq.upper()
+
+                if pad_out_of_bounds:
+                    seq = ("N" * left_pad) + seq + ("N" * right_pad)
+
+                    if len(seq) < target_len:
+                        seq = seq + ("N" * (target_len - len(seq)))
+                    elif len(seq) > target_len:
+                        seq = seq[:target_len]
+                else:
+                    if len(seq) != target_len:
+                        raise ValueError(
+                            f"Peak {peak_id} produced sequence length {len(seq)}, "
+                            f"but expected {target_len}. Use pad_out_of_bounds=True "
+                            f"for fixed-length output."
+                        )
+
+                onehot = onehot_dna_sequence(seq).astype(dtype)
+
+                if onehot.shape != (seq_len, 4):
+                    raise ValueError(
+                        f"Peak {peak_id} produced one-hot shape {onehot.shape}, "
+                        f"but expected {(seq_len, 4)}."
+                    )
+
+                peak_onehot_array[peak_idx] = onehot
+    else:
+        tasks = [
+            (peak_id, genome_fasta, chrom_sizes, flank_size, pad_out_of_bounds, dtype)
+            for peak_id in peak_ids
+        ]
+        num_peaks = len(peak_ids)
+        min_iters = max(num_peaks // 100, 1)
+        pbar = tqdm(
+            total=num_peaks,
+            desc="Creating centered peak one-hot array",
+            disable=not show_progress,
+            ncols=100,
+            miniters=min_iters,
+        )
+        try:
+            with ProcessPoolExecutor(max_workers=num_workers) as executor:
+                future_to_peak = {
+                    executor.submit(_encode_centered_peak_onehot, task): task[0]
+                    for task in tasks
+                }
+                for future in as_completed(future_to_peak):
+                    peak_id, onehot = future.result()
+                    peak_idx = peak_id_to_idx[peak_id]
+                    peak_onehot_array[peak_idx] = onehot
+                    pbar.update(1)
+        finally:
+            pbar.close()
+
+    return peak_onehot_array
 
 def create_true_false_edges(
     chip_atlas_df: pd.DataFrame, 
     tf_names: list, 
     tf_col: str ="source_id", 
     peak_col: str ="peak_id", 
-    sample_frac: float | None =0.50
+    pct_true_edges: float | None = 1.0,
+    true_false_ratio: float = 1.0,
     ):
-    chipatlas_df = chip_atlas_df.copy()
+    """
+    Create sets of true and false TF-peak interactions from ChIP-Atlas data.
+    
+    Parameters
+    ----------
+    chip_atlas_df : pd.DataFrame
+        DataFrame containing ChIP-Atlas interactions with columns for TF names and peak IDs.
+    tf_names : list
+        List of TF names to include in the analysis. Only interactions involving these TFs will be considered.
+    tf_col : str
+        Name of the column in chip_atlas_df that contains TF names (default: "source_id").
+    peak_col : str
+        Name of the column in chip_atlas_df that contains peak IDs (default: "peak_id").
+    pct_true_edges : float or None
+        If not None, the fraction of true edges to include in the analysis (default: 1.0). If None, uses all true edges.
+    true_false_ratio : float
+        The ratio of false edges to true edges (default: 1.0).
+
+    Returns
+    -------
+    tuple
+        A tuple containing:
+        - set of true interactions (TF, peak)
+        - set of false interactions (TF, peak)
+    """
+    chipatlas_df: pd.DataFrame = chip_atlas_df.copy()
     chipatlas_df[tf_col] = chipatlas_df[tf_col]
     chipatlas_df = chipatlas_df[chipatlas_df[tf_col].isin(tf_names)].reset_index(drop=True)
     
-    if sample_frac is not None:
-        chipatlas_df = chipatlas_df.sample(frac=sample_frac, random_state=123)
+    if pct_true_edges is not None:
+        chipatlas_df = chipatlas_df.sample(frac=pct_true_edges, random_state=123)
 
     chipatlas_true_interactions = set(zip(chipatlas_df[tf_col], chipatlas_df[peak_col]))
 
@@ -179,9 +424,9 @@ def create_true_false_edges(
         max_false_edges = universe_size - len(true_interactions)
 
         if num_false_edges > max_false_edges:
-            raise ValueError(
-                f"Requested {num_false_edges:,} false edges, but only "
-                f"{max_false_edges:,} possible false edges exist."
+            num_false_edges = max_false_edges
+            logging.warning(
+                f"Requested {num_false_edges} false edges, but only {max_false_edges} are possible given the true interactions. Returning all possible false edges."
             )
 
         rng = np.random.default_rng(seed)
@@ -220,19 +465,12 @@ def create_true_false_edges(
         finally:
             pbar.close()
 
-        false_tfs = {tf for tf, _ in false_interactions}
-        false_peaks = {peak for _, peak in false_interactions}
-
-        logging.info(f"Total unique TFs in false interactions: {len(false_tfs):,}")
-        logging.info(f"Total unique peaks in false interactions: {len(false_peaks):,}")
-        logging.info(f"Total false interactions: {len(false_interactions):,}")
-
         return false_interactions
 
     false_interactions = create_n_false_edges(
-        tfs=chipatlas_df["source_id"].unique(),
-        peaks=chipatlas_df["peak_id"].unique(),
-        num_false_edges=len(chipatlas_true_interactions) // 4,
+        tfs=chipatlas_df[tf_col].unique(),
+        peaks=chipatlas_df[peak_col].unique(),
+        num_false_edges=round(len(chipatlas_true_interactions) * true_false_ratio),
         true_interactions=chipatlas_true_interactions,
         batch_size=1_000_000,
         seed=123,
@@ -271,6 +509,10 @@ def download_gene_protein_fastas(
         Entrez.api_key = api_key
 
     saved_files = {}
+    
+    # Check if the gene names are already downloaded to avoid unnecessary API calls
+    available_files = {f.stem.replace("_protein", ""): f for f in output_dir.glob("*_protein.fasta")}
+    gene_names = [gene for gene in gene_names if gene not in available_files]
 
     for i, gene_name in enumerate(gene_names, start=1):
         search_term = (

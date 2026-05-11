@@ -51,3 +51,5 @@ foldseek convert2fasta \
     "${OUT_DIR}/tf_proteins_3di.fasta"
 
 echo "3Di FASTA written to ${OUT_DIR}/tf_proteins_3di.fasta"
+
+echo "Done generating 3Di tokens for TF proteins."
