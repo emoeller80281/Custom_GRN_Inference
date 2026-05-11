@@ -37,6 +37,9 @@ class LitMultiomicTransformer(pl.LightningModule):
         max_ground_truth_pairs: int | None = 20000,
         ground_truth_seed: int = 1337,
         exclude_ground_truth_from_supervised_loss: bool = True,
+        validation_metric_sample_size: int = 200_000,
+        validation_metric_samples_per_batch: int = 4096,
+        metric_thresholds: int = 256,
     ):
         super().__init__()
         self.save_hyperparameters(ignore=["exp", "model", "ground_truth_edges"])
@@ -52,10 +55,13 @@ class LitMultiomicTransformer(pl.LightningModule):
         self.tg_scaler = exp.tg_scaler
         self.criterion = nn.BCEWithLogitsLoss()
 
-        self.val_auroc = BinaryAUROC(sync_on_compute=True)
-        self.val_auprc = BinaryAveragePrecision(sync_on_compute=True)
+        self.val_auroc = BinaryAUROC(thresholds=metric_thresholds, sync_on_compute=True)
+        self.val_auprc = BinaryAveragePrecision(thresholds=metric_thresholds, sync_on_compute=True)
+        self.validation_metric_sample_size = int(validation_metric_sample_size)
+        self.validation_metric_samples_per_batch = int(validation_metric_samples_per_batch)
         self.val_probs = []
         self.val_targets = []
+        self.val_metric_sample_count = 0
 
         self.ground_truth_name = ground_truth_name
         self.ground_truth_negative_ratio = int(ground_truth_negative_ratio)
@@ -88,6 +94,51 @@ class LitMultiomicTransformer(pl.LightningModule):
         preds = preds.reshape(-1)
         targets = targets.reshape(-1)
         return preds, targets
+
+    def _append_validation_metric_sample(self, probs, targets):
+        max_samples = max(0, int(self.validation_metric_sample_size))
+        per_batch = max(0, int(self.validation_metric_samples_per_batch))
+        if max_samples == 0 or per_batch == 0:
+            return
+
+        probs = probs.detach().reshape(-1).float().cpu()
+        targets = targets.detach().reshape(-1).int().cpu()
+        n = probs.numel()
+        if n == 0:
+            return
+
+        k = min(n, per_batch)
+        if k < n:
+            idx = torch.randint(n, (k,), device=probs.device)
+            probs = probs.index_select(0, idx)
+            targets = targets.index_select(0, idx)
+
+        self.val_probs.append(probs)
+        self.val_targets.append(targets)
+        self.val_metric_sample_count += int(probs.numel())
+
+        if self.val_metric_sample_count > max_samples * 2:
+            self._compact_validation_metric_sample()
+
+    def _compact_validation_metric_sample(self):
+        max_samples = max(0, int(self.validation_metric_sample_size))
+        if max_samples == 0 or not self.val_probs:
+            self.val_probs.clear()
+            self.val_targets.clear()
+            self.val_metric_sample_count = 0
+            return
+
+        probs = torch.cat(self.val_probs, dim=0).view(-1)
+        targets = torch.cat(self.val_targets, dim=0).view(-1).int()
+        n = probs.numel()
+        if n > max_samples:
+            idx = torch.randperm(n, device=probs.device)[:max_samples]
+            probs = probs.index_select(0, idx)
+            targets = targets.index_select(0, idx)
+
+        self.val_probs = [probs.contiguous()]
+        self.val_targets = [targets.contiguous()]
+        self.val_metric_sample_count = int(probs.numel())
 
     @staticmethod
     def _sample_curve_points(x, y, n_points: int = 10):
@@ -300,10 +351,15 @@ class LitMultiomicTransformer(pl.LightningModule):
 
         tf_ids_cpu = tf_ids.detach().cpu().long().view(-1).tolist()
         tg_ids_cpu = tg_ids.detach().cpu().long().view(-1).tolist()
+
         keep = [
-            (int(tf_id), int(tg_id)) not in positive_pair_ids
-            for tf_id, tg_id in zip(tf_ids_cpu, tg_ids_cpu)
+            [
+                (int(tf_id), int(tg_id)) not in positive_pair_ids
+                for tg_id in tg_ids_cpu
+            ]
+            for tf_id in tf_ids_cpu
         ]
+
         keep_mask = torch.tensor(keep, dtype=torch.bool, device=tf_ids.device)
         n_excluded = int((~keep_mask).sum().item())
         if stage == "train":
@@ -316,22 +372,29 @@ class LitMultiomicTransformer(pl.LightningModule):
         if self.gt_pair_df is None:
             return
 
-        if len(batch) not in (10, 12):
+        if len(batch) == 8:
+            atac_wins, tf_tensor, tg_tensor, _, shared_bias, shared_tf_ids, shared_tg_ids, _ = batch
+        elif len(batch) in (10, 12):
+            (
+                atac_wins,
+                tf_tensor,
+                tg_tensor,
+                _,
+                _,
+                _,
+                shared_bias,
+                shared_tf_ids,
+                shared_tg_ids,
+                _,
+                *extra,
+            ) = batch
+            if len(extra) >= 2:
+                tf_tensor, tg_tensor = extra[:2]
+                tf_tensor = tf_tensor.unsqueeze(0)
+                tg_tensor = tg_tensor.unsqueeze(0)
+                shared_bias = shared_bias.unsqueeze(0)
+        else:
             return
-
-        (
-            atac_wins,
-            tf_tensor,
-            tg_tensor,
-            _,
-            _,
-            _,
-            shared_bias,
-            shared_tf_ids,
-            shared_tg_ids,
-            _,
-            *extra,
-        ) = batch
 
         shared_tf_ids_cpu = shared_tf_ids.detach().cpu().long()
         shared_tg_ids_cpu = shared_tg_ids.detach().cpu().long()
@@ -357,35 +420,21 @@ class LitMultiomicTransformer(pl.LightningModule):
         )
         labels = torch.tensor(eval_df["label"].to_numpy(), dtype=torch.float32, device=device)
 
-        n_pairs = pair_tf_idx.numel()
-        atac_eval = atac_wins[:1].expand(n_pairs, -1, -1).contiguous()
-        if len(extra) >= 2:
-            shared_tf_tensor, shared_tg_tensor = extra[:2]
-        else:
-            shared_tf_tensor, shared_tg_tensor = tf_tensor, tg_tensor
-            if pair_tf_idx.max().item() >= shared_tf_tensor.numel() or pair_tg_idx.max().item() >= shared_tg_tensor.numel():
-                return
-
-        tf_eval = shared_tf_tensor.index_select(0, pair_tf_idx)
-        tg_eval = shared_tg_tensor.index_select(0, pair_tg_idx)
-        tf_ids = shared_tf_ids.index_select(0, pair_tf_idx)
-        tg_ids = shared_tg_ids.index_select(0, pair_tg_idx)
-        bias = shared_bias.index_select(0, pair_tg_idx)
-
-        tf_eval = self.tf_scaler.transform(tf_eval, tf_ids)
-        tg_eval = self.tg_scaler.transform(tg_eval, tg_ids)
+        tf_eval = self.tf_scaler.transform(tf_tensor[:1], shared_tf_ids)
+        tg_eval = self.tg_scaler.transform(tg_tensor[:1], shared_tg_ids)
 
         logits = self.model(
-            atac_eval,
+            atac_wins[:1],
             tf_eval,
             tg_eval,
-            tf_ids=tf_ids,
-            tg_ids=tg_ids,
-            bias=bias,
+            tf_ids=shared_tf_ids,
+            tg_ids=shared_tg_ids,
+            bias=shared_bias[:1],
             return_logits=True,
         )
 
-        probs = torch.sigmoid(logits.reshape(-1))
+        pair_logits = logits[0, pair_tf_idx, pair_tg_idx]
+        probs = torch.sigmoid(pair_logits.reshape(-1))
         self.gt_probs.append(probs.detach().cpu())
         self.gt_targets.append(labels.detach().cpu())
 
@@ -405,14 +454,17 @@ class LitMultiomicTransformer(pl.LightningModule):
             return_logits=True,
         )
 
-        logits, labels = self._match_pred_target_shape(logits, labels.float())
+        labels = labels.float()
         keep_mask = self._supervised_pair_keep_mask(tf_ids, tg_ids, stage="train")
         if keep_mask is not None:
-            keep_mask = keep_mask.reshape(-1)
+            if keep_mask.dim() == 2 and logits.dim() == 3:
+                keep_mask = keep_mask.unsqueeze(0).expand(logits.shape[0], -1, -1)
             logits = logits[keep_mask]
             labels = labels[keep_mask]
             if labels.numel() == 0:
                 return logits.sum() * 0.0
+        else:
+            logits, labels = self._match_pred_target_shape(logits, labels)
 
         train_loss = self.criterion(logits, labels)
         probs = torch.sigmoid(logits)
@@ -454,15 +506,18 @@ class LitMultiomicTransformer(pl.LightningModule):
             return_logits=True,
         )
 
-        logits, labels = self._match_pred_target_shape(logits, labels.float())
+        labels = labels.float()
         keep_mask = self._supervised_pair_keep_mask(tf_ids, tg_ids, stage="val")
         if keep_mask is not None:
-            keep_mask = keep_mask.reshape(-1)
+            if keep_mask.dim() == 2 and logits.dim() == 3:
+                keep_mask = keep_mask.unsqueeze(0).expand(logits.shape[0], -1, -1)
             logits = logits[keep_mask]
             labels = labels[keep_mask]
             if labels.numel() == 0:
                 self._update_ground_truth_metrics(batch)
                 return
+        else:
+            logits, labels = self._match_pred_target_shape(logits, labels)
 
         val_loss = self.criterion(logits, labels)
         probs = torch.sigmoid(logits)
@@ -470,8 +525,7 @@ class LitMultiomicTransformer(pl.LightningModule):
 
         self.val_auroc.update(probs.detach(), labels.int())
         self.val_auprc.update(probs.detach(), labels.int())
-        self.val_probs.append(probs.detach().cpu())
-        self.val_targets.append(labels.detach().cpu())
+        self._append_validation_metric_sample(probs, labels)
 
         self.log(
             "val/loss",
@@ -501,22 +555,26 @@ class LitMultiomicTransformer(pl.LightningModule):
         self.gt_eval_pair_count = 0
         self.gt_eval_pos_count = 0
         self.val_supervised_gt_excluded_count = 0
+        self.val_metric_sample_count = 0
 
     def on_validation_epoch_end(self):
         probs = None
         targets = None
         if self.val_probs:
+            self._compact_validation_metric_sample()
             probs = torch.cat(self.val_probs, dim=0).view(-1)
             targets = torch.cat(self.val_targets, dim=0).view(-1).int()
 
             self.val_probs.clear()
             self.val_targets.clear()
+            self.val_metric_sample_count = 0
 
             auroc = self.val_auroc.compute()
             auprc = self.val_auprc.compute()
 
             self.log("val/roc_auc", auroc, prog_bar=True, sync_dist=False)
             self.log("val/pr_auc", auprc, prog_bar=True, sync_dist=False)
+            self.log("val/metric_curve_sample_size", float(probs.numel()), prog_bar=False, sync_dist=False)
 
             self.val_auroc.reset()
             self.val_auprc.reset()

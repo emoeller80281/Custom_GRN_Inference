@@ -10,6 +10,7 @@ reference_networks/
 .venv/
 homer_results/
 poster_results/
+dev/notebooks/simple_model_testing/data
 checkpoint.pt
 .pybiomart
 dev/notebooks/sliding_window_calculation_method_testing_cache
@@ -39,6 +40,11 @@ dev/notebooks/sliding_window_calculation_method_testing_cache
 *.out
 *.xlsx
 *.parquet
+*.h5
+*.h5mu
+*.h5ad
+*.fasta
+*.fa
 .code-workspace
 
 # Keep the motif information

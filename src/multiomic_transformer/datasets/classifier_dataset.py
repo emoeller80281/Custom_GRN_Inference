@@ -750,105 +750,40 @@ class MultiomicTransformerDataset(Dataset):
     @staticmethod
     def collate_fn(batch, max_pairs: Optional[int] = None):
         """
-        Returns:
-        atac_wins:  [N_pairs, W, 1]
-        tf_tensor:  [N_pairs]
-        tg_tensor:  [N_pairs]
-        labels:     [N_pairs]
-        pair_tf_idx: [N_pairs]
-        pair_tg_idx: [N_pairs]
-        bias:       shared per-chromosome bias tensor [G, W]
-        tf_ids:     shared per-chromosome TF ids [T]
-        tg_ids:     shared per-chromosome TG ids [G]
-        motif_mask: shared per-chromosome motif mask [G, T]
-        shared_tf_tensor: shared first-cell TF expression tensor [T]
-        shared_tg_tensor: shared first-cell TG expression tensor [G]
+        Returns full per-cell TF/TG tensors instead of sampled TF-TG pairs.
+
+        atac_wins:  [B, W, 1]
+        tf_tensor:  [B, T]
+        tg_tensor:  [B, G]
+        labels:     [B, T, G]
+        bias:       [B, G, W]
+        tf_ids:     [T]
+        tg_ids:     [G]
+        motif_mask: [G, T]
         """
         atac_list, tf_list, tg_list, bias_list, tf_ids_list, tg_ids_list, mask_list = zip(*batch)
 
-        per_item_cap = None
-        if max_pairs is not None:
-            per_item_cap = max(1, int(max_pairs) // max(1, len(batch)))
+        atac_wins = torch.stack(atac_list, dim=0)
+        tf_tensor = torch.stack(tf_list, dim=0)
+        tg_tensor = torch.stack(tg_list, dim=0)
+        bias = torch.stack(bias_list, dim=0)
 
-        pair_atac = []
-        pair_tf = []
-        pair_tg = []
-        pair_labels = []
-        pair_tf_idx = []
-        pair_tg_idx = []
+        tf_ids = tf_ids_list[0].long().contiguous()
+        tg_ids = tg_ids_list[0].long().contiguous()
+        motif_mask = mask_list[0]
 
-        for atac_wins, tf_tensor, tg_tensor, bias, tf_ids, tg_ids, motif_mask in zip(
-            atac_list, tf_list, tg_list, bias_list, tf_ids_list, tg_ids_list, mask_list
-        ):
-            tf_idx_grid, tg_idx_grid = torch.meshgrid(
-                torch.arange(tf_tensor.shape[0], device=tf_tensor.device),
-                torch.arange(tg_tensor.shape[0], device=tg_tensor.device),
-                indexing="ij",
-            )
-
-            flat_tf_idx = tf_idx_grid.reshape(-1)
-            flat_tg_idx = tg_idx_grid.reshape(-1)
-
-            pair_labels_full = motif_mask[flat_tg_idx, flat_tf_idx].to(dtype=torch.float32).contiguous()
-
-            if per_item_cap is not None and flat_tf_idx.numel() > per_item_cap:
-                pos_idx = torch.nonzero(pair_labels_full > 0.5, as_tuple=False).reshape(-1)
-                neg_idx = torch.nonzero(pair_labels_full <= 0.5, as_tuple=False).reshape(-1)
-
-                keep_pos = pos_idx
-                if keep_pos.numel() > per_item_cap:
-                    keep_pos = keep_pos[torch.randperm(keep_pos.numel(), device=keep_pos.device)[:per_item_cap]]
-                    keep_idx = keep_pos
-                else:
-                    remaining = per_item_cap - keep_pos.numel()
-                    if remaining > 0 and neg_idx.numel() > 0:
-                        keep_neg = neg_idx[torch.randperm(neg_idx.numel(), device=neg_idx.device)[:remaining]]
-                        keep_idx = torch.cat([keep_pos, keep_neg], dim=0)
-                    else:
-                        keep_idx = keep_pos
-            else:
-                keep_idx = torch.arange(flat_tf_idx.numel(), device=flat_tf_idx.device)
-
-            selected_tf_idx = flat_tf_idx.index_select(0, keep_idx)
-            selected_tg_idx = flat_tg_idx.index_select(0, keep_idx)
-
-            pair_count = keep_idx.numel()
-
-            pair_atac.append(atac_wins.unsqueeze(0).expand(pair_count, -1, -1).contiguous())
-            pair_tf.append(tf_tensor.index_select(0, selected_tf_idx).contiguous())
-            pair_tg.append(tg_tensor.index_select(0, selected_tg_idx).contiguous())
-            pair_labels.append(pair_labels_full.index_select(0, keep_idx).contiguous())
-            pair_tf_idx.append(selected_tf_idx.long().contiguous())
-            pair_tg_idx.append(selected_tg_idx.long().contiguous())
-
-        atac_wins = torch.cat(pair_atac, dim=0)
-        tf_tensor = torch.cat(pair_tf, dim=0)
-        tg_tensor = torch.cat(pair_tg, dim=0)
-        labels = torch.cat(pair_labels, dim=0)
-        pair_tf_idx = torch.cat(pair_tf_idx, dim=0)
-        pair_tg_idx = torch.cat(pair_tg_idx, dim=0)
-
-        # These tensors are chromosome-level shared data; keep one copy per batch.
-        shared_bias = bias_list[0]
-        shared_tf_ids = tf_ids_list[0].long().contiguous()
-        shared_tg_ids = tg_ids_list[0].long().contiguous()
-        shared_motif_mask = mask_list[0]
-        shared_tf_tensor = tf_list[0].contiguous()
-        shared_tg_tensor = tg_list[0].contiguous()
+        labels = motif_mask.to(dtype=torch.float32).transpose(0, 1).contiguous()
+        labels = labels.unsqueeze(0).expand(len(batch), -1, -1).contiguous()
 
         return (
             atac_wins,
             tf_tensor,
             tg_tensor,
             labels,
-            pair_tf_idx,
-            pair_tg_idx,
-            shared_bias,
-            shared_tf_ids,
-            shared_tg_ids,
-            shared_motif_mask,
-            shared_tf_tensor,
-            shared_tg_tensor,
+            bias,
+            tf_ids,
+            tg_ids,
+            motif_mask,
         )
     
     def standardize_name(self, name: str) -> str:

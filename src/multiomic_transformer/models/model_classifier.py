@@ -258,55 +258,30 @@ class MultiomicTransformer(nn.Module):
             num_layers=self.num_layers,
             enable_nested_tensor=False
         )
-        # ----- TF-ATAC and ATAC-TF Cross Attention
-        # TF -> ATAC Cross Attention "Which windows matter for this TF?"
-        #     Each TF embedding (identity + expression) attends over window embeddings
-        #     to learn TF-specific regulatory information. TF-specific information
-        #     Creates one vector of length d_model per TF
-        self.cross_tf_to_atac = CrossAttention(d_model, num_heads, dropout) # [batch_size, num_tfs_evaluated, d_model]
-        
-        # ATAC -> TF Cross Attention "Which TFs explain this accessibility?"
-        #    Windows attends to the TF embeddings to create a window aware view of the
-        #    TFs available and their expression. Global TF context based on accessibility.
-        #    Creates one vector of length d_model per window
-        self.cross_atac_to_tf = CrossAttention(d_model, num_heads, dropout) # [batch_size, num_windows, d_model]
-        
-        # ----- Attention Pooling -----
-        #    Reduces shape from [sequence, d_model] -> [d_model]
-        #    Weighted average of softmax-norm dot product between learnable query vector and each element in the sequence.
-        #    Creates a global TF or ATAC sample-level summary of shape d_model
-        
-        # TF Q -> ATAC K Cross Attention Pooling
-        self.tf_to_atac_cross_attn_pool = AttentionPooling(d_model)     # [batch_size, d_model]
-        
-        # ATAC Q -> TF KCross Attention Pooling
-        self.atac_to_tf_cross_attn_pool = AttentionPooling(d_model)     # [batch_size, d_model]
 
-        # ATAC summary pooled across windows for the TF-TG pair classifier
+        self.cross_atac_to_tg = CrossAttention(d_model, num_heads, dropout)
+        self.cross_atac_to_tf = CrossAttention(d_model, num_heads, dropout)
+
+        self.cross_tf_to_tg = CrossAttention(d_model, num_heads, dropout)
+        self.cross_tf_to_atac = CrossAttention(d_model, num_heads, dropout)
+        
+        self.cross_tg_to_tf = CrossAttention(d_model, num_heads, dropout)
+        self.cross_tg_to_atac = CrossAttention(d_model, num_heads, dropout)
+        
         self.atac_summary_pool = AttentionPooling(d_model)
         
-        # TF-ATAC and ATAC-TF attention pooling output is concatenated  # [batch_size, 2*d_model]
-        
-        # Pooled Cross-Attention Output Dense Layer
-        #     Pass the output of the TF -> ATAC and ATAC -> TF cross-attention through a dense layer
-        #     to reduce the dimensionality back down from [2*d_model] -> [d_model]
-        self.pooled_cross_attn_dense_layer = nn.Sequential(
-            nn.Linear(2*d_model, d_ff, bias=False),
-            # GELU helps to keep small negatives rather than zeroing them out like RELU
+        # Pair-specific summary of TF<->TG cross-attention context.
+        self.tf_tg_pair_dense_layer = nn.Sequential(
+            nn.Linear(2 * d_model, d_ff, bias=False),
             nn.GELU(),  
             nn.Dropout(self.dropout),
             nn.Linear(d_ff, d_model, bias=False),
             nn.LayerNorm(d_model)
         )
         
-        # TG -> ATAC Cross Attention "Which windows matter for this TG?"
-        #    TG query vector attends to the ATAC windows.
-        #    Distance bias is added 
-        self.cross_tg_to_atac = CrossAttention(d_model, num_heads, dropout)
-        
         # Pair classifier head that maps the TF/TG/ATAC context to an interaction logit.
         self.interaction_head = nn.Sequential(
-            nn.Linear(5 * d_model, d_ff, bias=False),
+            nn.Linear(6 * d_model, d_ff, bias=False),
             nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(d_ff, d_model, bias=False),
@@ -318,23 +293,21 @@ class MultiomicTransformer(nn.Module):
     @staticmethod
     def _normalize_expression_tensor(expr_tensor):
         if expr_tensor.dim() == 0:
-            expr_tensor = expr_tensor.unsqueeze(0)
+            expr_tensor = expr_tensor.view(1, 1)
         if expr_tensor.dim() == 1:
-            expr_tensor = expr_tensor.unsqueeze(-1)
-        if expr_tensor.dim() != 2 or expr_tensor.shape[-1] != 1:
+            expr_tensor = expr_tensor.unsqueeze(0)
+        if expr_tensor.dim() != 2:
             raise ValueError(
-                f"Expression tensors must have shape [B] or [B, 1]; got {tuple(expr_tensor.shape)}"
+                f"Expression tensors must have shape [B, N] or [N]; got {tuple(expr_tensor.shape)}"
             )
         return expr_tensor
 
     @staticmethod
-    def _normalize_id_tensor(id_tensor, batch_size, device):
+    def _normalize_gene_id_tensor(id_tensor, expected_size, device, name):
         id_tensor = torch.as_tensor(id_tensor, device=device).long().view(-1)
-        if id_tensor.numel() == 1 and batch_size > 1:
-            id_tensor = id_tensor.expand(batch_size)
-        if id_tensor.numel() != batch_size:
+        if id_tensor.numel() != expected_size:
             raise ValueError(
-                f"Expected {batch_size} ids, got {id_tensor.numel()}"
+                f"Expected {expected_size} {name} ids, got {id_tensor.numel()}"
             )
         return id_tensor
         
@@ -350,127 +323,131 @@ class MultiomicTransformer(nn.Module):
         return_logits=False,
     ):
         """
-        atac_windows : [batch_size, n_window, 1]
-        tf_expr      : [batch_size] or [batch_size, 1]
-        tg_expr      : [batch_size] or [batch_size, 1]
-        tf_ids       : LongTensor [batch_size] or scalar
-        tg_ids       : LongTensor [batch_size] or scalar
-        bias         : [batch_size, n_window] or [batch_size, 1, n_window] or None
-        returns      : [batch_size] interaction probability by default
+        Full TF-by-TG classifier forward pass.
+
+        atac_windows : [B, W, 1]
+        tf_expr      : [B, n_tfs]
+        tg_expr      : [B, n_tgs]
+        tf_ids       : LongTensor [n_tfs]
+        tg_ids       : LongTensor [n_tgs]
+        bias         : [B, n_tgs, W], [n_tgs, W], or None
+
+        returns:
+            [B, n_tfs, n_tgs] interaction probabilities by default
+            [B, n_tfs, n_tgs] logits if return_logits=True
         """
 
-        atac_windows = torch.nan_to_num(atac_windows, nan=0.0, posinf=1e6, neginf=-1e6).clamp_(-10.0, 10.0)
-        tf_expr      = torch.nan_to_num(tf_expr,      nan=0.0, posinf=1e6, neginf=-1e6).clamp_(-10.0, 10.0)
-        tg_expr      = torch.nan_to_num(tg_expr,      nan=0.0, posinf=1e6, neginf=-1e6).clamp_(-10.0, 10.0)
-        
+        atac_windows = torch.nan_to_num(
+            atac_windows, nan=0.0, posinf=1e6, neginf=-1e6
+        ).clamp_(-10.0, 10.0)
+        tf_expr = torch.nan_to_num(
+            tf_expr, nan=0.0, posinf=1e6, neginf=-1e6
+        ).clamp_(-10.0, 10.0)
+        tg_expr = torch.nan_to_num(
+            tg_expr, nan=0.0, posinf=1e6, neginf=-1e6
+        ).clamp_(-10.0, 10.0)
+
         atac_windows = self.window_downsampler(atac_windows)
-        
         batch_size, n_window, _ = atac_windows.shape
         device = atac_windows.device
 
-        tf_ids = self._normalize_id_tensor(tf_ids, batch_size, device)
-        tg_ids = self._normalize_id_tensor(tg_ids, batch_size, device)
         tf_expr = self._normalize_expression_tensor(tf_expr)
         tg_expr = self._normalize_expression_tensor(tg_expr)
         if tf_expr.shape[0] != batch_size or tg_expr.shape[0] != batch_size:
             raise ValueError(
-                f"Expression batch size mismatch: atac={batch_size}, tf={tf_expr.shape[0]}, tg={tg_expr.shape[0]}"
+                f"Expression batch size mismatch: atac={batch_size}, "
+                f"tf={tf_expr.shape[0]}, tg={tg_expr.shape[0]}"
             )
-        
-        # ----- ATAC encoding -----
-        win_emb = self.atac_acc_dense_input_layer(atac_windows)       # [batch_size,n_window,d_model]
-        
-        # Add positional encoding
+
+        n_tfs = int(tf_expr.shape[1])
+        n_tgs = int(tg_expr.shape[1])
+        tf_ids = self._normalize_gene_id_tensor(tf_ids, n_tfs, device, "TF")
+        tg_ids = self._normalize_gene_id_tensor(tg_ids, n_tgs, device, "TG")
+
+        win_emb = self.atac_acc_dense_input_layer(atac_windows)
         pos = torch.arange(n_window, device=device, dtype=torch.float32)
-        win_emb = win_emb + self.posenc(pos, batch_size=batch_size).transpose(0, 1)  # [batch_size,n_window,d_model]
-        win_emb = self.encoder(win_emb)                               # [batch_size,n_window,d_model]
+        pos_emb = self.posenc(pos, batch_size=batch_size).transpose(0, 1)
+        win_emb = self.encoder(win_emb + pos_emb)
+        atac_repr, _ = self.atac_summary_pool(win_emb)
 
-        atac_repr, _ = self.atac_summary_pool(win_emb)               # [batch_size,d_model]
+        tf_id_emb = self.tf_identity_emb(tf_ids).unsqueeze(0).expand(batch_size, -1, -1)
+        tf_expr_emb = self.tf_expr_dense_input_layer(tf_expr.unsqueeze(-1))
+        tf_emb = tf_id_emb + tf_expr_emb
 
-        # ----- TF embeddings -----
-        # Embed the TFs
-        tf_id_emb = self.tf_identity_emb(tf_ids)                      # [batch_size,d_model]
-        
-        # Pass the TF expression through the dense layer to project to d_model
-        tf_expr_emb = self.tf_expr_dense_input_layer(tf_expr)        # [batch_size,d_model]
-        
-        # Add TF expression projection to TF identity embedding
-        tf_emb = tf_expr_emb + tf_id_emb                             # [batch_size,d_model]
-
-        # ----- TG embeddings -----
-        tg_id_emb = self.tg_query_emb(tg_ids)                        # [batch_size,d_model]
-        tg_expr_emb = self.tg_expr_dense_input_layer(tg_expr)        # [batch_size,d_model]
-        tg_emb = tg_expr_emb + tg_id_emb                             # [batch_size,d_model]
-
-        # ----- TF / TG conditioned ATAC context -----
-        tf_cross = self.cross_tf_to_atac(tf_emb.unsqueeze(1), win_emb).squeeze(1)   # [batch_size,d_model]
+        tg_id_emb = self.tg_query_emb(tg_ids).unsqueeze(0).expand(batch_size, -1, -1)
+        tg_expr_emb = self.tg_expr_dense_input_layer(tg_expr.unsqueeze(-1))
+        tg_emb = tg_id_emb + tg_expr_emb
 
         attn_bias = None
         if self.use_bias and (bias is not None):
             bias = torch.nan_to_num(bias, nan=0.0, posinf=1e4, neginf=-1e4)
-
-            # Allow either:
-            #   [W]      shared across batch
-            #   [B, W]   per-sample
-            #   [B, 1, W]
             if bias.dim() == 1:
-                bias = bias.unsqueeze(0)
+                bias = bias.view(1, 1, -1).expand(batch_size, n_tgs, -1)
             elif bias.dim() == 2:
-                pass
-            elif bias.dim() == 3 and bias.size(1) == 1:
-                bias = bias.squeeze(1)
+                if bias.shape[0] == n_tgs:
+                    bias = bias.unsqueeze(0).expand(batch_size, -1, -1)
+                elif bias.shape[0] == batch_size:
+                    bias = bias.unsqueeze(1).expand(-1, n_tgs, -1)
+                else:
+                    raise ValueError(
+                        f"2D bias must have shape [G, W] or [B, W], got {tuple(bias.shape)}"
+                    )
+            elif bias.dim() == 3:
+                if bias.shape[0] == 1:
+                    bias = bias.expand(batch_size, -1, -1)
+                if bias.shape[0] != batch_size or bias.shape[1] != n_tgs:
+                    raise ValueError(
+                        f"3D bias must have shape [B, G, W], got {tuple(bias.shape)}"
+                    )
             else:
-                raise ValueError(f"bias must have shape [W], [B,W], or [B,1,W], got {bias.shape}")
+                raise ValueError(
+                    f"bias must have shape [W], [G, W], [B, W], or [B, G, W], got {tuple(bias.shape)}"
+                )
 
             bias = F.avg_pool1d(
-                bias,
+                bias.reshape(batch_size * n_tgs, 1, bias.shape[-1]),
                 kernel_size=self.window_pool_size,
                 stride=self.window_pool_size,
                 ceil_mode=False,
-            )  # [1, W_new] or [B, W_new]
+            ).squeeze(1).reshape(batch_size, n_tgs, -1)
 
-            # final safety alignment
             target_w = win_emb.shape[1]
+            if bias.shape[-1] < target_w:
+                raise ValueError(
+                    f"Pooled bias has fewer windows than win_emb: bias={bias.shape[-1]}, win_emb={target_w}"
+                )
             if bias.shape[-1] != target_w:
                 bias = bias[..., :target_w]
 
-            # [1 or B, W_new] -> [1 or B, 1, 1, W_new]
-            attn_bias = bias.unsqueeze(1).unsqueeze(1)
-
-            # Expand across heads and query length
-            attn_bias = attn_bias.expand(
-                batch_size,
-                self.num_heads,
-                1,
-                target_w,
-            )
-
-            assert attn_bias.shape == (
-                batch_size,
-                self.num_heads,
-                1,
-                win_emb.size(1),
-            ), f"Unexpected attn_bias shape: {attn_bias.shape}"
-
+            attn_bias = bias.unsqueeze(1).expand(batch_size, self.num_heads, n_tgs, target_w)
             attn_bias = self.bias_scale * attn_bias
 
-        # TG-ATAC cross attention with distance bias
-        tg_cross = self.cross_tg_to_atac(tg_emb.unsqueeze(1), win_emb, attn_bias=attn_bias).squeeze(1)
+        tf_atac_token = self.cross_tf_to_atac(tf_emb, win_emb)
+        tg_atac_token = self.cross_tg_to_atac(tg_emb, win_emb, attn_bias=attn_bias)
 
+        tf_tg_token = self.cross_tf_to_tg(tf_atac_token, tg_atac_token)
+        tg_tf_token = self.cross_tg_to_tf(tg_atac_token, tf_atac_token)
+
+        tf_ctx = tf_atac_token.unsqueeze(2).expand(-1, -1, n_tgs, -1)
+        tg_ctx = tg_atac_token.unsqueeze(1).expand(-1, n_tfs, -1, -1)
+        tf_tg_ctx = tf_tg_token.unsqueeze(2).expand(-1, -1, n_tgs, -1)
+        tg_tf_ctx = tg_tf_token.unsqueeze(1).expand(-1, n_tfs, -1, -1)
+        atac_repr = atac_repr.unsqueeze(1).unsqueeze(2).expand(-1, n_tfs, n_tgs, -1)
+
+        tf_tg_cross = self.tf_tg_pair_dense_layer(torch.cat([tf_tg_ctx, tg_tf_ctx], dim=-1))
         pair_features = torch.cat(
             [
-                tf_cross,
-                tg_cross,
-                tf_cross * tg_cross,
-                torch.abs(tf_cross - tg_cross),
+                tf_ctx,
+                tg_ctx,
+                tf_tg_cross,
+                tf_ctx * tg_ctx,
+                torch.abs(tf_ctx - tg_ctx),
                 atac_repr,
             ],
             dim=-1,
         )
 
         interaction_logits = self.interaction_head(pair_features).squeeze(-1)
-
         if return_logits:
             return interaction_logits
-
         return torch.sigmoid(interaction_logits)
