@@ -11,6 +11,8 @@ reference_networks/
 homer_results/
 poster_results/
 dev/notebooks/simple_model_testing/data
+dev/notebooks/simple_model_testing/tf_peak_binding
+dev/notebooks/simple_model_testing/checkpoints
 checkpoint.pt
 .pybiomart
 dev/notebooks/sliding_window_calculation_method_testing_cache
@@ -46,6 +48,7 @@ dev/notebooks/sliding_window_calculation_method_testing_cache
 *.h5ad
 *.fasta
 *.fa
+*.ckpt
 .code-workspace
 
 # Keep the motif information

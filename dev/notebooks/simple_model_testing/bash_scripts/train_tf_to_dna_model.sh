@@ -5,8 +5,8 @@
 #SBATCH --time=72:00:00
 #SBATCH -p dense
 #SBATCH -N 1
-#SBATCH --gres=gpu:a100:1
-#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:a100:4
+#SBATCH --ntasks-per-node=4
 #SBATCH -c 16
 #SBATCH --mem=128G
 #SBATCH --signal=SIGUSR1@90
@@ -91,4 +91,8 @@ srun python3 ${PROJECT_DIR}/scripts/train_tf_to_dna_model.py \
     --model_dim 128 \
     --num_layers 4 \
     --num_gpus $NPROC_PER_NODE \
-    --num_nodes $SLURM_JOB_NUM_NODES
+    --num_nodes $SLURM_JOB_NUM_NODES \
+    --run_name tfbind_train_${SLURM_JOB_ID} \
+    --output_dir ${PROJECT_DIR}/checkpoints/tfbind_train_${SLURM_JOB_ID} #\
+    # --checkpoint_path "${PROJECT_DIR}/checkpoints/tf_peak_binding/epoch=01-val_auroc=0.9287-val_loss=0.3160.ckpt"
+

@@ -5,12 +5,15 @@ from torchmetrics.classification import BinaryAUROC, BinaryAveragePrecision, Bin
 
 from bidirectional_cross_attention import BidirectionalCrossAttentionTransformer
 
+from sklearn.metrics import roc_curve, precision_recall_curve
+import wandb
+
 class TFPeakBindingModel(nn.Module):
     def __init__(
         self,
         tf_embedding_dim: int = 128,
         hidden_dim: int = 128,
-        dropout: float = 0.1,
+        dropout: float = 0.3,
         num_layers: int = 2,
         num_heads: int = 4,
         dim_head: int = 32,
@@ -139,12 +142,14 @@ class LitTFPeakBindingModel(pl.LightningModule):
         lr: float = 1e-4,
         weight_decay: float = 1e-4,
         pos_weight: float | None = None,
+        logit_clamp: float | None = 20.0,
     ):
         super().__init__()
 
         self.model = model
         self.lr = lr
         self.weight_decay = weight_decay
+        self.logit_clamp = logit_clamp
 
         # Save hyperparameters except the raw nn.Module object
         self.save_hyperparameters(ignore=["model"])
@@ -163,6 +168,9 @@ class LitTFPeakBindingModel(pl.LightningModule):
 
         self.train_acc = BinaryAccuracy()
         self.val_acc = BinaryAccuracy()
+
+        self.val_probs = []
+        self.val_targets = []
 
     def forward(self, tf_embedding, tf_mask, peak_embedding):
         return self.model(
@@ -189,6 +197,19 @@ class LitTFPeakBindingModel(pl.LightningModule):
         tf_mask = batch["tf_mask"]
         peak_embedding = batch["peak_embedding"]
         labels = batch["label"].float()
+        tf_idx = batch.get("tf_idx", None)
+        peak_idx = batch.get("peak_idx", None)
+
+        idx_info = ""
+        if tf_idx is not None and peak_idx is not None:
+            idx_info = f" (tf_idx={tf_idx[:4].tolist()}, peak_idx={peak_idx[:4].tolist()})"
+
+        if not torch.isfinite(tf_embedding).all():
+            raise RuntimeError(f"Non-finite tf_embedding in {stage} step{idx_info}")
+        if not torch.isfinite(peak_embedding).all():
+            raise RuntimeError(f"Non-finite peak_embedding in {stage} step{idx_info}")
+        if not torch.isfinite(labels).all():
+            raise RuntimeError(f"Non-finite labels in {stage} step{idx_info}")
 
         logits = self(
             tf_embedding=tf_embedding,
@@ -196,8 +217,21 @@ class LitTFPeakBindingModel(pl.LightningModule):
             peak_embedding=peak_embedding,
         )
 
+        if not torch.isfinite(logits).all():
+            raise RuntimeError(f"Non-finite logits in {stage} step{idx_info}")
+
+        if self.logit_clamp is not None:
+            logits = logits.clamp(min=-self.logit_clamp, max=self.logit_clamp)
+
         loss = self._loss(logits, labels)
+
+        if not torch.isfinite(loss):
+            raise RuntimeError(f"Non-finite loss in {stage} step{idx_info}")
+
         probs = torch.sigmoid(logits)
+
+        if not torch.isfinite(probs).all():
+            raise RuntimeError(f"Non-finite probs in {stage} step{idx_info}")
 
         if stage == "train":
             auroc = self.train_auroc(probs, labels.int())
@@ -207,6 +241,9 @@ class LitTFPeakBindingModel(pl.LightningModule):
             auroc = self.val_auroc(probs, labels.int())
             auprc = self.val_auprc(probs, labels.int())
             acc = self.val_acc(probs, labels.int())
+
+            self.val_probs.append(probs.detach().cpu())
+            self.val_targets.append(labels.detach().cpu())
         else:
             raise ValueError(f"Unknown stage: {stage}")
 
@@ -257,6 +294,44 @@ class LitTFPeakBindingModel(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         self._shared_step(batch, stage="val")
+
+    def on_validation_epoch_start(self):
+        self.val_probs.clear()
+        self.val_targets.clear()
+
+    def on_validation_epoch_end(self):
+        if not self.val_probs:
+            return
+
+        probs = torch.cat(self.val_probs, dim=0).view(-1)
+        targets = torch.cat(self.val_targets, dim=0).view(-1).int()
+
+        self.val_probs.clear()
+        self.val_targets.clear()
+
+        auroc = self.val_auroc.compute()
+        auprc = self.val_auprc.compute()
+
+        self.log("val/roc_auc", auroc, prog_bar=True, sync_dist=False)
+        self.log("val/pr_auc", auprc, prog_bar=True, sync_dist=False)
+
+        self.val_auroc.reset()
+        self.val_auprc.reset()
+
+        if self.trainer.is_global_zero:
+            try:
+                p_np = probs.detach().cpu().numpy()
+                y_np = targets.detach().cpu().numpy()
+
+                pre, rec, _ = precision_recall_curve(y_np, p_np)
+                fpr, tpr, _ = roc_curve(y_np, p_np)
+
+                self.logger.experiment.log({
+                    "val/pr_curve": wandb.plot.line_series([rec], [pre], keys=["precision"], xname="Recall"),
+                    "val/roc_curve": wandb.plot.line_series([fpr], [tpr], keys=["TPR"], xname="FPR"),
+                })
+            except Exception as e:
+                print("[WARN] PR/ROC curve error:", e)
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(

@@ -14,7 +14,7 @@ from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset, DataLoader, Subset
 
 import pytorch_lightning as pl
-from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping, LearningRateMonitor
+from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping, LearningRateMonitor, TQDMProgressBar
 from lightning.pytorch.loggers import WandbLogger
 
 DATA_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data")
@@ -200,6 +200,10 @@ if __name__ == "__main__":
     argparser.add_argument("--model_dim", type=int, default=128, help="Dimension of the model")
     argparser.add_argument("--batch_size", type=int, default=64, help="Batch size for training")
     argparser.add_argument("--num_layers", type=int, default=4, help="Number of layers in the model")
+    argparser.add_argument("--run_name", type=str, required=True, default="tfbind_train", help="Name of the training run")
+    argparser.add_argument("--output_dir", type=str, required=True, help="Path to save model checkpoints")
+    argparser.add_argument("--checkpoint_path", type=str, required=False, help="Path to a model checkpoint to resume training from")
+    argparser.add_argument("--force_reload", action="store_true", help="Whether to force reload cached data instead of using existing cache files")
     args = argparser.parse_args()
     
     epochs = args.epochs
@@ -208,10 +212,27 @@ if __name__ == "__main__":
     model_dim = args.model_dim
     batch_size = args.batch_size
     num_layers = args.num_layers
-
+    run_name = args.run_name
+    output_dir = args.output_dir
+    checkpoint_path = args.checkpoint_path
+    force_reload = args.force_reload
+    
     genome_fasta_path = DATA_DIR / "genome_data" / "reference_genome" / "mm10" / "mm10.fa"
     chrom_sizes_path = DATA_DIR / "genome_data" / "reference_genome" / "mm10" / "mm10.chrom.sizes"
     embedding_dir = PROJECT_DIR / "data" / "tf_data" / "tf_embeddings"
+    training_cache_dir = PROJECT_DIR / "data" / "training_data_cache"
+    training_cache_dir.mkdir(exist_ok=True, parents=True)
+    
+    # Define paths for cached data files
+    tf_name_to_idx_cache_path = training_cache_dir / "tf_name_to_idx.csv"
+    peak_id_to_idx_cache_path = training_cache_dir / "peak_id_to_idx.csv"
+    edge_tf_idx_cache_path = training_cache_dir / "edge_tf_idx.pt"
+    edge_peak_idx_cache_path = training_cache_dir / "edge_peak_idx.pt"
+    edge_labels_cache_path = training_cache_dir / "edge_labels.pt"
+    tf_embedding_cache_path = training_cache_dir / "tf_embeddings.pt"
+    tf_mask_cache_path = training_cache_dir / "tf_masks.pt"
+    tf_lengths_cache_path = training_cache_dir / "tf_lengths.pt"
+    peak_onehot_cache_path = training_cache_dir / "peak_onehot_array.pt"
     
     # Load TF embeddings and metadata
     tf_embedding_files = list(embedding_dir.glob("*_protein_embedding.pt"))
@@ -228,57 +249,85 @@ if __name__ == "__main__":
     tf_names = true_edge_df["gene_id"].unique().tolist()
     peak_ids = true_edge_df["peak_id"].unique().tolist()
     
-    # Create true and false interaction sets
-    true_interactions, false_interactions = utils.create_true_false_edges(
-        chip_atlas_df=true_edge_df,
-        tf_names=tf_names,
-        tf_col="gene_id",
-        peak_col="peak_id",
-        pct_true_edges=0.25,
-        true_false_ratio=0.5
-    )
+    # Load or create the TF name to index and peak ID to index mappings, caching them to disk for faster loading in the future
+    map_cache_files = [tf_name_to_idx_cache_path, peak_id_to_idx_cache_path]
+    if all(f.exists() for f in map_cache_files) and force_reload == False:
+        tf_name_to_idx = pd.read_csv(tf_name_to_idx_cache_path).set_index("tf_name")["tf_idx"].to_dict()
+        peak_id_to_idx = pd.read_csv(peak_id_to_idx_cache_path).set_index("peak_id")["peak_idx"].to_dict()
+    else:
+        # Map the TF names and peak IDs to their respective indices
+        tf_name_to_idx = {tf: idx for idx, tf in enumerate(tf_names)}
+        peak_id_to_idx = {peak: idx for idx, peak in enumerate(peak_ids)}
         
-    # Map the TF names and peak IDs to their respective indices
-    tf_name_to_idx = {tf: idx for idx, tf in enumerate(tf_names)}
-    peak_id_to_idx = {peak: idx for idx, peak in enumerate(peak_ids)}
+        pd.DataFrame({"tf_name": list(tf_name_to_idx.keys()), "tf_idx": list(tf_name_to_idx.values())}).to_csv(tf_name_to_idx_cache_path, index=False)
+        pd.DataFrame({"peak_id": list(peak_id_to_idx.keys()), "peak_idx": list(peak_id_to_idx.values())}).to_csv(peak_id_to_idx_cache_path, index=False)
+    
+    # Cache the TF-peak edge indices and labels to disk for faster loading in the future
+    edge_cache_files = [edge_tf_idx_cache_path, edge_peak_idx_cache_path, edge_labels_cache_path]
+    if all(f.exists() for f in edge_cache_files) and force_reload == False:
+        edge_tf_idx_tensor = torch.load(edge_tf_idx_cache_path)
+        edge_peak_idx_tensor = torch.load(edge_peak_idx_cache_path)
+        edge_labels_tensor = torch.load(edge_labels_cache_path)
+    else:
+        # Create true and false interaction sets
+        true_interactions, false_interactions = utils.create_true_false_edges(
+            chip_atlas_df=true_edge_df,
+            tf_names=tf_names,
+            tf_col="gene_id",
+            peak_col="peak_id",
+            pct_true_edges=0.25,
+            true_false_ratio=0.5
+        )
+        
+        # Create a labeled dataset of TF-peak interactions
+        tf_peak_labeled_df = create_labeled_tf_peak_dataset(
+            true_interactions=true_interactions,
+            false_interactions=false_interactions,
+            tf_name_to_idx=tf_name_to_idx,
+            peak_id_to_idx=peak_id_to_idx,
+            drop_missing=False,
+        )
 
-    # Create a labeled dataset of TF-peak interactions
-    tf_peak_labeled_df = create_labeled_tf_peak_dataset(
-        true_interactions=true_interactions,
-        false_interactions=false_interactions,
-        tf_name_to_idx=tf_name_to_idx,
-        peak_id_to_idx=peak_id_to_idx,
-        drop_missing=False,
-    )
+        # Extract the TF indices, peak indices, and labels as numpy arrays for model input
+        edge_tf_idx = tf_peak_labeled_df["tf_idx"].to_numpy(dtype=np.int64)
+        edge_peak_idx = tf_peak_labeled_df["peak_idx"].to_numpy(dtype=np.int64)
+        edge_labels = tf_peak_labeled_df["label"].to_numpy(dtype=np.float32)
 
-    # Extract the TF indices, peak indices, and labels as numpy arrays for model input
-    edge_tf_idx = tf_peak_labeled_df["tf_idx"].to_numpy(dtype=np.int64)
-    edge_peak_idx = tf_peak_labeled_df["peak_idx"].to_numpy(dtype=np.int64)
-    edge_labels = tf_peak_labeled_df["label"].to_numpy(dtype=np.float32)
+        # Convert to PyTorch tensors
+        edge_tf_idx_tensor = torch.as_tensor(edge_tf_idx, dtype=torch.long)
+        edge_peak_idx_tensor = torch.as_tensor(edge_peak_idx, dtype=torch.long)
+        edge_labels_tensor = torch.as_tensor(edge_labels, dtype=torch.float32)
 
-    # Convert to PyTorch tensors
-    edge_tf_idx_tensor = torch.as_tensor(edge_tf_idx, dtype=torch.long)
-    edge_peak_idx_tensor = torch.as_tensor(edge_peak_idx, dtype=torch.long)
-    edge_labels_tensor = torch.as_tensor(edge_labels, dtype=torch.float32)
+    # Cache the TF embeddings, masks, and metadata to disk for faster loading in the future
+    tf_cache_files = [tf_embedding_cache_path, tf_mask_cache_path, tf_lengths_cache_path]
+    if all(f.exists() for f in tf_cache_files) and force_reload == False:
+        tf_embeddings_tensor = torch.load(tf_embedding_cache_path)
+        tf_mask_tensor = torch.load(tf_mask_cache_path)
+        tf_lengths_tensor = torch.load(tf_lengths_cache_path)
+        tf_names_ordered = list(tf_name_to_idx.keys())
+    else:
+        # Load all of the TF embeddings in the order specified by tf_name_to_idx
+        tf_data = load_ordered_tf_embeddings(
+            embedding_dir=embedding_dir,
+            tf_name_to_idx=tf_name_to_idx,
+        )
 
-    # Load all of the TF embeddings in the order specified by tf_name_to_idx
-    tf_data = load_ordered_tf_embeddings(
-        embedding_dir=embedding_dir,
-        tf_name_to_idx=tf_name_to_idx,
-    )
-
-    # Extract the embeddings, masks, and ordered TF names from the loaded data
-    tf_embeddings_tensor: torch.Tensor = tf_data["embeddings"]
-    tf_mask_tensor: torch.Tensor = tf_data["mask"]
-    tf_lengths_tensor: torch.Tensor = tf_data["lengths"]
-    tf_names_ordered: list[str] = tf_data["tf_names"]
+        # Extract the embeddings, masks, and ordered TF names from the loaded data
+        tf_embeddings_tensor: torch.Tensor = tf_data["embeddings"]
+        tf_mask_tensor: torch.Tensor = tf_data["mask"]
+        tf_lengths_tensor: torch.Tensor = tf_data["lengths"]
+        tf_names_ordered: list[str] = tf_data["tf_names"]
+        
+        torch.save(tf_embeddings_tensor, tf_embedding_cache_path)
+        torch.save(tf_mask_tensor, tf_mask_cache_path)
+        torch.save(tf_lengths_tensor, tf_lengths_cache_path)
     
     peak_ids = list(tf_peak_labeled_df["peak_id"].unique())
 
     chrom_sizes = utils.load_chrom_sizes(chrom_sizes_path)
 
-    peak_onehot_cache_path = PROJECT_DIR / "data" / "training_data_cache" / "peak_onehot_array.pt"
-    if os.path.exists(peak_onehot_cache_path):
+    # Create the peak one-hot encoding array, caching it to disk for faster loading in the future
+    if os.path.exists(peak_onehot_cache_path) and force_reload == False:
         peak_tensor = torch.load(peak_onehot_cache_path)
     else:
         peak_onehot_array = utils.create_centered_peak_onehot_array(
@@ -339,7 +388,7 @@ if __name__ == "__main__":
     base_model = tf_to_dna_module.TFPeakBindingModel(
         tf_embedding_dim=model_dim,
         hidden_dim=model_dim,
-        dropout=0.1,
+        dropout=0.3,
         num_layers=num_layers,
         num_heads=4,
         dim_head=32,
@@ -355,7 +404,7 @@ if __name__ == "__main__":
 
 
     checkpoint_callback = ModelCheckpoint(
-        dirpath=PROJECT_DIR / "checkpoints" / "tf_peak_binding",
+        dirpath=output_dir,
         filename="epoch={epoch:02d}-val_auroc={val/auroc:.4f}-val_loss={val/loss:.4f}",
         monitor="val/auroc",
         mode="max",
@@ -374,7 +423,8 @@ if __name__ == "__main__":
 
     wandb_logger = WandbLogger(
         project="tf_peak_binding",
-        name="cross_attention_tf_peak_model",
+        name=run_name,
+        save_dir=output_dir,
     )
     
     world_size = int(
@@ -385,7 +435,7 @@ if __name__ == "__main__":
     )
 
     use_ddp = world_size > 1
-
+    
     trainer = pl.Trainer(
         max_epochs=epochs,
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
@@ -395,19 +445,37 @@ if __name__ == "__main__":
         precision="16-mixed",
         logger=wandb_logger,
         callbacks=[
+            TQDMProgressBar(refresh_rate=200),
             checkpoint_callback,
             early_stopping_callback,
             lr_monitor,
         ],
         gradient_clip_val=1.0,
-        log_every_n_steps=10,
+        gradient_clip_algorithm="norm",
+        log_every_n_steps=100,
+        default_root_dir=output_dir,
+        enable_progress_bar=True,
+        enable_checkpointing=True,
+        check_val_every_n_epoch=1,
     )
     
     torch.set_float32_matmul_precision('medium')
-
-    trainer.fit(
-        lit_model,
-        train_dataloaders=train_loader,
-        val_dataloaders=val_loader,
-    )
-                
+    
+    # Debug to find NaNs in the loss
+    torch.autograd.set_detect_anomaly(True)
+    
+    if checkpoint_path is not None:
+        logging.info(f"Resuming training from checkpoint: {checkpoint_path}")
+        trainer.fit(
+            lit_model,
+            train_dataloaders=train_loader,
+            val_dataloaders=val_loader,
+            ckpt_path=checkpoint_path,
+        )
+    else:
+        trainer.fit(
+            lit_model,
+            train_dataloaders=train_loader,
+            val_dataloaders=val_loader,
+        )
+                    
