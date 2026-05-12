@@ -276,7 +276,7 @@ if __name__ == "__main__":
             tf_col="gene_id",
             peak_col="peak_id",
             pct_true_edges=0.25,
-            true_false_ratio=0.5
+            true_false_ratio=0.25
         )
         
         # Create a labeled dataset of TF-peak interactions
@@ -297,6 +297,10 @@ if __name__ == "__main__":
         edge_tf_idx_tensor = torch.as_tensor(edge_tf_idx, dtype=torch.long)
         edge_peak_idx_tensor = torch.as_tensor(edge_peak_idx, dtype=torch.long)
         edge_labels_tensor = torch.as_tensor(edge_labels, dtype=torch.float32)
+        
+        torch.save(edge_tf_idx_tensor, edge_tf_idx_cache_path)
+        torch.save(edge_peak_idx_tensor, edge_peak_idx_cache_path)
+        torch.save(edge_labels_tensor, edge_labels_cache_path)
 
     # Cache the TF embeddings, masks, and metadata to disk for faster loading in the future
     tf_cache_files = [tf_embedding_cache_path, tf_mask_cache_path, tf_lengths_cache_path]
@@ -354,35 +358,66 @@ if __name__ == "__main__":
         edge_labels=edge_labels_tensor,
     )
     
-    indices = np.arange(len(edge_labels))
+    # Chromosome-stratified split by peak_id
+    def _get_chrom(peak_id: str) -> str:
+        # Expect format like "chr1:123-456"
+        return peak_id.split(":", 1)[0]
 
-    # Create train/val splits, ensuring that the same TFs and peaks appear in both sets
-    train_idx, val_idx = train_test_split(
-        indices,
-        test_size=0.2,
-        random_state=42,
-        stratify=edge_labels,
-    )
+    edge_peak_ids = tf_peak_labeled_df["peak_id"].to_numpy()
+    edge_chroms = np.array([_get_chrom(pid) for pid in edge_peak_ids])
 
+    # Split the dataset into train/val/test sets by chromosome
+    # Test set: chromosomes 1-15
+    # Val set: chromosomes 16-17
+    # Test set: chromosomes 18 and 19
+    train_chroms = {f"chr{i}" for i in range(1, 16)}
+    val_chroms = {f"chr{i}" for i in range(16, 18)}
+    test_chroms = {"chr18", "chr19"}
+
+    # Create boolean masks for train/val/test edges based on their chromosome
+    train_mask = np.isin(edge_chroms, list(train_chroms))
+    val_mask = np.isin(edge_chroms, list(val_chroms))
+    test_mask = np.isin(edge_chroms, list(test_chroms))
+
+    # Get the indices of the edges in each split
+    train_idx = np.where(train_mask)[0]
+    val_idx = np.where(val_mask)[0]
+    test_idx = np.where(test_mask)[0]
+
+    # Subset the datasets by the split indices
     train_dataset = Subset(edge_dataset, train_idx)
     val_dataset = Subset(edge_dataset, val_idx)
+    test_dataset = Subset(edge_dataset, test_idx)
 
+    # Create dataloaders for each split
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=7,
+        num_workers=4,
         pin_memory=True,
         persistent_workers=True,
+        prefetch_factor=4,
     )
 
     val_loader = DataLoader(
         val_dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=7,
+        num_workers=4,
         pin_memory=True,
         persistent_workers=True,
+        prefetch_factor=4,
+    )
+
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=4,
+        pin_memory=True,
+        persistent_workers=True,
+        prefetch_factor=4,
     )
     
     base_model = tf_to_dna_module.TFPeakBindingModel(
@@ -441,11 +476,11 @@ if __name__ == "__main__":
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
         devices=num_gpus,
         num_nodes=num_nodes,
-        strategy="ddp_find_unused_parameters_true" if use_ddp else "auto",
+        strategy="ddp" if use_ddp else "auto",
         precision="16-mixed",
         logger=wandb_logger,
         callbacks=[
-            TQDMProgressBar(refresh_rate=200),
+            TQDMProgressBar(refresh_rate=100),
             checkpoint_callback,
             early_stopping_callback,
             lr_monitor,
@@ -462,7 +497,7 @@ if __name__ == "__main__":
     torch.set_float32_matmul_precision('medium')
     
     # Debug to find NaNs in the loss
-    torch.autograd.set_detect_anomaly(True)
+    torch.autograd.set_detect_anomaly(False)
     
     if checkpoint_path is not None:
         logging.info(f"Resuming training from checkpoint: {checkpoint_path}")

@@ -7,7 +7,7 @@
 #SBATCH -N 1
 #SBATCH --gres=gpu:a100:4
 #SBATCH --ntasks-per-node=4
-#SBATCH -c 16
+#SBATCH -c 8
 #SBATCH --mem=128G
 #SBATCH --signal=SIGUSR1@90
 
