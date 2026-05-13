@@ -242,9 +242,6 @@ def create_centered_peak_onehot_array(
                 desc="Creating centered peak one-hot array",
                 disable=not show_progress,
                 ncols=100,
-                miniters=min_iters,
-                mininterval=0,
-                dynamic_miniters=False,
             ):
                 peak_idx = peak_id_to_idx[peak_id]
 
@@ -338,145 +335,197 @@ def create_centered_peak_onehot_array(
     return peak_onehot_array
 
 def create_true_false_edges(
-    chip_atlas_df: pd.DataFrame, 
-    tf_names: list, 
-    tf_col: str ="source_id", 
-    peak_col: str ="peak_id", 
+    edge_df: pd.DataFrame,
+    tf_names: list,
+    tf_col: str = "source_id",
+    item_col: str = "peak_id",
     pct_true_edges: float | None = 1.0,
     true_false_ratio: float = 1.0,
-    ):
+    seed: int = 123,
+    batch_size: int = 1_000_000,
+    show_progress: bool = True,
+):
     """
-    Create sets of true and false TF-peak interactions from ChIP-Atlas data.
-    
+    Create observed positive and sampled-unobserved negative TF-item edges.
+
+    This function is generic. The second entity can be a peak, target gene,
+    enhancer, motif, or any other item.
+
+    Examples
+    --------
+    TF-peak edges:
+        tf_col="source_id"
+        item_col="peak_id"
+
+    TF-TG edges:
+        tf_col="source_id"
+        item_col="tg_id"
+
     Parameters
     ----------
-    chip_atlas_df : pd.DataFrame
-        DataFrame containing ChIP-Atlas interactions with columns for TF names and peak IDs.
+    edge_df : pd.DataFrame
+        DataFrame containing observed TF-item interactions.
+
     tf_names : list
-        List of TF names to include in the analysis. Only interactions involving these TFs will be considered.
+        TF names to include.
+
     tf_col : str
-        Name of the column in chip_atlas_df that contains TF names (default: "source_id").
-    peak_col : str
-        Name of the column in chip_atlas_df that contains peak IDs (default: "peak_id").
+        Column containing TF names.
+
+    item_col : str
+        Column containing the second entity in the edge.
+        For TF-peak edges, this could be "peak_id".
+        For TF-TG edges, this could be "tg_id".
+
     pct_true_edges : float or None
-        If not None, the fraction of true edges to include in the analysis (default: 1.0). If None, uses all true edges.
+        Fraction of observed positive edges to include.
+        If None, use all observed positive edges.
+
     true_false_ratio : float
-        The ratio of false edges to true edges (default: 1.0).
+        Number of sampled unobserved edges per observed positive edge.
+
+    seed : int
+        Random seed.
+
+    batch_size : int
+        Number of candidate pairs to sample per batch.
+
+    show_progress : bool
+        Whether to show a tqdm progress bar.
 
     Returns
     -------
-    tuple
-        A tuple containing:
-        - set of true interactions (TF, peak)
-        - set of false interactions (TF, peak)
+    true_edges : set[tuple]
+        Observed positive TF-item edges.
+
+    false_edges : set[tuple]
+        Sampled unobserved TF-item edges.
+        These are not guaranteed biological false edges.
     """
-    chipatlas_df: pd.DataFrame = chip_atlas_df.copy()
-    chipatlas_df[tf_col] = chipatlas_df[tf_col]
-    chipatlas_df = chipatlas_df[chipatlas_df[tf_col].isin(tf_names)].reset_index(drop=True)
-    
-    if pct_true_edges is not None:
-        chipatlas_df = chipatlas_df.sample(frac=pct_true_edges, random_state=123)
 
-    chipatlas_true_interactions = set(zip(chipatlas_df[tf_col], chipatlas_df[peak_col]))
+    df_all = edge_df.copy()
 
-    def create_n_false_edges(
-        tfs,
-        peaks,
-        num_false_edges,
-        true_interactions,
-        batch_size=1_000_000,
-        seed=None,
-        show_progress=True,
-    ):
-        """
-        Randomly sample unique TF-peak pairs that are not in true_interactions.
+    # Keep only requested TFs
+    df_all = df_all[df_all[tf_col].isin(tf_names)].copy()
 
-        Parameters
-        ----------
-        tfs : iterable
-            TF names.
-        peaks : iterable
-            Peak IDs.
-        num_false_edges : int
-            Number of false edges to generate.
-        true_interactions : set[tuple]
-            Known true TF-peak interactions to exclude.
-        batch_size : int
-            Number of candidate pairs to sample per batch.
-        seed : int or None
-            Random seed.
-        show_progress : bool
-            Whether to show tqdm progress bar.
+    # Drop missing values
+    df_all = df_all.dropna(subset=[tf_col, item_col])
 
-        Returns
-        -------
-        set[tuple]
-            Set of sampled false interactions.
-        """
+    # Normalize to string for safer set operations
+    df_all[tf_col] = df_all[tf_col].astype(str)
+    df_all[item_col] = df_all[item_col].astype(str)
 
-        tfs = np.asarray(list(tfs), dtype=object)
-        peaks = np.asarray(list(peaks), dtype=object)
-        true_interactions = set(true_interactions)
+    # Each observed edge should count once
+    df_all = df_all.drop_duplicates([tf_col, item_col]).reset_index(drop=True)
 
-        n_tfs = len(tfs)
-        n_peaks = len(peaks)
-        universe_size = n_tfs * n_peaks
-        max_false_edges = universe_size - len(true_interactions)
-
-        if num_false_edges > max_false_edges:
-            num_false_edges = max_false_edges
-            logging.warning(
-                f"Requested {num_false_edges} false edges, but only {max_false_edges} are possible given the true interactions. Returning all possible false edges."
-            )
-
-        rng = np.random.default_rng(seed)
-        false_interactions = set()
-
-        pbar = tqdm(
-            total=num_false_edges,
-            desc="Generating False Interactions",
-            ncols=125,
-            disable=not show_progress,
+    if df_all.empty:
+        raise ValueError(
+            f"No edges remain after filtering by tf_names using columns "
+            f"{tf_col!r} and {item_col!r}."
         )
 
-        try:
-            while len(false_interactions) < num_false_edges:
-                remaining = num_false_edges - len(false_interactions)
+    # Build the candidate universe before optional positive subsampling
+    candidate_tfs = np.asarray(sorted(df_all[tf_col].unique()), dtype=object)
+    candidate_items = np.asarray(sorted(df_all[item_col].unique()), dtype=object)
 
-                this_batch_size = min(batch_size, max(remaining * 3, 10_000))
+    # Optionally subsample observed positives
+    df_pos = df_all
 
-                tf_idx = rng.integers(0, n_tfs, size=this_batch_size)
-                peak_idx = rng.integers(0, n_peaks, size=this_batch_size)
+    if pct_true_edges is not None:
+        if not (0 < pct_true_edges <= 1):
+            raise ValueError("pct_true_edges must be in (0, 1] or None.")
 
-                candidates = zip(tfs[tf_idx], peaks[peak_idx])
+        df_pos = df_all.sample(frac=pct_true_edges, random_state=seed)
 
-                old_count = len(false_interactions)
+    true_edges = set(zip(df_pos[tf_col], df_pos[item_col]))
 
-                for edge in candidates:
-                    if edge not in true_interactions:
-                        false_interactions.add(edge)
+    num_false_edges = round(len(true_edges) * true_false_ratio)
 
-                        if len(false_interactions) >= num_false_edges:
-                            break
-
-                new_count = len(false_interactions)
-                pbar.update(new_count - old_count)
-
-        finally:
-            pbar.close()
-
-        return false_interactions
-
-    false_interactions = create_n_false_edges(
-        tfs=chipatlas_df[tf_col].unique(),
-        peaks=chipatlas_df[peak_col].unique(),
-        num_false_edges=round(len(chipatlas_true_interactions) * true_false_ratio),
-        true_interactions=chipatlas_true_interactions,
-        batch_size=1_000_000,
-        seed=123,
+    false_edges = sample_unobserved_edges(
+        tfs=candidate_tfs,
+        items=candidate_items,
+        num_edges=num_false_edges,
+        true_edges=true_edges,
+        batch_size=batch_size,
+        seed=seed,
+        show_progress=show_progress,
     )
-    
-    return chipatlas_true_interactions, false_interactions
+
+    return true_edges, false_edges
+
+
+def sample_unobserved_edges(
+    tfs,
+    items,
+    num_edges,
+    true_edges,
+    batch_size=1_000_000,
+    seed=123,
+    show_progress=True,
+):
+    """
+    Randomly sample unique TF-item pairs that are not in true_edges.
+
+    These sampled pairs are unobserved negatives, not guaranteed biological
+    false interactions.
+    """
+
+    tfs = np.asarray(list(tfs), dtype=object)
+    items = np.asarray(list(items), dtype=object)
+    true_edges = set(true_edges)
+
+    n_tfs = len(tfs)
+    n_items = len(items)
+
+    universe_size = n_tfs * n_items
+    max_unobserved_edges = universe_size - len(true_edges)
+
+    if max_unobserved_edges <= 0:
+        raise ValueError(
+            "No unobserved TF-item pairs are available. "
+            "The true_edges set covers the full TF x item universe."
+        )
+
+    if num_edges > max_unobserved_edges:
+        logging.warning(
+            f"Requested {num_edges} sampled unobserved edges, but only "
+            f"{max_unobserved_edges} are possible. Returning all possible."
+        )
+        num_edges = max_unobserved_edges
+
+    rng = np.random.default_rng(seed)
+    sampled_edges = set()
+
+    pbar = tqdm(
+        total=num_edges,
+        desc="Generating sampled unobserved TF-item edges",
+        ncols=125,
+        disable=not show_progress,
+    )
+
+    try:
+        while len(sampled_edges) < num_edges:
+            remaining = num_edges - len(sampled_edges)
+            this_batch_size = min(batch_size, max(remaining * 3, 10_000))
+
+            tf_idx = rng.integers(0, n_tfs, size=this_batch_size)
+            item_idx = rng.integers(0, n_items, size=this_batch_size)
+
+            old_count = len(sampled_edges)
+
+            for edge in zip(tfs[tf_idx], items[item_idx]):
+                if edge not in true_edges:
+                    sampled_edges.add(edge)
+
+                    if len(sampled_edges) >= num_edges:
+                        break
+
+            pbar.update(len(sampled_edges) - old_count)
+
+    finally:
+        pbar.close()
+
+    return sampled_edges
 
 def download_gene_protein_fastas(
     gene_names,
