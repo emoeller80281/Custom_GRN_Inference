@@ -90,10 +90,7 @@ srun python3 ${PROJECT_DIR}/scripts/train_tf_to_tg_model.py \
     --num_nodes $SLURM_JOB_NUM_NODES \
     --run_name tf_tg_train_${SLURM_JOB_ID} \
     --output_dir ${PROJECT_DIR}/checkpoints/tf_tg_train_${SLURM_JOB_ID} \
-    --sample_pairs 1000 \
+    --sample_pairs 256 \
     --max_peaks_per_tg 8 \
-    --max_cells_per_pair 25 \
-    --batch_size 16 \
-    --edge_cache_dir ${PROJECT_DIR}/data/training_data_cache/tf_tg_train_edges \
-    --edge_cache_shard_size 128 \
-    --use_edge_cache
+    --max_cells_per_pair 16 \
+    --batch_size 8

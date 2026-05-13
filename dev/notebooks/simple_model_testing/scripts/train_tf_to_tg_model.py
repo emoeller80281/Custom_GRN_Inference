@@ -627,153 +627,6 @@ class TFTGEdgeBagDataset(Dataset):
         return item
 
 
-class TFTGEdgeBagDiskDataset(Dataset):
-    def __init__(self, cache_dir: Path | str):
-        self.cache_dir = Path(cache_dir)
-        self.index = torch.load(self.cache_dir / "index.pt", map_location="cpu")
-        self._cached_shard_path = None
-        self._cached_shard_items = None
-
-    def __len__(self):
-        return len(self.index)
-
-    def __getitem__(self, idx):
-        entry = self.index[idx]
-        if "path" in entry:
-            return torch.load(self.cache_dir / entry["path"], map_location="cpu")
-
-        shard_path = self.cache_dir / entry["shard_path"]
-        if self._cached_shard_path != shard_path:
-            self._cached_shard_items = torch.load(shard_path, map_location="cpu")
-            self._cached_shard_path = shard_path
-        item = self._cached_shard_items[entry["index"]]
-        if isinstance(item, dict) and "static" in item and "cell" in item:
-            return _inflate_edge_bag(item)
-        return item
-
-
-def _inflate_edge_bag(item):
-    static = item["static"]
-    cell = item["cell"]
-
-    n_cells = int(cell["tf_expression"].shape[0])
-
-    inflated = {
-        "label": static["label"],
-        "tf_name": static["tf_name"],
-        "tg_name": static["tg_name"],
-        "cell_ids": cell["cell_ids"],
-        "peak_accessibility": cell["peak_accessibility"],
-        "tf_expression": cell["tf_expression"],
-        "tg_expression": cell["tg_expression"],
-    }
-
-    static_tensor_keys = [
-        "tf_embedding",
-        "tf_mask",
-        "peak_sequences",
-        "peak_distance",
-        "tg_embedding",
-    ]
-
-    for key in static_tensor_keys:
-        tensor = static[key]
-        inflated[key] = tensor.unsqueeze(0).repeat(n_cells, *([1] * tensor.ndim))
-
-    if "peak_mask" in static:
-        tensor = static["peak_mask"]
-        inflated["peak_mask"] = tensor.unsqueeze(0).repeat(n_cells, *([1] * tensor.ndim))
-
-    return inflated
-
-
-def write_tftg_edge_bag_cache(
-    inputs,
-    cache_dir: Path | str,
-    max_cells_per_pair=None,
-    strict: bool = True,
-    shard_size: int = 512,
-):
-    cache_dir = Path(cache_dir)
-    cache_dir.mkdir(parents=True, exist_ok=True)
-
-    dataset = TFTGEdgeBagDataset(
-        inputs,
-        max_cells_per_pair=max_cells_per_pair,
-        strict=strict,
-    )
-
-    index = []
-    shard_items = []
-    shard_meta = []
-    shard_id = 0
-
-    def _flush_shard():
-        nonlocal shard_id, shard_items, shard_meta
-        if not shard_items or not shard_meta:
-            return None, None
-        shard_name = f"edge_shard_{shard_id:05d}.pt"
-        meta = shard_meta
-        torch.save(shard_items, cache_dir / shard_name)
-        shard_items = []
-        shard_meta = []
-        shard_id += 1
-        return shard_name, meta
-
-    def _compress_edge_bag(item):
-        static = {
-            "label": item["label"],
-            "tf_name": item["tf_name"],
-            "tg_name": item["tg_name"],
-            "tf_embedding": item["tf_embedding"][0],
-            "tf_mask": item["tf_mask"][0],
-            "peak_sequences": item["peak_sequences"][0],
-            "peak_distance": item["peak_distance"][0],
-            "tg_embedding": item["tg_embedding"][0],
-        }
-
-        if "peak_mask" in item:
-            static["peak_mask"] = item["peak_mask"][0]
-
-        cell = {
-            "cell_ids": item["cell_ids"],
-            "peak_accessibility": item["peak_accessibility"],
-            "tf_expression": item["tf_expression"],
-            "tg_expression": item["tg_expression"],
-        }
-
-        return {"static": static, "cell": cell}
-
-    for i in range(len(dataset)):
-        item = dataset[i]
-        compressed = _compress_edge_bag(item)
-        shard_items.append(compressed)
-        shard_meta.append((compressed["static"]["tf_name"], compressed["static"]["tg_name"]))
-
-        if len(shard_items) >= shard_size:
-            shard_name, meta = _flush_shard()
-            for j, (tf_name, tg_name) in enumerate(meta):
-                index.append({
-                    "shard_path": shard_name,
-                    "index": j,
-                    "tf_name": tf_name,
-                    "tg_name": tg_name,
-                })
-
-    if shard_items:
-        shard_name, meta = _flush_shard()
-        for j, (tf_name, tg_name) in enumerate(meta):
-            index.append({
-                "shard_path": shard_name,
-                "index": j,
-                "tf_name": tf_name,
-                "tg_name": tg_name,
-            })
-
-    torch.save(index, cache_dir / "index.pt")
-    return len(index)
-
-
 def collate_tftg_edge_bags(batch):
     labels = torch.stack([b["label"] for b in batch]).float()
 
@@ -1206,9 +1059,6 @@ if __name__ == "__main__":
     parser.add_argument("--true_false_ratio", type=float, default=2.0, help="Ratio of true to false edges in the training set (default: 2.0)")
     parser.add_argument("--checkpoint_path", type=str, required=False, help="Path to a model checkpoint to resume training from")
     parser.add_argument("--force_reload", action="store_true", help="Whether to force reload cached data instead of using existing cache files")
-    parser.add_argument("--edge_cache_dir", type=str, default=None, help="Directory for per-edge TFTG cache")
-    parser.add_argument("--use_edge_cache", action="store_true", help="Use disk-backed per-edge cache if available")
-    parser.add_argument("--edge_cache_shard_size", type=int, default=512, help="Number of edges per cache shard")
     args = parser.parse_args()
 
     ckpt_path = PROJECT_DIR / "checkpoints" / "tfbind_train_3668735" / "epoch=03-val_auroc=0.9271-val_loss=0.2623.ckpt"
@@ -1231,9 +1081,6 @@ if __name__ == "__main__":
     max_cells_per_pair = args.max_cells_per_pair
     pct_true_edges = args.pct_true_edges
     true_false_ratio = args.true_false_ratio
-    edge_cache_dir = Path(args.edge_cache_dir) if args.edge_cache_dir else None
-    use_edge_cache = args.use_edge_cache
-    edge_cache_shard_size = args.edge_cache_shard_size
 
     atac_pseudobulk = pd.read_parquet(PROJECT_DIR / "data" / "ATAC_data" / "RE_pseudobulk.parquet")
     peak_to_gene_distance = pd.read_parquet(PROJECT_DIR / "data" / "ATAC_data" / "peak_to_gene_dist.parquet")
@@ -1263,7 +1110,7 @@ if __name__ == "__main__":
     # Create a mapping from TG name to index across all ground-truth TGs
     tg_id_to_idx = {tg: idx for idx, tg in enumerate(merged_ground_truth_df["Target"].unique())}
     
-    logging.info(f"Number of unique TGs: {len(tg_id_to_idx)}")
+    logging.info(f"Number of")
 
     train_genes, val_genes, test_genes = split_genes_by_chromosome(gene_ref_file)
     
@@ -1371,88 +1218,40 @@ if __name__ == "__main__":
         tg_id_to_idx=tg_id_to_idx,
     )
 
-    train_cache_dir = edge_cache_dir / "train" if edge_cache_dir else None
-    val_cache_dir = edge_cache_dir / "val" if edge_cache_dir else None
-    test_cache_dir = edge_cache_dir / "test" if edge_cache_dir else None
+    logging.info("Building TFTGRegulationModel inputs for train/val/test sets...")
+    tftg_inputs_train = build_tftg_inputs(
+        tf_tg_train_subset,
+        seed=123,
+        **common_build_kwargs,
+    )
+    logging.info(f"Train TFTGRegulationModel inputs built with {len(tftg_inputs_train['label'])} edges")
+    
+    tftg_inputs_val = build_tftg_inputs(
+        tf_tg_val_subset,
+        seed=124,
+        **common_build_kwargs,
+    )
+    logging.info(f"Validation TFTGRegulationModel inputs built with {len(tftg_inputs_val['label'])} edges")
+    
+    tftg_inputs_test = build_tftg_inputs(
+        tf_tg_test_subset,
+        seed=125,
+        **common_build_kwargs,
+    )
+    logging.info(f"Test TFTGRegulationModel inputs built with {len(tftg_inputs_test['label'])} edges")
 
-    edge_cache_ready = False
-    if use_edge_cache and edge_cache_dir and not force_reload:
-        if (
-            (train_cache_dir / "index.pt").exists()
-            and (val_cache_dir / "index.pt").exists()
-            and (test_cache_dir / "index.pt").exists()
-        ):
-            logging.info("Loading disk-backed TFTG edge cache...")
-            train_dataset = TFTGEdgeBagDiskDataset(train_cache_dir)
-            val_dataset = TFTGEdgeBagDiskDataset(val_cache_dir)
-            test_dataset = TFTGEdgeBagDiskDataset(test_cache_dir)
-            edge_cache_ready = True
-
-    if not edge_cache_ready:
-        logging.info("Building TFTGRegulationModel inputs for train/val/test sets...")
-        tftg_inputs_train = build_tftg_inputs(
-            tf_tg_train_subset,
-            seed=123,
-            **common_build_kwargs,
-        )
-        logging.info(f"Train TFTGRegulationModel inputs built with {len(tftg_inputs_train['label'])} edges")
-
-        tftg_inputs_val = build_tftg_inputs(
-            tf_tg_val_subset,
-            seed=124,
-            **common_build_kwargs,
-        )
-        logging.info(f"Validation TFTGRegulationModel inputs built with {len(tftg_inputs_val['label'])} edges")
-
-        tftg_inputs_test = build_tftg_inputs(
-            tf_tg_test_subset,
-            seed=125,
-            **common_build_kwargs,
-        )
-        logging.info(f"Test TFTGRegulationModel inputs built with {len(tftg_inputs_test['label'])} edges")
-
-        if edge_cache_dir:
-            logging.info("Writing TFTG edge cache to disk...")
-            write_tftg_edge_bag_cache(
-                tftg_inputs_train,
-                train_cache_dir,
-                max_cells_per_pair=max_cells_per_pair,
-                strict=True,
-                shard_size=edge_cache_shard_size,
-            )
-            write_tftg_edge_bag_cache(
-                tftg_inputs_val,
-                val_cache_dir,
-                max_cells_per_pair=max_cells_per_pair,
-                strict=True,
-                shard_size=edge_cache_shard_size,
-            )
-            write_tftg_edge_bag_cache(
-                tftg_inputs_test,
-                test_cache_dir,
-                max_cells_per_pair=max_cells_per_pair,
-                strict=True,
-                shard_size=edge_cache_shard_size,
-            )
-
-        if use_edge_cache and edge_cache_dir:
-            train_dataset = TFTGEdgeBagDiskDataset(train_cache_dir)
-            val_dataset = TFTGEdgeBagDiskDataset(val_cache_dir)
-            test_dataset = TFTGEdgeBagDiskDataset(test_cache_dir)
-            del tftg_inputs_train, tftg_inputs_val, tftg_inputs_test
-        else:
-            train_dataset = TFTGEdgeBagDataset(tftg_inputs_train, strict=True)
-            val_dataset = TFTGEdgeBagDataset(tftg_inputs_val, strict=True)
-            test_dataset = TFTGEdgeBagDataset(tftg_inputs_test, strict=True)
+    train_dataset = TFTGEdgeBagDataset(tftg_inputs_train, strict=True)
+    val_dataset = TFTGEdgeBagDataset(tftg_inputs_val, strict=True)
+    test_dataset = TFTGEdgeBagDataset(tftg_inputs_test, strict=True)
 
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=2,
+        num_workers=4,
         pin_memory=True,
-        persistent_workers=False,
-        prefetch_factor=2,
+        persistent_workers=True,
+        prefetch_factor=4,
         collate_fn=collate_tftg_edge_bags,
         )
 
@@ -1460,10 +1259,10 @@ if __name__ == "__main__":
         val_dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=1,
+        num_workers=4,
         pin_memory=True,
-        persistent_workers=False,
-        prefetch_factor=2,
+        persistent_workers=True,
+        prefetch_factor=4,
         collate_fn=collate_tftg_edge_bags,
         )
 
@@ -1471,10 +1270,10 @@ if __name__ == "__main__":
         test_dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=1,
+        num_workers=4,
         pin_memory=True,
-        persistent_workers=False,
-        prefetch_factor=2,
+        persistent_workers=True,
+        prefetch_factor=4,
         collate_fn=collate_tftg_edge_bags,
         )
 
@@ -1574,9 +1373,6 @@ if __name__ == "__main__":
             "num_workers": 4,
             "prefetch_factor": 4,
             "persistent_workers": True,
-            "edge_cache_dir": str(edge_cache_dir) if edge_cache_dir else None,
-            "use_edge_cache": use_edge_cache,
-            "edge_cache_shard_size": edge_cache_shard_size,
         },
         allow_val_change=True,
     )
@@ -1630,72 +1426,72 @@ if __name__ == "__main__":
             val_dataloaders=val_loader,
         )
 
-    # tf_tg_model = lit_model.model
+    tf_tg_model = lit_model.model
 
-    # final_train_metrics = evaluate_with_metrics(
-    #     model=tf_tg_model,
-    #     loader=train_loader,
-    #     criterion=criterion,
-    #     device=device,
-    #     score_threshold=score_threshold,
-    #     random_state=42 + epochs,
-    #     pooling_mode=pooling_mode,
-    #     pooling_temperature=pooling_temperature,
-    # )
+    final_train_metrics = evaluate_with_metrics(
+        model=tf_tg_model,
+        loader=train_loader,
+        criterion=criterion,
+        device=device,
+        score_threshold=score_threshold,
+        random_state=42 + epochs,
+        pooling_mode=pooling_mode,
+        pooling_temperature=pooling_temperature,
+    )
 
-    # final_val_metrics = evaluate_with_metrics(
-    #     model=tf_tg_model,
-    #     loader=val_loader,
-    #     criterion=criterion,
-    #     device=device,
-    #     score_threshold=score_threshold,
-    #     random_state=10_000 + epochs,
-    #     pooling_mode=pooling_mode,
-    #     pooling_temperature=pooling_temperature,
-    # )
+    final_val_metrics = evaluate_with_metrics(
+        model=tf_tg_model,
+        loader=val_loader,
+        criterion=criterion,
+        device=device,
+        score_threshold=score_threshold,
+        random_state=10_000 + epochs,
+        pooling_mode=pooling_mode,
+        pooling_temperature=pooling_temperature,
+    )
 
-    # final_test_metrics = evaluate_with_metrics(
-    #     model=tf_tg_model,
-    #     loader=test_loader,
-    #     criterion=criterion,
-    #     device=device,
-    #     score_threshold=score_threshold,
-    #     random_state=20_000 + epochs,
-    #     pooling_mode=pooling_mode,
-    #     pooling_temperature=pooling_temperature,
-    # )
+    final_test_metrics = evaluate_with_metrics(
+        model=tf_tg_model,
+        loader=test_loader,
+        criterion=criterion,
+        device=device,
+        score_threshold=score_threshold,
+        random_state=20_000 + epochs,
+        pooling_mode=pooling_mode,
+        pooling_temperature=pooling_temperature,
+    )
 
-    # epoch_rows.append(
-    #     metrics_to_row(
-    #         metrics=final_train_metrics,
-    #         epoch=epochs,
-    #         split="train",
-    #         train_loss=np.nan,
-    #     )
-    # )
+    epoch_rows.append(
+        metrics_to_row(
+            metrics=final_train_metrics,
+            epoch=epochs,
+            split="train",
+            train_loss=np.nan,
+        )
+    )
 
-    # epoch_rows.append(
-    #     metrics_to_row(
-    #         metrics=final_val_metrics,
-    #         epoch=epochs,
-    #         split="val",
-    #         train_loss=np.nan,
-    #     )
-    # )
+    epoch_rows.append(
+        metrics_to_row(
+            metrics=final_val_metrics,
+            epoch=epochs,
+            split="val",
+            train_loss=np.nan,
+        )
+    )
 
-    # epoch_rows.append(
-    #     metrics_to_row(
-    #         metrics=final_test_metrics,
-    #         epoch=epochs,
-    #         split="test",
-    #         train_loss=np.nan,
-    #     )
-    # )
+    epoch_rows.append(
+        metrics_to_row(
+            metrics=final_test_metrics,
+            epoch=epochs,
+            split="test",
+            train_loss=np.nan,
+        )
+    )
 
-    # epoch_metric_df = pd.DataFrame(epoch_rows)
+    epoch_metric_df = pd.DataFrame(epoch_rows)
 
-    # epoch_metric_path = PROJECT_DIR / "testing_results" / "metrics_per_epoch.csv"
-    # epoch_metric_path.parent.mkdir(parents=True, exist_ok=True)
+    epoch_metric_path = PROJECT_DIR / "testing_results" / "metrics_per_epoch.csv"
+    epoch_metric_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # epoch_metric_df.to_csv(epoch_metric_path, index=False)
+    epoch_metric_df.to_csv(epoch_metric_path, index=False)
     
