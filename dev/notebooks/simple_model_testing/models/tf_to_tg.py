@@ -1,5 +1,14 @@
 import torch
 import torch.nn as nn
+import pytorch_lightning as pl
+from torchmetrics.classification import (
+    BinaryAccuracy,
+    BinaryAUROC,
+    BinaryAveragePrecision,
+)
+import numpy as np
+from sklearn.metrics import roc_curve, precision_recall_curve
+import wandb
 
 
 class TFTGRegulationModel(nn.Module):
@@ -330,3 +339,216 @@ class TFTGRegulationModel(nn.Module):
         )  # [E]
 
         return edge_logits, cell_logits
+    
+class LitTFPeakBindingModel(pl.LightningModule):
+    def __init__(
+        self,
+        model: TFTGRegulationModel,
+        lr: float = 1e-4,
+        weight_decay: float = 1e-4,
+        pos_weight: float | None = None,
+        pooling_mode: str = "lse",
+        pooling_temperature: float = 1.0,
+        logit_clamp: float | None = 20.0,
+    ):
+        super().__init__()
+
+        self.model = model
+        self.lr = lr
+        self.weight_decay = weight_decay
+        self.pooling_mode = pooling_mode
+        self.pooling_temperature = pooling_temperature
+        self.logit_clamp = logit_clamp
+
+        self.save_hyperparameters(ignore=["model"])
+
+        if pos_weight is not None:
+            pos_weight_tensor = torch.tensor([pos_weight], dtype=torch.float32)
+            self.register_buffer("pos_weight", pos_weight_tensor)
+        else:
+            self.pos_weight = None
+
+        self.train_auroc = BinaryAUROC()
+        self.val_auroc = BinaryAUROC()
+
+        self.train_auprc = BinaryAveragePrecision()
+        self.val_auprc = BinaryAveragePrecision()
+
+        self.train_acc = BinaryAccuracy()
+        self.val_acc = BinaryAccuracy()
+
+        self.val_probs = []
+        self.val_targets = []
+
+    def forward(self, batch):
+        return self.model(
+            tf_embedding=batch["tf_embedding"],
+            tf_mask=batch["tf_mask"],
+            peak_sequences=batch["peak_sequences"],
+            peak_accessibility=batch["peak_accessibility"],
+            peak_distance=batch["peak_distance"],
+            tf_expression=batch["tf_expression"],
+            tg_expression=batch["tg_expression"],
+            tg_embedding=batch["tg_embedding"],
+            cell_mask=batch["cell_mask"],
+            peak_mask=batch.get("peak_mask", None),
+            pooling_mode=self.pooling_mode,
+            pooling_temperature=self.pooling_temperature,
+        )
+
+    def _loss(self, logits, labels):
+        if self.pos_weight is not None:
+            return nn.functional.binary_cross_entropy_with_logits(
+                logits,
+                labels,
+                pos_weight=self.pos_weight,
+            )
+
+        return nn.functional.binary_cross_entropy_with_logits(
+            logits,
+            labels,
+        )
+
+    def _shared_step(self, batch, stage: str):
+        labels = batch["label"].float()
+
+        edge_logits, _ = self.forward(batch)
+
+        if self.logit_clamp is not None:
+            edge_logits = edge_logits.clamp(min=-self.logit_clamp, max=self.logit_clamp)
+
+        loss = self._loss(edge_logits, labels)
+        probs = torch.sigmoid(edge_logits)
+
+        if stage == "train":
+            auroc = self.train_auroc(probs, labels.int())
+            auprc = self.train_auprc(probs, labels.int())
+            acc = self.train_acc(probs, labels.int())
+        elif stage == "val":
+            auroc = self.val_auroc(probs, labels.int())
+            auprc = self.val_auprc(probs, labels.int())
+            acc = self.val_acc(probs, labels.int())
+
+            self.val_probs.append(probs.detach().cpu())
+            self.val_targets.append(labels.detach().cpu())
+        else:
+            raise ValueError(f"Unknown stage: {stage}")
+
+        self.log(
+            f"{stage}/loss",
+            loss,
+            on_step=(stage == "train"),
+            on_epoch=True,
+            prog_bar=True,
+            logger=True,
+            sync_dist=True,
+        )
+
+        self.log(
+            f"{stage}/auroc",
+            auroc,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            logger=True,
+            sync_dist=True,
+        )
+
+        self.log(
+            f"{stage}/auprc",
+            auprc,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            logger=True,
+            sync_dist=True,
+        )
+
+        self.log(
+            f"{stage}/acc",
+            acc,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+            sync_dist=True,
+        )
+
+        return loss
+
+    def training_step(self, batch, batch_idx):
+        return self._shared_step(batch, stage="train")
+
+    def validation_step(self, batch, batch_idx):
+        self._shared_step(batch, stage="val")
+
+    def on_validation_epoch_start(self):
+        self.val_probs.clear()
+        self.val_targets.clear()
+
+    def on_validation_epoch_end(self):
+        if not self.val_probs:
+            return
+
+        probs = torch.cat(self.val_probs, dim=0).view(-1)
+        targets = torch.cat(self.val_targets, dim=0).view(-1).int()
+
+        self.val_probs.clear()
+        self.val_targets.clear()
+
+        auroc = self.val_auroc.compute()
+        auprc = self.val_auprc.compute()
+
+        self.log("val/roc_auc", auroc, prog_bar=True, sync_dist=False)
+        self.log("val/pr_auc", auprc, prog_bar=True, sync_dist=False)
+
+        self.val_auroc.reset()
+        self.val_auprc.reset()
+
+        if not getattr(self.logger, "experiment", None):
+            return
+
+        if not self.trainer.is_global_zero:
+            return
+
+        try:
+            p_np = probs.detach().cpu().numpy()
+            y_np = targets.detach().cpu().numpy()
+
+            pre, rec, _ = precision_recall_curve(y_np, p_np)
+            fpr, tpr, _ = roc_curve(y_np, p_np)
+
+            def _sample_curve(x, y, n=50):
+                if len(x) <= n:
+                    return x, y
+                idx = np.linspace(0, len(x) - 1, n).astype(int)
+                return x[idx], y[idx]
+
+            rec_s, pre_s = _sample_curve(rec, pre, n=50)
+            fpr_s, tpr_s = _sample_curve(fpr, tpr, n=50)
+
+            self.logger.experiment.log({
+                "val/pr_curve": wandb.plot.line_series(
+                    [rec_s],
+                    [pre_s],
+                    keys=["precision"],
+                    xname="Recall",
+                ),
+                "val/roc_curve": wandb.plot.line_series(
+                    [fpr_s],
+                    [tpr_s],
+                    keys=["TPR"],
+                    xname="FPR",
+                ),
+            })
+        except Exception as e:
+            print("[WARN] PR/ROC curve error:", e)
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.AdamW(
+            self.parameters(),
+            lr=self.lr,
+            weight_decay=self.weight_decay,
+        )
+
+        return optimizer

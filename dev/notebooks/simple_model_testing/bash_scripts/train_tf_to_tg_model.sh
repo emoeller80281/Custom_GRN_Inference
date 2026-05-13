@@ -84,4 +84,13 @@ echo "[INFO] Using nproc_per_node=$NPROC_PER_NODE based on GPUs per node"
 export NCCL_DEBUG=INFO
 export PYTHONFAULTHANDLER=1
 
-srun python3 ${PROJECT_DIR}/scripts/train_tf_to_tg_model.py
+srun python3 ${PROJECT_DIR}/scripts/train_tf_to_tg_model.py \
+    --epochs 50 \
+    --num_gpus $NPROC_PER_NODE \
+    --num_nodes $SLURM_JOB_NUM_NODES \
+    --run_name tf_tg_train_${SLURM_JOB_ID} \
+    --output_dir ${PROJECT_DIR}/checkpoints/tf_tg_train_${SLURM_JOB_ID} \
+    --sample_pairs 10000 \
+    --max_peaks_per_tg 10 \
+    --max_cells_per_pair 25 \
+    --batch_size 32
