@@ -97,6 +97,10 @@ class TFTGRegulationModel(nn.Module):
         """
 
         self.tf_peak_model.eval()
+        model_device = next(self.tf_peak_model.parameters()).device
+        tf_embedding_flat = tf_embedding_flat.to(model_device)
+        tf_mask_flat = tf_mask_flat.to(model_device)
+        peak_seq_flat = peak_seq_flat.to(model_device)
         logits_chunks = []
 
         with torch.no_grad():
