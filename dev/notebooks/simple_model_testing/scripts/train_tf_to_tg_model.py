@@ -291,7 +291,7 @@ def prepare_tftg_lookup_tables(
 
 class TFTGEdgeBagLazyDataset(Dataset):
     def __init__(self, lmdb_path, total_edges, max_cells_per_pair=None):
-        self.lmdb_path = lmdb_path
+        self.lmdb_path = str(lmdb_path)
         self.total_edges = total_edges
         self.max_cells_per_pair = max_cells_per_pair
         self.env = None  # Instantiated lazily per process worker
@@ -925,27 +925,24 @@ if __name__ == "__main__":
         save_dir=output_dir,
     )
 
-    wandb_logger.experiment.config.update(
-        {
-            "epochs": epochs,
-            "batch_size": batch_size,
-            "sample_pairs": sample_pairs,
-            "max_peaks_per_tg": max_peaks_per_tg,
-            "max_cells_per_pair": max_cells_per_pair,
-            "pct_true_edges": pct_true_edges,
-            "true_false_ratio": true_false_ratio,
-            "pooling_mode": pooling_mode,
-            "pooling_temperature": pooling_temperature,
-            "lr": 1e-4,
-            "weight_decay": 1e-4,
-            "flank_size": 128,
-            "max_precompute_peaks": 64,
-            "num_workers": 4,
-            "prefetch_factor": 4,
-            "persistent_workers": True,
-        },
-        allow_val_change=True,
-    )
+    wandb_logger.log_hyperparams({
+        "epochs": epochs,
+        "batch_size": batch_size,
+        "sample_pairs": sample_pairs,
+        "max_peaks_per_tg": max_peaks_per_tg,
+        "max_cells_per_pair": max_cells_per_pair,
+        "pct_true_edges": pct_true_edges,
+        "true_false_ratio": true_false_ratio,
+        "pooling_mode": pooling_mode,
+        "pooling_temperature": pooling_temperature,
+        "lr": 1e-4,
+        "weight_decay": 1e-4,
+        "flank_size": 128,
+        "max_precompute_peaks": 64,
+        "num_workers": 4,
+        "prefetch_factor": 4,
+        "persistent_workers": True,
+    })
     
     world_size = int(
         os.environ.get(

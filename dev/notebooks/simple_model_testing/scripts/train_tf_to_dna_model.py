@@ -4,7 +4,6 @@ import os
 import sys
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import train_test_split
 from pathlib import Path
 import logging
 import argparse
@@ -217,9 +216,6 @@ if __name__ == "__main__":
     checkpoint_path = args.checkpoint_path
     force_reload = args.force_reload
     
-    genome_fasta_path = DATA_DIR / "genome_data" / "reference_genome" / "mm10" / "mm10.fa"
-    chrom_sizes_path = DATA_DIR / "genome_data" / "reference_genome" / "mm10" / "mm10.chrom.sizes"
-    embedding_dir = PROJECT_DIR / "data" / "tf_data" / "tf_embeddings"
     training_cache_dir = PROJECT_DIR / "data" / "training_data_cache"
     training_cache_dir.mkdir(exist_ok=True, parents=True)
     
@@ -234,121 +230,36 @@ if __name__ == "__main__":
     tf_lengths_cache_path = training_cache_dir / "tf_lengths.pt"
     peak_onehot_cache_path = training_cache_dir / "peak_onehot_array.pt"
     
-    # Load TF embeddings and metadata
-    tf_embedding_files = list(embedding_dir.glob("*_protein_embedding.pt"))
-    embedded_tf_names = [f.stem.split("_protein_embedding")[0] for f in tf_embedding_files]
-    logging.info(f"TFs with embeddings: {len(embedded_tf_names)}")
-    logging.info(f"Example TFs with embeddings: {embedded_tf_names[:10]}")
-    
-    # Load true TF-peak interactions from ChIP-Atlas and create labeled dataset
-    true_edge_file = DATA_DIR / "ground_truth_files" / "chipatlas_mESC.csv"
-    true_edge_df = pd.read_csv(true_edge_file)
-    
-    true_edge_df = true_edge_df[true_edge_df["gene_id"].isin(embedded_tf_names)]
-    
-    tf_names = true_edge_df["gene_id"].unique().tolist()
-    peak_ids = true_edge_df["peak_id"].unique().tolist()
-    
-    # Load or create the TF name to index and peak ID to index mappings, caching them to disk for faster loading in the future
-    map_cache_files = [tf_name_to_idx_cache_path, peak_id_to_idx_cache_path]
-    if all(f.exists() for f in map_cache_files) and force_reload == False:
-        tf_name_to_idx = pd.read_csv(tf_name_to_idx_cache_path).set_index("tf_name")["tf_idx"].to_dict()
-        peak_id_to_idx = pd.read_csv(peak_id_to_idx_cache_path).set_index("peak_id")["peak_idx"].to_dict()
-    else:
-        # Map the TF names and peak IDs to their respective indices
-        tf_name_to_idx = {tf: idx for idx, tf in enumerate(tf_names)}
-        peak_id_to_idx = {peak: idx for idx, peak in enumerate(peak_ids)}
-        
-        pd.DataFrame({"tf_name": list(tf_name_to_idx.keys()), "tf_idx": list(tf_name_to_idx.values())}).to_csv(tf_name_to_idx_cache_path, index=False)
-        pd.DataFrame({"peak_id": list(peak_id_to_idx.keys()), "peak_idx": list(peak_id_to_idx.values())}).to_csv(peak_id_to_idx_cache_path, index=False)
-    
-    # Cache the TF-peak edge indices and labels to disk for faster loading in the future
-    edge_cache_files = [edge_tf_idx_cache_path, edge_peak_idx_cache_path, edge_labels_cache_path]
-    if all(f.exists() for f in edge_cache_files) and force_reload == False:
-        edge_tf_idx_tensor = torch.load(edge_tf_idx_cache_path)
-        edge_peak_idx_tensor = torch.load(edge_peak_idx_cache_path)
-        edge_labels_tensor = torch.load(edge_labels_cache_path)
-    else:
-        # Create true and false interaction sets
-        true_interactions, false_interactions = utils.create_true_false_edges(
-            chip_atlas_df=true_edge_df,
-            tf_names=tf_names,
-            tf_col="gene_id",
-            peak_col="peak_id",
-            pct_true_edges=0.25,
-            true_false_ratio=0.25
-        )
-        
-        # Create a labeled dataset of TF-peak interactions
-        tf_peak_labeled_df = create_labeled_tf_peak_dataset(
-            true_interactions=true_interactions,
-            false_interactions=false_interactions,
-            tf_name_to_idx=tf_name_to_idx,
-            peak_id_to_idx=peak_id_to_idx,
-            drop_missing=False,
+    cache_files = [
+        tf_name_to_idx_cache_path,
+        peak_id_to_idx_cache_path,
+        edge_tf_idx_cache_path,
+        edge_peak_idx_cache_path,
+        edge_labels_cache_path,
+        tf_embedding_cache_path,
+        tf_mask_cache_path,
+        peak_onehot_cache_path,
+        training_cache_dir / "train_idx.pt",
+        training_cache_dir / "val_idx.pt",
+        training_cache_dir / "test_idx.pt",
+    ]
+    missing = [str(path) for path in cache_files if not path.exists()]
+    if missing:
+        raise FileNotFoundError(
+            "Missing TF-to-DNA cache files. Run build_tf_to_dna_train_data.py first.\n"
+            + "\n".join(missing)
         )
 
-        # Extract the TF indices, peak indices, and labels as numpy arrays for model input
-        edge_tf_idx = tf_peak_labeled_df["tf_idx"].to_numpy(dtype=np.int64)
-        edge_peak_idx = tf_peak_labeled_df["peak_idx"].to_numpy(dtype=np.int64)
-        edge_labels = tf_peak_labeled_df["label"].to_numpy(dtype=np.float32)
+    edge_tf_idx_tensor = torch.load(edge_tf_idx_cache_path)
+    edge_peak_idx_tensor = torch.load(edge_peak_idx_cache_path)
+    edge_labels_tensor = torch.load(edge_labels_cache_path)
+    tf_embeddings_tensor = torch.load(tf_embedding_cache_path)
+    tf_mask_tensor = torch.load(tf_mask_cache_path)
+    peak_tensor = torch.load(peak_onehot_cache_path)
+    train_idx = torch.load(training_cache_dir / "train_idx.pt")
+    val_idx = torch.load(training_cache_dir / "val_idx.pt")
+    test_idx = torch.load(training_cache_dir / "test_idx.pt")
 
-        # Convert to PyTorch tensors
-        edge_tf_idx_tensor = torch.as_tensor(edge_tf_idx, dtype=torch.long)
-        edge_peak_idx_tensor = torch.as_tensor(edge_peak_idx, dtype=torch.long)
-        edge_labels_tensor = torch.as_tensor(edge_labels, dtype=torch.float32)
-        
-        torch.save(edge_tf_idx_tensor, edge_tf_idx_cache_path)
-        torch.save(edge_peak_idx_tensor, edge_peak_idx_cache_path)
-        torch.save(edge_labels_tensor, edge_labels_cache_path)
-
-    # Cache the TF embeddings, masks, and metadata to disk for faster loading in the future
-    tf_cache_files = [tf_embedding_cache_path, tf_mask_cache_path, tf_lengths_cache_path]
-    if all(f.exists() for f in tf_cache_files) and force_reload == False:
-        tf_embeddings_tensor = torch.load(tf_embedding_cache_path)
-        tf_mask_tensor = torch.load(tf_mask_cache_path)
-        tf_lengths_tensor = torch.load(tf_lengths_cache_path)
-        tf_names_ordered = list(tf_name_to_idx.keys())
-    else:
-        # Load all of the TF embeddings in the order specified by tf_name_to_idx
-        tf_data = load_ordered_tf_embeddings(
-            embedding_dir=embedding_dir,
-            tf_name_to_idx=tf_name_to_idx,
-        )
-
-        # Extract the embeddings, masks, and ordered TF names from the loaded data
-        tf_embeddings_tensor: torch.Tensor = tf_data["embeddings"]
-        tf_mask_tensor: torch.Tensor = tf_data["mask"]
-        tf_lengths_tensor: torch.Tensor = tf_data["lengths"]
-        tf_names_ordered: list[str] = tf_data["tf_names"]
-        
-        torch.save(tf_embeddings_tensor, tf_embedding_cache_path)
-        torch.save(tf_mask_tensor, tf_mask_cache_path)
-        torch.save(tf_lengths_tensor, tf_lengths_cache_path)
-    
-    peak_ids = list(tf_peak_labeled_df["peak_id"].unique())
-
-    chrom_sizes = utils.load_chrom_sizes(chrom_sizes_path)
-
-    # Create the peak one-hot encoding array, caching it to disk for faster loading in the future
-    if os.path.exists(peak_onehot_cache_path) and force_reload == False:
-        peak_tensor = torch.load(peak_onehot_cache_path)
-    else:
-        peak_onehot_array = utils.create_centered_peak_onehot_array(
-            peak_ids=peak_ids,
-            genome_fasta=genome_fasta_path,
-            chrom_sizes=chrom_sizes,
-            peak_id_to_idx=peak_id_to_idx,
-            flank_size=256,
-            dtype=np.float32,
-            pad_out_of_bounds=True,
-            num_workers=12,
-        )
-        peak_tensor = torch.as_tensor(peak_onehot_array,dtype=torch.float32)
-        
-        torch.save(peak_tensor, peak_onehot_cache_path)
-    
-    # Load the TF-peak edge dataset
     edge_dataset = TFPeakEdgeDataset(
         tf_embeddings=tf_embeddings_tensor,
         tf_mask=tf_mask_tensor,
@@ -357,37 +268,10 @@ if __name__ == "__main__":
         edge_peak_idx=edge_peak_idx_tensor,
         edge_labels=edge_labels_tensor,
     )
-    
-    # Chromosome-stratified split by peak_id
-    def _get_chrom(peak_id: str) -> str:
-        # Expect format like "chr1:123-456"
-        return peak_id.split(":", 1)[0]
 
-    edge_peak_ids = tf_peak_labeled_df["peak_id"].to_numpy()
-    edge_chroms = np.array([_get_chrom(pid) for pid in edge_peak_ids])
-
-    # Split the dataset into train/val/test sets by chromosome
-    # Test set: chromosomes 1-15
-    # Val set: chromosomes 16-17
-    # Test set: chromosomes 18 and 19
-    train_chroms = {f"chr{i}" for i in range(1, 16)}
-    val_chroms = {f"chr{i}" for i in range(16, 18)}
-    test_chroms = {"chr18", "chr19"}
-
-    # Create boolean masks for train/val/test edges based on their chromosome
-    train_mask = np.isin(edge_chroms, list(train_chroms))
-    val_mask = np.isin(edge_chroms, list(val_chroms))
-    test_mask = np.isin(edge_chroms, list(test_chroms))
-
-    # Get the indices of the edges in each split
-    train_idx = np.where(train_mask)[0]
-    val_idx = np.where(val_mask)[0]
-    test_idx = np.where(test_mask)[0]
-
-    # Subset the datasets by the split indices
-    train_dataset = Subset(edge_dataset, train_idx)
-    val_dataset = Subset(edge_dataset, val_idx)
-    test_dataset = Subset(edge_dataset, test_idx)
+    train_dataset = Subset(edge_dataset, train_idx.tolist())
+    val_dataset = Subset(edge_dataset, val_idx.tolist())
+    test_dataset = Subset(edge_dataset, test_idx.tolist())
 
     # Create dataloaders for each split
     train_loader = DataLoader(

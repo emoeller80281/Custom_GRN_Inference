@@ -5,8 +5,8 @@
 #SBATCH --time=72:00:00
 #SBATCH -p dense
 #SBATCH -N 1
-#SBATCH --gres=gpu:a100:1
-#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:a100:4
+#SBATCH --ntasks-per-node=4
 #SBATCH -c 8
 #SBATCH --mem=128G
 #SBATCH --signal=SIGUSR1@90
@@ -99,7 +99,6 @@ srun python3 ${PROJECT_DIR}/scripts/train_tf_to_tg_model.py \
     --num_nodes $SLURM_JOB_NUM_NODES \
     --run_name tf_tg_train_${SLURM_JOB_ID} \
     --output_dir ${PROJECT_DIR}/checkpoints/tf_tg_train_${SLURM_JOB_ID} \
-    --sample_pairs 4000 \
     --max_peaks_per_tg 8 \
     --max_cells_per_pair 16 \
     --batch_size 4

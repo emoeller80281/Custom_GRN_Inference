@@ -85,6 +85,11 @@ echo "[INFO] Using nproc_per_node=$NPROC_PER_NODE based on GPUs per node"
 export NCCL_DEBUG=INFO
 export PYTHONFAULTHANDLER=1
 
+echo "[INFO] Building TF-to-DNA datasets..."
+python3 ${PROJECT_DIR}/scripts/build_tf_to_dna_train_data.py \
+    --pct_true_edges 0.25 \
+    --true_false_ratio 0.25
+
 srun python3 ${PROJECT_DIR}/scripts/train_tf_to_dna_model.py \
     --epochs 50 \
     --batch_size 256 \
