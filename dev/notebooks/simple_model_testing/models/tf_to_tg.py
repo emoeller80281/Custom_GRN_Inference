@@ -19,13 +19,11 @@ class TFTGRegulationModel(nn.Module):
         num_heads=4,
         dropout=0.1,
         tf_peak_chunk_size=256,
-        use_expression_conditioned_query=True,
     ):
         super().__init__()
 
         self.tf_peak_model = pretrained_tf_peak_model
         self.tf_peak_chunk_size = tf_peak_chunk_size
-        self.use_expression_conditioned_query = use_expression_conditioned_query
 
         # Frozen TF-peak feature extractor
         for p in self.tf_peak_model.parameters():
@@ -65,9 +63,9 @@ class TFTGRegulationModel(nn.Module):
 
         self.norm = nn.LayerNorm(d_model)
 
-        # peak_context + tf_expr + tg_expr + tg_identity
+        # peak_context + tf_expr + tg_expr
         self.classifier = nn.Sequential(
-            nn.Linear(d_model * 4, d_model),
+            nn.Linear(d_model * 3, d_model),
             nn.SiLU(),
             nn.Dropout(dropout),
             nn.Linear(d_model, d_model // 2),
@@ -97,7 +95,12 @@ class TFTGRegulationModel(nn.Module):
         """
 
         self.tf_peak_model.eval()
+        input_device = tf_embedding_flat.device
         model_device = next(self.tf_peak_model.parameters()).device
+        if model_device != input_device:
+            # Keep the frozen TF-peak model on the same device as inputs.
+            self.tf_peak_model.to(input_device)
+            model_device = input_device
         tf_embedding_flat = tf_embedding_flat.to(model_device)
         tf_mask_flat = tf_mask_flat.to(model_device)
         peak_seq_flat = peak_seq_flat.to(model_device)
@@ -162,7 +165,6 @@ class TFTGRegulationModel(nn.Module):
         peak_distance,
         tf_expression,
         tg_expression,
-        tg_embedding,
         cell_mask,
         peak_mask=None,
         pooling_mode: str = "lse",
@@ -183,7 +185,6 @@ class TFTGRegulationModel(nn.Module):
         peak_distance : [E, C, P]
         tf_expression : [E, C]
         tg_expression : [E, C]
-        tg_embedding : [E, C, d_model]
         cell_mask : [E, C]
         peak_mask : [E, C, P], optional
 
@@ -206,7 +207,6 @@ class TFTGRegulationModel(nn.Module):
         tf_mask_edge = tf_mask[:, 0]                    # [E, T]
         peak_sequences_edge = peak_sequences[:, 0]      # [E, P, L, 4]
         peak_distance_edge = peak_distance[:, 0]        # [E, P]
-        tg_embedding_edge = tg_embedding[:, 0]          # [E, d_model]
 
         if peak_mask is not None:
             peak_mask_edge = peak_mask[:, 0]            # [E, P]
@@ -276,7 +276,7 @@ class TFTGRegulationModel(nn.Module):
         peak_tokens = self.peak_feature_proj(peak_features)  # [E*C, P, d_model]
 
         # ------------------------------------------------------------
-        # 5. Expression and TG identity tokens
+        # 5. Expression tokens
         # ------------------------------------------------------------
         tf_expr_token = self.tf_expr_proj(
             tf_expression.reshape(EC, 1)
@@ -286,14 +286,7 @@ class TFTGRegulationModel(nn.Module):
             tg_expression.reshape(EC, 1)
         )  # [E*C, d_model]
 
-        tg_embedding_cell = tg_embedding_edge[:, None, :].expand(
-            E, C, tg_embedding_edge.shape[-1]
-        ).reshape(EC, tg_embedding_edge.shape[-1])  # [E*C, d_model]
-
-        if self.use_expression_conditioned_query:
-            tg_query_input = tg_embedding_cell + tf_expr_token + tg_expr_token
-        else:
-            tg_query_input = tg_embedding_cell
+        tg_query_input = tf_expr_token + tg_expr_token
 
         tg_query = self.tg_query_proj(tg_query_input).unsqueeze(1)  # [E*C, 1, d_model]
 
@@ -324,10 +317,9 @@ class TFTGRegulationModel(nn.Module):
                 peak_context,
                 tf_expr_token,
                 tg_expr_token,
-                tg_embedding_cell,
             ],
             dim=-1,
-        )  # [E*C, d_model * 4]
+        )  # [E*C, d_model * 3]
 
         cell_logits = self.classifier(final).squeeze(-1)  # [E*C]
         cell_logits = cell_logits.reshape(E, C)           # [E, C]
@@ -393,7 +385,6 @@ class LitTFPeakBindingModel(pl.LightningModule):
             peak_distance=batch["peak_distance"],
             tf_expression=batch["tf_expression"],
             tg_expression=batch["tg_expression"],
-            tg_embedding=batch["tg_embedding"],
             cell_mask=batch["cell_mask"],
             peak_mask=batch.get("peak_mask", None),
             pooling_mode=self.pooling_mode,

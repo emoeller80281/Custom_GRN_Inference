@@ -5,10 +5,10 @@
 #SBATCH --time=12:00:00
 #SBATCH -p dense
 #SBATCH -N 1
-#SBATCH --gres=gpu:v100:1
+#SBATCH --gres=gpu:a100:1
 #SBATCH --ntasks-per-node=1
-#SBATCH -c 12
-#SBATCH --mem=64G
+#SBATCH -c 24
+#SBATCH --mem=128G
 
 set -eo pipefail
 
@@ -39,7 +39,7 @@ foldseek createdb \
     "${COMBINED_FASTA}" \
     "${DB_PREFIX}" \
     --prostt5-model "${WEIGHTS_DIR}" \
-    --threads "${SLURM_CPUS_PER_TASK:-12}"
+    --threads "${SLURM_CPUS_PER_TASK:-24}"
 
 # Extract predicted 3Di states as FASTA
 foldseek lndb \
@@ -53,3 +53,13 @@ foldseek convert2fasta \
 echo "3Di FASTA written to ${OUT_DIR}/tf_proteins_3di.fasta"
 
 echo "Done generating 3Di tokens for TF proteins."
+
+echo "Extracting 3Di tokens for TF proteins using Foldseek..."
+python ${PROJECT_DIR}/scripts/extract_tf_embeddings.py \
+  --aa_dir ${FASTA_DIR} \
+  --di_fasta ${OUT_DIR}/tf_proteins_3di.fasta \
+  --out_dir ${PROJECT_DIR}/data/tf_data/tf_embeddings/ \
+  --d_model 128 \
+  --device cuda
+
+echo "Done extracting 3Di tokens for TF proteins."

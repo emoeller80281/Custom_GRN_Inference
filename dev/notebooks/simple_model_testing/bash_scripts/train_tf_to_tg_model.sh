@@ -85,12 +85,12 @@ export NCCL_DEBUG=INFO
 export PYTHONFAULTHANDLER=1
 
 srun python3 ${PROJECT_DIR}/scripts/train_tf_to_tg_model.py \
-    --epochs 50 \
+    --epochs 250 \
     --num_gpus $NPROC_PER_NODE \
     --num_nodes $SLURM_JOB_NUM_NODES \
     --run_name tf_tg_train_${SLURM_JOB_ID} \
     --output_dir ${PROJECT_DIR}/checkpoints/tf_tg_train_${SLURM_JOB_ID} \
-    --sample_pairs 256 \
+    --sample_pairs 4000 \
     --max_peaks_per_tg 8 \
     --max_cells_per_pair 16 \
-    --batch_size 8
+    --batch_size 4

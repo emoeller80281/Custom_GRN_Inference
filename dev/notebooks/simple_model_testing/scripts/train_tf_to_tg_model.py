@@ -5,6 +5,8 @@ import gtfparse
 import numpy as np
 import pandas as pd
 from pathlib import Path
+import pickle
+import lmdb
 import logging
 from collections import defaultdict
 from sklearn.metrics import (
@@ -286,9 +288,9 @@ def prepare_tftg_lookup_tables(
 
     return tg_to_peak_info, cell_to_idx, atac_mat, rna_mat, gene_to_rna_idx
 
-
-def build_tftg_inputs(
+def build_tftg_inputs_to_lmdb(
     tf_tg_df,
+    lmdb_path,
     max_peaks_per_tg=64,
     max_cells_per_pair=8,
     seed=123,
@@ -303,328 +305,174 @@ def build_tftg_inputs(
     atac_peak_tensor,
     tf_embeddings_tensor,
     tf_mask_tensor,
-    tg_embedding_table,
     tf_name_to_idx,
     tg_id_to_idx,
 ):
     rng = np.random.default_rng(seed)
-
-    tf_names = []
-    tg_names = []
-    cell_ids = []
-    labels = []
-
-    tf_embeddings = []
-    tf_masks = []
-    peak_seqs = []
-    peak_access = []
-    peak_dist = []
-    peak_masks = []
-    tf_expr = []
-    tg_expr = []
-    tg_embed = []
-    peak_id_sets = []
-
-    if zero_fields is None:
-        zero_fields = set()
-    else:
-        zero_fields = set(zero_fields)
-
-    ZEROABLE_FIELDS = {
-        "tf_embedding",
-        "peak_sequences",
-        "peak_accessibility",
-        "peak_distance",
-        "tf_expression",
-        "tg_expression",
-        "tg_embedding",
-    }
-
-    invalid = zero_fields - ZEROABLE_FIELDS
-    if invalid:
-        raise ValueError(
-            f"Invalid zero_fields: {sorted(invalid)}. "
-            f"Valid options are: {sorted(ZEROABLE_FIELDS)}"
-        )
-
+    zero_fields = set(zero_fields) if zero_fields is not None else set()
     common_cells = list(common_cells)
     n_common_cells = len(common_cells)
+    
+    lmdb_path = str(lmdb_path)
 
-    for _, row in tf_tg_df.iterrows():
-        tf_name = row["tf_name"]
-        tg_name = row["tg_id"]
-        label = float(row["label"])
+    # Initialize LMDB Environment (Allocate 1TB virtual address space safely)
+    os.makedirs(os.path.dirname(lmdb_path), exist_ok=True)
+    env = lmdb.open(lmdb_path, map_size=1099511627776, writemap=False, sync=True)
+    
+    edge_counter = 0
+    
+    # Open write transaction
+    with env.begin(write=True) as txn:
+        for _, row in tf_tg_df.iterrows():
+            tf_name = row["tf_name"]
+            tg_name = row["tg_id"]
+            label = float(row["label"])
+            
+            tf_norm = str(tf_name).upper()
+            tg_norm = str(tg_name).upper()
+            
+            tf_idx = tf_name_to_idx.get(tf_name)
+            tg_idx = tg_id_to_idx.get(tg_name)
+            if tf_idx is None or tg_idx is None:
+                continue
+                
+            peak_info = tg_to_peak_info.get(tg_norm)
+            if peak_info is None:
+                continue
+                
+            peak_indices_real = peak_info["peak_indices"][:max_peaks_per_tg]
+            peak_dst_real = peak_info["peak_distances"][:max_peaks_per_tg]
+            n_peaks = len(peak_indices_real)
+            if n_peaks == 0:
+                continue
 
-        tf_norm = str(tf_name).upper()
-        tg_norm = str(tg_name).upper()
+            # 1. Process Peaks (Shared across all cells for this edge)
+            peak_seq = atac_peak_tensor[peak_indices_real]
+            peak_dst = np.asarray(peak_dst_real, dtype=np.float32)
+            peak_mask = np.ones(n_peaks, dtype=bool)
+            
+            if n_peaks < max_peaks_per_tg:
+                pad_len = max_peaks_per_tg - n_peaks
+                peak_seq = torch.nn.functional.pad(peak_seq, (0, 0, 0, 0, 0, pad_len))
+                peak_dst = np.pad(peak_dst, (0, pad_len), constant_values=0.0)
+                peak_mask = np.pad(peak_mask, (0, pad_len), constant_values=False)
 
-        tf_idx = tf_name_to_idx.get(tf_name)
-        tg_idx = tg_id_to_idx.get(tg_name)
+            # Zeroing logic fields
+            if "peak_sequences" in zero_fields:
+                peak_seq = torch.zeros_like(peak_seq)
+            if "peak_distance" in zero_fields:
+                peak_dst = np.zeros_like(peak_dst)
 
-        if tf_idx is None or tg_idx is None:
-            continue
-
-        peak_info = tg_to_peak_info.get(tg_norm)
-        if peak_info is None:
-            continue
-
-        peak_ids_real = peak_info["peak_ids"][:max_peaks_per_tg]
-        peak_indices_real = peak_info["peak_indices"][:max_peaks_per_tg]
-        peak_dst_real = peak_info["peak_distances"][:max_peaks_per_tg]
-
-        n_peaks = len(peak_indices_real)
-        if n_peaks == 0:
-            continue
-
-        peak_seq = atac_peak_tensor[peak_indices_real]
-        peak_dst = np.asarray(peak_dst_real, dtype=np.float32)
-        peak_mask = np.ones(n_peaks, dtype=bool)
-
-        peak_ids = list(peak_ids_real)
-
-        if n_peaks < max_peaks_per_tg:
-            pad_len = max_peaks_per_tg - n_peaks
-
-            peak_seq = torch.nn.functional.pad(
-                peak_seq,
-                (0, 0, 0, 0, 0, pad_len),
-            )
-
-            peak_dst = np.pad(
-                peak_dst,
-                (0, pad_len),
-                constant_values=0.0,
-            )
-
-            peak_mask = np.pad(
-                peak_mask,
-                (0, pad_len),
-                constant_values=False,
-            )
-
-            peak_ids = peak_ids + [""] * pad_len
-
-        if max_cells_per_pair is None or max_cells_per_pair >= n_common_cells:
-            sampled_cells = common_cells
-        else:
-            sampled_cells = rng.choice(
-                common_cells,
-                size=max_cells_per_pair,
-                replace=False,
-            ).tolist()
-
-        sampled_cell_indices = np.asarray(
-            [cell_to_idx[c] for c in sampled_cells],
-            dtype=np.int64,
-        )
-
-        peak_acc_matrix = np.zeros(
-            (len(sampled_cell_indices), max_peaks_per_tg),
-            dtype=np.float32,
-        )
-
-        if n_peaks > 0:
-            peak_acc_matrix[:, :n_peaks] = atac_mat[
-                np.ix_(peak_indices_real, sampled_cell_indices)
-            ].T
-
-        tf_rna_idx = gene_to_rna_idx.get(tf_norm)
-        tg_rna_idx = gene_to_rna_idx.get(tg_norm)
-
-        if tf_rna_idx is None:
-            tf_expr_vals = np.zeros(len(sampled_cell_indices), dtype=np.float32)
-        else:
-            tf_expr_vals = rna_mat[tf_rna_idx, sampled_cell_indices].astype(np.float32)
-
-        if tg_rna_idx is None:
-            tg_expr_vals = np.zeros(len(sampled_cell_indices), dtype=np.float32)
-        else:
-            tg_expr_vals = rna_mat[tg_rna_idx, sampled_cell_indices].astype(np.float32)
-
-        tf_embedding_i = tf_embeddings_tensor[tf_idx]
-        tf_mask_i = tf_mask_tensor[tf_idx]
-        tg_embedding_i = tg_embedding_table(
-            torch.tensor([tg_idx], device=tg_embedding_table.weight.device)
-        ).squeeze(0).detach().cpu()
-
-        for j, cell_id in enumerate(sampled_cells):
-            tf_embeddings.append(tf_embedding_i)
-            tf_masks.append(tf_mask_i)
-            peak_seqs.append(peak_seq)
-            peak_access.append(peak_acc_matrix[j])
-            peak_dist.append(peak_dst)
-            peak_masks.append(peak_mask)
-
-            tf_expr.append(float(tf_expr_vals[j]))
-            tg_expr.append(float(tg_expr_vals[j]))
-            tg_embed.append(tg_embedding_i)
-
-            peak_id_sets.append(peak_ids)
-            tf_names.append(tf_name)
-            tg_names.append(tg_name)
-            cell_ids.append(cell_id)
-            labels.append(label)
-
-    if len(labels) == 0:
-        raise ValueError(
-            "No TF-TG examples were created. Check TF/TG IDs, peak_to_gene mapping, "
-            "and overlap with ATAC/RNA matrices."
-        )
-
-    peak_distance_tensor = torch.tensor(np.stack(peak_dist), dtype=torch.float32)
-    tf_embedding = torch.stack(tf_embeddings)
-    tf_mask = torch.stack(tf_masks)
-    peak_sequences = torch.stack(peak_seqs)
-    peak_accessibility = torch.tensor(np.stack(peak_access), dtype=torch.float32)
-    peak_mask_tensor = torch.tensor(np.stack(peak_masks), dtype=torch.bool)
-    tf_expr_tensor = torch.tensor(tf_expr, dtype=torch.float32)
-    tg_expr_tensor = torch.tensor(tg_expr, dtype=torch.float32)
-    tg_embed_tensor = torch.stack(tg_embed)
-
-    def maybe_zero(name, tensor, zero_fields):
-        return torch.zeros_like(tensor) if name in zero_fields else tensor
-
-    return {
-        "tf_name": tf_names,
-        "tg_name": tg_names,
-        "cell_id": cell_ids,
-        "peak_ids": peak_id_sets,
-        "label": torch.tensor(labels, dtype=torch.float32),
-
-        "tf_embedding": maybe_zero("tf_embedding", tf_embedding, zero_fields),
-        "tf_mask": tf_mask,
-
-        "peak_sequences": maybe_zero("peak_sequences", peak_sequences, zero_fields),
-
-        "peak_accessibility": maybe_zero(
-            "peak_accessibility",
-            peak_accessibility,
-            zero_fields,
-        ),
-        "peak_mask": peak_mask_tensor,
-        "peak_distance": maybe_zero(
-            "peak_distance",
-            peak_distance_tensor,
-            zero_fields,
-        ),
-        "tf_expression": maybe_zero(
-            "tf_expression",
-            tf_expr_tensor,
-            zero_fields,
-        ),
-        "tg_expression": maybe_zero(
-            "tg_expression",
-            tg_expr_tensor,
-            zero_fields,
-        ),
-        "tg_embedding": maybe_zero(
-            "tg_embedding",
-            tg_embed_tensor,
-            zero_fields,
-        ),
-    }
-
-class TFTGEdgeBagDataset(Dataset):
-    def __init__(self, inputs, max_cells_per_pair=None, strict=True):
-        self.inputs = inputs
-        self.max_cells_per_pair = max_cells_per_pair
-
-        required_list_keys = [
-            "tf_name",
-            "tg_name",
-            "cell_id",
-        ]
-
-        required_tensor_keys = [
-            "label",
-            "tf_embedding",
-            "tf_mask",
-            "peak_sequences",
-            "peak_accessibility",
-            "peak_distance",
-            "tf_expression",
-            "tg_expression",
-            "tg_embedding",
-        ]
-
-        if "peak_mask" in inputs:
-            required_tensor_keys.append("peak_mask")
-
-        lengths = {}
-
-        for key in required_list_keys:
-            lengths[key] = len(inputs[key])
-
-        for key in required_tensor_keys:
-            lengths[key] = inputs[key].shape[0]
-
-        unique_lengths = sorted(set(lengths.values()))
-
-        if len(unique_lengths) != 1:
-            msg = "\n".join(
-                [f"{key:20s}: {length}" for key, length in lengths.items()]
-            )
-
-            if strict:
-                raise ValueError(
-                    "Input fields have inconsistent first-dimension lengths:\n"
-                    f"{msg}\n\n"
-                    "This usually means one of the lists was appended without "
-                    "a matching tensor row, or tensors were filtered after metadata "
-                    "was created."
-                )
+            # 2. Sample Cells
+            if max_cells_per_pair is None or max_cells_per_pair >= n_common_cells:
+                sampled_cells = common_cells
             else:
-                self.n_rows = min(unique_lengths)
-                logging.info(
-                    "WARNING: Input fields have inconsistent lengths. "
-                    f"Using first {self.n_rows} rows only.\n{msg}"
-                )
-        else:
-            self.n_rows = unique_lengths[0]
+                sampled_cells = rng.choice(common_cells, size=max_cells_per_pair, replace=False).tolist()
+                
+            sampled_cell_indices = np.asarray([cell_to_idx[c] for c in sampled_cells], dtype=np.int64)
+            n_cells = len(sampled_cells)
 
-        groups = defaultdict(list)
+            # 3. Process Cell Accessibility and Expressions
+            peak_acc_matrix = np.zeros((n_cells, max_peaks_per_tg), dtype=np.float32)
+            if n_peaks > 0:
+                # Transpose matching your original .T operation
+                peak_acc_matrix[:, :n_peaks] = atac_mat[np.ix_(peak_indices_real, sampled_cell_indices)].T
+            if "peak_accessibility" in zero_fields:
+                peak_acc_matrix.fill(0.0)
 
-        for i in range(self.n_rows):
-            tf = inputs["tf_name"][i]
-            tg = inputs["tg_name"][i]
-            groups[(tf, tg)].append(i)
+            # Expression slices
+            tf_rna_idx = gene_to_rna_idx.get(tf_norm)
+            tg_rna_idx = gene_to_rna_idx.get(tg_norm)
+            
+            tf_expr_vals = rna_mat[tf_rna_idx, sampled_cell_indices].astype(np.float32) if tf_rna_idx is not None else np.zeros(n_cells, dtype=np.float32)
+            tg_expr_vals = rna_mat[tg_rna_idx, sampled_cell_indices].astype(np.float32) if tg_rna_idx is not None else np.zeros(n_cells, dtype=np.float32)
+            
+            if "tf_expression" in zero_fields:
+                tf_expr_vals.fill(0.0)
+            if "tg_expression" in zero_fields:
+                tg_expr_vals.fill(0.0)
 
-        self.edge_keys = list(groups.keys())
-        self.groups = [
-            torch.tensor(v, dtype=torch.long)
-            for v in groups.values()
-        ]
+            # Embeddings
+            tf_embedding_i = tf_embeddings_tensor[tf_idx]
+            if "tf_embedding" in zero_fields:
+                tf_embedding_i = torch.zeros_like(tf_embedding_i)
+            tf_mask_i = tf_mask_tensor[tf_idx]
 
-        self.tensor_keys = [
-            key for key in required_tensor_keys
-            if key != "label"
-        ]
+            # 4. Construct a Single Edge Item Block
+            # Expand static tensors along cellular dimension to mirror original batch output
+            edge_data = {
+                "label": label,
+                "tf_name": tf_name,
+                "tg_name": tg_name,
+                "cell_ids": sampled_cells,
+                "tf_embedding": tf_embedding_i.repeat(n_cells, 1),
+                "tf_mask": tf_mask_i.repeat(n_cells, 1),
+                "peak_sequences": peak_seq.repeat(n_cells, 1, 1),
+                "peak_accessibility": torch.from_numpy(peak_acc_matrix),
+                "peak_mask": torch.from_numpy(peak_mask).repeat(n_cells, 1),
+                "peak_distance": torch.from_numpy(peak_dst).repeat(n_cells, 1),
+                "tf_expression": torch.from_numpy(tf_expr_vals),
+                "tg_expression": torch.from_numpy(tg_expr_vals),
+            }
+
+            # Store serialized block using integer index string as key
+            txn.put(str(edge_counter).encode("ascii"), pickle.dumps(edge_data))
+            edge_counter += 1
+
+    env.close()
+    if edge_counter == 0:
+        raise ValueError("No TF-TG examples were created.")
+        
+    logging.info(f"LMDB dataset saved at {lmdb_path} containing {edge_counter} unique edge bags.")
+    return edge_counter
+
+
+class TFTGEdgeBagLazyDataset(Dataset):
+    def __init__(self, lmdb_path, total_edges, max_cells_per_pair=None):
+        self.lmdb_path = lmdb_path
+        self.total_edges = total_edges
+        self.max_cells_per_pair = max_cells_per_pair
+        self.env = None  # Instantiated lazily per process worker
 
     def __len__(self):
-        return len(self.groups)
+        return self.total_edges
 
     def __getitem__(self, idx):
-        row_idx = self.groups[idx]
+        # Workers open unique DB read handles safely upon target call
+        if self.env is None:
+            self.env = lmdb.open(
+                self.lmdb_path,
+                readonly=True,
+                lock=False,
+                readahead=False,
+                meminit=False
+            )
 
+        with self.env.begin(write=False) as txn:
+            byte_data = txn.get(str(idx).encode("ascii"))
+            
+        if byte_data is None:
+            raise IndexError(f"Index {idx} missing from LMDB database storage.")
+
+        # Rehydrate specific bag slice directly from disk
+        item = pickle.loads(byte_data)
+
+        # Apply your cell subset truncation constraint if required dynamically
         if self.max_cells_per_pair is not None:
-            row_idx = row_idx[: self.max_cells_per_pair]
-
-        label = self.inputs["label"][row_idx[0]]
-
-        item = {
-            "label": label,
-            "tf_name": self.edge_keys[idx][0],
-            "tg_name": self.edge_keys[idx][1],
-            "cell_ids": [
-                self.inputs["cell_id"][i]
-                for i in row_idx.tolist()
-            ],
-        }
-
-        for key in self.tensor_keys:
-            item[key] = self.inputs[key][row_idx]
+            n_cells = len(item["cell_ids"])
+            if self.max_cells_per_pair < n_cells:
+                item["cell_ids"] = item["cell_ids"][:self.max_cells_per_pair]
+                # Slice tensor keys accordingly
+                tensor_keys = [
+                    "tf_embedding", "tf_mask", "peak_sequences", 
+                    "peak_accessibility", "peak_mask", "peak_distance", 
+                    "tf_expression", "tg_expression"
+                ]
+                for key in tensor_keys:
+                    item[key] = item[key][:self.max_cells_per_pair]
 
         return item
+
 
 
 def collate_tftg_edge_bags(batch):
@@ -651,7 +499,6 @@ def collate_tftg_edge_bags(batch):
         "peak_distance",
         "tf_expression",
         "tg_expression",
-        "tg_embedding",
     ]
 
     if "peak_mask" in batch[0]:
@@ -681,7 +528,6 @@ def _move_batch_to_device(batch, device):
         "peak_distance": batch["peak_distance"].to(device),
         "tf_expression": batch["tf_expression"].to(device),
         "tg_expression": batch["tg_expression"].to(device),
-        "tg_embedding": batch["tg_embedding"].to(device),
         "label": batch["label"].to(device),
     }
 
@@ -721,7 +567,6 @@ def evaluate(
             peak_distance=batch["peak_distance"],
             tf_expression=batch["tf_expression"],
             tg_expression=batch["tg_expression"],
-            tg_embedding=batch["tg_embedding"],
             peak_mask=batch.get("peak_mask", None),
             cell_mask=cell_mask,
             pooling_mode=pooling_mode,
@@ -813,7 +658,6 @@ def evaluate_with_metrics(
             peak_distance=batch["peak_distance"],
             tf_expression=batch["tf_expression"],
             tg_expression=batch["tg_expression"],
-            tg_embedding=batch["tg_embedding"],
             peak_mask=batch.get("peak_mask", None),
             cell_mask=cell_mask,
             pooling_mode=pooling_mode,
@@ -881,7 +725,6 @@ def train_one_epoch(
             peak_distance=batch["peak_distance"],
             tf_expression=batch["tf_expression"],
             tg_expression=batch["tg_expression"],
-            tg_embedding=batch["tg_embedding"],
             peak_mask=batch.get("peak_mask", None),
             cell_mask=cell_mask,
             pooling_mode=pooling_mode,
@@ -954,7 +797,6 @@ def train_one_epoch_track_test_metrics(
             peak_distance=batch["peak_distance"],
             tf_expression=batch["tf_expression"],
             tg_expression=batch["tg_expression"],
-            tg_embedding=batch["tg_embedding"],
             cell_mask=cell_mask,
             peak_mask=batch.get("peak_mask", None),
             pooling_mode=pooling_mode,
@@ -1172,8 +1014,6 @@ if __name__ == "__main__":
     peak_to_gene = peak_to_gene_distance.copy()
     peak_to_gene["target_id_norm"] = peak_to_gene["target_id"].str.upper()
 
-    tg_embedding_table = torch.nn.Embedding(len(tg_id_to_idx), 128)
-
     tg_to_peak_info, cell_to_idx, atac_mat, rna_mat, gene_to_rna_idx = prepare_tftg_lookup_tables(
         peak_to_gene=peak_to_gene,
         atac_peak_map=atac_peak_map,
@@ -1194,8 +1034,8 @@ if __name__ == "__main__":
     
     # Sample a subset of the TF-TG pairs for faster training during development
     tf_tg_train_subset = _sample_df(tf_tg_labeled_train_df, n=sample_pairs, seed=123)
-    tf_tg_val_subset = _sample_df(tf_tg_labeled_val_df, n=sample_pairs, seed=123)
-    tf_tg_test_subset = _sample_df(tf_tg_labeled_test_df, n=sample_pairs, seed=123)
+    tf_tg_val_subset = _sample_df(tf_tg_labeled_val_df, n=sample_pairs // 2, seed=123)
+    tf_tg_test_subset = _sample_df(tf_tg_labeled_test_df, n=sample_pairs // 4, seed=123)
 
     zero_fields = None
 
@@ -1213,37 +1053,32 @@ if __name__ == "__main__":
         atac_peak_tensor=atac_peak_tensor,
         tf_embeddings_tensor=tf_embeddings_tensor,
         tf_mask_tensor=tf_mask_tensor,
-        tg_embedding_table=tg_embedding_table,
         tf_name_to_idx=tf_name_to_idx,
         tg_id_to_idx=tg_id_to_idx,
     )
 
-    logging.info("Building TFTGRegulationModel inputs for train/val/test sets...")
-    tftg_inputs_train = build_tftg_inputs(
-        tf_tg_train_subset,
-        seed=123,
-        **common_build_kwargs,
+    # Build and dump datasets to disk sequentially
+    logging.info("Writing training data to LMDB...")
+    train_count = build_tftg_inputs_to_lmdb(
+        tf_tg_train_subset, training_cache_dir / "train.lmdb", seed=123, **common_build_kwargs
     )
-    logging.info(f"Train TFTGRegulationModel inputs built with {len(tftg_inputs_train['label'])} edges")
     
-    tftg_inputs_val = build_tftg_inputs(
-        tf_tg_val_subset,
-        seed=124,
-        **common_build_kwargs,
+    logging.info("Writing validation data to LMDB...")
+    val_count = build_tftg_inputs_to_lmdb(
+        tf_tg_val_subset, training_cache_dir / "val.lmdb", seed=124, **common_build_kwargs
     )
-    logging.info(f"Validation TFTGRegulationModel inputs built with {len(tftg_inputs_val['label'])} edges")
     
-    tftg_inputs_test = build_tftg_inputs(
-        tf_tg_test_subset,
-        seed=125,
-        **common_build_kwargs,
+    logging.info("Writing test data to LMDB...")
+    test_count = build_tftg_inputs_to_lmdb(
+        tf_tg_test_subset, training_cache_dir / "test.lmdb", seed=125, **common_build_kwargs
     )
-    logging.info(f"Test TFTGRegulationModel inputs built with {len(tftg_inputs_test['label'])} edges")
 
-    train_dataset = TFTGEdgeBagDataset(tftg_inputs_train, strict=True)
-    val_dataset = TFTGEdgeBagDataset(tftg_inputs_val, strict=True)
-    test_dataset = TFTGEdgeBagDataset(tftg_inputs_test, strict=True)
+    # Initialize the lazy dataset pointers
+    train_dataset = TFTGEdgeBagLazyDataset(training_cache_dir / "train.lmdb", total_edges=train_count)
+    val_dataset = TFTGEdgeBagLazyDataset(training_cache_dir / "val.lmdb", total_edges=val_count)
+    test_dataset = TFTGEdgeBagLazyDataset(training_cache_dir / "test.lmdb", total_edges=test_count)
 
+    # Create the DataLoaders with the custom collate function for batching edge bags
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
@@ -1427,6 +1262,7 @@ if __name__ == "__main__":
         )
 
     tf_tg_model = lit_model.model
+    tf_tg_model = tf_tg_model.to(device)
 
     final_train_metrics = evaluate_with_metrics(
         model=tf_tg_model,
