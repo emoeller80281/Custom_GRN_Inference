@@ -5,6 +5,7 @@ import gtfparse
 import numpy as np
 import pandas as pd
 from pathlib import Path
+import json
 import pickle
 import lmdb
 import logging
@@ -287,145 +288,6 @@ def prepare_tftg_lookup_tables(
     }
 
     return tg_to_peak_info, cell_to_idx, atac_mat, rna_mat, gene_to_rna_idx
-
-def build_tftg_inputs_to_lmdb(
-    tf_tg_df,
-    lmdb_path,
-    max_peaks_per_tg=64,
-    max_cells_per_pair=8,
-    seed=123,
-    zero_fields=None,
-    *,
-    tg_to_peak_info,
-    cell_to_idx,
-    atac_mat,
-    rna_mat,
-    gene_to_rna_idx,
-    common_cells,
-    atac_peak_tensor,
-    tf_embeddings_tensor,
-    tf_mask_tensor,
-    tf_name_to_idx,
-    tg_id_to_idx,
-):
-    rng = np.random.default_rng(seed)
-    zero_fields = set(zero_fields) if zero_fields is not None else set()
-    common_cells = list(common_cells)
-    n_common_cells = len(common_cells)
-    
-    lmdb_path = str(lmdb_path)
-
-    # Initialize LMDB Environment (Allocate 1TB virtual address space safely)
-    os.makedirs(os.path.dirname(lmdb_path), exist_ok=True)
-    env = lmdb.open(lmdb_path, map_size=1099511627776, writemap=False, sync=True)
-    
-    edge_counter = 0
-    
-    # Open write transaction
-    with env.begin(write=True) as txn:
-        for _, row in tf_tg_df.iterrows():
-            tf_name = row["tf_name"]
-            tg_name = row["tg_id"]
-            label = float(row["label"])
-            
-            tf_norm = str(tf_name).upper()
-            tg_norm = str(tg_name).upper()
-            
-            tf_idx = tf_name_to_idx.get(tf_name)
-            tg_idx = tg_id_to_idx.get(tg_name)
-            if tf_idx is None or tg_idx is None:
-                continue
-                
-            peak_info = tg_to_peak_info.get(tg_norm)
-            if peak_info is None:
-                continue
-                
-            peak_indices_real = peak_info["peak_indices"][:max_peaks_per_tg]
-            peak_dst_real = peak_info["peak_distances"][:max_peaks_per_tg]
-            n_peaks = len(peak_indices_real)
-            if n_peaks == 0:
-                continue
-
-            # 1. Process Peaks (Shared across all cells for this edge)
-            peak_seq = atac_peak_tensor[peak_indices_real]
-            peak_dst = np.asarray(peak_dst_real, dtype=np.float32)
-            peak_mask = np.ones(n_peaks, dtype=bool)
-            
-            if n_peaks < max_peaks_per_tg:
-                pad_len = max_peaks_per_tg - n_peaks
-                peak_seq = torch.nn.functional.pad(peak_seq, (0, 0, 0, 0, 0, pad_len))
-                peak_dst = np.pad(peak_dst, (0, pad_len), constant_values=0.0)
-                peak_mask = np.pad(peak_mask, (0, pad_len), constant_values=False)
-
-            # Zeroing logic fields
-            if "peak_sequences" in zero_fields:
-                peak_seq = torch.zeros_like(peak_seq)
-            if "peak_distance" in zero_fields:
-                peak_dst = np.zeros_like(peak_dst)
-
-            # 2. Sample Cells
-            if max_cells_per_pair is None or max_cells_per_pair >= n_common_cells:
-                sampled_cells = common_cells
-            else:
-                sampled_cells = rng.choice(common_cells, size=max_cells_per_pair, replace=False).tolist()
-                
-            sampled_cell_indices = np.asarray([cell_to_idx[c] for c in sampled_cells], dtype=np.int64)
-            n_cells = len(sampled_cells)
-
-            # 3. Process Cell Accessibility and Expressions
-            peak_acc_matrix = np.zeros((n_cells, max_peaks_per_tg), dtype=np.float32)
-            if n_peaks > 0:
-                # Transpose matching your original .T operation
-                peak_acc_matrix[:, :n_peaks] = atac_mat[np.ix_(peak_indices_real, sampled_cell_indices)].T
-            if "peak_accessibility" in zero_fields:
-                peak_acc_matrix.fill(0.0)
-
-            # Expression slices
-            tf_rna_idx = gene_to_rna_idx.get(tf_norm)
-            tg_rna_idx = gene_to_rna_idx.get(tg_norm)
-            
-            tf_expr_vals = rna_mat[tf_rna_idx, sampled_cell_indices].astype(np.float32) if tf_rna_idx is not None else np.zeros(n_cells, dtype=np.float32)
-            tg_expr_vals = rna_mat[tg_rna_idx, sampled_cell_indices].astype(np.float32) if tg_rna_idx is not None else np.zeros(n_cells, dtype=np.float32)
-            
-            if "tf_expression" in zero_fields:
-                tf_expr_vals.fill(0.0)
-            if "tg_expression" in zero_fields:
-                tg_expr_vals.fill(0.0)
-
-            # Embeddings
-            tf_embedding_i = tf_embeddings_tensor[tf_idx]
-            if "tf_embedding" in zero_fields:
-                tf_embedding_i = torch.zeros_like(tf_embedding_i)
-            tf_mask_i = tf_mask_tensor[tf_idx]
-
-            # 4. Construct a Single Edge Item Block
-            # Expand static tensors along cellular dimension to mirror original batch output
-            edge_data = {
-                "label": label,
-                "tf_name": tf_name,
-                "tg_name": tg_name,
-                "cell_ids": sampled_cells,
-                "tf_embedding": tf_embedding_i.repeat(n_cells, 1),
-                "tf_mask": tf_mask_i.repeat(n_cells, 1),
-                "peak_sequences": peak_seq.repeat(n_cells, 1, 1),
-                "peak_accessibility": torch.from_numpy(peak_acc_matrix),
-                "peak_mask": torch.from_numpy(peak_mask).repeat(n_cells, 1),
-                "peak_distance": torch.from_numpy(peak_dst).repeat(n_cells, 1),
-                "tf_expression": torch.from_numpy(tf_expr_vals),
-                "tg_expression": torch.from_numpy(tg_expr_vals),
-            }
-
-            # Store serialized block using integer index string as key
-            txn.put(str(edge_counter).encode("ascii"), pickle.dumps(edge_data))
-            edge_counter += 1
-
-    env.close()
-    if edge_counter == 0:
-        raise ValueError("No TF-TG examples were created.")
-        
-    logging.info(f"LMDB dataset saved at {lmdb_path} containing {edge_counter} unique edge bags.")
-    return edge_counter
-
 
 class TFTGEdgeBagLazyDataset(Dataset):
     def __init__(self, lmdb_path, total_edges, max_cells_per_pair=None):
@@ -924,159 +786,32 @@ if __name__ == "__main__":
     pct_true_edges = args.pct_true_edges
     true_false_ratio = args.true_false_ratio
 
-    atac_pseudobulk = pd.read_parquet(PROJECT_DIR / "data" / "ATAC_data" / "RE_pseudobulk.parquet")
-    peak_to_gene_distance = pd.read_parquet(PROJECT_DIR / "data" / "ATAC_data" / "peak_to_gene_dist.parquet")
-
-    rna_pseudobulk = pd.read_parquet(PROJECT_DIR / "data" / "RNA_data" / "TG_pseudobulk.parquet")
-    
-    mm10_chip_atlas_file = DATA_DIR / "ground_truth_files" / "chip_atlas_tf_peak_tg_dist.csv"
-    rn111_file = DATA_DIR / "ground_truth_files" / "RN111.tsv"
-    rn112_file = DATA_DIR / "ground_truth_files" / "RN112.tsv"
-    rn114_file = DATA_DIR / "ground_truth_files" / "RN114.tsv"
-    rn116_file = DATA_DIR / "ground_truth_files" / "RN116.tsv"
-    
-    merged_ground_truth_df = load_ground_truth_files([
-        mm10_chip_atlas_file,
-        rn111_file,
-        rn112_file,
-        rn114_file,
-        rn116_file,
-    ])
-    
     training_cache_dir = PROJECT_DIR / "data" / "training_data_cache"
-    tf_name_to_idx_cache_path = training_cache_dir / "tf_name_to_idx.csv"
-    tf_name_to_idx = pd.read_csv(tf_name_to_idx_cache_path).set_index("tf_name")["tf_idx"].to_dict()
-    
-    logging.info(f"Number of TFs with embeddings: {len(tf_name_to_idx)}")
-
-    # Create a mapping from TG name to index across all ground-truth TGs
-    tg_id_to_idx = {tg: idx for idx, tg in enumerate(merged_ground_truth_df["Target"].unique())}
-    
-    logging.info(f"Number of")
-
-    train_genes, val_genes, test_genes = split_genes_by_chromosome(gene_ref_file)
-    
-    gt_train_df, gt_val_df, gt_test_df = create_train_val_test_splits(merged_ground_truth_df, train_genes, val_genes, test_genes)
-    
-    logging.info(f"Train genes in ground truth: {gt_train_df['Target'].nunique()}")
-    logging.info(f"Validation genes in ground truth: {gt_val_df['Target'].nunique()}")
-    logging.info(f"Test genes in ground truth: {gt_test_df['Target'].nunique()}")
-    
-    # Create labeled datasets, split by train/val/test chromosomes
-    tf_tg_labeled_train_df = _create_labeled_df(gt_train_df, pct_true_edges, true_false_ratio)
-    tf_tg_labeled_val_df = _create_labeled_df(gt_val_df, pct_true_edges, true_false_ratio)
-    tf_tg_labeled_test_df = _create_labeled_df(gt_test_df, pct_true_edges, true_false_ratio)
-
-    logging.info(f"Train labeled edges: {len(tf_tg_labeled_train_df)}")
-    logging.info(f"Val labeled edges: {len(tf_tg_labeled_val_df)}")
-    logging.info(f"Test labeled edges: {len(tf_tg_labeled_test_df)}")
-    
-    dataset_peaks = atac_pseudobulk.index.to_list()
-    valid_chroms = {f"chr{i}" for i in range(1, 20)}
-    dataset_peaks = [peak for peak in dataset_peaks if peak.split(":", 1)[0] in valid_chroms]
-    atac_peak_map = {peak: idx for idx, peak in enumerate(dataset_peaks)}
-    logging.info(f"Peaks in dataset: {dataset_peaks[:2]}...{dataset_peaks[-2:]} (total: {len(dataset_peaks)})")
-
-    # Build TFTGRegulationModel inputs from TF-TG ground truth + ATAC peaks
-    training_cache_dir = PROJECT_DIR / "data" / "training_data_cache"
-    tf_embedding_cache_path = training_cache_dir / "tf_embeddings.pt"
-    tf_mask_cache_path = training_cache_dir / "tf_masks.pt"
-    atac_peak_onehot_cache_path = training_cache_dir / "atac_peak_onehot_array.pt"
-
-    tf_embeddings_tensor = torch.load(tf_embedding_cache_path)
-    tf_mask_tensor = torch.load(tf_mask_cache_path)
-
-    # Create or load the one-hot encoded peak sequences for the ATAC peaks in the dataset
-    dataset_peaks = list(atac_peak_map.keys())
-    if os.path.exists(atac_peak_onehot_cache_path):
-        atac_peak_tensor = torch.load(atac_peak_onehot_cache_path)
-    else:
-        atac_peak_array = utils.create_centered_peak_onehot_array(
-            peak_ids=dataset_peaks,
-            genome_fasta=genome_fasta_path,
-            chrom_sizes=utils.load_chrom_sizes(chrom_sizes_path),
-            peak_id_to_idx=atac_peak_map,
-            flank_size=128,
-            dtype=np.float32,
-            pad_out_of_bounds=True,
-            num_workers=1,
+    counts_path = training_cache_dir / "tftg_lmdb_counts.json"
+    if not counts_path.exists():
+        raise FileNotFoundError(
+            "LMDB counts file not found. Run build_tf_to_tg_train_data.py first: "
+            f"{counts_path}"
         )
-        atac_peak_tensor = torch.as_tensor(atac_peak_array, dtype=torch.float32)
-        torch.save(atac_peak_tensor, atac_peak_onehot_cache_path)
 
-    # Align cell IDs across RNA and ATAC pseudobulk matrices
-    rna_pseudobulk_norm = rna_pseudobulk.copy()
-    rna_pseudobulk_norm.index = rna_pseudobulk_norm.index.str.upper()
+    with counts_path.open("r", encoding="utf-8") as handle:
+        counts = json.load(handle)
 
-    common_cells = sorted(set(rna_pseudobulk_norm.columns) & set(atac_pseudobulk.columns))
-    logging.info(f"Common cells: {len(common_cells)}")
-
-    peak_to_gene = peak_to_gene_distance.copy()
-    peak_to_gene["target_id_norm"] = peak_to_gene["target_id"].str.upper()
-
-    tg_to_peak_info, cell_to_idx, atac_mat, rna_mat, gene_to_rna_idx = prepare_tftg_lookup_tables(
-        peak_to_gene=peak_to_gene,
-        atac_peak_map=atac_peak_map,
-        atac_pseudobulk=atac_pseudobulk,
-        rna_pseudobulk_norm=rna_pseudobulk_norm,
-        dataset_peaks=dataset_peaks,
-        common_cells=common_cells,
-        max_precompute_peaks=64,
-    )
-        
-    def _sample_df(df: pd.DataFrame, n: int | None, seed: int) -> pd.DataFrame:
-        if n is None or len(df) <= n:
-            return df
-        return df.sample(n=n, random_state=seed)
-    
-    if sample_pairs is None:
-        sample_pairs = len(tf_tg_labeled_train_df)
-    
-    # Sample a subset of the TF-TG pairs for faster training during development
-    tf_tg_train_subset = _sample_df(tf_tg_labeled_train_df, n=sample_pairs, seed=123)
-    tf_tg_val_subset = _sample_df(tf_tg_labeled_val_df, n=sample_pairs // 2, seed=123)
-    tf_tg_test_subset = _sample_df(tf_tg_labeled_test_df, n=sample_pairs // 4, seed=123)
-
-    zero_fields = None
-
-    # Build the TFTGRegulationModel inputs for the sampled TF-TG pairs for the train/val/test sets
-    common_build_kwargs = dict(
-        max_peaks_per_tg=max_peaks_per_tg,
+    train_dataset = TFTGEdgeBagLazyDataset(
+        training_cache_dir / "train.lmdb",
+        total_edges=counts["train"],
         max_cells_per_pair=max_cells_per_pair,
-        zero_fields=zero_fields,
-        tg_to_peak_info=tg_to_peak_info,
-        cell_to_idx=cell_to_idx,
-        atac_mat=atac_mat,
-        rna_mat=rna_mat,
-        gene_to_rna_idx=gene_to_rna_idx,
-        common_cells=common_cells,
-        atac_peak_tensor=atac_peak_tensor,
-        tf_embeddings_tensor=tf_embeddings_tensor,
-        tf_mask_tensor=tf_mask_tensor,
-        tf_name_to_idx=tf_name_to_idx,
-        tg_id_to_idx=tg_id_to_idx,
     )
-
-    # Build and dump datasets to disk sequentially
-    logging.info("Writing training data to LMDB...")
-    train_count = build_tftg_inputs_to_lmdb(
-        tf_tg_train_subset, training_cache_dir / "train.lmdb", seed=123, **common_build_kwargs
+    val_dataset = TFTGEdgeBagLazyDataset(
+        training_cache_dir / "val.lmdb",
+        total_edges=counts["val"],
+        max_cells_per_pair=max_cells_per_pair,
     )
-    
-    logging.info("Writing validation data to LMDB...")
-    val_count = build_tftg_inputs_to_lmdb(
-        tf_tg_val_subset, training_cache_dir / "val.lmdb", seed=124, **common_build_kwargs
+    test_dataset = TFTGEdgeBagLazyDataset(
+        training_cache_dir / "test.lmdb",
+        total_edges=counts["test"],
+        max_cells_per_pair=max_cells_per_pair,
     )
-    
-    logging.info("Writing test data to LMDB...")
-    test_count = build_tftg_inputs_to_lmdb(
-        tf_tg_test_subset, training_cache_dir / "test.lmdb", seed=125, **common_build_kwargs
-    )
-
-    # Initialize the lazy dataset pointers
-    train_dataset = TFTGEdgeBagLazyDataset(training_cache_dir / "train.lmdb", total_edges=train_count)
-    val_dataset = TFTGEdgeBagLazyDataset(training_cache_dir / "val.lmdb", total_edges=val_count)
-    test_dataset = TFTGEdgeBagLazyDataset(training_cache_dir / "test.lmdb", total_edges=test_count)
 
     # Create the DataLoaders with the custom collate function for batching edge bags
     train_loader = DataLoader(

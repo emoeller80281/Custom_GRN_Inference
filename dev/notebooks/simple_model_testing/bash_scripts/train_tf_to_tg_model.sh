@@ -84,6 +84,15 @@ echo "[INFO] Using nproc_per_node=$NPROC_PER_NODE based on GPUs per node"
 export NCCL_DEBUG=INFO
 export PYTHONFAULTHANDLER=1
 
+echo "[INFO] Building LMDB datasets..."
+python3 ${PROJECT_DIR}/scripts/build_tf_to_tg_train_data.py \
+    --sample_pairs 4000 \
+    --max_peaks_per_tg 8 \
+    --max_cells_per_pair 16 \
+    --pct_true_edges 0.15 \
+    --true_false_ratio 2.0
+
+echo "[INFO] Starting training..."
 srun python3 ${PROJECT_DIR}/scripts/train_tf_to_tg_model.py \
     --epochs 250 \
     --num_gpus $NPROC_PER_NODE \
