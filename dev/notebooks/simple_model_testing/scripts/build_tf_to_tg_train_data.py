@@ -357,8 +357,8 @@ def main():
     parser.add_argument("--true_false_ratio", type=float, default=2.0)
     parser.add_argument("--force_rebuild", action="store_true")
     args = parser.parse_args()
-	
-	# Create the training cache directory if it doesn't exist
+    
+    # Create the training cache directory if it doesn't exist
     training_data_dir = args.training_data_dir
 
     if training_data_dir:
@@ -445,14 +445,19 @@ def main():
             genome_fasta=genome_fasta_path,
             chrom_sizes=utils.load_chrom_sizes(chrom_sizes_path),
             peak_id_to_idx=atac_peak_map,
-            flank_size=128,
-            dtype=np.float32,
+            flank_size=64,
+            dtype=np.uint8,
             pad_out_of_bounds=True,
             num_workers=16,
             show_progress=True,
+            chunk_size=10000,
         )
-        atac_peak_tensor = torch.as_tensor(atac_peak_array, dtype=torch.float32)
+        atac_peak_tensor = torch.as_tensor(atac_peak_array, dtype=torch.uint8)
+        atac_peak_tensor = atac_peak_tensor.float()
         torch.save(atac_peak_tensor, atac_peak_onehot_cache_path)
+        
+    if atac_peak_tensor.dtype == torch.uint8:
+        atac_peak_tensor = atac_peak_tensor.float()
 
     rna_pseudobulk_norm = rna_pseudobulk.copy()
     rna_pseudobulk_norm.index = rna_pseudobulk_norm.index.str.upper()
@@ -509,15 +514,15 @@ def main():
  
     logging.info("Writing training data to LMDB...")
     train_count = build_tftg_inputs_to_lmdb(
-        tf_tg_train_subset, training_cache_dir / "tf_to_tg_training_data" / "train.lmdb", seed=123, **common_build_kwargs
+        tf_tg_train_subset, train_file, seed=123, **common_build_kwargs
     )
     logging.info("Writing validation data to LMDB...")
     val_count = build_tftg_inputs_to_lmdb(
-        tf_tg_val_subset, training_cache_dir / "tf_to_tg_training_data" / "val.lmdb", seed=124, **common_build_kwargs
+        tf_tg_val_subset, val_file, seed=124, **common_build_kwargs
     )
     logging.info("Writing test data to LMDB...")
     test_count = build_tftg_inputs_to_lmdb(
-        tf_tg_test_subset, training_cache_dir / "tf_to_tg_training_data" / "test.lmdb", seed=125, **common_build_kwargs
+        tf_tg_test_subset, test_file, seed=125, **common_build_kwargs
     )
 
     counts_path = training_cache_dir / "tftg_lmdb_counts.json"

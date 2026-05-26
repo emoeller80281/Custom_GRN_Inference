@@ -256,14 +256,17 @@ def main():
             genome_fasta=genome_fasta_path,
             chrom_sizes=chrom_sizes,
             peak_id_to_idx=peak_id_to_idx,
-            flank_size=128,
-            dtype=np.float32,
+            flank_size=64,
+            dtype=np.uint8,
             pad_out_of_bounds=True,
             num_workers=12,
             show_progress=True,
+            chunk_size=10000,
         )
-        peak_tensor = torch.as_tensor(peak_onehot_array, dtype=torch.float32)
+        peak_tensor = torch.as_tensor(peak_onehot_array, dtype=torch.uint8)
+        peak_tensor = peak_tensor.float()
         torch.save(peak_tensor, peak_onehot_cache_path)
+        
 
     if all(p.exists() for p in [train_idx_cache_path, val_idx_cache_path, test_idx_cache_path]) and not args.force_reload:
         train_idx = torch.load(train_idx_cache_path)

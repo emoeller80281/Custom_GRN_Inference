@@ -35,7 +35,7 @@ import argparse
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-def create_new_tf_tg_binding_model(ckpt_path: Path) -> tf_to_tg_module.TFTGRegulationModel:
+def create_new_tf_tg_binding_model(tf_bind_model_path: Path) -> tf_to_tg_module.TFTGRegulationModel:
     # 1) Recreate the base TF→DNA model with the same hyperparameters
     base_model = tf_to_dna_module.TFPeakBindingModel(
         tf_embedding_dim=128,
@@ -48,14 +48,14 @@ def create_new_tf_tg_binding_model(ckpt_path: Path) -> tf_to_tg_module.TFTGRegul
 
     # 2) Wrap in Lightning module and load checkpoint
     lit_model = tf_to_dna_module.LitTFPeakBindingModel.load_from_checkpoint(
-        checkpoint_path=ckpt_path,
+        checkpoint_path=tf_bind_model_path,
         model=base_model,
         lr=1e-4,
         weight_decay=1e-4,
         pos_weight=None,
     )
 
-    state = torch.load(ckpt_path, map_location="cpu")
+    state = torch.load(tf_bind_model_path, map_location="cpu")
     lit_model.load_state_dict(state["state_dict"], strict=True)
 
     # 3) Get the trained base model and freeze it
@@ -801,12 +801,11 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size for training (default: 32)")
     parser.add_argument("--pct_true_edges", type=float, default=0.15, help="Percentage of true edges to include in the training set (default: 0.15)")
     parser.add_argument("--true_false_ratio", type=float, default=2.0, help="Ratio of true to false edges in the training set (default: 2.0)")
+    parser.add_argument("--tf_bind_model_path", type=str, required=False, help="Path to the TF→DNA model checkpoint to initialize from (if not using default)")
     parser.add_argument("--training_data_dir", type=str, required=False, help="Path to directory containing training data cache files (if not using default)")
     parser.add_argument("--checkpoint_path", type=str, required=False, help="Path to a model checkpoint to resume training from")
     parser.add_argument("--force_reload", action="store_true", help="Whether to force reload cached data instead of using existing cache files")
     args = parser.parse_args()
-
-    ckpt_path = PROJECT_DIR / "checkpoints" / "tfbind_train_3669315" / "epoch=05-val_auroc=0.9269-val_loss=0.2624.ckpt"
 
     gene_ref_file = DATA_DIR / "genome_data" / "genome_annotation" / "mm10" / "Mus_musculus.GRCm39.115.gtf.gz"
     genome_fasta_path = DATA_DIR / "genome_data" / "reference_genome" / "mm10" / "mm10.fa"
@@ -826,6 +825,7 @@ if __name__ == "__main__":
     pct_true_edges = args.pct_true_edges
     true_false_ratio = args.true_false_ratio
     training_data_dir = args.training_data_dir
+    tf_bind_model_path = Path(args.tf_bind_model_path)
 
     if training_data_dir:
         training_cache_dir = Path(training_data_dir)
@@ -842,19 +842,23 @@ if __name__ == "__main__":
 
     with counts_path.open("r", encoding="utf-8") as handle:
         counts = json.load(handle)
+        
+    train_file = training_cache_dir / "tf_to_tg_training_data" / "train.lmdb"
+    val_file = training_cache_dir / "tf_to_tg_training_data" / "val.lmdb"
+    test_file = training_cache_dir / "tf_to_tg_training_data" / "test.lmdb"
 
     train_dataset = TFTGEdgeBagLazyDataset(
-        training_cache_dir / "train.lmdb",
+        train_file,
         total_edges=counts["train"],
         max_cells_per_pair=max_cells_per_pair,
     )
     val_dataset = TFTGEdgeBagLazyDataset(
-        training_cache_dir / "val.lmdb",
+        val_file,
         total_edges=counts["val"],
         max_cells_per_pair=max_cells_per_pair,
     )
     test_dataset = TFTGEdgeBagLazyDataset(
-        training_cache_dir / "test.lmdb",
+        test_file,
         total_edges=counts["test"],
         max_cells_per_pair=max_cells_per_pair,
     )
@@ -895,7 +899,7 @@ if __name__ == "__main__":
 
     logging.info(f"Train/Val/Test sizes: {len(train_dataset)}, {len(val_dataset)}, {len(test_dataset)}")
 
-    tf_tg_model = create_new_tf_tg_binding_model(ckpt_path)
+    tf_tg_model = create_new_tf_tg_binding_model(tf_bind_model_path)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     tf_tg_model = tf_tg_model.to(device)
@@ -1030,7 +1034,7 @@ if __name__ == "__main__":
             lit_model,
             train_dataloaders=train_loader,
             val_dataloaders=val_loader,
-            ckpt_path=checkpoint_path,
+            tf_bind_model_path=checkpoint_path,
         )
     else:
         trainer.fit(

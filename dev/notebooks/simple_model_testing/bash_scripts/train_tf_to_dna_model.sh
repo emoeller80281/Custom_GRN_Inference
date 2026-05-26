@@ -93,6 +93,7 @@ python3 ${PROJECT_DIR}/scripts/build_tf_to_dna_train_data.py \
     --pct_true_edges 0.10 \
     --true_false_ratio 0.25
 
+echo "[INFO] Starting TF-to-DNA model training..."
 srun python3 ${PROJECT_DIR}/scripts/train_tf_to_dna_model.py \
     --training_data_dir $training_data_dir \
     --epochs 50 \

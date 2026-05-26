@@ -183,10 +183,10 @@ class TFPeakEdgeDataset(Dataset):
         peak_idx = self.edge_peak_idx[idx]
 
         return {
-            "tf_embedding": self.tf_embeddings[tf_idx],      # [max_tf_len, 128]
-            "tf_mask": self.tf_mask[tf_idx],                 # [max_tf_len]
-            "peak_embedding": self.peak_embeddings[peak_idx],# [512, 4]
-            "label": self.edge_labels[idx],                  # scalar
+            "tf_embedding": self.tf_embeddings[tf_idx].float(),         # [max_tf_len, 128]
+            "tf_mask": self.tf_mask[tf_idx],                            # [max_tf_len]
+            "peak_embedding": self.peak_embeddings[peak_idx].float(),   # [512, 4]
+            "label": self.edge_labels[idx],                             # scalar
             "tf_idx": tf_idx,
             "peak_idx": peak_idx,
         }
@@ -244,9 +244,9 @@ if __name__ == "__main__":
         tf_embedding_cache_path,
         tf_mask_cache_path,
         peak_onehot_cache_path,
-        training_cache_dir / "train_idx.pt",
-        training_cache_dir / "val_idx.pt",
-        training_cache_dir / "test_idx.pt",
+        training_cache_dir / "tf_to_tg_training_data" / "train_idx.pt",
+        training_cache_dir / "tf_to_tg_training_data" / "val_idx.pt",
+        training_cache_dir / "tf_to_tg_training_data" / "test_idx.pt",
     ]
     missing = [str(path) for path in cache_files if not path.exists()]
     if missing:
@@ -255,15 +255,18 @@ if __name__ == "__main__":
             + "\n".join(missing)
         )
 
-    edge_tf_idx_tensor = torch.load(edge_tf_idx_cache_path)
-    edge_peak_idx_tensor = torch.load(edge_peak_idx_cache_path)
-    edge_labels_tensor = torch.load(edge_labels_cache_path)
-    tf_embeddings_tensor = torch.load(tf_embedding_cache_path)
-    tf_mask_tensor = torch.load(tf_mask_cache_path)
-    peak_tensor = torch.load(peak_onehot_cache_path)
-    train_idx = torch.load(training_cache_dir / "train_idx.pt")
-    val_idx = torch.load(training_cache_dir / "val_idx.pt")
-    test_idx = torch.load(training_cache_dir / "test_idx.pt")
+    edge_tf_idx_tensor: torch.Tensor = torch.load(edge_tf_idx_cache_path)
+    edge_peak_idx_tensor: torch.Tensor = torch.load(edge_peak_idx_cache_path)
+    edge_labels_tensor: torch.Tensor = torch.load(edge_labels_cache_path)
+    tf_embeddings_tensor: torch.Tensor = torch.load(tf_embedding_cache_path)
+    tf_mask_tensor: torch.Tensor = torch.load(tf_mask_cache_path)
+    peak_tensor: torch.Tensor = torch.load(peak_onehot_cache_path)
+    train_idx: torch.Tensor = torch.load(training_cache_dir / "train_idx.pt")
+    val_idx: torch.Tensor = torch.load(training_cache_dir / "val_idx.pt")
+    test_idx: torch.Tensor = torch.load(training_cache_dir / "test_idx.pt")
+
+    if peak_tensor.dtype == torch.uint8:
+        peak_tensor = peak_tensor.float()
 
     edge_dataset = TFPeakEdgeDataset(
         tf_embeddings=tf_embeddings_tensor,
@@ -283,7 +286,7 @@ if __name__ == "__main__":
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=4,
+        num_workers=8,
         pin_memory=True,
         persistent_workers=True,
         prefetch_factor=4,
@@ -384,6 +387,7 @@ if __name__ == "__main__":
     )
     
     torch.set_float32_matmul_precision('medium')
+    torch.backends.cudnn.benchmark = True
     
     # Debug to find NaNs in the loss
     torch.autograd.set_detect_anomaly(False)

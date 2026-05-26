@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pyfaidx
 from pathlib import Path
-from tqdm import tqdm
+from tqdm.auto import tqdm
 import re
 import time
 import requests
@@ -104,79 +104,144 @@ def load_chrom_sizes(chromsizes_file):
     
     return chrom_sizes
 
-def _encode_centered_peak_onehot(args):
-    peak_id, genome_fasta, chrom_sizes, flank_size, pad_out_of_bounds, dtype = args
+from itertools import repeat
+
+def _centered_peak_to_onehot(
+    peak_id: str,
+    genome,
+    chrom_sizes: dict[str, int],
+    flank_size: int,
+    dtype=np.uint8,
+    pad_out_of_bounds: bool = True,
+):
+    """
+    Encode one centered peak window into a one-hot DNA matrix.
+
+    Returns
+    -------
+    np.ndarray
+        Shape [2 * flank_size, 4]
+    """
+    chrom, peak_start, peak_end = parse_peak(peak_id)
+
+    if chrom not in chrom_sizes:
+        raise KeyError(
+            f"Chromosome {chrom!r} not found in chrom_sizes. "
+            f"Peak: {peak_id}"
+        )
+
+    chrom_size = chrom_sizes[chrom]
+    seq_len = 2 * flank_size
+
+    peak_center = (peak_start + peak_end) // 2
+    seq_start = peak_center - flank_size
+    seq_end = peak_center + flank_size
+
+    fetch_start = seq_start
+    fetch_end = seq_end
+
+    left_pad = 0
+    right_pad = 0
+
+    if fetch_start < 0:
+        left_pad = -fetch_start
+        fetch_start = 0
+
+    if fetch_end > chrom_size:
+        right_pad = fetch_end - chrom_size
+        fetch_end = chrom_size
+
+    if fetch_end < fetch_start:
+        fetch_end = fetch_start
+
+    seq = genome[chrom][fetch_start:fetch_end].seq.upper()
+
+    if pad_out_of_bounds:
+        if left_pad:
+            seq = ("N" * left_pad) + seq
+        if right_pad:
+            seq = seq + ("N" * right_pad)
+
+        if len(seq) < seq_len:
+            seq = seq + ("N" * (seq_len - len(seq)))
+        elif len(seq) > seq_len:
+            seq = seq[:seq_len]
+    else:
+        if len(seq) != seq_len:
+            raise ValueError(
+                f"Peak {peak_id} produced sequence length {len(seq)}, "
+                f"but expected {seq_len}. Use pad_out_of_bounds=True "
+                f"for fixed-length output."
+            )
+
+    onehot = onehot_dna_sequence(seq).astype(dtype, copy=False)
+
+    if onehot.shape != (seq_len, 4):
+        raise ValueError(
+            f"Peak {peak_id} produced one-hot shape {onehot.shape}, "
+            f"but expected {(seq_len, 4)}."
+        )
+
+    return onehot
+
+def _encode_peak_chunk(args):
+    """
+    Worker function for multiprocessing.
+
+    Each worker opens the FASTA once per chunk, not once per peak.
+    """
+    (
+        peak_chunk,
+        genome_fasta,
+        chrom_sizes,
+        flank_size,
+        dtype,
+        pad_out_of_bounds,
+    ) = args
+
+    results = []
 
     with pyfaidx.Fasta(str(genome_fasta)) as genome:
-        chrom, peak_start, peak_end = parse_peak(peak_id)
-
-        if chrom not in chrom_sizes:
-            raise KeyError(
-                f"Chromosome {chrom!r} not found in chrom_sizes. "
-                f"Peak: {peak_id}"
+        for peak_id in peak_chunk:
+            onehot = _centered_peak_to_onehot(
+                peak_id=peak_id,
+                genome=genome,
+                chrom_sizes=chrom_sizes,
+                flank_size=flank_size,
+                dtype=dtype,
+                pad_out_of_bounds=pad_out_of_bounds,
             )
+            results.append((peak_id, onehot))
 
-        chrom_size = chrom_sizes[chrom]
+    return results
 
-        peak_center = (peak_start + peak_end) // 2
-        seq_start = peak_center - flank_size
-        seq_end = peak_center + flank_size
-        target_len = 2 * flank_size
+def _iter_chunks(items, chunk_size: int):
+    """
+    Yield lists of up to chunk_size items.
+    """
+    chunk = []
 
-        fetch_start = seq_start
-        fetch_end = seq_end
+    for item in items:
+        chunk.append(item)
 
-        left_pad = 0
-        right_pad = 0
+        if len(chunk) >= chunk_size:
+            yield chunk
+            chunk = []
 
-        if fetch_start < 0:
-            left_pad = -fetch_start
-            fetch_start = 0
-
-        if fetch_end > chrom_size:
-            right_pad = fetch_end - chrom_size
-            fetch_end = chrom_size
-
-        if fetch_end < fetch_start:
-            fetch_end = fetch_start
-
-        seq = genome[chrom][fetch_start:fetch_end].seq.upper()
-
-        if pad_out_of_bounds:
-            seq = ("N" * left_pad) + seq + ("N" * right_pad)
-
-            if len(seq) < target_len:
-                seq = seq + ("N" * (target_len - len(seq)))
-            elif len(seq) > target_len:
-                seq = seq[:target_len]
-        else:
-            if len(seq) != target_len:
-                raise ValueError(
-                    f"Peak {peak_id} produced sequence length {len(seq)}, "
-                    f"but expected {target_len}. Use pad_out_of_bounds=True "
-                    f"for fixed-length output."
-                )
-
-        onehot = onehot_dna_sequence(seq).astype(dtype)
-
-        if onehot.shape != (target_len, 4):
-            raise ValueError(
-                f"Peak {peak_id} produced one-hot shape {onehot.shape}, "
-                f"but expected {(target_len, 4)}."
-            )
-
-    return peak_id, onehot
-
+    if chunk:
+        yield chunk
+        
 def create_centered_peak_onehot_array(
     peak_ids: list[str],
     genome_fasta: str | Path,
     chrom_sizes: dict[str, int],
     peak_id_to_idx: dict[str, int],
     flank_size: int,
-    dtype=np.float32,
+    dtype=np.uint8,
     pad_out_of_bounds: bool = True,
     show_progress: bool = True,
     num_workers: int = 1,
+    chunk_size: int = 1000,
 ):
     """
     Create a stacked one-hot encoded DNA array using an existing peak_id_to_idx map.
@@ -195,20 +260,21 @@ def create_centered_peak_onehot_array(
         Number of bases on each side of the peak center.
         Output length is 2 * flank_size.
     dtype : numpy dtype
-        Output dtype.
+        Output dtype. np.uint8 is recommended for one-hot DNA.
     pad_out_of_bounds : bool
         Whether to pad with N if the requested window goes out of bounds.
     show_progress : bool
         Whether to show tqdm progress bar.
     num_workers : int
         Number of worker processes to use. Use 1 to run serially.
+    chunk_size : int
+        Number of peaks per worker task when num_workers > 1.
 
     Returns
     -------
     np.ndarray
         Array of shape [len(peak_id_to_idx), 2 * flank_size, 4].
     """
-
     genome_fasta = Path(genome_fasta)
 
     if not genome_fasta.exists():
@@ -219,119 +285,80 @@ def create_centered_peak_onehot_array(
 
     peak_ids = list(peak_ids)
 
-    missing_peaks = [peak_id for peak_id in peak_ids if peak_id not in peak_id_to_idx]
-    if len(missing_peaks) > 0:
+    missing_peaks = [
+        peak_id for peak_id in peak_ids
+        if peak_id not in peak_id_to_idx
+    ]
+
+    if missing_peaks:
         raise KeyError(
             f"{len(missing_peaks)} peak_ids are missing from peak_id_to_idx. "
             f"Example: {missing_peaks[:5]}"
         )
 
     seq_len = 2 * flank_size
-    num_peaks = len(peak_id_to_idx)
+    num_output_peaks = len(peak_id_to_idx)
+    num_encoded_peaks = len(peak_ids)
 
     peak_onehot_array = np.zeros(
-        (num_peaks, seq_len, 4),
+        (num_output_peaks, seq_len, 4),
         dtype=dtype,
+    )
+
+    pbar_kwargs = dict(
+        total=num_encoded_peaks,
+        desc="One-hot peaks",
+        disable=not show_progress,
+        dynamic_ncols=True,
+        miniters=max(num_encoded_peaks // 1000, 1),
     )
 
     if num_workers <= 1:
         with pyfaidx.Fasta(str(genome_fasta)) as genome:
-            num_peaks = len(peak_ids)
-            min_iters = max(num_peaks // 100, 1)
-            for peak_id in tqdm(
-                peak_ids,
-                desc="Creating centered peak one-hot array",
-                disable=not show_progress,
-                ncols=100,
-            ):
+            for peak_id in tqdm(peak_ids, **pbar_kwargs):
                 peak_idx = peak_id_to_idx[peak_id]
 
-                chrom, peak_start, peak_end = parse_peak(peak_id)
+                peak_onehot_array[peak_idx] = _centered_peak_to_onehot(
+                    peak_id=peak_id,
+                    genome=genome,
+                    chrom_sizes=chrom_sizes,
+                    flank_size=flank_size,
+                    dtype=dtype,
+                    pad_out_of_bounds=pad_out_of_bounds,
+                )
 
-                if chrom not in chrom_sizes:
-                    raise KeyError(
-                        f"Chromosome {chrom!r} not found in chrom_sizes. "
-                        f"Peak: {peak_id}"
-                    )
-
-                chrom_size = chrom_sizes[chrom]
-
-                peak_center = (peak_start + peak_end) // 2
-
-                seq_start = peak_center - flank_size
-                seq_end = peak_center + flank_size
-                target_len = seq_len
-
-                fetch_start = seq_start
-                fetch_end = seq_end
-
-                left_pad = 0
-                right_pad = 0
-
-                if fetch_start < 0:
-                    left_pad = -fetch_start
-                    fetch_start = 0
-
-                if fetch_end > chrom_size:
-                    right_pad = fetch_end - chrom_size
-                    fetch_end = chrom_size
-
-                if fetch_end < fetch_start:
-                    fetch_end = fetch_start
-
-                seq = genome[chrom][fetch_start:fetch_end].seq.upper()
-
-                if pad_out_of_bounds:
-                    seq = ("N" * left_pad) + seq + ("N" * right_pad)
-
-                    if len(seq) < target_len:
-                        seq = seq + ("N" * (target_len - len(seq)))
-                    elif len(seq) > target_len:
-                        seq = seq[:target_len]
-                else:
-                    if len(seq) != target_len:
-                        raise ValueError(
-                            f"Peak {peak_id} produced sequence length {len(seq)}, "
-                            f"but expected {target_len}. Use pad_out_of_bounds=True "
-                            f"for fixed-length output."
-                        )
-
-                onehot = onehot_dna_sequence(seq).astype(dtype)
-
-                if onehot.shape != (seq_len, 4):
-                    raise ValueError(
-                        f"Peak {peak_id} produced one-hot shape {onehot.shape}, "
-                        f"but expected {(seq_len, 4)}."
-                    )
-
-                peak_onehot_array[peak_idx] = onehot
     else:
-        tasks = [
-            (peak_id, genome_fasta, chrom_sizes, flank_size, pad_out_of_bounds, dtype)
-            for peak_id in peak_ids
-        ]
-        num_peaks = len(peak_ids)
-        min_iters = max(num_peaks // 100, 1)
-        pbar = tqdm(
-            total=num_peaks,
-            desc="Creating centered peak one-hot array",
-            disable=not show_progress,
-            ncols=100,
-            miniters=min_iters,
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be > 0.")
+
+        chunk_iter = _iter_chunks(peak_ids, chunk_size)
+
+        task_iter = (
+            (
+                peak_chunk,
+                genome_fasta,
+                chrom_sizes,
+                flank_size,
+                dtype,
+                pad_out_of_bounds,
+            )
+            for peak_chunk in chunk_iter
         )
-        try:
-            with ProcessPoolExecutor(max_workers=num_workers) as executor:
-                future_to_peak = {
-                    executor.submit(_encode_centered_peak_onehot, task): task[0]
-                    for task in tasks
-                }
-                for future in as_completed(future_to_peak):
-                    peak_id, onehot = future.result()
-                    peak_idx = peak_id_to_idx[peak_id]
-                    peak_onehot_array[peak_idx] = onehot
-                    pbar.update(1)
-        finally:
-            pbar.close()
+
+        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+            encoded_chunk_iter = executor.map(
+                _encode_peak_chunk,
+                task_iter,
+                chunksize=1,
+            )
+
+            with tqdm(**pbar_kwargs) as pbar:
+                for encoded_chunk in encoded_chunk_iter:
+                    for peak_id, onehot in encoded_chunk:
+                        peak_idx = peak_id_to_idx[peak_id]
+                        peak_onehot_array[peak_idx] = onehot
+
+                    pbar.update(len(encoded_chunk))
 
     return peak_onehot_array
 
