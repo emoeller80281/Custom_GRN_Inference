@@ -7,7 +7,7 @@
 #SBATCH -N 1
 #SBATCH --gres=gpu:a100:4
 #SBATCH --ntasks-per-node=4
-#SBATCH -c 8
+#SBATCH -c 12
 #SBATCH --mem=128G
 #SBATCH --signal=SIGUSR1@90
 
@@ -85,12 +85,16 @@ echo "[INFO] Using nproc_per_node=$NPROC_PER_NODE based on GPUs per node"
 export NCCL_DEBUG=INFO
 export PYTHONFAULTHANDLER=1
 
+training_data_dir="${PROJECT_DIR}/data/training_data_cache_new"
+
 echo "[INFO] Building TF-to-DNA datasets..."
 python3 ${PROJECT_DIR}/scripts/build_tf_to_dna_train_data.py \
-    --pct_true_edges 0.25 \
+    --training_data_dir $training_data_dir \
+    --pct_true_edges 0.10 \
     --true_false_ratio 0.25
 
 srun python3 ${PROJECT_DIR}/scripts/train_tf_to_dna_model.py \
+    --training_data_dir $training_data_dir \
     --epochs 50 \
     --batch_size 256 \
     --model_dim 128 \

@@ -211,30 +211,6 @@ def create_labeled_tf_tg_dataset(
     return df
 
 
-def _create_labeled_df(
-    gt_df: pd.DataFrame, 
-    pct_true_edges: float = 0.15, 
-    true_false_ratio: float = 2.0, 
-    seed: int = 123
-    ) -> pd.DataFrame:
-    true_edges, false_edges = utils.create_true_false_edges(
-        edge_df=gt_df,
-        tf_names=tf_name_to_idx.keys(),
-        tf_col="Source",
-        item_col="Target",
-        pct_true_edges=pct_true_edges,
-        true_false_ratio=true_false_ratio,
-        seed=seed,
-    )
-    return create_labeled_tf_tg_dataset(
-        true_interactions=true_edges,
-        false_interactions=false_edges,
-        tf_name_to_idx=tf_name_to_idx,
-        tg_id_to_idx=tg_id_to_idx,
-        drop_missing=False,
-    )
-    
-
 def prepare_tftg_lookup_tables(
     peak_to_gene,
     atac_peak_map,
@@ -294,13 +270,76 @@ class TFTGEdgeBagLazyDataset(Dataset):
         self.lmdb_path = str(lmdb_path)
         self.total_edges = total_edges
         self.max_cells_per_pair = max_cells_per_pair
-        self.env = None  # Instantiated lazily per process worker
+        self.env = None
 
     def __len__(self):
         return self.total_edges
 
+    @staticmethod
+    def _repeat_edge_tensor(tensor, n_cells):
+        return tensor.unsqueeze(0).expand(n_cells, *tensor.shape)
+
+    @staticmethod
+    def _reshape_repeated_tensor(tensor, n_cells, key):
+        if tensor.shape[0] % n_cells != 0:
+            raise ValueError(
+                f"Cannot infer cell dimension for {key}: shape={tuple(tensor.shape)}, "
+                f"n_cells={n_cells}"
+            )
+        return tensor.reshape(n_cells, tensor.shape[0] // n_cells, *tensor.shape[1:])
+
+    def _normalize_cell_shapes(self, item):
+        n_cells = len(item["cell_ids"])
+
+        item["tf_embedding"] = torch.as_tensor(item["tf_embedding"], dtype=torch.float32)
+        item["tf_mask"] = torch.as_tensor(item["tf_mask"], dtype=torch.bool)
+        item["peak_sequences"] = torch.as_tensor(item["peak_sequences"], dtype=torch.float32)
+        item["peak_accessibility"] = torch.as_tensor(item["peak_accessibility"], dtype=torch.float32)
+        item["peak_distance"] = torch.as_tensor(item["peak_distance"], dtype=torch.float32)
+        item["tf_expression"] = torch.as_tensor(item["tf_expression"], dtype=torch.float32)
+        item["tg_expression"] = torch.as_tensor(item["tg_expression"], dtype=torch.float32)
+
+        if "peak_mask" in item:
+            item["peak_mask"] = torch.as_tensor(item["peak_mask"], dtype=torch.bool)
+
+        peak_count = None
+        for key in ("peak_mask", "peak_distance", "peak_accessibility"):
+            value = item.get(key)
+            if value is not None and value.ndim >= 2:
+                peak_count = value.shape[1]
+                break
+
+        if item["tf_embedding"].ndim == 2:
+            if item["tf_embedding"].shape[0] == n_cells:
+                raise ValueError(
+                    "tf_embedding is missing its token dimension: "
+                    f"shape={tuple(item['tf_embedding'].shape)}"
+                )
+            if item["tf_embedding"].shape[0] % n_cells == 0:
+                item["tf_embedding"] = self._reshape_repeated_tensor(
+                    item["tf_embedding"], n_cells, "tf_embedding"
+                )
+            else:
+                item["tf_embedding"] = self._repeat_edge_tensor(item["tf_embedding"], n_cells)
+
+        if item["tf_mask"].ndim == 1:
+            item["tf_mask"] = self._repeat_edge_tensor(item["tf_mask"], n_cells)
+
+        if item["peak_sequences"].ndim == 3:
+            if peak_count is not None and item["peak_sequences"].shape[0] == n_cells * peak_count:
+                item["peak_sequences"] = item["peak_sequences"].reshape(
+                    n_cells, peak_count, *item["peak_sequences"].shape[1:]
+                )
+            elif peak_count is not None and item["peak_sequences"].shape[0] == peak_count:
+                item["peak_sequences"] = self._repeat_edge_tensor(item["peak_sequences"], n_cells)
+            else:
+                item["peak_sequences"] = self._reshape_repeated_tensor(
+                    item["peak_sequences"], n_cells, "peak_sequences"
+                )
+
+        return item
+
     def __getitem__(self, idx):
-        # Workers open unique DB read handles safely upon target call
         if self.env is None:
             self.env = lmdb.open(
                 self.lmdb_path,
@@ -314,24 +353,25 @@ class TFTGEdgeBagLazyDataset(Dataset):
             byte_data = txn.get(str(idx).encode("ascii"))
             
         if byte_data is None:
-            raise IndexError(f"Index {idx} missing from LMDB database storage.")
+            raise IndexError(f"Index {idx} missing from LMDB storage.")
 
-        # Rehydrate specific bag slice directly from disk
         item = pickle.loads(byte_data)
+        item = self._normalize_cell_shapes(item)
 
-        # Apply your cell subset truncation constraint if required dynamically
+        # 1. Truncate cellular dimensions dynamically if constraint is active
         if self.max_cells_per_pair is not None:
             n_cells = len(item["cell_ids"])
             if self.max_cells_per_pair < n_cells:
                 item["cell_ids"] = item["cell_ids"][:self.max_cells_per_pair]
-                # Slice tensor keys accordingly
-                tensor_keys = [
+                slice_keys = [
                     "tf_embedding", "tf_mask", "peak_sequences", 
                     "peak_accessibility", "peak_mask", "peak_distance", 
                     "tf_expression", "tg_expression"
                 ]
-                for key in tensor_keys:
+                for key in slice_keys:
                     item[key] = item[key][:self.max_cells_per_pair]
+
+        item["label"] = torch.tensor(item["label"], dtype=torch.float32)
 
         return item
 
@@ -761,13 +801,13 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size for training (default: 32)")
     parser.add_argument("--pct_true_edges", type=float, default=0.15, help="Percentage of true edges to include in the training set (default: 0.15)")
     parser.add_argument("--true_false_ratio", type=float, default=2.0, help="Ratio of true to false edges in the training set (default: 2.0)")
+    parser.add_argument("--training_data_dir", type=str, required=False, help="Path to directory containing training data cache files (if not using default)")
     parser.add_argument("--checkpoint_path", type=str, required=False, help="Path to a model checkpoint to resume training from")
     parser.add_argument("--force_reload", action="store_true", help="Whether to force reload cached data instead of using existing cache files")
     args = parser.parse_args()
 
-    ckpt_path = PROJECT_DIR / "checkpoints" / "tfbind_train_3668735" / "epoch=03-val_auroc=0.9271-val_loss=0.2623.ckpt"
+    ckpt_path = PROJECT_DIR / "checkpoints" / "tfbind_train_3669315" / "epoch=05-val_auroc=0.9269-val_loss=0.2624.ckpt"
 
-    tf_name_file = DATA_DIR / "databases" / "motif_information" / "mm10" / "TF_Information_all_motifs.txt"
     gene_ref_file = DATA_DIR / "genome_data" / "genome_annotation" / "mm10" / "Mus_musculus.GRCm39.115.gtf.gz"
     genome_fasta_path = DATA_DIR / "genome_data" / "reference_genome" / "mm10" / "mm10.fa"
     chrom_sizes_path = DATA_DIR / "genome_data" / "reference_genome" / "mm10" / "mm10.chrom.sizes"
@@ -785,8 +825,14 @@ if __name__ == "__main__":
     max_cells_per_pair = args.max_cells_per_pair
     pct_true_edges = args.pct_true_edges
     true_false_ratio = args.true_false_ratio
+    training_data_dir = args.training_data_dir
 
-    training_cache_dir = PROJECT_DIR / "data" / "training_data_cache"
+    if training_data_dir:
+        training_cache_dir = Path(training_data_dir)
+    else:
+        training_cache_dir = PROJECT_DIR / "data" / "training_data_cache"
+    training_cache_dir.mkdir(exist_ok=True, parents=True)
+    
     counts_path = training_cache_dir / "tftg_lmdb_counts.json"
     if not counts_path.exists():
         raise FileNotFoundError(

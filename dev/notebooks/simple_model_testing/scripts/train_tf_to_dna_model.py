@@ -201,6 +201,7 @@ if __name__ == "__main__":
     argparser.add_argument("--num_layers", type=int, default=4, help="Number of layers in the model")
     argparser.add_argument("--run_name", type=str, required=True, default="tfbind_train", help="Name of the training run")
     argparser.add_argument("--output_dir", type=str, required=True, help="Path to save model checkpoints")
+    argparser.add_argument("--training_data_dir", type=str, required=False, help="Path to directory containing training data cache files (if not using default)")
     argparser.add_argument("--checkpoint_path", type=str, required=False, help="Path to a model checkpoint to resume training from")
     argparser.add_argument("--force_reload", action="store_true", help="Whether to force reload cached data instead of using existing cache files")
     args = argparser.parse_args()
@@ -215,8 +216,12 @@ if __name__ == "__main__":
     output_dir = args.output_dir
     checkpoint_path = args.checkpoint_path
     force_reload = args.force_reload
-    
-    training_cache_dir = PROJECT_DIR / "data" / "training_data_cache"
+    training_data_dir = args.training_data_dir
+
+    if training_data_dir:
+        training_cache_dir = Path(training_data_dir)
+    else:
+        training_cache_dir = PROJECT_DIR / "data" / "training_data_cache"
     training_cache_dir.mkdir(exist_ok=True, parents=True)
     
     # Define paths for cached data files

@@ -84,8 +84,11 @@ echo "[INFO] Using nproc_per_node=$NPROC_PER_NODE based on GPUs per node"
 export NCCL_DEBUG=INFO
 export PYTHONFAULTHANDLER=1
 
+training_data_dir="${PROJECT_DIR}/data/training_data_cache_new"
+
 echo "[INFO] Building LMDB datasets..."
 python3 ${PROJECT_DIR}/scripts/build_tf_to_tg_train_data.py \
+    --training_data_dir $training_data_dir \
     --sample_pairs 4000 \
     --max_peaks_per_tg 8 \
     --max_cells_per_pair 16 \
@@ -99,6 +102,7 @@ srun python3 ${PROJECT_DIR}/scripts/train_tf_to_tg_model.py \
     --num_nodes $SLURM_JOB_NUM_NODES \
     --run_name tf_tg_train_${SLURM_JOB_ID} \
     --output_dir ${PROJECT_DIR}/checkpoints/tf_tg_train_${SLURM_JOB_ID} \
+    --training_data_dir $training_data_dir \
     --max_peaks_per_tg 8 \
     --max_cells_per_pair 16 \
     --batch_size 4
