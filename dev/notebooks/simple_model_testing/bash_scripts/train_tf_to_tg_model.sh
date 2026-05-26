@@ -85,16 +85,16 @@ export NCCL_DEBUG=INFO
 export PYTHONFAULTHANDLER=1
 
 training_data_dir="${PROJECT_DIR}/data/training_data_cache_new"
-tf_bind_model_path="${PROJECT_DIR}/checkpoints/tfbind_train_3671604/epoch=00-val_auroc=0.8662-val_loss=0.3401.ckpt"
+tf_bind_model_path="${PROJECT_DIR}/checkpoints/tfbind_train_3671604/epoch=04-val_auroc=0.9159-val_loss=0.2798.ckpt"
 
-echo "[INFO] Building LMDB datasets..."
+echo "[INFO] Building and Caching Training Data..."
 python3 ${PROJECT_DIR}/scripts/build_tf_to_tg_train_data.py \
     --training_data_dir $training_data_dir \
-    --sample_pairs 4000 \
-    --max_peaks_per_tg 8 \
-    --max_cells_per_pair 16 \
-    --pct_true_edges 0.15 \
-    --true_false_ratio 2.0
+    --max_peaks_per_tg 64 \
+    --max_cells_per_pair 32 \
+    --pct_true_edges 1.0 \
+    --true_false_ratio 2.0 \
+    --force_reload
 
 echo "[INFO] Starting training..."
 srun python3 ${PROJECT_DIR}/scripts/train_tf_to_tg_model.py \
@@ -106,5 +106,5 @@ srun python3 ${PROJECT_DIR}/scripts/train_tf_to_tg_model.py \
     --tf_bind_model_path $tf_bind_model_path \
     --training_data_dir $training_data_dir \
     --max_peaks_per_tg 8 \
-    --max_cells_per_pair 16 \
-    --batch_size 4
+    --max_cells_per_pair 32 \
+    --batch_size 16

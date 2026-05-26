@@ -5,9 +5,9 @@ import gtfparse
 import numpy as np
 import pandas as pd
 from pathlib import Path
-import pickle
-import lmdb
 import logging
+import json
+from tqdm import tqdm
 
 import torch
 import argparse
@@ -206,9 +206,8 @@ def prepare_tftg_lookup_tables(
     return tg_to_peak_info, cell_to_idx, atac_mat, rna_mat, gene_to_rna_idx
 
 
-def build_tftg_inputs_to_lmdb(
+def build_tftg_inputs(
     tf_tg_df,
-    lmdb_path,
     max_peaks_per_tg=64,
     max_cells_per_pair=8,
     seed=123,
@@ -220,131 +219,218 @@ def build_tftg_inputs_to_lmdb(
     rna_mat,
     gene_to_rna_idx,
     common_cells,
-    atac_peak_tensor,
-    tf_embeddings_tensor,
-    tf_mask_tensor,
     tf_name_to_idx,
     tg_id_to_idx,
 ):
+    """
+    Build compact TFTGRegulationModel inputs.
+
+    This version stores indices and small numeric arrays only.
+    Large lookup tensors are retrieved lazily in Dataset.__getitem__().
+    """
+
     rng = np.random.default_rng(seed)
-    zero_fields = set(zero_fields) if zero_fields is not None else set()
+
+    tf_names = []
+    tg_names = []
+    cell_ids = []
+    labels = []
+
+    tf_indices = []
+    tg_indices = []
+    peak_indices_all = []
+
+    peak_access = []
+    peak_dist = []
+    peak_masks = []
+    tf_expr = []
+    tg_expr = []
+    peak_id_sets = []
+
+    if zero_fields is None:
+        zero_fields = set()
+    else:
+        zero_fields = set(zero_fields)
+
+    ZEROABLE_FIELDS = {
+        "tf_embedding",
+        "peak_sequences",
+        "peak_accessibility",
+        "peak_distance",
+        "tf_expression",
+        "tg_expression",
+        "tg_embedding",
+    }
+
+    invalid = zero_fields - ZEROABLE_FIELDS
+    if invalid:
+        raise ValueError(
+            f"Invalid zero_fields: {sorted(invalid)}. "
+            f"Valid options are: {sorted(ZEROABLE_FIELDS)}"
+        )
+
     common_cells = list(common_cells)
     n_common_cells = len(common_cells)
+    miniters = max(1, len(tf_tg_df) // 1000)
 
-    lmdb_path = str(lmdb_path)
-    os.makedirs(os.path.dirname(lmdb_path), exist_ok=True)
-    env = lmdb.open(lmdb_path, map_size=1099511627776, writemap=False, sync=True)
+    for _, row in tqdm(
+        tf_tg_df.iterrows(),
+        total=len(tf_tg_df),
+        ncols=100,
+        desc="Building compact TF-TG inputs",
+        miniters=miniters,
+        
+    ):
+        tf_name = row["tf_name"]
+        tg_name = row["tg_id"]
+        label = float(row["label"])
 
-    edge_counter = 0
-    with env.begin(write=True) as txn:
-        for _, row in tf_tg_df.iterrows():
-            tf_name = row["tf_name"]
-            tg_name = row["tg_id"]
-            label = float(row["label"])
+        tf_norm = str(tf_name).upper()
+        tg_norm = str(tg_name).upper()
 
-            tf_norm = str(tf_name).upper()
-            tg_norm = str(tg_name).upper()
+        tf_idx = tf_name_to_idx.get(tf_name)
+        tg_idx = tg_id_to_idx.get(tg_name)
 
-            tf_idx = tf_name_to_idx.get(tf_name)
-            tg_idx = tg_id_to_idx.get(tg_name)
-            if tf_idx is None or tg_idx is None:
-                continue
+        if tf_idx is None or tg_idx is None:
+            continue
 
-            peak_info = tg_to_peak_info.get(tg_norm)
-            if peak_info is None:
-                continue
+        peak_info = tg_to_peak_info.get(tg_norm)
+        if peak_info is None:
+            continue
 
-            peak_indices_real = peak_info["peak_indices"][:max_peaks_per_tg]
-            peak_dst_real = peak_info["peak_distances"][:max_peaks_per_tg]
-            n_peaks = len(peak_indices_real)
-            if n_peaks == 0:
-                continue
+        # -----------------------------
+        # Peak index / distance setup
+        # -----------------------------
+        peak_ids_real = list(peak_info["peak_ids"][:max_peaks_per_tg])
+        peak_indices_real = list(peak_info["peak_indices"][:max_peaks_per_tg])
+        peak_dst_real = list(peak_info["peak_distances"][:max_peaks_per_tg])
 
-            peak_seq = atac_peak_tensor[peak_indices_real]
-            peak_dst = np.asarray(peak_dst_real, dtype=np.float32)
-            peak_mask = np.ones(n_peaks, dtype=bool)
+        n_peaks = len(peak_indices_real)
+        if n_peaks == 0:
+            continue
 
-            if n_peaks < max_peaks_per_tg:
-                pad_len = max_peaks_per_tg - n_peaks
-                peak_seq = torch.nn.functional.pad(peak_seq, (0, 0, 0, 0, 0, pad_len))
-                peak_dst = np.pad(peak_dst, (0, pad_len), constant_values=0.0)
-                peak_mask = np.pad(peak_mask, (0, pad_len), constant_values=False)
+        peak_indices = np.asarray(peak_indices_real, dtype=np.int64)
+        peak_dst = np.asarray(peak_dst_real, dtype=np.float32)
+        peak_mask = np.ones(n_peaks, dtype=bool)
+        peak_ids = list(peak_ids_real)
 
-            if "peak_sequences" in zero_fields:
-                peak_seq = torch.zeros_like(peak_seq)
-            if "peak_distance" in zero_fields:
-                peak_dst = np.zeros_like(peak_dst)
+        if n_peaks < max_peaks_per_tg:
+            pad_len = max_peaks_per_tg - n_peaks
 
-            if max_cells_per_pair is None or max_cells_per_pair >= n_common_cells:
-                sampled_cells = common_cells
-            else:
-                sampled_cells = rng.choice(
-                    common_cells,
-                    size=max_cells_per_pair,
-                    replace=False,
-                ).tolist()
-
-            sampled_cell_indices = np.asarray(
-                [cell_to_idx[c] for c in sampled_cells],
-                dtype=np.int64,
+            # Use 0 as dummy padded peak index.
+            # It will be masked out by peak_mask.
+            peak_indices = np.pad(
+                peak_indices,
+                (0, pad_len),
+                constant_values=0,
             )
-            n_cells = len(sampled_cells)
 
-            peak_acc_matrix = np.zeros((n_cells, max_peaks_per_tg), dtype=np.float32)
-            if n_peaks > 0:
-                peak_acc_matrix[:, :n_peaks] = atac_mat[
-                    np.ix_(peak_indices_real, sampled_cell_indices)
-                ].T
-            if "peak_accessibility" in zero_fields:
-                peak_acc_matrix.fill(0.0)
+            peak_dst = np.pad(
+                peak_dst,
+                (0, pad_len),
+                constant_values=0.0,
+            )
 
-            tf_rna_idx = gene_to_rna_idx.get(tf_norm)
-            tg_rna_idx = gene_to_rna_idx.get(tg_norm)
+            peak_mask = np.pad(
+                peak_mask,
+                (0, pad_len),
+                constant_values=False,
+            )
 
-            if tf_rna_idx is None:
-                tf_expr_vals = np.zeros(n_cells, dtype=np.float32)
-            else:
-                tf_expr_vals = rna_mat[tf_rna_idx, sampled_cell_indices].astype(np.float32)
+            peak_ids = peak_ids + [""] * pad_len
 
-            if tg_rna_idx is None:
-                tg_expr_vals = np.zeros(n_cells, dtype=np.float32)
-            else:
-                tg_expr_vals = rna_mat[tg_rna_idx, sampled_cell_indices].astype(np.float32)
+        # -----------------------------
+        # Sample cells
+        # -----------------------------
+        if max_cells_per_pair is None or max_cells_per_pair >= n_common_cells:
+            sampled_cells = common_cells
+        else:
+            sampled_cells = rng.choice(
+                common_cells,
+                size=max_cells_per_pair,
+                replace=False,
+            ).tolist()
 
-            if "tf_expression" in zero_fields:
-                tf_expr_vals.fill(0.0)
-            if "tg_expression" in zero_fields:
-                tg_expr_vals.fill(0.0)
+        sampled_cell_indices = np.asarray(
+            [cell_to_idx[c] for c in sampled_cells],
+            dtype=np.int64,
+        )
 
-            tf_embedding_i = tf_embeddings_tensor[tf_idx]
-            if "tf_embedding" in zero_fields:
-                tf_embedding_i = torch.zeros_like(tf_embedding_i)
-            tf_mask_i = tf_mask_tensor[tf_idx]
+        # -----------------------------
+        # Vectorized ATAC accessibility
+        # -----------------------------
+        peak_acc_matrix = np.zeros(
+            (len(sampled_cell_indices), max_peaks_per_tg),
+            dtype=np.float32,
+        )
 
-            edge_data = {
-                "label": label,
-                "tf_name": tf_name,
-                "tg_name": tg_name,
-                "cell_ids": sampled_cells,
-                "tf_embedding": tf_embedding_i.unsqueeze(0).repeat(n_cells, 1, 1),
-                "tf_mask": tf_mask_i.repeat(n_cells, 1),
-                "peak_sequences": peak_seq.unsqueeze(0).repeat(n_cells, 1, 1, 1),
-                "peak_accessibility": torch.from_numpy(peak_acc_matrix),
-                "peak_mask": torch.from_numpy(peak_mask).repeat(n_cells, 1),
-                "peak_distance": torch.from_numpy(peak_dst).repeat(n_cells, 1),
-                "tf_expression": torch.from_numpy(tf_expr_vals),
-                "tg_expression": torch.from_numpy(tg_expr_vals),
-            }
+        peak_acc_matrix[:, :n_peaks] = atac_mat[
+            np.ix_(peak_indices_real, sampled_cell_indices)
+        ].T
 
-            txn.put(str(edge_counter).encode("ascii"), pickle.dumps(edge_data))
-            edge_counter += 1
+        # -----------------------------
+        # Vectorized RNA expression
+        # -----------------------------
+        tf_rna_idx = gene_to_rna_idx.get(tf_norm)
+        tg_rna_idx = gene_to_rna_idx.get(tg_norm)
 
-    env.close()
-    if edge_counter == 0:
-        raise ValueError("No TF-TG examples were created.")
+        if tf_rna_idx is None:
+            tf_expr_vals = np.zeros(len(sampled_cell_indices), dtype=np.float32)
+        else:
+            tf_expr_vals = rna_mat[tf_rna_idx, sampled_cell_indices].astype(np.float32)
 
-    logging.info(f"LMDB dataset saved at {lmdb_path} containing {edge_counter} unique edge bags.")
-    return edge_counter
+        if tg_rna_idx is None:
+            tg_expr_vals = np.zeros(len(sampled_cell_indices), dtype=np.float32)
+        else:
+            tg_expr_vals = rna_mat[tg_rna_idx, sampled_cell_indices].astype(np.float32)
+
+        # -----------------------------
+        # Append one row per sampled cell
+        # -----------------------------
+        for j, cell_id in enumerate(sampled_cells):
+            tf_indices.append(tf_idx)
+            tg_indices.append(tg_idx)
+            peak_indices_all.append(peak_indices)
+
+            peak_access.append(peak_acc_matrix[j])
+            peak_dist.append(peak_dst)
+            peak_masks.append(peak_mask)
+
+            tf_expr.append(float(tf_expr_vals[j]))
+            tg_expr.append(float(tg_expr_vals[j]))
+
+            peak_id_sets.append(peak_ids)
+            tf_names.append(tf_name)
+            tg_names.append(tg_name)
+            cell_ids.append(cell_id)
+            labels.append(label)
+
+    if len(labels) == 0:
+        raise ValueError(
+            "No TF-TG examples were created. Check TF/TG IDs, peak-to-gene mapping, "
+            "and overlap with ATAC/RNA matrices."
+        )
+
+    return {
+        "tf_name": tf_names,
+        "tg_name": tg_names,
+        "cell_id": cell_ids,
+        "peak_ids": peak_id_sets,
+
+        "label": torch.tensor(labels, dtype=torch.float32),
+
+        # Compact indices
+        "tf_idx": torch.tensor(tf_indices, dtype=torch.long),
+        "tg_idx": torch.tensor(tg_indices, dtype=torch.long),
+        "peak_indices": torch.tensor(np.stack(peak_indices_all), dtype=torch.long),
+
+        # Small per-cell/per-edge tensors
+        "peak_accessibility": torch.tensor(np.stack(peak_access), dtype=torch.float32),
+        "peak_mask": torch.tensor(np.stack(peak_masks), dtype=torch.bool),
+        "peak_distance": torch.tensor(np.stack(peak_dist), dtype=torch.float32),
+        "tf_expression": torch.tensor(tf_expr, dtype=torch.float32),
+        "tg_expression": torch.tensor(tg_expr, dtype=torch.float32),
+    }
 
 
 def main():
@@ -355,17 +441,17 @@ def main():
     parser.add_argument("--max_cells_per_pair", type=int, default=8)
     parser.add_argument("--pct_true_edges", type=float, default=0.15)
     parser.add_argument("--true_false_ratio", type=float, default=2.0)
-    parser.add_argument("--force_rebuild", action="store_true")
+    parser.add_argument("--force_reload", action="store_true")
     args = parser.parse_args()
     
     # Create the training cache directory if it doesn't exist
     training_data_dir = args.training_data_dir
 
     if training_data_dir:
-        training_cache_dir = Path(training_data_dir)
+        tf_tg_input_cache_dir = Path(training_data_dir)
     else:
-        training_cache_dir = PROJECT_DIR / "data" / "training_data_cache"
-    training_cache_dir.mkdir(exist_ok=True, parents=True)
+        tf_tg_input_cache_dir = PROJECT_DIR / "data" / "training_data_cache"
+    tf_tg_input_cache_dir.mkdir(exist_ok=True, parents=True)
 
     gene_ref_file = DATA_DIR / "genome_data" / "genome_annotation" / "mm10" / "Mus_musculus.GRCm39.115.gtf.gz"
     genome_fasta_path = DATA_DIR / "genome_data" / "reference_genome" / "mm10" / "mm10.fa"
@@ -389,7 +475,7 @@ def main():
         rn116_file,
     ])
 
-    tf_name_to_idx_cache_path = training_cache_dir / "tf_name_to_idx.csv"
+    tf_name_to_idx_cache_path = tf_tg_input_cache_dir / "tf_name_to_idx.csv"
     tf_name_to_idx = pd.read_csv(tf_name_to_idx_cache_path).set_index("tf_name")["tf_idx"].to_dict()
     tg_id_to_idx = {tg: idx for idx, tg in enumerate(merged_ground_truth_df["Target"].unique())}
 
@@ -428,9 +514,9 @@ def main():
     dataset_peaks = [peak for peak in dataset_peaks if peak.split(":", 1)[0] in valid_chroms]
     atac_peak_map = {peak: idx for idx, peak in enumerate(dataset_peaks)}
 
-    tf_embedding_cache_path = training_cache_dir / "tf_embeddings.pt"
-    tf_mask_cache_path = training_cache_dir / "tf_masks.pt"
-    atac_peak_onehot_cache_path = training_cache_dir / "atac_peak_onehot_array.pt"
+    tf_embedding_cache_path = tf_tg_input_cache_dir / "tf_embeddings.pt"
+    tf_mask_cache_path = tf_tg_input_cache_dir / "tf_masks.pt"
+    atac_peak_onehot_cache_path = tf_tg_input_cache_dir / "atac_peak_onehot_array.pt"
 
     tf_embeddings_tensor = torch.load(tf_embedding_cache_path)
     tf_mask_tensor = torch.load(tf_mask_cache_path)
@@ -489,8 +575,8 @@ def main():
     tf_tg_test_subset = _sample_df(tf_tg_labeled_test_df, n=args.sample_pairs // 4, seed=123)
 
     common_build_kwargs = dict(
-        max_peaks_per_tg=args.max_peaks_per_tg,
-        max_cells_per_pair=args.max_cells_per_pair,
+        max_peaks_per_tg=8,
+        max_cells_per_pair=16,
         zero_fields=None,
         tg_to_peak_info=tg_to_peak_info,
         cell_to_idx=cell_to_idx,
@@ -498,39 +584,86 @@ def main():
         rna_mat=rna_mat,
         gene_to_rna_idx=gene_to_rna_idx,
         common_cells=common_cells,
-        atac_peak_tensor=atac_peak_tensor,
-        tf_embeddings_tensor=tf_embeddings_tensor,
-        tf_mask_tensor=tf_mask_tensor,
         tf_name_to_idx=tf_name_to_idx,
         tg_id_to_idx=tg_id_to_idx,
     )
 
-    train_file = training_cache_dir / "tf_to_tg_training_data" / "train.lmdb"
-    val_file = training_cache_dir / "tf_to_tg_training_data" / "val.lmdb"
-    test_file = training_cache_dir / "tf_to_tg_training_data" / "test.lmdb"
-    if all(f.exists() for f in [train_file, val_file, test_file]) and not args.force_rebuild:
+    train_file = tf_tg_input_cache_dir / "tf_to_tg_training_data" / "train.lmdb"
+    val_file = tf_tg_input_cache_dir / "tf_to_tg_training_data" / "val.lmdb"
+    test_file = tf_tg_input_cache_dir / "tf_to_tg_training_data" / "test.lmdb"
+    if all(f.exists() for f in [train_file, val_file, test_file]) and not args.force_reload:
         logging.info("LMDB files already exist. Skipping LMDB creation.")
         return
- 
-    logging.info("Writing training data to LMDB...")
-    train_count = build_tftg_inputs_to_lmdb(
-        tf_tg_train_subset, train_file, seed=123, **common_build_kwargs
-    )
-    logging.info("Writing validation data to LMDB...")
-    val_count = build_tftg_inputs_to_lmdb(
-        tf_tg_val_subset, val_file, seed=124, **common_build_kwargs
-    )
-    logging.info("Writing test data to LMDB...")
-    test_count = build_tftg_inputs_to_lmdb(
-        tf_tg_test_subset, test_file, seed=125, **common_build_kwargs
+    
+    logging.info("Building training inputs")
+    tftg_inputs_train = build_tftg_inputs(
+        tf_tg_train_subset,
+        seed=123,
+        **common_build_kwargs,
     )
 
-    counts_path = training_cache_dir / "tftg_lmdb_counts.json"
-    counts_path.parent.mkdir(parents=True, exist_ok=True)
-    with counts_path.open("w", encoding="utf-8") as handle:
-        json.dump({"train": train_count, "val": val_count, "test": test_count}, handle, indent=2)
+    logging.info("Building validation inputs")
+    tftg_inputs_val = build_tftg_inputs(
+        tf_tg_val_subset,
+        seed=124,
+        **common_build_kwargs,
+    )
 
-    logging.info(f"Wrote LMDB counts to {counts_path}")
+    logging.info("Building test inputs")
+    tftg_inputs_test = build_tftg_inputs(
+        tf_tg_test_subset,
+        seed=125,
+        **common_build_kwargs,
+    )
+
+
+    tf_tg_input_cache_dir = (
+        tf_tg_input_cache_dir
+        / "tf_tg_training_data_cache"
+    )
+
+    tf_tg_input_cache_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save compact split inputs
+    torch.save(tftg_inputs_train, tf_tg_input_cache_dir / "tftg_inputs_train.pt")
+    torch.save(tftg_inputs_val, tf_tg_input_cache_dir / "tftg_inputs_val.pt")
+    torch.save(tftg_inputs_test, tf_tg_input_cache_dir / "tftg_inputs_test.pt")
+
+    # Save lookup tensors
+    torch.save(atac_peak_tensor, tf_tg_input_cache_dir / "atac_peak_tensor.pt")
+
+    # Save mapping dictionaries and metadata
+    metadata = {
+        "tf_name_to_idx": tf_name_to_idx,
+        "tg_id_to_idx": tg_id_to_idx,
+        "gene_to_rna_idx": gene_to_rna_idx,
+        "cell_to_idx": cell_to_idx,
+        "max_peaks_per_tg": 8,
+        "max_cells_per_pair": 16,
+        "flank_size": 64,
+        "peak_dtype": "uint8",
+    }
+    with open(tf_tg_input_cache_dir / "metadata.json", "w") as f:
+        json.dump(metadata, f, indent=4)
+
+    # Save a manifest to keep track of model settings and dataset versions
+    manifest = {
+        "max_peaks_per_tg": 8,
+        "max_cells_per_pair": 16,
+        "flank_size": 64,
+        "atac_peak_tensor_dtype": str(atac_peak_tensor.dtype),
+        "atac_peak_tensor_shape": list(atac_peak_tensor.shape),
+        "tf_embeddings_tensor_shape": list(tf_embeddings_tensor.shape),
+        "tf_mask_tensor_shape": list(tf_mask_tensor.shape),
+        "n_train_rows": int(len(tftg_inputs_train["label"])),
+        "n_val_rows": int(len(tftg_inputs_val["label"])),
+        "n_test_rows": int(len(tftg_inputs_test["label"])),
+    }
+
+    with open(tf_tg_input_cache_dir / "manifest.json", "w") as f:
+        json.dump(manifest, f, indent=2)
+
+    logging.info(f"Wrote training data and metadata to {tf_tg_input_cache_dir}")
 
 
 if __name__ == "__main__":

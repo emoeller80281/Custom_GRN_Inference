@@ -6,8 +6,6 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 import json
-import pickle
-import lmdb
 import logging
 from collections import defaultdict
 from sklearn.metrics import (
@@ -265,120 +263,212 @@ def prepare_tftg_lookup_tables(
 
     return tg_to_peak_info, cell_to_idx, atac_mat, rna_mat, gene_to_rna_idx
 
-class TFTGEdgeBagLazyDataset(Dataset):
-    def __init__(self, lmdb_path, total_edges, max_cells_per_pair=None):
-        self.lmdb_path = str(lmdb_path)
-        self.total_edges = total_edges
+class TFTGEdgeBagDataset(Dataset):
+    def __init__(
+        self,
+        inputs,
+        *,
+        tf_embeddings_tensor,
+        tf_mask_tensor,
+        atac_peak_tensor,
+        tg_embedding_table,
+        max_cells_per_pair=None,
+        zero_fields=None,
+        strict=True,
+    ):
+        """
+        Groups rows from build_tftg_inputs() by (tf_name, tg_name).
+
+        Each item is one TF-TG edge bag containing multiple sampled cells.
+        Large tensors are gathered lazily using compact indices.
+        """
+
+        self.inputs = inputs
+        self.tf_embeddings_tensor = tf_embeddings_tensor
+        self.tf_mask_tensor = tf_mask_tensor
+        self.atac_peak_tensor = atac_peak_tensor
+        self.tg_embedding_table = tg_embedding_table
         self.max_cells_per_pair = max_cells_per_pair
-        self.env = None
+
+        if zero_fields is None:
+            zero_fields = set()
+        else:
+            zero_fields = set(zero_fields)
+
+        self.zero_fields = zero_fields
+
+        required_list_keys = [
+            "tf_name",
+            "tg_name",
+            "cell_id",
+        ]
+
+        required_tensor_keys = [
+            "label",
+            "tf_idx",
+            "tg_idx",
+            "peak_indices",
+            "peak_accessibility",
+            "peak_distance",
+            "peak_mask",
+            "tf_expression",
+            "tg_expression",
+        ]
+
+        lengths = {}
+
+        for key in required_list_keys:
+            lengths[key] = len(inputs[key])
+
+        for key in required_tensor_keys:
+            lengths[key] = inputs[key].shape[0]
+
+        unique_lengths = sorted(set(lengths.values()))
+
+        if len(unique_lengths) != 1:
+            msg = "\n".join(
+                [f"{key:20s}: {length}" for key, length in lengths.items()]
+            )
+
+            if strict:
+                raise ValueError(
+                    "Input fields have inconsistent first-dimension lengths:\n"
+                    f"{msg}\n\n"
+                    "This usually means one of the lists was appended without "
+                    "a matching tensor row, or tensors were filtered after metadata "
+                    "was created."
+                )
+            else:
+                self.n_rows = min(unique_lengths)
+                print(
+                    "WARNING: Input fields have inconsistent lengths. "
+                    f"Using first {self.n_rows} rows only.\n{msg}"
+                )
+        else:
+            self.n_rows = unique_lengths[0]
+
+        groups = defaultdict(list)
+
+        for i in range(self.n_rows):
+            tf = inputs["tf_name"][i]
+            tg = inputs["tg_name"][i]
+            groups[(tf, tg)].append(i)
+
+        self.edge_keys = list(groups.keys())
+        self.groups = [
+            torch.tensor(v, dtype=torch.long)
+            for v in groups.values()
+        ]
 
     def __len__(self):
-        return self.total_edges
+        return len(self.groups)
 
-    @staticmethod
-    def _repeat_edge_tensor(tensor, n_cells):
-        return tensor.unsqueeze(0).expand(n_cells, *tensor.shape)
-
-    @staticmethod
-    def _reshape_repeated_tensor(tensor, n_cells, key):
-        if tensor.shape[0] % n_cells != 0:
-            raise ValueError(
-                f"Cannot infer cell dimension for {key}: shape={tuple(tensor.shape)}, "
-                f"n_cells={n_cells}"
-            )
-        return tensor.reshape(n_cells, tensor.shape[0] // n_cells, *tensor.shape[1:])
-
-    def _normalize_cell_shapes(self, item):
-        n_cells = len(item["cell_ids"])
-
-        item["tf_embedding"] = torch.as_tensor(item["tf_embedding"], dtype=torch.float32)
-        item["tf_mask"] = torch.as_tensor(item["tf_mask"], dtype=torch.bool)
-        item["peak_sequences"] = torch.as_tensor(item["peak_sequences"], dtype=torch.float32)
-        item["peak_accessibility"] = torch.as_tensor(item["peak_accessibility"], dtype=torch.float32)
-        item["peak_distance"] = torch.as_tensor(item["peak_distance"], dtype=torch.float32)
-        item["tf_expression"] = torch.as_tensor(item["tf_expression"], dtype=torch.float32)
-        item["tg_expression"] = torch.as_tensor(item["tg_expression"], dtype=torch.float32)
-
-        if "peak_mask" in item:
-            item["peak_mask"] = torch.as_tensor(item["peak_mask"], dtype=torch.bool)
-
-        peak_count = None
-        for key in ("peak_mask", "peak_distance", "peak_accessibility"):
-            value = item.get(key)
-            if value is not None and value.ndim >= 2:
-                peak_count = value.shape[1]
-                break
-
-        if item["tf_embedding"].ndim == 2:
-            if item["tf_embedding"].shape[0] == n_cells:
-                raise ValueError(
-                    "tf_embedding is missing its token dimension: "
-                    f"shape={tuple(item['tf_embedding'].shape)}"
-                )
-            if item["tf_embedding"].shape[0] % n_cells == 0:
-                item["tf_embedding"] = self._reshape_repeated_tensor(
-                    item["tf_embedding"], n_cells, "tf_embedding"
-                )
-            else:
-                item["tf_embedding"] = self._repeat_edge_tensor(item["tf_embedding"], n_cells)
-
-        if item["tf_mask"].ndim == 1:
-            item["tf_mask"] = self._repeat_edge_tensor(item["tf_mask"], n_cells)
-
-        if item["peak_sequences"].ndim == 3:
-            if peak_count is not None and item["peak_sequences"].shape[0] == n_cells * peak_count:
-                item["peak_sequences"] = item["peak_sequences"].reshape(
-                    n_cells, peak_count, *item["peak_sequences"].shape[1:]
-                )
-            elif peak_count is not None and item["peak_sequences"].shape[0] == peak_count:
-                item["peak_sequences"] = self._repeat_edge_tensor(item["peak_sequences"], n_cells)
-            else:
-                item["peak_sequences"] = self._reshape_repeated_tensor(
-                    item["peak_sequences"], n_cells, "peak_sequences"
-                )
-
-        return item
+    def _maybe_zero(self, name, tensor):
+        if name in self.zero_fields:
+            return torch.zeros_like(tensor)
+        return tensor
 
     def __getitem__(self, idx):
-        if self.env is None:
-            self.env = lmdb.open(
-                self.lmdb_path,
-                readonly=True,
-                lock=False,
-                readahead=False,
-                meminit=False
-            )
+        row_idx = self.groups[idx]
 
-        with self.env.begin(write=False) as txn:
-            byte_data = txn.get(str(idx).encode("ascii"))
-            
-        if byte_data is None:
-            raise IndexError(f"Index {idx} missing from LMDB storage.")
-
-        item = pickle.loads(byte_data)
-        item = self._normalize_cell_shapes(item)
-
-        # 1. Truncate cellular dimensions dynamically if constraint is active
         if self.max_cells_per_pair is not None:
-            n_cells = len(item["cell_ids"])
-            if self.max_cells_per_pair < n_cells:
-                item["cell_ids"] = item["cell_ids"][:self.max_cells_per_pair]
-                slice_keys = [
-                    "tf_embedding", "tf_mask", "peak_sequences", 
-                    "peak_accessibility", "peak_mask", "peak_distance", 
-                    "tf_expression", "tg_expression"
-                ]
-                for key in slice_keys:
-                    item[key] = item[key][:self.max_cells_per_pair]
+            row_idx = row_idx[: self.max_cells_per_pair]
 
-        item["label"] = torch.tensor(item["label"], dtype=torch.float32)
+        row_idx_list = row_idx.tolist()
+
+        label = self.inputs["label"][row_idx[0]]
+
+        # These should be constant within a TF-TG edge bag
+        tf_idx = self.inputs["tf_idx"][row_idx[0]]
+        tg_idx = self.inputs["tg_idx"][row_idx[0]]
+
+        # Gather large static lookup tensors once per edge bag
+        tf_embedding = self.tf_embeddings_tensor[tf_idx]
+        tf_mask = self.tf_mask_tensor[tf_idx]
+
+        # TG embedding from embedding table
+        # Keep this on CPU for DataLoader collation.
+        with torch.no_grad():
+            tg_embedding = self.tg_embedding_table(
+                tg_idx.to(self.tg_embedding_table.weight.device).view(1)
+            ).squeeze(0).detach().cpu()
+
+        # Small per-cell tensors
+        peak_indices = self.inputs["peak_indices"][row_idx]          # [C, P]
+        peak_accessibility = self.inputs["peak_accessibility"][row_idx]  # [C, P]
+        peak_distance = self.inputs["peak_distance"][row_idx]        # [C, P]
+        peak_mask = self.inputs["peak_mask"][row_idx]                # [C, P]
+        tf_expression = self.inputs["tf_expression"][row_idx]        # [C]
+        tg_expression = self.inputs["tg_expression"][row_idx]        # [C]
+
+        # Gather peak sequences lazily
+        # atac_peak_tensor is probably uint8: [n_peaks, seq_len, 4]
+        # peak_sequences: [C, P, seq_len, 4]
+        peak_sequences = self.atac_peak_tensor[peak_indices]
+
+        # Repeat static TF/TG features across cells because your current collate/model
+        # expect a cell dimension on every field.
+        n_cells = row_idx.shape[0]
+
+        tf_embedding = tf_embedding.unsqueeze(0).expand(n_cells, -1, -1)
+        tf_mask = tf_mask.unsqueeze(0).expand(n_cells, -1)
+        tg_embedding = tg_embedding.unsqueeze(0).expand(n_cells, -1)
+
+        item = {
+            "label": label,
+            "tf_name": self.edge_keys[idx][0],
+            "tg_name": self.edge_keys[idx][1],
+            "cell_ids": [
+                self.inputs["cell_id"][i]
+                for i in row_idx_list
+            ],
+
+            "tf_idx": tf_idx,
+            "tg_idx": tg_idx,
+            "peak_indices": peak_indices,
+
+            "tf_embedding": self._maybe_zero(
+                "tf_embedding",
+                tf_embedding.float(),
+            ),
+            "tf_mask": tf_mask.bool(),
+
+            "peak_sequences": self._maybe_zero(
+                "peak_sequences",
+                peak_sequences.float(),
+            ),
+            "peak_accessibility": self._maybe_zero(
+                "peak_accessibility",
+                peak_accessibility.float(),
+            ),
+            "peak_distance": self._maybe_zero(
+                "peak_distance",
+                peak_distance.float(),
+            ),
+            "peak_mask": peak_mask.bool(),
+
+            "tf_expression": self._maybe_zero(
+                "tf_expression",
+                tf_expression.float(),
+            ),
+            "tg_expression": self._maybe_zero(
+                "tg_expression",
+                tg_expression.float(),
+            ),
+            "tg_embedding": self._maybe_zero(
+                "tg_embedding",
+                tg_embedding.float(),
+            ),
+        }
 
         return item
-
-
-
+        
 def collate_tftg_edge_bags(batch):
-    labels = torch.stack([b["label"] for b in batch]).float()
+    """
+    Pads each TF-TG edge bag to the max number of cells in the batch.
+    """
+
+    labels = torch.stack([b["label"] for b in batch]).float()  # [E]
 
     max_cells = max(b["tf_expression"].shape[0] for b in batch)
     batch_size = len(batch)
@@ -391,6 +481,8 @@ def collate_tftg_edge_bags(batch):
         "tf_name": [b["tf_name"] for b in batch],
         "tg_name": [b["tg_name"] for b in batch],
         "cell_ids": [b["cell_ids"] for b in batch],
+        "tf_idx": torch.stack([b["tf_idx"] for b in batch]).long(),
+        "tg_idx": torch.stack([b["tg_idx"] for b in batch]).long(),
     }
 
     tensor_keys = [
@@ -399,12 +491,12 @@ def collate_tftg_edge_bags(batch):
         "peak_sequences",
         "peak_accessibility",
         "peak_distance",
+        "peak_mask",
         "tf_expression",
         "tg_expression",
+        "tg_embedding",
+        "peak_indices",
     ]
-
-    if "peak_mask" in batch[0]:
-        tensor_keys.append("peak_mask")
 
     for key in tensor_keys:
         example = batch[0][key]
@@ -414,11 +506,15 @@ def collate_tftg_edge_bags(batch):
         for i, b in enumerate(batch):
             n_cells = b[key].shape[0]
             padded[i, :n_cells] = b[key]
-            cell_mask[i, :n_cells] = True
 
         output[key] = padded
 
+    for i, b in enumerate(batch):
+        n_cells = b["tf_expression"].shape[0]
+        cell_mask[i, :n_cells] = True
+
     return output
+        
         
 @torch.no_grad()
 def _move_batch_to_device(batch, device):
@@ -833,35 +929,69 @@ if __name__ == "__main__":
         training_cache_dir = PROJECT_DIR / "data" / "training_data_cache"
     training_cache_dir.mkdir(exist_ok=True, parents=True)
     
-    counts_path = training_cache_dir / "tftg_lmdb_counts.json"
-    if not counts_path.exists():
-        raise FileNotFoundError(
-            "LMDB counts file not found. Run build_tf_to_tg_train_data.py first: "
-            f"{counts_path}"
-        )
+    tf_tg_input_cache_dir = training_cache_dir / "tf_to_tg_training_data"
+    
+    # Load the compact split inputs
+    tftg_inputs_train = torch.load(tf_tg_input_cache_dir / "tftg_inputs_train.pt")
+    tftg_inputs_val = torch.load(tf_tg_input_cache_dir / "tftg_inputs_val.pt")
+    tftg_inputs_test = torch.load(tf_tg_input_cache_dir / "tftg_inputs_test.pt")
 
-    with counts_path.open("r", encoding="utf-8") as handle:
-        counts = json.load(handle)
+    # Load the lookup tensors
+    tf_embeddings_tensor = torch.load(training_cache_dir / "tf_embeddings.pt")
+    tf_mask_tensor = torch.load(training_cache_dir / "tf_masks.pt")
+    atac_peak_tensor = torch.load(tf_tg_input_cache_dir / "atac_peak_tensor.pt")
+
+    # Load the metadata
+    with open(tf_tg_input_cache_dir / "metadata.json", "r") as f:
+        metadata = json.load(f)
         
-    train_file = training_cache_dir / "tf_to_tg_training_data" / "train.lmdb"
-    val_file = training_cache_dir / "tf_to_tg_training_data" / "val.lmdb"
-    test_file = training_cache_dir / "tf_to_tg_training_data" / "test.lmdb"
+    tf_name_to_idx = metadata["tf_name_to_idx"]
+    tg_id_to_idx = metadata["tg_id_to_idx"]
 
-    train_dataset = TFTGEdgeBagLazyDataset(
-        train_file,
-        total_edges=counts["train"],
-        max_cells_per_pair=max_cells_per_pair,
+    # Load the manifest and verify tensor shapes and dtypes match expectations
+    with open(tf_tg_input_cache_dir / "manifest.json") as f:
+        manifest = json.load(f)
+
+    print(json.dumps(manifest, indent=2))
+
+    assert tuple(manifest["atac_peak_tensor_shape"]) == tuple(atac_peak_tensor.shape)
+    assert manifest["atac_peak_tensor_dtype"] == str(atac_peak_tensor.dtype)
+    
+    tg_embedding_table = torch.nn.Embedding(len(tg_id_to_idx), 128)
+
+    # Re-create the datasets and dataloaders using the loaded compact inputs and lookup tensors
+    train_dataset = TFTGEdgeBagDataset(
+        tftg_inputs_train,
+        tf_embeddings_tensor=tf_embeddings_tensor,
+        tf_mask_tensor=tf_mask_tensor,
+        atac_peak_tensor=atac_peak_tensor,
+        tg_embedding_table=tg_embedding_table,
+        zero_fields=None,
+        strict=True,
     )
-    val_dataset = TFTGEdgeBagLazyDataset(
-        val_file,
-        total_edges=counts["val"],
-        max_cells_per_pair=max_cells_per_pair,
+
+    val_dataset = TFTGEdgeBagDataset(
+        tftg_inputs_val,
+        tf_embeddings_tensor=tf_embeddings_tensor,
+        tf_mask_tensor=tf_mask_tensor,
+        atac_peak_tensor=atac_peak_tensor,
+        tg_embedding_table=tg_embedding_table,
+        zero_fields=None,
+        strict=True,
     )
-    test_dataset = TFTGEdgeBagLazyDataset(
-        test_file,
-        total_edges=counts["test"],
-        max_cells_per_pair=max_cells_per_pair,
+
+    test_dataset = TFTGEdgeBagDataset(
+        tftg_inputs_test,
+        tf_embeddings_tensor=tf_embeddings_tensor,
+        tf_mask_tensor=tf_mask_tensor,
+        atac_peak_tensor=atac_peak_tensor,
+        tg_embedding_table=tg_embedding_table,
+        zero_fields=None,
+        strict=True,
     )
+
+    if atac_peak_tensor.dtype == torch.uint8:
+        atac_peak_tensor = atac_peak_tensor.float()
 
     # Create the DataLoaders with the custom collate function for batching edge bags
     train_loader = DataLoader(
