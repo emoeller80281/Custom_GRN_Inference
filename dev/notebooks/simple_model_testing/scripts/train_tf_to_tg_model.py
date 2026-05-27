@@ -7,6 +7,7 @@ import pandas as pd
 from pathlib import Path
 import json
 import logging
+import warnings
 from collections import defaultdict
 from sklearn.metrics import (
     roc_auc_score,
@@ -21,6 +22,7 @@ from tqdm import tqdm
 import pytorch_lightning as pl
 from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping, LearningRateMonitor, TQDMProgressBar
 from lightning.pytorch.loggers import WandbLogger
+from pytorch_lightning.utilities import rank_zero_only
 
 DATA_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data")
 PROJECT_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/dev/notebooks/simple_model_testing")
@@ -28,10 +30,20 @@ sys.path.append(str(PROJECT_DIR))
 
 import models.tf_to_tg as tf_to_tg_module
 import models.tf_to_dna as tf_to_dna_module
-import utils
 import argparse
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
+warnings.filterwarnings(
+    "ignore",
+    message="This DataLoader will create .* worker processes in total\.",
+    category=UserWarning,
+    module="torch.utils.data.dataloader",
+)
+
+@rank_zero_only
+def log_once(msg: str) -> None:
+    logging.info(msg)
 
 def create_new_tf_tg_binding_model(tf_bind_model_path: Path) -> tf_to_tg_module.TFTGRegulationModel:
     # 1) Recreate the base TF→DNA model with the same hyperparameters
@@ -53,7 +65,11 @@ def create_new_tf_tg_binding_model(tf_bind_model_path: Path) -> tf_to_tg_module.
         pos_weight=None,
     )
 
-    state = torch.load(tf_bind_model_path, map_location="cpu")
+    state = torch.load(
+        tf_bind_model_path,
+        map_location="cpu",
+        weights_only=False,
+    )
     lit_model.load_state_dict(state["state_dict"], strict=True)
 
     # 3) Get the trained base model and freeze it
@@ -71,198 +87,6 @@ def create_new_tf_tg_binding_model(tf_bind_model_path: Path) -> tf_to_tg_module.
     
     return tf_tg_model
 
-def load_ground_truth(ground_truth_file: Path | str) -> pd.DataFrame:
-    if type(ground_truth_file) == str:
-        ground_truth_file = Path(ground_truth_file)
-        
-    logging.info(f"Loading ground truth file: {ground_truth_file.name}")
-
-    if ground_truth_file.suffix == ".csv":
-        sep = ","
-    elif ground_truth_file.suffix == ".tsv":
-        sep="\t"
-        
-    ground_truth_df = pd.read_csv(ground_truth_file, sep=sep, on_bad_lines="skip", engine="python")
-    
-    if "chip" in ground_truth_file.name and "atlas" in ground_truth_file.name:
-        ground_truth_df = ground_truth_df[["source_id", "target_id"]]
-
-    if ground_truth_df.columns[0] != "Source" or ground_truth_df.columns[1] != "Target":
-        ground_truth_df = ground_truth_df.rename(columns={ground_truth_df.columns[0]: "Source", ground_truth_df.columns[1]: "Target"})
-    ground_truth_df["Source"] = ground_truth_df["Source"].astype(str).str.capitalize()
-    ground_truth_df["Target"] = ground_truth_df["Target"].astype(str).str.capitalize()
-    
-    # Build TF, TG, and edge sets for quick lookup later
-    gt = ground_truth_df[["Source", "Target"]].dropna()
-
-    return gt
-
-def split_genes_by_chromosome(gene_reference_file: Path):
-    gene_ref_df = gtfparse.read_gtf(
-        gene_reference_file,
-        result_type="pandas"
-        )
-        
-    gene_chrom = gene_ref_df[["seqname", "gene_name"]].rename(columns={"seqname": "chrom", "gene_name": "TG"})
-    gene_chrom["chrom"] = gene_chrom["chrom"]
-    gene_chrom["TG"] = gene_chrom["TG"]
-    # gene_chrom = gene_chrom[gene_chrom["TG"].str.upper().isin(dataset_tgs)]
-
-    # Train set: genes on chromosomes 1 - 15
-    train_genes = gene_chrom[gene_chrom["chrom"].isin([str(i) for i in range(1, 16)])]["TG"].unique()
-    logging.info(f"Train set: {len(train_genes)} genes")
-
-    # Validation set: genes on chromosomes 16 - 18
-    val_genes = gene_chrom[gene_chrom["chrom"].isin([str(i) for i in range(16, 19)])]["TG"].unique()
-    logging.info(f"Validation set: {len(val_genes)} genes")
-
-    # Test set: genes on chromosome 19
-    test_genes = gene_chrom[gene_chrom["chrom"].isin([str(19)])]["TG"].unique()
-    logging.info(f"Test set: {len(test_genes)} genes")
-    
-    return train_genes, val_genes, test_genes
-
-def create_train_val_test_splits(ground_truth_df: pd.DataFrame, train_genes: np.ndarray, val_genes: np.ndarray, test_genes: np.ndarray):
-    # Create train/val/test splits of the ground truth based on the TG's chromosome
-    train_genes_set = set(train_genes)
-    val_genes_set = set(val_genes)
-    test_genes_set = set(test_genes)
-
-    gt_train_df = ground_truth_df[ground_truth_df["Target"].isin(train_genes_set)].copy()
-    gt_val_df = ground_truth_df[ground_truth_df["Target"].isin(val_genes_set)].copy()
-    gt_test_df = ground_truth_df[ground_truth_df["Target"].isin(test_genes_set)].copy()
-
-    logging.info(f"Train interactions: {len(gt_train_df)}")
-    logging.info(f"Validation interactions: {len(gt_val_df)}")
-    logging.info(f"Test interactions: {len(gt_test_df)}")
-
-    return gt_train_df, gt_val_df, gt_test_df
-
-def load_ground_truth_files(gt_path_list: list[Path]) -> pd.DataFrame:
-    gt_dfs = []
-    for gt_path in gt_path_list:
-        gt_df = load_ground_truth(gt_path)
-        gt_dfs.append(gt_df)
-    merged_gt_df = pd.concat(gt_dfs, ignore_index=True)
-    return merged_gt_df
-
-def create_labeled_tf_tg_dataset(
-    true_interactions: set[tuple[str, str]],
-    false_interactions: set[tuple[str, str]],
-    tf_name_to_idx: dict[str, int],
-    tg_id_to_idx: dict[str, int],
-    drop_missing: bool = True,
-) -> pd.DataFrame:
-    """
-    Create a labeled TF-TG interaction dataset.
-
-    Labels:
-        true interactions  -> 1
-        false interactions -> 0
-
-    Returns
-    -------
-    pd.DataFrame with columns:
-        tf_name, tg_id, tf_idx, tg_idx, label
-    """
-
-    rows = []
-
-    # Create rows for true interactions with label 1
-    for tf, tg in true_interactions:
-        rows.append((tf, tg, 1))
-
-    # Create rows for false interactions with label 0
-    for tf, tg in false_interactions:
-        rows.append((tf, tg, 0))
-
-    # Convert to DataFrame
-    df = pd.DataFrame(rows, columns=["tf_name", "tg_id", "label"])
-
-    # Map TF names and TG IDs to their respective indices
-    df["tf_idx"] = df["tf_name"].map(tf_name_to_idx)
-    df["tg_idx"] = df["tg_id"].map(tg_id_to_idx)
-
-    # Check for any missing mappings and handle them
-    missing_mask = df["tf_idx"].isna() | df["tg_idx"].isna()
-
-    if missing_mask.any():
-        n_missing = missing_mask.sum()
-
-        if drop_missing:
-            logging.info(f"Dropping {n_missing} interactions with missing TF or TG indices.")
-            df = df.loc[~missing_mask].copy()
-        else:
-            missing_examples = df.loc[missing_mask].head()
-            raise ValueError(
-                f"{n_missing} interactions are missing TF or TG indices.\n"
-                f"Examples:\n{missing_examples}"
-            )
-
-    # Convert indices and labels to appropriate data types
-    df["tf_idx"] = df["tf_idx"].astype(np.int64)
-    df["tg_idx"] = df["tg_idx"].astype(np.int64)
-    df["label"] = df["label"].astype(np.float32)
-
-    # Optional: shuffle rows
-    df = df.sample(frac=1.0, random_state=123).reset_index(drop=True)
-
-    return df
-
-
-def prepare_tftg_lookup_tables(
-    peak_to_gene,
-    atac_peak_map,
-    atac_pseudobulk,
-    rna_pseudobulk_norm,
-    dataset_peaks,
-    common_cells,
-    max_precompute_peaks=64,
-):
-    valid_peak_set = set(atac_peak_map.keys())
-
-    peak_to_gene_valid = peak_to_gene[
-        peak_to_gene["peak_id"].isin(valid_peak_set)
-    ].copy()
-
-    peak_to_gene_valid["abs_dist"] = peak_to_gene_valid["TSS_dist"].abs()
-
-    tg_to_peak_info = {}
-
-    for tg_norm, sub in peak_to_gene_valid.groupby("target_id_norm", sort=False):
-        sub = sub.sort_values("abs_dist").head(max_precompute_peaks)
-
-        peak_ids = sub["peak_id"].tolist()
-        peak_indices = np.asarray([atac_peak_map[p] for p in peak_ids], dtype=np.int64)
-        peak_distances = sub["TSS_dist"].to_numpy(dtype=np.float32)
-
-        tg_to_peak_info[tg_norm] = {
-            "peak_ids": peak_ids,
-            "peak_indices": peak_indices,
-            "peak_distances": peak_distances,
-        }
-
-    cell_to_idx = {cell: i for i, cell in enumerate(common_cells)}
-
-    atac_mat = (
-        atac_pseudobulk
-        .reindex(index=dataset_peaks, columns=common_cells)
-        .fillna(0.0)
-        .to_numpy(dtype=np.float32)
-    )
-
-    rna_mat = (
-        rna_pseudobulk_norm
-        .reindex(columns=common_cells)
-        .fillna(0.0)
-        .to_numpy(dtype=np.float32)
-    )
-
-    gene_to_rna_idx = {
-        gene: i for i, gene in enumerate(rna_pseudobulk_norm.index)
-    }
-
-    return tg_to_peak_info, cell_to_idx, atac_mat, rna_mat, gene_to_rna_idx
 
 class TFTGEdgeBagDataset(Dataset):
     def __init__(
@@ -272,232 +96,70 @@ class TFTGEdgeBagDataset(Dataset):
         tf_embeddings_tensor,
         tf_mask_tensor,
         atac_peak_tensor,
-        max_cells_per_pair=None,
-        zero_fields=None,
-        strict=True,
     ):
-        """
-        Groups rows from build_tftg_inputs() by (tf_name, tg_name).
-
-        Each item is one TF-TG edge bag containing multiple sampled cells.
-        Large tensors are gathered lazily using compact indices.
-        """
-
         self.inputs = inputs
         self.tf_embeddings_tensor = tf_embeddings_tensor
         self.tf_mask_tensor = tf_mask_tensor
         self.atac_peak_tensor = atac_peak_tensor
-        self.max_cells_per_pair = max_cells_per_pair
-
-        if zero_fields is None:
-            zero_fields = set()
-        else:
-            zero_fields = set(zero_fields)
-
-        self.zero_fields = zero_fields
-
-        required_list_keys = [
-            "tf_name",
-            "tg_name",
-            "cell_id",
-        ]
-
-        required_tensor_keys = [
-            "label",
-            "tf_idx",
-            "tg_idx",
-            "peak_indices",
-            "peak_accessibility",
-            "peak_distance",
-            "peak_mask",
-            "tf_expression",
-            "tg_expression",
-        ]
-
-        lengths = {}
-
-        for key in required_list_keys:
-            lengths[key] = len(inputs[key])
-
-        for key in required_tensor_keys:
-            lengths[key] = inputs[key].shape[0]
-
-        unique_lengths = sorted(set(lengths.values()))
-
-        if len(unique_lengths) != 1:
-            msg = "\n".join(
-                [f"{key:20s}: {length}" for key, length in lengths.items()]
-            )
-
-            if strict:
-                raise ValueError(
-                    "Input fields have inconsistent first-dimension lengths:\n"
-                    f"{msg}\n\n"
-                    "This usually means one of the lists was appended without "
-                    "a matching tensor row, or tensors were filtered after metadata "
-                    "was created."
-                )
-            else:
-                self.n_rows = min(unique_lengths)
-                print(
-                    "WARNING: Input fields have inconsistent lengths. "
-                    f"Using first {self.n_rows} rows only.\n{msg}"
-                )
-        else:
-            self.n_rows = unique_lengths[0]
-
-        groups = defaultdict(list)
-
-        for i in range(self.n_rows):
-            tf = inputs["tf_name"][i]
-            tg = inputs["tg_name"][i]
-            groups[(tf, tg)].append(i)
-
-        self.edge_keys = list(groups.keys())
-        self.groups = [
-            torch.tensor(v, dtype=torch.long)
-            for v in groups.values()
-        ]
 
     def __len__(self):
-        return len(self.groups)
-
-    def _maybe_zero(self, name, tensor):
-        if name in self.zero_fields:
-            return torch.zeros_like(tensor)
-        return tensor
+        return len(self.inputs["label"])
 
     def __getitem__(self, idx):
-        row_idx = self.groups[idx]
+        tf_idx = self.inputs["tf_idx"][idx]
+        tg_idx = self.inputs["tg_idx"][idx]
 
-        if self.max_cells_per_pair is not None:
-            row_idx = row_idx[: self.max_cells_per_pair]
+        peak_indices = self.inputs["peak_indices"][idx]          # [P]
+        peak_sequences = self.atac_peak_tensor[peak_indices]     # [P, L, 4]
 
-        row_idx_list = row_idx.tolist()
+        tf_embedding = self.tf_embeddings_tensor[tf_idx]         # [T, D]
+        tf_mask = self.tf_mask_tensor[tf_idx]                    # [T]
 
-        label = self.inputs["label"][row_idx[0]]
+        return {
+            "label": self.inputs["label"][idx],
 
-        # These should be constant within a TF-TG edge bag
-        tf_idx = self.inputs["tf_idx"][row_idx[0]]
-        tg_idx = self.inputs["tg_idx"][row_idx[0]]
-
-        # Gather large static lookup tensors once per edge bag
-        tf_embedding = self.tf_embeddings_tensor[tf_idx]
-        tf_mask = self.tf_mask_tensor[tf_idx]
-
-        # Small per-cell tensors
-        peak_indices = self.inputs["peak_indices"][row_idx]          # [C, P]
-        peak_accessibility = self.inputs["peak_accessibility"][row_idx]  # [C, P]
-        peak_distance = self.inputs["peak_distance"][row_idx]        # [C, P]
-        peak_mask = self.inputs["peak_mask"][row_idx]                # [C, P]
-        tf_expression = self.inputs["tf_expression"][row_idx]        # [C]
-        tg_expression = self.inputs["tg_expression"][row_idx]        # [C]
-
-        # Gather peak sequences lazily
-        # atac_peak_tensor is probably uint8: [n_peaks, seq_len, 4]
-        # peak_sequences: [C, P, seq_len, 4]
-        peak_sequences = self.atac_peak_tensor[peak_indices]
-
-        # Repeat static TF/TG features across cells because your current collate/model
-        # expect a cell dimension on every field.
-        n_cells = row_idx.shape[0]
-
-        tf_embedding = tf_embedding.unsqueeze(0).expand(n_cells, -1, -1)
-        tf_mask = tf_mask.unsqueeze(0).expand(n_cells, -1)
-
-        item = {
-            "label": label,
-            "tf_name": self.edge_keys[idx][0],
-            "tg_name": self.edge_keys[idx][1],
-            "cell_ids": [
-                self.inputs["cell_id"][i]
-                for i in row_idx_list
-            ],
-
+            "tf_name": self.inputs["tf_name"][idx],
+            "tg_name": self.inputs["tg_name"][idx],
+            "cell_ids": self.inputs["cell_ids"][idx],
             "tf_idx": tf_idx,
             "tg_idx": tg_idx,
-            "peak_indices": peak_indices,
-
-            "tf_embedding": self._maybe_zero(
-                "tf_embedding",
-                tf_embedding.float(),
-            ),
+            "tf_embedding": tf_embedding.float(),
             "tf_mask": tf_mask.bool(),
-
-            "peak_sequences": self._maybe_zero(
-                "peak_sequences",
-                peak_sequences.float(),
-            ),
-            "peak_accessibility": self._maybe_zero(
-                "peak_accessibility",
-                peak_accessibility.float(),
-            ),
-            "peak_distance": self._maybe_zero(
-                "peak_distance",
-                peak_distance.float(),
-            ),
-            "peak_mask": peak_mask.bool(),
-
-            "tf_expression": self._maybe_zero(
-                "tf_expression",
-                tf_expression.float(),
-            ),
-            "tg_expression": self._maybe_zero(
-                "tg_expression",
-                tg_expression.float(),
-            )
+            "peak_indices": peak_indices,
+            "peak_sequences": peak_sequences,
+            "peak_distance": self.inputs["peak_distance"][idx].float(),
+            "peak_mask": self.inputs["peak_mask"][idx].bool(),
+            "peak_accessibility": self.inputs["peak_accessibility"][idx].float(),
+            "tf_expression": self.inputs["tf_expression"][idx].float(),
+            "tg_expression": self.inputs["tg_expression"][idx].float(),
         }
-
-        return item
         
 def collate_tftg_edge_bags(batch):
-    """
-    Pads each TF-TG edge bag to the max number of cells in the batch.
-    """
-
-    labels = torch.stack([b["label"] for b in batch]).float()  # [E]
-
-    max_cells = max(b["tf_expression"].shape[0] for b in batch)
-    batch_size = len(batch)
-
-    cell_mask = torch.zeros(batch_size, max_cells, dtype=torch.bool)
-
     output = {
-        "label": labels,
-        "cell_mask": cell_mask,
+        "label": torch.stack([b["label"] for b in batch]).float(),
+
+        "tf_idx": torch.stack([b["tf_idx"] for b in batch]).long(),
+        "tg_idx": torch.stack([b["tg_idx"] for b in batch]).long(),
+
+        "tf_embedding": torch.stack([b["tf_embedding"] for b in batch]),
+        "tf_mask": torch.stack([b["tf_mask"] for b in batch]),
+
+        "peak_indices": torch.stack([b["peak_indices"] for b in batch]),
+        "peak_sequences": torch.stack([b["peak_sequences"] for b in batch]),
+        "peak_distance": torch.stack([b["peak_distance"] for b in batch]),
+        "peak_mask": torch.stack([b["peak_mask"] for b in batch]),
+
+        "peak_accessibility": torch.stack([b["peak_accessibility"] for b in batch]),
+        "tf_expression": torch.stack([b["tf_expression"] for b in batch]),
+        "tg_expression": torch.stack([b["tg_expression"] for b in batch]),
+
         "tf_name": [b["tf_name"] for b in batch],
         "tg_name": [b["tg_name"] for b in batch],
         "cell_ids": [b["cell_ids"] for b in batch],
-        "tf_idx": torch.stack([b["tf_idx"] for b in batch]).long(),
-        "tg_idx": torch.stack([b["tg_idx"] for b in batch]).long(),
     }
 
-    tensor_keys = [
-        "tf_embedding",
-        "tf_mask",
-        "peak_sequences",
-        "peak_accessibility",
-        "peak_distance",
-        "peak_mask",
-        "tf_expression",
-        "tg_expression",
-        "peak_indices",
-    ]
-
-    for key in tensor_keys:
-        example = batch[0][key]
-        padded_shape = (batch_size, max_cells) + tuple(example.shape[1:])
-        padded = example.new_zeros(padded_shape)
-
-        for i, b in enumerate(batch):
-            n_cells = b[key].shape[0]
-            padded[i, :n_cells] = b[key]
-
-        output[key] = padded
-
-    for i, b in enumerate(batch):
-        n_cells = b["tf_expression"].shape[0]
-        cell_mask[i, :n_cells] = True
+    E, C = output["tf_expression"].shape
+    output["cell_mask"] = torch.ones(E, C, dtype=torch.bool)
 
     return output
         
@@ -505,21 +167,21 @@ def collate_tftg_edge_bags(batch):
 @torch.no_grad()
 def _move_batch_to_device(batch, device):
     moved = {
-        "tf_embedding": batch["tf_embedding"].to(device),
-        "tf_mask": batch["tf_mask"].to(device),
-        "peak_sequences": batch["peak_sequences"].to(device),
-        "peak_accessibility": batch["peak_accessibility"].to(device),
-        "peak_distance": batch["peak_distance"].to(device),
-        "tf_expression": batch["tf_expression"].to(device),
-        "tg_expression": batch["tg_expression"].to(device),
-        "label": batch["label"].to(device),
+        "tf_embedding": batch["tf_embedding"].to(device, non_blocking=True),
+        "tf_mask": batch["tf_mask"].to(device, non_blocking=True),
+        "peak_sequences": batch["peak_sequences"].to(device, non_blocking=True),
+        "peak_accessibility": batch["peak_accessibility"].to(device, non_blocking=True),
+        "peak_distance": batch["peak_distance"].to(device, non_blocking=True),
+        "tf_expression": batch["tf_expression"].to(device, non_blocking=True),
+        "tg_expression": batch["tg_expression"].to(device, non_blocking=True),
+        "label": batch["label"].to(device, non_blocking=True),
     }
 
     if "cell_mask" in batch:
-        moved["cell_mask"] = batch["cell_mask"].to(device)
+        moved["cell_mask"] = batch["cell_mask"].to(device, non_blocking=True)
 
     if "peak_mask" in batch:
-        moved["peak_mask"] = batch["peak_mask"].to(device)
+        moved["peak_mask"] = batch["peak_mask"].to(device, non_blocking=True)
 
     return moved
 
@@ -841,7 +503,7 @@ def train_one_epoch_track_test_metrics(
 
             metric_rows.append(row)
 
-            logging.info(
+            log_once(
                 f"Epoch {epoch:02d} | "
                 f"batch {batch_num:04d} | "
                 f"step {global_step:05d} | "
@@ -911,9 +573,6 @@ if __name__ == "__main__":
     tf_bind_model_path = Path(args.tf_bind_model_path)
     peak_flank_size = args.peak_flank_size
     
-    prefetch_factor = 4
-    num_workers_per_dataloader = 6
-
     if training_data_dir:
         training_cache_dir = Path(training_data_dir)
     else:
@@ -923,14 +582,32 @@ if __name__ == "__main__":
     tf_tg_input_cache_dir = training_cache_dir / "tf_tg_training_data_cache"
     
     # Load the compact split inputs
-    tftg_inputs_train = torch.load(tf_tg_input_cache_dir / "tftg_inputs_train.pt")
-    tftg_inputs_val = torch.load(tf_tg_input_cache_dir / "tftg_inputs_val.pt")
-    tftg_inputs_test = torch.load(tf_tg_input_cache_dir / "tftg_inputs_test.pt")
+    tftg_inputs_train = torch.load(
+        tf_tg_input_cache_dir / "tftg_inputs_train.pt",
+        weights_only=False,
+    )
+    tftg_inputs_val = torch.load(
+        tf_tg_input_cache_dir / "tftg_inputs_val.pt",
+        weights_only=False,
+    )
+    tftg_inputs_test = torch.load(
+        tf_tg_input_cache_dir / "tftg_inputs_test.pt",
+        weights_only=False,
+    )
 
     # Load the lookup tensors
-    tf_embeddings_tensor = torch.load(training_cache_dir / "tf_embeddings.pt")
-    tf_mask_tensor = torch.load(training_cache_dir / "tf_masks.pt")
-    atac_peak_tensor = torch.load(tf_tg_input_cache_dir / "atac_peak_tensor.pt")
+    tf_embeddings_tensor = torch.load(
+        training_cache_dir / "tf_embeddings.pt",
+        weights_only=True,
+    )
+    tf_mask_tensor = torch.load(
+        training_cache_dir / "tf_masks.pt",
+        weights_only=True,
+    )
+    atac_peak_tensor = torch.load(
+        tf_tg_input_cache_dir / "atac_peak_tensor.pt",
+        weights_only=True,
+    )
 
     # Load the metadata
     with open(tf_tg_input_cache_dir / "metadata.json", "r") as f:
@@ -943,7 +620,8 @@ if __name__ == "__main__":
     with open(tf_tg_input_cache_dir / "manifest.json") as f:
         manifest = json.load(f)
 
-    print(json.dumps(manifest, indent=2))
+    
+    log_once(json.dumps(manifest, indent=2))
 
     assert tuple(manifest["atac_peak_tensor_shape"]) == tuple(atac_peak_tensor.shape)
     assert manifest["atac_peak_tensor_dtype"] == str(atac_peak_tensor.dtype)
@@ -953,41 +631,33 @@ if __name__ == "__main__":
         tftg_inputs_train,
         tf_embeddings_tensor=tf_embeddings_tensor,
         tf_mask_tensor=tf_mask_tensor,
-        atac_peak_tensor=atac_peak_tensor,
-        zero_fields=None,
-        strict=True,
+        atac_peak_tensor=atac_peak_tensor
     )
 
     val_dataset = TFTGEdgeBagDataset(
         tftg_inputs_val,
         tf_embeddings_tensor=tf_embeddings_tensor,
         tf_mask_tensor=tf_mask_tensor,
-        atac_peak_tensor=atac_peak_tensor,
-        zero_fields=None,
-        strict=True,
+        atac_peak_tensor=atac_peak_tensor
+
     )
 
     test_dataset = TFTGEdgeBagDataset(
         tftg_inputs_test,
         tf_embeddings_tensor=tf_embeddings_tensor,
         tf_mask_tensor=tf_mask_tensor,
-        atac_peak_tensor=atac_peak_tensor,
-        zero_fields=None,
-        strict=True,
+        atac_peak_tensor=atac_peak_tensor
     )
-
-    if atac_peak_tensor.dtype == torch.uint8:
-        atac_peak_tensor = atac_peak_tensor.float()
 
     # Create the DataLoaders with the custom collate function for batching edge bags
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=num_workers_per_dataloader,
+        num_workers=6,
         pin_memory=True,
         persistent_workers=True,
-        prefetch_factor=prefetch_factor,
+        prefetch_factor=4,
         collate_fn=collate_tftg_edge_bags,
         )
 
@@ -995,10 +665,10 @@ if __name__ == "__main__":
         val_dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=num_workers_per_dataloader,
+        num_workers=2,
         pin_memory=True,
         persistent_workers=True,
-        prefetch_factor=prefetch_factor,
+        prefetch_factor=2,
         collate_fn=collate_tftg_edge_bags,
         )
 
@@ -1006,19 +676,16 @@ if __name__ == "__main__":
         test_dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=num_workers_per_dataloader,
+        num_workers=2,
         pin_memory=True,
         persistent_workers=True,
-        prefetch_factor=prefetch_factor,
+        prefetch_factor=2,
         collate_fn=collate_tftg_edge_bags,
         )
 
-    logging.info(f"Train/Val/Test sizes: {len(train_dataset)}, {len(val_dataset)}, {len(test_dataset)}")
+    log_once(f"Train/Val/Test sizes: {len(train_dataset)}, {len(val_dataset)}, {len(test_dataset)}")
 
     tf_tg_model = create_new_tf_tg_binding_model(tf_bind_model_path)
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    tf_tg_model = tf_tg_model.to(device)
 
     criterion = torch.nn.BCEWithLogitsLoss()
 
@@ -1056,7 +723,7 @@ if __name__ == "__main__":
             "pooling_temperature": pooling_temperature,
         }
 
-    logging.info("\nStarting Lightning training...")
+    log_once("\nStarting Lightning training...")
 
     lit_model = tf_to_tg_module.LitTFPeakBindingModel(
         model=tf_tg_model,
@@ -1105,8 +772,6 @@ if __name__ == "__main__":
         "weight_decay": 1e-4,
         "flank_size": peak_flank_size,
         "max_precompute_peaks": max_peaks_per_tg,
-        "num_workers": num_workers_per_dataloader,
-        "prefetch_factor": prefetch_factor,
         "persistent_workers": True,
     })
     
@@ -1119,6 +784,9 @@ if __name__ == "__main__":
 
     use_ddp = world_size > 1
     
+    log_once(f"Num GPUs: {world_size} | Batch size: {batch_size}")
+    log_once(f"Num steps per epoch: {len(train_loader)}")
+    
     trainer = pl.Trainer(
         max_epochs=epochs,
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
@@ -1128,7 +796,7 @@ if __name__ == "__main__":
         precision="16-mixed",
         logger=wandb_logger,
         callbacks=[
-            TQDMProgressBar(refresh_rate=100),
+            TQDMProgressBar(refresh_rate=50),
             checkpoint_callback,
             early_stopping_callback,
             lr_monitor,
@@ -1145,7 +813,7 @@ if __name__ == "__main__":
     torch.set_float32_matmul_precision('medium')
 
     if checkpoint_path is not None:
-        logging.info(f"Resuming training from checkpoint: {checkpoint_path}")
+        log_once(f"Resuming training from checkpoint: {checkpoint_path}")
         trainer.fit(
             lit_model,
             train_dataloaders=train_loader,
@@ -1159,6 +827,7 @@ if __name__ == "__main__":
             val_dataloaders=val_loader,
         )
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     tf_tg_model = lit_model.model
     tf_tg_model = tf_tg_model.to(device)
 

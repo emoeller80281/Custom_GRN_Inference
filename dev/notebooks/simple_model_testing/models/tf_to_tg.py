@@ -9,6 +9,7 @@ from torchmetrics.classification import (
 import numpy as np
 from sklearn.metrics import roc_curve, precision_recall_curve
 import wandb
+import time
 
 
 class TFTGRegulationModel(nn.Module):
@@ -107,16 +108,28 @@ class TFTGRegulationModel(nn.Module):
         logits_chunks = []
 
         with torch.no_grad():
-            for start in range(0, tf_embedding_flat.shape[0], self.tf_peak_chunk_size):
-                end = start + self.tf_peak_chunk_size
-
+            if (
+                self.tf_peak_chunk_size is None
+                or self.tf_peak_chunk_size <= 0
+                or tf_embedding_flat.shape[0] <= self.tf_peak_chunk_size
+            ):
                 logits_chunk = self.tf_peak_model(
-                    tf_embedding=tf_embedding_flat[start:end],
-                    tf_mask=tf_mask_flat[start:end],
-                    peak_embedding=peak_seq_flat[start:end],
+                    tf_embedding=tf_embedding_flat,
+                    tf_mask=tf_mask_flat,
+                    peak_embedding=peak_seq_flat,
                 )
-
                 logits_chunks.append(logits_chunk)
+            else:
+                for start in range(0, tf_embedding_flat.shape[0], self.tf_peak_chunk_size):
+                    end = start + self.tf_peak_chunk_size
+
+                    logits_chunk = self.tf_peak_model(
+                        tf_embedding=tf_embedding_flat[start:end],
+                        tf_mask=tf_mask_flat[start:end],
+                        peak_embedding=peak_seq_flat[start:end],
+                    )
+
+                    logits_chunks.append(logits_chunk)
 
         return torch.cat(logits_chunks, dim=0)
 
@@ -195,7 +208,10 @@ class TFTGRegulationModel(nn.Module):
         """
 
         E, C = cell_mask.shape
-        _, _, P, L, nuc_dim = peak_sequences.shape
+        if not torch.is_floating_point(peak_sequences):
+            # Keep CPU storage compact; cast once on device for compute.
+            peak_sequences = peak_sequences.float()
+        _, P, L, nuc_dim = peak_sequences.shape
         EC = E * C
 
         # ------------------------------------------------------------
@@ -203,13 +219,13 @@ class TFTGRegulationModel(nn.Module):
         # ------------------------------------------------------------
         # These are repeated across cells in your current dataloader.
         # Use only the first cell to avoid C-fold redundant TF-DNA inference.
-        tf_embedding_edge = tf_embedding[:, 0]          # [E, T, D]
-        tf_mask_edge = tf_mask[:, 0]                    # [E, T]
-        peak_sequences_edge = peak_sequences[:, 0]      # [E, P, L, 4]
-        peak_distance_edge = peak_distance[:, 0]        # [E, P]
+        tf_embedding_edge = tf_embedding         # [E, T, D]
+        tf_mask_edge = tf_mask                  # [E, T]
+        peak_sequences_edge = peak_sequences    # [E, P, L, 4]
+        peak_distance_edge = peak_distance        # [E, P]
 
         if peak_mask is not None:
-            peak_mask_edge = peak_mask[:, 0]            # [E, P]
+            peak_mask_edge = peak_mask            # [E, P]
         else:
             peak_mask_edge = None
 
@@ -259,8 +275,11 @@ class TFTGRegulationModel(nn.Module):
         # ------------------------------------------------------------
         # 4. Cell-specific peak features
         # ------------------------------------------------------------
-        if peak_mask is not None:
-            peak_accessibility = peak_accessibility.masked_fill(~peak_mask, 0.0)
+        if peak_mask_edge is not None:
+            peak_accessibility = peak_accessibility.masked_fill(
+                ~peak_mask_edge[:, None, :],
+                0.0,
+            )
 
         peak_features = torch.stack(
             [
@@ -346,6 +365,7 @@ class LitTFPeakBindingModel(pl.LightningModule):
         pooling_mode: str = "lse",
         pooling_temperature: float = 1.0,
         logit_clamp: float | None = 20.0,
+        enable_timing_sync: bool = False,
     ):
         super().__init__()
 
@@ -355,6 +375,7 @@ class LitTFPeakBindingModel(pl.LightningModule):
         self.pooling_mode = pooling_mode
         self.pooling_temperature = pooling_temperature
         self.logit_clamp = logit_clamp
+        self.enable_timing_sync = enable_timing_sync
 
         self.save_hyperparameters(ignore=["model"])
 
@@ -375,6 +396,30 @@ class LitTFPeakBindingModel(pl.LightningModule):
 
         self.val_probs = []
         self.val_targets = []
+        self._prev_batch_end_time = None
+        self._step_start_time = None
+        self._backward_start_time = None
+        self._timing_window_size = 50
+        self._timing_windows = {
+            "load": [],
+            "h2d": [],
+            "forward": [],
+            "backward": [],
+            "step": [],
+        }
+        self._latest_timing_avgs = {}
+
+    def _sync_if_cuda(self, device=None) -> None:
+        if self.enable_timing_sync and torch.cuda.is_available():
+            torch.cuda.synchronize(device)
+
+    def _record_timing(self, name: str, value: float) -> None:
+        window = self._timing_windows[name]
+        window.append(value)
+        if len(window) > self._timing_window_size:
+            window.pop(0)
+
+        self._latest_timing_avgs[name] = sum(window) / len(window)
 
     def forward(self, batch):
         return self.model(
@@ -407,7 +452,17 @@ class LitTFPeakBindingModel(pl.LightningModule):
     def _shared_step(self, batch, stage: str):
         labels = batch["label"].float()
 
+        forward_start = None
+        if stage == "train":
+            self._sync_if_cuda()
+            forward_start = time.perf_counter()
+
         edge_logits, _ = self.forward(batch)
+
+        if forward_start is not None:
+            self._sync_if_cuda()
+            forward_time = time.perf_counter() - forward_start
+            self._record_timing("forward", forward_time)
 
         if self.logit_clamp is not None:
             edge_logits = edge_logits.clamp(min=-self.logit_clamp, max=self.logit_clamp)
@@ -436,7 +491,7 @@ class LitTFPeakBindingModel(pl.LightningModule):
             on_epoch=True,
             prog_bar=True,
             logger=True,
-            sync_dist=True,
+            sync_dist=(stage != "train"),
         )
 
         self.log(
@@ -446,7 +501,7 @@ class LitTFPeakBindingModel(pl.LightningModule):
             on_epoch=True,
             prog_bar=True,
             logger=True,
-            sync_dist=True,
+            sync_dist=(stage != "train"),
         )
 
         self.log(
@@ -456,7 +511,7 @@ class LitTFPeakBindingModel(pl.LightningModule):
             on_epoch=True,
             prog_bar=True,
             logger=True,
-            sync_dist=True,
+            sync_dist=(stage != "train"),
         )
 
         self.log(
@@ -466,13 +521,83 @@ class LitTFPeakBindingModel(pl.LightningModule):
             on_epoch=True,
             prog_bar=False,
             logger=True,
-            sync_dist=True,
+            sync_dist=(stage != "train"),
         )
 
         return loss
 
     def training_step(self, batch, batch_idx):
         return self._shared_step(batch, stage="train")
+
+    def on_before_batch_transfer(self, batch, dataloader_idx):
+        if not self.training:
+            return batch
+
+        if self._prev_batch_end_time is not None:
+            load_time = time.perf_counter() - self._prev_batch_end_time
+            self._record_timing("load", load_time)
+
+        return batch
+
+    def transfer_batch_to_device(self, batch, device, dataloader_idx):
+        if not self.training:
+            return super().transfer_batch_to_device(batch, device, dataloader_idx)
+
+        start_time = time.perf_counter()
+        batch = super().transfer_batch_to_device(batch, device, dataloader_idx)
+        self._sync_if_cuda(device)
+        h2d_time = time.perf_counter() - start_time
+        self._record_timing("h2d", h2d_time)
+        return batch
+
+    def on_train_batch_start(self, batch, batch_idx):
+        self._sync_if_cuda()
+        self._step_start_time = time.perf_counter()
+
+    def on_before_backward(self, loss):
+        self._sync_if_cuda()
+        self._backward_start_time = time.perf_counter()
+
+    def optimizer_step(
+        self,
+        epoch,
+        batch_idx,
+        optimizer,
+        optimizer_closure,
+    ):
+        start_time = self._backward_start_time or time.perf_counter()
+        result = super().optimizer_step(
+            epoch,
+            batch_idx,
+            optimizer,
+            optimizer_closure,
+        )
+        self._sync_if_cuda()
+        backward_opt_time = time.perf_counter() - start_time
+        self._backward_start_time = None
+        self._record_timing("backward", backward_opt_time)
+        return result
+
+    def on_train_batch_end(self, outputs, batch, batch_idx):
+        if self._step_start_time is None:
+            return
+
+        self._sync_if_cuda()
+        step_time = time.perf_counter() - self._step_start_time
+        self._step_start_time = None
+        self._record_timing("step", step_time)
+        self._prev_batch_end_time = time.perf_counter()
+
+        for name, avg_value in self._latest_timing_avgs.items():
+            self.log(
+                f"train/{name}_time_avg",
+                avg_value,
+                on_step=True,
+                on_epoch=False,
+                prog_bar=False,
+                logger=True,
+                sync_dist=False,
+            )
 
     def validation_step(self, batch, batch_idx):
         self._shared_step(batch, stage="val")
@@ -513,14 +638,14 @@ class LitTFPeakBindingModel(pl.LightningModule):
             pre, rec, _ = precision_recall_curve(y_np, p_np)
             fpr, tpr, _ = roc_curve(y_np, p_np)
 
-            def _sample_curve(x, y, n=50):
+            def _sample_curve(x, y, n=100):
                 if len(x) <= n:
                     return x, y
                 idx = np.linspace(0, len(x) - 1, n).astype(int)
                 return x[idx], y[idx]
 
-            rec_s, pre_s = _sample_curve(rec, pre, n=50)
-            fpr_s, tpr_s = _sample_curve(fpr, tpr, n=50)
+            rec_s, pre_s = _sample_curve(rec, pre, n=100)
+            fpr_s, tpr_s = _sample_curve(fpr, tpr, n=100)
 
             self.logger.experiment.log({
                 "val/pr_curve": wandb.plot.line_series(

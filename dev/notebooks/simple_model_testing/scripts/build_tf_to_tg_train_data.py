@@ -211,7 +211,6 @@ def build_tftg_inputs(
     max_peaks_per_tg=64,
     max_cells_per_pair=8,
     seed=123,
-    zero_fields=None,
     *,
     tg_to_peak_info,
     cell_to_idx,
@@ -223,67 +222,49 @@ def build_tftg_inputs(
     tg_id_to_idx,
 ):
     """
-    Build compact TFTGRegulationModel inputs.
+    Build one compact item per TF-TG edge.
 
-    This version stores indices and small numeric arrays only.
-    Large lookup tensors are retrieved lazily in Dataset.__getitem__().
+    Output shapes:
+        label:              [E]
+        tf_idx:             [E]
+        tg_idx:             [E]
+        peak_indices:       [E, P]
+        peak_distance:      [E, P]
+        peak_mask:          [E, P]
+        peak_accessibility: [E, C, P]
+        tf_expression:      [E, C]
+        tg_expression:      [E, C]
     """
 
     rng = np.random.default_rng(seed)
 
     tf_names = []
     tg_names = []
-    cell_ids = []
+    cell_ids_all = []
     labels = []
 
     tf_indices = []
     tg_indices = []
     peak_indices_all = []
-
-    peak_access = []
-    peak_dist = []
-    peak_masks = []
-    tf_expr = []
-    tg_expr = []
-    peak_id_sets = []
-
-    if zero_fields is None:
-        zero_fields = set()
-    else:
-        zero_fields = set(zero_fields)
-
-    ZEROABLE_FIELDS = {
-        "tf_embedding",
-        "peak_sequences",
-        "peak_accessibility",
-        "peak_distance",
-        "tf_expression",
-        "tg_expression",
-        "tg_embedding",
-    }
-
-    invalid = zero_fields - ZEROABLE_FIELDS
-    if invalid:
-        raise ValueError(
-            f"Invalid zero_fields: {sorted(invalid)}. "
-            f"Valid options are: {sorted(ZEROABLE_FIELDS)}"
-        )
+    peak_access_all = []
+    peak_dist_all = []
+    peak_masks_all = []
+    tf_expr_all = []
+    tg_expr_all = []
 
     common_cells = list(common_cells)
     n_common_cells = len(common_cells)
-    miniters = max(1, len(tf_tg_df) // 50)  # Update tqdm every 2% of progress
 
-    for _, row in tqdm(
-        tf_tg_df.iterrows(),
-        total=len(tf_tg_df),
-        ncols=100,
-        desc="Building compact TF-TG inputs",
-        miniters=miniters,
-        
-    ):
-        tf_name = row["tf_name"]
-        tg_name = row["tg_id"]
-        label = float(row["label"])
+    n_total = len(tf_tg_df)
+    log_every = max(1, n_total // 50)
+
+    for i, row in enumerate(tf_tg_df.itertuples(index=False), start=1):
+        if i == 1 or i % log_every == 0 or i == n_total:
+            logging.info(f"Building compact TF-TG edges: {100 * i / n_total:.1f}% ({i:,}/{n_total:,})")
+
+        tf_name = row.tf_name
+        tg_name = row.tg_id
+        label = float(row.label)
 
         tf_norm = str(tf_name).upper()
         tg_norm = str(tg_name).upper()
@@ -298,9 +279,6 @@ def build_tftg_inputs(
         if peak_info is None:
             continue
 
-        # -----------------------------
-        # Peak index / distance setup
-        # -----------------------------
         peak_ids_real = list(peak_info["peak_ids"][:max_peaks_per_tg])
         peak_indices_real = list(peak_info["peak_indices"][:max_peaks_per_tg])
         peak_dst_real = list(peak_info["peak_distances"][:max_peaks_per_tg])
@@ -312,13 +290,10 @@ def build_tftg_inputs(
         peak_indices = np.asarray(peak_indices_real, dtype=np.int64)
         peak_dst = np.asarray(peak_dst_real, dtype=np.float32)
         peak_mask = np.ones(n_peaks, dtype=bool)
-        peak_ids = list(peak_ids_real)
 
         if n_peaks < max_peaks_per_tg:
             pad_len = max_peaks_per_tg - n_peaks
 
-            # Use 0 as dummy padded peak index.
-            # It will be masked out by peak_mask.
             peak_indices = np.pad(
                 peak_indices,
                 (0, pad_len),
@@ -337,11 +312,7 @@ def build_tftg_inputs(
                 constant_values=False,
             )
 
-            peak_ids = peak_ids + [""] * pad_len
-
-        # -----------------------------
         # Sample cells
-        # -----------------------------
         if max_cells_per_pair is None or max_cells_per_pair >= n_common_cells:
             sampled_cells = common_cells
         else:
@@ -356,54 +327,49 @@ def build_tftg_inputs(
             dtype=np.int64,
         )
 
-        # -----------------------------
-        # Vectorized ATAC accessibility
-        # -----------------------------
-        peak_acc_matrix = np.zeros(
-            (len(sampled_cell_indices), max_peaks_per_tg),
-            dtype=np.float32,
-        )
+        C = len(sampled_cell_indices)
+        P = max_peaks_per_tg
 
+        # ATAC accessibility: [C, P]
+        peak_acc_matrix = np.zeros((C, P), dtype=np.float32)
         peak_acc_matrix[:, :n_peaks] = atac_mat[
             np.ix_(peak_indices_real, sampled_cell_indices)
         ].T
 
-        # -----------------------------
-        # Vectorized RNA expression
-        # -----------------------------
+        # RNA expression: [C]
         tf_rna_idx = gene_to_rna_idx.get(tf_norm)
         tg_rna_idx = gene_to_rna_idx.get(tg_norm)
 
         if tf_rna_idx is None:
-            tf_expr_vals = np.zeros(len(sampled_cell_indices), dtype=np.float32)
+            tf_expr_vals = np.zeros(C, dtype=np.float32)
         else:
-            tf_expr_vals = rna_mat[tf_rna_idx, sampled_cell_indices].astype(np.float32)
+            tf_expr_vals = np.asarray(
+                rna_mat[tf_rna_idx, sampled_cell_indices],
+                dtype=np.float32,
+            ).reshape(-1)
 
         if tg_rna_idx is None:
-            tg_expr_vals = np.zeros(len(sampled_cell_indices), dtype=np.float32)
+            tg_expr_vals = np.zeros(C, dtype=np.float32)
         else:
-            tg_expr_vals = rna_mat[tg_rna_idx, sampled_cell_indices].astype(np.float32)
+            tg_expr_vals = np.asarray(
+                rna_mat[tg_rna_idx, sampled_cell_indices],
+                dtype=np.float32,
+            ).reshape(-1)
 
-        # -----------------------------
-        # Append one row per sampled cell
-        # -----------------------------
-        for j, cell_id in enumerate(sampled_cells):
-            tf_indices.append(tf_idx)
-            tg_indices.append(tg_idx)
-            peak_indices_all.append(peak_indices)
+        # Append once per TF-TG edge
+        tf_names.append(tf_name)
+        tg_names.append(tg_name)
+        cell_ids_all.append(sampled_cells)
+        labels.append(label)
 
-            peak_access.append(peak_acc_matrix[j])
-            peak_dist.append(peak_dst)
-            peak_masks.append(peak_mask)
-
-            tf_expr.append(float(tf_expr_vals[j]))
-            tg_expr.append(float(tg_expr_vals[j]))
-
-            peak_id_sets.append(peak_ids)
-            tf_names.append(tf_name)
-            tg_names.append(tg_name)
-            cell_ids.append(cell_id)
-            labels.append(label)
+        tf_indices.append(tf_idx)
+        tg_indices.append(tg_idx)
+        peak_indices_all.append(peak_indices)
+        peak_access_all.append(peak_acc_matrix)
+        peak_dist_all.append(peak_dst)
+        peak_masks_all.append(peak_mask)
+        tf_expr_all.append(tf_expr_vals)
+        tg_expr_all.append(tg_expr_vals)
 
     if len(labels) == 0:
         raise ValueError(
@@ -414,22 +380,20 @@ def build_tftg_inputs(
     return {
         "tf_name": tf_names,
         "tg_name": tg_names,
-        "cell_id": cell_ids,
-        "peak_ids": peak_id_sets,
+        "cell_ids": cell_ids_all,
 
         "label": torch.tensor(labels, dtype=torch.float32),
 
-        # Compact indices
         "tf_idx": torch.tensor(tf_indices, dtype=torch.long),
         "tg_idx": torch.tensor(tg_indices, dtype=torch.long),
-        "peak_indices": torch.tensor(np.stack(peak_indices_all), dtype=torch.long),
 
-        # Small per-cell/per-edge tensors
-        "peak_accessibility": torch.tensor(np.stack(peak_access), dtype=torch.float32),
-        "peak_mask": torch.tensor(np.stack(peak_masks), dtype=torch.bool),
-        "peak_distance": torch.tensor(np.stack(peak_dist), dtype=torch.float32),
-        "tf_expression": torch.tensor(tf_expr, dtype=torch.float32),
-        "tg_expression": torch.tensor(tg_expr, dtype=torch.float32),
+        "peak_indices": torch.tensor(np.stack(peak_indices_all), dtype=torch.long),
+        "peak_accessibility": torch.tensor(np.stack(peak_access_all), dtype=torch.float32),
+        "peak_mask": torch.tensor(np.stack(peak_masks_all), dtype=torch.bool),
+        "peak_distance": torch.tensor(np.stack(peak_dist_all), dtype=torch.float32),
+
+        "tf_expression": torch.tensor(np.stack(tf_expr_all), dtype=torch.float32),
+        "tg_expression": torch.tensor(np.stack(tg_expr_all), dtype=torch.float32),
     }
 
 
@@ -569,14 +533,14 @@ def main():
     atac_peak_map = {peak: idx for idx, peak in enumerate(dataset_peaks)}
 
     # Load cached TF embeddings and masks from TF-DNA model training
-    tf_embeddings_tensor = torch.load(tf_embedding_cache_path)
-    tf_mask_tensor = torch.load(tf_mask_cache_path)
+    tf_embeddings_tensor = torch.load(tf_embedding_cache_path, weights_only=True)
+    tf_mask_tensor = torch.load(tf_mask_cache_path, weights_only=True)
 
     # Create or load cached one-hot encodings for ATAC peaks
     # One-hot encodings use ACGT order and uses 'flank_size' bp upstream and downstream of the peak center.
     dataset_peaks = list(atac_peak_map.keys())
     if os.path.exists(atac_peak_onehot_cache_path):
-        atac_peak_tensor = torch.load(atac_peak_onehot_cache_path)
+        atac_peak_tensor = torch.load(atac_peak_onehot_cache_path, weights_only=True)
     else:
         logging.info("Creating centered peak one-hot encodings for ATAC peaks...")
         atac_peak_array = utils.create_centered_peak_onehot_array(
@@ -630,7 +594,6 @@ def main():
     common_build_kwargs = dict(
         max_peaks_per_tg=max_peaks_per_tg,
         max_cells_per_pair=max_cells_per_pair,
-        zero_fields=None,
         tg_to_peak_info=tg_to_peak_info,
         cell_to_idx=cell_to_idx,
         atac_mat=atac_mat,
@@ -645,21 +608,21 @@ def main():
         logging.info("Cached input files already exist. Skipping (use --force_reload to override).")
         return
     
-    logging.info("Building training inputs")
+    logging.info("\nBuilding training inputs")
     tftg_inputs_train = build_tftg_inputs(
         tf_tg_train_subset,
         seed=123,
         **common_build_kwargs,
     )
 
-    logging.info("Building validation inputs")
+    logging.info("\nBuilding validation inputs")
     tftg_inputs_val = build_tftg_inputs(
         tf_tg_val_subset,
         seed=124,
         **common_build_kwargs,
     )
 
-    logging.info("Building test inputs")
+    logging.info("\nBuilding test inputs")
     tftg_inputs_test = build_tftg_inputs(
         tf_tg_test_subset,
         seed=125,

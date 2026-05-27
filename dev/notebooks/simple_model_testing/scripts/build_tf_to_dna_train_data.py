@@ -62,7 +62,7 @@ def load_ordered_tf_embeddings(
     embedding_dir,
     tf_name_to_idx,
     suffix="_protein_embedding.pt",
-    weights_only=False,
+    weights_only=True,
 ):
     embedding_dir = Path(embedding_dir)
     available_files = {}
@@ -189,9 +189,9 @@ def main():
 
     edge_cache_files = [edge_tf_idx_cache_path, edge_peak_idx_cache_path, edge_labels_cache_path]
     if all(f.exists() for f in edge_cache_files) and not args.force_reload:
-        edge_tf_idx_tensor = torch.load(edge_tf_idx_cache_path)
-        edge_peak_idx_tensor = torch.load(edge_peak_idx_cache_path)
-        edge_labels_tensor = torch.load(edge_labels_cache_path)
+        edge_tf_idx_tensor = torch.load(edge_tf_idx_cache_path, weights_only=True)
+        edge_peak_idx_tensor = torch.load(edge_peak_idx_cache_path, weights_only=True)
+        edge_labels_tensor = torch.load(edge_labels_cache_path, weights_only=True)
     else:
         true_interactions, false_interactions = utils.create_true_false_edges(
             edge_df=true_edge_df,
@@ -226,9 +226,9 @@ def main():
 
     tf_cache_files = [tf_embedding_cache_path, tf_mask_cache_path, tf_lengths_cache_path]
     if all(f.exists() for f in tf_cache_files) and not args.force_reload:
-        tf_embeddings_tensor = torch.load(tf_embedding_cache_path)
-        tf_mask_tensor = torch.load(tf_mask_cache_path)
-        tf_lengths_tensor = torch.load(tf_lengths_cache_path)
+        tf_embeddings_tensor = torch.load(tf_embedding_cache_path, weights_only=True)
+        tf_mask_tensor = torch.load(tf_mask_cache_path, weights_only=True)
+        tf_lengths_tensor = torch.load(tf_lengths_cache_path, weights_only=True)
     else:
         tf_data = load_ordered_tf_embeddings(
             embedding_dir=embedding_dir,
@@ -248,7 +248,7 @@ def main():
     chrom_sizes = utils.load_chrom_sizes(chrom_sizes_path)
 
     if os.path.exists(peak_onehot_cache_path) and not args.force_reload:
-        peak_tensor = torch.load(peak_onehot_cache_path)
+        peak_tensor = torch.load(peak_onehot_cache_path, weights_only=True)
     else:
         logging.info("Creating centered peak one-hot encodings...")
         peak_onehot_array = utils.create_centered_peak_onehot_array(
@@ -269,9 +269,9 @@ def main():
         
 
     if all(p.exists() for p in [train_idx_cache_path, val_idx_cache_path, test_idx_cache_path]) and not args.force_reload:
-        train_idx = torch.load(train_idx_cache_path)
-        val_idx = torch.load(val_idx_cache_path)
-        test_idx = torch.load(test_idx_cache_path)
+        train_idx = torch.load(train_idx_cache_path, weights_only=True)
+        val_idx = torch.load(val_idx_cache_path, weights_only=True)
+        test_idx = torch.load(test_idx_cache_path, weights_only=True)
     else:
         logging.info("Creating train/val/test splits based on chromosome...")
         peak_id_df = pd.read_csv(peak_id_to_idx_cache_path)
