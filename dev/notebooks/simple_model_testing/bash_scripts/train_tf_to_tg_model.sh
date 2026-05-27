@@ -4,7 +4,7 @@
 #SBATCH --error=LOGS/tf_tg_model/%x_%j.err
 #SBATCH --time=72:00:00
 #SBATCH -p dense
-#SBATCH -N 1
+#SBATCH -N 2
 #SBATCH --gres=gpu:a100:3
 #SBATCH --ntasks-per-node=3
 #SBATCH -c 8
@@ -84,16 +84,18 @@ echo "[INFO] Using nproc_per_node=$NPROC_PER_NODE based on GPUs per node"
 export NCCL_DEBUG=INFO
 export PYTHONFAULTHANDLER=1
 
-training_data_dir="${PROJECT_DIR}/data/training_data_cache_new"
-tf_bind_model_path="${PROJECT_DIR}/checkpoints/tfbind_train_3671604/epoch=04-val_auroc=0.9159-val_loss=0.2798.ckpt"
+training_data_dir="${PROJECT_DIR}/data/training_data_cache"
+tf_bind_model_path="${PROJECT_DIR}/checkpoints/tfbind_train_3671604/epoch=06-val_auroc=0.9186-val_loss=0.2750.ckpt"
 
 echo "[INFO] Building and Caching Training Data..."
 python3 ${PROJECT_DIR}/scripts/build_tf_to_tg_train_data.py \
     --training_data_dir $training_data_dir \
-    --max_peaks_per_tg 64 \
-    --max_cells_per_pair 32 \
+    --max_peaks_per_tg 16 \
+    --max_cells_per_pair 64 \
     --pct_true_edges 1.0 \
     --true_false_ratio 2.0 \
+    --peak_flank_size 128 \
+    --num_cpu $SLURM_CPUS_PER_TASK \
     --force_reload
 
 echo "[INFO] Starting training..."
@@ -105,6 +107,6 @@ srun python3 ${PROJECT_DIR}/scripts/train_tf_to_tg_model.py \
     --output_dir ${PROJECT_DIR}/checkpoints/tf_tg_train_${SLURM_JOB_ID} \
     --tf_bind_model_path $tf_bind_model_path \
     --training_data_dir $training_data_dir \
-    --max_peaks_per_tg 8 \
-    --max_cells_per_pair 32 \
-    --batch_size 16
+    --max_peaks_per_tg 16 \
+    --max_cells_per_pair 64 \
+    --batch_size 32

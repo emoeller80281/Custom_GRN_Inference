@@ -929,7 +929,7 @@ if __name__ == "__main__":
         training_cache_dir = PROJECT_DIR / "data" / "training_data_cache"
     training_cache_dir.mkdir(exist_ok=True, parents=True)
     
-    tf_tg_input_cache_dir = training_cache_dir / "tf_to_tg_training_data"
+    tf_tg_input_cache_dir = training_cache_dir / "tf_tg_training_data_cache"
     
     # Load the compact split inputs
     tftg_inputs_train = torch.load(tf_tg_input_cache_dir / "tftg_inputs_train.pt")
@@ -1142,7 +1142,7 @@ if __name__ == "__main__":
         precision="16-mixed",
         logger=wandb_logger,
         callbacks=[
-            TQDMProgressBar(refresh_rate=10),
+            TQDMProgressBar(refresh_rate=100),
             checkpoint_callback,
             early_stopping_callback,
             lr_monitor,

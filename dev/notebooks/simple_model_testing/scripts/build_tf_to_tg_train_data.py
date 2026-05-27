@@ -271,7 +271,7 @@ def build_tftg_inputs(
 
     common_cells = list(common_cells)
     n_common_cells = len(common_cells)
-    miniters = max(1, len(tf_tg_df) // 1000)
+    miniters = max(1, len(tf_tg_df) // 10000)
 
     for _, row in tqdm(
         tf_tg_df.iterrows(),
@@ -441,17 +441,62 @@ def main():
     parser.add_argument("--max_cells_per_pair", type=int, default=8)
     parser.add_argument("--pct_true_edges", type=float, default=0.15)
     parser.add_argument("--true_false_ratio", type=float, default=2.0)
+    parser.add_argument("--peak_flank_size", type=int, default=64)
+    parser.add_argument("--num_cpu", type=int, default=8)
     parser.add_argument("--force_reload", action="store_true")
     args = parser.parse_args()
+    
+    max_peaks_per_tg = args.max_peaks_per_tg
+    max_cells_per_pair = args.max_cells_per_pair
+    pct_true_edges = args.pct_true_edges
+    true_false_ratio = args.true_false_ratio
+    peak_flank_size = args.peak_flank_size
+    num_cpu = args.num_cpu
     
     # Create the training cache directory if it doesn't exist
     training_data_dir = args.training_data_dir
 
     if training_data_dir:
-        tf_tg_input_cache_dir = Path(training_data_dir)
+        cache_dir = Path(training_data_dir)
     else:
-        tf_tg_input_cache_dir = PROJECT_DIR / "data" / "training_data_cache"
-    tf_tg_input_cache_dir.mkdir(exist_ok=True, parents=True)
+        cache_dir = PROJECT_DIR / "data" / "training_data_cache"
+    cache_dir.mkdir(exist_ok=True, parents=True)
+    
+    tf_tg_input_cache_dir = (
+        tf_tg_input_cache_dir
+        / "tf_tg_training_data_cache"
+    )
+
+    tf_tg_input_cache_dir.mkdir(parents=True, exist_ok=True)
+    
+    tf_name_to_idx_cache_path = cache_dir / "tf_name_to_idx.csv"
+    tf_embedding_cache_path = cache_dir / "tf_embeddings.pt"
+    tf_mask_cache_path = cache_dir / "tf_masks.pt"
+    merged_ground_truth_path = cache_dir / "merged_ground_truth.parquet"
+    
+    atac_peak_onehot_cache_path = tf_tg_input_cache_dir / "atac_peak_tensor.pt"
+    train_file = tf_tg_input_cache_dir / "tftg_inputs_train.pt"
+    val_file = tf_tg_input_cache_dir / "tftg_inputs_val.pt"
+    test_file = tf_tg_input_cache_dir / "tftg_inputs_test.pt"
+    
+    metadata_file = tf_tg_input_cache_dir / "metadata.json"
+    manifest_file = tf_tg_input_cache_dir / "manifest.json"
+    
+    required_cache_files = [
+        tf_name_to_idx_cache_path,
+        tf_embedding_cache_path,
+        tf_mask_cache_path,
+        atac_peak_onehot_cache_path,
+        train_file,
+        val_file,
+        test_file,
+        metadata_file,
+        manifest_file,
+    ]
+    
+    if all(f.exists() for f in required_cache_files) and not args.force_reload:
+        logging.info("All required cache files already exist. Skipping construction (use --force_reload to override).")
+        return
 
     gene_ref_file = DATA_DIR / "genome_data" / "genome_annotation" / "mm10" / "Mus_musculus.GRCm39.115.gtf.gz"
     genome_fasta_path = DATA_DIR / "genome_data" / "reference_genome" / "mm10" / "mm10.fa"
@@ -461,66 +506,74 @@ def main():
     peak_to_gene_distance = pd.read_parquet(PROJECT_DIR / "data" / "ATAC_data" / "peak_to_gene_dist.parquet")
     rna_pseudobulk = pd.read_parquet(PROJECT_DIR / "data" / "RNA_data" / "TG_pseudobulk.parquet")
 
-    mm10_chip_atlas_file = DATA_DIR / "ground_truth_files" / "chip_atlas_tf_peak_tg_dist.csv"
-    rn111_file = DATA_DIR / "ground_truth_files" / "RN111.tsv"
-    rn112_file = DATA_DIR / "ground_truth_files" / "RN112.tsv"
-    rn114_file = DATA_DIR / "ground_truth_files" / "RN114.tsv"
-    rn116_file = DATA_DIR / "ground_truth_files" / "RN116.tsv"
+    if not merged_ground_truth_path.exists() or args.force_reload:
+        mm10_chip_atlas_file = DATA_DIR / "ground_truth_files" / "chip_atlas_tf_peak_tg_dist.csv"
+        rn111_file = DATA_DIR / "ground_truth_files" / "RN111.tsv"
+        rn112_file = DATA_DIR / "ground_truth_files" / "RN112.tsv"
+        rn114_file = DATA_DIR / "ground_truth_files" / "RN114.tsv"
+        rn116_file = DATA_DIR / "ground_truth_files" / "RN116.tsv"
 
-    merged_ground_truth_df = load_ground_truth_files([
-        mm10_chip_atlas_file,
-        rn111_file,
-        rn112_file,
-        rn114_file,
-        rn116_file,
-    ])
-
-    tf_name_to_idx_cache_path = tf_tg_input_cache_dir / "tf_name_to_idx.csv"
+        merged_ground_truth_df = load_ground_truth_files([
+            mm10_chip_atlas_file,
+            rn111_file,
+            rn112_file,
+            rn114_file,
+            rn116_file,
+        ])
+        
+        merged_ground_truth_df.to_parquet(merged_ground_truth_path, index=False)
+    else:
+        merged_ground_truth_df = pd.read_parquet(merged_ground_truth_path)
+    
+    # Get the map of TF name to index
     tf_name_to_idx = pd.read_csv(tf_name_to_idx_cache_path).set_index("tf_name")["tf_idx"].to_dict()
     tg_id_to_idx = {tg: idx for idx, tg in enumerate(merged_ground_truth_df["Target"].unique())}
 
+    # Split genes into train/val/test based on chromosome
     train_genes, val_genes, test_genes = split_genes_by_chromosome(gene_ref_file)
     gt_train_df, gt_val_df, gt_test_df = create_train_val_test_splits(
         merged_ground_truth_df, train_genes, val_genes, test_genes
     )
 
+    # Create labeled TF-TG datasets for train/val/test splits
+    # (samples true and false edges according to pct_true_edges and true_false_ratio)
     tf_tg_labeled_train_df = _create_labeled_df(
         gt_train_df,
-        args.pct_true_edges,
-        args.true_false_ratio,
+        pct_true_edges,
+        true_false_ratio,
         seed=123,
         tf_name_to_idx=tf_name_to_idx,
         tg_id_to_idx=tg_id_to_idx,
     )
     tf_tg_labeled_val_df = _create_labeled_df(
         gt_val_df,
-        args.pct_true_edges,
-        args.true_false_ratio,
+        pct_true_edges,
+        true_false_ratio,
         seed=123,
         tf_name_to_idx=tf_name_to_idx,
         tg_id_to_idx=tg_id_to_idx,
     )
     tf_tg_labeled_test_df = _create_labeled_df(
         gt_test_df,
-        args.pct_true_edges,
-        args.true_false_ratio,
+        pct_true_edges,
+        true_false_ratio,
         seed=123,
         tf_name_to_idx=tf_name_to_idx,
         tg_id_to_idx=tg_id_to_idx,
     )
 
+    # Create a map of ATAC peaks to indices in the pseudobulk matrix, filtering to valid chromosomes
     dataset_peaks = atac_pseudobulk.index.to_list()
     valid_chroms = {f"chr{i}" for i in range(1, 20)}
     dataset_peaks = [peak for peak in dataset_peaks if peak.split(":", 1)[0] in valid_chroms]
     atac_peak_map = {peak: idx for idx, peak in enumerate(dataset_peaks)}
 
-    tf_embedding_cache_path = tf_tg_input_cache_dir / "tf_embeddings.pt"
-    tf_mask_cache_path = tf_tg_input_cache_dir / "tf_masks.pt"
-    atac_peak_onehot_cache_path = tf_tg_input_cache_dir / "atac_peak_onehot_array.pt"
-
+    # Load cached TF embeddings and masks from TF-DNA model training
     tf_embeddings_tensor = torch.load(tf_embedding_cache_path)
     tf_mask_tensor = torch.load(tf_mask_cache_path)
 
+    # Create or load cached one-hot encodings for ATAC peaks
+    # One-hot encodings use ACGT order and uses 'flank_size' bp upstream and downstream of the peak center.
     dataset_peaks = list(atac_peak_map.keys())
     if os.path.exists(atac_peak_onehot_cache_path):
         atac_peak_tensor = torch.load(atac_peak_onehot_cache_path)
@@ -531,10 +584,10 @@ def main():
             genome_fasta=genome_fasta_path,
             chrom_sizes=utils.load_chrom_sizes(chrom_sizes_path),
             peak_id_to_idx=atac_peak_map,
-            flank_size=64,
+            flank_size=peak_flank_size,
             dtype=np.uint8,
             pad_out_of_bounds=True,
-            num_workers=16,
+            num_workers=num_cpu,
             show_progress=True,
             chunk_size=10000,
         )
@@ -559,7 +612,7 @@ def main():
         rna_pseudobulk_norm=rna_pseudobulk_norm,
         dataset_peaks=dataset_peaks,
         common_cells=common_cells,
-        max_precompute_peaks=64,
+        max_precompute_peaks=max_peaks_per_tg,
     )
 
     def _sample_df(df: pd.DataFrame, n: int | None, seed: int) -> pd.DataFrame:
@@ -575,8 +628,8 @@ def main():
     tf_tg_test_subset = _sample_df(tf_tg_labeled_test_df, n=args.sample_pairs // 4, seed=123)
 
     common_build_kwargs = dict(
-        max_peaks_per_tg=8,
-        max_cells_per_pair=16,
+        max_peaks_per_tg=max_peaks_per_tg,
+        max_cells_per_pair=max_cells_per_pair,
         zero_fields=None,
         tg_to_peak_info=tg_to_peak_info,
         cell_to_idx=cell_to_idx,
@@ -587,12 +640,9 @@ def main():
         tf_name_to_idx=tf_name_to_idx,
         tg_id_to_idx=tg_id_to_idx,
     )
-
-    train_file = tf_tg_input_cache_dir / "tf_to_tg_training_data" / "train.lmdb"
-    val_file = tf_tg_input_cache_dir / "tf_to_tg_training_data" / "val.lmdb"
-    test_file = tf_tg_input_cache_dir / "tf_to_tg_training_data" / "test.lmdb"
+    
     if all(f.exists() for f in [train_file, val_file, test_file]) and not args.force_reload:
-        logging.info("LMDB files already exist. Skipping LMDB creation.")
+        logging.info("Cached input files already exist. Skipping (use --force_reload to override).")
         return
     
     logging.info("Building training inputs")
@@ -616,21 +666,10 @@ def main():
         **common_build_kwargs,
     )
 
-
-    tf_tg_input_cache_dir = (
-        tf_tg_input_cache_dir
-        / "tf_tg_training_data_cache"
-    )
-
-    tf_tg_input_cache_dir.mkdir(parents=True, exist_ok=True)
-
     # Save compact split inputs
-    torch.save(tftg_inputs_train, tf_tg_input_cache_dir / "tftg_inputs_train.pt")
-    torch.save(tftg_inputs_val, tf_tg_input_cache_dir / "tftg_inputs_val.pt")
-    torch.save(tftg_inputs_test, tf_tg_input_cache_dir / "tftg_inputs_test.pt")
-
-    # Save lookup tensors
-    torch.save(atac_peak_tensor, tf_tg_input_cache_dir / "atac_peak_tensor.pt")
+    torch.save(tftg_inputs_train, train_file)
+    torch.save(tftg_inputs_val, val_file)
+    torch.save(tftg_inputs_test, test_file)
 
     # Save mapping dictionaries and metadata
     metadata = {
@@ -638,19 +677,19 @@ def main():
         "tg_id_to_idx": tg_id_to_idx,
         "gene_to_rna_idx": gene_to_rna_idx,
         "cell_to_idx": cell_to_idx,
-        "max_peaks_per_tg": 8,
-        "max_cells_per_pair": 16,
-        "flank_size": 64,
+        "max_peaks_per_tg": max_peaks_per_tg,
+        "max_cells_per_pair": max_cells_per_pair,
+        "flank_size": peak_flank_size,
         "peak_dtype": "uint8",
     }
-    with open(tf_tg_input_cache_dir / "metadata.json", "w") as f:
+    with open(metadata_file, "w") as f:
         json.dump(metadata, f, indent=4)
 
     # Save a manifest to keep track of model settings and dataset versions
     manifest = {
-        "max_peaks_per_tg": 8,
-        "max_cells_per_pair": 16,
-        "flank_size": 64,
+        "max_peaks_per_tg": max_peaks_per_tg,
+        "max_cells_per_pair": max_cells_per_pair,
+        "flank_size": peak_flank_size,
         "atac_peak_tensor_dtype": str(atac_peak_tensor.dtype),
         "atac_peak_tensor_shape": list(atac_peak_tensor.shape),
         "tf_embeddings_tensor_shape": list(tf_embeddings_tensor.shape),
@@ -660,7 +699,7 @@ def main():
         "n_test_rows": int(len(tftg_inputs_test["label"])),
     }
 
-    with open(tf_tg_input_cache_dir / "manifest.json", "w") as f:
+    with open(manifest_file, "w") as f:
         json.dump(manifest, f, indent=2)
 
     logging.info(f"Wrote training data and metadata to {tf_tg_input_cache_dir}")

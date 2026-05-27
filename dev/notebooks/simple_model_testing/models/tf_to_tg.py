@@ -494,8 +494,8 @@ class LitTFPeakBindingModel(pl.LightningModule):
         auroc = self.val_auroc.compute()
         auprc = self.val_auprc.compute()
 
-        self.log("val/roc_auc", auroc, prog_bar=True, sync_dist=False)
-        self.log("val/pr_auc", auprc, prog_bar=True, sync_dist=False)
+        self.log("val/roc_auc", auroc, prog_bar=True, sync_dist=True)
+        self.log("val/pr_auc", auprc, prog_bar=True, sync_dist=True)
 
         self.val_auroc.reset()
         self.val_auprc.reset()
