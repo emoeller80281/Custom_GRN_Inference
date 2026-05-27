@@ -271,7 +271,7 @@ def build_tftg_inputs(
 
     common_cells = list(common_cells)
     n_common_cells = len(common_cells)
-    miniters = max(1, len(tf_tg_df) // 10000)
+    miniters = max(1, len(tf_tg_df) // 50)  # Update tqdm every 2% of progress
 
     for _, row in tqdm(
         tf_tg_df.iterrows(),
@@ -463,7 +463,7 @@ def main():
     cache_dir.mkdir(exist_ok=True, parents=True)
     
     tf_tg_input_cache_dir = (
-        tf_tg_input_cache_dir
+        cache_dir
         / "tf_tg_training_data_cache"
     )
 

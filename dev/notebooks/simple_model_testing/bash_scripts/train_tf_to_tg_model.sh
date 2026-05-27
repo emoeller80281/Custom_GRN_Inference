@@ -95,8 +95,7 @@ python3 ${PROJECT_DIR}/scripts/build_tf_to_tg_train_data.py \
     --pct_true_edges 1.0 \
     --true_false_ratio 2.0 \
     --peak_flank_size 128 \
-    --num_cpu $SLURM_CPUS_PER_TASK \
-    --force_reload
+    --num_cpu $SLURM_CPUS_PER_TASK
 
 echo "[INFO] Starting training..."
 srun python3 ${PROJECT_DIR}/scripts/train_tf_to_tg_model.py \
@@ -109,4 +108,5 @@ srun python3 ${PROJECT_DIR}/scripts/train_tf_to_tg_model.py \
     --training_data_dir $training_data_dir \
     --max_peaks_per_tg 16 \
     --max_cells_per_pair 64 \
+    --peak_flank_size 128 \
     --batch_size 32

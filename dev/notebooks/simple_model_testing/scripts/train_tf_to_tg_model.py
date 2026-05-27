@@ -66,6 +66,7 @@ def create_new_tf_tg_binding_model(tf_bind_model_path: Path) -> tf_to_tg_module.
     tf_tg_model = tf_to_tg_module.TFTGRegulationModel(
         pretrained_tf_peak_model=trained_tf_peak_model,
         d_model=128,
+        tf_peak_chunk_size=2048,
     )
     
     return tf_tg_model
@@ -271,7 +272,6 @@ class TFTGEdgeBagDataset(Dataset):
         tf_embeddings_tensor,
         tf_mask_tensor,
         atac_peak_tensor,
-        tg_embedding_table,
         max_cells_per_pair=None,
         zero_fields=None,
         strict=True,
@@ -287,7 +287,6 @@ class TFTGEdgeBagDataset(Dataset):
         self.tf_embeddings_tensor = tf_embeddings_tensor
         self.tf_mask_tensor = tf_mask_tensor
         self.atac_peak_tensor = atac_peak_tensor
-        self.tg_embedding_table = tg_embedding_table
         self.max_cells_per_pair = max_cells_per_pair
 
         if zero_fields is None:
@@ -386,13 +385,6 @@ class TFTGEdgeBagDataset(Dataset):
         tf_embedding = self.tf_embeddings_tensor[tf_idx]
         tf_mask = self.tf_mask_tensor[tf_idx]
 
-        # TG embedding from embedding table
-        # Keep this on CPU for DataLoader collation.
-        with torch.no_grad():
-            tg_embedding = self.tg_embedding_table(
-                tg_idx.to(self.tg_embedding_table.weight.device).view(1)
-            ).squeeze(0).detach().cpu()
-
         # Small per-cell tensors
         peak_indices = self.inputs["peak_indices"][row_idx]          # [C, P]
         peak_accessibility = self.inputs["peak_accessibility"][row_idx]  # [C, P]
@@ -412,7 +404,6 @@ class TFTGEdgeBagDataset(Dataset):
 
         tf_embedding = tf_embedding.unsqueeze(0).expand(n_cells, -1, -1)
         tf_mask = tf_mask.unsqueeze(0).expand(n_cells, -1)
-        tg_embedding = tg_embedding.unsqueeze(0).expand(n_cells, -1)
 
         item = {
             "label": label,
@@ -454,11 +445,7 @@ class TFTGEdgeBagDataset(Dataset):
             "tg_expression": self._maybe_zero(
                 "tg_expression",
                 tg_expression.float(),
-            ),
-            "tg_embedding": self._maybe_zero(
-                "tg_embedding",
-                tg_embedding.float(),
-            ),
+            )
         }
 
         return item
@@ -494,7 +481,6 @@ def collate_tftg_edge_bags(batch):
         "peak_mask",
         "tf_expression",
         "tg_expression",
-        "tg_embedding",
         "peak_indices",
     ]
 
@@ -897,6 +883,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size for training (default: 32)")
     parser.add_argument("--pct_true_edges", type=float, default=0.15, help="Percentage of true edges to include in the training set (default: 0.15)")
     parser.add_argument("--true_false_ratio", type=float, default=2.0, help="Ratio of true to false edges in the training set (default: 2.0)")
+    parser.add_argument("--peak_flank_size", type=int, default=64)
     parser.add_argument("--tf_bind_model_path", type=str, required=False, help="Path to the TF→DNA model checkpoint to initialize from (if not using default)")
     parser.add_argument("--training_data_dir", type=str, required=False, help="Path to directory containing training data cache files (if not using default)")
     parser.add_argument("--checkpoint_path", type=str, required=False, help="Path to a model checkpoint to resume training from")
@@ -922,6 +909,10 @@ if __name__ == "__main__":
     true_false_ratio = args.true_false_ratio
     training_data_dir = args.training_data_dir
     tf_bind_model_path = Path(args.tf_bind_model_path)
+    peak_flank_size = args.peak_flank_size
+    
+    prefetch_factor = 4
+    num_workers_per_dataloader = 6
 
     if training_data_dir:
         training_cache_dir = Path(training_data_dir)
@@ -957,15 +948,12 @@ if __name__ == "__main__":
     assert tuple(manifest["atac_peak_tensor_shape"]) == tuple(atac_peak_tensor.shape)
     assert manifest["atac_peak_tensor_dtype"] == str(atac_peak_tensor.dtype)
     
-    tg_embedding_table = torch.nn.Embedding(len(tg_id_to_idx), 128)
-
     # Re-create the datasets and dataloaders using the loaded compact inputs and lookup tensors
     train_dataset = TFTGEdgeBagDataset(
         tftg_inputs_train,
         tf_embeddings_tensor=tf_embeddings_tensor,
         tf_mask_tensor=tf_mask_tensor,
         atac_peak_tensor=atac_peak_tensor,
-        tg_embedding_table=tg_embedding_table,
         zero_fields=None,
         strict=True,
     )
@@ -975,7 +963,6 @@ if __name__ == "__main__":
         tf_embeddings_tensor=tf_embeddings_tensor,
         tf_mask_tensor=tf_mask_tensor,
         atac_peak_tensor=atac_peak_tensor,
-        tg_embedding_table=tg_embedding_table,
         zero_fields=None,
         strict=True,
     )
@@ -985,7 +972,6 @@ if __name__ == "__main__":
         tf_embeddings_tensor=tf_embeddings_tensor,
         tf_mask_tensor=tf_mask_tensor,
         atac_peak_tensor=atac_peak_tensor,
-        tg_embedding_table=tg_embedding_table,
         zero_fields=None,
         strict=True,
     )
@@ -998,10 +984,10 @@ if __name__ == "__main__":
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=4,
+        num_workers=num_workers_per_dataloader,
         pin_memory=True,
         persistent_workers=True,
-        prefetch_factor=4,
+        prefetch_factor=prefetch_factor,
         collate_fn=collate_tftg_edge_bags,
         )
 
@@ -1009,10 +995,10 @@ if __name__ == "__main__":
         val_dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=4,
+        num_workers=num_workers_per_dataloader,
         pin_memory=True,
         persistent_workers=True,
-        prefetch_factor=4,
+        prefetch_factor=prefetch_factor,
         collate_fn=collate_tftg_edge_bags,
         )
 
@@ -1020,10 +1006,10 @@ if __name__ == "__main__":
         test_dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=4,
+        num_workers=num_workers_per_dataloader,
         pin_memory=True,
         persistent_workers=True,
-        prefetch_factor=4,
+        prefetch_factor=prefetch_factor,
         collate_fn=collate_tftg_edge_bags,
         )
 
@@ -1117,10 +1103,10 @@ if __name__ == "__main__":
         "pooling_temperature": pooling_temperature,
         "lr": 1e-4,
         "weight_decay": 1e-4,
-        "flank_size": 128,
-        "max_precompute_peaks": 64,
-        "num_workers": 4,
-        "prefetch_factor": 4,
+        "flank_size": peak_flank_size,
+        "max_precompute_peaks": max_peaks_per_tg,
+        "num_workers": num_workers_per_dataloader,
+        "prefetch_factor": prefetch_factor,
         "persistent_workers": True,
     })
     
