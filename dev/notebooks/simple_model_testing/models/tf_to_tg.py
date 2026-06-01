@@ -11,7 +11,6 @@ from sklearn.metrics import roc_curve, precision_recall_curve
 import wandb
 import time
 
-
 class TFTGRegulationModel(nn.Module):
     def __init__(
         self,
@@ -339,7 +338,7 @@ class TFTGRegulationModel(nn.Module):
 
         return edge_logits, cell_logits
     
-class LitTFPeakBindingModel(pl.LightningModule):
+class LitTFTGRegulationModel(pl.LightningModule):
     def __init__(
         self,
         model: TFTGRegulationModel,
@@ -403,6 +402,7 @@ class LitTFPeakBindingModel(pl.LightningModule):
         self._latest_timing_avgs[name] = sum(window) / len(window)
 
     def forward(self, batch):
+        
         return self.model(
             tf_embedding=batch["tf_embedding"],
             tf_mask=batch["tf_mask"],
@@ -657,3 +657,26 @@ class LitTFPeakBindingModel(pl.LightningModule):
         )
 
         return optimizer
+
+# ----- Utility Functions -----
+@torch.no_grad()
+def move_batch_to_device(batch, device):
+    moved = {
+        "tf_embedding": batch["tf_embedding"].to(device, non_blocking=True),
+        "tf_mask": batch["tf_mask"].to(device, non_blocking=True),
+        "peak_sequences": batch["peak_sequences"].to(device, non_blocking=True),
+        "peak_accessibility": batch["peak_accessibility"].to(device, non_blocking=True),
+        "peak_distance": batch["peak_distance"].to(device, non_blocking=True),
+        "tf_expression": batch["tf_expression"].to(device, non_blocking=True),
+        "tg_expression": batch["tg_expression"].to(device, non_blocking=True),
+        "label": batch["label"].to(device, non_blocking=True),
+    }
+
+    if "cell_mask" in batch:
+        moved["cell_mask"] = batch["cell_mask"].to(device, non_blocking=True)
+
+    if "peak_mask" in batch:
+        moved["peak_mask"] = batch["peak_mask"].to(device, non_blocking=True)
+
+    return moved
+

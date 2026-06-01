@@ -117,7 +117,6 @@ class TFTGEdgeBagDataset(Dataset):
 
         return {
             "label": self.inputs["label"][idx],
-
             "tf_name": self.inputs["tf_name"][idx],
             "tg_name": self.inputs["tg_name"][idx],
             "cell_ids": self.inputs["cell_ids"][idx],
@@ -439,7 +438,6 @@ if __name__ == "__main__":
     # Load the manifest and verify tensor shapes and dtypes match expectations
     with open(tf_tg_input_cache_dir / "manifest.json") as f:
         manifest = json.load(f)
-
     
     log_once(json.dumps(manifest, indent=2))
 
@@ -545,7 +543,7 @@ if __name__ == "__main__":
 
     log_once("\nStarting Lightning training...")
 
-    lit_model = tf_to_tg_module.LitTFPeakBindingModel(
+    lit_model = tf_to_tg_module.LitTFTGRegulationModel(
         model=tf_tg_model,
         lr=1e-4,
         weight_decay=1e-4,
