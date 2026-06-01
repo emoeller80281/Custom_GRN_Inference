@@ -82,7 +82,7 @@ def create_new_tf_tg_binding_model(tf_bind_model_path: Path) -> tf_to_tg_module.
     tf_tg_model = tf_to_tg_module.TFTGRegulationModel(
         pretrained_tf_peak_model=trained_tf_peak_model,
         d_model=128,
-        tf_peak_chunk_size=2048,
+        tf_peak_chunk_size=256,
     )
     
     return tf_tg_model
@@ -552,7 +552,7 @@ if __name__ == "__main__":
         pos_weight=None,
         pooling_mode=pooling_mode,
         pooling_temperature=pooling_temperature,
-        enable_timing_sync=False,
+        enable_timing_sync=True,
     )
     
     checkpoint_callback = ModelCheckpoint(

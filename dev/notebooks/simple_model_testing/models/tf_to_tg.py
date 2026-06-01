@@ -75,64 +75,6 @@ class TFTGRegulationModel(nn.Module):
             nn.Linear(d_model // 2, 1),
         )
 
-    def compute_binding_logits(
-        self,
-        tf_embedding_flat,
-        tf_mask_flat,
-        peak_seq_flat,
-    ):
-        """
-        Frozen TF-DNA model forward pass, chunked over TF-peak pairs.
-
-        Inputs
-        ------
-        tf_embedding_flat : [N, T, D]
-        tf_mask_flat : [N, T]
-        peak_seq_flat : [N, L, 4]
-
-        Returns
-        -------
-        logits : [N]
-        """
-
-        self.tf_peak_model.eval()
-        input_device = tf_embedding_flat.device
-        model_device = next(self.tf_peak_model.parameters()).device
-        if model_device != input_device:
-            # Keep the frozen TF-peak model on the same device as inputs.
-            self.tf_peak_model.to(input_device)
-            model_device = input_device
-        tf_embedding_flat = tf_embedding_flat.to(model_device)
-        tf_mask_flat = tf_mask_flat.to(model_device)
-        peak_seq_flat = peak_seq_flat.to(model_device)
-        logits_chunks = []
-
-        with torch.no_grad():
-            if (
-                self.tf_peak_chunk_size is None
-                or self.tf_peak_chunk_size <= 0
-                or tf_embedding_flat.shape[0] <= self.tf_peak_chunk_size
-            ):
-                logits_chunk = self.tf_peak_model(
-                    tf_embedding=tf_embedding_flat,
-                    tf_mask=tf_mask_flat,
-                    peak_embedding=peak_seq_flat,
-                )
-                logits_chunks.append(logits_chunk)
-            else:
-                for start in range(0, tf_embedding_flat.shape[0], self.tf_peak_chunk_size):
-                    end = start + self.tf_peak_chunk_size
-
-                    logits_chunk = self.tf_peak_model(
-                        tf_embedding=tf_embedding_flat[start:end],
-                        tf_mask=tf_mask_flat[start:end],
-                        peak_embedding=peak_seq_flat[start:end],
-                    )
-
-                    logits_chunks.append(logits_chunk)
-
-        return torch.cat(logits_chunks, dim=0)
-
     @staticmethod
     def pool_cell_logits(
         cell_logits,
@@ -191,15 +133,15 @@ class TFTGRegulationModel(nn.Module):
 
         Parameters
         ----------
-        tf_embedding : [E, C, T, D]
-        tf_mask : [E, C, T]
-        peak_sequences : [E, C, P, L, 4]
+        tf_embedding : [E T, D]
+        tf_mask : [E, T]
+        peak_sequences : [E, P, L, 4]
         peak_accessibility : [E, C, P]
-        peak_distance : [E, C, P]
+        peak_distance : [E, P]
         tf_expression : [E, C]
         tg_expression : [E, C]
         cell_mask : [E, C]
-        peak_mask : [E, C, P], optional
+        peak_mask : [E, P], optional
 
         Returns
         -------
@@ -230,26 +172,58 @@ class TFTGRegulationModel(nn.Module):
             peak_mask_edge = None
 
         # ------------------------------------------------------------
-        # 2. Frozen TF-DNA binding model: [E, P] only
+        # 2a. Frozen TF-DNA binding model: [E, P]
         # ------------------------------------------------------------
-        tf_embedding_rep = tf_embedding_edge[:, None].expand(
-            E, P, *tf_embedding_edge.shape[1:]
-        )
-        tf_embedding_flat = tf_embedding_rep.reshape(
-            E * P, *tf_embedding_edge.shape[1:]
-        )
-
-        tf_mask_rep = tf_mask_edge[:, None].expand(E, P, tf_mask_edge.shape[1])
-        tf_mask_flat = tf_mask_rep.reshape(E * P, tf_mask_edge.shape[1])
 
         peak_seq_flat = peak_sequences_edge.reshape(E * P, L, nuc_dim)
 
-        binding_logits = self.compute_binding_logits(
-            tf_embedding_flat=tf_embedding_flat,
-            tf_mask_flat=tf_mask_flat,
-            peak_seq_flat=peak_seq_flat,
-        ).reshape(E, P)
+        chunk_size = self.tf_peak_chunk_size
+        if chunk_size is None or chunk_size <= 0:
+            chunk_size = E * P
 
+        binding_logits_chunks = []
+
+        with torch.no_grad():
+            self.tf_peak_model.eval()
+
+            # Make sure the frozen TF-DNA model is on the same device.
+            input_device = peak_sequences_edge.device
+            model_device = next(self.tf_peak_model.parameters()).device
+            if model_device != input_device:
+                self.tf_peak_model.to(input_device)
+
+            for start in range(0, E * P, chunk_size):
+                end = min(start + chunk_size, E * P)
+
+                # Flat TF-peak indices: 0...(E*P - 1)
+                flat_idx = torch.arange(start, end, device=input_device)
+
+                # Convert flat TF-peak index back to edge index.
+                # Example: if P=8, flat indices 0..7 use edge 0,
+                # 8..15 use edge 1, etc.
+                edge_idx = flat_idx // P
+
+                # Gather only this chunk's TF embedding/mask.
+                # Shape: [chunk, T, D]
+                tf_embedding_chunk = tf_embedding_edge[edge_idx]
+                tf_mask_chunk = tf_mask_edge[edge_idx]
+
+                # Gather only this chunk's peak sequences.
+                peak_seq_chunk = peak_seq_flat[start:end]
+
+                logits_chunk = self.tf_peak_model(
+                    tf_embedding=tf_embedding_chunk,
+                    tf_mask=tf_mask_chunk,
+                    peak_embedding=peak_seq_chunk,
+                )
+
+                binding_logits_chunks.append(logits_chunk)
+
+        binding_logits = torch.cat(binding_logits_chunks, dim=0).reshape(E, P)
+        
+        # ------------------------------------------------------------
+        # 2b. Mask and expand TF-peak binding scores across cells
+        # ------------------------------------------------------------
         binding_score = torch.sigmoid(binding_logits)  # [E, P]
 
         if peak_mask_edge is not None:
@@ -262,15 +236,15 @@ class TFTGRegulationModel(nn.Module):
         # 3. Distance features
         # ------------------------------------------------------------
         abs_distance = peak_distance_edge.abs()
-        distance_scaled = torch.clamp(abs_distance / 250_000.0, 0.0, 1.0)
-        distance_weight = torch.exp(-abs_distance / 50_000.0)
+        distance_scaled = torch.clamp(abs_distance / 250_000.0, 0.0, 1.0)   # [E, P]
+        distance_weight = torch.exp(-abs_distance / 50_000.0)               # [E, P]
 
         if peak_mask_edge is not None:
             distance_scaled = distance_scaled.masked_fill(~peak_mask_edge, 0.0)
             distance_weight = distance_weight.masked_fill(~peak_mask_edge, 0.0)
 
-        distance_scaled = distance_scaled[:, None, :].expand(E, C, P)
-        distance_weight = distance_weight[:, None, :].expand(E, C, P)
+        distance_scaled = distance_scaled[:, None, :].expand(E, C, P) # [E, C, P]
+        distance_weight = distance_weight[:, None, :].expand(E, C, P) # [E, C, P]
 
         # ------------------------------------------------------------
         # 4. Cell-specific peak features
@@ -280,6 +254,16 @@ class TFTGRegulationModel(nn.Module):
                 ~peak_mask_edge[:, None, :],
                 0.0,
             )
+            
+        assert binding_score.shape == peak_accessibility.shape, (
+            f"binding_score {binding_score.shape} != peak_accessibility {peak_accessibility.shape}"
+        )
+        assert distance_scaled.shape == peak_accessibility.shape, (
+            f"distance_scaled {distance_scaled.shape} != peak_accessibility {peak_accessibility.shape}"
+        )
+        assert distance_weight.shape == peak_accessibility.shape, (
+            f"distance_weight {distance_weight.shape} != peak_accessibility {peak_accessibility.shape}"
+        )
 
         peak_features = torch.stack(
             [
@@ -385,10 +369,7 @@ class LitTFPeakBindingModel(pl.LightningModule):
         else:
             self.pos_weight = None
 
-        self.train_auroc = BinaryAUROC()
         self.val_auroc = BinaryAUROC()
-
-        self.train_auprc = BinaryAveragePrecision()
         self.val_auprc = BinaryAveragePrecision()
 
         self.train_acc = BinaryAccuracy()
@@ -471,8 +452,6 @@ class LitTFPeakBindingModel(pl.LightningModule):
         probs = torch.sigmoid(edge_logits)
 
         if stage == "train":
-            auroc = self.train_auroc(probs, labels.int())
-            auprc = self.train_auprc(probs, labels.int())
             acc = self.train_acc(probs, labels.int())
         elif stage == "val":
             auroc = self.val_auroc(probs, labels.int())
@@ -481,6 +460,26 @@ class LitTFPeakBindingModel(pl.LightningModule):
 
             self.val_probs.append(probs.detach().cpu())
             self.val_targets.append(labels.detach().cpu())
+            
+            self.log(
+                f"{stage}/auroc",
+                auroc,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=True,
+                logger=True,
+                sync_dist=(stage != "train"),
+            )
+
+            self.log(
+                f"{stage}/auprc",
+                auprc,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=True,
+                logger=True,
+                sync_dist=(stage != "train"),
+            )
         else:
             raise ValueError(f"Unknown stage: {stage}")
 
@@ -488,26 +487,6 @@ class LitTFPeakBindingModel(pl.LightningModule):
             f"{stage}/loss",
             loss,
             on_step=(stage == "train"),
-            on_epoch=True,
-            prog_bar=True,
-            logger=True,
-            sync_dist=(stage != "train"),
-        )
-
-        self.log(
-            f"{stage}/auroc",
-            auroc,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=True,
-            logger=True,
-            sync_dist=(stage != "train"),
-        )
-
-        self.log(
-            f"{stage}/auprc",
-            auprc,
-            on_step=False,
             on_epoch=True,
             prog_bar=True,
             logger=True,
@@ -549,6 +528,12 @@ class LitTFPeakBindingModel(pl.LightningModule):
         h2d_time = time.perf_counter() - start_time
         self._record_timing("h2d", h2d_time)
         return batch
+    
+    def on_train_epoch_start(self):
+        for k in self._timing_windows:
+            self._timing_windows[k].clear()
+        self._latest_timing_avgs.clear()
+        self._prev_batch_end_time = None
 
     def on_train_batch_start(self, batch, batch_idx):
         self._sync_if_cuda()

@@ -87,7 +87,7 @@ export PYTHONFAULTHANDLER=1
 training_data_dir="${PROJECT_DIR}/data/training_data_cache_new"
 tf_bind_model_path="${PROJECT_DIR}/checkpoints/tfbind_train_3671604/epoch=06-val_auroc=0.9186-val_loss=0.2750.ckpt"
 
-max_cells_per_pair=32
+max_cells_per_pair=16
 max_peaks_per_tg=8
 peak_flank_size=128
 pct_true_edges=1.0
@@ -115,4 +115,4 @@ srun python3 ${PROJECT_DIR}/scripts/train_tf_to_tg_model.py \
     --max_peaks_per_tg $max_peaks_per_tg \
     --max_cells_per_pair $max_cells_per_pair \
     --peak_flank_size $peak_flank_size \
-    --batch_size 256
+    --batch_size 128
