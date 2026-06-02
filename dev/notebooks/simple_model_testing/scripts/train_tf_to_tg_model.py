@@ -353,6 +353,7 @@ if __name__ == "__main__":
     """
     
     parser = argparse.ArgumentParser()
+    parser.add_argument("--sample_name", type=str, required=True, help="Name of the sample")
     parser.add_argument("--epochs", type=int, default=50, help="Number of training epochs")
     parser.add_argument("--num_gpus", type=int, default=1, help="Number of GPU devices to use for training")
     parser.add_argument("--num_nodes", type=int, default=1, help="Number of nodes to use for training")
@@ -375,6 +376,7 @@ if __name__ == "__main__":
     genome_fasta_path = DATA_DIR / "genome_data" / "reference_genome" / "mm10" / "mm10.fa"
     chrom_sizes_path = DATA_DIR / "genome_data" / "reference_genome" / "mm10" / "mm10.chrom.sizes"
     
+    sample_name = args.sample_name
     epochs = args.epochs
     num_gpus = args.num_gpus
     num_nodes = args.num_nodes
@@ -393,14 +395,26 @@ if __name__ == "__main__":
     peak_flank_size = args.peak_flank_size
     
     if training_data_dir:
-        training_cache_dir = Path(training_data_dir)
+        cache_dir = Path(training_data_dir)
     else:
-        training_cache_dir = PROJECT_DIR / "data" / "training_data_cache"
-    training_cache_dir.mkdir(exist_ok=True, parents=True)
+        cache_dir = PROJECT_DIR / "data" / "training_data_cache"
+    cache_dir.mkdir(exist_ok=True, parents=True)
     
-    tf_tg_input_cache_dir = training_cache_dir / "tf_tg_training_data_cache"
+    tf_tg_input_cache_dir = cache_dir / "tf_tg_training_cache" / sample_name
     
-    # Load the compact split inputs
+    # Load the trained TF embedding and mask tensors from the TF→DNA model cache 
+    # (these are needed for the TF→TG model since it uses the pretrained TF peak embedding module)
+    tf_embeddings_tensor = torch.load(
+        cache_dir / "tf_embeddings.pt",
+        weights_only=True,
+    )
+    tf_mask_tensor = torch.load(
+        cache_dir / "tf_masks.pt",
+        weights_only=True,
+    )
+    
+    # Load the train/val/test splits of the compact TF-TG input tensors 
+    # that were preprocessed and cached by the data preprocessing script
     tftg_inputs_train = torch.load(
         tf_tg_input_cache_dir / "tftg_inputs_train.pt",
         weights_only=False,
@@ -414,15 +428,6 @@ if __name__ == "__main__":
         weights_only=False,
     )
 
-    # Load the lookup tensors
-    tf_embeddings_tensor = torch.load(
-        training_cache_dir / "tf_embeddings.pt",
-        weights_only=True,
-    )
-    tf_mask_tensor = torch.load(
-        training_cache_dir / "tf_masks.pt",
-        weights_only=True,
-    )
     atac_peak_tensor = torch.load(
         tf_tg_input_cache_dir / "atac_peak_tensor.pt",
         weights_only=True,

@@ -84,17 +84,23 @@ echo "[INFO] Using nproc_per_node=$NPROC_PER_NODE based on GPUs per node"
 export NCCL_DEBUG=INFO
 export PYTHONFAULTHANDLER=1
 
-training_data_dir="${PROJECT_DIR}/data/training_data_cache_new"
+cell_type="mESC"
+sample_name="E8.5_rep1"
+sample_input_data_dir="${PROJECT_DIR}/data/sample_input_data/${cell_type}/${sample_name}"
+training_data_dir="${PROJECT_DIR}/data/${cell_type}_cache"
+
 tf_bind_model_path="${PROJECT_DIR}/checkpoints/tfbind_train_3671604/epoch=06-val_auroc=0.9186-val_loss=0.2750.ckpt"
 
 max_cells_per_pair=16
 max_peaks_per_tg=8
 peak_flank_size=128
-pct_true_edges=1.0
-true_false_ratio=2.0
+pct_true_edges=0.5
+true_false_ratio=1.0
 
 echo "[INFO] Building and Caching Training Data..."
 python3 ${PROJECT_DIR}/scripts/build_tf_to_tg_train_data.py \
+    --sample_name $sample_name \
+    --input_data_dir $sample_input_data_dir \
     --training_data_dir $training_data_dir \
     --max_peaks_per_tg $max_peaks_per_tg \
     --max_cells_per_pair $max_cells_per_pair \
@@ -106,6 +112,7 @@ python3 ${PROJECT_DIR}/scripts/build_tf_to_tg_train_data.py \
 echo "[INFO] Starting training..."
 srun python3 ${PROJECT_DIR}/scripts/train_tf_to_tg_model.py \
     --epochs 250 \
+    --sample_name $sample_name \
     --num_gpus $NPROC_PER_NODE \
     --num_nodes $SLURM_JOB_NUM_NODES \
     --run_name tf_tg_train_${SLURM_JOB_ID} \

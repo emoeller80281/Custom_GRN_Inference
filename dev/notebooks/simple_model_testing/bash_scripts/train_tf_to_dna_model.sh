@@ -19,7 +19,6 @@ cd $PROJECT_DIR
 echo "Activating conda environment and starting training..."
 source activate my_env
 
-
 # --- Memory + math ---
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,max_split_size_mb:32
 export TORCH_ALLOW_TF32=1
@@ -85,12 +84,14 @@ echo "[INFO] Using nproc_per_node=$NPROC_PER_NODE based on GPUs per node"
 export NCCL_DEBUG=INFO
 export PYTHONFAULTHANDLER=1
 
-training_data_dir="${PROJECT_DIR}/data/training_data_cache_new"
+cell_type="mESC"
+sample_name="E7.5_rep1"
+training_data_dir="${PROJECT_DIR}/data/${cell_type}_cache"
 
 echo "[INFO] Building TF-to-DNA datasets..."
 python3 ${PROJECT_DIR}/scripts/build_tf_to_dna_train_data.py \
     --training_data_dir $training_data_dir \
-    --pct_true_edges 0.10 \
+    --pct_true_edges 0.05 \
     --true_false_ratio 0.25
 
 echo "[INFO] Starting TF-to-DNA model training..."

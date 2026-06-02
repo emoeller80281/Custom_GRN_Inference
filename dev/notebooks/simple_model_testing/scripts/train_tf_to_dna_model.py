@@ -224,16 +224,21 @@ if __name__ == "__main__":
         training_cache_dir = PROJECT_DIR / "data" / "training_data_cache"
     training_cache_dir.mkdir(exist_ok=True, parents=True)
     
-    # Define paths for cached data files
+    # Shared cache files for both TF-to-TG and TF-to-DNA training
     tf_name_to_idx_cache_path = training_cache_dir / "tf_name_to_idx.csv"
-    peak_id_to_idx_cache_path = training_cache_dir / "peak_id_to_idx.csv"
-    edge_tf_idx_cache_path = training_cache_dir / "edge_tf_idx.pt"
-    edge_peak_idx_cache_path = training_cache_dir / "edge_peak_idx.pt"
-    edge_labels_cache_path = training_cache_dir / "edge_labels.pt"
     tf_embedding_cache_path = training_cache_dir / "tf_embeddings.pt"
     tf_mask_cache_path = training_cache_dir / "tf_masks.pt"
-    tf_lengths_cache_path = training_cache_dir / "tf_lengths.pt"
-    peak_onehot_cache_path = training_cache_dir / "peak_onehot_array.pt"
+    
+    # TF-DNA training specific cache files
+    peak_id_to_idx_cache_path = training_cache_dir / "tf_dna_training_cache" / "peak_id_to_idx.csv"
+    edge_tf_idx_cache_path = training_cache_dir / "tf_dna_training_cache" / "edge_tf_idx.pt"
+    edge_peak_idx_cache_path = training_cache_dir / "tf_dna_training_cache" / "edge_peak_idx.pt"
+    edge_labels_cache_path = training_cache_dir / "tf_dna_training_cache" / "edge_labels.pt"
+    tf_lengths_cache_path = training_cache_dir / "tf_dna_training_cache" / "tf_lengths.pt"
+    peak_onehot_cache_path = training_cache_dir / "tf_dna_training_cache" / "peak_onehot_array.pt"
+    train_idx_cache_path = training_cache_dir / "tf_dna_training_cache" / "train_idx.pt"
+    val_idx_cache_path = training_cache_dir / "tf_dna_training_cache" / "val_idx.pt"
+    test_idx_cache_path = training_cache_dir / "tf_dna_training_cache" / "test_idx.pt"
     
     cache_files = [
         tf_name_to_idx_cache_path,
@@ -244,9 +249,9 @@ if __name__ == "__main__":
         tf_embedding_cache_path,
         tf_mask_cache_path,
         peak_onehot_cache_path,
-        training_cache_dir / "tf_to_tg_training_data" / "train_idx.pt",
-        training_cache_dir / "tf_to_tg_training_data" / "val_idx.pt",
-        training_cache_dir / "tf_to_tg_training_data" / "test_idx.pt",
+        training_cache_dir / "tf_dna_training_cache" / "train_idx.pt",
+        training_cache_dir / "tf_dna_training_cache" / "val_idx.pt",
+        training_cache_dir / "tf_dna_training_cache" / "test_idx.pt",
     ]
     missing = [str(path) for path in cache_files if not path.exists()]
     if missing:
@@ -255,15 +260,18 @@ if __name__ == "__main__":
             + "\n".join(missing)
         )
 
+    # Load cached data
     edge_tf_idx_tensor: torch.Tensor = torch.load(edge_tf_idx_cache_path)
     edge_peak_idx_tensor: torch.Tensor = torch.load(edge_peak_idx_cache_path)
     edge_labels_tensor: torch.Tensor = torch.load(edge_labels_cache_path)
     tf_embeddings_tensor: torch.Tensor = torch.load(tf_embedding_cache_path)
     tf_mask_tensor: torch.Tensor = torch.load(tf_mask_cache_path)
     peak_tensor: torch.Tensor = torch.load(peak_onehot_cache_path)
-    train_idx: torch.Tensor = torch.load(training_cache_dir / "train_idx.pt")
-    val_idx: torch.Tensor = torch.load(training_cache_dir / "val_idx.pt")
-    test_idx: torch.Tensor = torch.load(training_cache_dir / "test_idx.pt")
+    
+    # Load train/val/test splits
+    train_idx: torch.Tensor = torch.load(training_cache_dir / "tf_dna_training_cache" / "train_idx.pt")
+    val_idx: torch.Tensor = torch.load(training_cache_dir / "tf_dna_training_cache" / "val_idx.pt")
+    test_idx: torch.Tensor = torch.load(training_cache_dir / "tf_dna_training_cache" / "test_idx.pt")
 
     if peak_tensor.dtype == torch.uint8:
         peak_tensor = peak_tensor.float()

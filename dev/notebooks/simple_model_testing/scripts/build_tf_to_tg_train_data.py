@@ -21,32 +21,6 @@ import utils
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 
-def load_ground_truth(ground_truth_file: Path | str) -> pd.DataFrame:
-    if isinstance(ground_truth_file, str):
-        ground_truth_file = Path(ground_truth_file)
-
-    logging.info(f"Loading ground truth file: {ground_truth_file.name}")
-
-    if ground_truth_file.suffix == ".csv":
-        sep = ","
-    elif ground_truth_file.suffix == ".tsv":
-        sep = "\t"
-
-    ground_truth_df = pd.read_csv(ground_truth_file, sep=sep, on_bad_lines="skip", engine="python")
-
-    if "chip" in ground_truth_file.name and "atlas" in ground_truth_file.name:
-        ground_truth_df = ground_truth_df[["source_id", "target_id"]]
-
-    if ground_truth_df.columns[0] != "Source" or ground_truth_df.columns[1] != "Target":
-        ground_truth_df = ground_truth_df.rename(
-            columns={ground_truth_df.columns[0]: "Source", ground_truth_df.columns[1]: "Target"}
-        )
-    ground_truth_df["Source"] = ground_truth_df["Source"].astype(str).str.capitalize()
-    ground_truth_df["Target"] = ground_truth_df["Target"].astype(str).str.capitalize()
-
-    return ground_truth_df[["Source", "Target"]].dropna()
-
-
 def split_genes_by_chromosome(gene_reference_file: Path):
     gene_ref_df = gtfparse.read_gtf(gene_reference_file, result_type="pandas")
 
@@ -59,16 +33,15 @@ def split_genes_by_chromosome(gene_reference_file: Path):
     ].unique()
     logging.info(f"Train set: {len(train_genes)} genes")
 
-    val_genes = gene_chrom[gene_chrom["chrom"].isin([str(i) for i in range(16, 19)])][
+    val_genes = gene_chrom[gene_chrom["chrom"].isin([str(i) for i in range(16, 18)])][
         "TG"
     ].unique()
     logging.info(f"Validation set: {len(val_genes)} genes")
 
-    test_genes = gene_chrom[gene_chrom["chrom"].isin([str(19)])]["TG"].unique()
+    test_genes = gene_chrom[gene_chrom["chrom"].isin([str(i) for i in range(18, 20)])]["TG"].unique()
     logging.info(f"Test set: {len(test_genes)} genes")
 
     return train_genes, val_genes, test_genes
-
 
 def create_train_val_test_splits(
     ground_truth_df: pd.DataFrame,
@@ -89,12 +62,6 @@ def create_train_val_test_splits(
     logging.info(f"Test interactions: {len(gt_test_df)}")
 
     return gt_train_df, gt_val_df, gt_test_df
-
-
-def load_ground_truth_files(gt_path_list: list[Path]) -> pd.DataFrame:
-    gt_dfs = [load_ground_truth(gt_path) for gt_path in gt_path_list]
-    return pd.concat(gt_dfs, ignore_index=True)
-
 
 def create_labeled_tf_tg_dataset(
     true_interactions: set[tuple[str, str]],
@@ -399,7 +366,9 @@ def build_tftg_inputs(
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--input_data_dir", type=str, required=False, help="Path to directory containing the sample input data")
     parser.add_argument("--training_data_dir", type=str, required=False, help="Path to directory containing training data cache files (if not using default)")
+    parser.add_argument("--sample_name", type=str, default="E7.5_rep1")
     parser.add_argument("--sample_pairs", type=int, default=None)
     parser.add_argument("--max_peaks_per_tg", type=int, default=64)
     parser.add_argument("--max_cells_per_pair", type=int, default=8)
@@ -416,9 +385,13 @@ def main():
     true_false_ratio = args.true_false_ratio
     peak_flank_size = args.peak_flank_size
     num_cpu = args.num_cpu
+    sample_name = args.sample_name
     
     # Create the training cache directory if it doesn't exist
     training_data_dir = args.training_data_dir
+    input_data_dir = Path(args.input_data_dir)
+    
+    assert input_data_dir.exists(), f"Input data directory does not exist: {input_data_dir}"
 
     if training_data_dir:
         cache_dir = Path(training_data_dir)
@@ -426,10 +399,7 @@ def main():
         cache_dir = PROJECT_DIR / "data" / "training_data_cache"
     cache_dir.mkdir(exist_ok=True, parents=True)
     
-    tf_tg_input_cache_dir = (
-        cache_dir
-        / "tf_tg_training_data_cache"
-    )
+    tf_tg_input_cache_dir = cache_dir / "tf_tg_training_cache" / sample_name
 
     tf_tg_input_cache_dir.mkdir(parents=True, exist_ok=True)
     
@@ -466,10 +436,23 @@ def main():
     genome_fasta_path = DATA_DIR / "genome_data" / "reference_genome" / "mm10" / "mm10.fa"
     chrom_sizes_path = DATA_DIR / "genome_data" / "reference_genome" / "mm10" / "mm10.chrom.sizes"
 
-    atac_pseudobulk = pd.read_parquet(PROJECT_DIR / "data" / "ATAC_data" / "RE_pseudobulk.parquet")
-    peak_to_gene_distance = pd.read_parquet(PROJECT_DIR / "data" / "ATAC_data" / "peak_to_gene_dist.parquet")
-    rna_pseudobulk = pd.read_parquet(PROJECT_DIR / "data" / "RNA_data" / "TG_pseudobulk.parquet")
+    # Load the input data for the sample
+    required_input_files = [
+        "RE_pseudobulk.parquet",
+        "peak_to_gene_dist.parquet",
+        "TG_pseudobulk.parquet"
+    ]
+    
+    for filename in required_input_files:
+        file_path = input_data_dir / filename
+        if not file_path.exists():
+            raise FileNotFoundError(f"Required input file not found: {file_path}")
+    
+    atac_pseudobulk = pd.read_parquet(input_data_dir / "RE_pseudobulk.parquet")
+    peak_to_gene_distance = pd.read_parquet(input_data_dir / "peak_to_gene_dist.parquet")
+    rna_pseudobulk = pd.read_parquet(input_data_dir / "TG_pseudobulk.parquet")
 
+    # Load and merge the ground truth files, or load from cache if already merged
     if not merged_ground_truth_path.exists() or args.force_reload:
         mm10_chip_atlas_file = DATA_DIR / "ground_truth_files" / "chip_atlas_tf_peak_tg_dist.csv"
         rn111_file = DATA_DIR / "ground_truth_files" / "RN111.tsv"
@@ -477,7 +460,7 @@ def main():
         rn114_file = DATA_DIR / "ground_truth_files" / "RN114.tsv"
         rn116_file = DATA_DIR / "ground_truth_files" / "RN116.tsv"
 
-        merged_ground_truth_df = load_ground_truth_files([
+        merged_ground_truth_df = utils.load_ground_truth_files([
             mm10_chip_atlas_file,
             rn111_file,
             rn112_file,

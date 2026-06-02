@@ -139,19 +139,22 @@ def main():
     else:
         training_cache_dir = PROJECT_DIR / "data" / "training_data_cache"
     training_cache_dir.mkdir(exist_ok=True, parents=True)
-
+    
+    # Shared cache files for both TF-to-TG and TF-to-DNA training
     tf_name_to_idx_cache_path = training_cache_dir / "tf_name_to_idx.csv"
-    peak_id_to_idx_cache_path = training_cache_dir / "peak_id_to_idx.csv"
-    edge_tf_idx_cache_path = training_cache_dir / "edge_tf_idx.pt"
-    edge_peak_idx_cache_path = training_cache_dir / "edge_peak_idx.pt"
-    edge_labels_cache_path = training_cache_dir / "edge_labels.pt"
     tf_embedding_cache_path = training_cache_dir / "tf_embeddings.pt"
     tf_mask_cache_path = training_cache_dir / "tf_masks.pt"
-    tf_lengths_cache_path = training_cache_dir / "tf_lengths.pt"
-    peak_onehot_cache_path = training_cache_dir / "peak_onehot_array.pt"
-    train_idx_cache_path = training_cache_dir / "train_idx.pt"
-    val_idx_cache_path = training_cache_dir / "val_idx.pt"
-    test_idx_cache_path = training_cache_dir / "test_idx.pt"
+    
+    # TF-DNA training specific cache files
+    peak_id_to_idx_cache_path = training_cache_dir / "tf_dna_training_cache" / "peak_id_to_idx.csv"
+    edge_tf_idx_cache_path = training_cache_dir / "tf_dna_training_cache" / "edge_tf_idx.pt"
+    edge_peak_idx_cache_path = training_cache_dir / "tf_dna_training_cache" / "edge_peak_idx.pt"
+    edge_labels_cache_path = training_cache_dir / "tf_dna_training_cache" / "edge_labels.pt"
+    tf_lengths_cache_path = training_cache_dir / "tf_dna_training_cache" / "tf_lengths.pt"
+    peak_onehot_cache_path = training_cache_dir / "tf_dna_training_cache" / "peak_onehot_array.pt"
+    train_idx_cache_path = training_cache_dir / "tf_dna_training_cache" / "train_idx.pt"
+    val_idx_cache_path = training_cache_dir / "tf_dna_training_cache" / "val_idx.pt"
+    test_idx_cache_path = training_cache_dir / "tf_dna_training_cache" / "test_idx.pt"
 
     tf_embedding_files = list(embedding_dir.glob("*_protein_embedding.pt"))
     embedded_tf_names = [f.stem.split("_protein_embedding")[0] for f in tf_embedding_files]
@@ -159,7 +162,7 @@ def main():
     logging.info(f"Example TFs with embeddings: {embedded_tf_names[:10]}")
  
     logging.info("Loading true edges...")
-    true_edge_file = DATA_DIR / "ground_truth_files" / "chip_atlas_mm10_all_sample.csv"
+    true_edge_file = DATA_DIR / "ground_truth_files" / "chip_atlas_mm10_all.csv"
     true_edge_df = pd.read_csv(true_edge_file)
     true_edge_df = true_edge_df[true_edge_df["source_id"].isin(embedded_tf_names)]
     logging.info("  - Done loading edges")
@@ -287,7 +290,7 @@ def main():
 
         train_chroms = {f"chr{i}" for i in range(1, 16)}
         val_chroms = {f"chr{i}" for i in range(16, 18)}
-        test_chroms = {"chr18", "chr19"}
+        test_chroms = {""}
 
         train_mask = np.isin(edge_chroms, list(train_chroms))
         val_mask = np.isin(edge_chroms, list(val_chroms))

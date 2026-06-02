@@ -106,6 +106,35 @@ def load_chrom_sizes(chromsizes_file):
 
 from itertools import repeat
 
+def load_ground_truth(ground_truth_file: Path | str) -> pd.DataFrame:
+    if isinstance(ground_truth_file, str):
+        ground_truth_file = Path(ground_truth_file)
+
+    logging.info(f"Loading ground truth file: {ground_truth_file.name}")
+
+    if ground_truth_file.suffix == ".csv":
+        sep = ","
+    elif ground_truth_file.suffix == ".tsv":
+        sep = "\t"
+
+    ground_truth_df = pd.read_csv(ground_truth_file, sep=sep, on_bad_lines="skip", engine="python")
+
+    if "chip" in ground_truth_file.name and "atlas" in ground_truth_file.name:
+        ground_truth_df = ground_truth_df[["source_id", "target_id"]]
+
+    if ground_truth_df.columns[0] != "Source" or ground_truth_df.columns[1] != "Target":
+        ground_truth_df = ground_truth_df.rename(
+            columns={ground_truth_df.columns[0]: "Source", ground_truth_df.columns[1]: "Target"}
+        )
+    ground_truth_df["Source"] = ground_truth_df["Source"].astype(str).str.capitalize()
+    ground_truth_df["Target"] = ground_truth_df["Target"].astype(str).str.capitalize()
+
+    return ground_truth_df[["Source", "Target"]].dropna()
+
+def load_ground_truth_files(gt_path_list: list[Path]) -> pd.DataFrame:
+    gt_dfs = [load_ground_truth(gt_path) for gt_path in gt_path_list]
+    return pd.concat(gt_dfs, ignore_index=True)
+
 def _centered_peak_to_onehot(
     peak_id: str,
     genome,
