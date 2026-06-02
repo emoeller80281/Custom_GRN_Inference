@@ -583,6 +583,7 @@ if __name__ == "__main__":
     )
 
     wandb_logger.log_hyperparams({
+        "sample_name": sample_name,
         "epochs": epochs,
         "batch_size": batch_size,
         "sample_pairs": sample_pairs,

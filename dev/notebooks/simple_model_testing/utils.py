@@ -701,7 +701,7 @@ def download_gene_protein_fastas(
 
     return saved_files
 
-def fetch_chip_atlas_tf_list(tf_list, genome="mm10", num_workers=10):
+def fetch_chip_atlas_tf_list(tf_list, genome="mm10", num_workers=10) -> pd.DataFrame:
     
     def fetch_chip_atlas_tf(tf, genome=genome, threshold="05", timeout=120):
         tf_canon = tf.replace("-", "")

@@ -5,8 +5,8 @@
 #SBATCH --time=72:00:00
 #SBATCH -p dense
 #SBATCH -N 1
-#SBATCH --gres=gpu:a100:1
-#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:a100:2
+#SBATCH --ntasks-per-node=2
 #SBATCH -c 8
 #SBATCH --mem=128G
 #SBATCH --signal=SIGUSR1@90
@@ -24,8 +24,7 @@ export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:32
 export TORCH_ALLOW_TF32=1
 export NVIDIA_TF32_OVERRIDE=1
 
-# --- Threading: set to match SLURM CPUs per task ---
-THREADS=${SLURM_CPUS_PER_TASK:-1}
+# --- Threading ---
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
@@ -85,17 +84,19 @@ export NCCL_DEBUG=INFO
 export PYTHONFAULTHANDLER=1
 
 cell_type="mESC"
-sample_name="E8.5_rep1"
+sample_name="E7.5_rep1"
 sample_input_data_dir="${PROJECT_DIR}/data/sample_input_data/${cell_type}/${sample_name}"
 training_data_dir="${PROJECT_DIR}/data/${cell_type}_cache"
 
 tf_bind_model_path="${PROJECT_DIR}/checkpoints/tfbind_train_3671604/epoch=06-val_auroc=0.9186-val_loss=0.2750.ckpt"
 
+tf_tg_chkpt_dir="${PROJECT_DIR}/checkpoints/${cell_type}/${sample_name}/tf_tg_train_${sample_name}_${SLURM_JOB_ID}"
+
 max_cells_per_pair=16
 max_peaks_per_tg=8
 peak_flank_size=128
-pct_true_edges=0.5
-true_false_ratio=1.0
+pct_true_edges=1.0
+true_false_ratio=2.0
 
 echo "[INFO] Building and Caching Training Data..."
 python3 ${PROJECT_DIR}/scripts/build_tf_to_tg_train_data.py \
@@ -115,11 +116,11 @@ srun python3 ${PROJECT_DIR}/scripts/train_tf_to_tg_model.py \
     --sample_name $sample_name \
     --num_gpus $NPROC_PER_NODE \
     --num_nodes $SLURM_JOB_NUM_NODES \
-    --run_name tf_tg_train_${SLURM_JOB_ID} \
-    --output_dir ${PROJECT_DIR}/checkpoints/tf_tg_train_${SLURM_JOB_ID} \
+    --run_name tf_tg_train_${sample_name}_ddp_${SLURM_JOB_ID} \
+    --output_dir $tf_tg_chkpt_dir \
     --tf_bind_model_path $tf_bind_model_path \
     --training_data_dir $training_data_dir \
     --max_peaks_per_tg $max_peaks_per_tg \
     --max_cells_per_pair $max_cells_per_pair \
     --peak_flank_size $peak_flank_size \
-    --batch_size 128
+    --batch_size 1024
