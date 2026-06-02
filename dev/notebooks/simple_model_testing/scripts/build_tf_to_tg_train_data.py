@@ -17,6 +17,7 @@ PROJECT_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERE
 sys.path.append(str(PROJECT_DIR))
 
 import utils
+import config
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -367,8 +368,6 @@ def build_tftg_inputs(
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input_data_dir", type=str, required=False, help="Path to directory containing the sample input data")
-    parser.add_argument("--training_data_dir", type=str, required=False, help="Path to directory containing training data cache files (if not using default)")
-    parser.add_argument("--sample_name", type=str, default="E7.5_rep1")
     parser.add_argument("--sample_pairs", type=int, default=None)
     parser.add_argument("--max_peaks_per_tg", type=int, default=64)
     parser.add_argument("--max_cells_per_pair", type=int, default=8)
@@ -385,36 +384,36 @@ def main():
     true_false_ratio = args.true_false_ratio
     peak_flank_size = args.peak_flank_size
     num_cpu = args.num_cpu
-    sample_name = args.sample_name
+        
+    gene_ref_file = config.gene_ref_file
+    genome_fasta_path = config.genome_fasta_path
+    chrom_sizes_path = config.chrom_sizes_path
+    
+    assert gene_ref_file.exists(), f"Gene reference file not found: {gene_ref_file}"
+    assert genome_fasta_path.exists(), f"Genome FASTA file not found: {genome_fasta_path}"
+    assert chrom_sizes_path.exists(), f"Chromosome sizes file not found: {chrom_sizes_path}"
     
     # Create the training cache directory if it doesn't exist
-    training_data_dir = args.training_data_dir
     input_data_dir = Path(args.input_data_dir)
     
     assert input_data_dir.exists(), f"Input data directory does not exist: {input_data_dir}"
-
-    if training_data_dir:
-        cache_dir = Path(training_data_dir)
-    else:
-        cache_dir = PROJECT_DIR / "data" / "training_data_cache"
-    cache_dir.mkdir(exist_ok=True, parents=True)
     
-    tf_tg_input_cache_dir = cache_dir / "tf_tg_training_cache" / sample_name
+    tf_tg_input_cache_dir = config.tf_tg_input_cache_dir
 
     tf_tg_input_cache_dir.mkdir(parents=True, exist_ok=True)
     
-    tf_name_to_idx_cache_path = cache_dir / "tf_name_to_idx.csv"
-    tf_embedding_cache_path = cache_dir / "tf_embeddings.pt"
-    tf_mask_cache_path = cache_dir / "tf_masks.pt"
-    merged_ground_truth_path = cache_dir / "merged_ground_truth.parquet"
+    tf_name_to_idx_cache_path = config.tf_name_to_idx_cache_path
+    tf_embedding_cache_path = config.tf_embedding_cache_path
+    tf_mask_cache_path = config.tf_mask_cache_path
+    merged_ground_truth_path = config.merged_ground_truth_cache_path
     
-    atac_peak_onehot_cache_path = tf_tg_input_cache_dir / "atac_peak_tensor.pt"
-    train_file = tf_tg_input_cache_dir / "tftg_inputs_train.pt"
-    val_file = tf_tg_input_cache_dir / "tftg_inputs_val.pt"
-    test_file = tf_tg_input_cache_dir / "tftg_inputs_test.pt"
+    atac_peak_onehot_cache_path = config.tf_tg_atac_peak_cache_path
+    train_file = config.tf_tg_train_cache_path
+    val_file = config.tf_tg_val_cache_path
+    test_file = config.tf_tg_test_cache_path
     
-    metadata_file = tf_tg_input_cache_dir / "metadata.json"
-    manifest_file = tf_tg_input_cache_dir / "manifest.json"
+    metadata_file = config.tf_tg_metadata_cache_path
+    manifest_file = config.tf_tg_manifest_cache_path
     
     required_cache_files = [
         tf_name_to_idx_cache_path,
@@ -431,10 +430,6 @@ def main():
     if all(f.exists() for f in required_cache_files) and not args.force_reload:
         logging.info("All required cache files already exist. Skipping construction (use --force_reload to override).")
         return
-
-    gene_ref_file = DATA_DIR / "genome_data" / "genome_annotation" / "mm10" / "Mus_musculus.GRCm39.115.gtf.gz"
-    genome_fasta_path = DATA_DIR / "genome_data" / "reference_genome" / "mm10" / "mm10.fa"
-    chrom_sizes_path = DATA_DIR / "genome_data" / "reference_genome" / "mm10" / "mm10.chrom.sizes"
 
     # Load the input data for the sample
     required_input_files = [

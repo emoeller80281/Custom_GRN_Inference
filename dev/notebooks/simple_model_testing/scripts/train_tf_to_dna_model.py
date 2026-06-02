@@ -21,6 +21,7 @@ PROJECT_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERE
 sys.path.append(str(PROJECT_DIR))
 
 import models.tf_to_dna as tf_to_dna_module
+import config
 import utils
 
 logging.basicConfig(
@@ -199,9 +200,7 @@ if __name__ == "__main__":
     argparser.add_argument("--model_dim", type=int, default=128, help="Dimension of the model")
     argparser.add_argument("--batch_size", type=int, default=64, help="Batch size for training")
     argparser.add_argument("--num_layers", type=int, default=4, help="Number of layers in the model")
-    argparser.add_argument("--run_name", type=str, required=True, default="tfbind_train", help="Name of the training run")
-    argparser.add_argument("--output_dir", type=str, required=True, help="Path to save model checkpoints")
-    argparser.add_argument("--training_data_dir", type=str, required=False, help="Path to directory containing training data cache files (if not using default)")
+    argparser.add_argument("--job_id", type=str, required=True, help="SLURM job ID for this training run")
     argparser.add_argument("--checkpoint_path", type=str, required=False, help="Path to a model checkpoint to resume training from")
     argparser.add_argument("--force_reload", action="store_true", help="Whether to force reload cached data instead of using existing cache files")
     args = argparser.parse_args()
@@ -212,46 +211,40 @@ if __name__ == "__main__":
     model_dim = args.model_dim
     batch_size = args.batch_size
     num_layers = args.num_layers
-    run_name = args.run_name
-    output_dir = args.output_dir
+    job_id = args.job_id
     checkpoint_path = args.checkpoint_path
     force_reload = args.force_reload
-    training_data_dir = args.training_data_dir
-
-    if training_data_dir:
-        training_cache_dir = Path(training_data_dir)
-    else:
-        training_cache_dir = PROJECT_DIR / "data" / "training_data_cache"
-    training_cache_dir.mkdir(exist_ok=True, parents=True)
     
+    output_dir = PROJECT_DIR / "checkpoints" / f"tf_dna_{config.species}_{job_id}"
+    
+    run_name = f"tf_dna_{config.species}_{job_id}"
+        
     # Shared cache files for both TF-to-TG and TF-to-DNA training
-    tf_name_to_idx_cache_path = training_cache_dir / "tf_name_to_idx.csv"
-    tf_embedding_cache_path = training_cache_dir / "tf_embeddings.pt"
-    tf_mask_cache_path = training_cache_dir / "tf_masks.pt"
+    tf_name_to_idx_cache_path = config.tf_name_to_idx_cache_path
+    tf_embedding_cache_path = config.tf_embedding_cache_path
+    tf_mask_cache_path = config.tf_mask_cache_path
     
     # TF-DNA training specific cache files
-    peak_id_to_idx_cache_path = training_cache_dir / "tf_dna_training_cache" / "peak_id_to_idx.csv"
-    edge_tf_idx_cache_path = training_cache_dir / "tf_dna_training_cache" / "edge_tf_idx.pt"
-    edge_peak_idx_cache_path = training_cache_dir / "tf_dna_training_cache" / "edge_peak_idx.pt"
-    edge_labels_cache_path = training_cache_dir / "tf_dna_training_cache" / "edge_labels.pt"
-    tf_lengths_cache_path = training_cache_dir / "tf_dna_training_cache" / "tf_lengths.pt"
-    peak_onehot_cache_path = training_cache_dir / "tf_dna_training_cache" / "peak_onehot_array.pt"
-    train_idx_cache_path = training_cache_dir / "tf_dna_training_cache" / "train_idx.pt"
-    val_idx_cache_path = training_cache_dir / "tf_dna_training_cache" / "val_idx.pt"
-    test_idx_cache_path = training_cache_dir / "tf_dna_training_cache" / "test_idx.pt"
+    tf_dna_edge_tf_idx_cache_path = config.tf_dna_edge_tf_idx_cache_path
+    tf_dna_edge_peak_idx_cache_path = config.tf_dna_edge_peak_idx_cache_path
+    tf_dna_edge_labels_cache_path = config.tf_dna_edge_labels_cache_path
+    tf_dna_tf_lengths_cache_path = config.tf_dna_tf_lengths_cache_path
+    tf_dna_peak_onehot_cache_path = config.tf_dna_peak_onehot_cache_path
+    tf_dna_train_idx_cache_path = config.tf_dna_train_idx_cache_path
+    tf_dna_val_idx_cache_path = config.tf_dna_val_idx_cache_path
+    tf_dna_test_idx_cache_path = config.tf_dna_test_idx_cache_path
     
     cache_files = [
         tf_name_to_idx_cache_path,
-        peak_id_to_idx_cache_path,
-        edge_tf_idx_cache_path,
-        edge_peak_idx_cache_path,
-        edge_labels_cache_path,
+        tf_dna_edge_tf_idx_cache_path,
+        tf_dna_edge_peak_idx_cache_path,
+        tf_dna_edge_labels_cache_path,
         tf_embedding_cache_path,
         tf_mask_cache_path,
-        peak_onehot_cache_path,
-        training_cache_dir / "tf_dna_training_cache" / "train_idx.pt",
-        training_cache_dir / "tf_dna_training_cache" / "val_idx.pt",
-        training_cache_dir / "tf_dna_training_cache" / "test_idx.pt",
+        tf_dna_peak_onehot_cache_path,
+        tf_dna_train_idx_cache_path,
+        tf_dna_val_idx_cache_path,
+        tf_dna_test_idx_cache_path,
     ]
     missing = [str(path) for path in cache_files if not path.exists()]
     if missing:
@@ -261,17 +254,17 @@ if __name__ == "__main__":
         )
 
     # Load cached data
-    edge_tf_idx_tensor: torch.Tensor = torch.load(edge_tf_idx_cache_path)
-    edge_peak_idx_tensor: torch.Tensor = torch.load(edge_peak_idx_cache_path)
-    edge_labels_tensor: torch.Tensor = torch.load(edge_labels_cache_path)
+    edge_tf_idx_tensor: torch.Tensor = torch.load(tf_dna_edge_tf_idx_cache_path)
+    edge_peak_idx_tensor: torch.Tensor = torch.load(tf_dna_edge_peak_idx_cache_path)
+    edge_labels_tensor: torch.Tensor = torch.load(tf_dna_edge_labels_cache_path)
     tf_embeddings_tensor: torch.Tensor = torch.load(tf_embedding_cache_path)
     tf_mask_tensor: torch.Tensor = torch.load(tf_mask_cache_path)
-    peak_tensor: torch.Tensor = torch.load(peak_onehot_cache_path)
+    peak_tensor: torch.Tensor = torch.load(tf_dna_peak_onehot_cache_path)
     
     # Load train/val/test splits
-    train_idx: torch.Tensor = torch.load(training_cache_dir / "tf_dna_training_cache" / "train_idx.pt")
-    val_idx: torch.Tensor = torch.load(training_cache_dir / "tf_dna_training_cache" / "val_idx.pt")
-    test_idx: torch.Tensor = torch.load(training_cache_dir / "tf_dna_training_cache" / "test_idx.pt")
+    train_idx: torch.Tensor = torch.load(tf_dna_train_idx_cache_path)
+    val_idx: torch.Tensor = torch.load(tf_dna_val_idx_cache_path)
+    test_idx: torch.Tensor = torch.load(tf_dna_test_idx_cache_path)
 
     if peak_tensor.dtype == torch.uint8:
         peak_tensor = peak_tensor.float()

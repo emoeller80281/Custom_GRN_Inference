@@ -84,26 +84,19 @@ echo "[INFO] Using nproc_per_node=$NPROC_PER_NODE based on GPUs per node"
 export NCCL_DEBUG=INFO
 export PYTHONFAULTHANDLER=1
 
-cell_type="mESC"
-sample_name="E7.5_rep1"
-training_data_dir="${PROJECT_DIR}/data/${cell_type}_cache"
-
 echo "[INFO] Building TF-to-DNA datasets..."
 python3 ${PROJECT_DIR}/scripts/build_tf_to_dna_train_data.py \
-    --training_data_dir $training_data_dir \
     --pct_true_edges 0.05 \
     --true_false_ratio 0.25
 
 echo "[INFO] Starting TF-to-DNA model training..."
 srun python3 ${PROJECT_DIR}/scripts/train_tf_to_dna_model.py \
-    --training_data_dir $training_data_dir \
     --epochs 50 \
     --batch_size 256 \
     --model_dim 128 \
     --num_layers 4 \
     --num_gpus $NPROC_PER_NODE \
     --num_nodes $SLURM_JOB_NUM_NODES \
-    --run_name tfbind_train_${SLURM_JOB_ID} \
-    --output_dir ${PROJECT_DIR}/checkpoints/tfbind_train_${SLURM_JOB_ID} #\
+    --job_id $SLURM_JOB_ID \
     # --checkpoint_path "${PROJECT_DIR}/checkpoints/tf_peak_binding/epoch=01-val_auroc=0.9287-val_loss=0.3160.ckpt"
 

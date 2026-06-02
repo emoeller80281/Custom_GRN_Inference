@@ -30,6 +30,7 @@ sys.path.append(str(PROJECT_DIR))
 
 import models.tf_to_tg as tf_to_tg_module
 import models.tf_to_dna as tf_to_dna_module
+import config
 import argparse
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -357,8 +358,7 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type=int, default=50, help="Number of training epochs")
     parser.add_argument("--num_gpus", type=int, default=1, help="Number of GPU devices to use for training")
     parser.add_argument("--num_nodes", type=int, default=1, help="Number of nodes to use for training")
-    parser.add_argument("--run_name", type=str, help="Name of the training run (for logging/checkpointing)")
-    parser.add_argument("--output_dir", type=str, help="Path to the output directory")
+    parser.add_argument("--job_id", type=str, help="SLURM job ID for this training run")
     parser.add_argument("--sample_pairs", type=int, default=None, help="Number of TF-TG pairs to sample for training (default: use all)")
     parser.add_argument("--max_peaks_per_tg", type=int, default=64, help="Maximum number of peaks to consider per TG (default: 64)")
     parser.add_argument("--max_cells_per_pair", type=int, default=8, help="Maximum number of cells to sample per TF-TG pair (default: 8)")
@@ -376,12 +376,10 @@ if __name__ == "__main__":
     genome_fasta_path = DATA_DIR / "genome_data" / "reference_genome" / "mm10" / "mm10.fa"
     chrom_sizes_path = DATA_DIR / "genome_data" / "reference_genome" / "mm10" / "mm10.chrom.sizes"
     
-    sample_name = args.sample_name
     epochs = args.epochs
     num_gpus = args.num_gpus
     num_nodes = args.num_nodes
-    output_dir = args.output_dir
-    run_name = args.run_name
+    job_id = args.job_id
     checkpoint_path = args.checkpoint_path
     force_reload = args.force_reload
     batch_size = args.batch_size
@@ -390,58 +388,55 @@ if __name__ == "__main__":
     max_cells_per_pair = args.max_cells_per_pair
     pct_true_edges = args.pct_true_edges
     true_false_ratio = args.true_false_ratio
-    training_data_dir = args.training_data_dir
     tf_bind_model_path = Path(args.tf_bind_model_path)
     peak_flank_size = args.peak_flank_size
     
-    if training_data_dir:
-        cache_dir = Path(training_data_dir)
-    else:
-        cache_dir = PROJECT_DIR / "data" / "training_data_cache"
-    cache_dir.mkdir(exist_ok=True, parents=True)
+    sample_name = config.sample_name
     
-    tf_tg_input_cache_dir = cache_dir / "tf_tg_training_cache" / sample_name
+    output_dir = PROJECT_DIR / "checkpoints" / f"{config.cell_type}" / f"{sample_name}" / f"tf_tg_train_{sample_name}_{job_id}"
+    
+    run_name = f"tf_tg_{sample_name}_{job_id}"
     
     # Load the trained TF embedding and mask tensors from the TF→DNA model cache 
     # (these are needed for the TF→TG model since it uses the pretrained TF peak embedding module)
     tf_embeddings_tensor = torch.load(
-        cache_dir / "tf_embeddings.pt",
+        config.tf_embedding_cache_path,
         weights_only=True,
     )
     tf_mask_tensor = torch.load(
-        cache_dir / "tf_masks.pt",
+        config.tf_mask_cache_path,
         weights_only=True,
     )
     
     # Load the train/val/test splits of the compact TF-TG input tensors 
     # that were preprocessed and cached by the data preprocessing script
     tftg_inputs_train = torch.load(
-        tf_tg_input_cache_dir / "tftg_inputs_train.pt",
+        config.tf_tg_train_cache_path,
         weights_only=False,
     )
     tftg_inputs_val = torch.load(
-        tf_tg_input_cache_dir / "tftg_inputs_val.pt",
+        config.tf_tg_val_cache_path,
         weights_only=False,
     )
     tftg_inputs_test = torch.load(
-        tf_tg_input_cache_dir / "tftg_inputs_test.pt",
+        config.tf_tg_test_cache_path,
         weights_only=False,
     )
 
     atac_peak_tensor = torch.load(
-        tf_tg_input_cache_dir / "atac_peak_tensor.pt",
+        config.tf_tg_atac_peak_cache_path,
         weights_only=True,
     )
 
     # Load the metadata
-    with open(tf_tg_input_cache_dir / "metadata.json", "r") as f:
+    with open(config.tf_tg_metadata_cache_path, "r") as f:
         metadata = json.load(f)
         
     tf_name_to_idx = metadata["tf_name_to_idx"]
     tg_id_to_idx = metadata["tg_id_to_idx"]
 
     # Load the manifest and verify tensor shapes and dtypes match expectations
-    with open(tf_tg_input_cache_dir / "manifest.json") as f:
+    with open(config.tf_tg_manifest_cache_path) as f:
         manifest = json.load(f)
     
     log_once(json.dumps(manifest, indent=2))

@@ -620,6 +620,10 @@ def download_gene_protein_fastas(
     available_files = {f.stem.replace("_protein", ""): f for f in output_dir.glob("*_protein.fasta")}
     gene_names = [gene for gene in gene_names if gene not in available_files]
 
+    if not gene_names:
+        logging.info("All gene FASTA files already exist. No downloads needed.")
+        return {gene: available_files[gene] for gene in gene_names}
+    
     for i, gene_name in enumerate(gene_names, start=1):
         search_term = (
             f'{gene_name}[Gene Name] '

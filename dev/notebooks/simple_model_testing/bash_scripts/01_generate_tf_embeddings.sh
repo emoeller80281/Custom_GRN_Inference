@@ -14,11 +14,25 @@ set -eo pipefail
 
 source activate tfbindformer
 
+species="mm10"
+
 PROJECT_DIR="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/dev/notebooks/simple_model_testing"
 cd "${PROJECT_DIR}"
 
-FASTA_DIR="${PROJECT_DIR}/data/tf_data/tf_sequences"
-OUT_DIR="${PROJECT_DIR}/data/tf_data/tf_3di_output"
+species="mm10"
+entrez_email="luminarada@gmail.com"
+
+# Download TF protein sequences from ChIP-Atlas and save as FASTA files
+python ${PROJECT_DIR}/download_chipatlas.py \
+    --species ${species} \
+    --entrez_email ${entrez_email} \
+    --num_workers 24
+
+# Generate 3Di tokens for TF proteins using Foldseek and ProstT5
+echo ""
+echo "Generating 3Di tokens for TF proteins using Foldseek and ProstT5..."
+FASTA_DIR="${PROJECT_DIR}/data/tf_data/${species}/tf_sequences"
+OUT_DIR="${PROJECT_DIR}/data/tf_data/${species}/tf_3di_output"
 TMP_DIR="${OUT_DIR}/tmp"
 WEIGHTS_DIR="${OUT_DIR}/prostt5_weights"
 
@@ -50,16 +64,15 @@ foldseek convert2fasta \
     "${DB_PREFIX}_ss" \
     "${OUT_DIR}/tf_proteins_3di.fasta"
 
-echo "3Di FASTA written to ${OUT_DIR}/tf_proteins_3di.fasta"
+echo "Done! 3Di FASTA written to ${OUT_DIR}/tf_proteins_3di.fasta"
 
-echo "Done generating 3Di tokens for TF proteins."
-
-echo "Extracting 3Di tokens for TF proteins using Foldseek..."
+echo ""
+echo "Extracting TF embeddings..."
 python ${PROJECT_DIR}/scripts/extract_tf_embeddings.py \
   --aa_dir ${FASTA_DIR} \
   --di_fasta ${OUT_DIR}/tf_proteins_3di.fasta \
-  --out_dir ${PROJECT_DIR}/data/tf_data/tf_embeddings/ \
+  --out_dir ${PROJECT_DIR}/data/tf_data/${species}/tf_embeddings/ \
   --d_model 128 \
   --device cuda
 
-echo "Done extracting 3Di tokens for TF proteins."
+echo "Done! All steps finished."

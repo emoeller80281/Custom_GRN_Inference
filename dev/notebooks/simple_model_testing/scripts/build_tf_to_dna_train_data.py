@@ -14,6 +14,7 @@ PROJECT_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERE
 sys.path.append(str(PROJECT_DIR))
 
 import utils
+import config
 
 logging.basicConfig(
     level=logging.INFO,
@@ -122,39 +123,30 @@ def load_ordered_tf_embeddings(
 
 def main():
     argparser = argparse.ArgumentParser(description="Build TF-to-DNA training data")
-    argparser.add_argument("--training_data_dir", type=str, required=False, help="Path to directory containing training data cache files (if not using default)")
     argparser.add_argument("--pct_true_edges", type=float, default=0.25)
     argparser.add_argument("--true_false_ratio", type=float, default=0.25)
     argparser.add_argument("--force_reload", action="store_true")
     args = argparser.parse_args()
 
-    genome_fasta_path = DATA_DIR / "genome_data" / "reference_genome" / "mm10" / "mm10.fa"
-    chrom_sizes_path = DATA_DIR / "genome_data" / "reference_genome" / "mm10" / "mm10.chrom.sizes"
-    embedding_dir = PROJECT_DIR / "data" / "tf_data" / "tf_embeddings"
-    
-    training_data_dir = args.training_data_dir
-
-    if training_data_dir:
-        training_cache_dir = Path(training_data_dir)
-    else:
-        training_cache_dir = PROJECT_DIR / "data" / "training_data_cache"
-    training_cache_dir.mkdir(exist_ok=True, parents=True)
-    
+    genome_fasta_path = config.genome_fasta_path
+    chrom_sizes_path = config.chrom_sizes_path
+    embedding_dir = config.embedding_dir
+        
     # Shared cache files for both TF-to-TG and TF-to-DNA training
-    tf_name_to_idx_cache_path = training_cache_dir / "tf_name_to_idx.csv"
-    tf_embedding_cache_path = training_cache_dir / "tf_embeddings.pt"
-    tf_mask_cache_path = training_cache_dir / "tf_masks.pt"
+    tf_name_to_idx_cache_path = config.tf_name_to_idx_cache_path
+    tf_embedding_cache_path = config.tf_embedding_cache_path
+    tf_mask_cache_path = config.tf_mask_cache_path
     
     # TF-DNA training specific cache files
-    peak_id_to_idx_cache_path = training_cache_dir / "tf_dna_training_cache" / "peak_id_to_idx.csv"
-    edge_tf_idx_cache_path = training_cache_dir / "tf_dna_training_cache" / "edge_tf_idx.pt"
-    edge_peak_idx_cache_path = training_cache_dir / "tf_dna_training_cache" / "edge_peak_idx.pt"
-    edge_labels_cache_path = training_cache_dir / "tf_dna_training_cache" / "edge_labels.pt"
-    tf_lengths_cache_path = training_cache_dir / "tf_dna_training_cache" / "tf_lengths.pt"
-    peak_onehot_cache_path = training_cache_dir / "tf_dna_training_cache" / "peak_onehot_array.pt"
-    train_idx_cache_path = training_cache_dir / "tf_dna_training_cache" / "train_idx.pt"
-    val_idx_cache_path = training_cache_dir / "tf_dna_training_cache" / "val_idx.pt"
-    test_idx_cache_path = training_cache_dir / "tf_dna_training_cache" / "test_idx.pt"
+    tf_dna_peak_id_to_idx_cache_path = config.tf_dna_peak_id_to_idx_cache_path
+    tf_dna_edge_tf_idx_cache_path = config.tf_dna_edge_tf_idx_cache_path
+    tf_dna_edge_peak_idx_cache_path = config.tf_dna_edge_peak_idx_cache_path
+    tf_dna_edge_labels_cache_path = config.tf_dna_edge_labels_cache_path
+    tf_dna_tf_lengths_cache_path = config.tf_dna_tf_lengths_cache_path
+    tf_dna_peak_onehot_cache_path = config.tf_dna_peak_onehot_cache_path
+    tf_dna_train_idx_cache_path = config.tf_dna_train_idx_cache_path
+    tf_dna_val_idx_cache_path = config.tf_dna_val_idx_cache_path
+    tf_dna_test_idx_cache_path = config.tf_dna_test_idx_cache_path
 
     tf_embedding_files = list(embedding_dir.glob("*_protein_embedding.pt"))
     embedded_tf_names = [f.stem.split("_protein_embedding")[0] for f in tf_embedding_files]
@@ -170,12 +162,12 @@ def main():
     tf_names = true_edge_df["source_id"].unique().tolist()
     peak_ids = true_edge_df["peak_id"].unique().tolist()
 
-    map_cache_files = [tf_name_to_idx_cache_path, peak_id_to_idx_cache_path]
+    map_cache_files = [tf_name_to_idx_cache_path, tf_dna_peak_id_to_idx_cache_path]
     if all(f.exists() for f in map_cache_files) and not args.force_reload:
         tf_name_to_idx = pd.read_csv(tf_name_to_idx_cache_path).set_index("tf_name")[
             "tf_idx"
         ].to_dict()
-        peak_id_to_idx = pd.read_csv(peak_id_to_idx_cache_path).set_index("peak_id")[
+        peak_id_to_idx = pd.read_csv(tf_dna_peak_id_to_idx_cache_path).set_index("peak_id")[
             "peak_idx"
         ].to_dict()
     else:
@@ -186,15 +178,15 @@ def main():
             index=False,
         )
         pd.DataFrame({"peak_id": list(peak_id_to_idx.keys()), "peak_idx": list(peak_id_to_idx.values())}).to_csv(
-            peak_id_to_idx_cache_path,
+            tf_dna_peak_id_to_idx_cache_path,
             index=False,
         )
 
-    edge_cache_files = [edge_tf_idx_cache_path, edge_peak_idx_cache_path, edge_labels_cache_path]
+    edge_cache_files = [tf_dna_edge_tf_idx_cache_path, tf_dna_edge_peak_idx_cache_path, tf_dna_edge_labels_cache_path]
     if all(f.exists() for f in edge_cache_files) and not args.force_reload:
-        edge_tf_idx_tensor = torch.load(edge_tf_idx_cache_path, weights_only=True)
-        edge_peak_idx_tensor = torch.load(edge_peak_idx_cache_path, weights_only=True)
-        edge_labels_tensor = torch.load(edge_labels_cache_path, weights_only=True)
+        edge_tf_idx_tensor = torch.load(tf_dna_edge_tf_idx_cache_path, weights_only=True)
+        edge_peak_idx_tensor = torch.load(tf_dna_edge_peak_idx_cache_path, weights_only=True)
+        edge_labels_tensor = torch.load(tf_dna_edge_labels_cache_path, weights_only=True)
     else:
         true_interactions, false_interactions = utils.create_true_false_edges(
             edge_df=true_edge_df,
@@ -223,15 +215,15 @@ def main():
         edge_labels_tensor = torch.as_tensor(edge_labels, dtype=torch.float32)
 
         logging.info("Saving edge indices and labels to cache...")
-        torch.save(edge_tf_idx_tensor, edge_tf_idx_cache_path)
-        torch.save(edge_peak_idx_tensor, edge_peak_idx_cache_path)
-        torch.save(edge_labels_tensor, edge_labels_cache_path)
+        torch.save(edge_tf_idx_tensor, tf_dna_edge_tf_idx_cache_path)
+        torch.save(edge_peak_idx_tensor, tf_dna_edge_peak_idx_cache_path)
+        torch.save(edge_labels_tensor, tf_dna_edge_labels_cache_path)
 
-    tf_cache_files = [tf_embedding_cache_path, tf_mask_cache_path, tf_lengths_cache_path]
+    tf_cache_files = [tf_embedding_cache_path, tf_mask_cache_path, tf_dna_tf_lengths_cache_path]
     if all(f.exists() for f in tf_cache_files) and not args.force_reload:
         tf_embeddings_tensor = torch.load(tf_embedding_cache_path, weights_only=True)
         tf_mask_tensor = torch.load(tf_mask_cache_path, weights_only=True)
-        tf_lengths_tensor = torch.load(tf_lengths_cache_path, weights_only=True)
+        tf_lengths_tensor = torch.load(tf_dna_tf_lengths_cache_path, weights_only=True)
     else:
         tf_data = load_ordered_tf_embeddings(
             embedding_dir=embedding_dir,
@@ -245,13 +237,13 @@ def main():
         logging.info("Saving TF embeddings and masks to cache...")
         torch.save(tf_embeddings_tensor, tf_embedding_cache_path)
         torch.save(tf_mask_tensor, tf_mask_cache_path)
-        torch.save(tf_lengths_tensor, tf_lengths_cache_path)
+        torch.save(tf_lengths_tensor, tf_dna_tf_lengths_cache_path)
 
     peak_ids = list(peak_id_to_idx.keys())
     chrom_sizes = utils.load_chrom_sizes(chrom_sizes_path)
 
-    if os.path.exists(peak_onehot_cache_path) and not args.force_reload:
-        peak_tensor = torch.load(peak_onehot_cache_path, weights_only=True)
+    if os.path.exists(tf_dna_peak_onehot_cache_path) and not args.force_reload:
+        peak_tensor = torch.load(tf_dna_peak_onehot_cache_path, weights_only=True)
     else:
         logging.info("Creating centered peak one-hot encodings...")
         peak_onehot_array = utils.create_centered_peak_onehot_array(
@@ -268,16 +260,16 @@ def main():
         )
         peak_tensor = torch.as_tensor(peak_onehot_array, dtype=torch.uint8)
         peak_tensor = peak_tensor.float()
-        torch.save(peak_tensor, peak_onehot_cache_path)
+        torch.save(peak_tensor, tf_dna_peak_onehot_cache_path)
         
 
-    if all(p.exists() for p in [train_idx_cache_path, val_idx_cache_path, test_idx_cache_path]) and not args.force_reload:
-        train_idx = torch.load(train_idx_cache_path, weights_only=True)
-        val_idx = torch.load(val_idx_cache_path, weights_only=True)
-        test_idx = torch.load(test_idx_cache_path, weights_only=True)
+    if all(p.exists() for p in [tf_dna_train_idx_cache_path, tf_dna_val_idx_cache_path, tf_dna_test_idx_cache_path]) and not args.force_reload:
+        train_idx = torch.load(tf_dna_train_idx_cache_path, weights_only=True)
+        val_idx = torch.load(tf_dna_val_idx_cache_path, weights_only=True)
+        test_idx = torch.load(tf_dna_test_idx_cache_path, weights_only=True)
     else:
         logging.info("Creating train/val/test splits based on chromosome...")
-        peak_id_df = pd.read_csv(peak_id_to_idx_cache_path)
+        peak_id_df = pd.read_csv(tf_dna_peak_id_to_idx_cache_path)
         peak_id_df = peak_id_df.sort_values("peak_idx")
         peak_ids_ordered = peak_id_df["peak_id"].tolist()
 
@@ -300,9 +292,9 @@ def main():
         val_idx = torch.as_tensor(np.where(val_mask)[0], dtype=torch.long)
         test_idx = torch.as_tensor(np.where(test_mask)[0], dtype=torch.long)
 
-        torch.save(train_idx, train_idx_cache_path)
-        torch.save(val_idx, val_idx_cache_path)
-        torch.save(test_idx, test_idx_cache_path)
+        torch.save(train_idx, tf_dna_train_idx_cache_path)
+        torch.save(val_idx, tf_dna_val_idx_cache_path)
+        torch.save(test_idx, tf_dna_test_idx_cache_path)
 
     logging.info("\nFinished building TF-to-DNA training data")
     logging.info(f"  - Cached TF embeddings: {tf_embeddings_tensor.shape}")
