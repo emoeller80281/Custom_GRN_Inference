@@ -214,6 +214,14 @@ def _centered_peak_to_onehot(
 
     return onehot
 
+_GENOME_HANDLE = None
+
+
+def _init_genome_handle(genome_fasta: str) -> None:
+    global _GENOME_HANDLE
+    _GENOME_HANDLE = pyfaidx.Fasta(genome_fasta)
+
+
 def _encode_peak_chunk(args):
     """
     Worker function for multiprocessing.
@@ -231,17 +239,18 @@ def _encode_peak_chunk(args):
 
     results = []
 
-    with pyfaidx.Fasta(str(genome_fasta)) as genome:
-        for peak_id in peak_chunk:
-            onehot = _centered_peak_to_onehot(
-                peak_id=peak_id,
-                genome=genome,
-                chrom_sizes=chrom_sizes,
-                flank_size=flank_size,
-                dtype=dtype,
-                pad_out_of_bounds=pad_out_of_bounds,
-            )
-            results.append((peak_id, onehot))
+    genome = _GENOME_HANDLE
+
+    for peak_id in peak_chunk:
+        onehot = _centered_peak_to_onehot(
+            peak_id=peak_id,
+            genome=genome,
+            chrom_sizes=chrom_sizes,
+            flank_size=flank_size,
+            dtype=dtype,
+            pad_out_of_bounds=pad_out_of_bounds,
+        )
+        results.append((peak_id, onehot))
 
     return results
 
@@ -375,7 +384,11 @@ def create_centered_peak_onehot_array(
             for peak_chunk in chunk_iter
         )
 
-        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+        with ProcessPoolExecutor(
+            max_workers=num_workers,
+            initializer=_init_genome_handle,
+            initargs=(str(genome_fasta),),
+        ) as executor:
             encoded_chunk_iter = executor.map(
                 _encode_peak_chunk,
                 task_iter,
@@ -404,76 +417,26 @@ def create_true_false_edges(
     show_progress: bool = True,
 ):
     """
-    Create observed positive and sampled-unobserved negative TF-item edges.
-
-    This function is generic. The second entity can be a peak, target gene,
-    enhancer, motif, or any other item.
-
-    Examples
-    --------
-    TF-peak edges:
-        tf_col="source_id"
-        item_col="peak_id"
-
-    TF-TG edges:
-        tf_col="source_id"
-        item_col="tg_id"
-
-    Parameters
-    ----------
-    edge_df : pd.DataFrame
-        DataFrame containing observed TF-item interactions.
-
-    tf_names : list
-        TF names to include.
-
-    tf_col : str
-        Column containing TF names.
-
-    item_col : str
-        Column containing the second entity in the edge.
-        For TF-peak edges, this could be "peak_id".
-        For TF-TG edges, this could be "tg_id".
-
-    pct_true_edges : float or None
-        Fraction of observed positive edges to include.
-        If None, use all observed positive edges.
-
-    true_false_ratio : float
-        Number of sampled unobserved edges per observed positive edge.
-
-    seed : int
-        Random seed.
-
-    batch_size : int
-        Number of candidate pairs to sample per batch.
-
-    show_progress : bool
-        Whether to show a tqdm progress bar.
+    Create sets of true and false edges for training.
 
     Returns
     -------
-    true_edges : set[tuple]
-        Observed positive TF-item edges.
+    true_edges : set[tuple[str, str]]
+        Sampled observed positive edges.
 
-    false_edges : set[tuple]
-        Sampled unobserved TF-item edges.
-        These are not guaranteed biological false edges.
+    false_edges : set[tuple[str, str]]
+        Sampled unobserved negative edges, excluding all known observed edges,
+        not just the sampled positives.
     """
 
-    df_all = edge_df.copy()
+    df_all = edge_df[[tf_col, item_col]].copy()
 
-    # Keep only requested TFs
-    df_all = df_all[df_all[tf_col].isin(tf_names)].copy()
-
-    # Drop missing values
+    df_all = df_all[df_all[tf_col].isin(tf_names)]
     df_all = df_all.dropna(subset=[tf_col, item_col])
 
-    # Normalize to string for safer set operations
     df_all[tf_col] = df_all[tf_col].astype(str)
     df_all[item_col] = df_all[item_col].astype(str)
 
-    # Each observed edge should count once
     df_all = df_all.drop_duplicates([tf_col, item_col]).reset_index(drop=True)
 
     if df_all.empty:
@@ -482,31 +445,57 @@ def create_true_false_edges(
             f"{tf_col!r} and {item_col!r}."
         )
 
-    # Build the candidate universe before optional positive subsampling
+    # Candidate universe
     candidate_tfs = np.asarray(sorted(df_all[tf_col].unique()), dtype=object)
     candidate_items = np.asarray(sorted(df_all[item_col].unique()), dtype=object)
 
-    # Optionally subsample observed positives
-    df_pos = df_all
+    tf_to_i = {tf: i for i, tf in enumerate(candidate_tfs)}
+    item_to_i = {item: i for i, item in enumerate(candidate_items)}
 
+    n_tfs = len(candidate_tfs)
+    n_items = len(candidate_items)
+
+    # Integer-code all observed edges.
+    # These should be excluded from negative sampling.
+    obs_tf_idx = df_all[tf_col].map(tf_to_i).to_numpy(dtype=np.int64)
+    obs_item_idx = df_all[item_col].map(item_to_i).to_numpy(dtype=np.int64)
+
+    observed_codes = obs_tf_idx * n_items + obs_item_idx
+
+    # Use np.unique so membership checks are vectorized with np.isin.
+    observed_codes = np.unique(observed_codes)
+
+    # Subsample positives after defining all observed codes.
     if pct_true_edges is not None:
         if not (0 < pct_true_edges <= 1):
             raise ValueError("pct_true_edges must be in (0, 1] or None.")
 
         df_pos = df_all.sample(frac=pct_true_edges, random_state=seed)
+    else:
+        df_pos = df_all
 
     true_edges = set(zip(df_pos[tf_col], df_pos[item_col]))
 
     num_false_edges = round(len(true_edges) * true_false_ratio)
 
-    false_edges = sample_unobserved_edges(
-        tfs=candidate_tfs,
-        items=candidate_items,
+    false_codes = sample_unobserved_edge_codes_fast(
+        n_tfs=n_tfs,
+        n_items=n_items,
+        observed_codes=observed_codes,
         num_edges=num_false_edges,
-        true_edges=true_edges,
         batch_size=batch_size,
         seed=seed,
         show_progress=show_progress,
+    )
+
+    false_tf_idx = false_codes // n_items
+    false_item_idx = false_codes % n_items
+
+    false_edges = set(
+        zip(
+            candidate_tfs[false_tf_idx],
+            candidate_items[false_item_idx],
+        )
     )
 
     return true_edges, false_edges

@@ -7,7 +7,7 @@
 #SBATCH -N 1
 #SBATCH --gres=gpu:a100:4
 #SBATCH --ntasks-per-node=4
-#SBATCH -c 12
+#SBATCH -c 24
 #SBATCH --mem=128G
 #SBATCH --signal=SIGUSR1@90
 
@@ -92,7 +92,7 @@ python3 ${PROJECT_DIR}/scripts/build_tf_to_dna_train_data.py \
 echo "[INFO] Starting TF-to-DNA model training..."
 srun python3 ${PROJECT_DIR}/scripts/train_tf_to_dna_model.py \
     --epochs 50 \
-    --batch_size 256 \
+    --batch_size 64 \
     --model_dim 128 \
     --num_layers 4 \
     --num_gpus $NPROC_PER_NODE \

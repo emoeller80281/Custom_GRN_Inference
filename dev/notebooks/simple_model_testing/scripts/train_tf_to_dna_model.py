@@ -159,37 +159,22 @@ def load_ordered_tf_embeddings(
 class TFPeakEdgeDataset(Dataset):
     def __init__(
         self,
-        tf_embeddings,
-        tf_mask,
-        peak_embeddings,
         edge_tf_idx,
         edge_peak_idx,
         edge_labels,
     ):
-        # Inputs
-        self.tf_embeddings = tf_embeddings
-        self.tf_mask = tf_mask
-        self.peak_embeddings = peak_embeddings
-
-        # Labels and indices for edges
-        self.edge_tf_idx = edge_tf_idx
-        self.edge_peak_idx = edge_peak_idx
-        self.edge_labels = edge_labels
+        self.edge_tf_idx = edge_tf_idx.long()
+        self.edge_peak_idx = edge_peak_idx.long()
+        self.edge_labels = edge_labels.float()
 
     def __len__(self):
         return len(self.edge_labels)
 
     def __getitem__(self, idx):
-        tf_idx = self.edge_tf_idx[idx]
-        peak_idx = self.edge_peak_idx[idx]
-
         return {
-            "tf_embedding": self.tf_embeddings[tf_idx].float(),         # [max_tf_len, 128]
-            "tf_mask": self.tf_mask[tf_idx],                            # [max_tf_len]
-            "peak_embedding": self.peak_embeddings[peak_idx].float(),   # [512, 4]
-            "label": self.edge_labels[idx],                             # scalar
-            "tf_idx": tf_idx,
-            "peak_idx": peak_idx,
+            "tf_idx": self.edge_tf_idx[idx],
+            "peak_idx": self.edge_peak_idx[idx],
+            "label": self.edge_labels[idx],
         }
 
 if __name__ == "__main__":
@@ -270,9 +255,6 @@ if __name__ == "__main__":
         peak_tensor = peak_tensor.float()
 
     edge_dataset = TFPeakEdgeDataset(
-        tf_embeddings=tf_embeddings_tensor,
-        tf_mask=tf_mask_tensor,
-        peak_embeddings=peak_tensor,
         edge_tf_idx=edge_tf_idx_tensor,
         edge_peak_idx=edge_peak_idx_tensor,
         edge_labels=edge_labels_tensor,
@@ -325,6 +307,9 @@ if __name__ == "__main__":
     # PyTorch Lightning wrapper for training
     lit_model = tf_to_dna_module.LitTFPeakBindingModel(
         model=base_model,
+        tf_embeddings_tensor=tf_embeddings_tensor,
+        tf_mask_tensor=tf_mask_tensor,
+        peak_tensor=peak_tensor,
         lr=1e-4,
         weight_decay=1e-4,
         pos_weight=None,

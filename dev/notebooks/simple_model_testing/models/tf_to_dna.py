@@ -7,6 +7,7 @@ from bidirectional_cross_attention import BidirectionalCrossAttentionTransformer
 
 from sklearn.metrics import roc_curve, precision_recall_curve
 import wandb
+import time
 
 class TFPeakBindingModel(nn.Module):
     def __init__(
@@ -36,14 +37,14 @@ class TFPeakBindingModel(nn.Module):
         self.peak_encoder = nn.Sequential(
             # First Conv layer to capture local motifs 
             # (sets of 15 nucleotides, roughly the size of a TF binding motif)
-            # [B, 4, 512] -> [B, 64, 512]
+            # [B, 4, 512] -> [B, 64, 128]
             nn.Conv1d(4, 64, kernel_size=15, padding=7),
             nn.BatchNorm1d(64),
             nn.GELU(),
             nn.MaxPool1d(4),  # 512 -> 128
 
             # Second Conv layer to reduce dimensionality
-            # [B, 64, 128] -> [B, hidden_dim, 128]
+            # [B, 64, 128] -> [B, 128, 32]
             nn.Conv1d(64, 128, kernel_size=9, padding=4),
             nn.BatchNorm1d(128),
             nn.GELU(),
@@ -139,20 +140,37 @@ class LitTFPeakBindingModel(pl.LightningModule):
     def __init__(
         self,
         model: nn.Module,
+        tf_embeddings_tensor: torch.Tensor,
+        tf_mask_tensor: torch.Tensor,
+        peak_tensor: torch.Tensor,
         lr: float = 1e-4,
         weight_decay: float = 1e-4,
         pos_weight: float | None = None,
         logit_clamp: float | None = 20.0,
+        enable_timing_sync: bool = False,
     ):
         super().__init__()
 
         self.model = model
+        
+        self.register_buffer("tf_embeddings_tensor", tf_embeddings_tensor.float())
+        self.register_buffer("tf_mask_tensor", tf_mask_tensor.bool())
+        self.register_buffer("peak_tensor", peak_tensor.float())
+        
         self.lr = lr
         self.weight_decay = weight_decay
         self.logit_clamp = logit_clamp
+        self.enable_timing_sync = enable_timing_sync
 
         # Save hyperparameters except the raw nn.Module object
-        self.save_hyperparameters(ignore=["model"])
+        self.save_hyperparameters(
+            ignore=[
+                "model",
+                "tf_embeddings_tensor",
+                "tf_mask_tensor",
+                "peak_tensor",
+            ]
+        )
 
         if pos_weight is not None:
             pos_weight_tensor = torch.tensor([pos_weight], dtype=torch.float32)
@@ -171,6 +189,30 @@ class LitTFPeakBindingModel(pl.LightningModule):
 
         self.val_probs = []
         self.val_targets = []
+        self._prev_batch_end_time = None
+        self._step_start_time = None
+        self._backward_start_time = None
+        self._timing_window_size = 50
+        self._timing_windows = {
+            "load": [],
+            "h2d": [],
+            "forward": [],
+            "backward": [],
+            "step": [],
+        }
+        self._latest_timing_avgs = {}
+
+    def _sync_if_cuda(self, device=None) -> None:
+        if self.enable_timing_sync and torch.cuda.is_available():
+            torch.cuda.synchronize(device)
+
+    def _record_timing(self, name: str, value: float) -> None:
+        window = self._timing_windows[name]
+        window.append(value)
+        if len(window) > self._timing_window_size:
+            window.pop(0)
+
+        self._latest_timing_avgs[name] = sum(window) / len(window)
 
     def forward(self, tf_embedding, tf_mask, peak_embedding):
         return self.model(
@@ -193,23 +235,18 @@ class LitTFPeakBindingModel(pl.LightningModule):
         )
 
     def _shared_step(self, batch, stage: str):
-        tf_embedding = batch["tf_embedding"]
-        tf_mask = batch["tf_mask"]
-        peak_embedding = batch["peak_embedding"]
+        tf_idx = batch["tf_idx"].long()
+        peak_idx = batch["peak_idx"].long()
         labels = batch["label"].float()
-        tf_idx = batch.get("tf_idx", None)
-        peak_idx = batch.get("peak_idx", None)
 
-        idx_info = ""
-        if tf_idx is not None and peak_idx is not None:
-            idx_info = f" (tf_idx={tf_idx[:4].tolist()}, peak_idx={peak_idx[:4].tolist()})"
+        tf_embedding = self.tf_embeddings_tensor[tf_idx]
+        tf_mask = self.tf_mask_tensor[tf_idx]
+        peak_embedding = self.peak_tensor[peak_idx]
 
-        if not torch.isfinite(tf_embedding).all():
-            raise RuntimeError(f"Non-finite tf_embedding in {stage} step{idx_info}")
-        if not torch.isfinite(peak_embedding).all():
-            raise RuntimeError(f"Non-finite peak_embedding in {stage} step{idx_info}")
-        if not torch.isfinite(labels).all():
-            raise RuntimeError(f"Non-finite labels in {stage} step{idx_info}")
+        forward_start = None
+        if stage == "train":
+            self._sync_if_cuda()
+            forward_start = time.perf_counter()
 
         logits = self(
             tf_embedding=tf_embedding,
@@ -217,35 +254,56 @@ class LitTFPeakBindingModel(pl.LightningModule):
             peak_embedding=peak_embedding,
         )
 
-        if not torch.isfinite(logits).all():
-            raise RuntimeError(f"Non-finite logits in {stage} step{idx_info}")
+        if forward_start is not None:
+            self._sync_if_cuda()
+            forward_time = time.perf_counter() - forward_start
+            self._record_timing("forward", forward_time)
 
         if self.logit_clamp is not None:
             logits = logits.clamp(min=-self.logit_clamp, max=self.logit_clamp)
 
         loss = self._loss(logits, labels)
 
-        if not torch.isfinite(loss):
-            raise RuntimeError(f"Non-finite loss in {stage} step{idx_info}")
-
         probs = torch.sigmoid(logits)
 
-        if not torch.isfinite(probs).all():
-            raise RuntimeError(f"Non-finite probs in {stage} step{idx_info}")
-
-        if stage == "train":
-            auroc = self.train_auroc(probs, labels.int())
-            auprc = self.train_auprc(probs, labels.int())
-            acc = self.train_acc(probs, labels.int())
-        elif stage == "val":
+        if stage == "val":
             auroc = self.val_auroc(probs, labels.int())
             auprc = self.val_auprc(probs, labels.int())
             acc = self.val_acc(probs, labels.int())
 
             self.val_probs.append(probs.detach().cpu())
             self.val_targets.append(labels.detach().cpu())
-        else:
-            raise ValueError(f"Unknown stage: {stage}")
+            
+            
+            self.log(
+                f"{stage}/auroc",
+                auroc,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=True,
+                logger=True,
+                sync_dist=True,
+            )
+
+            self.log(
+                f"{stage}/auprc",
+                auprc,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=True,
+                logger=True,
+                sync_dist=True,
+            )
+
+            self.log(
+                f"{stage}/acc",
+                acc,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                sync_dist=True,
+            )
 
         self.log(
             f"{stage}/loss",
@@ -254,38 +312,9 @@ class LitTFPeakBindingModel(pl.LightningModule):
             on_epoch=True,
             prog_bar=True,
             logger=True,
-            sync_dist=True,
+            sync_dist=False,
         )
 
-        self.log(
-            f"{stage}/auroc",
-            auroc,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=True,
-            logger=True,
-            sync_dist=True,
-        )
-
-        self.log(
-            f"{stage}/auprc",
-            auprc,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=True,
-            logger=True,
-            sync_dist=True,
-        )
-
-        self.log(
-            f"{stage}/acc",
-            acc,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=False,
-            logger=True,
-            sync_dist=True,
-        )
 
         return loss
 
@@ -294,6 +323,82 @@ class LitTFPeakBindingModel(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         self._shared_step(batch, stage="val")
+
+    def on_before_batch_transfer(self, batch, dataloader_idx):
+        if not self.training:
+            return batch
+
+        if self._prev_batch_end_time is not None:
+            load_time = time.perf_counter() - self._prev_batch_end_time
+            self._record_timing("load", load_time)
+
+        return batch
+
+    def transfer_batch_to_device(self, batch, device, dataloader_idx):
+        if not self.training:
+            return super().transfer_batch_to_device(batch, device, dataloader_idx)
+
+        start_time = time.perf_counter()
+        batch = super().transfer_batch_to_device(batch, device, dataloader_idx)
+        self._sync_if_cuda(device)
+        h2d_time = time.perf_counter() - start_time
+        self._record_timing("h2d", h2d_time)
+        return batch
+
+    def on_train_epoch_start(self):
+        for k in self._timing_windows:
+            self._timing_windows[k].clear()
+        self._latest_timing_avgs.clear()
+        self._prev_batch_end_time = None
+
+    def on_train_batch_start(self, batch, batch_idx):
+        self._sync_if_cuda()
+        self._step_start_time = time.perf_counter()
+
+    def on_before_backward(self, loss):
+        self._sync_if_cuda()
+        self._backward_start_time = time.perf_counter()
+
+    def optimizer_step(
+        self,
+        epoch,
+        batch_idx,
+        optimizer,
+        optimizer_closure,
+    ):
+        start_time = self._backward_start_time or time.perf_counter()
+        result = super().optimizer_step(
+            epoch,
+            batch_idx,
+            optimizer,
+            optimizer_closure,
+        )
+        self._sync_if_cuda()
+        backward_opt_time = time.perf_counter() - start_time
+        self._backward_start_time = None
+        self._record_timing("backward", backward_opt_time)
+        return result
+
+    def on_train_batch_end(self, outputs, batch, batch_idx):
+        if self._step_start_time is None:
+            return
+
+        self._sync_if_cuda()
+        step_time = time.perf_counter() - self._step_start_time
+        self._step_start_time = None
+        self._record_timing("step", step_time)
+        self._prev_batch_end_time = time.perf_counter()
+
+        for name, avg_value in self._latest_timing_avgs.items():
+            self.log(
+                f"train/{name}_time_avg",
+                avg_value,
+                on_step=True,
+                on_epoch=False,
+                prog_bar=False,
+                logger=True,
+                sync_dist=False,
+            )
 
     def on_validation_epoch_start(self):
         self.val_probs.clear()

@@ -152,58 +152,107 @@ def main():
     tf_dna_train_idx_cache_path = config.tf_dna_train_idx_cache_path
     tf_dna_val_idx_cache_path = config.tf_dna_val_idx_cache_path
     tf_dna_test_idx_cache_path = config.tf_dna_test_idx_cache_path
+    
+    # Check if all TF-to-DNA training cache files already exist before doing any expensive processing, unless --force_reload is specified
+    all_required_files = [
+        tf_name_to_idx_cache_path,
+        tf_embedding_cache_path,
+        tf_mask_cache_path,
+        tf_dna_peak_id_to_idx_cache_path,
+        tf_dna_edge_tf_idx_cache_path,
+        tf_dna_edge_peak_idx_cache_path,
+        tf_dna_edge_labels_cache_path,
+        tf_dna_tf_lengths_cache_path,
+        tf_dna_peak_onehot_cache_path,
+        tf_dna_train_idx_cache_path,
+        tf_dna_val_idx_cache_path,
+        tf_dna_test_idx_cache_path,
+    ]
+    
+    if all(f.exists() for f in all_required_files) and not args.force_reload:
+        logging.info("All TF-to-DNA training cache files already exist. Use --force_reload to rebuild.")
+        return
 
     tf_embedding_files = list(embedding_dir.glob("*_protein_embedding.pt"))
     embedded_tf_names = [f.stem.split("_protein_embedding")[0] for f in tf_embedding_files]
     logging.info(f"TFs with embeddings: {len(embedded_tf_names)}")
     logging.info(f"Example TFs with embeddings: {embedded_tf_names[:10]}")
- 
-    logging.info("Loading true edges...")
-    true_edge_file = DATA_DIR / "ground_truth_files" / f"chip_atlas_{species}_all.parquet"
-    true_edge_df = pd.read_parquet(true_edge_file)
-    true_edge_df = true_edge_df[true_edge_df["source_id"].isin(embedded_tf_names)]
-    logging.info(f"    Done. Loaded {len(true_edge_df):,} ChIP-Atlas edges")
+    
+    map_cache_files = [tf_name_to_idx_cache_path]
+    edge_cache_files = [
+        tf_dna_edge_tf_idx_cache_path, 
+        tf_dna_edge_peak_idx_cache_path, 
+        tf_dna_edge_labels_cache_path
+        ]
+    
+    # Can skip reading in the true edges if edge_cache_files and map_cache_files exist
+    if not all(f.exists() for f in map_cache_files + edge_cache_files) or args.force_reload:
+        logging.info("Loading true edges...")
+        true_edge_file = DATA_DIR / "ground_truth_files" / f"chip_atlas_{species}_all.parquet"
+        true_edge_df = pd.read_parquet(true_edge_file)
+        true_edge_df = true_edge_df[true_edge_df["source_id"].isin(embedded_tf_names)]
+        logging.info(f"    Done. Loaded {len(true_edge_df):,} ChIP-Atlas edges")
     
     # Creates or loads the TF and peak name to index mapping files
-    logging.info("Creating TF and peak name to index mappings...")
-    map_cache_files = [tf_name_to_idx_cache_path, tf_dna_peak_id_to_idx_cache_path]
-    if all(f.exists() for f in map_cache_files) and not args.force_reload:
-        logging.info(f"    Loading TF and peak name to index mappings from cache...")
-        tf_name_to_idx = pd.read_csv(tf_name_to_idx_cache_path).set_index("tf_name")[
-            "tf_idx"
-        ].to_dict()
-        peak_id_to_idx = pd.read_csv(tf_dna_peak_id_to_idx_cache_path).set_index("peak_id")[
-            "peak_idx"
-        ].to_dict()
+    logging.info("Creating or loading TF name to index mapping...")
+    if tf_name_to_idx_cache_path.exists() and not args.force_reload:
+        logging.info("    Loading TF name to index mapping from cache...")
+        tf_name_to_idx = (
+            pd.read_csv(tf_name_to_idx_cache_path)
+            .set_index("tf_name")["tf_idx"]
+            .to_dict()
+        )
     else:
+        logging.info("    Creating TF name to index mapping...")
         tf_names = true_edge_df["source_id"].unique().tolist()
-        peak_ids = true_edge_df["peak_id"].unique().tolist()
-        
         tf_name_to_idx = {tf: idx for idx, tf in enumerate(tf_names)}
-        peak_id_to_idx = {peak: idx for idx, peak in enumerate(peak_ids)}
-        pd.DataFrame({"tf_name": list(tf_name_to_idx.keys()), "tf_idx": list(tf_name_to_idx.values())}).to_csv(
-            tf_name_to_idx_cache_path,
-            index=False,
-        )
-        pd.DataFrame({"peak_id": list(peak_id_to_idx.keys()), "peak_idx": list(peak_id_to_idx.values())}).to_csv(
-            tf_dna_peak_id_to_idx_cache_path,
-            index=False,
-        )
-        
-    tf_names = list(tf_name_to_idx.keys())
-    peak_ids = list(peak_id_to_idx.keys())
-    logging.info(f"    Done. Found {len(tf_names)} unique TFs and {len(peak_ids)} unique peaks in the ChIP-Atlas dataset.")
 
-    # Creates the labeled dataset of TF-peak interactions for training, and caches the edge indices and labels as tensors
+        pd.DataFrame({
+            "tf_name": list(tf_name_to_idx.keys()),
+            "tf_idx": list(tf_name_to_idx.values()),
+        }).to_csv(tf_name_to_idx_cache_path, index=False)
+
+    tf_names = list(tf_name_to_idx.keys())
+
+    # ------------------------------------------------------------
+    # Load or create labeled TF-peak edge dataset + compact peak map
+    # ------------------------------------------------------------
     logging.info("Creating or loading labeled dataset of TF-peak interactions")
-    edge_cache_files = [tf_dna_edge_tf_idx_cache_path, tf_dna_edge_peak_idx_cache_path, tf_dna_edge_labels_cache_path]
-    if all(f.exists() for f in edge_cache_files) and not args.force_reload:
-        logging.info(f"    Loading edge indices and labels from cache...")
+
+    if all(f.exists() for f in edge_cache_files + [tf_dna_peak_id_to_idx_cache_path]) and not args.force_reload:
+        logging.info("    Loading edge indices, labels, and TF-DNA peak map from cache...")
+
         edge_tf_idx_tensor = torch.load(tf_dna_edge_tf_idx_cache_path, weights_only=True)
         edge_peak_idx_tensor = torch.load(tf_dna_edge_peak_idx_cache_path, weights_only=True)
         edge_labels_tensor = torch.load(tf_dna_edge_labels_cache_path, weights_only=True)
+
+        tf_dna_peak_id_to_idx = (
+            pd.read_csv(tf_dna_peak_id_to_idx_cache_path)
+            .set_index("peak_id")["peak_idx"]
+            .to_dict()
+        )
+
+        # Make sure values are normal Python ints
+        tf_dna_peak_id_to_idx = {
+            peak_id: int(idx) for peak_id, idx in tf_dna_peak_id_to_idx.items()
+        }
+
+        # Reconstruct ordered peak_ids from the cached compact mapping
+        used_peak_ids = [
+            peak_id
+            for peak_id, idx in sorted(
+                tf_dna_peak_id_to_idx.items(),
+                key=lambda x: x[1],
+            )
+        ]
+
     else:
         logging.info("    Creating True/False edges")
+        full_peak_ids = true_edge_df["peak_id"].unique().tolist()
+        full_peak_id_to_idx = {
+            peak_id: idx for idx, peak_id in enumerate(full_peak_ids)
+        }
+
         true_interactions, false_interactions = utils.create_true_false_edges(
             edge_df=true_edge_df,
             tf_names=tf_names,
@@ -213,14 +262,46 @@ def main():
             true_false_ratio=args.true_false_ratio,
         )
 
-        logging.info(f"    Creating labeled dataset with {len(true_interactions)} true interactions and {len(false_interactions)} false interactions.")
+        logging.info(
+            f"    Creating labeled dataset with "
+            f"{len(true_interactions)} true interactions and "
+            f"{len(false_interactions)} false interactions."
+        )
+
+        # This can use the full peak_id_to_idx temporarily just to validate
+        # that peaks exist in the broader universe.
         tf_peak_labeled_df = create_labeled_tf_peak_dataset(
             true_interactions=true_interactions,
             false_interactions=false_interactions,
             tf_name_to_idx=tf_name_to_idx,
-            peak_id_to_idx=peak_id_to_idx,
+            peak_id_to_idx=full_peak_id_to_idx,
             drop_missing=False,
         )
+
+        # Define compact TF-DNA peak universe
+        used_peak_ids = (
+            tf_peak_labeled_df["peak_id"]
+            .drop_duplicates()
+            .sort_values()
+            .tolist()
+        )
+
+        tf_dna_peak_id_to_idx = {
+            peak_id: idx for idx, peak_id in enumerate(used_peak_ids)
+        }
+
+        # Remap edge peak_idx to compact TF-DNA peak tensor rows
+        tf_peak_labeled_df["peak_idx"] = (
+            tf_peak_labeled_df["peak_id"]
+            .map(tf_dna_peak_id_to_idx)
+            .astype(np.int64)
+        )
+
+        # Save compact peak map
+        pd.DataFrame({
+            "peak_id": list(tf_dna_peak_id_to_idx.keys()),
+            "peak_idx": list(tf_dna_peak_id_to_idx.values()),
+        }).to_csv(tf_dna_peak_id_to_idx_cache_path, index=False)
 
         edge_tf_idx = tf_peak_labeled_df["tf_idx"].to_numpy(dtype=np.int64)
         edge_peak_idx = tf_peak_labeled_df["peak_idx"].to_numpy(dtype=np.int64)
@@ -230,11 +311,14 @@ def main():
         edge_peak_idx_tensor = torch.as_tensor(edge_peak_idx, dtype=torch.long)
         edge_labels_tensor = torch.as_tensor(edge_labels, dtype=torch.float32)
 
-        logging.info("    Saving edge indices and labels to cache...")
         torch.save(edge_tf_idx_tensor, tf_dna_edge_tf_idx_cache_path)
         torch.save(edge_peak_idx_tensor, tf_dna_edge_peak_idx_cache_path)
         torch.save(edge_labels_tensor, tf_dna_edge_labels_cache_path)
-    logging.info(f"    Done. Created/Loaded dataset with {len(edge_labels_tensor):,} edges.")
+
+    logging.info(
+        f"    Done. Created/Loaded dataset with {len(edge_labels_tensor):,} edges "
+        f"and {len(used_peak_ids):,} compact peaks."
+    )
 
     logging.info("Creating or loading ordered TF embeddings...")
     tf_cache_files = [tf_embedding_cache_path, tf_mask_cache_path, tf_dna_tf_lengths_cache_path]
@@ -261,25 +345,24 @@ def main():
     logging.info(f"    Done. Created/Loaded TF embeddings with shape {tf_embeddings_tensor.shape} and mask with shape {tf_mask_tensor.shape}.")
         
     logging.info("Creating or loading peak one-hot encodings...")
-    peak_ids = list(peak_id_to_idx.keys())
     chrom_sizes = utils.load_chrom_sizes(chrom_sizes_path)
 
     if os.path.exists(tf_dna_peak_onehot_cache_path) and not args.force_reload:
         logging.info(f"    Loading peak one-hot encodings from cache...")
         peak_tensor = torch.load(tf_dna_peak_onehot_cache_path, weights_only=True)
     else:
-        logging.info("    Creating centered peak one-hot encodings...")
+        logging.info(f"    Creating centered peak one-hot encodings for {len(used_peak_ids):,} peaks...")
         peak_onehot_array = utils.create_centered_peak_onehot_array(
-            peak_ids=peak_ids,
+            peak_ids=used_peak_ids,
             genome_fasta=genome_fasta_path,
             chrom_sizes=chrom_sizes,
-            peak_id_to_idx=peak_id_to_idx,
+            peak_id_to_idx=tf_dna_peak_id_to_idx,
             flank_size=64,
             dtype=np.uint8,
             pad_out_of_bounds=True,
-            num_workers=12,
+            num_workers=64,
             show_progress=True,
-            chunk_size=10000,
+            chunk_size=100_000,
         )
         peak_tensor = torch.as_tensor(peak_onehot_array, dtype=torch.uint8)
         peak_tensor = peak_tensor.float()
@@ -287,18 +370,30 @@ def main():
         logging.info("    Done. Created/Loaded peak one-hot encodings.")
 
     logging.info("Creating or loading train/val/test splits...")
-    if all(p.exists() for p in [tf_dna_train_idx_cache_path, tf_dna_val_idx_cache_path, tf_dna_test_idx_cache_path]) and not args.force_reload:
-        logging.info(f"    Loading train/val/test splits from cache...")
+
+    split_cache_files = [
+        tf_dna_train_idx_cache_path,
+        tf_dna_val_idx_cache_path,
+        tf_dna_test_idx_cache_path,
+    ]
+
+    if all(p.exists() for p in split_cache_files) and not args.force_reload:
+        logging.info("    Loading train/val/test splits from cache...")
         train_idx = torch.load(tf_dna_train_idx_cache_path, weights_only=True)
         val_idx = torch.load(tf_dna_val_idx_cache_path, weights_only=True)
         test_idx = torch.load(tf_dna_test_idx_cache_path, weights_only=True)
+
     else:
         logging.info("    Creating train/val/test splits based on chromosome...")
-        peak_id_df = pd.read_csv(tf_dna_peak_id_to_idx_cache_path)
-        peak_id_df = peak_id_df.sort_values("peak_idx")
-        peak_ids_ordered = peak_id_df["peak_id"].tolist()
 
-        edge_peak_ids = np.array([peak_ids_ordered[idx] for idx in edge_peak_idx_tensor.numpy()])
+        idx_to_tf_dna_peak_id = {
+            idx: peak_id for peak_id, idx in tf_dna_peak_id_to_idx.items()
+        }
+
+        edge_peak_ids = np.array([
+            idx_to_tf_dna_peak_id[int(idx)]
+            for idx in edge_peak_idx_tensor.cpu().numpy()
+        ])
 
         def _get_chrom(peak_id: str) -> str:
             return peak_id.split(":", 1)[0]
@@ -308,10 +403,6 @@ def main():
         train_chroms = {f"chr{i}" for i in range(1, 16)}
         val_chroms = {f"chr{i}" for i in range(16, 18)}
         test_chroms = {f"chr{i}" for i in range(18, 20)}
-        
-        logging.info(f"    Train chroms: {train_chroms}")
-        logging.info(f"    Val chroms: {val_chroms}")
-        logging.info(f"    Test chroms: {test_chroms}")
 
         train_mask = np.isin(edge_chroms, list(train_chroms))
         val_mask = np.isin(edge_chroms, list(val_chroms))
@@ -324,6 +415,7 @@ def main():
         torch.save(train_idx, tf_dna_train_idx_cache_path)
         torch.save(val_idx, tf_dna_val_idx_cache_path)
         torch.save(test_idx, tf_dna_test_idx_cache_path)
+        
     logging.info(f"    Done. Created/Loaded train/val/test splits with {len(train_idx)}, {len(val_idx)}, and {len(test_idx)} edges, respectively.")
 
     logging.info("\nFinished building TF-to-DNA training data")
