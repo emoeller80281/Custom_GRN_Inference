@@ -7,9 +7,14 @@ sys.path.append(str(PROJECT_DIR))
 
 DATA_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data")
 
-species = "mm10"
-cell_type="mESC"
-sample_name="E7.5_rep1"
+species = "hg38"
+cell_type="iPSC"
+sample_name="WT_D13_rep1"
+
+assert cell_type in {"Macrophage", "mESC", "K562", "iPSC"}, \
+    f"Invalid cell type: {cell_type}. Select from: 'Macrophage', 'mESC', 'K562', 'iPSC'"
+assert species in {"mm10", "hg38"}, \
+    f"Invalid species: {species}. Select from: 'mm10', 'hg38'"
 
 # Species-specific paths
 genome_fasta_path = DATA_DIR / "genome_data" / "reference_genome" / species / f"{species}.fa"
@@ -35,7 +40,7 @@ tf_embedding_cache_path = training_cache_dir / "tf_embeddings.pt"
 tf_mask_cache_path = training_cache_dir / "tf_masks.pt"
 
 # Cache file for the merged ground truth dataset for the TF-TG true edges
-merged_ground_truth_cache_path = training_cache_dir / "merged_ground_truth.parquet"
+merged_ground_truth_cache_path = training_cache_dir / f"{cell_type}_merged_ground_truth.parquet"
 
 # TF-DNA training specific cache files
 tf_dna_peak_id_to_idx_cache_path = tf_dna_input_cache_dir / "peak_id_to_idx.csv"
@@ -55,3 +60,24 @@ tf_tg_manifest_cache_path = tf_tg_input_cache_dir / "manifest.json"
 tf_tg_train_cache_path = tf_tg_input_cache_dir / "tftg_inputs_train.pt"
 tf_tg_val_cache_path = tf_tg_input_cache_dir / "tftg_inputs_val.pt"
 tf_tg_test_cache_path = tf_tg_input_cache_dir / "tftg_inputs_test.pt"
+
+# Ground truth files by cell type
+gt_by_dataset_dict = {
+    "Macrophage": [
+        DATA_DIR / "ground_truth_files" / "chipatlas_macrophage.csv",
+    ],
+    "mESC": [
+        DATA_DIR / "ground_truth_files" / "chip_atlas_tf_peak_tg_dist.csv",
+        DATA_DIR / "ground_truth_files" / "RN111.tsv",
+        DATA_DIR / "ground_truth_files" / "RN112.tsv",
+        DATA_DIR / "ground_truth_files" / "RN114.tsv",
+        DATA_DIR / "ground_truth_files" / "RN116.tsv",        
+    ],
+    "K562": [
+        DATA_DIR / "ground_truth_files" / "chipatlas_K562.csv",
+        DATA_DIR / "ground_truth_files" / "RN117.tsv",        
+    ],
+    "iPSC": [
+        DATA_DIR / "ground_truth_files" / "chipatlas_iPSC.csv",
+    ]
+}

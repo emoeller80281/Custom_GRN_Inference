@@ -1,33 +1,32 @@
 #!/bin/bash -l
-#SBATCH --job-name=generate_3di_tokens
-#SBATCH --output=LOGS/generate_tokens/%x_%A.log
-#SBATCH --error=LOGS/generate_tokens/%x_%A.err
+#SBATCH --job-name=generate_tf_embeddings
+#SBATCH --output=LOGS/generate_tf_embeddings/%x_%A.log
+#SBATCH --error=LOGS/generate_tf_embeddings/%x_%A.err
 #SBATCH --time=12:00:00
 #SBATCH -p dense
 #SBATCH -N 1
 #SBATCH --gres=gpu:a100:1
 #SBATCH --ntasks-per-node=1
-#SBATCH -c 24
+#SBATCH -c 32
 #SBATCH --mem=128G
 
 set -eo pipefail
 
-source activate tfbindformer
-
-species="mm10"
+source activate my_env
 
 PROJECT_DIR="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/dev/notebooks/simple_model_testing"
 cd "${PROJECT_DIR}"
 
-species="mm10"
+species="hg38"
 entrez_email="luminarada@gmail.com"
 
 # Download TF protein sequences from ChIP-Atlas and save as FASTA files
 python ${PROJECT_DIR}/download_chipatlas.py \
     --species ${species} \
     --entrez_email ${entrez_email} \
-    --num_workers 24
+    --num_workers 32
 
+source activate tfbindformer
 # Generate 3Di tokens for TF proteins using Foldseek and ProstT5
 echo ""
 echo "Generating 3Di tokens for TF proteins using Foldseek and ProstT5..."
@@ -36,7 +35,7 @@ OUT_DIR="${PROJECT_DIR}/data/tf_data/${species}/tf_3di_output"
 TMP_DIR="${OUT_DIR}/tmp"
 WEIGHTS_DIR="${OUT_DIR}/prostt5_weights"
 
-mkdir -p "${OUT_DIR}" "${TMP_DIR}" "${WEIGHTS_DIR}" "LOGS/generate_tokens"
+mkdir -p "${OUT_DIR}" "${TMP_DIR}" "${WEIGHTS_DIR}" "LOGS/generate_tf_embeddings"
 
 COMBINED_FASTA="${OUT_DIR}/tf_proteins.fasta"
 DB_PREFIX="${OUT_DIR}/tf_proteins_3di_db"

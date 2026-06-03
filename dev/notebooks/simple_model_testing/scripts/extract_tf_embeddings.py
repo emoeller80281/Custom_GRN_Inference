@@ -148,7 +148,6 @@ def main():
 
         emb = embedding_features(tokenizer, model, aa_seq, di_seq, args.d_model, device)
 
-
         torch.save(emb, out_path)
 
         logging.info(f"Saved {tf_id}: {tuple(emb.shape)} → {out_path}")

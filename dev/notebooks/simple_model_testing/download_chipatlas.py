@@ -3,6 +3,13 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 import argparse
+import logging
+
+logging.basicConfig(
+    format='%(asctime)s %(levelname)s: %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
+    level=logging.INFO
+)
 
 PROJECT_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/dev/notebooks/simple_model_testing")
 sys.path.append(str(PROJECT_DIR))
@@ -19,16 +26,35 @@ def parse_args():
 
 def create_organism_chip_atlas_file(
     species: str, 
-    save_dir: Path, 
+    ground_truth_dir: Path, 
+    tf_chip_seq_save_dir: Path,
     tf_names: np.ndarray,
     num_workers: int = 10
     ) -> pd.DataFrame:
-    if not Path(save_dir / f"chip_atlas_{species}_all.csv").exists():
-        chip_atlas_full_df: pd.DataFrame = utils.fetch_chip_atlas_tf_list(tf_names, species=species, num_workers=num_workers)
-        chip_atlas_full_df.to_csv(save_dir / f"chip_atlas_{species}_all.csv", index=False)
-    else:
-        chip_atlas_full_df: pd.DataFrame = pd.read_csv(save_dir / f"chip_atlas_{species}_all.csv")
+    
+    full_chip_atlas_path = ground_truth_dir / f"chip_atlas_{species}_all.parquet"
+    
+    if not Path(full_chip_atlas_path).exists():
+        utils.fetch_chip_atlas_tf_list_to_parquet(
+            tf_names, 
+            genome=species, 
+            out_dir=tf_chip_seq_save_dir,
+            num_workers=num_workers
+            )
         
+        utils.build_chip_atlas_df_from_parquet(
+            parquet_dir=tf_chip_seq_save_dir, 
+            output_file=full_chip_atlas_path
+        )
+        
+        chip_atlas_full_df: pd.DataFrame = pd.read_parquet(full_chip_atlas_path)
+        
+        logging.info(f"Fetched {len(chip_atlas_full_df)} TF-DNA interactions from ChIP-Atlas for {species}. Saving...")
+        chip_atlas_full_df.to_parquet(full_chip_atlas_path, index=False)
+    else:
+        chip_atlas_full_df: pd.DataFrame = pd.read_parquet(full_chip_atlas_path)
+        logging.info(f"Loaded {len(chip_atlas_full_df)} TF-DNA interactions from existing file for {species}.")
+
     return chip_atlas_full_df
 
 def main():
@@ -44,6 +70,12 @@ def main():
         organism_name = "human"
 
     DATA_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data")
+    
+    tf_sequences_dir = PROJECT_DIR / "data" / "tf_data" / species / "tf_sequences"
+    tf_chip_seq_save_dir = PROJECT_DIR / "data" / "tf_data" / species / "chip_atlas_TF_files"
+    
+    tf_sequences_dir.mkdir(parents=True, exist_ok=True)
+    tf_chip_seq_save_dir.mkdir(parents=True, exist_ok=True)
 
     # Load the TF names for the species from the motif information file
     tf_name_file = DATA_DIR / "databases" / "motif_information" / species / "TF_Information_all_motifs.txt"
@@ -54,24 +86,23 @@ def main():
     ground_truth_dir = DATA_DIR / "ground_truth_files"
     chip_atlas_full_df = create_organism_chip_atlas_file(
         species=species,
-        save_dir=ground_truth_dir,
+        ground_truth_dir=ground_truth_dir,
+        tf_chip_seq_save_dir=tf_chip_seq_save_dir,
         tf_names=tf_names,
         num_workers=num_workers
     )
 
     # Get the TF names from the ChIP-Atlas dataset
-    chip_atlas_tfs = chip_atlas_full_df["TF"].unique()
+    chip_atlas_tfs = chip_atlas_full_df["source_id"].unique()
 
     # Download FASTA files for the TFs currently in the ChIP-Atlas database
     gene_names = chip_atlas_tfs
 
-    output_dir = PROJECT_DIR / "data" / "tf_data" / species / "tf_sequences"
-    output_dir.mkdir(parents=True, exist_ok=True)
-
+    logging.info(f"Downloading FASTA files for {len(gene_names)} TFs from ChIP-Atlas for {species}...")
     utils.download_gene_protein_fastas(
         gene_names=gene_names,
         organism=organism_name,
-        output_dir=output_dir,
+        output_dir=tf_sequences_dir,
         email=email,
     )
 

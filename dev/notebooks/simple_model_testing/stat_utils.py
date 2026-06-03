@@ -6,6 +6,7 @@ from sklearn.metrics import (
     average_precision_score,
     accuracy_score,
     precision_score,
+    recall_score
 )
 import torch
 from tqdm import tqdm
@@ -35,6 +36,7 @@ def compute_binary_classification_metrics(
 
     accuracy = accuracy_score(labels, preds)
     precision = precision_score(labels, preds, zero_division=0)
+    recall = recall_score(labels, preds, zero_division=0)
 
     if len(np.unique(labels)) < 2:
         auroc = np.nan
@@ -58,6 +60,7 @@ def compute_binary_classification_metrics(
         "rand_auprc": rand_auprc,
         "accuracy": accuracy,
         "precision": precision,
+        "recall": recall,
         "n_edges": len(labels),
         "n_pos": int(labels.sum()),
         "n_neg": int((labels == 0).sum()),

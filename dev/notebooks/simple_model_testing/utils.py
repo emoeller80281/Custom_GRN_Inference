@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import duckdb
 import pyfaidx
 from pathlib import Path
 from tqdm.auto import tqdm
@@ -642,7 +643,7 @@ def download_gene_protein_fastas(
             protein_ids = search_results.get("IdList", [])
 
             if not protein_ids:
-                print(f"[{i}/{len(gene_names)}] No records found for {gene_name}")
+                logging.info(f"[{i}/{len(gene_names)}] No records found for {gene_name}")
                 saved_files[gene_name] = None
                 time.sleep(delay)
                 continue
@@ -656,7 +657,7 @@ def download_gene_protein_fastas(
                 records = list(SeqIO.parse(fetch_handle, "genbank"))
 
             if not records:
-                print(f"[{i}/{len(gene_names)}] Could not parse records for {gene_name}")
+                logging.info(f"[{i}/{len(gene_names)}] Could not parse records for {gene_name}")
                 saved_files[gene_name] = None
                 time.sleep(delay)
                 continue
@@ -692,13 +693,13 @@ def download_gene_protein_fastas(
 
             saved_files[gene_name] = output_file
 
-            print(
+            logging.info(
                 f"[{i}/{len(gene_names)}] Saved {gene_name}: "
                 f"{best_record.id} ({len(best_record.seq)} aa)"
             )
 
         except Exception as e:
-            print(f"[{i}/{len(gene_names)}] Failed for {gene_name}: {e}")
+            logging.info(f"[{i}/{len(gene_names)}] Failed for {gene_name}: {e}")
             saved_files[gene_name] = None
 
         time.sleep(delay)
@@ -772,3 +773,108 @@ def fetch_chip_atlas_tf_list(tf_list, genome="mm10", num_workers=10) -> pd.DataF
         chip_atlas_df = pd.concat(tf_dfs, ignore_index=True).drop_duplicates()
 
     return chip_atlas_df
+
+def fetch_chip_atlas_tf_list_to_parquet(
+    tf_list,
+    genome="mm10",
+    out_dir="chip_atlas_tf_parquet",
+    num_workers=10,
+    threshold="05",
+    timeout=120,
+):
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    failed_tfs = {}
+    
+    existing_files = {f.stem: f for f in out_dir.glob("*.parquet")}
+    if len(existing_files) > 0:
+        logging.info(f"Found {len(existing_files)} / {len(tf_list)} existing parquet files. Skipping these TFs.")
+    
+    tf_list = [tf for tf in tf_list if tf not in existing_files]
+
+    def fetch_chip_atlas_tf(tf):
+        tf_canon = tf.replace("-", "")
+
+        url = (
+            f"https://chip-atlas.dbcls.jp/data/{genome}/assembled/"
+            f"Oth.ALL.{threshold}.{tf_canon}.AllCell.bed"
+        )
+
+        try:
+            with requests.get(url, stream=True, timeout=timeout) as r:
+                r.raise_for_status()
+
+                df = pd.read_csv(
+                    r.raw,
+                    sep="\t",
+                    comment="t",
+                    header=None,
+                    usecols=[0, 1, 2],
+                    names=["peak_chr", "peak_start", "peak_end"],
+                    dtype={
+                        "peak_chr": "category",
+                        "peak_start": "int32",
+                        "peak_end": "int32",
+                    },
+                )
+
+            if df.empty:
+                return tf, None, "empty dataframe"
+
+            # Deduplicate before writing.
+            # This is much cheaper than one giant global dedup.
+            df = df.drop_duplicates()
+
+            df["source_id"] = tf
+
+            # Keep peak coordinates separate for now.
+            # Building millions of strings is expensive.
+            df = df[["source_id", "peak_chr", "peak_start", "peak_end"]]
+
+            out_file = out_dir / f"{tf}.parquet"
+            df.to_parquet(out_file, index=False)
+
+            return tf, out_file, None
+
+        except Exception as e:
+            return tf, None, e
+
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        futures = {
+            executor.submit(fetch_chip_atlas_tf, tf): tf
+            for tf in tf_list
+        }
+
+        for future in as_completed(futures):
+            tf, out_file, error = future.result()
+
+            if error is not None:
+                failed_tfs[tf] = error
+                logging.info(f"TF '{tf}' not found or failed: {error}")
+                continue
+
+            logging.info(f"Wrote {tf} to {out_file}")
+
+    return failed_tfs
+
+def build_chip_atlas_df_from_parquet(
+    parquet_dir="chip_atlas_tf_parquet",
+    output_file="chip_atlas_tf_peak_edges.parquet",
+):
+    parquet_dir = Path(parquet_dir)
+
+    query = f"""
+    COPY (
+        SELECT DISTINCT
+            source_id,
+            peak_chr || ':' || peak_start::VARCHAR || '-' || peak_end::VARCHAR AS peak_id
+        FROM read_parquet('{parquet_dir}/*.parquet')
+    )
+    TO '{output_file}'
+    (FORMAT PARQUET);
+    """
+
+    duckdb.sql(query)
+
+    return output_file

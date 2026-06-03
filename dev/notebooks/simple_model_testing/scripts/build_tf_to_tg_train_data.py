@@ -443,25 +443,18 @@ def main():
         if not file_path.exists():
             raise FileNotFoundError(f"Required input file not found: {file_path}")
     
+    # Read in the ATAC and RNA pseudobulk data, and the peak-to-gene distance file
     atac_pseudobulk = pd.read_parquet(input_data_dir / "RE_pseudobulk.parquet")
     peak_to_gene_distance = pd.read_parquet(input_data_dir / "peak_to_gene_dist.parquet")
     rna_pseudobulk = pd.read_parquet(input_data_dir / "TG_pseudobulk.parquet")
 
     # Load and merge the ground truth files, or load from cache if already merged
     if not merged_ground_truth_path.exists() or args.force_reload:
-        mm10_chip_atlas_file = DATA_DIR / "ground_truth_files" / "chip_atlas_tf_peak_tg_dist.csv"
-        rn111_file = DATA_DIR / "ground_truth_files" / "RN111.tsv"
-        rn112_file = DATA_DIR / "ground_truth_files" / "RN112.tsv"
-        rn114_file = DATA_DIR / "ground_truth_files" / "RN114.tsv"
-        rn116_file = DATA_DIR / "ground_truth_files" / "RN116.tsv"
 
-        merged_ground_truth_df = utils.load_ground_truth_files([
-            mm10_chip_atlas_file,
-            rn111_file,
-            rn112_file,
-            rn114_file,
-            rn116_file,
-        ])
+        merged_ground_truth_df: pd.DataFrame = utils.load_ground_truth_files(
+            config.gt_by_dataset_dict[config.cell_type], 
+            num_workers=num_cpu
+            )
         
         merged_ground_truth_df.to_parquet(merged_ground_truth_path, index=False)
     else:
