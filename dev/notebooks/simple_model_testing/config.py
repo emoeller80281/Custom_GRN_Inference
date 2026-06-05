@@ -7,9 +7,13 @@ sys.path.append(str(PROJECT_DIR))
 
 DATA_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data")
 
-species = "hg38"
-cell_type="iPSC"
-sample_name="WT_D13_rep1"
+# species = "hg38"
+# cell_type="iPSC"
+# sample_name="WT_D13_rep1"
+
+species = "mm10"
+cell_type="mESC"
+sample_name="E7.5_rep1"
 
 assert cell_type in {"Macrophage", "mESC", "K562", "iPSC"}, \
     f"Invalid cell type: {cell_type}. Select from: 'Macrophage', 'mESC', 'K562', 'iPSC'"
@@ -78,6 +82,6 @@ gt_by_dataset_dict = {
         DATA_DIR / "ground_truth_files" / "RN117.tsv",        
     ],
     "iPSC": [
-        DATA_DIR / "ground_truth_files" / "chipatlas_iPSC.csv",
+        DATA_DIR / "ground_truth_files" / "chipatlas_iPSC_1mb.csv",
     ]
 }

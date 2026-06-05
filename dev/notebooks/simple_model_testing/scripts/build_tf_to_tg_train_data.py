@@ -367,7 +367,6 @@ def build_tftg_inputs(
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input_data_dir", type=str, required=False, help="Path to directory containing the sample input data")
     parser.add_argument("--sample_pairs", type=int, default=None)
     parser.add_argument("--max_peaks_per_tg", type=int, default=64)
     parser.add_argument("--max_cells_per_pair", type=int, default=8)
@@ -394,7 +393,7 @@ def main():
     assert chrom_sizes_path.exists(), f"Chromosome sizes file not found: {chrom_sizes_path}"
     
     # Create the training cache directory if it doesn't exist
-    input_data_dir = Path(args.input_data_dir)
+    input_data_dir = Path(config.sample_input_data_dir)
     
     assert input_data_dir.exists(), f"Input data directory does not exist: {input_data_dir}"
     
@@ -452,9 +451,15 @@ def main():
     if not merged_ground_truth_path.exists() or args.force_reload:
 
         merged_ground_truth_df: pd.DataFrame = utils.load_ground_truth_files(
-            config.gt_by_dataset_dict[config.cell_type], 
-            num_workers=num_cpu
+            config.gt_by_dataset_dict[config.cell_type]
             )
+        
+        if config.species == "mm10":
+            merged_ground_truth_df["Source"] = merged_ground_truth_df["Source"].str.capitalize()
+            merged_ground_truth_df["Target"] = merged_ground_truth_df["Target"].str.capitalize()
+        elif config.species == "hg38":
+            merged_ground_truth_df["Source"] = merged_ground_truth_df["Source"].str.upper()
+            merged_ground_truth_df["Target"] = merged_ground_truth_df["Target"].str.upper()
         
         merged_ground_truth_df.to_parquet(merged_ground_truth_path, index=False)
     else:

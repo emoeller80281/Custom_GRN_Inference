@@ -501,47 +501,43 @@ def create_true_false_edges(
     return true_edges, false_edges
 
 
-def sample_unobserved_edges(
-    tfs,
-    items,
-    num_edges,
-    true_edges,
-    batch_size=1_000_000,
-    seed=123,
-    show_progress=True,
+def sample_unobserved_edge_codes_fast(
+    n_tfs: int,
+    n_items: int,
+    observed_codes: np.ndarray,
+    num_edges: int,
+    batch_size: int = 1_000_000,
+    seed: int = 123,
+    show_progress: bool = True,
 ):
     """
-    Randomly sample unique TF-item pairs that are not in true_edges.
+    Sample unique integer-coded TF-item pairs not present in observed_codes.
 
-    These sampled pairs are unobserved negatives, not guaranteed biological
-    false interactions.
+    edge_code = tf_idx * n_items + item_idx
     """
 
-    tfs = np.asarray(list(tfs), dtype=object)
-    items = np.asarray(list(items), dtype=object)
-    true_edges = set(true_edges)
-
-    n_tfs = len(tfs)
-    n_items = len(items)
-
     universe_size = n_tfs * n_items
-    max_unobserved_edges = universe_size - len(true_edges)
+    max_unobserved_edges = universe_size - len(observed_codes)
 
     if max_unobserved_edges <= 0:
         raise ValueError(
             "No unobserved TF-item pairs are available. "
-            "The true_edges set covers the full TF x item universe."
+            "The observed edges cover the full TF x item universe."
         )
 
     if num_edges > max_unobserved_edges:
         logging.warning(
-            f"Requested {num_edges} sampled unobserved edges, but only "
-            f"{max_unobserved_edges} are possible. Returning all possible."
+            f"Requested {num_edges:,} sampled unobserved edges, but only "
+            f"{max_unobserved_edges:,} are possible. Returning all possible."
         )
         num_edges = max_unobserved_edges
 
     rng = np.random.default_rng(seed)
-    sampled_edges = set()
+    sampled_chunks = []
+    sampled_count = 0
+
+    # Keep a Python set only for sampled integer codes, not tuple objects.
+    sampled_seen = set()
 
     pbar = tqdm(
         total=num_edges,
@@ -551,28 +547,55 @@ def sample_unobserved_edges(
     )
 
     try:
-        while len(sampled_edges) < num_edges:
-            remaining = num_edges - len(sampled_edges)
+        while sampled_count < num_edges:
+            remaining = num_edges - sampled_count
             this_batch_size = min(batch_size, max(remaining * 3, 10_000))
 
-            tf_idx = rng.integers(0, n_tfs, size=this_batch_size)
-            item_idx = rng.integers(0, n_items, size=this_batch_size)
+            tf_idx = rng.integers(0, n_tfs, size=this_batch_size, dtype=np.int64)
+            item_idx = rng.integers(0, n_items, size=this_batch_size, dtype=np.int64)
 
-            old_count = len(sampled_edges)
+            codes = tf_idx * n_items + item_idx
 
-            for edge in zip(tfs[tf_idx], items[item_idx]):
-                if edge not in true_edges:
-                    sampled_edges.add(edge)
+            # Remove duplicates within this batch.
+            codes = np.unique(codes)
 
-                    if len(sampled_edges) >= num_edges:
+            # Remove known observed positives.
+            is_observed = np.isin(codes, observed_codes, assume_unique=False)
+            codes = codes[~is_observed]
+
+            if len(codes) == 0:
+                continue
+
+            # Remove codes already sampled in previous batches.
+            # This small Python loop is much cheaper than tuple loops.
+            new_codes = []
+            for code in codes:
+                code_int = int(code)
+                if code_int not in sampled_seen:
+                    sampled_seen.add(code_int)
+                    new_codes.append(code_int)
+
+                    if sampled_count + len(new_codes) >= num_edges:
                         break
 
-            pbar.update(len(sampled_edges) - old_count)
+            if not new_codes:
+                continue
+
+            new_codes = np.asarray(new_codes, dtype=np.int64)
+            sampled_chunks.append(new_codes)
+
+            sampled_count += len(new_codes)
+            pbar.update(len(new_codes))
 
     finally:
         pbar.close()
 
-    return sampled_edges
+    sampled_codes = np.concatenate(sampled_chunks)
+
+    if len(sampled_codes) > num_edges:
+        sampled_codes = sampled_codes[:num_edges]
+
+    return sampled_codes
 
 def download_gene_protein_fastas(
     gene_names,

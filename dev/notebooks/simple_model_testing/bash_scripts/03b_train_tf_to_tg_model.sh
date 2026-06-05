@@ -1,13 +1,13 @@
 #!/bin/bash -l
-#SBATCH --job-name=tf_dna_model
-#SBATCH --output=LOGS/tf_dna_model/%x_%j.log
-#SBATCH --error=LOGS/tf_dna_model/%x_%j.err
+#SBATCH --job-name=tf_tg_model
+#SBATCH --output=LOGS/tf_tg_model/%x_%j.log
+#SBATCH --error=LOGS/tf_tg_model/%x_%j.err
 #SBATCH --time=72:00:00
 #SBATCH -p dense
 #SBATCH -N 1
-#SBATCH --gres=gpu:a100:4
+#SBATCH --gres=gpu:v100:4
 #SBATCH --ntasks-per-node=4
-#SBATCH -c 24
+#SBATCH -c 8
 #SBATCH --mem=128G
 #SBATCH --signal=SIGUSR1@90
 
@@ -20,12 +20,11 @@ echo "Activating conda environment and starting training..."
 source activate my_env
 
 # --- Memory + math ---
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,max_split_size_mb:32
+export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:32
 export TORCH_ALLOW_TF32=1
 export NVIDIA_TF32_OVERRIDE=1
 
-# --- Threading: set to match SLURM CPUs per task ---
-THREADS=${SLURM_CPUS_PER_TASK:-1}
+# --- Threading ---
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
@@ -84,19 +83,31 @@ echo "[INFO] Using nproc_per_node=$NPROC_PER_NODE based on GPUs per node"
 export NCCL_DEBUG=INFO
 export PYTHONFAULTHANDLER=1
 
-echo "[INFO] Building TF-to-DNA datasets..."
-python3 ${PROJECT_DIR}/scripts/build_tf_to_dna_train_data.py \
-    --pct_true_edges 0.05 \
-    --true_false_ratio 0.25
+tf_bind_model_path="${PROJECT_DIR}/checkpoints/tf_dna_hg38_3682773/epoch=00-val_auroc=0.9414-val_loss=0.2365.ckpt"
 
-echo "[INFO] Starting TF-to-DNA model training..."
-srun python3 ${PROJECT_DIR}/scripts/train_tf_to_dna_model.py \
-    --epochs 50 \
-    --batch_size 64 \
-    --model_dim 128 \
-    --num_layers 4 \
+max_cells_per_pair=32
+max_peaks_per_tg=12
+peak_flank_size=128
+pct_true_edges=0.5
+true_false_ratio=1.0
+
+# echo "[INFO] Building and Caching Training Data..."
+# python3 ${PROJECT_DIR}/scripts/build_tf_to_tg_train_data.py \
+#     --max_peaks_per_tg $max_peaks_per_tg \
+#     --max_cells_per_pair $max_cells_per_pair \
+#     --pct_true_edges $pct_true_edges \
+#     --true_false_ratio $true_false_ratio \
+#     --peak_flank_size $peak_flank_size \
+#     --num_cpu $SLURM_CPUS_PER_TASK
+
+echo "[INFO] Starting training..."
+srun python3 ${PROJECT_DIR}/scripts/train_tf_to_tg_model.py \
+    --epochs 250 \
     --num_gpus $NPROC_PER_NODE \
     --num_nodes $SLURM_JOB_NUM_NODES \
-    --job_id $SLURM_JOB_ID \
-    # --checkpoint_path "${PROJECT_DIR}/checkpoints/tf_peak_binding/epoch=01-val_auroc=0.9287-val_loss=0.3160.ckpt"
-
+    --job_id ${SLURM_JOB_ID} \
+    --tf_bind_model_path $tf_bind_model_path \
+    --max_peaks_per_tg $max_peaks_per_tg \
+    --max_cells_per_pair $max_cells_per_pair \
+    --peak_flank_size $peak_flank_size \
+    --batch_size 256

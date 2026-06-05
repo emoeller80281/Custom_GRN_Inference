@@ -5,7 +5,10 @@ from torchmetrics.classification import BinaryAUROC, BinaryAveragePrecision, Bin
 
 from bidirectional_cross_attention import BidirectionalCrossAttentionTransformer
 
-from sklearn.metrics import roc_curve, precision_recall_curve
+from sklearn.metrics import (
+    roc_curve, precision_recall_curve,
+    roc_auc_score, average_precision_score, accuracy_score
+)
 import wandb
 import time
 
@@ -142,7 +145,6 @@ class LitTFPeakBindingModel(pl.LightningModule):
         model: nn.Module,
         tf_embeddings_tensor: torch.Tensor,
         tf_mask_tensor: torch.Tensor,
-        peak_tensor: torch.Tensor,
         lr: float = 1e-4,
         weight_decay: float = 1e-4,
         pos_weight: float | None = None,
@@ -153,10 +155,18 @@ class LitTFPeakBindingModel(pl.LightningModule):
 
         self.model = model
         
-        self.register_buffer("tf_embeddings_tensor", tf_embeddings_tensor.float())
-        self.register_buffer("tf_mask_tensor", tf_mask_tensor.bool())
-        self.register_buffer("peak_tensor", peak_tensor.float())
-        
+        self.register_buffer(
+            "tf_embeddings_tensor",
+            tf_embeddings_tensor.float(),
+            persistent=False,
+        )
+
+        self.register_buffer(
+            "tf_mask_tensor",
+            tf_mask_tensor.bool(),
+            persistent=False,
+        )
+
         self.lr = lr
         self.weight_decay = weight_decay
         self.logit_clamp = logit_clamp
@@ -168,7 +178,6 @@ class LitTFPeakBindingModel(pl.LightningModule):
                 "model",
                 "tf_embeddings_tensor",
                 "tf_mask_tensor",
-                "peak_tensor",
             ]
         )
 
@@ -177,15 +186,6 @@ class LitTFPeakBindingModel(pl.LightningModule):
             self.register_buffer("pos_weight", pos_weight_tensor)
         else:
             self.pos_weight = None
-
-        self.train_auroc = BinaryAUROC()
-        self.val_auroc = BinaryAUROC()
-
-        self.train_auprc = BinaryAveragePrecision()
-        self.val_auprc = BinaryAveragePrecision()
-
-        self.train_acc = BinaryAccuracy()
-        self.val_acc = BinaryAccuracy()
 
         self.val_probs = []
         self.val_targets = []
@@ -236,12 +236,11 @@ class LitTFPeakBindingModel(pl.LightningModule):
 
     def _shared_step(self, batch, stage: str):
         tf_idx = batch["tf_idx"].long()
-        peak_idx = batch["peak_idx"].long()
         labels = batch["label"].float()
 
         tf_embedding = self.tf_embeddings_tensor[tf_idx]
         tf_mask = self.tf_mask_tensor[tf_idx]
-        peak_embedding = self.peak_tensor[peak_idx]
+        peak_embedding = batch["peak_embedding"].float()
 
         forward_start = None
         if stage == "train":
@@ -264,57 +263,32 @@ class LitTFPeakBindingModel(pl.LightningModule):
 
         loss = self._loss(logits, labels)
 
-        probs = torch.sigmoid(logits)
-
         if stage == "val":
-            auroc = self.val_auroc(probs, labels.int())
-            auprc = self.val_auprc(probs, labels.int())
-            acc = self.val_acc(probs, labels.int())
+            probs = torch.sigmoid(logits).detach().cpu()
+            targets = labels.detach().cpu().int()
 
-            self.val_probs.append(probs.detach().cpu())
-            self.val_targets.append(labels.detach().cpu())
-            
-            
+            self.val_probs.append(probs)
+            self.val_targets.append(targets)
+
             self.log(
-                f"{stage}/auroc",
-                auroc,
+                "val/loss",
+                loss,
                 on_step=False,
                 on_epoch=True,
                 prog_bar=True,
                 logger=True,
                 sync_dist=True,
             )
-
+        else:
             self.log(
-                f"{stage}/auprc",
-                auprc,
-                on_step=False,
+                "train/loss",
+                loss,
+                on_step=True,
                 on_epoch=True,
                 prog_bar=True,
                 logger=True,
-                sync_dist=True,
+                sync_dist=False,
             )
-
-            self.log(
-                f"{stage}/acc",
-                acc,
-                on_step=False,
-                on_epoch=True,
-                prog_bar=False,
-                logger=True,
-                sync_dist=True,
-            )
-
-        self.log(
-            f"{stage}/loss",
-            loss,
-            on_step=(stage == "train"),
-            on_epoch=True,
-            prog_bar=True,
-            logger=True,
-            sync_dist=False,
-        )
-
 
         return loss
 
@@ -359,25 +333,14 @@ class LitTFPeakBindingModel(pl.LightningModule):
         self._sync_if_cuda()
         self._backward_start_time = time.perf_counter()
 
-    def optimizer_step(
-        self,
-        epoch,
-        batch_idx,
-        optimizer,
-        optimizer_closure,
-    ):
-        start_time = self._backward_start_time or time.perf_counter()
-        result = super().optimizer_step(
-            epoch,
-            batch_idx,
-            optimizer,
-            optimizer_closure,
-        )
+    def on_after_backward(self):
+        if self._backward_start_time is None:
+            return
+
         self._sync_if_cuda()
-        backward_opt_time = time.perf_counter() - start_time
+        backward_time = time.perf_counter() - self._backward_start_time
         self._backward_start_time = None
-        self._record_timing("backward", backward_opt_time)
-        return result
+        self._record_timing("backward", backward_time)
 
     def on_train_batch_end(self, outputs, batch, batch_idx):
         if self._step_start_time is None:
@@ -413,15 +376,14 @@ class LitTFPeakBindingModel(pl.LightningModule):
 
         self.val_probs.clear()
         self.val_targets.clear()
+        
+        val_auroc = roc_auc_score(targets, probs)
+        val_auprc = average_precision_score(targets, probs)
+        val_acc = accuracy_score(targets, probs >= 0.5)
 
-        auroc = self.val_auroc.compute()
-        auprc = self.val_auprc.compute()
-
-        self.log("val/roc_auc", auroc, prog_bar=True, sync_dist=False)
-        self.log("val/pr_auc", auprc, prog_bar=True, sync_dist=False)
-
-        self.val_auroc.reset()
-        self.val_auprc.reset()
+        self.log("val/auroc", val_auroc, prog_bar=True, logger=True, sync_dist=False)
+        self.log("val/auprc", val_auprc, prog_bar=True, logger=True, sync_dist=False)
+        self.log("val/acc", val_acc, prog_bar=False, logger=True, sync_dist=False)
 
         if self.trainer.is_global_zero:
             try:
@@ -437,6 +399,10 @@ class LitTFPeakBindingModel(pl.LightningModule):
                 })
             except Exception as e:
                 print("[WARN] PR/ROC curve error:", e)
+        
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.reset_peak_memory_stats()
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(

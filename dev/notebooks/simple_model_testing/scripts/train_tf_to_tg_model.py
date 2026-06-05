@@ -46,7 +46,12 @@ warnings.filterwarnings(
 def log_once(msg: str) -> None:
     logging.info(msg)
 
-def create_new_tf_tg_binding_model(tf_bind_model_path: Path) -> tf_to_tg_module.TFTGRegulationModel:
+def create_new_tf_tg_binding_model(
+    tf_bind_model_path: Path, 
+    tf_embeddings_tensor: torch.Tensor, 
+    tf_mask_tensor: torch.Tensor
+    ) -> tf_to_tg_module.TFTGRegulationModel:
+    
     # 1) Recreate the base TF→DNA model with the same hyperparameters
     base_model = tf_to_dna_module.TFPeakBindingModel(
         tf_embedding_dim=128,
@@ -61,6 +66,8 @@ def create_new_tf_tg_binding_model(tf_bind_model_path: Path) -> tf_to_tg_module.
     lit_model = tf_to_dna_module.LitTFPeakBindingModel.load_from_checkpoint(
         checkpoint_path=tf_bind_model_path,
         model=base_model,
+        tf_embeddings_tensor=tf_embeddings_tensor,
+        tf_mask_tensor=tf_mask_tensor,
         lr=1e-4,
         weight_decay=1e-4,
         pos_weight=None,
@@ -354,7 +361,6 @@ if __name__ == "__main__":
     """
     
     parser = argparse.ArgumentParser()
-    parser.add_argument("--sample_name", type=str, required=True, help="Name of the sample")
     parser.add_argument("--epochs", type=int, default=50, help="Number of training epochs")
     parser.add_argument("--num_gpus", type=int, default=1, help="Number of GPU devices to use for training")
     parser.add_argument("--num_nodes", type=int, default=1, help="Number of nodes to use for training")
@@ -503,7 +509,7 @@ if __name__ == "__main__":
 
     log_once(f"Train/Val/Test sizes: {len(train_dataset)}, {len(val_dataset)}, {len(test_dataset)}")
 
-    tf_tg_model = create_new_tf_tg_binding_model(tf_bind_model_path)
+    tf_tg_model = create_new_tf_tg_binding_model(tf_bind_model_path, tf_embeddings_tensor, tf_mask_tensor)
 
     criterion = torch.nn.BCEWithLogitsLoss()
 
@@ -581,6 +587,11 @@ if __name__ == "__main__":
         "sample_name": sample_name,
         "epochs": epochs,
         "batch_size": batch_size,
+        "num_batches": len(train_loader),
+        "num_gpus": num_gpus,
+        "num_nodes": num_nodes,
+        "job_id": job_id,
+        "run_name": run_name,
         "sample_pairs": sample_pairs,
         "max_peaks_per_tg": max_peaks_per_tg,
         "max_cells_per_pair": max_cells_per_pair,

@@ -148,10 +148,10 @@ class TFTGRegulationModel(nn.Module):
         cell_logits : [E, C]
         """
 
-        E, C = cell_mask.shape
         if not torch.is_floating_point(peak_sequences):
-            # Keep CPU storage compact; cast once on device for compute.
             peak_sequences = peak_sequences.float()
+
+        E, C = cell_mask.shape
         _, P, L, nuc_dim = peak_sequences.shape
         EC = E * C
 

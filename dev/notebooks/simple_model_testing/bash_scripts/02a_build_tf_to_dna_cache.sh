@@ -1,7 +1,7 @@
 #!/bin/bash -l
-#SBATCH --job-name=tf_dna_model
-#SBATCH --output=LOGS/tf_dna_model/%x_%j.log
-#SBATCH --error=LOGS/tf_dna_model/%x_%j.err
+#SBATCH --job-name=build_tf_dna_cache
+#SBATCH --output=LOGS/build_tf_dna_cache/%x_%j.log
+#SBATCH --error=LOGS/build_tf_dna_cache/%x_%j.err
 #SBATCH --time=72:00:00
 #SBATCH -p compute
 #SBATCH -N 1
@@ -18,6 +18,6 @@ source activate my_env
 
 echo "[INFO] Building TF-to-DNA datasets..."
 python3 ${PROJECT_DIR}/scripts/build_tf_to_dna_train_data.py \
-    --pct_true_edges 0.05 \
+    --pct_true_edges 0.005 \
     --true_false_ratio 0.25 \
     --force_reload

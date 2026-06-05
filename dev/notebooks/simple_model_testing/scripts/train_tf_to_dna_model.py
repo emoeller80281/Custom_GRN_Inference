@@ -13,8 +13,9 @@ from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset, DataLoader, Subset
 
 import pytorch_lightning as pl
-from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping, LearningRateMonitor, TQDMProgressBar
-from lightning.pytorch.loggers import WandbLogger
+from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping, LearningRateMonitor, TQDMProgressBar
+from pytorch_lightning.loggers import WandbLogger
+from pytorch_lightning.strategies import DDPStrategy
 
 DATA_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data")
 PROJECT_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/dev/notebooks/simple_model_testing")
@@ -162,18 +163,24 @@ class TFPeakEdgeDataset(Dataset):
         edge_tf_idx,
         edge_peak_idx,
         edge_labels,
+        peak_tensor,
     ):
         self.edge_tf_idx = edge_tf_idx.long()
         self.edge_peak_idx = edge_peak_idx.long()
         self.edge_labels = edge_labels.float()
 
+        # Peak tensor kept on CPU due to large size
+        self.peak_tensor = peak_tensor
+
     def __len__(self):
         return len(self.edge_labels)
 
     def __getitem__(self, idx):
+        peak_idx = self.edge_peak_idx[idx]
+
         return {
             "tf_idx": self.edge_tf_idx[idx],
-            "peak_idx": self.edge_peak_idx[idx],
+            "peak_embedding": self.peak_tensor[peak_idx],
             "label": self.edge_labels[idx],
         }
 
@@ -239,17 +246,17 @@ if __name__ == "__main__":
         )
 
     # Load cached data
-    edge_tf_idx_tensor: torch.Tensor = torch.load(tf_dna_edge_tf_idx_cache_path)
-    edge_peak_idx_tensor: torch.Tensor = torch.load(tf_dna_edge_peak_idx_cache_path)
-    edge_labels_tensor: torch.Tensor = torch.load(tf_dna_edge_labels_cache_path)
-    tf_embeddings_tensor: torch.Tensor = torch.load(tf_embedding_cache_path)
-    tf_mask_tensor: torch.Tensor = torch.load(tf_mask_cache_path)
-    peak_tensor: torch.Tensor = torch.load(tf_dna_peak_onehot_cache_path)
+    edge_tf_idx_tensor: torch.Tensor = torch.load(tf_dna_edge_tf_idx_cache_path, weights_only=True)
+    edge_peak_idx_tensor: torch.Tensor = torch.load(tf_dna_edge_peak_idx_cache_path, weights_only=True)
+    edge_labels_tensor: torch.Tensor = torch.load(tf_dna_edge_labels_cache_path, weights_only=True)
+    tf_embeddings_tensor: torch.Tensor = torch.load(tf_embedding_cache_path, weights_only=True)
+    tf_mask_tensor: torch.Tensor = torch.load(tf_mask_cache_path, weights_only=True)
+    peak_tensor: torch.Tensor = torch.load(tf_dna_peak_onehot_cache_path, weights_only=True)
     
     # Load train/val/test splits
-    train_idx: torch.Tensor = torch.load(tf_dna_train_idx_cache_path)
-    val_idx: torch.Tensor = torch.load(tf_dna_val_idx_cache_path)
-    test_idx: torch.Tensor = torch.load(tf_dna_test_idx_cache_path)
+    train_idx: torch.Tensor = torch.load(tf_dna_train_idx_cache_path, weights_only=True)
+    val_idx: torch.Tensor = torch.load(tf_dna_val_idx_cache_path, weights_only=True)
+    test_idx: torch.Tensor = torch.load(tf_dna_test_idx_cache_path, weights_only=True)
 
     if peak_tensor.dtype == torch.uint8:
         peak_tensor = peak_tensor.float()
@@ -258,6 +265,7 @@ if __name__ == "__main__":
         edge_tf_idx=edge_tf_idx_tensor,
         edge_peak_idx=edge_peak_idx_tensor,
         edge_labels=edge_labels_tensor,
+        peak_tensor=peak_tensor,
     )
 
     train_dataset = Subset(edge_dataset, train_idx.tolist())
@@ -309,10 +317,10 @@ if __name__ == "__main__":
         model=base_model,
         tf_embeddings_tensor=tf_embeddings_tensor,
         tf_mask_tensor=tf_mask_tensor,
-        peak_tensor=peak_tensor,
         lr=1e-4,
         weight_decay=1e-4,
         pos_weight=None,
+        enable_timing_sync=True,
     )
 
 
@@ -340,6 +348,19 @@ if __name__ == "__main__":
         save_dir=output_dir,
     )
     
+    wandb_logger.log_hyperparams({
+        "sample_name": config.sample_name,
+        "epochs": epochs,
+        "batch_size": batch_size,
+        "num_batches": len(train_loader),
+        "model_dim": model_dim,
+        "num_layers": num_layers,
+        "num_gpus": num_gpus*num_nodes,
+        "num_nodes": num_nodes,
+        "job_id": job_id,
+        "run_name": run_name,
+    })
+    
     world_size = int(
         os.environ.get(
             "WORLD_SIZE",
@@ -354,18 +375,18 @@ if __name__ == "__main__":
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
         devices=num_gpus,
         num_nodes=num_nodes,
-        strategy="ddp" if use_ddp else "auto",
+        strategy=DDPStrategy(broadcast_buffers=False) if use_ddp else "auto",
         precision="16-mixed",
         logger=wandb_logger,
         callbacks=[
-            TQDMProgressBar(refresh_rate=100),
+            TQDMProgressBar(refresh_rate=50),
             checkpoint_callback,
             early_stopping_callback,
             lr_monitor,
         ],
         gradient_clip_val=1.0,
         gradient_clip_algorithm="norm",
-        log_every_n_steps=100,
+        log_every_n_steps=50,
         default_root_dir=output_dir,
         enable_progress_bar=True,
         enable_checkpointing=True,
