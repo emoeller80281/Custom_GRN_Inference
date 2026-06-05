@@ -601,12 +601,6 @@ class LitTFTGRegulationModel(pl.LightningModule):
         self.val_probs.clear()
         self.val_targets.clear()
 
-        auroc = self.val_auroc.compute()
-        auprc = self.val_auprc.compute()
-
-        self.log("val/roc_auc", auroc, prog_bar=True, sync_dist=True)
-        self.log("val/pr_auc", auprc, prog_bar=True, sync_dist=True)
-
         self.val_auroc.reset()
         self.val_auprc.reset()
 
