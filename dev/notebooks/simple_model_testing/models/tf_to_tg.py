@@ -30,7 +30,7 @@ class TFTGRegulationModel(nn.Module):
             p.requires_grad = False
 
         self.peak_feature_proj = nn.Sequential(
-            nn.Linear(4, d_model),  # binding, accessibility, distance_scaled, distance_weight
+            nn.Linear(2, d_model),  # binding, accessibility, distance_scaled, distance_weight
             nn.SiLU(),
             nn.Dropout(dropout),
             nn.Linear(d_model, d_model),
@@ -274,7 +274,7 @@ class TFTGRegulationModel(nn.Module):
             dim=-1,
         )  # [E, C, P, 4]
 
-        peak_features = peak_features.reshape(EC, P, 2)
+        peak_features = peak_features.reshape(EC, P, 2)  # [E*C, P, 2]
         peak_tokens = self.peak_feature_proj(peak_features)  # [E*C, P, d_model]
 
         # ------------------------------------------------------------
@@ -408,7 +408,7 @@ class LitTFTGRegulationModel(pl.LightningModule):
             tf_mask=batch["tf_mask"],
             peak_sequences=batch["peak_sequences"],
             peak_accessibility=batch["peak_accessibility"],
-            # peak_distance=batch["peak_distance"],
+            peak_distance=batch["peak_distance"],
             tf_expression=batch["tf_expression"],
             tg_expression=batch["tg_expression"],
             cell_mask=batch["cell_mask"],

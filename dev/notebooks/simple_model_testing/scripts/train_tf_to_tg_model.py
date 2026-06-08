@@ -35,8 +35,6 @@ import argparse
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-WANDB_PROJECT_NAME = "tf_tg_sweep"
-
 warnings.filterwarnings(
     "ignore",
     message="This DataLoader will create .* worker processes in total\.",
@@ -580,7 +578,7 @@ if __name__ == "__main__":
     lr_monitor = LearningRateMonitor(logging_interval="epoch")
 
     wandb_logger = WandbLogger(
-        project=WANDB_PROJECT_NAME,
+        project="tf_tg_regulation_prediction",
         name=run_name,
         save_dir=output_dir,
     )

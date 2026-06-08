@@ -50,6 +50,7 @@ def plot_auroc_auprc(
     labels,
     scores,
     balance_pos_neg_auroc: bool = True,
+    title=None,
 ) -> plt.Figure:
     """
     labels: array-like of 0/1 labels
@@ -145,6 +146,10 @@ def plot_auroc_auprc(
 
     ax[1].set_ylim(0, 1.0)
     ax[1].set_xlim(0, 1.0)
+    
+    if title is not None:
+        plt.suptitle(title, fontsize=12)
+    
     plt.tight_layout()
     
     return fig
@@ -157,6 +162,7 @@ def plot_score_histograms(
     y_log=False,
     panel_kind="kde",
     density=False,
+    title=None,
 ):
     
     fig, ax = plt.subplots(
@@ -236,6 +242,9 @@ def plot_score_histograms(
     if y_log:
         plot_ax.set_yscale("log")
         plot_ax.set_ylim(bottom=0.1)
+        
+    if title is not None:
+        plt.suptitle(title, fontsize=12)
 
     fig.tight_layout(rect=[0, 0, 1, 0.98])
 
