@@ -1,0 +1,19 @@
+program: wandb_sweep.py
+method: bayes
+metric:
+  name: val/auroc
+  goal: maximize
+parameters:
+  tf_bind_model_path:
+    value: /gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/dev/notebooks/simple_model_testing/checkpoints/tf_dna_hg38_3683606/epoch=13-val_auroc=0.9566-val_loss=0.2042.ckpt
+  max_peaks_per_tg:
+    values: [4, 8, 16]
+  max_cells_per_pair:
+    values: [8, 16, 32]
+  peak_flank_size:
+    values: [64, 128]
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+  - ${args}

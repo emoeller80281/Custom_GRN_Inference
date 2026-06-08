@@ -18,6 +18,6 @@ source activate my_env
 
 echo "[INFO] Building TF-to-DNA datasets..."
 python3 ${PROJECT_DIR}/scripts/build_tf_to_dna_train_data.py \
-    --pct_true_edges 0.01 \
-    --true_false_ratio 0.25 \
+    --pct_true_edges 0.15 \
+    --true_false_ratio 4.00 \
     --force_reload

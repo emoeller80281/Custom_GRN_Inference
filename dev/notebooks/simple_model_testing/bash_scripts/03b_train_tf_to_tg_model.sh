@@ -83,8 +83,8 @@ echo "[INFO] Using nproc_per_node=$NPROC_PER_NODE based on GPUs per node"
 export NCCL_DEBUG=INFO
 export PYTHONFAULTHANDLER=1
 
-# tf_bind_model_path="${PROJECT_DIR}/checkpoints/tf_dna_hg38_3683606/epoch=13-val_auroc=0.9566-val_loss=0.2042.ckpt"
-tf_bind_model_path="${PROJECT_DIR}/checkpoints/tf_dna_mm10_3682785/epoch=05-val_auroc=0.9765-val_loss=0.1653.ckpt"
+tf_bind_model_path="${PROJECT_DIR}/checkpoints/tf_dna_hg38_3683606/epoch=13-val_auroc=0.9566-val_loss=0.2042.ckpt"
+# tf_bind_model_path="${PROJECT_DIR}/checkpoints/tf_dna_mm10_3682785/epoch=05-val_auroc=0.9765-val_loss=0.1653.ckpt"
 
 max_cells_per_pair=16
 max_peaks_per_tg=8

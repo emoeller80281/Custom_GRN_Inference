@@ -11,17 +11,17 @@ DATA_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE
 # cell_type="iPSC"
 # sample_name="WT_D13_rep1"
 
-# species = "hg38"
-# cell_type="Macrophage"
-# sample_name="buffer_2"
+species = "hg38"
+cell_type="Macrophage"
+sample_name="buffer_1"
 
 # species = "mm10"
 # cell_type="mESC"
 # sample_name="E8.5_rep1"
 
-species = "hg38"
-cell_type="K562"
-sample_name="sample_1"
+# species = "hg38"
+# cell_type="K562"
+# sample_name="sample_1"
 
 assert cell_type in {"Macrophage", "mESC", "K562", "iPSC"}, \
     f"Invalid cell type: {cell_type}. Select from: 'Macrophage', 'mESC', 'K562', 'iPSC'"

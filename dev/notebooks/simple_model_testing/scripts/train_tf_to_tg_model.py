@@ -35,6 +35,8 @@ import argparse
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
+WANDB_PROJECT_NAME = "tf_tg_sweep"
+
 warnings.filterwarnings(
     "ignore",
     message="This DataLoader will create .* worker processes in total\.",
@@ -578,7 +580,7 @@ if __name__ == "__main__":
     lr_monitor = LearningRateMonitor(logging_interval="epoch")
 
     wandb_logger = WandbLogger(
-        project="tf_tg_regulation_prediction",
+        project=WANDB_PROJECT_NAME,
         name=run_name,
         save_dir=output_dir,
     )
@@ -604,6 +606,7 @@ if __name__ == "__main__":
         "flank_size": peak_flank_size,
         "max_precompute_peaks": max_peaks_per_tg,
         "persistent_workers": True,
+        "tf_bind_model_path": str(tf_bind_model_path),
     })
     
     world_size = int(

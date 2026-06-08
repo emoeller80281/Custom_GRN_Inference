@@ -15,6 +15,7 @@ import pytorch_lightning as pl
 
 import torch
 import argparse
+import wandb
 
 DATA_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data")
 PROJECT_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/dev/notebooks/simple_model_testing")
@@ -28,6 +29,55 @@ import scripts.train_tf_to_tg_model as train_tf_to_tg_model
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 import hashlib
+
+SWEEP_PARAMETER_NAMES = (
+    "epochs",
+    "batch_size",
+    "num_gpus",
+    "num_nodes",
+    "sample_pairs",
+    "max_peaks_per_tg",
+    "max_cells_per_pair",
+    "pct_true_edges",
+    "true_false_ratio",
+    "peak_flank_size",
+)
+
+def get_sweep_setting_hash(
+    max_peaks_per_tg: int,
+    max_cells_per_pair: int,
+    pct_true_edges: float,
+    true_false_ratio: float,
+    peak_flank_size: int,
+) -> str:
+    sweep_setting_cache_string = (
+        f"{max_peaks_per_tg}_{max_cells_per_pair}_"
+        f"{pct_true_edges}_{true_false_ratio}_{peak_flank_size}"
+    )
+    return hashlib.md5(sweep_setting_cache_string.encode("utf-8")).hexdigest()
+
+
+def _coerce_sweep_value(
+    name: str,
+    cli_value,
+    config_value,
+    cast,
+):
+    """Prefer W&B config values and tolerate unresolved ${...} CLI placeholders."""
+    value = config_value if config_value is not None else cli_value
+
+    if value is None:
+        return None
+
+    if isinstance(value, str):
+        value = value.strip()
+        if value.startswith("${") and value.endswith("}"):
+            return None
+
+    try:
+        return cast(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Invalid value for {name}: {value}") from exc
 
 def build_tf_tg_input_cache(
     sample_pairs: int,
@@ -54,8 +104,13 @@ def build_tf_tg_input_cache(
     assert input_data_dir.exists(), f"Input data directory does not exist: {input_data_dir}"
     
     # Encode the sweep settings into a string and hash it to create a unique cache directory for this sweep configuration
-    sweep_setting_cache_string = f"{sample_pairs}_{max_peaks_per_tg}_{max_cells_per_pair}_{pct_true_edges}_{true_false_ratio}_{peak_flank_size}"
-    sweep_setting_hash = hashlib.md5(sweep_setting_cache_string.encode('utf-8')).hexdigest()
+    sweep_setting_hash = get_sweep_setting_hash(
+        max_peaks_per_tg=max_peaks_per_tg,
+        max_cells_per_pair=max_cells_per_pair,
+        pct_true_edges=pct_true_edges,
+        true_false_ratio=true_false_ratio,
+        peak_flank_size=peak_flank_size,
+    )
     
     tf_tg_input_cache_dir = config.tf_tg_input_cache_dir / "wandb_sweep" / f"tf_tg_sweep_{sweep_setting_hash}"
 
@@ -66,13 +121,13 @@ def build_tf_tg_input_cache(
     tf_mask_cache_path = config.tf_mask_cache_path
     merged_ground_truth_path = config.merged_ground_truth_cache_path
     
-    atac_peak_onehot_cache_path = config.tf_tg_atac_peak_cache_path
-    train_file = config.tf_tg_train_cache_path
-    val_file = config.tf_tg_val_cache_path
-    test_file = config.tf_tg_test_cache_path
+    atac_peak_onehot_cache_path = tf_tg_input_cache_dir / "atac_peak_tensor.pt"
+    train_file = tf_tg_input_cache_dir / "tftg_inputs_train.pt"
+    val_file = tf_tg_input_cache_dir / "tftg_inputs_val.pt"
+    test_file = tf_tg_input_cache_dir / "tftg_inputs_test.pt"
     
-    metadata_file = config.tf_tg_metadata_cache_path
-    manifest_file = config.tf_tg_manifest_cache_path
+    metadata_file = tf_tg_input_cache_dir / "metadata.json"
+    manifest_file = tf_tg_input_cache_dir / "manifest.json"
     
     required_cache_files = [
         tf_name_to_idx_cache_path,
@@ -88,7 +143,7 @@ def build_tf_tg_input_cache(
     
     if all(f.exists() for f in required_cache_files) and not force_reload:
         logging.info("All required cache files already exist. Skipping construction (use --force_reload to override).")
-        return
+        return sweep_setting_hash
 
     # Load the input data for the sample
     required_input_files = [
@@ -256,7 +311,7 @@ def build_tf_tg_input_cache(
     
     if all(f.exists() for f in [train_file, val_file, test_file]) and not force_reload:
         logging.info("Cached input files already exist. Skipping (use --force_reload to override).")
-        return
+        return sweep_setting_hash
     
     logging.info("\nBuilding training inputs")
     tftg_inputs_train = build_tf_to_tg_train_data.build_tftg_inputs(
@@ -320,7 +375,6 @@ def build_tf_tg_input_cache(
     return sweep_setting_hash
 
 def train_tf_tg_model(
-    tf_embedding_cache_path: str | Path,
     sweep_setting_hash: str,
     tf_bind_model_path: str | Path,
     sample_pairs: int,
@@ -333,6 +387,7 @@ def train_tf_tg_model(
     num_nodes: int,
     epochs: int = 50,
     batch_size: int = 128,
+    wandb_config: dict[str, object] | None = None,
 ):
     
     sample_name = config.sample_name
@@ -443,45 +498,12 @@ def train_tf_tg_model(
 
     tf_tg_model = train_tf_to_tg_model.create_new_tf_tg_binding_model(tf_bind_model_path, tf_embeddings_tensor, tf_mask_tensor)
 
-    criterion = torch.nn.BCEWithLogitsLoss()
-
-    score_threshold = 0.5
     pooling_mode = "lse"
     pooling_temperature = 1.0
 
-    epoch_rows = []
-
-    def metrics_to_row(
-        metrics,
-        epoch,
-        split,
-        train_loss=np.nan,
-    ):
-        pos_rate = metrics["n_pos"] / max(metrics["n_edges"], 1)
-
-        return {
-            "epoch": epoch,
-            "split": split,
-            "train_loss": train_loss,
-            "loss": metrics["loss"],
-            "auroc": metrics["auroc"],
-            "auprc": metrics["auprc"],
-            "rand_auroc": metrics["rand_auroc"],
-            "rand_auprc": metrics["rand_auprc"],
-            "accuracy": metrics["accuracy"],
-            "precision": metrics["precision"],
-            "n_edges": metrics["n_edges"],
-            "n_pos": metrics["n_pos"],
-            "n_neg": metrics["n_neg"],
-            "pos_rate": pos_rate,
-            "score_threshold": metrics["score_threshold"],
-            "pooling_mode": pooling_mode,
-            "pooling_temperature": pooling_temperature,
-        }
-
     train_tf_to_tg_model.log_once("\nStarting Lightning training...")
 
-    lit_model = train_tf_to_tg_model.LitTFTGRegulationModel(
+    lit_model = train_tf_to_tg_model.tf_to_tg_module.LitTFTGRegulationModel(
         model=tf_tg_model,
         lr=1e-4,
         weight_decay=1e-4,
@@ -513,6 +535,7 @@ def train_tf_tg_model(
         project="tf_tg_regulation_prediction",
         name=run_name,
         save_dir=output_dir,
+        config=wandb_config,
     )
 
     wandb_logger.log_hyperparams({
@@ -575,5 +598,85 @@ def train_tf_tg_model(
     trainer.fit(
         lit_model,
         train_dataloaders=train_loader,
-        val_dataloaders=val_loader
+        val_dataloaders=val_loader,
     )
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--epochs", type=str, default="25", help="Number of training epochs")
+    parser.add_argument("--num_gpus", type=str, default="1", help="Number of GPU devices to use for training")
+    parser.add_argument("--num_nodes", type=str, default="1", help="Number of nodes to use for training")
+    parser.add_argument("--max_peaks_per_tg", type=str, default="64", help="Maximum number of peaks to consider per TG (default: 64)")
+    parser.add_argument("--max_cells_per_pair", type=str, default="8", help="Maximum number of cells to sample per TF-TG pair (default: 8)")
+    parser.add_argument("--batch_size", type=str, default="128", help="Batch size for training (default: 32)")
+    parser.add_argument("--pct_true_edges", type=str, default="0.05", help="Percentage of true edges to include in the training set (default: 0.15)")
+    parser.add_argument("--true_false_ratio", type=str, default="1.0", help="Ratio of true to false edges in the training set (default: 2.0)")
+    parser.add_argument("--peak_flank_size", type=str, default="64", help="Size of the flank region around each peak (default: 64)")
+    parser.add_argument("--num_cpu", type=int, default=8, help="Number of CPU workers to use for preprocessing")
+    parser.add_argument("--tf_bind_model_path", type=str, required=True, help="Path to the TF→DNA model checkpoint to initialize from")
+    parser.add_argument("--checkpoint_path", type=str, required=False, help="Path to a model checkpoint to resume training from")
+    parser.add_argument("--force_reload", action="store_true", help="Whether to force reload cached data instead of using existing cache files")
+    args = parser.parse_args()
+
+    if args.tf_bind_model_path is None:
+        raise ValueError("--tf_bind_model_path is required to initialize the TF->TG model")
+
+    sweep_run = wandb.init(
+        project="tf_tg_regulation_prediction",
+        config=vars(args),
+        job_type="tf_tg_sweep",
+    )
+    wandb.define_metric("val/auroc", summary="max")
+    run_config = dict(sweep_run.config)
+
+    for parameter_name in SWEEP_PARAMETER_NAMES:
+        if parameter_name in run_config and run_config[parameter_name] is not None:
+            setattr(args, parameter_name, run_config[parameter_name])
+
+    args.epochs = _coerce_sweep_value("epochs", args.epochs, run_config.get("epochs"), int)
+    args.batch_size = _coerce_sweep_value("batch_size", args.batch_size, run_config.get("batch_size"), int)
+    args.num_gpus = _coerce_sweep_value("num_gpus", args.num_gpus, run_config.get("num_gpus"), int)
+    args.num_nodes = _coerce_sweep_value("num_nodes", args.num_nodes, run_config.get("num_nodes"), int)
+    args.max_peaks_per_tg = _coerce_sweep_value("max_peaks_per_tg", args.max_peaks_per_tg, run_config.get("max_peaks_per_tg"), int)
+    args.max_cells_per_pair = _coerce_sweep_value("max_cells_per_pair", args.max_cells_per_pair, run_config.get("max_cells_per_pair"), int)
+    args.pct_true_edges = _coerce_sweep_value("pct_true_edges", args.pct_true_edges, run_config.get("pct_true_edges"), float)
+    args.true_false_ratio = _coerce_sweep_value("true_false_ratio", args.true_false_ratio, run_config.get("true_false_ratio"), float)
+    args.peak_flank_size = _coerce_sweep_value("peak_flank_size", args.peak_flank_size, run_config.get("peak_flank_size"), int)
+
+    sample_pairs = None
+    max_peaks_per_tg = args.max_peaks_per_tg
+    max_cells_per_pair = args.max_cells_per_pair
+    pct_true_edges = args.pct_true_edges
+    true_false_ratio = args.true_false_ratio
+    peak_flank_size = args.peak_flank_size
+
+    sweep_setting_hash = build_tf_tg_input_cache(
+        sample_pairs=sample_pairs,
+        max_peaks_per_tg=max_peaks_per_tg,
+        max_cells_per_pair=max_cells_per_pair,
+        pct_true_edges=pct_true_edges,
+        true_false_ratio=true_false_ratio,
+        peak_flank_size=peak_flank_size,
+        num_cpu=args.num_cpu,
+        force_reload=args.force_reload,
+    )
+
+    try:
+        train_tf_tg_model(
+            sweep_setting_hash=sweep_setting_hash,
+            tf_bind_model_path=Path(args.tf_bind_model_path),
+            sample_pairs=sample_pairs,
+            max_peaks_per_tg=max_peaks_per_tg,
+            max_cells_per_pair=max_cells_per_pair,
+            pct_true_edges=pct_true_edges,
+            true_false_ratio=true_false_ratio,
+            peak_flank_size=peak_flank_size,
+            num_gpus=args.num_gpus,
+            num_nodes=args.num_nodes,
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            wandb_config=run_config,
+        )
+    finally:
+        wandb.finish()

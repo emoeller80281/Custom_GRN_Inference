@@ -163,7 +163,7 @@ class TFTGRegulationModel(nn.Module):
         tf_embedding_edge = tf_embedding         # [E, T, D]
         tf_mask_edge = tf_mask                  # [E, T]
         peak_sequences_edge = peak_sequences    # [E, P, L, 4]
-        peak_distance_edge = peak_distance        # [E, P]
+        # peak_distance_edge = peak_distance        # [E, P]
 
         if peak_mask is not None:
             peak_mask_edge = peak_mask            # [E, P]
@@ -234,16 +234,16 @@ class TFTGRegulationModel(nn.Module):
         # ------------------------------------------------------------
         # 3. Distance features
         # ------------------------------------------------------------
-        abs_distance = peak_distance_edge.abs()
-        distance_scaled = torch.clamp(abs_distance / 250_000.0, 0.0, 1.0)   # [E, P]
-        distance_weight = torch.exp(-abs_distance / 50_000.0)               # [E, P]
+        # abs_distance = peak_distance_edge.abs()
+        # distance_scaled = torch.clamp(abs_distance / 250_000.0, 0.0, 1.0)   # [E, P]
+        # distance_weight = torch.exp(-abs_distance / 50_000.0)               # [E, P]
 
-        if peak_mask_edge is not None:
-            distance_scaled = distance_scaled.masked_fill(~peak_mask_edge, 0.0)
-            distance_weight = distance_weight.masked_fill(~peak_mask_edge, 0.0)
+        # if peak_mask_edge is not None:
+        #     distance_scaled = distance_scaled.masked_fill(~peak_mask_edge, 0.0)
+        #     distance_weight = distance_weight.masked_fill(~peak_mask_edge, 0.0)
 
-        distance_scaled = distance_scaled[:, None, :].expand(E, C, P) # [E, C, P]
-        distance_weight = distance_weight[:, None, :].expand(E, C, P) # [E, C, P]
+        # distance_scaled = distance_scaled[:, None, :].expand(E, C, P) # [E, C, P]
+        # distance_weight = distance_weight[:, None, :].expand(E, C, P) # [E, C, P]
 
         # ------------------------------------------------------------
         # 4. Cell-specific peak features
@@ -257,24 +257,24 @@ class TFTGRegulationModel(nn.Module):
         assert binding_score.shape == peak_accessibility.shape, (
             f"binding_score {binding_score.shape} != peak_accessibility {peak_accessibility.shape}"
         )
-        assert distance_scaled.shape == peak_accessibility.shape, (
-            f"distance_scaled {distance_scaled.shape} != peak_accessibility {peak_accessibility.shape}"
-        )
-        assert distance_weight.shape == peak_accessibility.shape, (
-            f"distance_weight {distance_weight.shape} != peak_accessibility {peak_accessibility.shape}"
-        )
+        # assert distance_scaled.shape == peak_accessibility.shape, (
+        #     f"distance_scaled {distance_scaled.shape} != peak_accessibility {peak_accessibility.shape}"
+        # )
+        # assert distance_weight.shape == peak_accessibility.shape, (
+        #     f"distance_weight {distance_weight.shape} != peak_accessibility {peak_accessibility.shape}"
+        # )
 
         peak_features = torch.stack(
             [
                 binding_score,
                 peak_accessibility,
-                distance_scaled,
-                distance_weight,
+                # distance_scaled,
+                # distance_weight,
             ],
             dim=-1,
         )  # [E, C, P, 4]
 
-        peak_features = peak_features.reshape(EC, P, 4)
+        peak_features = peak_features.reshape(EC, P, 2)
         peak_tokens = self.peak_feature_proj(peak_features)  # [E*C, P, d_model]
 
         # ------------------------------------------------------------
@@ -408,7 +408,7 @@ class LitTFTGRegulationModel(pl.LightningModule):
             tf_mask=batch["tf_mask"],
             peak_sequences=batch["peak_sequences"],
             peak_accessibility=batch["peak_accessibility"],
-            peak_distance=batch["peak_distance"],
+            # peak_distance=batch["peak_distance"],
             tf_expression=batch["tf_expression"],
             tg_expression=batch["tg_expression"],
             cell_mask=batch["cell_mask"],
