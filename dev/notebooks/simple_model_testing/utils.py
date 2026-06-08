@@ -470,7 +470,9 @@ def create_true_false_edges(
         if not (0 < pct_true_edges <= 1):
             raise ValueError("pct_true_edges must be in (0, 1] or None.")
 
+        logging.info(f"Sampling {pct_true_edges:.2%} of true edges.")
         df_pos = df_all.sample(frac=pct_true_edges, random_state=seed)
+        logging.info(f"  - Sampled {len(df_pos)} true edges")
     else:
         df_pos = df_all
 

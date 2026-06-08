@@ -190,6 +190,7 @@ def main():
         logging.info("Loading true edges...")
         true_edge_file = DATA_DIR / "ground_truth_files" / f"chip_atlas_{species}_all.parquet"
         true_edge_df = pd.read_parquet(true_edge_file)
+        
         true_edge_df = true_edge_df[true_edge_df["source_id"].isin(embedded_tf_names)]
         logging.info(f"    Done. Loaded {len(true_edge_df):,} ChIP-Atlas edges")
     
@@ -400,9 +401,14 @@ def main():
 
         edge_chroms = np.array([_get_chrom(pid) for pid in edge_peak_ids])
 
-        train_chroms = {f"chr{i}" for i in range(1, 16)}
-        val_chroms = {f"chr{i}" for i in range(16, 18)}
-        test_chroms = {f"chr{i}" for i in range(18, 20)}
+        if config.species == "mm10":
+            train_chroms = [f"chr{i}" for i in range(1, 16)]
+            val_chroms = [f"chr{i}" for i in range(16, 18)]
+            test_chroms = [f"chr{i}" for i in range(18, 20)]
+        elif config.species == "hg38":
+            train_chroms = [f"chr{i}" for i in range(1, 18)]
+            val_chroms = [f"chr{i}" for i in range(18, 20)]
+            test_chroms = [f"chr{i}" for i in range(20, 23)]
 
         train_mask = np.isin(edge_chroms, list(train_chroms))
         val_mask = np.isin(edge_chroms, list(val_chroms))

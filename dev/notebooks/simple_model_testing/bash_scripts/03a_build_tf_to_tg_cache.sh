@@ -16,11 +16,11 @@ cd $PROJECT_DIR
 echo "Activating conda environment and starting training..."
 source activate my_env
 
-max_cells_per_pair=32
-max_peaks_per_tg=12
+max_cells_per_pair=16
+max_peaks_per_tg=8
 peak_flank_size=128
-pct_true_edges=0.5
-true_false_ratio=1.0
+pct_true_edges=0.15
+true_false_ratio=2.0
 
 echo "[INFO] Building and Caching Training Data..."
 python3 ${PROJECT_DIR}/scripts/build_tf_to_tg_train_data.py \

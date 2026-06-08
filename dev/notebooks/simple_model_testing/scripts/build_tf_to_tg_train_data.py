@@ -1,4 +1,5 @@
 import os
+from re import I
 import sys
 import json
 import gtfparse
@@ -22,24 +23,29 @@ import config
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 
-def split_genes_by_chromosome(gene_reference_file: Path):
+def split_genes_by_chromosome(
+    gene_reference_file: Path, 
+    train_chroms: list[str] = None, 
+    val_chroms: list[str] = None, 
+    test_chroms: list[str] = None
+    ):
     gene_ref_df = gtfparse.read_gtf(gene_reference_file, result_type="pandas")
 
-    gene_chrom = gene_ref_df[["seqname", "gene_name"]].rename(
+    gene_chrom: pd.DataFrame = gene_ref_df[["seqname", "gene_name"]].rename(
         columns={"seqname": "chrom", "gene_name": "TG"}
     )
-
-    train_genes = gene_chrom[gene_chrom["chrom"].isin([str(i) for i in range(1, 16)])][
+    
+    train_genes = gene_chrom[gene_chrom["chrom"].isin(train_chroms)][
         "TG"
     ].unique()
     logging.info(f"Train set: {len(train_genes)} genes")
 
-    val_genes = gene_chrom[gene_chrom["chrom"].isin([str(i) for i in range(16, 18)])][
+    val_genes = gene_chrom[gene_chrom["chrom"].isin(val_chroms)][
         "TG"
     ].unique()
     logging.info(f"Validation set: {len(val_genes)} genes")
 
-    test_genes = gene_chrom[gene_chrom["chrom"].isin([str(i) for i in range(18, 20)])]["TG"].unique()
+    test_genes = gene_chrom[gene_chrom["chrom"].isin(test_chroms)]["TG"].unique()
     logging.info(f"Test set: {len(test_genes)} genes")
 
     return train_genes, val_genes, test_genes
@@ -57,6 +63,11 @@ def create_train_val_test_splits(
     gt_train_df = ground_truth_df[ground_truth_df["Target"].isin(train_genes_set)].copy()
     gt_val_df = ground_truth_df[ground_truth_df["Target"].isin(val_genes_set)].copy()
     gt_test_df = ground_truth_df[ground_truth_df["Target"].isin(test_genes_set)].copy()
+    
+    if len(gt_train_df) == 0:
+        logging.warning("No training interactions found for the selected train genes.")
+        logging.info(f"Dataset genes: {list(train_genes_set)[:5]}")
+        logging.info(f"Ground truth target genes: {ground_truth_df['Target'].unique()[:5]}")
 
     logging.info(f"Train interactions: {len(gt_train_df)}")
     logging.info(f"Validation interactions: {len(gt_val_df)}")
@@ -460,7 +471,7 @@ def main():
         elif config.species == "hg38":
             merged_ground_truth_df["Source"] = merged_ground_truth_df["Source"].str.upper()
             merged_ground_truth_df["Target"] = merged_ground_truth_df["Target"].str.upper()
-        
+            
         merged_ground_truth_df.to_parquet(merged_ground_truth_path, index=False)
     else:
         merged_ground_truth_df = pd.read_parquet(merged_ground_truth_path)
@@ -468,9 +479,23 @@ def main():
     # Get the map of TF name to index
     tf_name_to_idx = pd.read_csv(tf_name_to_idx_cache_path).set_index("tf_name")["tf_idx"].to_dict()
     tg_id_to_idx = {tg: idx for idx, tg in enumerate(merged_ground_truth_df["Target"].unique())}
+    
+    if config.species == "mm10":
+        train_chroms = [str(i) for i in range(1, 16)]
+        val_chroms = [ str(i) for i in range(16, 18)]
+        test_chroms = [str(i) for i in range(18, 20)]
+    elif config.species == "hg38":
+        train_chroms = [str(i) for i in range(1, 18)]
+        val_chroms = [str(i) for i in range(18, 20)]
+        test_chroms = [str(i) for i in range(20, 23)]
 
     # Split genes into train/val/test based on chromosome
-    train_genes, val_genes, test_genes = split_genes_by_chromosome(gene_ref_file)
+    train_genes, val_genes, test_genes = split_genes_by_chromosome(
+        gene_ref_file,
+        train_chroms=train_chroms,
+        val_chroms=val_chroms,
+        test_chroms=test_chroms
+        )
     gt_train_df, gt_val_df, gt_test_df = create_train_val_test_splits(
         merged_ground_truth_df, train_genes, val_genes, test_genes
     )

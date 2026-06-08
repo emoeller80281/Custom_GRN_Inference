@@ -83,14 +83,14 @@ echo "[INFO] Using nproc_per_node=$NPROC_PER_NODE based on GPUs per node"
 export NCCL_DEBUG=INFO
 export PYTHONFAULTHANDLER=1
 
-tf_bind_model_path="${PROJECT_DIR}/checkpoints/tf_dna_hg38_3683606/epoch=13-val_auroc=0.9566-val_loss=0.2042.ckpt"
-# tf_bind_model_path="${PROJECT_DIR}/checkpoints/tf_dna_mm10_3682785/epoch=05-val_auroc=0.9765-val_loss=0.1653.ckpt"
+# tf_bind_model_path="${PROJECT_DIR}/checkpoints/tf_dna_hg38_3683606/epoch=13-val_auroc=0.9566-val_loss=0.2042.ckpt"
+tf_bind_model_path="${PROJECT_DIR}/checkpoints/tf_dna_mm10_3682785/epoch=05-val_auroc=0.9765-val_loss=0.1653.ckpt"
 
-max_cells_per_pair=32
-max_peaks_per_tg=12
+max_cells_per_pair=16
+max_peaks_per_tg=8
 peak_flank_size=128
-pct_true_edges=0.5
-true_false_ratio=1.0
+pct_true_edges=0.15
+true_false_ratio=2.0
 
 # echo "[INFO] Building and Caching Training Data..."
 # python3 ${PROJECT_DIR}/scripts/build_tf_to_tg_train_data.py \
@@ -111,4 +111,4 @@ srun python3 ${PROJECT_DIR}/scripts/train_tf_to_tg_model.py \
     --max_peaks_per_tg $max_peaks_per_tg \
     --max_cells_per_pair $max_cells_per_pair \
     --peak_flank_size $peak_flank_size \
-    --batch_size 256
+    --batch_size 350
