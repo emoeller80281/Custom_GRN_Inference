@@ -29,6 +29,7 @@ def split_genes_by_chromosome(
     val_chroms: list[str] = None, 
     test_chroms: list[str] = None
     ):
+    logging.info(f"Splitting genes into train/val/test based on chromosome:")
     gene_ref_df = gtfparse.read_gtf(gene_reference_file, result_type="pandas")
 
     gene_chrom: pd.DataFrame = gene_ref_df[["seqname", "gene_name"]].rename(
@@ -38,15 +39,15 @@ def split_genes_by_chromosome(
     train_genes = gene_chrom[gene_chrom["chrom"].isin(train_chroms)][
         "TG"
     ].unique()
-    logging.info(f"Train set: {len(train_genes)} genes")
+    logging.info(f"  - Train set: {len(train_genes):,} genes (chroms {min(train_chroms)}-{max(train_chroms)})")
 
     val_genes = gene_chrom[gene_chrom["chrom"].isin(val_chroms)][
         "TG"
     ].unique()
-    logging.info(f"Validation set: {len(val_genes)} genes")
+    logging.info(f"  - Validation set: {len(val_genes):,} genes (chroms {min(val_chroms)}-{max(val_chroms)})")
 
     test_genes = gene_chrom[gene_chrom["chrom"].isin(test_chroms)]["TG"].unique()
-    logging.info(f"Test set: {len(test_genes)} genes")
+    logging.info(f"  - Test set: {len(test_genes):,} genes (chroms {min(test_chroms)}-{max(test_chroms)})")
 
     return train_genes, val_genes, test_genes
 

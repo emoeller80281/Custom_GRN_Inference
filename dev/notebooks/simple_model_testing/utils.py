@@ -472,7 +472,7 @@ def create_true_false_edges(
 
         logging.info(f"Sampling {pct_true_edges:.2%} of true edges.")
         df_pos = df_all.sample(frac=pct_true_edges, random_state=seed)
-        logging.info(f"  - Sampled {len(df_pos)} true edges")
+        logging.info(f"  - Sampled {len(df_pos):,} of {len(df_all):,} true edges")
     else:
         df_pos = df_all
 

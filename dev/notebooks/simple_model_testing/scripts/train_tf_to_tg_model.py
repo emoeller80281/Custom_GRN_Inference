@@ -564,7 +564,7 @@ if __name__ == "__main__":
         filename="epoch={epoch:02d}-val_auroc={val/auroc:.4f}-val_loss={val/loss:.4f}",
         monitor="val/auroc",
         mode="max",
-        save_top_k=100,
+        save_top_k=500,
         save_last=True,
         auto_insert_metric_name=False,
     )

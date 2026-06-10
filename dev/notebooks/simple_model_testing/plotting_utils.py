@@ -163,6 +163,7 @@ def plot_score_histograms(
     panel_kind="kde",
     density=False,
     title=None,
+    balance_pos_neg: bool = True,
 ):
     
     fig, ax = plt.subplots(
@@ -175,10 +176,14 @@ def plot_score_histograms(
     y = np.asarray(labels).astype(int).ravel()
     s = np.asarray(scores).astype(float).ravel()
 
-    balanced_labels, balanced_scores = _balance_pos_neg(y, s)
+    if balance_pos_neg:
+        balanced_labels, balanced_scores = _balance_pos_neg(y, s)
 
-    true_vals = balanced_scores[balanced_labels == 1]
-    false_vals = balanced_scores[balanced_labels == 0]
+        true_vals = balanced_scores[balanced_labels == 1]
+        false_vals = balanced_scores[balanced_labels == 0]
+    else:
+        true_vals = s[y == 1]
+        false_vals = s[y == 0]
 
     min_len = min(len(true_vals), len(false_vals))
     if min_len == 0:

@@ -7,7 +7,7 @@ from torchmetrics.classification import (
     BinaryAveragePrecision,
 )
 import numpy as np
-from sklearn.metrics import roc_curve, precision_recall_curve
+from sklearn.metrics import roc_auc_score, average_precision_score, roc_curve, precision_recall_curve
 import wandb
 import time
 
@@ -30,7 +30,7 @@ class TFTGRegulationModel(nn.Module):
             p.requires_grad = False
 
         self.peak_feature_proj = nn.Sequential(
-            nn.Linear(2, d_model),  # binding, accessibility, distance_scaled, distance_weight
+            nn.Linear(4, d_model),  # binding, accessibility, distance_scaled, distance_weight
             nn.SiLU(),
             nn.Dropout(dropout),
             nn.Linear(d_model, d_model),
@@ -163,7 +163,7 @@ class TFTGRegulationModel(nn.Module):
         tf_embedding_edge = tf_embedding         # [E, T, D]
         tf_mask_edge = tf_mask                  # [E, T]
         peak_sequences_edge = peak_sequences    # [E, P, L, 4]
-        # peak_distance_edge = peak_distance        # [E, P]
+        peak_distance_edge = peak_distance        # [E, P]
 
         if peak_mask is not None:
             peak_mask_edge = peak_mask            # [E, P]
@@ -187,9 +187,6 @@ class TFTGRegulationModel(nn.Module):
 
             # Make sure the frozen TF-DNA model is on the same device.
             input_device = peak_sequences_edge.device
-            model_device = next(self.tf_peak_model.parameters()).device
-            if model_device != input_device:
-                self.tf_peak_model.to(input_device)
 
             for start in range(0, E * P, chunk_size):
                 end = min(start + chunk_size, E * P)
@@ -234,16 +231,16 @@ class TFTGRegulationModel(nn.Module):
         # ------------------------------------------------------------
         # 3. Distance features
         # ------------------------------------------------------------
-        # abs_distance = peak_distance_edge.abs()
-        # distance_scaled = torch.clamp(abs_distance / 250_000.0, 0.0, 1.0)   # [E, P]
-        # distance_weight = torch.exp(-abs_distance / 50_000.0)               # [E, P]
+        abs_distance = peak_distance_edge.abs()
+        distance_scaled = torch.clamp(abs_distance / 250_000.0, 0.0, 1.0)   # [E, P]
+        distance_weight = torch.exp(-abs_distance / 50_000.0)               # [E, P]
 
-        # if peak_mask_edge is not None:
-        #     distance_scaled = distance_scaled.masked_fill(~peak_mask_edge, 0.0)
-        #     distance_weight = distance_weight.masked_fill(~peak_mask_edge, 0.0)
+        if peak_mask_edge is not None:
+            distance_scaled = distance_scaled.masked_fill(~peak_mask_edge, 0.0)
+            distance_weight = distance_weight.masked_fill(~peak_mask_edge, 0.0)
 
-        # distance_scaled = distance_scaled[:, None, :].expand(E, C, P) # [E, C, P]
-        # distance_weight = distance_weight[:, None, :].expand(E, C, P) # [E, C, P]
+        distance_scaled = distance_scaled[:, None, :].expand(E, C, P) # [E, C, P]
+        distance_weight = distance_weight[:, None, :].expand(E, C, P) # [E, C, P]
 
         # ------------------------------------------------------------
         # 4. Cell-specific peak features
@@ -257,24 +254,24 @@ class TFTGRegulationModel(nn.Module):
         assert binding_score.shape == peak_accessibility.shape, (
             f"binding_score {binding_score.shape} != peak_accessibility {peak_accessibility.shape}"
         )
-        # assert distance_scaled.shape == peak_accessibility.shape, (
-        #     f"distance_scaled {distance_scaled.shape} != peak_accessibility {peak_accessibility.shape}"
-        # )
-        # assert distance_weight.shape == peak_accessibility.shape, (
-        #     f"distance_weight {distance_weight.shape} != peak_accessibility {peak_accessibility.shape}"
-        # )
+        assert distance_scaled.shape == peak_accessibility.shape, (
+            f"distance_scaled {distance_scaled.shape} != peak_accessibility {peak_accessibility.shape}"
+        )
+        assert distance_weight.shape == peak_accessibility.shape, (
+            f"distance_weight {distance_weight.shape} != peak_accessibility {peak_accessibility.shape}"
+        )
 
         peak_features = torch.stack(
             [
                 binding_score,
                 peak_accessibility,
-                # distance_scaled,
-                # distance_weight,
+                distance_scaled,
+                distance_weight,
             ],
             dim=-1,
         )  # [E, C, P, 4]
 
-        peak_features = peak_features.reshape(EC, P, 2)  # [E*C, P, 2]
+        peak_features = peak_features.reshape(EC, P, 4)  # [E*C, P, 4]
         peak_tokens = self.peak_feature_proj(peak_features)  # [E*C, P, d_model]
 
         # ------------------------------------------------------------
@@ -368,9 +365,6 @@ class LitTFTGRegulationModel(pl.LightningModule):
         else:
             self.pos_weight = None
 
-        self.val_auroc = BinaryAUROC()
-        self.val_auprc = BinaryAveragePrecision()
-
         self.train_acc = BinaryAccuracy()
         self.val_acc = BinaryAccuracy()
 
@@ -454,32 +448,10 @@ class LitTFTGRegulationModel(pl.LightningModule):
         if stage == "train":
             acc = self.train_acc(probs, labels.int())
         elif stage == "val":
-            auroc = self.val_auroc(probs, labels.int())
-            auprc = self.val_auprc(probs, labels.int())
             acc = self.val_acc(probs, labels.int())
 
-            self.val_probs.append(probs.detach().cpu())
-            self.val_targets.append(labels.detach().cpu())
-            
-            self.log(
-                f"{stage}/auroc",
-                auroc,
-                on_step=False,
-                on_epoch=True,
-                prog_bar=True,
-                logger=True,
-                sync_dist=(stage != "train"),
-            )
-
-            self.log(
-                f"{stage}/auprc",
-                auprc,
-                on_step=False,
-                on_epoch=True,
-                prog_bar=True,
-                logger=True,
-                sync_dist=(stage != "train"),
-            )
+            self.val_probs.append(probs.detach().float().cpu())
+            self.val_targets.append(labels.detach().int().cpu())
         else:
             raise ValueError(f"Unknown stage: {stage}")
 
@@ -601,8 +573,16 @@ class LitTFTGRegulationModel(pl.LightningModule):
         self.val_probs.clear()
         self.val_targets.clear()
 
-        self.val_auroc.reset()
-        self.val_auprc.reset()
+        if len(np.unique(targets)) >= 2:
+            auroc = roc_auc_score(targets, probs)
+            auprc = average_precision_score(targets, probs)
+        else:
+            auroc = np.nan
+            auprc = np.nan
+
+        self.log("val/auroc", auroc, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+        self.log("val/auprc", auprc, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+
 
         if not getattr(self.logger, "experiment", None):
             return
