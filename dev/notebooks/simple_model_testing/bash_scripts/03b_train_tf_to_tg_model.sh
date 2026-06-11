@@ -5,8 +5,8 @@
 #SBATCH --time=72:00:00
 #SBATCH -p dense
 #SBATCH -N 1
-#SBATCH --gres=gpu:a100:3
-#SBATCH --ntasks-per-node=3
+#SBATCH --gres=gpu:v100:4
+#SBATCH --ntasks-per-node=4
 #SBATCH -c 8
 #SBATCH --mem=128G
 #SBATCH --signal=SIGUSR1@90
@@ -111,4 +111,4 @@ srun python3 ${PROJECT_DIR}/scripts/train_tf_to_tg_model.py \
     --max_peaks_per_tg $max_peaks_per_tg \
     --max_cells_per_pair $max_cells_per_pair \
     --peak_flank_size $peak_flank_size \
-    --batch_size 1024
+    --batch_size 512

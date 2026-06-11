@@ -1,4 +1,5 @@
 import os, sys
+from typing import Literal
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -46,112 +47,152 @@ def _balance_pos_neg(labels, scores):
     
     return balanced_labels, balanced_scores
 
+
 def plot_auroc_auprc(
     labels,
     scores,
-    balance_pos_neg_auroc: bool = True,
+    roc_line_color="#4195df",
+    prc_line_color="#4195df",
+    rand_line_color="#747474",
     title=None,
+    plot_type: Literal["both", "roc", "prc"] = "both",
 ) -> plt.Figure:
     """
     labels: array-like of 0/1 labels
     scores: array-like of predicted probabilities after sigmoid
+
+    plot_type:
+        "both" -> plot ROC and PRC
+        "roc"  -> plot ROC only
+        "prc"  -> plot PRC only
     """
+
+    if plot_type not in {"both", "roc", "prc"}:
+        raise ValueError("plot_type must be one of: 'both', 'roc', or 'prc'.")
 
     labels = np.asarray(labels).astype(int).ravel()
     scores = np.asarray(scores).astype(float).ravel()
 
-    auroc = roc_auc_score(labels, scores)
-    fpr, tpr, _ = roc_curve(labels, scores)
     rand_scores = _create_random_distribution(scores)
-    rand_fpr, rand_tpr, _ = roc_curve(labels, rand_scores)
-    rand_auroc = roc_auc_score(labels, rand_scores)
-    
-    auprc = average_precision_score(labels, scores)
-    prec, rec, _ = precision_recall_curve(labels, scores)
-    rand_prec, rand_rec, _ = precision_recall_curve(labels, rand_scores)
-    rand_auprc = average_precision_score(labels, rand_scores)
 
-    # ROC plot
-    fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(7, 4))
+    plots_to_make = []
+    if plot_type in {"both", "roc"}:
+        plots_to_make.append("roc")
+    if plot_type in {"both", "prc"}:
+        plots_to_make.append("prc")
 
-    roc_line, = ax[0].plot(
-        fpr, tpr,
-        lw=2,
-        color="#4195df",
-        label=f"AUROC = {auroc:.3f}",
-        zorder=3,
+    ncols = len(plots_to_make)
+    figsize = (7, 4) if ncols == 2 else (4, 4)
+
+    fig, axes = plt.subplots(
+        nrows=1,
+        ncols=ncols,
+        figsize=figsize,
     )
 
-    rand_roc_line, = ax[0].plot(
-        rand_fpr, rand_tpr,
-        color="#747474",
-        linestyle="--",
-        lw=2,
-        label=f"Random = {rand_auroc:.3f}",
-        zorder=2,
-    )
+    if ncols == 1:
+        axes = [axes]
 
-    diag_line, = ax[0].plot(
-        [0, 1], [0, 1],
-        "k--",
-        lw=1,
-        alpha=0.5,
-        zorder=1,
-    )
+    for ax, current_plot in zip(axes, plots_to_make):
 
-    ax[0].set_xlabel("False Positive Rate", fontsize=12)
-    ax[0].set_ylabel("True Positive Rate", fontsize=12)
-    ax[0].set_title("AUROC", fontsize=12)
+        if current_plot == "roc":
+            auroc = roc_auc_score(labels, scores)
+            fpr, tpr, _ = roc_curve(labels, scores)
 
-    ax[0].legend(
-        handles=[roc_line, rand_roc_line],
-        labels=[f"AUROC = {auroc:.3f}", f"Random = {rand_auroc:.3f}"],
-        bbox_to_anchor=(0.5, -0.28),
-        loc="upper center",
-        borderaxespad=0.0,
-    )
+            rand_fpr, rand_tpr, _ = roc_curve(labels, rand_scores)
+            rand_auroc = roc_auc_score(labels, rand_scores)
 
-    ax[0].set_xlim(0, 1)
-    ax[0].set_ylim(0, 1)
-    
-    # Precision-Recall plot
-    pr_line, = ax[1].plot(
-        rec, prec,
-        lw=2,
-        color="#4195df",
-        label=f"AUPRC = {auprc:.3f}",
-        zorder=3,
-    )
+            roc_line, = ax.plot(
+                fpr,
+                tpr,
+                lw=2,
+                color=roc_line_color,
+                label=f"AUROC = {auroc:.3f}",
+                zorder=3,
+            )
 
-    rand_pr_line, = ax[1].plot(
-        rand_rec, rand_prec,
-        color="#747474",
-        linestyle="--",
-        lw=2,
-        label=f"Random = {rand_auprc:.3f}",
-        zorder=2,
-    )
+            rand_roc_line, = ax.plot(
+                rand_fpr,
+                rand_tpr,
+                color=rand_line_color,
+                linestyle="--",
+                lw=2,
+                label=f"Random = {rand_auroc:.3f}",
+                zorder=2,
+            )
 
-    ax[1].set_xlabel("Recall", fontsize=12)
-    ax[1].set_ylabel("Precision", fontsize=12)
-    ax[1].set_title("AUPRC", fontsize=12)
+            ax.plot(
+                [0, 1],
+                [0, 1],
+                "k--",
+                lw=1,
+                alpha=0.5,
+                zorder=1,
+            )
 
-    ax[1].legend(
-        handles=[pr_line, rand_pr_line],
-        labels=[f"AUPRC = {auprc:.3f}", f"Random = {rand_auprc:.3f}"],
-        bbox_to_anchor=(0.5, -0.28),
-        loc="upper center",
-        borderaxespad=0.0,
-    )
+            ax.set_xlabel("False Positive Rate", fontsize=12)
+            ax.set_ylabel("True Positive Rate", fontsize=12)
+            ax.set_title("AUROC", fontsize=12)
 
-    ax[1].set_ylim(0, 1.0)
-    ax[1].set_xlim(0, 1.0)
-    
+            ax.legend(
+                handles=[roc_line, rand_roc_line],
+                labels=[f"AUROC = {auroc:.3f}", f"Random = {rand_auroc:.3f}"],
+                bbox_to_anchor=(0.5, -0.28),
+                loc="upper center",
+                borderaxespad=0.0,
+                facecolor="none",
+                edgecolor="none",
+            )
+
+            ax.set_xlim(0, 1)
+            ax.set_ylim(0, 1)
+
+        elif current_plot == "prc":
+            auprc = average_precision_score(labels, scores)
+            prec, rec, _ = precision_recall_curve(labels, scores)
+
+            rand_prec, rand_rec, _ = precision_recall_curve(labels, rand_scores)
+            rand_auprc = average_precision_score(labels, rand_scores)
+
+            pr_line, = ax.plot(
+                rec,
+                prec,
+                lw=2,
+                color=prc_line_color,
+                label=f"AUPRC = {auprc:.3f}",
+                zorder=3,
+            )
+
+            rand_pr_line, = ax.plot(
+                rand_rec,
+                rand_prec,
+                color=rand_line_color,
+                linestyle="--",
+                lw=2,
+                label=f"Random = {rand_auprc:.3f}",
+                zorder=2,
+            )
+
+            ax.set_xlabel("Recall", fontsize=12)
+            ax.set_ylabel("Precision", fontsize=12)
+            ax.set_title("AUPRC", fontsize=12)
+
+            ax.legend(
+                handles=[pr_line, rand_pr_line],
+                labels=[f"AUPRC = {auprc:.3f}", f"Random = {rand_auprc:.3f}"],
+                bbox_to_anchor=(0.5, -0.28),
+                loc="upper center",
+                borderaxespad=0.0,
+            )
+
+            ax.set_xlim(0, 1)
+            ax.set_ylim(0, 1)
+
     if title is not None:
-        plt.suptitle(title, fontsize=12)
-    
-    plt.tight_layout()
-    
+        fig.suptitle(title, fontsize=12)
+
+    fig.tight_layout()
+
     return fig
 
 def plot_score_histograms(
@@ -163,6 +204,8 @@ def plot_score_histograms(
     panel_kind="kde",
     density=False,
     title=None,
+    y_lim=None,
+    x_lim=None,
     balance_pos_neg: bool = True,
 ):
     
@@ -247,6 +290,11 @@ def plot_score_histograms(
     if y_log:
         plot_ax.set_yscale("log")
         plot_ax.set_ylim(bottom=0.1)
+        
+    if y_lim:
+        plot_ax.set_ylim(y_lim[0], y_lim[1])
+    if x_lim:
+        plot_ax.set_xlim(x_lim[0], x_lim[1])
         
     if title is not None:
         plt.suptitle(title, fontsize=12)

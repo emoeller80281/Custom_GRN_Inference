@@ -30,7 +30,7 @@ class TFTGRegulationModel(nn.Module):
             p.requires_grad = False
 
         self.peak_feature_proj = nn.Sequential(
-            nn.Linear(4, d_model),  # binding, accessibility, distance_scaled, distance_weight
+            nn.Linear(2, d_model),  # binding, accessibility
             nn.SiLU(),
             nn.Dropout(dropout),
             nn.Linear(d_model, d_model),
@@ -163,7 +163,7 @@ class TFTGRegulationModel(nn.Module):
         tf_embedding_edge = tf_embedding         # [E, T, D]
         tf_mask_edge = tf_mask                  # [E, T]
         peak_sequences_edge = peak_sequences    # [E, P, L, 4]
-        peak_distance_edge = peak_distance        # [E, P]
+        # peak_distance_edge = peak_distance        # [E, P]
 
         if peak_mask is not None:
             peak_mask_edge = peak_mask            # [E, P]
@@ -174,7 +174,6 @@ class TFTGRegulationModel(nn.Module):
         # 2a. Frozen TF-DNA binding model: [E, P]
         # ------------------------------------------------------------
 
-        # Flatten the peaks into a single batch dimension of ExP
         peak_seq_flat = peak_sequences_edge.reshape(E * P, L, nuc_dim)
 
         chunk_size = self.tf_peak_chunk_size
@@ -216,35 +215,32 @@ class TFTGRegulationModel(nn.Module):
 
                 binding_logits_chunks.append(logits_chunk)
 
-        # Concatenate the chunk outputs and reshape back to [E, P]
-        binding_logits = torch.cat(binding_logits_chunks, dim=0).reshape(E, P)  # [E, P]
+        binding_logits = torch.cat(binding_logits_chunks, dim=0).reshape(E, P)
         
         # ------------------------------------------------------------
         # 2b. Mask and expand TF-peak binding scores across cells
         # ------------------------------------------------------------
-        # Sigmoid to convert logits to probabilities
         binding_score = torch.sigmoid(binding_logits)  # [E, P]
 
-        # If a peak mask is provided, set binding scores of masked peaks to 0
         if peak_mask_edge is not None:
             binding_score = binding_score.masked_fill(~peak_mask_edge, 0.0)
 
         # Reuse TF-peak binding score across cells
         binding_score = binding_score[:, None, :].expand(E, C, P)  # [E, C, P]
 
-        # ------------------------------------------------------------
-        # 3. Distance features
-        # ------------------------------------------------------------
-        abs_distance = peak_distance_edge.abs()
-        distance_scaled = torch.clamp(abs_distance / 250_000.0, 0.0, 1.0)   # [E, P]
-        distance_weight = torch.exp(-abs_distance / 50_000.0)               # [E, P]
+        # # ------------------------------------------------------------
+        # # 3. Distance features
+        # # ------------------------------------------------------------
+        # abs_distance = peak_distance_edge.abs()
+        # distance_scaled = torch.clamp(abs_distance / 250_000.0, 0.0, 1.0)   # [E, P]
+        # distance_weight = torch.exp(-abs_distance / 50_000.0)               # [E, P]
 
-        if peak_mask_edge is not None:
-            distance_scaled = distance_scaled.masked_fill(~peak_mask_edge, 0.0)
-            distance_weight = distance_weight.masked_fill(~peak_mask_edge, 0.0)
+        # if peak_mask_edge is not None:
+        #     distance_scaled = distance_scaled.masked_fill(~peak_mask_edge, 0.0)
+        #     distance_weight = distance_weight.masked_fill(~peak_mask_edge, 0.0)
 
-        distance_scaled = distance_scaled[:, None, :].expand(E, C, P) # [E, C, P]
-        distance_weight = distance_weight[:, None, :].expand(E, C, P) # [E, C, P]
+        # distance_scaled = distance_scaled[:, None, :].expand(E, C, P) # [E, C, P]
+        # distance_weight = distance_weight[:, None, :].expand(E, C, P) # [E, C, P]
 
         # ------------------------------------------------------------
         # 4. Cell-specific peak features
@@ -258,24 +254,24 @@ class TFTGRegulationModel(nn.Module):
         assert binding_score.shape == peak_accessibility.shape, (
             f"binding_score {binding_score.shape} != peak_accessibility {peak_accessibility.shape}"
         )
-        assert distance_scaled.shape == peak_accessibility.shape, (
-            f"distance_scaled {distance_scaled.shape} != peak_accessibility {peak_accessibility.shape}"
-        )
-        assert distance_weight.shape == peak_accessibility.shape, (
-            f"distance_weight {distance_weight.shape} != peak_accessibility {peak_accessibility.shape}"
-        )
+        # assert distance_scaled.shape == peak_accessibility.shape, (
+        #     f"distance_scaled {distance_scaled.shape} != peak_accessibility {peak_accessibility.shape}"
+        # )
+        # assert distance_weight.shape == peak_accessibility.shape, (
+        #     f"distance_weight {distance_weight.shape} != peak_accessibility {peak_accessibility.shape}"
+        # )
 
         peak_features = torch.stack(
             [
                 binding_score,
                 peak_accessibility,
-                distance_scaled,
-                distance_weight,
+                # distance_scaled,
+                # distance_weight,
             ],
             dim=-1,
         )  # [E, C, P, 4]
 
-        peak_features = peak_features.reshape(EC, P, 4)  # [E*C, P, 4]
+        peak_features = peak_features.reshape(EC, P, 2)  # [E*C, P, 2]
         peak_tokens = self.peak_feature_proj(peak_features)  # [E*C, P, d_model]
 
         # ------------------------------------------------------------

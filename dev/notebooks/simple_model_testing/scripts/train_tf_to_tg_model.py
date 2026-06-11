@@ -628,7 +628,7 @@ if __name__ == "__main__":
         precision="16-mixed",
         logger=wandb_logger,
         callbacks=[
-            TQDMProgressBar(refresh_rate=50),
+            TQDMProgressBar(refresh_rate=25),
             checkpoint_callback,
             early_stopping_callback,
             lr_monitor,

@@ -13,6 +13,7 @@ poster_results/
 dev/notebooks/simple_model_testing/data
 dev/notebooks/simple_model_testing/tf_peak_binding
 dev/notebooks/simple_model_testing/checkpoints
+dev/notebooks/simple_model_testing/plots
 checkpoint.pt
 .pybiomart
 dev/notebooks/sliding_window_calculation_method_testing_cache
