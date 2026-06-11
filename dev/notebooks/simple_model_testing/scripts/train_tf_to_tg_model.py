@@ -90,7 +90,7 @@ def create_new_tf_tg_binding_model(
     tf_tg_model = tf_to_tg_module.TFTGRegulationModel(
         pretrained_tf_peak_model=trained_tf_peak_model,
         d_model=128,
-        tf_peak_chunk_size=256,
+        tf_peak_chunk_size=None,
     )
     
     return tf_tg_model

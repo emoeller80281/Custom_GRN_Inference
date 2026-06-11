@@ -89,7 +89,7 @@ tf_bind_model_path="${PROJECT_DIR}/checkpoints/tf_dna_mm10_3682785/epoch=05-val_
 max_cells_per_pair=16
 max_peaks_per_tg=8
 peak_flank_size=128
-pct_true_edges=1.0
+pct_true_edges=0.15
 true_false_ratio=2.0
 
 # echo "[INFO] Building and Caching Training Data..."
@@ -111,4 +111,4 @@ srun python3 ${PROJECT_DIR}/scripts/train_tf_to_tg_model.py \
     --max_peaks_per_tg $max_peaks_per_tg \
     --max_cells_per_pair $max_cells_per_pair \
     --peak_flank_size $peak_flank_size \
-    --batch_size 512
+    --batch_size 1024

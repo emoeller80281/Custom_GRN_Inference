@@ -24,6 +24,8 @@ class TFTGRegulationModel(nn.Module):
 
         self.tf_peak_model = pretrained_tf_peak_model
         self.tf_peak_chunk_size = tf_peak_chunk_size
+        
+        self.tf_peak_model.eval()
 
         # Frozen TF-peak feature extractor
         for p in self.tf_peak_model.parameters():
@@ -184,8 +186,6 @@ class TFTGRegulationModel(nn.Module):
         binding_logits_chunks = []
 
         with torch.no_grad():
-            self.tf_peak_model.eval()
-
             # Make sure the frozen TF-DNA model is on the same device.
             input_device = peak_sequences_edge.device
 
@@ -633,8 +633,28 @@ class LitTFTGRegulationModel(pl.LightningModule):
             lr=self.lr,
             weight_decay=self.weight_decay,
         )
+        
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, 
+            mode='min', 
+            factor=0.5, 
+            patience=5, 
+            threshold=1e-4, 
+            threshold_mode='rel', 
+            cooldown=2, 
+            min_lr=1e-7, 
+            eps=1e-08
+            )
 
-        return optimizer
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "interval": "epoch",      # Adjust LR per 'epoch' or 'step'
+                "frequency": 1,           # How often to step the scheduler
+                "monitor": "val/loss",    # Metric to track for ReduceLROnPlateau
+            },
+        }
 
 # ----- Utility Functions -----
 @torch.no_grad()
