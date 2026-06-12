@@ -410,5 +410,26 @@ class LitTFPeakBindingModel(pl.LightningModule):
             lr=self.lr,
             weight_decay=self.weight_decay,
         )
+        
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, 
+            mode='min', 
+            factor=0.1, 
+            patience=5, 
+            threshold=1e-4, 
+            threshold_mode='rel', 
+            cooldown=3, 
+            min_lr=1e-7, 
+            eps=1e-08
+            )
 
-        return optimizer
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "interval": "epoch",      # Adjust LR per 'epoch' or 'step'
+                "frequency": 1,           # How often to step the scheduler
+                "monitor": "val/loss",    # Metric to track for ReduceLROnPlateau
+            },
+        }
+

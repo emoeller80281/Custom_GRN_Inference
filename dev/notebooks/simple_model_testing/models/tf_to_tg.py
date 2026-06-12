@@ -637,11 +637,11 @@ class LitTFTGRegulationModel(pl.LightningModule):
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, 
             mode='min', 
-            factor=0.5, 
+            factor=0.1, 
             patience=5, 
             threshold=1e-4, 
             threshold_mode='rel', 
-            cooldown=2, 
+            cooldown=3, 
             min_lr=1e-7, 
             eps=1e-08
             )

@@ -191,6 +191,7 @@ def build_tftg_inputs(
     max_peaks_per_tg=64,
     max_cells_per_pair=8,
     seed=123,
+    silence=False,
     *,
     tg_to_peak_info,
     cell_to_idx,
@@ -239,15 +240,13 @@ def build_tftg_inputs(
     log_every = max(1, n_total // 50)
 
     for i, row in enumerate(tf_tg_df.itertuples(index=False), start=1):
-        if i == 1 or i % log_every == 0 or i == n_total:
-            logging.info(f"Building compact TF-TG edges: {100 * i / n_total:.1f}% ({i:,}/{n_total:,})")
+        if silence == False:
+            if i == 1 or i % log_every == 0 or i == n_total:
+                logging.info(f"Building compact TF-TG edges: {100 * i / n_total:.1f}% ({i:,}/{n_total:,})")
 
         tf_name = row.tf_name
         tg_name = row.tg_id
         label = float(row.label)
-
-        tf_norm = str(tf_name).upper()
-        tg_norm = str(tg_name).upper()
 
         tf_idx = tf_name_to_idx.get(tf_name)
         tg_idx = tg_id_to_idx.get(tg_name)
@@ -255,7 +254,7 @@ def build_tftg_inputs(
         if tf_idx is None or tg_idx is None:
             continue
 
-        peak_info = tg_to_peak_info.get(tg_norm)
+        peak_info = tg_to_peak_info.get(tg_name)
         if peak_info is None:
             continue
 
@@ -317,8 +316,8 @@ def build_tftg_inputs(
         ].T
 
         # RNA expression: [C]
-        tf_rna_idx = gene_to_rna_idx.get(tf_norm)
-        tg_rna_idx = gene_to_rna_idx.get(tg_norm)
+        tf_rna_idx = gene_to_rna_idx.get(tf_name)
+        tg_rna_idx = gene_to_rna_idx.get(tg_name)
 
         if tf_rna_idx is None:
             tf_expr_vals = np.zeros(C, dtype=np.float32)
