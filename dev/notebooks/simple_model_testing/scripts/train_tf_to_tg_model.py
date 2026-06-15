@@ -42,6 +42,10 @@ warnings.filterwarnings(
     module="torch.utils.data.dataloader",
 )
 
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+torch.set_float32_matmul_precision("high")
+
 @rank_zero_only
 def log_once(msg: str) -> None:
     logging.info(msg)
@@ -73,13 +77,6 @@ def create_new_tf_tg_binding_model(
         pos_weight=None,
     )
 
-    state = torch.load(
-        tf_bind_model_path,
-        map_location="cpu",
-        weights_only=False,
-    )
-    lit_model.load_state_dict(state["state_dict"], strict=True)
-
     # 3) Get the trained base model and freeze it
     trained_tf_peak_model = lit_model.model
     trained_tf_peak_model.eval()
@@ -90,7 +87,7 @@ def create_new_tf_tg_binding_model(
     tf_tg_model = tf_to_tg_module.TFTGRegulationModel(
         pretrained_tf_peak_model=trained_tf_peak_model,
         d_model=128,
-        tf_peak_chunk_size=None,
+        tf_peak_chunk_size=512,
     )
     
     return tf_tg_model
@@ -559,6 +556,8 @@ if __name__ == "__main__":
         enable_timing_sync=True,
     )
     
+    # compiled_model = torch.compile(lit_model)
+    
     checkpoint_callback = ModelCheckpoint(
         dirpath=output_dir,
         filename="epoch={epoch:02d}-val_auroc={val/auroc:.4f}-val_loss={val/loss:.4f}",
@@ -642,8 +641,6 @@ if __name__ == "__main__":
         check_val_every_n_epoch=1,
     )
     
-    torch.set_float32_matmul_precision('medium')
-
     if checkpoint_path is not None:
         log_once(f"Resuming training from checkpoint: {checkpoint_path}")
         trainer.fit(
@@ -658,75 +655,3 @@ if __name__ == "__main__":
             train_dataloaders=train_loader,
             val_dataloaders=val_loader,
         )
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    tf_tg_model = lit_model.model
-    tf_tg_model = tf_tg_model.to(device)
-
-    final_train_metrics = evaluate_with_metrics(
-        model=tf_tg_model,
-        loader=train_loader,
-        criterion=criterion,
-        device=device,
-        score_threshold=score_threshold,
-        random_state=42 + epochs,
-        pooling_mode=pooling_mode,
-        pooling_temperature=pooling_temperature,
-    )
-
-    final_val_metrics = evaluate_with_metrics(
-        model=tf_tg_model,
-        loader=val_loader,
-        criterion=criterion,
-        device=device,
-        score_threshold=score_threshold,
-        random_state=10_000 + epochs,
-        pooling_mode=pooling_mode,
-        pooling_temperature=pooling_temperature,
-    )
-
-    final_test_metrics = evaluate_with_metrics(
-        model=tf_tg_model,
-        loader=test_loader,
-        criterion=criterion,
-        device=device,
-        score_threshold=score_threshold,
-        random_state=20_000 + epochs,
-        pooling_mode=pooling_mode,
-        pooling_temperature=pooling_temperature,
-    )
-
-    epoch_rows.append(
-        metrics_to_row(
-            metrics=final_train_metrics,
-            epoch=epochs,
-            split="train",
-            train_loss=np.nan,
-        )
-    )
-
-    epoch_rows.append(
-        metrics_to_row(
-            metrics=final_val_metrics,
-            epoch=epochs,
-            split="val",
-            train_loss=np.nan,
-        )
-    )
-
-    epoch_rows.append(
-        metrics_to_row(
-            metrics=final_test_metrics,
-            epoch=epochs,
-            split="test",
-            train_loss=np.nan,
-        )
-    )
-
-    epoch_metric_df = pd.DataFrame(epoch_rows)
-
-    epoch_metric_path = PROJECT_DIR / "testing_results" / "metrics_per_epoch.csv"
-    epoch_metric_path.parent.mkdir(parents=True, exist_ok=True)
-
-    epoch_metric_df.to_csv(epoch_metric_path, index=False)
-    

@@ -1,13 +1,13 @@
 #!/bin/bash -l
-#SBATCH --job-name=tf_dna_model
-#SBATCH --output=LOGS/tf_dna_model/%x_%j.log
-#SBATCH --error=LOGS/tf_dna_model/%x_%j.err
+#SBATCH --job-name=all_methods_auroc_auprc
+#SBATCH --output=LOGS/all_methods_auroc_auprc/%x_%j.log
+#SBATCH --error=LOGS/all_methods_auroc_auprc/%x_%j.err
 #SBATCH --time=72:00:00
 #SBATCH -p dense
 #SBATCH -N 1
-#SBATCH --gres=gpu:a100:4
+#SBATCH --gres=gpu:v100:4
 #SBATCH --ntasks-per-node=4
-#SBATCH -c 12
+#SBATCH -c 8
 #SBATCH --mem=128G
 #SBATCH --signal=SIGUSR1@90
 
@@ -20,12 +20,11 @@ echo "Activating conda environment and starting training..."
 source activate my_env
 
 # --- Memory + math ---
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,max_split_size_mb:32
+export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:32
 export TORCH_ALLOW_TF32=1
 export NVIDIA_TF32_OVERRIDE=1
 
-# --- Threading: set to match SLURM CPUs per task ---
-THREADS=${SLURM_CPUS_PER_TASK:-1}
+# --- Threading ---
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
@@ -84,19 +83,9 @@ echo "[INFO] Using nproc_per_node=$NPROC_PER_NODE based on GPUs per node"
 export NCCL_DEBUG=INFO
 export PYTHONFAULTHANDLER=1
 
-# echo "[INFO] Building TF-to-DNA datasets..."
-# python3 ${PROJECT_DIR}/scripts/build_tf_to_dna_train_data.py \
-#     --pct_true_edges 0.05 \
-#     --true_false_ratio 0.25
-
-echo "[INFO] Starting TF-to-DNA model training..."
-srun python3 ${PROJECT_DIR}/scripts/train_tf_to_dna_model.py \
-    --epochs 50 \
-    --batch_size 128 \
-    --model_dim 128 \
-    --num_layers 4 \
-    --num_gpus $NPROC_PER_NODE \
-    --num_nodes $SLURM_JOB_NUM_NODES \
-    --job_id $SLURM_JOB_ID \
-    # --checkpoint_path "${PROJECT_DIR}/checkpoints/tf_peak_binding/epoch=01-val_auroc=0.9287-val_loss=0.3160.ckpt"
-
+echo "[INFO] Starting training..."
+torchrun \
+  --standalone \
+  --nnodes=1 \
+  --nproc_per_node=4 \
+  ${PROJECT_DIR}/plot_auroc_auprc_all_methods.py
