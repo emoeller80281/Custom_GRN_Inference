@@ -17,17 +17,18 @@ echo "Activating conda environment and starting training..."
 source activate my_env
 
 max_cells_per_pair=32
-max_peaks_per_tg=4
+# max_peaks_per_tg=4
 peak_flank_size=128
 pct_true_edges=0.15
 true_false_ratio=2.0
 
 echo "[INFO] Building and Caching Training Data..."
 python3 ${PROJECT_DIR}/scripts/build_tf_to_tg_train_data.py \
-    --max_peaks_per_tg $max_peaks_per_tg \
     --max_cells_per_pair $max_cells_per_pair \
     --pct_true_edges $pct_true_edges \
     --true_false_ratio $true_false_ratio \
     --peak_flank_size $peak_flank_size \
     --num_cpu $SLURM_CPUS_PER_TASK \
     --force_reload
+
+# --max_peaks_per_tg $max_peaks_per_tg \

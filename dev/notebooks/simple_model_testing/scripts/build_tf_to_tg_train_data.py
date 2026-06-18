@@ -1,19 +1,16 @@
 import os
-from re import I
 import sys
-import json
 import gtfparse
+from matplotlib.backend_bases import NonGuiException
 import numpy as np
 import pandas as pd
 from pathlib import Path
 import logging
 import json
-from tqdm import tqdm
 
 import torch
 import argparse
 
-DATA_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data")
 PROJECT_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/dev/notebooks/simple_model_testing")
 sys.path.append(str(PROJECT_DIR))
 
@@ -35,6 +32,9 @@ def split_genes_by_chromosome(
     gene_chrom: pd.DataFrame = gene_ref_df[["seqname", "gene_name"]].rename(
         columns={"seqname": "chrom", "gene_name": "TG"}
     )
+    
+    gene_chrom["chrom"] = gene_chrom["chrom"].astype(str).str.replace("^chr", "", regex=True)
+    gene_chrom["TG"] = gene_chrom["TG"].str.upper()
     
     train_genes = gene_chrom[gene_chrom["chrom"].isin(train_chroms)][
         "TG"
@@ -77,6 +77,68 @@ def create_train_val_test_splits(
 
     return gt_train_df, gt_val_df, gt_test_df
 
+def create_true_false_edges_from_full_universe(
+    edge_df: pd.DataFrame,
+    tf_col: str = "Source",
+    item_col: str = "Target",
+    pct_true_edges: float | None = 1.0,
+    true_false_ratio: float = 1.0,
+    seed: int = 123,
+):
+    df_all = edge_df[[tf_col, item_col]].copy()
+
+    df_all = df_all.dropna(subset=[tf_col, item_col])
+
+    df_all[tf_col] = df_all[tf_col].astype(str)
+    df_all[item_col] = df_all[item_col].astype(str)
+
+    df_all = df_all.drop_duplicates([tf_col, item_col]).reset_index(drop=True)
+
+    if df_all.empty:
+        raise ValueError(
+            f"No edges remain after filtering by tf_names using columns "
+            f"{tf_col!r} and {item_col!r}."
+        )
+
+    candidate_tfs = sorted(df_all[tf_col].unique())
+    candidate_items = sorted(df_all[item_col].unique())
+
+    gt_pairs = set(zip(df_all[tf_col], df_all[item_col]))
+
+    full_universe = (
+        pd.MultiIndex
+        .from_product([candidate_tfs, candidate_items], names=[tf_col, item_col])
+        .to_frame(index=False)
+    )
+
+    full_universe["_pair"] = list(zip(full_universe[tf_col], full_universe[item_col]))
+    full_universe["_in_gt"] = full_universe["_pair"].isin(gt_pairs)
+
+    true_df = full_universe[full_universe["_in_gt"]].copy()
+    false_df = full_universe[~full_universe["_in_gt"]].copy()
+
+    if pct_true_edges is not None:
+        if not (0 < pct_true_edges <= 1):
+            raise ValueError("pct_true_edges must be in (0, 1] or None.")
+
+        true_df = true_df.sample(frac=pct_true_edges, random_state=seed)
+
+    n_false = round(len(true_df) * true_false_ratio)
+
+    if n_false > len(false_df):
+        logging.warning(
+            f"Requested {n_false:,} false edges, but only {len(false_df):,} are available. "
+            "Using all available false edges."
+        )
+        n_false = len(false_df)
+
+    false_df = false_df.sample(n=n_false, random_state=seed)
+
+    true_edges = set(zip(true_df[tf_col], true_df[item_col]))
+    false_edges = set(zip(false_df[tf_col], false_df[item_col]))
+
+    return true_edges, false_edges
+
 def create_labeled_tf_tg_dataset(
     true_interactions: set[tuple[str, str]],
     false_interactions: set[tuple[str, str]],
@@ -113,7 +175,6 @@ def create_labeled_tf_tg_dataset(
 
     return df.sample(frac=1.0, random_state=123).reset_index(drop=True)
 
-
 def _create_labeled_df(
     gt_df: pd.DataFrame,
     pct_true_edges: float = 0.15,
@@ -123,15 +184,20 @@ def _create_labeled_df(
     tf_name_to_idx,
     tg_id_to_idx,
 ):
-    true_edges, false_edges = utils.create_true_false_edges(
+    gt_df = gt_df[
+        gt_df["Source"].isin(tf_name_to_idx.keys()) &
+        gt_df["Target"].isin(tg_id_to_idx.keys())
+    ].copy()
+    
+    true_edges, false_edges = create_true_false_edges_from_full_universe(
         edge_df=gt_df,
-        tf_names=tf_name_to_idx.keys(),
         tf_col="Source",
         item_col="Target",
         pct_true_edges=pct_true_edges,
         true_false_ratio=true_false_ratio,
         seed=seed,
     )
+
     return create_labeled_tf_tg_dataset(
         true_interactions=true_edges,
         false_interactions=false_edges,
@@ -140,7 +206,6 @@ def _create_labeled_df(
         drop_missing=False,
     )
 
-
 def prepare_tftg_lookup_tables(
     peak_to_gene,
     atac_peak_map,
@@ -148,19 +213,34 @@ def prepare_tftg_lookup_tables(
     rna_pseudobulk_norm,
     dataset_peaks,
     common_cells,
-    max_precompute_peaks=64,
+    max_precompute_peaks=None,
 ):
     valid_peak_set = set(atac_peak_map.keys())
 
-    peak_to_gene_valid = peak_to_gene[peak_to_gene["peak_id"].isin(valid_peak_set)].copy()
+    peak_to_gene_valid = peak_to_gene[
+        peak_to_gene["peak_id"].isin(valid_peak_set)
+    ].copy()
+
     peak_to_gene_valid["abs_dist"] = peak_to_gene_valid["TSS_dist"].abs()
 
     tg_to_peak_info = {}
+
+    # Subset to only peaks within 100kb of the TG TSS and sort by distance
     for tg_norm, sub in peak_to_gene_valid.groupby("target_id_norm", sort=False):
-        sub = sub.sort_values("abs_dist").head(max_precompute_peaks)
+        sub = sub[sub["abs_dist"] <= 100_000].sort_values("abs_dist")
+
+        if sub.empty:
+            continue
+
+        # Optional cap to only use the closest N peaks per TG
+        if max_precompute_peaks is not None:
+            sub = sub.head(max_precompute_peaks)
 
         peak_ids = sub["peak_id"].tolist()
-        peak_indices = np.asarray([atac_peak_map[p] for p in peak_ids], dtype=np.int64)
+        peak_indices = np.asarray(
+            [atac_peak_map[p] for p in peak_ids],
+            dtype=np.int64,
+        )
         peak_distances = sub["TSS_dist"].to_numpy(dtype=np.float32)
 
         tg_to_peak_info[tg_norm] = {
@@ -170,18 +250,21 @@ def prepare_tftg_lookup_tables(
         }
 
     cell_to_idx = {cell: i for i, cell in enumerate(common_cells)}
+
     atac_mat = (
         atac_pseudobulk
         .reindex(index=dataset_peaks, columns=common_cells)
         .fillna(0.0)
         .to_numpy(dtype=np.float32)
     )
+
     rna_mat = (
         rna_pseudobulk_norm
         .reindex(columns=common_cells)
         .fillna(0.0)
         .to_numpy(dtype=np.float32)
     )
+
     gene_to_rna_idx = {gene: i for i, gene in enumerate(rna_pseudobulk_norm.index)}
 
     return tg_to_peak_info, cell_to_idx, atac_mat, rna_mat, gene_to_rna_idx
@@ -189,7 +272,7 @@ def prepare_tftg_lookup_tables(
 
 def build_tftg_inputs(
     tf_tg_df,
-    max_peaks_per_tg=64,
+    max_peaks_per_tg=NonGuiException,
     max_cells_per_pair=8,
     seed=123,
     silence=False,
@@ -202,6 +285,7 @@ def build_tftg_inputs(
     common_cells,
     tf_name_to_idx,
     tg_id_to_idx,
+    max_peaks_real,
 ):
     """
     Build one compact item per TF-TG edge.
@@ -259,9 +343,9 @@ def build_tftg_inputs(
         if peak_info is None:
             continue
 
-        peak_ids_real = list(peak_info["peak_ids"][:max_peaks_per_tg])
-        peak_indices_real = list(peak_info["peak_indices"][:max_peaks_per_tg])
-        peak_dst_real = list(peak_info["peak_distances"][:max_peaks_per_tg])
+        peak_ids_real = list(peak_info["peak_ids"])
+        peak_indices_real = list(peak_info["peak_indices"])
+        peak_dst_real = list(peak_info["peak_distances"])
 
         n_peaks = len(peak_indices_real)
         if n_peaks == 0:
@@ -271,8 +355,8 @@ def build_tftg_inputs(
         peak_dst = np.asarray(peak_dst_real, dtype=np.float32)
         peak_mask = np.ones(n_peaks, dtype=bool)
 
-        if n_peaks < max_peaks_per_tg:
-            pad_len = max_peaks_per_tg - n_peaks
+        if n_peaks < max_peaks_real:
+            pad_len = max_peaks_real - n_peaks
 
             peak_indices = np.pad(
                 peak_indices,
@@ -308,7 +392,7 @@ def build_tftg_inputs(
         )
 
         C = len(sampled_cell_indices)
-        P = max_peaks_per_tg
+        P = max_peaks_real
 
         # ATAC accessibility: [C, P]
         peak_acc_matrix = np.zeros((C, P), dtype=np.float32)
@@ -320,21 +404,22 @@ def build_tftg_inputs(
         tf_rna_idx = gene_to_rna_idx.get(tf_name)
         tg_rna_idx = gene_to_rna_idx.get(tg_name)
 
-        if tf_rna_idx is None:
-            tf_expr_vals = np.zeros(C, dtype=np.float32)
-        else:
-            tf_expr_vals = np.asarray(
-                rna_mat[tf_rna_idx, sampled_cell_indices],
-                dtype=np.float32,
-            ).reshape(-1)
+        if tf_rna_idx is None or tg_rna_idx is None:
+            raise ValueError(
+                f"TF or TG missing from RNA matrix after filtering: "
+                f"tf_name={tf_name}, tg_name={tg_name}, "
+                f"tf_rna_idx={tf_rna_idx}, tg_rna_idx={tg_rna_idx}"
+            )
 
-        if tg_rna_idx is None:
-            tg_expr_vals = np.zeros(C, dtype=np.float32)
-        else:
-            tg_expr_vals = np.asarray(
-                rna_mat[tg_rna_idx, sampled_cell_indices],
-                dtype=np.float32,
-            ).reshape(-1)
+        tf_expr_vals = np.asarray(
+            rna_mat[tf_rna_idx, sampled_cell_indices],
+            dtype=np.float32,
+        ).reshape(-1)
+
+        tg_expr_vals = np.asarray(
+            rna_mat[tg_rna_idx, sampled_cell_indices],
+            dtype=np.float32,
+        ).reshape(-1)
 
         # Append once per TF-TG edge
         tf_names.append(tf_name)
@@ -380,7 +465,7 @@ def build_tftg_inputs(
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--sample_pairs", type=int, default=None)
-    parser.add_argument("--max_peaks_per_tg", type=int, default=64)
+    parser.add_argument("--max_peaks_per_tg", type=int, default=None)
     parser.add_argument("--max_cells_per_pair", type=int, default=8)
     parser.add_argument("--pct_true_edges", type=float, default=0.15)
     parser.add_argument("--true_false_ratio", type=float, default=2.0)
@@ -459,56 +544,82 @@ def main():
     peak_to_gene_distance = pd.read_parquet(input_data_dir / "peak_to_gene_dist.parquet")
     rna_pseudobulk = pd.read_parquet(input_data_dir / "TG_pseudobulk.parquet")
     
+    logging.info(f"ATAC peaks BEFORE peak-to-gene filtering: {atac_pseudobulk.shape[0]:,}")
+    # Keep only ATAC peaks that are present in the peak-to-gene distance table
+    valid_peak_ids = set(peak_to_gene_distance["peak_id"])
+
+    atac_pseudobulk = atac_pseudobulk.loc[
+        atac_pseudobulk.index.isin(valid_peak_ids)
+    ].copy()
+    logging.info(f"ATAC peaks AFTER peak-to-gene filtering: {atac_pseudobulk.shape[0]:,}")
+    
     rna_pseudobulk_norm = rna_pseudobulk.copy()
     rna_pseudobulk_norm.index = rna_pseudobulk_norm.index.str.upper()
 
     common_cells = sorted(set(rna_pseudobulk_norm.columns) & set(atac_pseudobulk.columns))
     
+    if len(common_cells) == 0:
+        raise ValueError(
+            "No common pseudobulk cell columns between RNA and ATAC matrices."
+        )
+
+    logging.info(f"Common RNA/ATAC pseudobulk columns: {len(common_cells):,}")
+        
     peak_to_gene = peak_to_gene_distance.copy()
     peak_to_gene["target_id_norm"] = peak_to_gene["target_id"].str.upper()
 
     # Load and merge the ground truth files, or load from cache if already merged
     if not merged_ground_truth_path.exists() or args.force_reload:
-
-        merged_ground_truth_df: pd.DataFrame = utils.load_ground_truth_files(
+        merged_ground_truth_df = utils.load_ground_truth_files(
             config.gt_by_dataset_dict[config.cell_type]
-            )
-        
-        if config.species == "mm10":
-            merged_ground_truth_df["Source"] = merged_ground_truth_df["Source"].str.upper()
-            merged_ground_truth_df["Target"] = merged_ground_truth_df["Target"].str.upper()
-        elif config.species == "hg38":
-            merged_ground_truth_df["Source"] = merged_ground_truth_df["Source"].str.upper()
-            merged_ground_truth_df["Target"] = merged_ground_truth_df["Target"].str.upper()
-            
-        merged_ground_truth_df.to_parquet(merged_ground_truth_path, index=False)
+        )
     else:
         merged_ground_truth_df = pd.read_parquet(merged_ground_truth_path)
+
+    merged_ground_truth_df["Source"] = merged_ground_truth_df["Source"].str.upper()
+    merged_ground_truth_df["Target"] = merged_ground_truth_df["Target"].str.upper()
+
+    if not merged_ground_truth_path.exists() or args.force_reload:
+        merged_ground_truth_df.to_parquet(merged_ground_truth_path, index=False)
     
     gt_tfs_in_rna = set(merged_ground_truth_df["Source"]).intersection(rna_pseudobulk_norm.index)
     gt_tgs_in_rna = set(merged_ground_truth_df["Target"]).intersection(rna_pseudobulk_norm.index)
     logging.info(f"Ground truth TFs in RNA pseudobulk: {len(gt_tfs_in_rna)} (Example: {list(gt_tfs_in_rna)[:5]})")
     logging.info(f"Ground truth TGs in RNA pseudobulk: {len(gt_tgs_in_rna)} (Example: {list(gt_tgs_in_rna)[:5]})")
     
+    n_before_rna_filter = len(merged_ground_truth_df)
+
     # Subset the ground truth to only TFs and TGs present in the rna_pseudobulk 
     merged_ground_truth_df = merged_ground_truth_df[
         merged_ground_truth_df["Source"].isin(gt_tfs_in_rna) &
         merged_ground_truth_df["Target"].isin(gt_tgs_in_rna)
-    ]
+    ].copy()
+    
+    logging.info(
+        f"Ground truth edges after RNA TF/TG filtering: "
+        f"{len(merged_ground_truth_df):,} / {n_before_rna_filter:,}"
+    )
 
     # Get the map of TF name to index
     tf_name_to_idx = pd.read_csv(tf_name_to_idx_cache_path)
     tf_name_to_idx["tf_name"] = tf_name_to_idx["tf_name"].str.upper()
     tf_name_to_idx = tf_name_to_idx.set_index("tf_name")["tf_idx"].to_dict()
     
+    # Only keep ground truth TFs that have embeddings (i.e. were present in the TF-DNA model training data)
     gt_tfs_in_embeddings = set(tf_name_to_idx.keys()).intersection(gt_tfs_in_rna)
     logging.info(f"Ground truth TFs with embeddings: {len(gt_tfs_in_embeddings)} (Example: {list(gt_tfs_in_embeddings)[:5]})")
     
-    # Subset the ground truth for TFs with embeddings
+    n_before_tf_embedding_filter = len(merged_ground_truth_df)
+
     merged_ground_truth_df = merged_ground_truth_df[
         merged_ground_truth_df["Source"].isin(gt_tfs_in_embeddings)
-    ]
-    
+    ].copy()
+
+    logging.info(
+        f"Ground truth edges after filtering to TFs with embeddings: "
+        f"{len(merged_ground_truth_df):,} / {n_before_tf_embedding_filter:,}"
+    )
+
     # Create a map of TG name to index for TGs present in the ground truth (and RNA pseudobulk)
     tg_id_to_idx = {tg: idx for idx, tg in enumerate(merged_ground_truth_df["Target"].unique())}
     
@@ -553,7 +664,7 @@ def main():
         gt_val_df,
         pct_true_edges,
         true_false_ratio,
-        seed=123,
+        seed=124,
         tf_name_to_idx=tf_name_to_idx,
         tg_id_to_idx=tg_id_to_idx,
     )
@@ -561,7 +672,7 @@ def main():
         gt_test_df,
         pct_true_edges,
         true_false_ratio,
-        seed=123,
+        seed=125,
         tf_name_to_idx=tf_name_to_idx,
         tg_id_to_idx=tg_id_to_idx,
     )
@@ -586,8 +697,19 @@ def main():
     # Create or load cached one-hot encodings for ATAC peaks
     # One-hot encodings use ACGT order and uses 'flank_size' bp upstream and downstream of the peak center.
     dataset_peaks = list(atac_peak_map.keys())
-    if os.path.exists(atac_peak_onehot_cache_path):
+    
+    if os.path.exists(atac_peak_onehot_cache_path) and not args.force_reload:
         atac_peak_tensor = torch.load(atac_peak_onehot_cache_path, weights_only=True)
+        
+        expected_n_peaks = len(dataset_peaks)
+
+        if atac_peak_tensor.shape[0] != expected_n_peaks:
+            raise ValueError(
+                f"ATAC one-hot tensor has {atac_peak_tensor.shape[0]:,} peaks, "
+                f"but current dataset_peaks has {expected_n_peaks:,}. "
+                "Delete the cached ATAC peak tensor or rerun with --force_reload."
+            )
+        
     else:
         logging.info("Creating centered peak one-hot encodings for ATAC peaks...")
         atac_peak_array = utils.create_centered_peak_onehot_array(
@@ -625,12 +747,41 @@ def main():
         return df.sample(n=n, random_state=seed)
 
     # Optionally sample a subset of TF-TG pairs for faster testing and debugging 
-    # (while still using all peaks and cells for those pairs)
     if args.sample_pairs is not None:
         tf_tg_labeled_train_df = _sample_df(tf_tg_labeled_train_df, n=args.sample_pairs, seed=123)
         tf_tg_labeled_val_df = _sample_df(tf_tg_labeled_val_df, n=args.sample_pairs, seed=123)
         tf_tg_labeled_test_df = _sample_df(tf_tg_labeled_test_df, n=args.sample_pairs, seed=123)
+    
+    # Determine the maximum number of peaks to consider across all TGs in the dataset 
+    # to ensure consistent tensor shapes
+    tf_tg_df = pd.concat([tf_tg_labeled_train_df, tf_tg_labeled_val_df, tf_tg_labeled_test_df], ignore_index=True)
+    
+    if tf_tg_df.empty:
+        raise ValueError(
+            "No labeled TF-TG pairs were created across train/val/test. "
+            "Check RNA filtering, TF embedding filtering, chromosome splits, and ground truth overlap."
+        )
+    
+    max_peaks_real = max(
+        len(tg_to_peak_info.get(tg_name, {}).get("peak_indices", []))
+        for tg_name in tf_tg_df["tg_id"]
+    )
+    
+    # Check that at least some TGs have peaks within 100kb, otherwise the model will have no signal to learn from
+    n_tgs_with_peaks = sum(
+        len(tg_to_peak_info.get(tg, {}).get("peak_indices", [])) > 0
+        for tg in tf_tg_df["tg_id"].unique()
+    )
+    
+    logging.info(f"TGs with at least one peak within 100kb: {n_tgs_with_peaks:,} / {tf_tg_df['tg_id'].nunique():,}")
+    logging.info(f"Max peaks per TG after filtering/capping: {max_peaks_real:,}")
 
+    if max_peaks_real == 0:
+        raise ValueError(
+            "No labeled TGs have peaks within 100kb. Check target_id_norm/tg_id matching, "
+            "peak IDs, chromosome filtering, and TSS distance file."
+        )
+    
     common_build_kwargs = dict(
         max_peaks_per_tg=max_peaks_per_tg,
         max_cells_per_pair=max_cells_per_pair,
@@ -642,6 +793,7 @@ def main():
         common_cells=common_cells,
         tf_name_to_idx=tf_name_to_idx,
         tg_id_to_idx=tg_id_to_idx,
+        max_peaks_real=max_peaks_real,
     )
     
     if all(f.exists() for f in [train_file, val_file, test_file]) and not args.force_reload:
@@ -685,6 +837,7 @@ def main():
         "max_cells_per_pair": max_cells_per_pair,
         "flank_size": peak_flank_size,
         "peak_dtype": "uint8",
+        "max_peaks_real": max_peaks_real,
     }
     with open(metadata_file, "w") as f:
         json.dump(metadata, f, indent=4)
