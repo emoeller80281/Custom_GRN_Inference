@@ -61,6 +61,7 @@ def create_train_val_test_splits(
     val_genes_set = set(val_genes)
     test_genes_set = set(test_genes)
 
+    # Subset the ground truth to create train/val/test splits based on the target gene chromosome splits
     gt_train_df = ground_truth_df[ground_truth_df["Target"].isin(train_genes_set)].copy()
     gt_val_df = ground_truth_df[ground_truth_df["Target"].isin(val_genes_set)].copy()
     gt_test_df = ground_truth_df[ground_truth_df["Target"].isin(test_genes_set)].copy()
@@ -457,6 +458,14 @@ def main():
     atac_pseudobulk = pd.read_parquet(input_data_dir / "RE_pseudobulk.parquet")
     peak_to_gene_distance = pd.read_parquet(input_data_dir / "peak_to_gene_dist.parquet")
     rna_pseudobulk = pd.read_parquet(input_data_dir / "TG_pseudobulk.parquet")
+    
+    rna_pseudobulk_norm = rna_pseudobulk.copy()
+    rna_pseudobulk_norm.index = rna_pseudobulk_norm.index.str.upper()
+
+    common_cells = sorted(set(rna_pseudobulk_norm.columns) & set(atac_pseudobulk.columns))
+    
+    peak_to_gene = peak_to_gene_distance.copy()
+    peak_to_gene["target_id_norm"] = peak_to_gene["target_id"].str.upper()
 
     # Load and merge the ground truth files, or load from cache if already merged
     if not merged_ground_truth_path.exists() or args.force_reload:
@@ -466,8 +475,8 @@ def main():
             )
         
         if config.species == "mm10":
-            merged_ground_truth_df["Source"] = merged_ground_truth_df["Source"].str.capitalize()
-            merged_ground_truth_df["Target"] = merged_ground_truth_df["Target"].str.capitalize()
+            merged_ground_truth_df["Source"] = merged_ground_truth_df["Source"].str.upper()
+            merged_ground_truth_df["Target"] = merged_ground_truth_df["Target"].str.upper()
         elif config.species == "hg38":
             merged_ground_truth_df["Source"] = merged_ground_truth_df["Source"].str.upper()
             merged_ground_truth_df["Target"] = merged_ground_truth_df["Target"].str.upper()
@@ -476,8 +485,31 @@ def main():
     else:
         merged_ground_truth_df = pd.read_parquet(merged_ground_truth_path)
     
+    gt_tfs_in_rna = set(merged_ground_truth_df["Source"]).intersection(rna_pseudobulk_norm.index)
+    gt_tgs_in_rna = set(merged_ground_truth_df["Target"]).intersection(rna_pseudobulk_norm.index)
+    logging.info(f"Ground truth TFs in RNA pseudobulk: {len(gt_tfs_in_rna)} (Example: {list(gt_tfs_in_rna)[:5]})")
+    logging.info(f"Ground truth TGs in RNA pseudobulk: {len(gt_tgs_in_rna)} (Example: {list(gt_tgs_in_rna)[:5]})")
+    
+    # Subset the ground truth to only TFs and TGs present in the rna_pseudobulk 
+    merged_ground_truth_df = merged_ground_truth_df[
+        merged_ground_truth_df["Source"].isin(gt_tfs_in_rna) &
+        merged_ground_truth_df["Target"].isin(gt_tgs_in_rna)
+    ]
+
     # Get the map of TF name to index
-    tf_name_to_idx = pd.read_csv(tf_name_to_idx_cache_path).set_index("tf_name")["tf_idx"].to_dict()
+    tf_name_to_idx = pd.read_csv(tf_name_to_idx_cache_path)
+    tf_name_to_idx["tf_name"] = tf_name_to_idx["tf_name"].str.upper()
+    tf_name_to_idx = tf_name_to_idx.set_index("tf_name")["tf_idx"].to_dict()
+    
+    gt_tfs_in_embeddings = set(tf_name_to_idx.keys()).intersection(gt_tfs_in_rna)
+    logging.info(f"Ground truth TFs with embeddings: {len(gt_tfs_in_embeddings)} (Example: {list(gt_tfs_in_embeddings)[:5]})")
+    
+    # Subset the ground truth for TFs with embeddings
+    merged_ground_truth_df = merged_ground_truth_df[
+        merged_ground_truth_df["Source"].isin(gt_tfs_in_embeddings)
+    ]
+    
+    # Create a map of TG name to index for TGs present in the ground truth (and RNA pseudobulk)
     tg_id_to_idx = {tg: idx for idx, tg in enumerate(merged_ground_truth_df["Target"].unique())}
     
     if config.species == "mm10":
@@ -489,16 +521,23 @@ def main():
         val_chroms = [str(i) for i in range(18, 20)]
         test_chroms = [str(i) for i in range(20, 23)]
 
-    # Split genes into train/val/test based on chromosome
+    # Split genes into train/val/test based on chromosome using the GTF reference file
     train_genes, val_genes, test_genes = split_genes_by_chromosome(
         gene_ref_file,
         train_chroms=train_chroms,
         val_chroms=val_chroms,
         test_chroms=test_chroms
         )
+    
+    # Subset the ground truth to create train/val/test splits based on the target gene chromosome splits
+    # (Only keeps TFs and TGs present in the ground truth and RNA pseudobulk, and only keeps TFs with embeddings)
     gt_train_df, gt_val_df, gt_test_df = create_train_val_test_splits(
         merged_ground_truth_df, train_genes, val_genes, test_genes
     )
+    logging.info(f"After subsetting to TFs with embeddings and TGs in RNA pseudobulk:")
+    logging.info(f"  - Train interactions: {len(gt_train_df)} (TFs: {gt_train_df['Source'].nunique()}, TGs: {gt_train_df['Target'].nunique()})")
+    logging.info(f"  - Val interactions: {len(gt_val_df)} (TFs: {gt_val_df['Source'].nunique()}, TGs: {gt_val_df['Target'].nunique()})")
+    logging.info(f"  - Test interactions: {len(gt_test_df)} (TFs: {gt_test_df['Source'].nunique()}, TGs: {gt_test_df['Target'].nunique()})")
 
     # Create labeled TF-TG datasets for train/val/test splits
     # (samples true and false edges according to pct_true_edges and true_false_ratio)
@@ -529,7 +568,14 @@ def main():
 
     # Create a map of ATAC peaks to indices in the pseudobulk matrix, filtering to valid chromosomes
     dataset_peaks = atac_pseudobulk.index.to_list()
-    valid_chroms = {f"chr{i}" for i in range(1, 20)}
+    
+    # Only use peaks from standard chromosomes (chr1-chr19 for mm10, chr1-chr22 for hg38) to avoid issues with 
+    # non-standard chromosomes and contigs
+    if config.species == "mm10":
+        valid_chroms = {f"chr{i}" for i in range(1, 20)}
+    elif config.species == "hg38":
+        valid_chroms = {f"chr{i}" for i in range(1, 23)}
+        
     dataset_peaks = [peak for peak in dataset_peaks if peak.split(":", 1)[0] in valid_chroms]
     atac_peak_map = {peak: idx for idx, peak in enumerate(dataset_peaks)}
 
@@ -563,13 +609,6 @@ def main():
     if atac_peak_tensor.dtype == torch.uint8:
         atac_peak_tensor = atac_peak_tensor.float()
 
-    rna_pseudobulk_norm = rna_pseudobulk.copy()
-    rna_pseudobulk_norm.index = rna_pseudobulk_norm.index.str.upper()
-
-    common_cells = sorted(set(rna_pseudobulk_norm.columns) & set(atac_pseudobulk.columns))
-    peak_to_gene = peak_to_gene_distance.copy()
-    peak_to_gene["target_id_norm"] = peak_to_gene["target_id"].str.upper()
-
     tg_to_peak_info, cell_to_idx, atac_mat, rna_mat, gene_to_rna_idx = prepare_tftg_lookup_tables(
         peak_to_gene=peak_to_gene,
         atac_peak_map=atac_peak_map,
@@ -585,12 +624,12 @@ def main():
             return df
         return df.sample(n=n, random_state=seed)
 
-    if args.sample_pairs is None:
-        args.sample_pairs = len(tf_tg_labeled_train_df)
-
-    tf_tg_train_subset = _sample_df(tf_tg_labeled_train_df, n=args.sample_pairs, seed=123)
-    tf_tg_val_subset = _sample_df(tf_tg_labeled_val_df, n=args.sample_pairs // 2, seed=123)
-    tf_tg_test_subset = _sample_df(tf_tg_labeled_test_df, n=args.sample_pairs // 4, seed=123)
+    # Optionally sample a subset of TF-TG pairs for faster testing and debugging 
+    # (while still using all peaks and cells for those pairs)
+    if args.sample_pairs is not None:
+        tf_tg_labeled_train_df = _sample_df(tf_tg_labeled_train_df, n=args.sample_pairs, seed=123)
+        tf_tg_labeled_val_df = _sample_df(tf_tg_labeled_val_df, n=args.sample_pairs, seed=123)
+        tf_tg_labeled_test_df = _sample_df(tf_tg_labeled_test_df, n=args.sample_pairs, seed=123)
 
     common_build_kwargs = dict(
         max_peaks_per_tg=max_peaks_per_tg,
@@ -609,23 +648,24 @@ def main():
         logging.info("Cached input files already exist. Skipping (use --force_reload to override).")
         return
     
+    # Build the compact TF-TG input datasets for train/val/test splits
     logging.info("\nBuilding training inputs")
     tftg_inputs_train = build_tftg_inputs(
-        tf_tg_train_subset,
+        tf_tg_labeled_train_df,
         seed=123,
         **common_build_kwargs,
     )
 
     logging.info("\nBuilding validation inputs")
     tftg_inputs_val = build_tftg_inputs(
-        tf_tg_val_subset,
+        tf_tg_labeled_val_df,
         seed=124,
         **common_build_kwargs,
     )
 
     logging.info("\nBuilding test inputs")
     tftg_inputs_test = build_tftg_inputs(
-        tf_tg_test_subset,
+        tf_tg_labeled_test_df,
         seed=125,
         **common_build_kwargs,
     )
