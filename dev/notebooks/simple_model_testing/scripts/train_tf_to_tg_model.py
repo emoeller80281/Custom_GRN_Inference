@@ -23,6 +23,7 @@ import pytorch_lightning as pl
 from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping, LearningRateMonitor, TQDMProgressBar
 from lightning.pytorch.loggers import WandbLogger
 from pytorch_lightning.utilities import rank_zero_only
+from pytorch_lightning.strategies import DDPStrategy
 
 DATA_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data")
 PROJECT_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/dev/notebooks/simple_model_testing")
@@ -79,15 +80,24 @@ def create_new_tf_tg_binding_model(
 
     # 3) Get the trained base model and freeze it
     trained_tf_peak_model = lit_model.model
+    
     trained_tf_peak_model.eval()
+    
     for p in trained_tf_peak_model.parameters():
         p.requires_grad = False
+    
+    # Compile the TF-DNA model to reduce inference time during training
+    trained_tf_peak_model = torch.compile(
+        trained_tf_peak_model,
+        mode="reduce-overhead",
+        fullgraph=False,
+    )
 
     # 4) Inject into your TF→TG model
     tf_tg_model = tf_to_tg_module.TFTGRegulationModel(
         pretrained_tf_peak_model=trained_tf_peak_model,
         d_model=128,
-        tf_peak_chunk_size=512,
+        tf_peak_chunk_size=128,
     )
     
     return tf_tg_model
@@ -352,7 +362,7 @@ if __name__ == "__main__":
     Need arguments for:
     
     sample_pairs: int | None
-    max_peaks_per_tg: int
+    max_peaks_per_tg: int | None
     max_cells_per_pair: int | None
     batch_size: int
     """
@@ -363,14 +373,13 @@ if __name__ == "__main__":
     parser.add_argument("--num_nodes", type=int, default=1, help="Number of nodes to use for training")
     parser.add_argument("--job_id", type=str, help="SLURM job ID for this training run")
     parser.add_argument("--sample_pairs", type=int, default=None, help="Number of TF-TG pairs to sample for training (default: use all)")
-    parser.add_argument("--max_peaks_per_tg", type=int, default=64, help="Maximum number of peaks to consider per TG (default: 64)")
+    parser.add_argument("--max_peaks_per_tg", type=int, required=False, default=None, help="Maximum number of peaks to consider per TG (default: 64)")
     parser.add_argument("--max_cells_per_pair", type=int, default=8, help="Maximum number of cells to sample per TF-TG pair (default: 8)")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size for training (default: 32)")
     parser.add_argument("--pct_true_edges", type=float, default=0.15, help="Percentage of true edges to include in the training set (default: 0.15)")
     parser.add_argument("--true_false_ratio", type=float, default=2.0, help="Ratio of true to false edges in the training set (default: 2.0)")
-    parser.add_argument("--peak_flank_size", type=int, default=64)
-    parser.add_argument("--tf_bind_model_path", type=str, required=False, help="Path to the TF→DNA model checkpoint to initialize from (if not using default)")
-    parser.add_argument("--training_data_dir", type=str, required=False, help="Path to directory containing training data cache files (if not using default)")
+    parser.add_argument("--peak_flank_size", type=int, default=128, help="Size of the flank region around peaks (default: 128)")
+    parser.add_argument("--tf_bind_model_path", type=str, required=True, help="Path to the TF→DNA model checkpoint to initialize from (if not using default)")
     parser.add_argument("--checkpoint_path", type=str, required=False, help="Path to a model checkpoint to resume training from")
     parser.add_argument("--force_reload", action="store_true", help="Whether to force reload cached data instead of using existing cache files")
     args = parser.parse_args()
@@ -393,7 +402,7 @@ if __name__ == "__main__":
     true_false_ratio = args.true_false_ratio
     tf_bind_model_path = Path(args.tf_bind_model_path)
     peak_flank_size = args.peak_flank_size
-    
+
     sample_name = config.sample_name
     
     output_dir = PROJECT_DIR / "checkpoints" / f"{config.cell_type}" / f"{sample_name}" / f"tf_tg_train_{sample_name}_{job_id}"
@@ -486,10 +495,10 @@ if __name__ == "__main__":
         val_dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=2,
+        num_workers=6,
         pin_memory=True,
         persistent_workers=True,
-        prefetch_factor=2,
+        prefetch_factor=4,
         collate_fn=collate_tftg_edge_bags,
         )
 
@@ -497,10 +506,10 @@ if __name__ == "__main__":
         test_dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=2,
+        num_workers=6,
         pin_memory=True,
         persistent_workers=True,
-        prefetch_factor=2,
+        prefetch_factor=4,
         collate_fn=collate_tftg_edge_bags,
         )
 
@@ -553,10 +562,8 @@ if __name__ == "__main__":
         pos_weight=None,
         pooling_mode=pooling_mode,
         pooling_temperature=pooling_temperature,
-        enable_timing_sync=True,
+        enable_timing_sync=False,
     )
-    
-    # compiled_model = torch.compile(lit_model)
     
     checkpoint_callback = ModelCheckpoint(
         dirpath=output_dir,
@@ -618,12 +625,17 @@ if __name__ == "__main__":
     log_once(f"Num GPUs: {world_size} | Batch size: {batch_size}")
     log_once(f"Num steps per epoch: {len(train_loader)}")
     
+    strategy=DDPStrategy(
+        process_group_backend="nccl",
+        find_unused_parameters=False,
+    ) if use_ddp else "auto"
+    
     trainer = pl.Trainer(
         max_epochs=epochs,
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
         devices=num_gpus,
         num_nodes=num_nodes,
-        strategy="ddp" if use_ddp else "auto",
+        strategy=strategy,
         precision="16-mixed",
         logger=wandb_logger,
         callbacks=[

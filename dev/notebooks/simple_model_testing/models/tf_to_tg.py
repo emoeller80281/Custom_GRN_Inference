@@ -24,12 +24,6 @@ class TFTGRegulationModel(nn.Module):
 
         self.tf_peak_model = pretrained_tf_peak_model
         self.tf_peak_chunk_size = tf_peak_chunk_size
-        
-        self.tf_peak_model.eval()
-
-        # Frozen TF-peak feature extractor
-        for p in self.tf_peak_model.parameters():
-            p.requires_grad = False
 
         self.peak_feature_proj = nn.Sequential(
             nn.Linear(4, d_model),  # binding, accessibility, distance_scaled, distance_weight
@@ -549,16 +543,17 @@ class LitTFTGRegulationModel(pl.LightningModule):
         self._record_timing("step", step_time)
         self._prev_batch_end_time = time.perf_counter()
 
-        for name, avg_value in self._latest_timing_avgs.items():
-            self.log(
-                f"train/{name}_time_avg",
-                avg_value,
-                on_step=True,
-                on_epoch=False,
-                prog_bar=False,
-                logger=True,
-                sync_dist=False,
-            )
+        if batch_idx % 50 == 0:
+            for name, avg_value in self._latest_timing_avgs.items():
+                self.log(
+                    f"train/{name}_time_avg",
+                    avg_value,
+                    on_step=True,
+                    on_epoch=False,
+                    prog_bar=False,
+                    logger=True,
+                    sync_dist=False,
+                )
 
     def validation_step(self, batch, batch_idx):
         self._shared_step(batch, stage="val")

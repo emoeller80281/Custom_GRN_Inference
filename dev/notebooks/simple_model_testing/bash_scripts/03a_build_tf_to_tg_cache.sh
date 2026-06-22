@@ -19,8 +19,8 @@ source activate my_env
 max_cells_per_pair=32
 # max_peaks_per_tg=4
 peak_flank_size=128
-pct_true_edges=0.15
-true_false_ratio=2.0
+pct_true_edges=1.0
+true_false_ratio=10.0
 
 echo "[INFO] Building and Caching Training Data..."
 python3 ${PROJECT_DIR}/scripts/build_tf_to_tg_train_data.py \

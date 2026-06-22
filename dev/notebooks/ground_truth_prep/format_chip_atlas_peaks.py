@@ -4,13 +4,14 @@ import pybedtools
 
 ground_truth_dir = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data/ground_truth_files"
 
-dataset_name = "K562"
-chip_atlast_file_name = "Oth.Bld.05.AllAg.K-562.bed"
+organism_code = "mm10"
+dataset_name = "mouse_liver"
+chip_atlast_file_name = "Oth.Liv.05.AllAg.Liver.bed"
 chip_atlas_bed_file = os.path.join(ground_truth_dir, chip_atlast_file_name)
 formatted_path = os.path.join(ground_truth_dir, f"chipatlas_{dataset_name}.csv")
 
-tss_bed_file = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data/genome_data/genome_annotation/hg38/gene_tss.bed"
-genome_file = genome_file = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data/genome_data/reference_genome/hg38/hg38.chrom.sizes"
+tss_bed_file = f"/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data/genome_data/genome_annotation/{organism_code}/gene_tss.bed"
+genome_file = genome_file = f"/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data/genome_data/reference_genome/{organism_code}/{organism_code}.chrom.sizes"
 
 
 def map_chip_atlas_peaks_to_closest_tss(

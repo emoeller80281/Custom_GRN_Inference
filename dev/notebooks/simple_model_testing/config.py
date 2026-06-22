@@ -11,20 +11,24 @@ DATA_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE
 # cell_type="iPSC"
 # sample_name="WT_D13_rep1"
 
-species = "hg38"
-cell_type="Macrophage"
-sample_name="buffer_3"
+# species = "hg38"
+# cell_type="Macrophage"
+# sample_name="buffer_3"
 
 # species = "mm10"
 # cell_type="mESC"
-# sample_name="E7.5_rep1"
+# sample_name="E8.5_rep1"
+
+species = "mm10"
+cell_type="mouse_liver"
+sample_name="liver_1"
 
 # species = "hg38"
 # cell_type="K562"
 # sample_name="sample_1"
 
-assert cell_type in {"Macrophage", "mESC", "K562", "iPSC"}, \
-    f"Invalid cell type: {cell_type}. Select from: 'Macrophage', 'mESC', 'K562', 'iPSC'"
+assert cell_type in {"Macrophage", "mESC", "K562", "iPSC", "mouse_liver"}, \
+    f"Invalid cell type: {cell_type}. Select from: 'Macrophage', 'mESC', 'K562', 'iPSC', 'mouse_liver'"
 assert species in {"mm10", "hg38"}, \
     f"Invalid species: {species}. Select from: 'mm10', 'hg38'"
 
@@ -91,5 +95,8 @@ gt_by_dataset_dict = {
     ],
     "iPSC": [
         DATA_DIR / "ground_truth_files" / "chipatlas_iPSC_1mb.csv",
-    ]
+    ],
+    "mouse_liver": [
+        DATA_DIR / "ground_truth_files" / "chipatlas_mouse_liver.csv",
+    ],
 }

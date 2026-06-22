@@ -5,10 +5,10 @@
 #SBATCH --time=72:00:00
 #SBATCH -p dense
 #SBATCH -N 1
-#SBATCH --gres=gpu:v100:4
+#SBATCH --gres=gpu:a100:4
 #SBATCH --ntasks-per-node=4
 #SBATCH -c 8
-#SBATCH --mem=128G
+#SBATCH --mem=64G
 #SBATCH --signal=SIGUSR1@90
 
 set -eo pipefail
@@ -63,7 +63,7 @@ echo ""
 # ---------- torchrun multi-node launch ----------
 # Pick the first node as rendezvous/master
 MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
-MASTER_PORT=29500
+MASTER_PORT=$((20000 + SLURM_JOB_ID % 20000))
 export MASTER_ADDR MASTER_PORT
 
 echo "[INFO] MASTER_ADDR=${MASTER_ADDR}, MASTER_PORT=${MASTER_PORT}"
@@ -86,11 +86,11 @@ export PYTHONFAULTHANDLER=1
 # tf_bind_model_path="${PROJECT_DIR}/checkpoints/tf_dna_hg38_3683606/epoch=13-val_auroc=0.9566-val_loss=0.2042.ckpt"
 tf_bind_model_path="${PROJECT_DIR}/checkpoints/tf_dna_mm10_3682785/epoch=05-val_auroc=0.9765-val_loss=0.1653.ckpt"
 
-max_cells_per_pair=16
-max_peaks_per_tg=8
+max_cells_per_pair=32
+# max_peaks_per_tg=8
 peak_flank_size=128
-pct_true_edges=0.15
-true_false_ratio=2.0
+pct_true_edges=1.0
+true_false_ratio=10.0
 
 # echo "[INFO] Building and Caching Training Data..."
 # python3 ${PROJECT_DIR}/scripts/build_tf_to_tg_train_data.py \
@@ -108,7 +108,8 @@ srun python3 ${PROJECT_DIR}/scripts/train_tf_to_tg_model.py \
     --num_nodes $SLURM_JOB_NUM_NODES \
     --job_id ${SLURM_JOB_ID} \
     --tf_bind_model_path $tf_bind_model_path \
-    --max_peaks_per_tg $max_peaks_per_tg \
     --max_cells_per_pair $max_cells_per_pair \
     --peak_flank_size $peak_flank_size \
-    --batch_size 1024
+    --batch_size 8 
+
+#     --max_peaks_per_tg $max_peaks_per_tg \

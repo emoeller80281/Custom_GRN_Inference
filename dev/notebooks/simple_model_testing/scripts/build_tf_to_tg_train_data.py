@@ -272,7 +272,7 @@ def prepare_tftg_lookup_tables(
 
 def build_tftg_inputs(
     tf_tg_df,
-    max_peaks_per_tg=NonGuiException,
+    max_peaks_per_tg=None,
     max_cells_per_pair=8,
     seed=123,
     silence=False,
