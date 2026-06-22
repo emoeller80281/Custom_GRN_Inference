@@ -17,7 +17,7 @@ source activate my_env
 PROJECT_DIR="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/dev/notebooks/simple_model_testing"
 cd "${PROJECT_DIR}"
 
-species="hg38"
+species="mm10"
 entrez_email="luminarada@gmail.com"
 
 # Download TF protein sequences from ChIP-Atlas and save as FASTA files

@@ -193,7 +193,7 @@ def main():
         true_edge_df = pd.read_parquet(true_edge_file)
         
         true_edge_df = true_edge_df[true_edge_df["source_id"].isin(embedded_tf_names)]
-        logging.info(f"    Done. Loaded {len(true_edge_df):,} ChIP-Atlas edges")
+        logging.info(f"    Done. Loaded {len(true_edge_df):,} matching ChIP-Atlas edges for the {len(set(embedded_tf_names))} TFs with available embeddings.")
     
     # Creates or loads the TF and peak name to index mapping files
     logging.info("Creating or loading TF name to index mapping...")
