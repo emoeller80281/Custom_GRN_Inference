@@ -4,8 +4,8 @@
 #SBATCH --error=LOGS/tf_tg_model/%x_%j.err
 #SBATCH --time=72:00:00
 #SBATCH -p dense
-#SBATCH -N 1
-#SBATCH --gres=gpu:a100:4
+#SBATCH -N 2
+#SBATCH --gres=gpu:v100:4
 #SBATCH --ntasks-per-node=4
 #SBATCH -c 8
 #SBATCH --mem=64G

@@ -177,29 +177,21 @@ class TFTGRegulationModel(nn.Module):
         if chunk_size is None or chunk_size <= 0:
             chunk_size = E * P
 
-        binding_logits_chunks = []
-
         with torch.no_grad():
-            # Make sure the frozen TF-DNA model is on the same device.
-            input_device = peak_sequences_edge.device
+            binding_logits_flat = torch.empty(
+                E * P,
+                device=peak_sequences_edge.device,
+                dtype=peak_sequences_edge.dtype,
+            )
 
             for start in range(0, E * P, chunk_size):
                 end = min(start + chunk_size, E * P)
 
-                # Flat TF-peak indices: 0...(E*P - 1)
-                flat_idx = torch.arange(start, end, device=input_device)
-
-                # Convert flat TF-peak index back to edge index.
-                # Example: if P=8, flat indices 0..7 use edge 0,
-                # 8..15 use edge 1, etc.
+                flat_idx = torch.arange(start, end, device=peak_sequences_edge.device)
                 edge_idx = flat_idx // P
 
-                # Gather only this chunk's TF embedding/mask.
-                # Shape: [chunk, T, D]
                 tf_embedding_chunk = tf_embedding_edge[edge_idx]
                 tf_mask_chunk = tf_mask_edge[edge_idx]
-
-                # Gather only this chunk's peak sequences.
                 peak_seq_chunk = peak_seq_flat[start:end]
 
                 logits_chunk = self.tf_peak_model(
@@ -208,10 +200,10 @@ class TFTGRegulationModel(nn.Module):
                     peak_embedding=peak_seq_chunk,
                 )
 
-                binding_logits_chunks.append(logits_chunk)
+                # Copy values out before next compiled-model invocation
+                binding_logits_flat[start:end].copy_(logits_chunk)
 
-        # Concatenate the chunk outputs and reshape back to [E, P]
-        binding_logits = torch.cat(binding_logits_chunks, dim=0).reshape(E, P)  # [E, P]
+        binding_logits = binding_logits_flat.reshape(E, P)
         
         # ------------------------------------------------------------
         # 2b. Mask and expand TF-peak binding scores across cells

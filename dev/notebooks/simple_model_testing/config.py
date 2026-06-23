@@ -7,21 +7,21 @@ sys.path.append(str(PROJECT_DIR))
 
 DATA_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data")
 
-# species = "hg38"
-# cell_type="iPSC"
-# sample_name="WT_D13_rep1"
+species = "hg38"
+cell_type="iPSC"
+sample_name="WT_D13_rep1"
 
 # species = "hg38"
 # cell_type="Macrophage"
-# sample_name="buffer_3"
+# sample_name="buffer_4"
 
 # species = "mm10"
 # cell_type="mESC"
 # sample_name="E8.5_rep1"
 
-species = "mm10"
-cell_type="mouse_liver"
-sample_name="liver_1"
+# species = "mm10"
+# cell_type="mouse_liver"
+# sample_name="liver_3"
 
 # species = "hg38"
 # cell_type="K562"
@@ -98,5 +98,6 @@ gt_by_dataset_dict = {
     ],
     "mouse_liver": [
         DATA_DIR / "ground_truth_files" / "chipatlas_mouse_liver.csv",
+        DATA_DIR / "ground_truth_files" / "KnockTF_mouse_liver.csv",
     ],
 }
