@@ -6,14 +6,15 @@ PROJECT_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERE
 sys.path.append(str(PROJECT_DIR))
 
 DATA_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data")
-
-species = "hg38"
-cell_type="iPSC"
-sample_name="WT_D13_rep1"
+CHKPT_DIR = PROJECT_DIR / "checkpoints"
 
 # species = "hg38"
-# cell_type="Macrophage"
-# sample_name="buffer_4"
+# cell_type="iPSC"
+# sample_name="WT_D13_rep1"
+
+species = "hg38"
+cell_type="Macrophage"
+sample_name="buffer_1"
 
 # species = "mm10"
 # cell_type="mESC"
@@ -21,7 +22,7 @@ sample_name="WT_D13_rep1"
 
 # species = "mm10"
 # cell_type="mouse_liver"
-# sample_name="liver_3"
+# sample_name="liver_4"
 
 # species = "hg38"
 # cell_type="K562"
@@ -31,6 +32,18 @@ assert cell_type in {"Macrophage", "mESC", "K562", "iPSC", "mouse_liver"}, \
     f"Invalid cell type: {cell_type}. Select from: 'Macrophage', 'mESC', 'K562', 'iPSC', 'mouse_liver'"
 assert species in {"mm10", "hg38"}, \
     f"Invalid species: {species}. Select from: 'mm10', 'hg38'"
+    
+# TF-DNA model checkpoints for the different cell types
+mm10_tf_dna_path = CHKPT_DIR / "tf_dna_mm10_3697823" / "epoch=07-val_auroc=0.9743-val_loss=0.1661.ckpt"
+hg38_tf_dna_path = CHKPT_DIR / "tf_dna_hg38_3683606" / "epoch=13-val_auroc=0.9566-val_loss=0.2042.ckpt"
+
+tf_dna_model_checkpoints = {
+    "mESC": mm10_tf_dna_path,
+    "mouse_liver": mm10_tf_dna_path,
+    "iPSC": hg38_tf_dna_path,
+    "Macrophage": hg38_tf_dna_path,
+    "K562": hg38_tf_dna_path
+}
 
 # Species-specific paths
 genome_fasta_path = DATA_DIR / "genome_data" / "reference_genome" / species / f"{species}.fa"
@@ -101,3 +114,4 @@ gt_by_dataset_dict = {
         DATA_DIR / "ground_truth_files" / "KnockTF_mouse_liver.csv",
     ],
 }
+

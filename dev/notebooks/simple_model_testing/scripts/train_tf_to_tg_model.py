@@ -379,7 +379,6 @@ if __name__ == "__main__":
     parser.add_argument("--pct_true_edges", type=float, default=0.15, help="Percentage of true edges to include in the training set (default: 0.15)")
     parser.add_argument("--true_false_ratio", type=float, default=2.0, help="Ratio of true to false edges in the training set (default: 2.0)")
     parser.add_argument("--peak_flank_size", type=int, default=128, help="Size of the flank region around peaks (default: 128)")
-    parser.add_argument("--tf_bind_model_path", type=str, required=True, help="Path to the TF→DNA model checkpoint to initialize from (if not using default)")
     parser.add_argument("--checkpoint_path", type=str, required=False, help="Path to a model checkpoint to resume training from")
     parser.add_argument("--force_reload", action="store_true", help="Whether to force reload cached data instead of using existing cache files")
     args = parser.parse_args()
@@ -400,8 +399,12 @@ if __name__ == "__main__":
     max_cells_per_pair = args.max_cells_per_pair
     pct_true_edges = args.pct_true_edges
     true_false_ratio = args.true_false_ratio
-    tf_bind_model_path = Path(args.tf_bind_model_path)
     peak_flank_size = args.peak_flank_size
+    
+    assert config.cell_type in config.tf_dna_model_checkpoints, \
+        f"Cell type '{config.cell_type}' not found in TF→DNA model checkpoints."
+    
+    tf_bind_model_path = config.tf_dna_model_checkpoints[config.cell_type] 
 
     sample_name = config.sample_name
     

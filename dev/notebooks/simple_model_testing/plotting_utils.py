@@ -94,7 +94,9 @@ def plot_auroc_auprc(
         axes = [axes]
 
     for ax, current_plot in zip(axes, plots_to_make):
-
+        
+        ax.set_box_aspect(1)
+        
         if current_plot == "roc":
             auroc = roc_auc_score(labels, scores)
             fpr, tpr, _ = roc_curve(labels, scores)

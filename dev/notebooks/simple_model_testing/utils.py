@@ -1,16 +1,34 @@
+import sys
 import numpy as np
 import pandas as pd
 import duckdb
 import pyfaidx
 from pathlib import Path
 from tqdm.auto import tqdm
-import re
+import torch
+from torch.utils.data import Dataset, DataLoader, Subset
+import json
 import time
 import requests
 from Bio import Entrez, SeqIO
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 
+PROJECT_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/dev/notebooks/simple_model_testing")
+sys.path.append(str(PROJECT_DIR))
+
+import models.tf_to_tg as tf_to_tg_module
+import models.tf_to_dna as tf_to_dna_module
+from scripts.train_tf_to_tg_model import TFTGEdgeBagDataset, collate_tftg_edge_bags
+
 import logging
+
+import warnings
+warnings.filterwarnings(
+    "ignore",
+    message="You are using `torch.load` with `weights_only=False`.*",
+    category=FutureWarning,
+)
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -502,7 +520,6 @@ def create_true_false_edges(
 
     return true_edges, false_edges
 
-
 def sample_unobserved_edge_codes_fast(
     n_tfs: int,
     n_items: int,
@@ -892,3 +909,234 @@ def build_chip_atlas_df_from_parquet(
     duckdb.sql(query)
 
     return output_file
+
+def find_latest_checkpoint(
+    checkpoint_dir: Path, 
+    cell_type: str, 
+    sample_name: str, 
+    training_number: int|None =None,
+    epoch_num: int|None =None,
+    ) -> Path:
+    """
+    Find the latest checkpoint file for a given cell type and sample name.
+    
+    Optionally takes a training_number (the SLURM ID from training) to select a specific checkpoint.
+    Optionally takes an epoch_num to select a specific epoch.
+    
+    Parameters
+    ----------
+    checkpoint_dir : Path
+        The base directory where checkpoints are stored.
+    cell_type : str
+        The cell type for which to find the checkpoint.
+    sample_name : str
+        The sample name for which to find the checkpoint.
+    training_number : int, optional
+        The specific training number (SLURM ID) to select a checkpoint from.
+    epoch_num : int, optional
+        The specific epoch number to select a checkpoint from.
+        
+    Returns
+    -------
+    Path or None
+        The path to the latest checkpoint file, or None if no checkpoint is found.
+    
+    """
+    
+    sample_chkpt_dir = checkpoint_dir / cell_type / sample_name
+    
+    if not sample_chkpt_dir.exists():
+        logging.warning(f"No checkpoints found for {cell_type} {sample_name} in {sample_chkpt_dir}")
+        return None
+    
+    # Find all SLURM job directories for the given sample (or specific training number if provided)
+    if training_number is not None:
+        slurm_job_dirs = [d for d in sample_chkpt_dir.iterdir() if d.is_dir() and d.name.startswith(f"tf_tg_train_{sample_name}_{training_number}")]
+    else:
+        slurm_job_dirs = [d for d in sample_chkpt_dir.iterdir() if d.is_dir() and d.name.startswith(f"tf_tg_train_{sample_name}_")]
+    
+    if not slurm_job_dirs:
+        logging.warning(f"No checkpoint directories found for {cell_type} {sample_name} in {sample_chkpt_dir}")
+        return None
+    
+    # Find the latest checkpoint directory based on the SLURM job ID (the last part of the directory name)
+    latest_chkpt_dir = max(slurm_job_dirs, key=lambda d: int(d.name.split("_")[-1]))
+    slurm_job_id = latest_chkpt_dir.name.split("_")[-1]
+    
+    # Find all checkpoint files in the latest checkpoint directory
+    chkpt_files = list(latest_chkpt_dir.glob("epoch=*-val_auroc=*-val_loss=*.ckpt"))
+    if not chkpt_files:
+        logging.warning(f"No checkpoint files found for {sample_name} in {latest_chkpt_dir}")
+        return None
+    
+    # If epoch_num is specified, find the checkpoint for that epoch. Otherwise, find the latest checkpoint.
+    chkpt_nums = [int(f.stem.split("-")[0].split("=")[1]) for f in chkpt_files]
+    if epoch_num is not None:
+        if epoch_num in chkpt_nums:
+            latest_chkpt_file = next(f for f in chkpt_files if int(f.stem.split("-")[0].split("=")[1]) == epoch_num)
+        else:
+            logging.warning(f"Checkpoint for epoch {epoch_num} not found for {sample_name} in {latest_chkpt_dir}. Available epochs: {chkpt_nums}")
+            return None
+    else:
+        latest_chkpt_file = max(chkpt_files, key=lambda f: int(f.stem.split("-")[0].split("=")[1]))
+    epoch = latest_chkpt_file.stem.split("-")[0].split("=")[1]
+    
+    logging.info(f"Latest checkpoint for {cell_type} {sample_name}: Job {slurm_job_id} Epoch {epoch}")
+    
+    return latest_chkpt_file
+
+def load_tf_tg_regulation_model(
+    tf_dna_model_path: Path, 
+    tf_tg_model_path: Path,
+    tf_embeddings_tensor: torch.Tensor,
+    tf_mask_tensor: torch.Tensor,
+    compile_tf_dna_model: bool = True,
+    tf_peak_chunk_size: int = 128
+    ) -> tf_to_tg_module.TFTGRegulationModel:
+    
+    """
+    Loads the trained TF-TG regulation model using the TF-DNA and TF-TG checkpoints.
+    
+    Parameters
+    ----------
+    tf_dna_model_path : Path
+        Path to the trained TF-DNA model checkpoint.
+    tf_tg_model_path : Path
+        Path to the trained TF-TG model checkpoint.
+    tf_embeddings_tensor : torch.Tensor
+        Precomputed TF embeddings tensor.
+    tf_mask_tensor : torch.Tensor
+        Precomputed TF mask tensor.
+    compile_tf_dna_model : bool, optional
+        Whether to compile the TF-DNA model for faster inference. Default is True.
+    tf_peak_chunk_size : int, optional
+        Chunk size for processing TF-peak binding predictions in the TF-TG model. Default is 128.
+        
+    Returns
+    -------
+    tf_to_tg_module.TFTGRegulationModel
+        The loaded TF-TG regulation model ready for inference.
+    
+    """
+    
+    # Recreate the base TF-DNA model with the same hyperparameters
+    base_model = tf_to_dna_module.TFPeakBindingModel(
+        tf_embedding_dim=128,
+        hidden_dim=128,
+        dropout=0.3,
+        num_layers=4,
+        num_heads=4,
+        dim_head=32,
+    )
+
+    # Wrap in Lightning module and load checkpoint
+    lit_model = tf_to_dna_module.LitTFPeakBindingModel.load_from_checkpoint(
+        checkpoint_path=tf_dna_model_path,
+        model=base_model,
+        tf_embeddings_tensor=tf_embeddings_tensor,
+        tf_mask_tensor=tf_mask_tensor,
+        lr=1e-4,
+        weight_decay=1e-4,
+        pos_weight=None,
+    )
+
+    # Load the model state from the checkpoint
+    state = torch.load(
+        tf_dna_model_path,
+        map_location="cpu",
+        weights_only=False,
+    )
+    lit_model.load_state_dict(state["state_dict"], strict=True)
+
+    # Get the trained TF-DNA model and freeze it
+    trained_tf_peak_model = lit_model.model
+    trained_tf_peak_model.eval()
+    for p in trained_tf_peak_model.parameters():
+        p.requires_grad = False
+    
+    if compile_tf_dna_model:
+        # Compile the TF-DNA model to reduce inference time during training
+        trained_tf_peak_model = torch.compile(
+            trained_tf_peak_model,
+            mode="reduce-overhead",
+            fullgraph=False,
+        )
+
+    # Create the TF-TG model object using the trained TF-DNA model, and load the trained model checkpoint
+    tf_tg_model = tf_to_tg_module.LitTFTGRegulationModel.load_from_checkpoint(
+        checkpoint_path=tf_tg_model_path,
+        model=tf_to_tg_module.TFTGRegulationModel(
+            pretrained_tf_peak_model=trained_tf_peak_model,
+            d_model=128,
+            tf_peak_chunk_size=tf_peak_chunk_size,
+        ),
+        lr=1e-4,
+        weight_decay=1e-4,
+        pos_weight=None,
+    )
+    
+    return tf_tg_model
+
+def load_training_cache_dataset(
+    sample_name: str,
+    cell_type_cache_dir: Path, 
+    split_type: str = "test", 
+    subset_size: int = None
+    ) -> DataLoader:
+    
+    assert split_type in ["train", "val", "test"], \
+        "split_type must be one of 'train', 'val', or 'test'"
+    
+    # Load the compact split inputs
+    tftg_inputs_test = torch.load(
+        cell_type_cache_dir / "tf_tg_training_cache" / sample_name / f"tftg_inputs_{split_type}.pt",
+        weights_only=False,
+    )
+
+    # Load the lookup tensors
+    tf_embeddings_tensor = torch.load(
+        cell_type_cache_dir / "tf_embeddings.pt",
+        weights_only=True,
+    )
+    tf_mask_tensor = torch.load(
+        cell_type_cache_dir / "tf_masks.pt",
+        weights_only=True,
+    )
+    atac_peak_tensor = torch.load(
+        cell_type_cache_dir / "tf_tg_training_cache" / sample_name / "atac_peak_tensor.pt",
+        weights_only=True,
+    )
+
+    # Load the metadata
+    with open(cell_type_cache_dir / "tf_tg_training_cache" / sample_name / "metadata.json", "r") as f:
+        metadata = json.load(f)
+
+    # Load the manifest and verify tensor shapes and dtypes match expectations
+    with open(cell_type_cache_dir / "tf_tg_training_cache" / sample_name / "manifest.json") as f:
+        manifest = json.load(f)
+    
+    assert tuple(manifest["atac_peak_tensor_shape"]) == tuple(atac_peak_tensor.shape)
+    assert manifest["atac_peak_tensor_dtype"] == str(atac_peak_tensor.dtype)
+
+    dataset = TFTGEdgeBagDataset(
+        tftg_inputs_test,
+        tf_embeddings_tensor=tf_embeddings_tensor,
+        tf_mask_tensor=tf_mask_tensor,
+        atac_peak_tensor=atac_peak_tensor
+    )
+    
+    subset_size = min(subset_size, len(dataset)) if subset_size is not None else None
+    
+    if subset_size is not None:
+        dataset = Subset(dataset, list(range(subset_size)))
+
+    loader = DataLoader(
+        dataset,
+        batch_size=64,
+        shuffle=False,
+        num_workers=0,
+        pin_memory=False,
+        collate_fn=collate_tftg_edge_bags,
+        )
+    
+    return loader, metadata, manifest, tf_embeddings_tensor, tf_mask_tensor
