@@ -21,20 +21,21 @@ import models.tf_to_dna as tf_to_dna_module
 from scripts.train_tf_to_tg_model import TFTGEdgeBagDataset, collate_tftg_edge_bags
 
 import logging
-
 import warnings
+
 warnings.filterwarnings(
     "ignore",
     message="You are using `torch.load` with `weights_only=False`.*",
     category=FutureWarning,
 )
 
-
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
+
+_GENOME_HANDLE = None
 
 def parse_peak(peak):
     """
@@ -76,6 +77,7 @@ def onehot_dna_sequence(seq):
 
     return onehot
 
+
 def load_peak_sequence(genome_fasta, selected_peak):
     """
     Load the DNA sequence for a given peak.
@@ -100,6 +102,7 @@ def load_peak_sequence(genome_fasta, selected_peak):
         
     return peak_sequence
 
+
 def load_chrom_sizes(chromsizes_file):
     """
     Load chromosome sizes from a chrom.sizes file.
@@ -123,7 +126,6 @@ def load_chrom_sizes(chromsizes_file):
     
     return chrom_sizes
 
-from itertools import repeat
 
 def load_ground_truth(ground_truth_file: Path | str) -> pd.DataFrame:
     if isinstance(ground_truth_file, str):
@@ -150,9 +152,11 @@ def load_ground_truth(ground_truth_file: Path | str) -> pd.DataFrame:
 
     return ground_truth_df[["Source", "Target"]].dropna()
 
+
 def load_ground_truth_files(gt_path_list: list[Path]) -> pd.DataFrame:
     gt_dfs = [load_ground_truth(gt_path) for gt_path in gt_path_list]
     return pd.concat(gt_dfs, ignore_index=True)
+
 
 def _centered_peak_to_onehot(
     peak_id: str,
@@ -232,8 +236,6 @@ def _centered_peak_to_onehot(
 
     return onehot
 
-_GENOME_HANDLE = None
-
 
 def _init_genome_handle(genome_fasta: str) -> None:
     global _GENOME_HANDLE
@@ -272,6 +274,7 @@ def _encode_peak_chunk(args):
 
     return results
 
+
 def _iter_chunks(items, chunk_size: int):
     """
     Yield lists of up to chunk_size items.
@@ -288,6 +291,7 @@ def _iter_chunks(items, chunk_size: int):
     if chunk:
         yield chunk
         
+
 def create_centered_peak_onehot_array(
     peak_ids: list[str],
     genome_fasta: str | Path,
@@ -423,6 +427,7 @@ def create_centered_peak_onehot_array(
 
     return peak_onehot_array
 
+
 def create_true_false_edges(
     edge_df: pd.DataFrame,
     tf_names: list,
@@ -520,6 +525,7 @@ def create_true_false_edges(
 
     return true_edges, false_edges
 
+
 def sample_unobserved_edge_codes_fast(
     n_tfs: int,
     n_items: int,
@@ -615,6 +621,7 @@ def sample_unobserved_edge_codes_fast(
         sampled_codes = sampled_codes[:num_edges]
 
     return sampled_codes
+
 
 def download_gene_protein_fastas(
     gene_names,
@@ -737,6 +744,7 @@ def download_gene_protein_fastas(
 
     return saved_files
 
+
 def fetch_chip_atlas_tf_list(tf_list, genome="mm10", num_workers=10) -> pd.DataFrame:
     
     def fetch_chip_atlas_tf(tf, genome=genome, threshold="05", timeout=120):
@@ -804,6 +812,7 @@ def fetch_chip_atlas_tf_list(tf_list, genome="mm10", num_workers=10) -> pd.DataF
         chip_atlas_df = pd.concat(tf_dfs, ignore_index=True).drop_duplicates()
 
     return chip_atlas_df
+
 
 def fetch_chip_atlas_tf_list_to_parquet(
     tf_list,
@@ -889,6 +898,7 @@ def fetch_chip_atlas_tf_list_to_parquet(
 
     return failed_tfs
 
+
 def build_chip_atlas_df_from_parquet(
     parquet_dir="chip_atlas_tf_parquet",
     output_file="chip_atlas_tf_peak_edges.parquet",
@@ -909,6 +919,7 @@ def build_chip_atlas_df_from_parquet(
     duckdb.sql(query)
 
     return output_file
+
 
 def find_latest_checkpoint(
     checkpoint_dir: Path, 
@@ -985,12 +996,12 @@ def find_latest_checkpoint(
     
     return latest_chkpt_file
 
+
 def load_tf_tg_regulation_model(
     tf_dna_model_path: Path, 
     tf_tg_model_path: Path,
     tf_embeddings_tensor: torch.Tensor,
     tf_mask_tensor: torch.Tensor,
-    compile_tf_dna_model: bool = True,
     tf_peak_chunk_size: int = 128
     ) -> tf_to_tg_module.TFTGRegulationModel:
     
@@ -1007,8 +1018,6 @@ def load_tf_tg_regulation_model(
         Precomputed TF embeddings tensor.
     tf_mask_tensor : torch.Tensor
         Precomputed TF mask tensor.
-    compile_tf_dna_model : bool, optional
-        Whether to compile the TF-DNA model for faster inference. Default is True.
     tf_peak_chunk_size : int, optional
         Chunk size for processing TF-peak binding predictions in the TF-TG model. Default is 128.
         
@@ -1019,7 +1028,9 @@ def load_tf_tg_regulation_model(
     
     """
     
-    # Recreate the base TF-DNA model with the same hyperparameters
+        # -----------------------------
+    # 1. Recreate base TF-DNA model
+    # -----------------------------
     base_model = tf_to_dna_module.TFPeakBindingModel(
         tf_embedding_dim=128,
         hidden_dim=128,
@@ -1029,9 +1040,27 @@ def load_tf_tg_regulation_model(
         dim_head=32,
     )
 
-    # Wrap in Lightning module and load checkpoint
-    lit_model = tf_to_dna_module.LitTFPeakBindingModel.load_from_checkpoint(
-        checkpoint_path=tf_dna_model_path,
+    # -----------------------------
+    # 2. Load TF-DNA checkpoint
+    # -----------------------------
+    tf_dna_ckpt = torch.load(
+        tf_dna_model_path,
+        map_location="cpu",
+        weights_only=False,
+    )
+
+    tf_dna_state_dict = tf_dna_ckpt["state_dict"]
+
+    # This handles TF-DNA checkpoints where the Lit model's .model was compiled.
+    tf_dna_uses_compiled_model = any(
+        key.startswith("model._orig_mod.")
+        for key in tf_dna_state_dict.keys()
+    )
+
+    if tf_dna_uses_compiled_model:
+        base_model = torch.compile(base_model)
+
+    lit_tf_dna_model = tf_to_dna_module.LitTFPeakBindingModel(
         model=base_model,
         tf_embeddings_tensor=tf_embeddings_tensor,
         tf_mask_tensor=tf_mask_tensor,
@@ -1040,42 +1069,55 @@ def load_tf_tg_regulation_model(
         pos_weight=None,
     )
 
-    # Load the model state from the checkpoint
-    state = torch.load(
-        tf_dna_model_path,
+    lit_tf_dna_model.load_state_dict(tf_dna_state_dict, strict=True)
+
+    trained_tf_peak_model = lit_tf_dna_model.model
+    trained_tf_peak_model.eval()
+
+    for p in trained_tf_peak_model.parameters():
+        p.requires_grad = False
+
+    # -----------------------------
+    # 3. Inspect TF-TG checkpoint
+    # -----------------------------
+    tf_tg_ckpt = torch.load(
+        tf_tg_model_path,
         map_location="cpu",
         weights_only=False,
     )
-    lit_model.load_state_dict(state["state_dict"], strict=True)
 
-    # Get the trained TF-DNA model and freeze it
-    trained_tf_peak_model = lit_model.model
-    trained_tf_peak_model.eval()
-    for p in trained_tf_peak_model.parameters():
-        p.requires_grad = False
-    
-    if compile_tf_dna_model:
-        # Compile the TF-DNA model to reduce inference time during training
-        trained_tf_peak_model = torch.compile(
-            trained_tf_peak_model,
-            mode="reduce-overhead",
-            fullgraph=False,
-        )
+    tf_tg_state_dict = tf_tg_ckpt["state_dict"]
 
-    # Create the TF-TG model object using the trained TF-DNA model, and load the trained model checkpoint
-    tf_tg_model = tf_to_tg_module.LitTFTGRegulationModel.load_from_checkpoint(
-        checkpoint_path=tf_tg_model_path,
-        model=tf_to_tg_module.TFTGRegulationModel(
-            pretrained_tf_peak_model=trained_tf_peak_model,
-            d_model=128,
-            tf_peak_chunk_size=tf_peak_chunk_size,
-        ),
+    tf_tg_uses_compiled_nested_tf_peak_model = any(
+        key.startswith("model.tf_peak_model._orig_mod.")
+        for key in tf_tg_state_dict.keys()
+    )
+
+    if tf_tg_uses_compiled_nested_tf_peak_model:
+        trained_tf_peak_model = torch.compile(trained_tf_peak_model)
+
+    # -----------------------------
+    # 4. Recreate TF-TG model
+    # -----------------------------
+    tf_tg_core_model = tf_to_tg_module.TFTGRegulationModel(
+        pretrained_tf_peak_model=trained_tf_peak_model,
+        d_model=128,
+        tf_peak_chunk_size=tf_peak_chunk_size,
+    )
+
+    lit_tf_tg_model = tf_to_tg_module.LitTFTGRegulationModel(
+        model=tf_tg_core_model,
         lr=1e-4,
         weight_decay=1e-4,
         pos_weight=None,
     )
-    
-    return tf_tg_model
+
+    lit_tf_tg_model.load_state_dict(tf_tg_state_dict, strict=True)
+
+    lit_tf_tg_model.eval()
+
+    return lit_tf_tg_model
+
 
 def load_training_cache_dataset(
     sample_name: str,

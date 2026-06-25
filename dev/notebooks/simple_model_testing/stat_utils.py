@@ -2,6 +2,7 @@ import os, sys
 from pathlib import Path
 import numpy as np
 from sklearn.metrics import (
+    f1_score,
     roc_auc_score,
     average_precision_score,
     accuracy_score,
@@ -37,6 +38,7 @@ def compute_binary_classification_metrics(
     accuracy = accuracy_score(labels, preds)
     precision = precision_score(labels, preds, zero_division=0)
     recall = recall_score(labels, preds, zero_division=0)
+    f1 = f1_score(labels, preds, zero_division=0)
 
     if len(np.unique(labels)) < 2:
         auroc = np.nan
@@ -61,6 +63,7 @@ def compute_binary_classification_metrics(
         "accuracy": accuracy,
         "precision": precision,
         "recall": recall,
+        "f1": f1,
         "n_edges": len(labels),
         "n_pos": int(labels.sum()),
         "n_neg": int((labels == 0).sum()),

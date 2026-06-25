@@ -52,11 +52,12 @@ def log_once(msg: str) -> None:
     logging.info(msg)
 
 def create_new_tf_tg_binding_model(
-    tf_bind_model_path: Path, 
-    tf_embeddings_tensor: torch.Tensor, 
-    tf_mask_tensor: torch.Tensor
-    ) -> tf_to_tg_module.TFTGRegulationModel:
-    
+    tf_bind_model_path: Path,
+    tf_embeddings_tensor: torch.Tensor,
+    tf_mask_tensor: torch.Tensor,
+    checkpoint_path: Path | None = None,
+) -> tf_to_tg_module.TFTGRegulationModel:
+
     # 1) Recreate the base TF→DNA model with the same hyperparameters
     base_model = tf_to_dna_module.TFPeakBindingModel(
         tf_embedding_dim=128,
@@ -80,13 +81,12 @@ def create_new_tf_tg_binding_model(
 
     # 3) Get the trained base model and freeze it
     trained_tf_peak_model = lit_model.model
-    
+
     trained_tf_peak_model.eval()
-    
+
     for p in trained_tf_peak_model.parameters():
         p.requires_grad = False
-    
-    # Compile the TF-DNA model to reduce inference time during training
+
     trained_tf_peak_model = torch.compile(
         trained_tf_peak_model,
         mode="reduce-overhead",
@@ -99,7 +99,26 @@ def create_new_tf_tg_binding_model(
         d_model=128,
         tf_peak_chunk_size=128,
     )
-    
+
+    # 5) Optionally load TF→TG checkpoint
+    if checkpoint_path is not None:
+        log_once(f"Loading TF→TG model weights from checkpoint: {checkpoint_path}")
+
+        tf_tg_ckpt = torch.load(
+            checkpoint_path,
+            map_location="cpu",
+            weights_only=False,
+        )
+
+        fixed = {}
+
+        for key, value in tf_tg_ckpt["state_dict"].items():
+            if key.startswith("model."):
+                key = key[len("model."):]
+            fixed[key] = value
+
+        tf_tg_model.load_state_dict(fixed, strict=True)
+
     return tf_tg_model
 
 
@@ -518,7 +537,12 @@ if __name__ == "__main__":
 
     log_once(f"Train/Val/Test sizes: {len(train_dataset)}, {len(val_dataset)}, {len(test_dataset)}")
 
-    tf_tg_model = create_new_tf_tg_binding_model(tf_bind_model_path, tf_embeddings_tensor, tf_mask_tensor)
+    tf_tg_model = create_new_tf_tg_binding_model(
+        tf_bind_model_path, 
+        tf_embeddings_tensor, 
+        tf_mask_tensor,
+        checkpoint_path=checkpoint_path
+        )
 
     criterion = torch.nn.BCEWithLogitsLoss()
 
@@ -658,15 +682,9 @@ if __name__ == "__main__":
     
     if checkpoint_path is not None:
         log_once(f"Resuming training from checkpoint: {checkpoint_path}")
-        trainer.fit(
-            lit_model,
-            train_dataloaders=train_loader,
-            val_dataloaders=val_loader,
-            tf_bind_model_path=checkpoint_path,
-        )
-    else:
-        trainer.fit(
-            lit_model,
-            train_dataloaders=train_loader,
-            val_dataloaders=val_loader,
-        )
+
+    trainer.fit(
+        lit_model,
+        train_dataloaders=train_loader,
+        val_dataloaders=val_loader,
+    )

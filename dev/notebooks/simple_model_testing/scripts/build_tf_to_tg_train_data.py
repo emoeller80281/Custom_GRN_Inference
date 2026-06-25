@@ -474,6 +474,8 @@ def main():
     parser.add_argument("--force_reload", action="store_true")
     args = parser.parse_args()
     
+    logging.info(f" === Species: {config.species}, Cell Type: {config.cell_type}, Sample: {config.sample_name} ===\n")
+    
     max_peaks_per_tg = args.max_peaks_per_tg
     max_cells_per_pair = args.max_cells_per_pair
     pct_true_edges = args.pct_true_edges

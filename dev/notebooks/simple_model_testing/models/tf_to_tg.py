@@ -438,6 +438,12 @@ class LitTFTGRegulationModel(pl.LightningModule):
         if stage == "train":
             acc = self.train_acc(probs, labels.int())
         elif stage == "val":
+            
+            valid_mask = torch.isfinite(probs) & torch.isfinite(labels)
+
+            probs = probs[valid_mask]
+            labels = labels[valid_mask]
+            
             acc = self.val_acc(probs, labels.int())
 
             self.val_probs.append(probs.detach().float().cpu())
@@ -549,6 +555,8 @@ class LitTFTGRegulationModel(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         self._shared_step(batch, stage="val")
+        
+        
 
     def on_validation_epoch_start(self):
         self.val_probs.clear()
@@ -557,23 +565,36 @@ class LitTFTGRegulationModel(pl.LightningModule):
     def on_validation_epoch_end(self):
         if not self.val_probs:
             return
-
+        
         probs = torch.cat(self.val_probs, dim=0).view(-1)
         targets = torch.cat(self.val_targets, dim=0).view(-1).int()
 
         self.val_probs.clear()
         self.val_targets.clear()
 
-        if len(np.unique(targets)) >= 2:
-            auroc = roc_auc_score(targets, probs)
-            auprc = average_precision_score(targets, probs)
-        else:
+        targets = np.asarray(targets).astype(float).ravel()
+        probs = np.asarray(probs).astype(float).ravel()
+
+        finite_mask = np.isfinite(targets) & np.isfinite(probs)
+
+        n_total = len(targets)
+        n_dropped = int((~finite_mask).sum())
+
+        targets = targets[finite_mask].astype(int)
+        probs = probs[finite_mask]
+
+        if len(targets) == 0:
             auroc = np.nan
             auprc = np.nan
+        elif len(np.unique(targets)) < 2:
+            auroc = np.nan
+            auprc = np.nan
+        else:
+            auroc = roc_auc_score(targets, probs)
+            auprc = average_precision_score(targets, probs)
 
-        self.log("val/auroc", auroc, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
-        self.log("val/auprc", auprc, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
-
+        self.log("val/auroc", auroc, prog_bar=True, sync_dist=True)
+        self.log("val/auprc", auprc, prog_bar=True, sync_dist=True)
 
         if not getattr(self.logger, "experiment", None):
             return
