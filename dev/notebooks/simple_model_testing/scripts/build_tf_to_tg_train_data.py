@@ -624,7 +624,7 @@ def main():
 
     # Create a map of TG name to index for TGs present in the ground truth (and RNA pseudobulk)
     tg_id_to_idx = {tg: idx for idx, tg in enumerate(merged_ground_truth_df["Target"].unique())}
-    
+        
     if config.species == "mm10":
         train_chroms = [str(i) for i in range(1, 16)]
         val_chroms = [ str(i) for i in range(16, 18)]

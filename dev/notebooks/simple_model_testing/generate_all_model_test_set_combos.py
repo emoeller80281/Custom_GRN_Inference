@@ -89,9 +89,6 @@ def run_prediction_vs_test_set(
     model = tf_tg_model.model
     model = model.to(device)
     
-    # compile the model
-    model = torch.compile(model, mode="reduce-overhead", fullgraph=True)
-
     criterion = torch.nn.BCEWithLogitsLoss()
     score_threshold = 0.5
     pooling_mode = "lse"
@@ -155,7 +152,7 @@ def run_prediction_vs_test_set(
 
     metric_df = pd.DataFrame([metrics])
 
-    col_order = ["Model", "Test Set", "auroc", "auprc", "accuracy", "precision", "recall", "rand_auroc", "rand_auprc"]
+    col_order = ["Model", "Test Set", "auroc", "auprc", "accuracy", "precision", "recall", "f1", "rand_auroc", "rand_auprc"]
 
     metric_df = metric_df[col_order]
     
@@ -229,12 +226,6 @@ if __name__ == "__main__":
                 for df in all_comparison_df_list
             )
             logging.info(f"Skipping {len(evaluated_combos)} already evaluated combinations")
-            
-            sample_list_all = [
-                (model_cell_type, model_training_sample)
-                for model_cell_type, model_training_sample in sample_list_all
-                if (model_cell_type, model_training_sample) not in evaluated_combos
-            ]
     else:
         all_comparison_df_list = []
         all_plot_data = {}
@@ -243,11 +234,15 @@ if __name__ == "__main__":
     for model_cell_type, model_training_sample in sample_list_all:
         for test_set_cell_type, evaluation_sample in sample_list_all:
             all_evaluation_combos.append((model_cell_type, model_training_sample, test_set_cell_type, evaluation_sample))
+
+    if intermediate_results_path.exists():
+        all_evaluation_combos = [
+            combo
+            for combo in all_evaluation_combos
+            if (combo[1], combo[3]) not in evaluated_combos
+        ]
             
     logging.info(f"Total evaluation combinations: {len(all_evaluation_combos)}")
-    
-    all_comparison_df_list = []
-    all_plot_data = {}
 
     subset_size = 5000
     for model_cell_type, model_training_sample, test_set_cell_type, evaluation_sample in tqdm(all_evaluation_combos, desc="Evaluating all model vs test set combinations", ncols=100):
@@ -449,9 +444,9 @@ if __name__ == "__main__":
     evaluation_metrics = ["AUROC", "AUPRC", "Accuracy", "Precision", "Recall", "F1 Score", "AUPRC Lift"]
 
     for selected_metric in evaluation_metrics:
-        test_comparison_df = test_comparison_df[["Model", "Test Set", selected_metric]]
+        metric_comparison_df = test_comparison_df[["Model", "Test Set", selected_metric]].copy()
 
-        test_comparison_df_pivot = test_comparison_df.pivot(index="Model", columns="Test Set", values=selected_metric)
+        test_comparison_df_pivot = metric_comparison_df.pivot(index="Model", columns="Test Set", values=selected_metric)
 
         fig = plt.figure(figsize=(10, 8))
         heatmap_fig = sns.heatmap(

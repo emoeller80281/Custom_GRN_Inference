@@ -155,7 +155,12 @@ def load_ground_truth(ground_truth_file: Path | str) -> pd.DataFrame:
 
 def load_ground_truth_files(gt_path_list: list[Path]) -> pd.DataFrame:
     gt_dfs = [load_ground_truth(gt_path) for gt_path in gt_path_list]
-    return pd.concat(gt_dfs, ignore_index=True)
+    
+    merged_gt_df = pd.concat(gt_dfs, ignore_index=True)
+    
+    merged_gt_df = merged_gt_df.drop_duplicates(subset=["Source", "Target"]).reset_index(drop=True)
+    
+    return merged_gt_df
 
 
 def _centered_peak_to_onehot(

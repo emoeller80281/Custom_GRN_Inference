@@ -12,24 +12,28 @@ CHKPT_DIR = PROJECT_DIR / "checkpoints"
 # cell_type="iPSC"
 # sample_name="WT_D13_rep1"
 
-# species = "hg38"
-# cell_type="Macrophage"
-# sample_name="buffer_1"
+species = "hg38"
+cell_type="Macrophage"
+sample_name="buffer_1"
 
-species = "mm10"
-cell_type="mESC"
-sample_name="E8.5_rep1"
+# species = "mm10"
+# cell_type="mESC"
+# sample_name="E8.5_rep1"
 
 # species = "mm10"
 # cell_type="mouse_liver"
 # sample_name="liver_4"
 
+# species = "mm10"
+# cell_type="mouse_hepatocytes"
+# sample_name="hepatocytes_3"
+
 # species = "hg38"
 # cell_type="K562"
 # sample_name="sample_1"
 
-assert cell_type in {"Macrophage", "mESC", "K562", "iPSC", "mouse_liver"}, \
-    f"Invalid cell type: {cell_type}. Select from: 'Macrophage', 'mESC', 'K562', 'iPSC', 'mouse_liver'"
+assert cell_type in {"Macrophage", "mESC", "K562", "iPSC", "mouse_liver", "mouse_hepatocytes"}, \
+    f"Invalid cell type: {cell_type}. Select from: 'Macrophage', 'mESC', 'K562', 'iPSC', 'mouse_liver', 'mouse_hepatocytes'"
 assert species in {"mm10", "hg38"}, \
     f"Invalid species: {species}. Select from: 'mm10', 'hg38'"
     
@@ -40,6 +44,7 @@ hg38_tf_dna_path = CHKPT_DIR / "tf_dna_hg38_3683606" / "epoch=13-val_auroc=0.956
 tf_dna_model_checkpoints = {
     "mESC": mm10_tf_dna_path,
     "mouse_liver": mm10_tf_dna_path,
+    "mouse_hepatocytes": mm10_tf_dna_path,
     "iPSC": hg38_tf_dna_path,
     "Macrophage": hg38_tf_dna_path,
     "K562": hg38_tf_dna_path
@@ -113,5 +118,8 @@ gt_by_dataset_dict = {
         DATA_DIR / "ground_truth_files" / "chipatlas_mouse_liver.csv",
         DATA_DIR / "ground_truth_files" / "KnockTF_mouse_liver.csv",
     ],
+    "mouse_hepatocytes": [
+        DATA_DIR / "ground_truth_files" / "chipatlas_mouse_hepatocytes.csv",
+    ]
 }
 

@@ -5,8 +5,8 @@
 #SBATCH --time=72:00:00
 #SBATCH -p dense
 #SBATCH -N 1
-#SBATCH --gres=gpu:v100:4
-#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:v100:1
+#SBATCH --ntasks-per-node=1
 #SBATCH -c 8
 #SBATCH --mem=128G
 #SBATCH --signal=SIGUSR1@90
@@ -87,5 +87,5 @@ echo "[INFO] Starting training..."
 torchrun \
   --standalone \
   --nnodes=1 \
-  --nproc_per_node=4 \
+  --nproc_per_node=1 \
   ${PROJECT_DIR}/plot_auroc_auprc_all_methods.py

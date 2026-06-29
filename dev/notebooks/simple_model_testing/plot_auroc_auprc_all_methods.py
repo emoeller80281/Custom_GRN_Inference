@@ -36,10 +36,11 @@ sys.path.append(str(PROJECT_DIR))
 
 import models.tf_to_tg as tf_to_tg_module
 import models.tf_to_dna as tf_to_dna_module
-import datasets.tftg_dataset as tftg_dataset_module
+from scripts.train_tf_to_tg_model import TFTGEdgeBagDataset, collate_tftg_edge_bags
 import plotting_utils
 import scripts.build_tf_to_tg_train_data as tf_tg_data_builder
 import utils
+import config
 import warnings
 
 warnings.filterwarnings(
@@ -87,54 +88,7 @@ def find_latest_checkpoint(cell_type, sample_name, training_number=None) -> Path
     logging.info(f"Latest checkpoint for {cell_type} {sample_name}: Job {slurm_job_id} Epoch {epoch}")
     return latest_chkpt_file
 
-def load_tf_tg_regulation_model(
-    tf_dna_model_path: Path, 
-    tf_tg_model_path: Path,
-    tf_embeddings_tensor: torch.Tensor,
-    tf_mask_tensor: torch.Tensor
-    ) -> tf_to_tg_module.TFTGRegulationModel:
-    
-    # 1) Recreate the base TF→DNA model with the same hyperparameters
-    base_model = tf_to_dna_module.TFPeakBindingModel(
-        tf_embedding_dim=128,
-        hidden_dim=128,
-        dropout=0.3,
-        num_layers=4,
-        num_heads=4,
-        dim_head=32,
-    )
 
-    # 2) Wrap in Lightning module and load checkpoint
-    lit_model = tf_to_dna_module.LitTFPeakBindingModel.load_from_checkpoint(
-        checkpoint_path=tf_dna_model_path,
-        model=base_model,
-        tf_embeddings_tensor=tf_embeddings_tensor,
-        tf_mask_tensor=tf_mask_tensor,
-        lr=1e-4,
-        weight_decay=1e-4,
-        pos_weight=None,
-    )
-
-    # 4) Get the trained TF-DNA model and freeze it
-    trained_tf_peak_model = lit_model.model
-    trained_tf_peak_model.eval()
-    for p in trained_tf_peak_model.parameters():
-        p.requires_grad = False
-
-    # 5) Create the TF-TG model object using the trained TF-DNA model, and load the trained model checkpoint
-    tf_tg_model = tf_to_tg_module.LitTFTGRegulationModel.load_from_checkpoint(
-        checkpoint_path=tf_tg_model_path,
-        model=tf_to_tg_module.TFTGRegulationModel(
-            pretrained_tf_peak_model=trained_tf_peak_model,
-            d_model=128,
-            tf_peak_chunk_size=256,
-        ),
-        lr=1e-4,
-        weight_decay=1e-4,
-        pos_weight=None,
-    )
-    
-    return tf_tg_model
 
 def generate_model_predictions(model, data_loader, device, tf_idx_to_name, tg_idx_to_name):
     pooling_mode = "lse"
@@ -442,15 +396,21 @@ tf_tg_model_checkpoints = {
     },
     "K562": {
         "sample_1": find_latest_checkpoint("K562", "sample_1"),
+    },
+    "mouse_liver": {
+        "liver_1": find_latest_checkpoint("mouse_liver", "liver_1"),
+        "liver_3": find_latest_checkpoint("mouse_liver", "liver_3"),
     }
 }
 
 evaluations = [
-    ("mm10", "mESC", "E7.5_rep1"),
-    ("hg38", "Macrophage", "buffer_1"),
-    ("hg38", "Macrophage", "buffer_2"),
-    ("hg38", "K562", "sample_1"),
+    # ("mm10", "mESC", "E7.5_rep1"),
+    # ("hg38", "Macrophage", "buffer_1"),
+    # ("hg38", "Macrophage", "buffer_2"),
+    # ("hg38", "K562", "sample_1"),
     # ("hg38", "iPSC", "WT_D13_rep1"),
+    ("mm10", "mouse_liver", "liver_1"),
+    ("mm10", "mouse_liver", "liver_3"),
 ]
 
 cross_model_cell_type = "mESC"
@@ -597,11 +557,17 @@ for species, cell_type, sample_name in evaluations:
             common_cells=common_cells,
             max_precompute_peaks=8,
         )
+        
+        max_peaks_real = max(
+            len(tg_to_peak_info.get(tg_name, {}).get("peak_indices", []))
+            for tg_name in labeled_df["tg_id"]
+        )
+        
 
         # Build the compact TF-TG input dataset for the test set
         common_build_kwargs = dict(
-            max_peaks_per_tg=8,
-            max_cells_per_pair=16,
+            max_peaks_per_tg=None,
+            max_cells_per_pair=32,
             tg_to_peak_info=tg_to_peak_info,
             cell_to_idx=cell_to_idx,
             atac_mat=atac_mat,
@@ -610,6 +576,7 @@ for species, cell_type, sample_name in evaluations:
             common_cells=common_cells,
             tf_name_to_idx=tf_name_to_idx,
             tg_id_to_idx=tg_id_to_idx,
+            max_peaks_real=max_peaks_real
         )
 
         tftg_inputs_test = tf_tg_data_builder.build_tftg_inputs(
@@ -630,7 +597,7 @@ for species, cell_type, sample_name in evaluations:
         )
         
         # Create the dataset for the test set using the loaded inputs and lookup tensors
-        dataset = tftg_dataset_module.TFTGEdgeBagDataset(
+        dataset = TFTGEdgeBagDataset(
             tftg_inputs_test,
             tf_embeddings_tensor=tf_embeddings_tensor,
             tf_mask_tensor=tf_mask_tensor,
@@ -647,7 +614,7 @@ for species, cell_type, sample_name in evaluations:
             pin_memory=True,
             persistent_workers=(num_workers > 0),
             prefetch_factor=2 if num_workers > 0 else None,
-            collate_fn=tftg_dataset_module.collate_tftg_edge_bags,
+            collate_fn=collate_tftg_edge_bags,
         )
 
         tf_dna_model_chkpt = tf_dna_model_checkpoints[cell_type]
@@ -657,7 +624,7 @@ for species, cell_type, sample_name in evaluations:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
         # Load the TF→TG model
-        tf_tg_model = load_tf_tg_regulation_model(
+        tf_tg_model = utils.create_true_false_edgesload_tf_tg_regulation_model(
             tf_dna_model_chkpt, 
             tf_tg_model_chkpt, 
             tf_embeddings_tensor, 
@@ -668,16 +635,16 @@ for species, cell_type, sample_name in evaluations:
         
         prediction_df.to_csv(sample_full_grn_file, sep="\t", index=False)
         
-        cross_tf_tg_model = load_tf_tg_regulation_model(
-            tf_dna_model_chkpt,
-            cross_model_chkpt,
-            tf_embeddings_tensor,
-            tf_mask_tensor,
-        )
+        # cross_tf_tg_model = load_tf_tg_regulation_model(
+        #     tf_dna_model_chkpt,
+        #     cross_model_chkpt,
+        #     tf_embeddings_tensor,
+        #     tf_mask_tensor,
+        # )
         
-        cross_model_prediction_df = generate_model_predictions(cross_tf_tg_model.model, loader, device, tf_idx_to_name, tg_idx_to_name)
+        # cross_model_prediction_df = generate_model_predictions(cross_tf_tg_model.model, loader, device, tf_idx_to_name, tg_idx_to_name)
 
-        cross_model_prediction_df.to_csv(cross_tf_tg_df_file, sep="\t", index=False)
+        # cross_model_prediction_df.to_csv(cross_tf_tg_df_file, sep="\t", index=False)
         
     else:
         prediction_df = pd.read_csv(sample_full_grn_file, sep="\t", header=0)
@@ -712,7 +679,7 @@ for species, cell_type, sample_name in evaluations:
         
     # Add the TF-TG model predictions to the standardized_method_dfs for metric computation
     standardized_method_dfs["MTGRN-STM"] = prediction_df
-    standardized_method_dfs["MTGRN-CTM"] = cross_model_prediction_df
+    # standardized_method_dfs["MTGRN-CTM"] = cross_model_prediction_df
 
     auprc_all_method_dfs[sample_name] = {}
     
@@ -744,11 +711,13 @@ pickle.dump(auprc_all_method_dfs, open(RESULT_DIR / "auprc_all_method_dfs.pkl", 
 
 
 sample_to_title_map = {
-    "E7.5_rep1": "mESC",
-    "buffer_1": "Macr-1",
-    "buffer_2": "Macr-2",
+    # "E7.5_rep1": "mESC",
+    # "buffer_1": "Macr-1",
+    # "buffer_2": "Macr-2",
     # "WT_D13_rep1": "iPSC",
-    "sample_1": "K562"
+    # "sample_1": "K562",
+    "liver_1": "Liver-1",
+    "liver_3": "Liver-3",
 }
 
 method_color_dict = {
@@ -916,7 +885,7 @@ combined_fig.subplots_adjust(
 plt.show()
 
 combined_fig.savefig(
-    all_evaluation_plot_dir / "models_vs_own_test_set_prc.png",
+    all_evaluation_plot_dir / "liver_models_vs_own_test_set_prc.png",
     dpi=300,
     bbox_inches="tight",
 )
