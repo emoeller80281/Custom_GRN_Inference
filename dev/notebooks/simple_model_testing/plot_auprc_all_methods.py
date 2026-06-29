@@ -36,9 +36,8 @@ sys.path.append(str(PROJECT_DIR))
 
 import models.tf_to_tg as tf_to_tg_module
 import models.tf_to_dna as tf_to_dna_module
-from scripts.train_tf_to_tg_model import TFTGEdgeBagDataset, collate_tftg_edge_bags
-import plotting_utils
 import scripts.build_tf_to_tg_train_data as tf_tg_data_builder
+from scripts.train_tf_to_tg_model import TFTGEdgeBagDataset, collate_tftg_edge_bags
 import utils
 import config
 import warnings
@@ -88,7 +87,54 @@ def find_latest_checkpoint(cell_type, sample_name, training_number=None) -> Path
     logging.info(f"Latest checkpoint for {cell_type} {sample_name}: Job {slurm_job_id} Epoch {epoch}")
     return latest_chkpt_file
 
+def load_tf_tg_regulation_model(
+    tf_dna_model_path: Path, 
+    tf_tg_model_path: Path,
+    tf_embeddings_tensor: torch.Tensor,
+    tf_mask_tensor: torch.Tensor
+    ) -> tf_to_tg_module.TFTGRegulationModel:
+    
+    # 1) Recreate the base TF→DNA model with the same hyperparameters
+    base_model = tf_to_dna_module.TFPeakBindingModel(
+        tf_embedding_dim=128,
+        hidden_dim=128,
+        dropout=0.3,
+        num_layers=4,
+        num_heads=4,
+        dim_head=32,
+    )
 
+    # 2) Wrap in Lightning module and load checkpoint
+    lit_model = tf_to_dna_module.LitTFPeakBindingModel.load_from_checkpoint(
+        checkpoint_path=tf_dna_model_path,
+        model=base_model,
+        tf_embeddings_tensor=tf_embeddings_tensor,
+        tf_mask_tensor=tf_mask_tensor,
+        lr=1e-4,
+        weight_decay=1e-4,
+        pos_weight=None,
+    )
+
+    # 4) Get the trained TF-DNA model and freeze it
+    trained_tf_peak_model = lit_model.model
+    trained_tf_peak_model.eval()
+    for p in trained_tf_peak_model.parameters():
+        p.requires_grad = False
+
+    # 5) Create the TF-TG model object using the trained TF-DNA model, and load the trained model checkpoint
+    tf_tg_model = tf_to_tg_module.LitTFTGRegulationModel.load_from_checkpoint(
+        checkpoint_path=tf_tg_model_path,
+        model=tf_to_tg_module.TFTGRegulationModel(
+            pretrained_tf_peak_model=trained_tf_peak_model,
+            d_model=128,
+            tf_peak_chunk_size=256,
+        ),
+        lr=1e-4,
+        weight_decay=1e-4,
+        pos_weight=None,
+    )
+    
+    return tf_tg_model
 
 def generate_model_predictions(model, data_loader, device, tf_idx_to_name, tg_idx_to_name):
     pooling_mode = "lse"
@@ -371,35 +417,29 @@ def sample_auprc_10x_negatives(full_universe, random_state=42):
 mm10_tf_dna_path = CHKPT_DIR / "tf_dna_mm10_3671604" / "epoch=08-val_auroc=0.9177-val_loss=0.2783.ckpt"
 hg38_tf_dna_path = CHKPT_DIR / "tf_dna_hg38_3683606" / "epoch=13-val_auroc=0.9566-val_loss=0.2042.ckpt"
 
-tf_dna_model_checkpoints = {
-    "mESC": mm10_tf_dna_path,
-    "iPSC": hg38_tf_dna_path,
-    "Macrophage": hg38_tf_dna_path,
-    "K562": hg38_tf_dna_path
-}
-
 tf_tg_model_checkpoints = {
     "mESC": {
-        "E7.5_rep1": CHKPT_DIR / "mESC" / "E7.5_rep1" / "tf_tg_train_E7.5_rep1_3675131" / "epoch_11_best_model.ckpt",
-        "E7.5_rep2": find_latest_checkpoint("mESC", "E7.5_rep2"),
-        "E8.5_rep1": find_latest_checkpoint("mESC", "E8.5_rep1", training_number="3691937"),
-        "E8.5_rep2": find_latest_checkpoint("mESC", "E8.5_rep2"),
+        # "E7.5_rep1": CHKPT_DIR / "mESC" / "E7.5_rep1" / "tf_tg_train_E7.5_rep1_3675131" / "epoch_11_best_model.ckpt",
+        "E7.5_rep1": utils.find_latest_checkpoint(CHKPT_DIR, "mESC", "E7.5_rep1"),
+        "E7.5_rep2": utils.find_latest_checkpoint(CHKPT_DIR, "mESC", "E7.5_rep2"),
+        "E8.5_rep1": utils.find_latest_checkpoint(CHKPT_DIR, "mESC", "E8.5_rep1", training_number="3691937"),
+        "E8.5_rep2": utils.find_latest_checkpoint(CHKPT_DIR, "mESC", "E8.5_rep2"),
     },
     "iPSC": {
-        "WT_D13_rep1": find_latest_checkpoint("iPSC", "WT_D13_rep1"),
+        "WT_D13_rep1": utils.find_latest_checkpoint(CHKPT_DIR, "iPSC", "WT_D13_rep1"),
     },
     "Macrophage": {
-        "buffer_1": find_latest_checkpoint("Macrophage", "buffer_1", training_number="3685893"),
-        "buffer_2": find_latest_checkpoint("Macrophage", "buffer_2"),
-        "buffer_3": find_latest_checkpoint("Macrophage", "buffer_3"),
-        "buffer_4": find_latest_checkpoint("Macrophage", "buffer_4"),
+        "buffer_1": utils.find_latest_checkpoint(CHKPT_DIR, "Macrophage", "buffer_1", training_number="3685893"),
+        "buffer_2": utils.find_latest_checkpoint(CHKPT_DIR, "Macrophage", "buffer_2"),
+        "buffer_3": utils.find_latest_checkpoint(CHKPT_DIR, "Macrophage", "buffer_3"),
+        "buffer_4": utils.find_latest_checkpoint(CHKPT_DIR, "Macrophage", "buffer_4"),
     },
     "K562": {
-        "sample_1": find_latest_checkpoint("K562", "sample_1"),
+        "sample_1": utils.find_latest_checkpoint(CHKPT_DIR, "K562", "sample_1"),
     },
-    "mouse_liver": {
-        "liver_1": find_latest_checkpoint("mouse_liver", "liver_1"),
-        "liver_3": find_latest_checkpoint("mouse_liver", "liver_3"),
+    "mouse_hepatocytes": {
+        "hepatocytes_1": utils.find_latest_checkpoint(CHKPT_DIR, "mouse_hepatocytes", "hepatocytes_1"),
+        "hepatocytes_3": utils.find_latest_checkpoint(CHKPT_DIR, "mouse_hepatocytes", "hepatocytes_3")
     }
 }
 
@@ -407,11 +447,13 @@ evaluations = [
     # ("mm10", "mESC", "E7.5_rep1"),
     # ("hg38", "Macrophage", "buffer_1"),
     # ("hg38", "Macrophage", "buffer_2"),
+    # ("hg38", "Macrophage", "buffer_3"),
     # ("hg38", "K562", "sample_1"),
     # ("hg38", "iPSC", "WT_D13_rep1"),
-    ("mm10", "mouse_liver", "liver_1"),
-    ("mm10", "mouse_liver", "liver_3"),
+    ("mm10", "mouse_hepatocytes", "hepatocytes_1"),
+    ("mm10", "mouse_hepatocytes", "hepatocytes_3"),
 ]
+force_reload = True
 
 cross_model_cell_type = "mESC"
 cross_model_sample_name = "E8.5_rep1"
@@ -430,7 +472,6 @@ for species, cell_type, sample_name in evaluations:
     genome_fasta_path = project_data_dir / "genome_data" / "reference_genome" / f"{species}" / f"{species}.fa"
     chrom_sizes_path = project_data_dir / "genome_data" / "reference_genome" / f"{species}" / f"{species}.chrom.sizes"
     chrom_sizes_path = project_data_dir / "genome_data" / "reference_genome" / f"{species}" / f"{species}.chrom.sizes"
-
 
     if species == "mm10":
         train_chroms = [str(i) for i in range(1, 16)]
@@ -466,6 +507,47 @@ for species, cell_type, sample_name in evaluations:
     # Load the merged ground truth
     cell_type_cache_dir = DATA_DIR / f"{cell_type}_cache"
     merged_ground_truth_df = pd.read_parquet(cell_type_cache_dir / f"{cell_type}_merged_ground_truth.parquet")
+    
+    gt_tfs_in_rna = set(merged_ground_truth_df["Source"]).intersection(rna_pseudobulk_norm.index)
+    gt_tgs_in_rna = set(merged_ground_truth_df["Target"]).intersection(rna_pseudobulk_norm.index)
+    logging.info(f"Ground truth TFs in RNA pseudobulk: {len(gt_tfs_in_rna)} (Example: {list(gt_tfs_in_rna)[:5]})")
+    logging.info(f"Ground truth TGs in RNA pseudobulk: {len(gt_tgs_in_rna)} (Example: {list(gt_tgs_in_rna)[:5]})")
+    
+    n_before_rna_filter = len(merged_ground_truth_df)
+
+    # Subset the ground truth to only TFs and TGs present in the rna_pseudobulk 
+    merged_ground_truth_df = merged_ground_truth_df[
+        merged_ground_truth_df["Source"].isin(gt_tfs_in_rna) &
+        merged_ground_truth_df["Target"].isin(gt_tgs_in_rna)
+    ].copy()
+    
+    logging.info(
+        f"Ground truth edges after RNA TF/TG filtering: "
+        f"{len(merged_ground_truth_df):,} / {n_before_rna_filter:,}"
+    )
+
+    tf_name_to_idx_cache_path = cell_type_cache_dir / "tf_name_to_idx.csv"
+
+    # Get the map of TF name to index
+    tf_name_to_idx = pd.read_csv(tf_name_to_idx_cache_path)
+    tf_name_to_idx["tf_name"] = tf_name_to_idx["tf_name"].str.upper()
+    tf_name_to_idx = tf_name_to_idx.set_index("tf_name")["tf_idx"].to_dict()
+    
+    # Only keep ground truth TFs that have embeddings (i.e. were present in the TF-DNA model training data)
+    gt_tfs_in_embeddings = set(tf_name_to_idx.keys()).intersection(gt_tfs_in_rna)
+    logging.info(f"Ground truth TFs with embeddings: {len(gt_tfs_in_embeddings)} (Example: {list(gt_tfs_in_embeddings)[:5]})")
+    
+    n_before_tf_embedding_filter = len(merged_ground_truth_df)
+
+    merged_ground_truth_df = merged_ground_truth_df[
+        merged_ground_truth_df["Source"].isin(gt_tfs_in_embeddings)
+    ].copy()
+
+    logging.info(
+        f"Ground truth edges after filtering to TFs with embeddings: "
+        f"{len(merged_ground_truth_df):,} / {n_before_tf_embedding_filter:,}"
+    )
+
 
     # Split genes into train/val/test based on chromosome
     train_genes, val_genes, test_genes = tf_tg_data_builder.split_genes_by_chromosome(
@@ -481,6 +563,11 @@ for species, cell_type, sample_name in evaluations:
     )
     gt_test_df["Source"] = gt_test_df["Source"].astype(str).str.upper()
     gt_test_df["Target"] = gt_test_df["Target"].astype(str).str.upper()
+    
+    logging.info(f"After subsetting to TFs with embeddings and TGs in RNA pseudobulk:")
+    logging.info(f"  - Train interactions: {len(gt_train_df)} (TFs: {gt_train_df['Source'].nunique()}, TGs: {gt_train_df['Target'].nunique()})")
+    logging.info(f"  - Val interactions: {len(gt_val_df)} (TFs: {gt_val_df['Source'].nunique()}, TGs: {gt_val_df['Target'].nunique()})")
+    logging.info(f"  - Test interactions: {len(gt_test_df)} (TFs: {gt_test_df['Source'].nunique()}, TGs: {gt_test_df['Target'].nunique()})")
 
     # Build TF, TG, and edge sets for quick lookup later
     gt_test_df = gt_test_df[["Source", "Target"]].dropna()
@@ -489,7 +576,6 @@ for species, cell_type, sample_name in evaluations:
     gt_pairs = (gt_test_df["Source"] + "\t" + gt_test_df["Target"]).drop_duplicates()
     
     gt_lookup = (gt_tfs, gt_tgs, set(gt_pairs))
-    
     
     sample_full_grn_dir = RESULT_DIR / "full_test_grns" / cell_type / sample_name
     sample_full_grn_dir.mkdir(parents=True, exist_ok=True)
@@ -511,7 +597,7 @@ for species, cell_type, sample_name in evaluations:
     true_df = full_universe[full_universe["_in_gt"] == 1]
     false_df = full_universe[full_universe["_in_gt"] == 0]
     
-    if not sample_full_grn_file.exists() and not cross_tf_tg_df_file.exists():
+    if not sample_full_grn_file.exists() and not cross_tf_tg_df_file.exists() or force_reload == True:
         true_interactions = zip(true_df["Source"], true_df["Target"])
         false_interactions = zip(false_df["Source"], false_df["Target"])
 
@@ -548,6 +634,7 @@ for species, cell_type, sample_name in evaluations:
         )
         atac_peak_tensor = torch.as_tensor(atac_peak_array, dtype=torch.uint8).float()
 
+        # Prepare the lookup tables needed to build the TF-TG input dataset for the test set
         tg_to_peak_info, cell_to_idx, atac_mat, rna_mat, gene_to_rna_idx = tf_tg_data_builder.prepare_tftg_lookup_tables(
             peak_to_gene=peak_to_gene,
             atac_peak_map=atac_peak_map,
@@ -558,16 +645,17 @@ for species, cell_type, sample_name in evaluations:
             max_precompute_peaks=8,
         )
         
+        
+        # Get the max number of peaks within 100Kb of any TG in the test set
         max_peaks_real = max(
             len(tg_to_peak_info.get(tg_name, {}).get("peak_indices", []))
             for tg_name in labeled_df["tg_id"]
         )
-        
 
         # Build the compact TF-TG input dataset for the test set
         common_build_kwargs = dict(
-            max_peaks_per_tg=None,
-            max_cells_per_pair=32,
+            max_peaks_per_tg=8,
+            max_cells_per_pair=16,
             tg_to_peak_info=tg_to_peak_info,
             cell_to_idx=cell_to_idx,
             atac_mat=atac_mat,
@@ -576,7 +664,7 @@ for species, cell_type, sample_name in evaluations:
             common_cells=common_cells,
             tf_name_to_idx=tf_name_to_idx,
             tg_id_to_idx=tg_id_to_idx,
-            max_peaks_real=max_peaks_real
+            max_peaks_real=max_peaks_real,
         )
 
         tftg_inputs_test = tf_tg_data_builder.build_tftg_inputs(
@@ -617,20 +705,21 @@ for species, cell_type, sample_name in evaluations:
             collate_fn=collate_tftg_edge_bags,
         )
 
-        tf_dna_model_chkpt = tf_dna_model_checkpoints[cell_type]
+        tf_dna_model_chkpt = config.tf_dna_model_checkpoints[cell_type]
         tf_tg_model_chkpt = tf_tg_model_checkpoints[cell_type][sample_name]
 
         # Generate the model predictions for the test set and create a DataFrame with TF names, TG names, and predicted scores
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
         # Load the TF→TG model
-        tf_tg_model = utils.create_true_false_edgesload_tf_tg_regulation_model(
+        tf_tg_model = utils.load_tf_tg_regulation_model(
             tf_dna_model_chkpt, 
             tf_tg_model_chkpt, 
             tf_embeddings_tensor, 
             tf_mask_tensor
             )
         
+        # Run the model on the test set and generate the predictions DataFrame
         prediction_df = generate_model_predictions(tf_tg_model.model, loader, device, tf_idx_to_name, tg_idx_to_name)
         
         prediction_df.to_csv(sample_full_grn_file, sep="\t", index=False)
@@ -648,7 +737,7 @@ for species, cell_type, sample_name in evaluations:
         
     else:
         prediction_df = pd.read_csv(sample_full_grn_file, sep="\t", header=0)
-        cross_model_prediction_df = pd.read_csv(cross_tf_tg_df_file, sep="\t", header=0)
+        # cross_model_prediction_df = pd.read_csv(cross_tf_tg_df_file, sep="\t", header=0)
 
     OTHER_METHOD_MUON_DIR = Path("/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/other_method_grns")
 
@@ -675,6 +764,8 @@ for species, cell_type, sample_name in evaluations:
         mask = df_std["Source"].isin(gt_tfs) & df_std["Target"].isin(gt_tgs)
         df_filtered: pd.DataFrame = df_std.loc[mask]
         
+        df_filtered["Score"] = np.abs(df_filtered["Score"])
+        
         standardized_method_dfs[method_name] = df_filtered
         
     # Add the TF-TG model predictions to the standardized_method_dfs for metric computation
@@ -684,6 +775,9 @@ for species, cell_type, sample_name in evaluations:
     auprc_all_method_dfs[sample_name] = {}
     
     full_universe_10x_negatives = sample_auprc_10x_negatives(full_universe, random_state=42)
+    
+    labeled_grn_dir = RESULT_DIR / "labeled_auprc_grns" / cell_type / sample_name
+    labeled_grn_dir.mkdir(parents=True, exist_ok=True)
     
     # Compute metrics for each method and print results
     for method_name, df_std in standardized_method_dfs.items():
@@ -705,19 +799,23 @@ for species, cell_type, sample_name in evaluations:
         auprc_df["Score"] = auprc_df["Score"].fillna(0)
         
         auprc_all_method_dfs[sample_name][method_name] = auprc_df
+        
+        auprc_df.to_csv(labeled_grn_dir / f"{method_name.lower().replace('+','')}.tsv", sep="\t", index=False)
 
 import pickle
 pickle.dump(auprc_all_method_dfs, open(RESULT_DIR / "auprc_all_method_dfs.pkl", "wb"))
 
+import plotting_utils
 
 sample_to_title_map = {
     # "E7.5_rep1": "mESC",
     # "buffer_1": "Macr-1",
     # "buffer_2": "Macr-2",
+    # "buffer_3": "Macr-3",
     # "WT_D13_rep1": "iPSC",
-    # "sample_1": "K562",
+    # "sample_1": "K562"
     "liver_1": "Liver-1",
-    "liver_3": "Liver-3",
+    "liver_3": "Liver-3"
 }
 
 method_color_dict = {
@@ -734,7 +832,7 @@ method_color_dict = {
 combined_fig, combined_axes = plt.subplots(
     nrows=1,
     ncols=len(sample_to_title_map),
-    figsize=(16, 5),
+    figsize=(9, 8),
     sharex=True,
     sharey=True,
     squeeze=False,
@@ -742,11 +840,16 @@ combined_fig, combined_axes = plt.subplots(
 
 combined_axes = np.array(combined_axes, ndmin=1).ravel()
 
+cell_type_method_auroc = {}
 for i, sample_name in enumerate(sample_to_title_map.keys()):
     
     ax = combined_axes[i]
     
+    ax.set_box_aspect(1)
+    
     auprc_text_lines = []
+    
+    cell_type_method_auroc[sample_name] = {}
     
     for method in auprc_all_method_dfs[sample_name].keys():
         
@@ -754,9 +857,17 @@ for i, sample_name in enumerate(sample_to_title_map.keys()):
 
         y_auprc = auprc_df["_in_gt"].astype(int).to_numpy()
         s_auprc = auprc_df["Score"].astype(float).to_numpy()
+        
+        print(f"\nSample: {sample_name} | Method: {method}")
+        print(f"  - TFs: {auprc_df['Source'].nunique()}")
+        print(f"  - TGs: {auprc_df['Target'].nunique()}")
+        print(f"  - Edges: {len(auprc_df)}")
+        print(f"     - Positives: {(y_auprc == 1).sum()} | Negatives: {(y_auprc == 0).sum()}")
 
         auprc = average_precision_score(y_auprc, s_auprc)
         prec, rec, _ = precision_recall_curve(y_auprc, s_auprc)
+        
+        cell_type_method_auroc[sample_name][method] = auprc
         
         rand_scores = plotting_utils._create_random_distribution(s_auprc)
         rand_prec, rand_rec, _ = precision_recall_curve(y_auprc, rand_scores)
@@ -769,27 +880,49 @@ for i, sample_name in enumerate(sample_to_title_map.keys()):
             line_weight = 2
         else:
             line_weight = 1
-
-        ax.plot(
+            
+        ax.step(
             rec,
             prec,
+            where="post",
             lw=line_weight,
             color=method_color,
-            label=f"",
+            label="",
             zorder=3,
         )
         
-        
-        ax.plot(
+        ax.step(
             rand_rec,
             rand_prec,
+            where="post",
             lw=1,
             linestyle="--",
             color=method_color,
             label="",
             zorder=3,
-            alpha=0.75
+            alpha=0.75,
         )
+
+        # ax.plot(
+        #     rec,
+        #     prec,
+        #     lw=line_weight,
+        #     color=method_color,
+        #     label=f"",
+        #     zorder=3,
+        # )
+        
+        
+        # ax.plot(
+        #     rand_rec,
+        #     rand_prec,
+        #     lw=1,
+        #     linestyle="--",
+        #     color=method_color,
+        #     label="",
+        #     zorder=3,
+        #     alpha=0.75
+        # )
         
     auprc_text_lines_sorted = sorted(
         auprc_text_lines,
@@ -846,16 +979,16 @@ for i, sample_name in enumerate(sample_to_title_map.keys()):
         child=packed_legend,
         pad=0.0,
         frameon=False,
-        bbox_to_anchor=(0.5, -0.45),
+        bbox_to_anchor=(0.5, -0.35),
         bbox_transform=ax.transAxes,
         borderpad=0.4,
     )
 
     ax.add_artist(anchored_text)
 
-    ax.tick_params(bottom=False, left=False)
-    ax.set_xticklabels([])
-    ax.set_yticklabels([])
+    # ax.tick_params(bottom=False, left=False)
+    # ax.set_xticklabels([])
+    # ax.set_yticklabels([])
 
 combined_fig.text(
     0.5,
@@ -875,7 +1008,7 @@ combined_fig.text(
 )
 
 combined_fig.subplots_adjust(
-    left=0.01,
+    left=0.03,
     right=0.99,
     bottom=0.40,
     top=0.82,
@@ -885,7 +1018,8 @@ combined_fig.subplots_adjust(
 plt.show()
 
 combined_fig.savefig(
-    all_evaluation_plot_dir / "liver_models_vs_own_test_set_prc.png",
+    all_evaluation_plot_dir / "models_vs_own_test_set_prc.png",
     dpi=300,
     bbox_inches="tight",
 )
+

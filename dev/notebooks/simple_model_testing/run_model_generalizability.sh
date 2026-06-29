@@ -1,14 +1,14 @@
 #!/bin/bash -l
-#SBATCH --job-name=all_methods_auroc_auprc
-#SBATCH --output=LOGS/all_methods_auroc_auprc/%x_%j.log
-#SBATCH --error=LOGS/all_methods_auroc_auprc/%x_%j.err
+#SBATCH --job-name=model_generalizability
+#SBATCH --output=LOGS/model_performance/%x_%j.log
+#SBATCH --error=LOGS/model_performance/%x_%j.err
 #SBATCH --time=72:00:00
 #SBATCH -p dense
 #SBATCH -N 1
 #SBATCH --gres=gpu:v100:1
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 8
-#SBATCH --mem=128G
+#SBATCH --mem=64G
 #SBATCH --signal=SIGUSR1@90
 
 set -eo pipefail
@@ -63,7 +63,7 @@ echo ""
 # ---------- torchrun multi-node launch ----------
 # Pick the first node as rendezvous/master
 MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
-MASTER_PORT=29500
+MASTER_PORT=$((20000 + SLURM_JOB_ID % 20000))
 export MASTER_ADDR MASTER_PORT
 
 echo "[INFO] MASTER_ADDR=${MASTER_ADDR}, MASTER_PORT=${MASTER_PORT}"
@@ -83,9 +83,5 @@ echo "[INFO] Using nproc_per_node=$NPROC_PER_NODE based on GPUs per node"
 export NCCL_DEBUG=INFO
 export PYTHONFAULTHANDLER=1
 
-echo "[INFO] Starting training..."
-torchrun \
-  --standalone \
-  --nnodes=1 \
-  --nproc_per_node=1 \
-  ${PROJECT_DIR}/plot_auroc_auprc_all_methods.py
+echo "[INFO] Running model generalizability test..."
+srun python3 ${PROJECT_DIR}/model_generalizability.py

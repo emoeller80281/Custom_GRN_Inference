@@ -59,6 +59,7 @@ def run_prediction_vs_test_set(
     show_progress_bar: bool = True
     ):
     
+    
     tf_tg_model_chkpt = tf_tg_model_checkpoints[model_cell_type][model_training_sample]
     tf_dna_model_chkpt = config.tf_dna_model_checkpoints[model_cell_type]
     
@@ -152,7 +153,23 @@ def run_prediction_vs_test_set(
 
     metric_df = pd.DataFrame([metrics])
 
-    col_order = ["Model", "Test Set", "auroc", "auprc", "accuracy", "precision", "recall", "f1", "rand_auroc", "rand_auprc"]
+    col_order = [
+        "Model", 
+        "Test Set", 
+        "auroc", 
+        "auprc", 
+        "accuracy", 
+        "precision", 
+        "early_precision", 
+        "recall", 
+        "f1", 
+        "rand_auroc", 
+        "rand_auprc",
+        "n_edges",
+        "n_pos",
+        "n_neg",
+        "score_threshold"
+        ]
 
     metric_df = metric_df[col_order]
     
@@ -215,6 +232,7 @@ if __name__ == "__main__":
     # Check if intermediate results exist and load them
     intermediate_results_path = evaluation_cache / "intermediate_results.pkl"
     if intermediate_results_path.exists():
+        logging.info(f"Loading intermediate results from {intermediate_results_path}")
         with open(intermediate_results_path, "rb") as f:
             intermediate_results = pickle.load(f)
             all_comparison_df_list = intermediate_results["all_comparison_df_list"]

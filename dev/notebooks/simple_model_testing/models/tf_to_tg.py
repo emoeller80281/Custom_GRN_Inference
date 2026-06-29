@@ -603,13 +603,14 @@ class LitTFTGRegulationModel(pl.LightningModule):
             return
 
         try:
-            p_np = probs.detach().cpu().numpy()
-            y_np = targets.detach().cpu().numpy()
+            if len(np.unique(targets)) < 2:
+                return
 
-            pre, rec, _ = precision_recall_curve(y_np, p_np)
-            fpr, tpr, _ = roc_curve(y_np, p_np)
+            pre, rec, _ = precision_recall_curve(targets, probs)
+            fpr, tpr, _ = roc_curve(targets, probs)
 
             def _sample_curve(x, y, n=100):
+                
                 if len(x) <= n:
                     return x, y
                 idx = np.linspace(0, len(x) - 1, n).astype(int)
