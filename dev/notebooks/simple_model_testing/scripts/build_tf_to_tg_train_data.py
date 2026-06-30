@@ -697,9 +697,7 @@ def main():
     tf_mask_tensor = torch.load(tf_mask_cache_path, weights_only=True)
 
     # Create or load cached one-hot encodings for ATAC peaks
-    # One-hot encodings use ACGT order and uses 'flank_size' bp upstream and downstream of the peak center.
-    dataset_peaks = list(atac_peak_map.keys())
-    
+    # One-hot encodings use ACGT order and uses 'flank_size' bp upstream and downstream of the peak center.    
     if os.path.exists(atac_peak_onehot_cache_path) and not args.force_reload:
         atac_peak_tensor = torch.load(atac_peak_onehot_cache_path, weights_only=True)
         
