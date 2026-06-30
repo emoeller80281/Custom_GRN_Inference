@@ -14,7 +14,7 @@ CHKPT_DIR = PROJECT_DIR / "checkpoints"
 
 species = "hg38"
 cell_type="Macrophage"
-sample_name="buffer_1"
+sample_name="buffer_2"
 
 # species = "mm10"
 # cell_type="mESC"

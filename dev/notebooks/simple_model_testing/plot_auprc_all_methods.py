@@ -814,8 +814,10 @@ sample_to_title_map = {
     # "buffer_3": "Macr-3",
     # "WT_D13_rep1": "iPSC",
     # "sample_1": "K562"
-    "liver_1": "Liver-1",
-    "liver_3": "Liver-3"
+    # "liver_1": "Liver-1",
+    # "liver_3": "Liver-3"
+    "hepatocytes_1": "Hepatocytes-1",
+    "hepatocytes_3": "Hepatocytes-3"
 }
 
 method_color_dict = {

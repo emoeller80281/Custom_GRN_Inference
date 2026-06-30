@@ -149,7 +149,7 @@ def run_prediction_vs_test_set(
     with torch.inference_mode():
         for batch in tqdm(data_loader, desc="Evaluating", ncols=100, disable=not show_progress_bar):
             # set batch peak_distance values to zero to eliminate distance information from predictions
-            batch["peak_distance"] = torch.zeros_like(batch["peak_distance"])
+            # batch["peak_distance"] = torch.zeros_like(batch["peak_distance"])
             
             batch = tf_to_tg_module.move_batch_to_device(batch, device)
 
