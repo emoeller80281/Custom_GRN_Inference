@@ -586,14 +586,18 @@ def get_reference_paths_and_chroms(species: str):
 
 
 def tf_dna_checkpoint_for_cell_type(cell_type: str):
-    mm10_tf_dna_path = CHKPT_DIR / "tf_dna_mm10_3671604" / "epoch=08-val_auroc=0.9177-val_loss=0.2783.ckpt"
+    mm10_tf_dna_path = CHKPT_DIR / "tf_dna_mm10_3697823" / "epoch=07-val_auroc=0.9743-val_loss=0.1661.ckpt"
     hg38_tf_dna_path = CHKPT_DIR / "tf_dna_hg38_3683606" / "epoch=13-val_auroc=0.9566-val_loss=0.2042.ckpt"
+
     tf_dna_model_checkpoints = {
         "mESC": mm10_tf_dna_path,
+        "mouse_liver": mm10_tf_dna_path,
+        "mouse_hepatocytes": mm10_tf_dna_path,
         "iPSC": hg38_tf_dna_path,
         "Macrophage": hg38_tf_dna_path,
-        "K562": hg38_tf_dna_path,
+        "K562": hg38_tf_dna_path
     }
+
     return tf_dna_model_checkpoints[cell_type]
 
 
@@ -649,9 +653,7 @@ def build_and_save_training_cache(args, paths):
         ].copy()
         logging.info(f"Ground truth edges after RNA TF/TG filtering: {len(merged_ground_truth_df):,} / {n_before_rna_filter:,}")
 
-        tf_name_to_idx = pd.read_csv(config.tf_name_to_idx_cache_path)
-        tf_name_to_idx["tf_name"] = tf_name_to_idx["tf_name"].str.upper()
-        tf_name_to_idx = tf_name_to_idx.set_index("tf_name")["tf_idx"].to_dict()
+        tf_embeddings_tensor, tf_mask_tensor, tf_name_to_idx = load_tf_embedding_resources(paths)
 
         gt_tfs_in_embeddings = set(tf_name_to_idx.keys()).intersection(gt_tfs_in_rna)
         n_before_tf_embedding_filter = len(merged_ground_truth_df)
@@ -782,6 +784,104 @@ def build_and_save_training_cache(args, paths):
         paths["failed"].write_text(repr(exc))
         raise
 
+def validate_tf_name_to_idx(
+    *,
+    tf_name_to_idx,
+    tf_embeddings_tensor,
+    tf_mask_tensor,
+    source,
+):
+    n_tf_embeddings = tf_embeddings_tensor.shape[0]
+    n_tf_masks = tf_mask_tensor.shape[0]
+
+    if n_tf_embeddings != n_tf_masks:
+        raise ValueError(
+            f"TF embedding/mask row mismatch from {source}: "
+            f"tf_embeddings={tuple(tf_embeddings_tensor.shape)}, "
+            f"tf_masks={tuple(tf_mask_tensor.shape)}"
+        )
+
+    if not tf_name_to_idx:
+        raise ValueError(f"Empty tf_name_to_idx loaded from {source}")
+
+    min_idx = min(tf_name_to_idx.values())
+    max_idx = max(tf_name_to_idx.values())
+
+    if min_idx < 0 or max_idx >= n_tf_embeddings:
+        bad = {
+            tf: idx
+            for tf, idx in tf_name_to_idx.items()
+            if idx < 0 or idx >= n_tf_embeddings
+        }
+
+        raise ValueError(
+            f"Incompatible tf_name_to_idx and tf_embeddings_tensor from {source}. "
+            f"Valid TF embedding rows are 0-{n_tf_embeddings - 1}, "
+            f"but map has min={min_idx}, max={max_idx}. "
+            f"Example invalid entries: {list(bad.items())[:20]}"
+        )
+
+def load_tf_embedding_resources(paths):
+    """
+    Load TF embeddings, masks, and the matching tf_name_to_idx map.
+
+    Critical: tf_name_to_idx values must index rows of tf_embeddings_tensor.
+    """
+    tf_embeddings_tensor = torch.load(
+        paths["cell_type_cache_dir"] / "tf_embeddings.pt",
+        map_location="cpu",
+        weights_only=True,
+    )
+    tf_mask_tensor = torch.load(
+        paths["cell_type_cache_dir"] / "tf_masks.pt",
+        map_location="cpu",
+        weights_only=True,
+    )
+
+    # Prefer a cell-type-specific TF index map if present.
+    tf_idx_csv = paths["cell_type_cache_dir"] / "tf_name_to_idx.csv"
+    tf_idx_json = paths["cell_type_cache_dir"] / "tf_name_to_idx.json"
+    metadata_json = paths["cell_type_cache_dir"] / "metadata.json"
+
+    if tf_idx_csv.exists():
+        tf_name_to_idx_df = pd.read_csv(tf_idx_csv)
+        tf_name_to_idx_df["tf_name"] = tf_name_to_idx_df["tf_name"].str.upper()
+        tf_name_to_idx = (
+            tf_name_to_idx_df
+            .set_index("tf_name")["tf_idx"]
+            .astype(int)
+            .to_dict()
+        )
+
+    elif tf_idx_json.exists():
+        with open(tf_idx_json) as f:
+            tf_name_to_idx = json.load(f)
+        tf_name_to_idx = {str(k).upper(): int(v) for k, v in tf_name_to_idx.items()}
+
+    elif metadata_json.exists():
+        with open(metadata_json) as f:
+            metadata = json.load(f)
+        tf_name_to_idx = {
+            str(k).upper(): int(v)
+            for k, v in metadata["tf_name_to_idx"].items()
+        }
+
+    else:
+        raise FileNotFoundError(
+            f"No TF index map found in {paths['cell_type_cache_dir']}. "
+            "Expected one of: tf_name_to_idx.csv, tf_name_to_idx.json, metadata.json. "
+            "Do not use config.tf_name_to_idx_cache_path unless it was generated with "
+            "this exact tf_embeddings.pt tensor."
+        )
+
+    validate_tf_name_to_idx(
+        tf_name_to_idx=tf_name_to_idx,
+        tf_embeddings_tensor=tf_embeddings_tensor,
+        tf_mask_tensor=tf_mask_tensor,
+        source=str(paths["cell_type_cache_dir"]),
+    )
+
+    return tf_embeddings_tensor, tf_mask_tensor, tf_name_to_idx
 
 def load_training_cache(paths):
     wait_for_cache(paths, poll_seconds=1, timeout_seconds=None)
@@ -789,9 +889,16 @@ def load_training_cache(paths):
     tftg_inputs_val = torch.load(paths["val"], map_location="cpu", weights_only=False)
     tftg_inputs_test = torch.load(paths["test"], map_location="cpu", weights_only=False)
     atac_peak_tensor = torch.load(paths["atac_peak_tensor"], map_location="cpu", weights_only=True)
-    tf_embeddings_tensor = torch.load(paths["cell_type_cache_dir"] / "tf_embeddings.pt", map_location="cpu", weights_only=True)
-    tf_mask_tensor = torch.load(paths["cell_type_cache_dir"] / "tf_masks.pt", map_location="cpu", weights_only=True)
-    return tftg_inputs_train, tftg_inputs_val, tftg_inputs_test, atac_peak_tensor, tf_embeddings_tensor, tf_mask_tensor
+    tf_embeddings_tensor, tf_mask_tensor, _ = load_tf_embedding_resources(paths)
+
+    return (
+        tftg_inputs_train,
+        tftg_inputs_val,
+        tftg_inputs_test,
+        atac_peak_tensor,
+        tf_embeddings_tensor,
+        tf_mask_tensor,
+    )
 
 
 def make_dataloader(dataset, *, batch_size, shuffle, num_workers, prefetch_factor):
