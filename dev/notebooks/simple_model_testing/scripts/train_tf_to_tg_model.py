@@ -402,10 +402,6 @@ if __name__ == "__main__":
     parser.add_argument("--force_reload", action="store_true", help="Whether to force reload cached data instead of using existing cache files")
     args = parser.parse_args()
 
-    gene_ref_file = DATA_DIR / "genome_data" / "genome_annotation" / "mm10" / "Mus_musculus.GRCm39.115.gtf.gz"
-    genome_fasta_path = DATA_DIR / "genome_data" / "reference_genome" / "mm10" / "mm10.fa"
-    chrom_sizes_path = DATA_DIR / "genome_data" / "reference_genome" / "mm10" / "mm10.chrom.sizes"
-    
     epochs = args.epochs
     num_gpus = args.num_gpus
     num_nodes = args.num_nodes
