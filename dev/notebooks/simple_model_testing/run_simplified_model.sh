@@ -1,15 +1,16 @@
 #!/bin/bash -l
-#SBATCH --job-name=tf_tg_model
-#SBATCH --output=LOGS/tf_tg_model/%x_%j.log
-#SBATCH --error=LOGS/tf_tg_model/%x_%j.err
+#SBATCH --job-name=tf_tg_model_simplified
+#SBATCH --output=LOGS/tf_tg_model_simplified/%x_%A_%a.log
+#SBATCH --error=LOGS/tf_tg_model_simplified/%x_%A_%a.err
 #SBATCH --time=72:00:00
 #SBATCH -p dense
 #SBATCH -N 1
-#SBATCH --gres=gpu:v100:4
-#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:v100:1
+#SBATCH --ntasks-per-node=1
 #SBATCH -c 8
 #SBATCH --mem=64G
 #SBATCH --signal=SIGUSR1@90
+#SBATCH --array=0-1%2
 
 set -eo pipefail
 
@@ -83,26 +84,57 @@ echo "[INFO] Using nproc_per_node=$NPROC_PER_NODE based on GPUs per node"
 export NCCL_DEBUG=INFO
 export PYTHONFAULTHANDLER=1
 
-species="hg38"
-cell_type="Macrophage"
-sample_name="buffer_1"
+EXPERIMENT_LIST=(
+    "mm10|mouse_hepatocytes|hepatocytes_1"
+    "mm10|mouse_hepatocytes|hepatocytes_3"
 
-max_cells_per_pair=24
+    "hg38|Macrophage|buffer_1"
+    "hg38|Macrophage|buffer_2"
+
+    "mm10|mESC|E7.5_rep1"
+    "mm10|mESC|E8.5_rep1"
+
+    "hg38|K562|sample_1"
+)
+
+# ==========================================
+#        EXPERIMENT SELECTION
+# ==========================================
+# Get the current experiment based on SLURM_ARRAY_TASK_ID
+TASK_ID=${SLURM_ARRAY_TASK_ID:-0}
+
+if [ ${TASK_ID} -ge ${#EXPERIMENT_LIST[@]} ]; then
+    echo "ERROR: SLURM_ARRAY_TASK_ID (${TASK_ID}) exceeds number of experiments (${#EXPERIMENT_LIST[@]})"
+    exit 1
+fi
+
+EXPERIMENT_CONFIG="${EXPERIMENT_LIST[$TASK_ID]}"
+
+# Parse experiment configuration
+IFS='|' read -r species cell_type sample_name <<< "$EXPERIMENT_CONFIG"
+
+echo "[INFO] Running experiment with species=$species, cell_type=$cell_type, sample_name=$sample_name"
+
 max_peaks_per_tg=25
+max_cells_per_pair=24
 peak_flank_size=128
-pct_true_edges=1.0
-true_false_ratio=10.0
+pct_true_edges=0.25
+true_false_ratio=2.0
 
 echo "[INFO] Starting training..."
-srun python3 ${PROJECT_DIR}/test_simplified_model.py \
+srun python3 ${PROJECT_DIR}/test_simplified_model_multigpu_safe.py \
     --epochs 250 \
+    --species $species \
+    --cell_type $cell_type \
+    --sample_name $sample_name \
     --num_gpus $NPROC_PER_NODE \
     --num_nodes $SLURM_JOB_NUM_NODES \
-    --job_id ${SLURM_JOB_ID} \
-    --max_cells_per_pair $max_cells_per_pair \
+    --job_id ${SLURM_JOB_ID}_${TASK_ID} \
     --max_peaks_per_tg $max_peaks_per_tg \
+    --max_cells_per_pair $max_cells_per_pair \
     --peak_flank_size $peak_flank_size \
     --pct_true_edges $pct_true_edges \
     --true_false_ratio $true_false_ratio \
-    --batch_size 8 \
-    --max_peaks_per_tg $max_peaks_per_tg
+    --batch_size 32 \
+    --force_reload
+    
