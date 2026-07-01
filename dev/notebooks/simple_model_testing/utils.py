@@ -1001,40 +1001,57 @@ def find_latest_checkpoint(
     
     return latest_chkpt_file
 
+def strip_compiled_prefix_from_state_dict(state_dict, prefix="_orig_mod."):
+    """
+    Remove torch.compile's _orig_mod prefix from state_dict keys.
+
+    Examples:
+        model._orig_mod.encoder.weight -> model.encoder.weight
+        _orig_mod.encoder.weight       -> encoder.weight
+    """
+    cleaned = {}
+
+    for key, value in state_dict.items():
+        cleaned_key = key.replace(prefix, "")
+        cleaned[cleaned_key] = value
+
+    return cleaned
+
+
+def gpu_supports_torch_compile(device):
+    if device.type != "cuda":
+        return False
+
+    major, minor = torch.cuda.get_device_capability(device)
+    return major >= 7
+
 
 def load_tf_tg_regulation_model(
-    tf_dna_model_path: Path, 
+    tf_dna_model_path: Path,
     tf_tg_model_path: Path,
     tf_embeddings_tensor: torch.Tensor,
     tf_mask_tensor: torch.Tensor,
-    tf_peak_chunk_size: int = 128
-    ) -> tf_to_tg_module.TFTGRegulationModel:
-    
-    """
-    Loads the trained TF-TG regulation model using the TF-DNA and TF-TG checkpoints.
-    
-    Parameters
-    ----------
-    tf_dna_model_path : Path
-        Path to the trained TF-DNA model checkpoint.
-    tf_tg_model_path : Path
-        Path to the trained TF-TG model checkpoint.
-    tf_embeddings_tensor : torch.Tensor
-        Precomputed TF embeddings tensor.
-    tf_mask_tensor : torch.Tensor
-        Precomputed TF mask tensor.
-    tf_peak_chunk_size : int, optional
-        Chunk size for processing TF-peak binding predictions in the TF-TG model. Default is 128.
-        
-    Returns
-    -------
-    tf_to_tg_module.TFTGRegulationModel
-        The loaded TF-TG regulation model ready for inference.
-    
-    """
-    
-        # -----------------------------
-    # 1. Recreate base TF-DNA model
+    tf_peak_chunk_size: int = 128,
+    compile_model: bool = False,
+    device: torch.device | None = None,
+) -> tf_to_tg_module.LitTFTGRegulationModel:
+
+    device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    if compile_model and not gpu_supports_torch_compile(device):
+        if device.type == "cuda":
+            major, minor = torch.cuda.get_device_capability(device)
+            logging.warning(
+                f"Skipping torch.compile because this GPU has compute capability "
+                f"{major}.{minor}; Inductor/Triton requires >= 7.0."
+            )
+        else:
+            logging.warning("Skipping torch.compile because device is not CUDA.")
+
+        compile_model = False
+
+    # -----------------------------
+    # 1. Recreate base TF-DNA model uncompiled
     # -----------------------------
     base_model = tf_to_dna_module.TFPeakBindingModel(
         tf_embedding_dim=128,
@@ -1056,14 +1073,9 @@ def load_tf_tg_regulation_model(
 
     tf_dna_state_dict = tf_dna_ckpt["state_dict"]
 
-    # This handles TF-DNA checkpoints where the Lit model's .model was compiled.
-    tf_dna_uses_compiled_model = any(
-        key.startswith("model._orig_mod.")
-        for key in tf_dna_state_dict.keys()
-    )
-
-    if tf_dna_uses_compiled_model:
-        base_model = torch.compile(base_model)
+    if any("._orig_mod." in key or key.startswith("_orig_mod.") for key in tf_dna_state_dict):
+        logging.info("Detected compiled TF-DNA checkpoint. Stripping _orig_mod prefixes.")
+        tf_dna_state_dict = strip_compiled_prefix_from_state_dict(tf_dna_state_dict)
 
     lit_tf_dna_model = tf_to_dna_module.LitTFPeakBindingModel(
         model=base_model,
@@ -1083,7 +1095,7 @@ def load_tf_tg_regulation_model(
         p.requires_grad = False
 
     # -----------------------------
-    # 3. Inspect TF-TG checkpoint
+    # 3. Load TF-TG checkpoint
     # -----------------------------
     tf_tg_ckpt = torch.load(
         tf_tg_model_path,
@@ -1093,16 +1105,12 @@ def load_tf_tg_regulation_model(
 
     tf_tg_state_dict = tf_tg_ckpt["state_dict"]
 
-    tf_tg_uses_compiled_nested_tf_peak_model = any(
-        key.startswith("model.tf_peak_model._orig_mod.")
-        for key in tf_tg_state_dict.keys()
-    )
-
-    if tf_tg_uses_compiled_nested_tf_peak_model:
-        trained_tf_peak_model = torch.compile(trained_tf_peak_model)
+    if any("._orig_mod." in key or key.startswith("_orig_mod.") for key in tf_tg_state_dict):
+        logging.info("Detected compiled TF-TG checkpoint. Stripping _orig_mod prefixes.")
+        tf_tg_state_dict = strip_compiled_prefix_from_state_dict(tf_tg_state_dict)
 
     # -----------------------------
-    # 4. Recreate TF-TG model
+    # 4. Recreate TF-TG model uncompiled
     # -----------------------------
     tf_tg_core_model = tf_to_tg_module.TFTGRegulationModel(
         pretrained_tf_peak_model=trained_tf_peak_model,
@@ -1118,11 +1126,22 @@ def load_tf_tg_regulation_model(
     )
 
     lit_tf_tg_model.load_state_dict(tf_tg_state_dict, strict=True)
-
     lit_tf_tg_model.eval()
 
-    return lit_tf_tg_model
+    for p in lit_tf_tg_model.parameters():
+        p.requires_grad = False
 
+    # -----------------------------
+    # 5. Optional compile after loading
+    # -----------------------------
+    if compile_model:
+        logging.info("Compiling loaded TF-TG core model.")
+        lit_tf_tg_model.model = torch.compile(
+            lit_tf_tg_model.model,
+            mode="reduce-overhead",
+        )
+
+    return lit_tf_tg_model
 
 def load_training_cache_dataset(
     sample_name: str,

@@ -96,15 +96,19 @@ def run_prediction_vs_test_set(
         batch_size=batch_size
         )
     
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
     tf_tg_model = utils.load_tf_tg_regulation_model(
         tf_dna_model_chkpt, 
         tf_tg_model_chkpt, 
         tf_embeddings_tensor, 
-        tf_mask_tensor
+        tf_mask_tensor,
+        compile_model=compile_model,
+        device=device
         )
 
     # print("Moving model to device")
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
     model = tf_tg_model.model
     model = model.to(device)
 
@@ -121,10 +125,6 @@ def run_prediction_vs_test_set(
     all_scores = []
     all_labels = []
     plot_data = {}
-    
-    if compile_model:
-        print("Compiling model for faster evaluation")
-        model = torch.compile(model)
 
     # print(f"Evaluating on {dataset_split_type} set")
     with torch.inference_mode():
@@ -246,7 +246,7 @@ if __name__ == "__main__":
         
     metric_df = comparison_result["metric_df"]
 
-    metric_save_file = RESULT_DIR / f"{model_training_sample}_model_vs_{evaluation_sample}_test_metrics.csv"
+    metric_save_file = RESULT_DIR / f"{model_training_sample}_model_vs_{evaluation_sample}_test_metrics_{subset_size}.csv"
     metric_save_file.parent.mkdir(parents=True, exist_ok=True)
     
     metric_df.to_csv(metric_save_file, index=False)
