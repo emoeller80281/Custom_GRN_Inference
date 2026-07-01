@@ -1,4 +1,3 @@
-# %%
 import json
 import os
 import sys
@@ -999,7 +998,7 @@ def main():
         enable_timing_sync=False,
     )
 
-    run_name = f"simplified_model_test_{args.sample_name}_{args.job_id}"
+    run_name = f"simple_model_{args.sample_name}_{args.job_id}"
     paths["output_dir"].mkdir(parents=True, exist_ok=True)
 
     checkpoint_callback = ModelCheckpoint(

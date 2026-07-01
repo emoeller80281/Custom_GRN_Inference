@@ -1,7 +1,7 @@
 #!/bin/bash -l
 #SBATCH --job-name=model_generalizability
-#SBATCH --output=LOGS/model_performance/%x_%j.log
-#SBATCH --error=LOGS/model_performance/%x_%j.err
+#SBATCH --output=LOGS/model_performance/model_generalizability_%x/%x_%A_%a.log
+#SBATCH --error=LOGS/model_performance/model_generalizability_%x/%x_%A_%a.err
 #SBATCH --time=72:00:00
 #SBATCH -p dense
 #SBATCH -N 1
@@ -9,7 +9,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 8
 #SBATCH --mem=64G
-#SBATCH --signal=SIGUSR1@90
+#SBATCH --array=0-35%8
 
 set -eo pipefail
 
@@ -18,6 +18,73 @@ cd $PROJECT_DIR
 
 echo "Activating conda environment and starting training..."
 source activate my_env
+
+evaluations=(
+
+    # === mESC Evaluations ====
+    # Same cell-type, same sample evaluations with own sample test sets
+    "mESC|E7.5_rep1|mESC|E7.5_rep1",
+    "mESC|E8.5_rep1|mESC|E8.5_rep1",
+
+    # Same cell-type, different sample evaluations with mouse hepatocyte test sets
+    "mESC|E7.5_rep1|mESC|E8.5_rep1",
+    "mESC|E8.5_rep1|mESC|E7.5_rep1",
+
+    # Cross cell-type, same organism evaluations with mESC test sets
+    "mESC|E7.5_rep1|mouse_hepatocytes|hepatocytes_1",
+    "mESC|E7.5_rep1|mouse_hepatocytes|hepatocytes_3",
+    "mESC|E8.5_rep1|mouse_hepatocytes|hepatocytes_1",
+    "mESC|E8.5_rep1|mouse_hepatocytes|hepatocytes_3",
+
+    # Cross cell-type, different organism evaluations with Macrophage test sets
+    "mESC|E7.5_rep1|Macrophage|buffer_1",
+    "mESC|E7.5_rep1|Macrophage|buffer_2",
+    "mESC|E8.5_rep1|Macrophage|buffer_1",
+    "mESC|E8.5_rep1|Macrophage|buffer_2",
+    
+    # ==== Hepatocyte Evaluations ====
+    # Same cell-type, same sample evaluations with own sample test sets
+    "mouse_hepatocytes|hepatocytes_1|mouse_hepatocytes|hepatocytes_1",
+    "mouse_hepatocytes|hepatocytes_3|mouse_hepatocytes|hepatocytes_3",
+    
+    # Same cell-type, different sample evaluations with mouse hepatocyte test sets
+    "mouse_hepatocytes|hepatocytes_1|mouse_hepatocytes|hepatocytes_3",
+    "mouse_hepatocytes|hepatocytes_3|mouse_hepatocytes|hepatocytes_1",
+    
+    # Cross cell-type, same organism evaluations with mESC test sets
+    "mouse_hepatocytes|hepatocytes_1|mESC|E7.5_rep1",
+    "mouse_hepatocytes|hepatocytes_1|mESC|E8.5_rep1",
+    "mouse_hepatocytes|hepatocytes_3|mESC|E7.5_rep1",
+    "mouse_hepatocytes|hepatocytes_3|mESC|E8.5_rep1",
+    
+    # Cross cell-type, different organism evaluations with Macrophage test sets
+    "mouse_hepatocytes|hepatocytes_1|Macrophage|buffer_1",
+    "mouse_hepatocytes|hepatocytes_1|Macrophage|buffer_2",
+    "mouse_hepatocytes|hepatocytes_3|Macrophage|buffer_1",
+    "mouse_hepatocytes|hepatocytes_3|Macrophage|buffer_2",
+    
+    # === Macrophage Evaluations ====
+    # Same cell-type, same sample evaluations with own sample test sets
+    "Macrophage|buffer_1|Macrophage|buffer_1",
+    "Macrophage|buffer_2|Macrophage|buffer_2",
+    
+    # Same cell-type, different sample evaluations with Macrophage test sets
+    "Macrophage|buffer_1|Macrophage|buffer_2",
+    "Macrophage|buffer_2|Macrophage|buffer_1",
+
+    # Cross cell-type, different organism evaluations with mESC test sets
+    "Macrophage|buffer_1|mESC|E7.5_rep1",
+    "Macrophage|buffer_1|mESC|E8.5_rep1",
+    "Macrophage|buffer_2|mESC|E7.5_rep1",
+    "Macrophage|buffer_2|mESC|E8.5_rep1",
+    
+    # Cross-cell type, different organism evaluations with mouse hepatocyte test sets
+    "Macrophage|buffer_1|mouse_hepatocytes|hepatocytes_1",
+    "Macrophage|buffer_1|mouse_hepatocytes|hepatocytes_3",
+    "Macrophage|buffer_2|mouse_hepatocytes|hepatocytes_1",
+    "Macrophage|buffer_2|mouse_hepatocytes|hepatocytes_3",
+    
+)
 
 # --- Memory + math ---
 export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:32
@@ -83,5 +150,33 @@ echo "[INFO] Using nproc_per_node=$NPROC_PER_NODE based on GPUs per node"
 export NCCL_DEBUG=INFO
 export PYTHONFAULTHANDLER=1
 
+# ==========================================
+#        EXPERIMENT SELECTION
+# ==========================================
+# Get the current experiment based on SLURM_ARRAY_TASK_ID
+TASK_ID=${SLURM_ARRAY_TASK_ID:-0}
+
+if [ ${TASK_ID} -ge ${#EXPERIMENT_LIST[@]} ]; then
+    echo "ERROR: SLURM_ARRAY_TASK_ID (${TASK_ID}) exceeds number of experiments (${#EXPERIMENT_LIST[@]})"
+    exit 1
+fi
+
+EXPERIMENT_CONFIG="${EXPERIMENT_LIST[$TASK_ID]}"
+
+# Parse experiment configuration
+IFS='|' read -r model_cell_type model_training_sample test_set_cell_type evaluation_sample <<< "$EXPERIMENT_CONFIG"
+
+echo "[INFO] Running experiment with:"
+echo "  model_cell_type=$model_cell_type"
+echo "  model_training_sample=$model_training_sample"
+echo "  test_set_cell_type=$test_set_cell_type"
+echo "  evaluation_sample=$evaluation_sample"
+
+
 echo "[INFO] Running model generalizability test..."
-srun python3 ${PROJECT_DIR}/model_generalizability.py
+srun python3 ${PROJECT_DIR}/model_generalizability.py \
+    --model_cell_type "$model_cell_type" \
+    --model_training_sample "$model_training_sample" \
+    --test_set_cell_type "$test_set_cell_type" \
+    --evaluation_sample "$evaluation_sample" \
+    --subset_size 10000

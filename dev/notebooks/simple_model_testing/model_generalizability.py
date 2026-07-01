@@ -3,42 +3,21 @@ import sys
 import pandas as pd
 import numpy as np
 import torch
-import importlib
-import json
 from pathlib import Path
-from torch.utils.data import Dataset, DataLoader, Subset
 import numpy as np
 from tqdm import tqdm
 import logging
-import matplotlib.pyplot as plt
-import seaborn as sns
-from matplotlib.offsetbox import AnchoredOffsetbox, TextArea, VPacker, HPacker, DrawingArea
-from matplotlib.patches import Rectangle
-
-from sklearn.metrics import (
-    roc_auc_score,
-    average_precision_score,
-    accuracy_score,
-    precision_score,
-    recall_score,
-    roc_curve,
-    precision_recall_curve,
-    f1_score
-)
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s - %(message)s')
 
 PROJECT_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/dev/notebooks/simple_model_testing")
 DATA_DIR = PROJECT_DIR / "data"
 CHKPT_DIR = PROJECT_DIR / "checkpoints"
-RESULT_DIR = PROJECT_DIR / "testing_results"
+RESULT_DIR = PROJECT_DIR / "testing_results" / "model_generalizability"
 
 sys.path.append(str(PROJECT_DIR))
 
 import models.tf_to_tg as tf_to_tg_module
-import models.tf_to_dna as tf_to_dna_module
-from scripts.train_tf_to_tg_model import TFTGEdgeBagDataset, collate_tftg_edge_bags
-import plotting_utils
 import stat_utils
 import utils
 import warnings
@@ -148,9 +127,6 @@ def run_prediction_vs_test_set(
     # print(f"Evaluating on {dataset_split_type} set")
     with torch.inference_mode():
         for batch in tqdm(data_loader, desc="Evaluating", ncols=100, disable=not show_progress_bar):
-            # set batch peak_distance values to zero to eliminate distance information from predictions
-            # batch["peak_distance"] = torch.zeros_like(batch["peak_distance"])
-            
             batch = tf_to_tg_module.move_batch_to_device(batch, device)
 
             labels = batch["label"]
@@ -226,80 +202,27 @@ def run_prediction_vs_test_set(
         "title": title
     }
     
-all_comparison_df_list = []
+import argparse
 
-evaluations = [
+def parse_args():
+    parser = argparse.ArgumentParser(description="Evaluate model generalizability across different cell types and samples.")
+    parser.add_argument("--model_cell_type", type=str, default=None, help="Model cell type for evaluation.")
+    parser.add_argument("--model_training_sample", type=str, default=None, help="Model training sample for evaluation.")
+    parser.add_argument("--test_set_cell_type", type=str, default=None, help="Test set cell type for evaluation.")
+    parser.add_argument("--evaluation_sample", type=str, default=None, help="Evaluation sample for the test set.")
+    parser.add_argument("--subset_size", type=int, default=None, help="Subset size for evaluation. If None, use the full dataset.")
+    return parser.parse_args()
 
-    # === mESC Evaluations ====
-    # Same cell-type, same sample evaluations with own sample test sets
-    ("mESC", "E7.5_rep1", "mESC", "E7.5_rep1"),
-    ("mESC", "E8.5_rep1", "mESC", "E8.5_rep1"),
-    
-    # Same cell-type, different sample evaluations with mouse hepatocyte test sets
-    ("mESC", "E7.5_rep1", "mESC", "E8.5_rep1"),
-    ("mESC", "E8.5_rep1", "mESC", "E7.5_rep1"),
-    
-    # Cross cell-type, same organism evaluations with mESC test sets
-    ("mESC", "E7.5_rep1", "mouse_hepatocytes", "hepatocytes_1"),
-    ("mESC", "E7.5_rep1", "mouse_hepatocytes", "hepatocytes_3"),
-    ("mESC", "E8.5_rep1", "mouse_hepatocytes", "hepatocytes_1"),
-    ("mESC", "E8.5_rep1", "mouse_hepatocytes", "hepatocytes_3"),
-    
-    # Cross cell-type, different organism evaluations with Macrophage test sets
-    ("mESC", "E7.5_rep1", "Macrophage", "buffer_1"),
-    ("mESC", "E7.5_rep1", "Macrophage", "buffer_2"),
-    ("mESC", "E8.5_rep1", "Macrophage", "buffer_1"),
-    ("mESC", "E8.5_rep1", "Macrophage", "buffer_2"),
-    
-    # ==== Hepatocyte Evaluations ====
-    # Same cell-type, same sample evaluations with own sample test sets
-    ("mouse_hepatocytes", "hepatocytes_1", "mouse_hepatocytes", "hepatocytes_1"),
-    ("mouse_hepatocytes", "hepatocytes_3", "mouse_hepatocytes", "hepatocytes_3"),
-    
-    # Same cell-type, different sample evaluations with mouse hepatocyte test sets
-    ("mouse_hepatocytes", "hepatocytes_1", "mouse_hepatocytes", "hepatocytes_3"),
-    ("mouse_hepatocytes", "hepatocytes_3", "mouse_hepatocytes", "hepatocytes_1"),
-    
-    # Cross cell-type, same organism evaluations with mESC test sets
-    ("mouse_hepatocytes", "hepatocytes_1", "mESC", "E7.5_rep1"),
-    ("mouse_hepatocytes", "hepatocytes_1", "mESC", "E8.5_rep1"),
-    ("mouse_hepatocytes", "hepatocytes_3", "mESC", "E7.5_rep1"),
-    ("mouse_hepatocytes", "hepatocytes_3", "mESC", "E8.5_rep1"),
-    
-    # Cross cell-type, different organism evaluations with Macrophage test sets
-    ("mouse_hepatocytes", "hepatocytes_1", "Macrophage", "buffer_1"),
-    ("mouse_hepatocytes", "hepatocytes_1", "Macrophage", "buffer_2"),
-    ("mouse_hepatocytes", "hepatocytes_3", "Macrophage", "buffer_1"),
-    ("mouse_hepatocytes", "hepatocytes_3", "Macrophage", "buffer_2"),
-    
-    # === Macrophage Evaluations ====
-    # Same cell-type, same sample evaluations with own sample test sets
-    ("Macrophage", "buffer_1", "Macrophage", "buffer_1"),
-    ("Macrophage", "buffer_2", "Macrophage", "buffer_2"),
-    
-    # Same cell-type, different sample evaluations with Macrophage test sets
-    ("Macrophage", "buffer_1", "Macrophage", "buffer_2"),
-    ("Macrophage", "buffer_2", "Macrophage", "buffer_1"),
+if __name__ == "__main__":
+    args = parse_args()
+    subset_size = args.subset_size
 
-    # Cross cell-type, different organism evaluations with mESC test sets
-    ("Macrophage", "buffer_1", "mESC", "E7.5_rep1"),
-    ("Macrophage", "buffer_1", "mESC", "E8.5_rep1"),
-    ("Macrophage", "buffer_2", "mESC", "E7.5_rep1"),
-    ("Macrophage", "buffer_2", "mESC", "E8.5_rep1"),
-    
-    # Cross-cell type, different organism evaluations with mouse hepatocyte test sets
-    ("Macrophage", "buffer_1", "mouse_hepatocytes", "hepatocytes_1"),
-    ("Macrophage", "buffer_1", "mouse_hepatocytes", "hepatocytes_3"),
-    ("Macrophage", "buffer_2", "mouse_hepatocytes", "hepatocytes_1"),
-    ("Macrophage", "buffer_2", "mouse_hepatocytes", "hepatocytes_3"),
-    
-]
+    model_cell_type = args.model_cell_type
+    model_training_sample = args.model_training_sample
+    test_set_cell_type = args.test_set_cell_type
+    evaluation_sample = args.evaluation_sample
 
-all_plot_data = {}
-
-subset_size = None
-# for model_cell_type, model_training_sample, test_set_cell_type, evaluation_sample in tqdm(evaluations, desc="Evaluating all model vs test set combinations", ncols=100):
-for model_cell_type, model_training_sample, test_set_cell_type, evaluation_sample in tqdm(evaluations, desc="Evaluating model vs test set combinations", ncols=100):
+    # for model_cell_type, model_training_sample, test_set_cell_type, evaluation_sample in tqdm(evaluations, desc="Evaluating model vs test set combinations", ncols=100):
     logging.info(f"Evaluating {model_cell_type} {model_training_sample} Model → {test_set_cell_type} {evaluation_sample} Test Set")
 
     dataset_split_type = "test"
@@ -312,22 +235,13 @@ for model_cell_type, model_training_sample, test_set_cell_type, evaluation_sampl
         evaluation_sample=evaluation_sample,
         dataset_split_type=dataset_split_type,
         subset_size=subset_size,
-        show_progress_bar=False,
-        compile_model=False
+        show_progress_bar=True,
+        compile_model=True
     )
         
     metric_df = comparison_result["metric_df"]
-    plot_data = comparison_result["plot_data"]
-    
-    all_labels_flat = plot_data[0]
-    all_scores_flat = plot_data[1]
-    
-    title = comparison_result["title"]
-    
-    all_plot_data[title] = (all_labels_flat, all_scores_flat)
-    
-    all_comparison_df_list.append(metric_df)
-    
-full_comparison_df = pd.concat(all_comparison_df_list, ignore_index=True)
 
-full_comparison_df.to_csv(RESULT_DIR / "model_generalizability_results.csv", index=False)
+    metric_save_file = RESULT_DIR / f"{model_cell_type}_{model_training_sample}_model_vs_{test_set_cell_type}_{evaluation_sample}_test_metrics.csv"
+    metric_save_file.parent.mkdir(parents=True, exist_ok=True)
+    
+    metric_df.to_csv(metric_save_file, index=False)

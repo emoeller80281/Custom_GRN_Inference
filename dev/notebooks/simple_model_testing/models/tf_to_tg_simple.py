@@ -60,6 +60,9 @@ class TFTGRegulationModel(nn.Module):
         self.norm = nn.LayerNorm(d_model)
 
         self.classifier = nn.Sequential(
+            nn.Linear(d_model * 3, d_model),
+            nn.SiLU(),
+            nn.Dropout(dropout),
             nn.Linear(d_model, d_model // 2),
             nn.SiLU(),
             nn.Dropout(dropout),
@@ -272,9 +275,16 @@ class TFTGRegulationModel(nn.Module):
         # ------------------------------------------------------------
         # 7. Cell-level logits
         # ------------------------------------------------------------
-        cell_logits = self.classifier(peak_context).squeeze(-1)  # [E*C]
-        
-        # Reshape cell logits back to [E, C] for pooling
+        final = torch.cat(
+            [
+                peak_context,
+                tf_expr_token,
+                tg_expr_token,
+            ],
+            dim=-1,
+        )  # [E*C, d_model * 3]
+
+        cell_logits = self.classifier(final).squeeze(-1)  # [E*C]
         cell_logits = cell_logits.reshape(E, C)           # [E, C]
 
         # ------------------------------------------------------------

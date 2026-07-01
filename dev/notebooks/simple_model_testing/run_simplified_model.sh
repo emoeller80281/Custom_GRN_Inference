@@ -5,12 +5,12 @@
 #SBATCH --time=72:00:00
 #SBATCH -p dense
 #SBATCH -N 1
-#SBATCH --gres=gpu:v100:1
-#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:v100:2
+#SBATCH --ntasks-per-node=2
 #SBATCH -c 8
 #SBATCH --mem=64G
 #SBATCH --signal=SIGUSR1@90
-#SBATCH --array=0-1%2
+#SBATCH --array=2-6%2
 
 set -eo pipefail
 
@@ -116,10 +116,10 @@ IFS='|' read -r species cell_type sample_name <<< "$EXPERIMENT_CONFIG"
 echo "[INFO] Running experiment with species=$species, cell_type=$cell_type, sample_name=$sample_name"
 
 max_peaks_per_tg=25
-max_cells_per_pair=24
+max_cells_per_pair=25
 peak_flank_size=128
-pct_true_edges=0.25
-true_false_ratio=2.0
+pct_true_edges=1.0
+true_false_ratio=10.0
 
 echo "[INFO] Starting training..."
 srun python3 ${PROJECT_DIR}/test_simplified_model_multigpu_safe.py \
@@ -135,6 +135,6 @@ srun python3 ${PROJECT_DIR}/test_simplified_model_multigpu_safe.py \
     --peak_flank_size $peak_flank_size \
     --pct_true_edges $pct_true_edges \
     --true_false_ratio $true_false_ratio \
-    --batch_size 32 \
+    --batch_size 30 \
     --force_reload
     

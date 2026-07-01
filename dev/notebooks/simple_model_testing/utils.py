@@ -1179,10 +1179,11 @@ def load_training_cache_dataset(
 
     loader = DataLoader(
         dataset,
-        batch_size=64,
+        batch_size=512,
         shuffle=False,
-        num_workers=0,
-        pin_memory=False,
+        num_workers=8,
+        pin_memory=True,
+        persistent_workers=True,
         collate_fn=collate_tftg_edge_bags,
         )
     

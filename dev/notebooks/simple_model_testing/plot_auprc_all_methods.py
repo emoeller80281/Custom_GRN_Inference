@@ -136,6 +136,8 @@ def load_tf_tg_regulation_model(
     
     return tf_tg_model
 
+
+
 def generate_model_predictions(model, data_loader, device, tf_idx_to_name, tg_idx_to_name):
     pooling_mode = "lse"
     pooling_temperature = 1.0
@@ -808,14 +810,13 @@ pickle.dump(auprc_all_method_dfs, open(RESULT_DIR / "auprc_all_method_dfs.pkl", 
 import plotting_utils
 
 sample_to_title_map = {
-    # "E7.5_rep1": "mESC",
-    # "buffer_1": "Macr-1",
-    # "buffer_2": "Macr-2",
+    "E7.5_rep1": "mESC",
+    "E8.5_rep1": "mESC",
+    "buffer_1": "Macr-1",
+    "buffer_2": "Macr-2",
     # "buffer_3": "Macr-3",
     # "WT_D13_rep1": "iPSC",
-    # "sample_1": "K562"
-    # "liver_1": "Liver-1",
-    # "liver_3": "Liver-3"
+    # "sample_1": "K562",
     "hepatocytes_1": "Hepatocytes-1",
     "hepatocytes_3": "Hepatocytes-3"
 }
