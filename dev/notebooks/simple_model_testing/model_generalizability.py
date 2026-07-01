@@ -74,6 +74,7 @@ def run_prediction_vs_test_set(
     subset_size: int | None = None,
     show_progress_bar: bool = True,
     compile_model: bool = True,
+    batch_size: int = 512
     ):
     
     tf_tg_model_chkpt = tf_tg_model_checkpoints[model_cell_type][model_training_sample]
@@ -91,7 +92,8 @@ def run_prediction_vs_test_set(
         sample_name=evaluation_sample,
         cell_type_cache_dir=cell_type_cache_dir,
         split_type=dataset_split_type,
-        subset_size=subset_size
+        subset_size=subset_size,
+        batch_size=batch_size
         )
     
     tf_tg_model = utils.load_tf_tg_regulation_model(
@@ -211,11 +213,13 @@ def parse_args():
     parser.add_argument("--test_set_cell_type", type=str, default=None, help="Test set cell type for evaluation.")
     parser.add_argument("--evaluation_sample", type=str, default=None, help="Evaluation sample for the test set.")
     parser.add_argument("--subset_size", type=int, default=None, help="Subset size for evaluation. If None, use the full dataset.")
+    parser.add_argument("--batch_size", type=int, default=512, help="Batch size for evaluation.")
     return parser.parse_args()
 
 if __name__ == "__main__":
     args = parse_args()
     subset_size = args.subset_size
+    batch_size = args.batch_size
 
     model_cell_type = args.model_cell_type
     model_training_sample = args.model_training_sample
@@ -236,12 +240,13 @@ if __name__ == "__main__":
         dataset_split_type=dataset_split_type,
         subset_size=subset_size,
         show_progress_bar=True,
-        compile_model=True
+        compile_model=True,
+        batch_size=batch_size
     )
         
     metric_df = comparison_result["metric_df"]
 
-    metric_save_file = RESULT_DIR / f"{model_cell_type}_{model_training_sample}_model_vs_{test_set_cell_type}_{evaluation_sample}_test_metrics.csv"
+    metric_save_file = RESULT_DIR / f"{model_training_sample}_model_vs_{evaluation_sample}_test_metrics.csv"
     metric_save_file.parent.mkdir(parents=True, exist_ok=True)
     
     metric_df.to_csv(metric_save_file, index=False)

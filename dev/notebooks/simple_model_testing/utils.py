@@ -1128,7 +1128,8 @@ def load_training_cache_dataset(
     sample_name: str,
     cell_type_cache_dir: Path, 
     split_type: str = "test", 
-    subset_size: int = None
+    subset_size: int = None,
+    batch_size: int = 512,
     ) -> DataLoader:
     
     assert split_type in ["train", "val", "test"], \
@@ -1179,7 +1180,7 @@ def load_training_cache_dataset(
 
     loader = DataLoader(
         dataset,
-        batch_size=512,
+        batch_size=batch_size,
         shuffle=False,
         num_workers=8,
         pin_memory=True,
