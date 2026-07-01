@@ -1,7 +1,7 @@
 #!/bin/bash -l
-#SBATCH --job-name=all_methods_auroc_auprc
-#SBATCH --output=LOGS/all_methods_auroc_auprc/%x_%j.log
-#SBATCH --error=LOGS/all_methods_auroc_auprc/%x_%j.err
+#SBATCH --job-name=compare_auprc_all_methods
+#SBATCH --output=LOGS/model_performance/compare_auprc_all_methods_%A/%x_%A_%a.log
+#SBATCH --error=LOGS/model_performance/compare_auprc_all_methods_%A/%x_%A_%a.err
 #SBATCH --time=72:00:00
 #SBATCH -p dense
 #SBATCH -N 1
@@ -9,7 +9,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 8
 #SBATCH --mem=128G
-#SBATCH --signal=SIGUSR1@90
+#SBATCH --array=0%7
 
 set -eo pipefail
 
@@ -18,6 +18,16 @@ cd $PROJECT_DIR
 
 echo "Activating conda environment and starting training..."
 source activate my_env
+
+EXPERIMENT_LIST=(
+    # "mm10|mESC|E7.5_rep1"
+    # "mm10|mESC|E8.5_rep1"
+    # "hg38|Macrophage|buffer_1"
+    # "hg38|Macrophage|buffer_2"
+    "hg38|K562|sample_1"
+    # "mm10|mouse_hepatocytes|hepatocytes_1"
+    # "mm10|mouse_hepatocytes|hepatocytes_3"
+)
 
 # --- Memory + math ---
 export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:32
@@ -83,9 +93,34 @@ echo "[INFO] Using nproc_per_node=$NPROC_PER_NODE based on GPUs per node"
 export NCCL_DEBUG=INFO
 export PYTHONFAULTHANDLER=1
 
+# ==========================================
+#        EXPERIMENT SELECTION
+# ==========================================
+# Get the current experiment based on SLURM_ARRAY_TASK_ID
+TASK_ID=${SLURM_ARRAY_TASK_ID:-0}
+
+if [ ${TASK_ID} -ge ${#EXPERIMENT_LIST[@]} ]; then
+    echo "ERROR: SLURM_ARRAY_TASK_ID (${TASK_ID}) exceeds number of experiments (${#EXPERIMENT_LIST[@]})"
+    exit 1
+fi
+
+EXPERIMENT_CONFIG="${EXPERIMENT_LIST[$TASK_ID]}"
+
+# Parse experiment configuration
+IFS='|' read -r species cell_type sample_name <<< "$EXPERIMENT_CONFIG"
+
+echo "[INFO] Running AUPRC vs other methods for:"
+echo "  species=$species"
+echo "  cell_type=$cell_type"
+echo "  sample_name=$sample_name"
+
 echo "[INFO] Starting training..."
 torchrun \
   --standalone \
   --nnodes=1 \
   --nproc_per_node=1 \
-  ${PROJECT_DIR}/plot_auprc_all_methods.py
+  ${PROJECT_DIR}/plot_auprc_all_methods.py \
+    --species "$species" \
+    --cell_type "$cell_type" \
+    --sample_name "$sample_name" \
+    --force_reload

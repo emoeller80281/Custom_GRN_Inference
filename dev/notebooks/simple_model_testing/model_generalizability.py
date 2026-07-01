@@ -36,23 +36,23 @@ all_evaluation_plot_dir.mkdir(exist_ok=True)
 
 tf_tg_model_checkpoints = {
     "mESC": {
-        # "E7.5_rep1": CHKPT_DIR / "mESC" / "E7.5_rep1" / "tf_tg_train_E7.5_rep1_3675131" / "epoch_11_best_model.ckpt",
-        "E7.5_rep1": utils.find_latest_checkpoint(CHKPT_DIR, "mESC", "E7.5_rep1"),
+        "E7.5_rep1": CHKPT_DIR / "mESC" / "E7.5_rep1" / "tf_tg_train_E7.5_rep1_3675131" / "epoch_11_best_model.ckpt",
+        # "E7.5_rep1": utils.find_latest_checkpoint(CHKPT_DIR, "mESC", "E7.5_rep1"),
         "E7.5_rep2": utils.find_latest_checkpoint(CHKPT_DIR, "mESC", "E7.5_rep2"),
         "E8.5_rep1": utils.find_latest_checkpoint(CHKPT_DIR, "mESC", "E8.5_rep1", training_number="3691937"),
-        "E8.5_rep2": utils.find_latest_checkpoint(CHKPT_DIR, "mESC", "E8.5_rep2"),
+        "E8.5_rep2": utils.find_latest_checkpoint(CHKPT_DIR, "mESC", "E8.5_rep2", training_number="3691937"),
     },
     "iPSC": {
         "WT_D13_rep1": utils.find_latest_checkpoint(CHKPT_DIR, "iPSC", "WT_D13_rep1"),
     },
     "Macrophage": {
         "buffer_1": utils.find_latest_checkpoint(CHKPT_DIR, "Macrophage", "buffer_1", training_number="3685893"),
-        "buffer_2": utils.find_latest_checkpoint(CHKPT_DIR, "Macrophage", "buffer_2"),
+        "buffer_2": utils.find_latest_checkpoint(CHKPT_DIR, "Macrophage", "buffer_2", training_number="3713132"),
         "buffer_3": utils.find_latest_checkpoint(CHKPT_DIR, "Macrophage", "buffer_3"),
         "buffer_4": utils.find_latest_checkpoint(CHKPT_DIR, "Macrophage", "buffer_4"),
     },
     "K562": {
-        "sample_1": utils.find_latest_checkpoint(CHKPT_DIR, "K562", "sample_1"),
+        "sample_1": utils.find_latest_checkpoint(CHKPT_DIR, "K562", "sample_1", training_number="3692409"),
     },
     "mouse_liver": {
         "liver_1": utils.find_latest_checkpoint(CHKPT_DIR, "mouse_liver", "liver_1"),
@@ -245,8 +245,23 @@ if __name__ == "__main__":
     )
         
     metric_df = comparison_result["metric_df"]
+    plot_data = comparison_result["plot_data"]
+    
+    labels, scores = plot_data
+    
+    score_label_df = pd.DataFrame({
+        "model_training_sample": model_training_sample,
+        "evaluation_sample": evaluation_sample,
+        "score": scores,
+        "label": labels
+    })
+    
+    score_label_save_file = RESULT_DIR / "score_label_files" / f"{model_training_sample}_model_vs_{evaluation_sample}_scores_labels_{subset_size}.csv"
+    score_label_df.to_csv(score_label_save_file, index=False)
 
-    metric_save_file = RESULT_DIR / f"{model_training_sample}_model_vs_{evaluation_sample}_test_metrics_{subset_size}.csv"
+    metric_save_file = RESULT_DIR / "comparison_metric_files" / f"{model_training_sample}_model_vs_{evaluation_sample}_test_metrics_{subset_size}.csv"
     metric_save_file.parent.mkdir(parents=True, exist_ok=True)
     
     metric_df.to_csv(metric_save_file, index=False)
+
+    logging.info("Done!")
