@@ -458,6 +458,9 @@ def parse_arguments():
     parser.add_argument("--species", type=str, help="Species to evaluate.")
     parser.add_argument("--cell_type", type=str, help="Cell type to evaluate.")
     parser.add_argument("--sample_name", type=str, help="Sample name to evaluate.")
+    parser.add_argument("--cross_model_cell_type", type=str, help="Cell type for cross-model evaluation.")
+    parser.add_argument("--cross_model_sample_name", type=str, help="Sample name for cross-model evaluation.")
+
     parser.add_argument("--force_reload", action="store_true", help="Force reload of data and models.")
 
     return parser.parse_args()
@@ -468,9 +471,30 @@ cell_type = args.cell_type
 sample_name = args.sample_name
 force_reload = args.force_reload
 
-cross_model_cell_type = "mESC"
-cross_model_sample_name = "E8.5_rep1"
+cross_model_cell_type = args.cross_model_cell_type
+cross_model_sample_name = args.cross_model_sample_name
 cross_model_chkpt = tf_tg_model_checkpoints[cross_model_cell_type][cross_model_sample_name]
+
+sample_to_title_map = {
+    "E7.5_rep1": "mESC-1",
+    "E8.5_rep1": "mESC-2",
+    "buffer_1": "Macrophage-1",
+    "buffer_2": "Macrophage-2",
+    "sample_1": "K562",
+    "hepatocytes_1": "Hepatocytes-1",
+    "hepatocytes_3": "Hepatocytes-3"
+}
+
+OWN_MODEL_METHOD = "TF-TG Model (own test set)"
+CROSS_MODEL_METHOD = "TF-TG Model (cross-trained)"
+
+TFTG_MODEL_METHODS = [
+    OWN_MODEL_METHOD,
+    CROSS_MODEL_METHOD,
+]
+
+model_sample_title = sample_to_title_map.get(sample_name, sample_name)
+cross_model_sample_title = sample_to_title_map.get(cross_model_sample_name, cross_model_sample_name)
 
 project_data_dir = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data")
 
@@ -609,7 +633,7 @@ full_universe["_in_gt"] = (full_universe["Source"] + "\t" + full_universe["Targe
 true_df = full_universe[full_universe["_in_gt"] == 1]
 false_df = full_universe[full_universe["_in_gt"] == 0]
 
-if not sample_full_grn_file.exists() and not cross_tf_tg_df_file.exists() or force_reload == True:
+if not sample_full_grn_file.exists() or not cross_tf_tg_df_file.exists() or force_reload == True:
     true_interactions = zip(true_df["Source"], true_df["Target"])
     false_interactions = zip(false_df["Source"], false_df["Target"])
 
@@ -723,33 +747,43 @@ if not sample_full_grn_file.exists() and not cross_tf_tg_df_file.exists() or for
     # Generate the model predictions for the test set and create a DataFrame with TF names, TG names, and predicted scores
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    # Load the TF→TG model
-    tf_tg_model = utils.load_tf_tg_regulation_model(
-        tf_dna_model_chkpt, 
-        tf_tg_model_chkpt, 
-        tf_embeddings_tensor, 
-        tf_mask_tensor
+    if not sample_full_grn_file.exists() or force_reload:
+        # Load the TF→TG model
+        tf_tg_model = utils.load_tf_tg_regulation_model(
+            tf_dna_model_chkpt, 
+            tf_tg_model_chkpt, 
+            tf_embeddings_tensor, 
+            tf_mask_tensor,
+            compile_model=True,
+            device=device
+            )
+        
+        # Run the model on the test set and generate the predictions DataFrame
+        prediction_df = generate_model_predictions(tf_tg_model.model, loader, device, tf_idx_to_name, tg_idx_to_name)
+        
+        prediction_df.to_csv(sample_full_grn_file, sep="\t", index=False)
+    else:
+        prediction_df = pd.read_csv(sample_full_grn_file, sep="\t", header=0)
+    
+    if not cross_tf_tg_df_file.exists() or force_reload:
+        cross_tf_tg_model = utils.load_tf_tg_regulation_model(
+            tf_dna_model_chkpt,
+            cross_model_chkpt,
+            tf_embeddings_tensor,
+            tf_mask_tensor,
+            compile_model=True,
+            device=device
         )
-    
-    # Run the model on the test set and generate the predictions DataFrame
-    prediction_df = generate_model_predictions(tf_tg_model.model, loader, device, tf_idx_to_name, tg_idx_to_name)
-    
-    prediction_df.to_csv(sample_full_grn_file, sep="\t", index=False)
-    
-    # cross_tf_tg_model = load_tf_tg_regulation_model(
-    #     tf_dna_model_chkpt,
-    #     cross_model_chkpt,
-    #     tf_embeddings_tensor,
-    #     tf_mask_tensor,
-    # )
-    
-    # cross_model_prediction_df = generate_model_predictions(cross_tf_tg_model.model, loader, device, tf_idx_to_name, tg_idx_to_name)
+        
+        cross_model_prediction_df = generate_model_predictions(cross_tf_tg_model.model, loader, device, tf_idx_to_name, tg_idx_to_name)
 
-    # cross_model_prediction_df.to_csv(cross_tf_tg_df_file, sep="\t", index=False)
+        cross_model_prediction_df.to_csv(cross_tf_tg_df_file, sep="\t", index=False)
+    else:
+        cross_model_prediction_df = pd.read_csv(cross_tf_tg_df_file, sep="\t", header=0)
     
 else:
     prediction_df = pd.read_csv(sample_full_grn_file, sep="\t", header=0)
-    # cross_model_prediction_df = pd.read_csv(cross_tf_tg_df_file, sep="\t", header=0)
+    cross_model_prediction_df = pd.read_csv(cross_tf_tg_df_file, sep="\t", header=0)
 
 OTHER_METHOD_MUON_DIR = Path("/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/other_method_grns")
 
@@ -779,8 +813,8 @@ for method_name, info in method_info.items():
     standardized_method_dfs[method_name] = df_filtered
     
 # Add the TF-TG model predictions to the standardized_method_dfs for metric computation
-standardized_method_dfs["TF-TG Model"] = prediction_df
-# standardized_method_dfs["MTGRN-CTM"] = cross_model_prediction_df
+standardized_method_dfs[OWN_MODEL_METHOD] = prediction_df
+standardized_method_dfs[CROSS_MODEL_METHOD] = cross_model_prediction_df
 
 auprc_all_method_dfs[sample_name] = {}
 
@@ -792,45 +826,41 @@ labeled_grn_dir.mkdir(parents=True, exist_ok=True)
 # Compute metrics for each method and print results
 for method_name, df_std in standardized_method_dfs.items():
     
-    # Create the labeled DataFrame for the model predictions vs the test set ground truth
-    method_labeled_df = create_ground_truth_comparison_df(df_std, gt_lookup, "test_chrom_gt")
+    method_grn_file = labeled_grn_dir / f"{method_name.lower().replace('+','')}.tsv"
+    if method_grn_file.exists() and not force_reload:
+        auprc_df = pd.read_csv(method_grn_file, sep="\t", header=0)
+    else:
+        # Create the labeled DataFrame for the model predictions vs the test set ground truth
+        method_labeled_df = create_ground_truth_comparison_df(df_std, gt_lookup, "test_chrom_gt")
 
-    y = method_labeled_df["_in_gt"].fillna(0).astype(int).to_numpy()
-    s = method_labeled_df["Score"].to_numpy()
-            
-    eval_df = full_universe_10x_negatives[["Source", "Target", "_in_gt"]].copy()
+        y = method_labeled_df["_in_gt"].fillna(0).astype(int).to_numpy()
+        s = method_labeled_df["Score"].to_numpy()
+                
+        eval_df = full_universe_10x_negatives[["Source", "Target", "_in_gt"]].copy()
 
-    auprc_df = eval_df.merge(
-        method_labeled_df[["Source", "Target", "Score"]],
-        on=["Source", "Target"],
-        how="left",
-    )
+        auprc_df = eval_df.merge(
+            method_labeled_df[["Source", "Target", "Score"]],
+            on=["Source", "Target"],
+            how="left",
+        )
 
-    auprc_df["Score"] = auprc_df["Score"].fillna(0)
+        auprc_df["Score"] = auprc_df["Score"].fillna(0)
     
     auprc_all_method_dfs[sample_name][method_name] = auprc_df
     
     auprc_df.to_csv(labeled_grn_dir / f"{method_name.lower().replace('+','')}.tsv", sep="\t", index=False)
 
+
+
 method_color_dict = {
-  "TF-TG Model": "#4195df",
-#   "MTGRN-CTM": "#86C7E7",
+  OWN_MODEL_METHOD: "#4195df",
+  CROSS_MODEL_METHOD: "#86C7E7",
   "LINGER": "#EF767A",
   "CellOracle": "#F9C60D",
   "Pando": "#EF9CFA",
   "SCENIC+": "#82EC32",
   "FigR": "#FDA7BB",
   "GRaNIE": "#F98637"
-}
-
-sample_to_title_map = {
-    "E7.5_rep1": "mESC-1",
-    "E8.5_rep1": "mESC-2",
-    "buffer_1": "Macrophage-1",
-    "buffer_2": "Macrophage-2",
-    "sample_1": "K562",
-    "hepatocytes_1": "Hepatocytes-1",
-    "hepatocytes_3": "Hepatocytes-3"
 }
 
 sample_title = sample_to_title_map.get(sample_name, sample_name)
@@ -882,7 +912,7 @@ for method in auprc_all_method_dfs[sample_name].keys():
     method_color = method_color_dict.get(method, "#747474")
     auprc_text_lines.append((method, auprc, method_color))
 
-    line_weight = 3 if method in ["TF-TG Model", "MTGRN-CTM"] else 2
+    line_weight = 3 if method in [OWN_MODEL_METHOD, CROSS_MODEL_METHOD] else 2
 
     ax.step(
         rec,
@@ -994,9 +1024,22 @@ combined_fig.subplots_adjust(
     top=0.88,
     wspace=0.08,
 )
+auprc_plot_dir = all_evaluation_plot_dir / "auprc_plots"
+auprc_plot_dir.mkdir(parents=True, exist_ok=True)
 
 combined_fig.savefig(
-    all_evaluation_plot_dir / f"{sample_name}_auprc.png",
+    auprc_plot_dir / f"{sample_name}_auprc.png",
     dpi=300,
     bbox_inches="tight",
+)
+
+# Save the AUPRC metrics for each method to a CSV file
+auprc_metric_dir = all_evaluation_plot_dir / "auprc_metrics"
+auprc_metric_dir.mkdir(parents=True, exist_ok=True)
+
+auprc_metrics_df = pd.DataFrame(cell_type_method_auprc)
+auprc_metrics_df.to_csv(
+    auprc_metric_dir / f"{sample_name}_auprc_metrics.csv",
+    sep="\t",
+    index=False,
 )

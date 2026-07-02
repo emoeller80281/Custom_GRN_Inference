@@ -9,7 +9,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 8
 #SBATCH --mem=64G
-#SBATCH --array=0%10
+#SBATCH --array=0-6%10
 
 set -eo pipefail
 
@@ -20,12 +20,10 @@ echo "Activating conda environment and starting training..."
 source activate my_env
 
 EXPERIMENT_LIST=(
-    "K562|sample_1|K562|sample_1"
-
     # === mESC Evaluations ====
     # Same cell-type, same sample evaluations with own sample test sets
-    # "mESC|E7.5_rep1|mESC|E7.5_rep1"
-    # "mESC|E8.5_rep1|mESC|E8.5_rep1"
+    "mESC|E7.5_rep1|mESC|E7.5_rep1"
+    "mESC|E8.5_rep1|mESC|E8.5_rep1"
 
     # # Same cell-type, different sample evaluations with mouse hepatocyte test sets
     # "mESC|E7.5_rep1|mESC|E8.5_rep1"
@@ -45,8 +43,8 @@ EXPERIMENT_LIST=(
     
     # # ==== Hepatocyte Evaluations ====
     # # Same cell-type, same sample evaluations with own sample test sets
-    # "mouse_hepatocytes|hepatocytes_1|mouse_hepatocytes|hepatocytes_1"
-    # "mouse_hepatocytes|hepatocytes_3|mouse_hepatocytes|hepatocytes_3"
+    "mouse_hepatocytes|hepatocytes_1|mouse_hepatocytes|hepatocytes_1"
+    "mouse_hepatocytes|hepatocytes_3|mouse_hepatocytes|hepatocytes_3"
     
     # # Same cell-type, different sample evaluations with mouse hepatocyte test sets
     # "mouse_hepatocytes|hepatocytes_1|mouse_hepatocytes|hepatocytes_3"
@@ -66,16 +64,16 @@ EXPERIMENT_LIST=(
     
     # # === Macrophage Evaluations ====
     # # Same cell-type, same sample evaluations with own sample test sets
-    # "Macrophage|buffer_1|Macrophage|buffer_1"
-    # "Macrophage|buffer_2|Macrophage|buffer_2"
+    "Macrophage|buffer_1|Macrophage|buffer_1"
+    "Macrophage|buffer_2|Macrophage|buffer_2"
     
     # # Same cell-type, different sample evaluations with Macrophage test sets
     # "Macrophage|buffer_1|Macrophage|buffer_2"
     # "Macrophage|buffer_2|Macrophage|buffer_1"
 
     # Different cell-type, same organism evaluations with K562 test sets
-    "Macrophage|buffer_1|K562|sample_1"
-    "Macrophage|buffer_2|K562|sample_1"
+    # "Macrophage|buffer_1|K562|sample_1"
+    # "Macrophage|buffer_2|K562|sample_1"
 
     # # Cross cell-type, different organism evaluations with mESC test sets
     # "Macrophage|buffer_1|mESC|E7.5_rep1"
@@ -88,6 +86,10 @@ EXPERIMENT_LIST=(
     # "Macrophage|buffer_1|mouse_hepatocytes|hepatocytes_3"
     # "Macrophage|buffer_2|mouse_hepatocytes|hepatocytes_1"
     # "Macrophage|buffer_2|mouse_hepatocytes|hepatocytes_3"
+    
+    "K562|sample_1|K562|sample_1"
+    # "K562|sample_1|Macrophage|buffer_1"
+
     
 )
 

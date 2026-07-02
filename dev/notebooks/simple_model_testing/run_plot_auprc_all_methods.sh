@@ -9,7 +9,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 8
 #SBATCH --mem=128G
-#SBATCH --array=0%7
+#SBATCH --array=0-6%7
 
 set -eo pipefail
 
@@ -20,13 +20,13 @@ echo "Activating conda environment and starting training..."
 source activate my_env
 
 EXPERIMENT_LIST=(
-    # "mm10|mESC|E7.5_rep1"
-    # "mm10|mESC|E8.5_rep1"
-    # "hg38|Macrophage|buffer_1"
-    # "hg38|Macrophage|buffer_2"
-    "hg38|K562|sample_1"
-    # "mm10|mouse_hepatocytes|hepatocytes_1"
-    # "mm10|mouse_hepatocytes|hepatocytes_3"
+    "mm10|mESC|E7.5_rep1|mouse_hepatocytes|hepatocytes_1"
+    "mm10|mESC|E8.5_rep1|mouse_hepatocytes|hepatocytes_1"
+    "hg38|Macrophage|buffer_1|K562|sample_1"
+    "hg38|Macrophage|buffer_2|K562|sample_1"
+    "hg38|K562|sample_1|Macrophage|buffer_1"
+    "mm10|mouse_hepatocytes|hepatocytes_1|mESC|E7.5_rep1"
+    "mm10|mouse_hepatocytes|hepatocytes_3|mESC|E7.5_rep1"
 )
 
 # --- Memory + math ---
@@ -107,12 +107,14 @@ fi
 EXPERIMENT_CONFIG="${EXPERIMENT_LIST[$TASK_ID]}"
 
 # Parse experiment configuration
-IFS='|' read -r species cell_type sample_name <<< "$EXPERIMENT_CONFIG"
+IFS='|' read -r species cell_type sample_name cross_model_cell_type cross_model_sample_name <<< "$EXPERIMENT_CONFIG"
 
 echo "[INFO] Running AUPRC vs other methods for:"
 echo "  species=$species"
 echo "  cell_type=$cell_type"
 echo "  sample_name=$sample_name"
+echo "  cross_model_cell_type=$cross_model_cell_type"
+echo "  cross_model_sample_name=$cross_model_sample_name"
 
 echo "[INFO] Starting training..."
 torchrun \
@@ -123,4 +125,5 @@ torchrun \
     --species "$species" \
     --cell_type "$cell_type" \
     --sample_name "$sample_name" \
-    --force_reload
+    --cross_model_cell_type "$cross_model_cell_type" \
+    --cross_model_sample_name "$cross_model_sample_name" \

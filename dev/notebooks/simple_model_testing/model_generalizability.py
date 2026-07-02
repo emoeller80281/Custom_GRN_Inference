@@ -1,4 +1,5 @@
 
+import json
 import sys
 import pandas as pd
 import numpy as np
@@ -74,7 +75,9 @@ def run_prediction_vs_test_set(
     subset_size: int | None = None,
     show_progress_bar: bool = True,
     compile_model: bool = True,
-    batch_size: int = 512
+    batch_size: int = 512,
+    tf_idx_to_name: dict | None = None,
+    tg_idx_to_name: dict | None = None
     ):
     
     tf_tg_model_chkpt = tf_tg_model_checkpoints[model_cell_type][model_training_sample]
@@ -122,13 +125,17 @@ def run_prediction_vs_test_set(
     total_loss = 0.0
     n_edges = 0
 
+    tf_indices_list = []
+    tg_indices_list = []
     all_scores = []
     all_labels = []
-    plot_data = {}
 
     # print(f"Evaluating on {dataset_split_type} set")
     with torch.inference_mode():
         for batch in tqdm(data_loader, desc="Evaluating", ncols=100, disable=not show_progress_bar):
+            tf_indices = batch["tf_idx"].detach().cpu().numpy().ravel()
+            tg_indices = batch["tg_idx"].detach().cpu().numpy().ravel()
+            
             batch = tf_to_tg_module.move_batch_to_device(batch, device)
 
             labels = batch["label"]
@@ -158,9 +165,24 @@ def run_prediction_vs_test_set(
 
             all_scores.append(scores.detach().cpu().numpy().ravel())
             all_labels.append(labels.detach().cpu().numpy().ravel())
+            
+            tf_indices_list.append(tf_indices)
+            tg_indices_list.append(tg_indices)
 
+    all_tf_indices_flat = np.concatenate(tf_indices_list)
+    all_tg_indices_flat = np.concatenate(tg_indices_list)
     all_scores_flat = np.concatenate(all_scores)
     all_labels_flat = np.concatenate(all_labels)
+
+    tf_names = [tf_idx_to_name[int(idx)].upper() for idx in all_tf_indices_flat]
+    tg_names = [tg_idx_to_name[int(idx)].upper() for idx in all_tg_indices_flat]
+    
+    prediction_df = pd.DataFrame({
+        "Source": tf_names,
+        "Target": tg_names,
+        "Score": all_scores_flat,
+        "Label": all_labels_flat
+    })
 
     metrics = stat_utils.compute_binary_classification_metrics(
         labels=all_labels_flat,
@@ -195,13 +217,11 @@ def run_prediction_vs_test_set(
     metric_df = metric_df[col_order]
     
     title = f"{model_cell_type} {model_training_sample} Model → {test_set_cell_type} {evaluation_sample} Test Set"
-    
-    plot_data = [all_labels_flat, all_scores_flat]
-    
+        
     return {
         "metric_df": metric_df,
-        "plot_data": plot_data,
-        "title": title
+        "title": title,
+        "prediction_df": prediction_df
     }
     
 import argparse
@@ -215,6 +235,11 @@ def parse_args():
     parser.add_argument("--subset_size", type=int, default=None, help="Subset size for evaluation. If None, use the full dataset.")
     parser.add_argument("--batch_size", type=int, default=512, help="Batch size for evaluation.")
     return parser.parse_args()
+
+def create_tf_tg_index_to_name_mappings(metadata):
+    tf_idx_to_name = {idx: name for name, idx in metadata["tf_name_to_idx"].items()}
+    tg_idx_to_name = {idx: name for name, idx in metadata["tg_id_to_idx"].items()}
+    return tf_idx_to_name, tg_idx_to_name
 
 if __name__ == "__main__":
     args = parse_args()
@@ -230,6 +255,17 @@ if __name__ == "__main__":
     logging.info(f"Evaluating {model_cell_type} {model_training_sample} Model → {test_set_cell_type} {evaluation_sample} Test Set")
 
     dataset_split_type = "test"
+    
+    cell_type_cache_dir = DATA_DIR / f"{test_set_cell_type}_cache"
+    
+    # Load the TF and TG name to index mappings from the training cache metadata
+    with open(cell_type_cache_dir / "tf_tg_training_cache" / evaluation_sample / "metadata.json", "r") as f:
+        metadata = json.load(f)
+        
+    tf_name_to_idx = metadata["tf_name_to_idx"]
+    tg_id_to_idx = metadata["tg_id_to_idx"]
+
+    tf_idx_to_name, tg_idx_to_name = create_tf_tg_index_to_name_mappings(metadata)
         
     comparison_result = run_prediction_vs_test_set(
         tf_tg_model_checkpoints=tf_tg_model_checkpoints,
@@ -240,26 +276,19 @@ if __name__ == "__main__":
         dataset_split_type=dataset_split_type,
         subset_size=subset_size,
         show_progress_bar=True,
-        compile_model=True,
-        batch_size=batch_size
+        compile_model=False,
+        batch_size=batch_size,
+        tf_idx_to_name=tf_idx_to_name,
+        tg_idx_to_name=tg_idx_to_name
     )
         
     metric_df = comparison_result["metric_df"]
-    plot_data = comparison_result["plot_data"]
+    prediction_df = comparison_result["prediction_df"]
     
-    labels, scores = plot_data
-    
-    score_label_df = pd.DataFrame({
-        "model_training_sample": model_training_sample,
-        "evaluation_sample": evaluation_sample,
-        "score": scores,
-        "label": labels
-    })
-    
-    score_label_save_file = RESULT_DIR / "score_label_files" / f"{model_training_sample}_model_vs_{evaluation_sample}_scores_labels_{subset_size}.csv"
-    score_label_df.to_csv(score_label_save_file, index=False)
+    prediction_save_file = RESULT_DIR / "labeled_grns" / f"{model_training_sample}_model_vs_{evaluation_sample}_grn_{subset_size}.csv"
+    prediction_df.to_csv(prediction_save_file, index=False)
 
-    metric_save_file = RESULT_DIR / "comparison_metric_files" / f"{model_training_sample}_model_vs_{evaluation_sample}_test_metrics_{subset_size}.csv"
+    metric_save_file = RESULT_DIR / "comparison_metric_files" / f"{model_training_sample}_model_vs_{evaluation_sample}_grn_{subset_size}.csv"
     metric_save_file.parent.mkdir(parents=True, exist_ok=True)
     
     metric_df.to_csv(metric_save_file, index=False)
