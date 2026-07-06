@@ -195,6 +195,22 @@ def run_prediction_vs_test_set(
     metrics["Test Set"] = evaluation_sample
 
     metric_df = pd.DataFrame([metrics])
+    
+    # Get info about the dataset size for the test set
+    peaks_per_tg = metadata.get("max_peaks_per_tg", None)
+    cells_per_pair = metadata.get("max_cells_per_pair", None)
+    max_peaks_real = metadata.get("max_peaks_real", None)
+    
+    num_tfs = len(metadata["tf_name_to_idx"])
+    num_tgs = len(metadata["tg_id_to_idx"])
+    
+    metric_df["peaks_per_tg"] = peaks_per_tg
+    metric_df["cells_per_pair"] = cells_per_pair
+    metric_df["max_peaks_real"] = max_peaks_real
+    metric_df["num_tfs"] = num_tfs
+    metric_df["num_tgs"] = num_tgs
+    metric_df["subset_size"] = subset_size
+    metric_df["batch_size"] = batch_size
 
     col_order = [
         "Model", 
@@ -211,22 +227,27 @@ def run_prediction_vs_test_set(
         "n_edges",
         "n_pos",
         "n_neg",
-        "score_threshold"
+        "score_threshold",
+        "peaks_per_tg",
+        "cells_per_pair",
+        "max_peaks_real",
+        "num_tfs",
+        "num_tgs",
+        "subset_size",
+        "batch_size"
         ]
 
     metric_df = metric_df[col_order]
-    
-    title = f"{model_cell_type} {model_training_sample} Model → {test_set_cell_type} {evaluation_sample} Test Set"
-        
+            
     return {
         "metric_df": metric_df,
-        "title": title,
         "prediction_df": prediction_df
     }
     
 import argparse
 
 def parse_args():
+    
     parser = argparse.ArgumentParser(description="Evaluate model generalizability across different cell types and samples.")
     parser.add_argument("--model_cell_type", type=str, default=None, help="Model cell type for evaluation.")
     parser.add_argument("--model_training_sample", type=str, default=None, help="Model training sample for evaluation.")
@@ -234,6 +255,7 @@ def parse_args():
     parser.add_argument("--evaluation_sample", type=str, default=None, help="Evaluation sample for the test set.")
     parser.add_argument("--subset_size", type=int, default=None, help="Subset size for evaluation. If None, use the full dataset.")
     parser.add_argument("--batch_size", type=int, default=512, help="Batch size for evaluation.")
+    parser.add_argument("--force_reload", action="store_true", help="Force reload of the dataset even if cached.")
     return parser.parse_args()
 
 def create_tf_tg_index_to_name_mappings(metadata):
@@ -250,6 +272,7 @@ if __name__ == "__main__":
     model_training_sample = args.model_training_sample
     test_set_cell_type = args.test_set_cell_type
     evaluation_sample = args.evaluation_sample
+    force_reload = args.force_reload
 
     # for model_cell_type, model_training_sample, test_set_cell_type, evaluation_sample in tqdm(evaluations, desc="Evaluating model vs test set combinations", ncols=100):
     logging.info(f"Evaluating {model_cell_type} {model_training_sample} Model → {test_set_cell_type} {evaluation_sample} Test Set")
@@ -258,6 +281,13 @@ if __name__ == "__main__":
     
     cell_type_cache_dir = DATA_DIR / f"{test_set_cell_type}_cache"
     
+    prediction_save_file = RESULT_DIR / "labeled_grns" / f"{model_training_sample}_model_vs_{evaluation_sample}_grn_{subset_size}.csv"
+    metric_save_file = RESULT_DIR / "comparison_metric_files" / f"{model_training_sample}_model_vs_{evaluation_sample}_grn_{subset_size}.csv"
+
+    if prediction_save_file.exists() and metric_save_file.exists() and not force_reload:
+        logging.info(f"Prediction and metric files already exist for {model_cell_type} {model_training_sample} → {test_set_cell_type} {evaluation_sample}. Skipping evaluation.")
+        sys.exit(0)
+        
     # Load the TF and TG name to index mappings from the training cache metadata
     with open(cell_type_cache_dir / "tf_tg_training_cache" / evaluation_sample / "metadata.json", "r") as f:
         metadata = json.load(f)
@@ -285,10 +315,8 @@ if __name__ == "__main__":
     metric_df = comparison_result["metric_df"]
     prediction_df = comparison_result["prediction_df"]
     
-    prediction_save_file = RESULT_DIR / "labeled_grns" / f"{model_training_sample}_model_vs_{evaluation_sample}_grn_{subset_size}.csv"
     prediction_df.to_csv(prediction_save_file, index=False)
 
-    metric_save_file = RESULT_DIR / "comparison_metric_files" / f"{model_training_sample}_model_vs_{evaluation_sample}_grn_{subset_size}.csv"
     metric_save_file.parent.mkdir(parents=True, exist_ok=True)
     
     metric_df.to_csv(metric_save_file, index=False)

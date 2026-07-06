@@ -25,6 +25,7 @@ import utils
 import config
 import scripts.build_tf_to_tg_train_data as build_tf_to_tg_train_data
 import scripts.train_tf_to_tg_model as train_tf_to_tg_model
+import test_simplified_model_multigpu_safe as safe_model
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -161,6 +162,8 @@ def build_tf_tg_input_cache(
     atac_pseudobulk = pd.read_parquet(input_data_dir / "RE_pseudobulk.parquet")
     peak_to_gene_distance = pd.read_parquet(input_data_dir / "peak_to_gene_dist.parquet")
     rna_pseudobulk = pd.read_parquet(input_data_dir / "TG_pseudobulk.parquet")
+    rna_pseudobulk_norm = rna_pseudobulk.copy()
+    rna_pseudobulk_norm.index = rna_pseudobulk_norm.index.str.upper()
 
     # Load and merge the ground truth files, or load from cache if already merged
     if not merged_ground_truth_path.exists() or force_reload:
@@ -175,13 +178,56 @@ def build_tf_tg_input_cache(
         elif config.species == "hg38":
             merged_ground_truth_df["Source"] = merged_ground_truth_df["Source"].str.upper()
             merged_ground_truth_df["Target"] = merged_ground_truth_df["Target"].str.upper()
-            
+
+        gt_tfs_in_rna = set(merged_ground_truth_df["Source"]).intersection(rna_pseudobulk_norm.index)
+        gt_tgs_in_rna = set(merged_ground_truth_df["Target"]).intersection(rna_pseudobulk_norm.index)
+        logging.info(f"Ground truth TFs in RNA pseudobulk: {len(gt_tfs_in_rna)}")
+        logging.info(f"Ground truth TGs in RNA pseudobulk: {len(gt_tgs_in_rna)}")
+
+        n_before_rna_filter = len(merged_ground_truth_df)
+        merged_ground_truth_df = merged_ground_truth_df[
+            merged_ground_truth_df["Source"].isin(gt_tfs_in_rna) &
+            merged_ground_truth_df["Target"].isin(gt_tgs_in_rna)
+        ].copy()
+        logging.info(
+            f"Ground truth edges after RNA TF/TG filtering: {len(merged_ground_truth_df):,} / {n_before_rna_filter:,}"
+        )
+
         merged_ground_truth_df.to_parquet(merged_ground_truth_path, index=False)
     else:
         merged_ground_truth_df = pd.read_parquet(merged_ground_truth_path)
+
+    merged_ground_truth_df["Source"] = merged_ground_truth_df["Source"].str.upper()
+    merged_ground_truth_df["Target"] = merged_ground_truth_df["Target"].str.upper()
+
+    gt_tfs_in_rna = set(merged_ground_truth_df["Source"]).intersection(rna_pseudobulk_norm.index)
+    gt_tgs_in_rna = set(merged_ground_truth_df["Target"]).intersection(rna_pseudobulk_norm.index)
+    logging.info(f"Ground truth TFs in RNA pseudobulk: {len(gt_tfs_in_rna)}")
+    logging.info(f"Ground truth TGs in RNA pseudobulk: {len(gt_tgs_in_rna)}")
+
+    n_before_rna_filter = len(merged_ground_truth_df)
+    merged_ground_truth_df = merged_ground_truth_df[
+        merged_ground_truth_df["Source"].isin(gt_tfs_in_rna) &
+        merged_ground_truth_df["Target"].isin(gt_tgs_in_rna)
+    ].copy()
+    logging.info(
+        f"Ground truth edges after RNA TF/TG filtering: {len(merged_ground_truth_df):,} / {n_before_rna_filter:,}"
+    )
+
+    merged_ground_truth_df.to_parquet(merged_ground_truth_path, index=False)
     
     # Get the map of TF name to index
     tf_name_to_idx = pd.read_csv(tf_name_to_idx_cache_path).set_index("tf_name")["tf_idx"].to_dict()
+
+    gt_tfs_in_embeddings = set(tf_name_to_idx.keys()).intersection(merged_ground_truth_df["Source"])
+    n_before_tf_embedding_filter = len(merged_ground_truth_df)
+    merged_ground_truth_df = merged_ground_truth_df[
+        merged_ground_truth_df["Source"].isin(gt_tfs_in_embeddings)
+    ].copy()
+    logging.info(
+        f"Ground truth edges after filtering to TFs with embeddings: {len(merged_ground_truth_df):,} / {n_before_tf_embedding_filter:,}"
+    )
+
     tg_id_to_idx = {tg: idx for idx, tg in enumerate(merged_ground_truth_df["Target"].unique())}
     
     if config.species == "mm10":
@@ -267,9 +313,6 @@ def build_tf_tg_input_cache(
     if atac_peak_tensor.dtype == torch.uint8:
         atac_peak_tensor = atac_peak_tensor.float()
 
-    rna_pseudobulk_norm = rna_pseudobulk.copy()
-    rna_pseudobulk_norm.index = rna_pseudobulk_norm.index.str.upper()
-
     common_cells = sorted(set(rna_pseudobulk_norm.columns) & set(atac_pseudobulk.columns))
     peak_to_gene = peak_to_gene_distance.copy()
     peak_to_gene["target_id_norm"] = peak_to_gene["target_id"].str.upper()
@@ -283,6 +326,12 @@ def build_tf_tg_input_cache(
         common_cells=common_cells,
         max_precompute_peaks=max_peaks_per_tg,
     )
+    
+    tf_tg_df = pd.concat([tf_tg_labeled_train_df, tf_tg_labeled_val_df, tf_tg_labeled_test_df], ignore_index=True)
+    max_peaks_real = max(len(tg_to_peak_info.get(tg_name, {}).get("peak_indices", [])) for tg_name in tf_tg_df["tg_id"])
+    n_tgs_with_peaks = sum(len(tg_to_peak_info.get(tg, {}).get("peak_indices", [])) > 0 for tg in tf_tg_df["tg_id"].unique())
+    logging.info(f"TGs with at least one peak within 100kb: {n_tgs_with_peaks:,} / {tf_tg_df['tg_id'].nunique():,}")
+    logging.info(f"Max peaks per TG after filtering/capping: {max_peaks_real:,}")
 
     def _sample_df(df: pd.DataFrame, n: int | None, seed: int) -> pd.DataFrame:
         if n is None or len(df) <= n:
@@ -307,6 +356,7 @@ def build_tf_tg_input_cache(
         common_cells=common_cells,
         tf_name_to_idx=tf_name_to_idx,
         tg_id_to_idx=tg_id_to_idx,
+        max_peaks_real=max_peaks_real,
     )
     
     if all(f.exists() for f in [train_file, val_file, test_file]) and not force_reload:
@@ -377,6 +427,7 @@ def build_tf_tg_input_cache(
 def train_tf_tg_model(
     sweep_setting_hash: str,
     tf_bind_model_path: str | Path,
+    checkpoint_path: str | Path | None,
     sample_pairs: int,
     max_peaks_per_tg: int,
     max_cells_per_pair: int,
@@ -438,14 +489,14 @@ def train_tf_tg_model(
     )
     
     # Re-create the datasets and dataloaders using the loaded compact inputs and lookup tensors
-    train_dataset = train_tf_to_tg_model.TFTGEdgeBagDataset(
+    train_dataset = safe_model.TFTGEdgeBagDataset(
         tftg_inputs_train,
         tf_embeddings_tensor=tf_embeddings_tensor,
         tf_mask_tensor=tf_mask_tensor,
         atac_peak_tensor=atac_peak_tensor
     )
 
-    val_dataset = train_tf_to_tg_model.TFTGEdgeBagDataset(
+    val_dataset = safe_model.TFTGEdgeBagDataset(
         tftg_inputs_val,
         tf_embeddings_tensor=tf_embeddings_tensor,
         tf_mask_tensor=tf_mask_tensor,
@@ -453,57 +504,53 @@ def train_tf_tg_model(
 
     )
 
-    test_dataset = train_tf_to_tg_model.TFTGEdgeBagDataset(
+    test_dataset = safe_model.TFTGEdgeBagDataset(
         tftg_inputs_test,
         tf_embeddings_tensor=tf_embeddings_tensor,
         tf_mask_tensor=tf_mask_tensor,
         atac_peak_tensor=atac_peak_tensor
     )
 
-    # Create the DataLoaders with the custom collate function for batching edge bags
-    train_loader = DataLoader(
+    # Create the DataLoaders with the tested batching path from the multigpu-safe script
+    train_loader = safe_model.make_dataloader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
         num_workers=6,
-        pin_memory=True,
-        persistent_workers=True,
         prefetch_factor=4,
-        collate_fn=train_tf_to_tg_model.collate_tftg_edge_bags,
-        )
+    )
 
-    val_loader = DataLoader(
+    val_loader = safe_model.make_dataloader(
         val_dataset,
         batch_size=batch_size,
         shuffle=False,
         num_workers=2,
-        pin_memory=True,
-        persistent_workers=True,
         prefetch_factor=2,
-        collate_fn=train_tf_to_tg_model.collate_tftg_edge_bags,
-        )
+    )
 
-    test_loader = DataLoader(
+    test_loader = safe_model.make_dataloader(
         test_dataset,
         batch_size=batch_size,
         shuffle=False,
         num_workers=2,
-        pin_memory=True,
-        persistent_workers=True,
         prefetch_factor=2,
-        collate_fn=train_tf_to_tg_model.collate_tftg_edge_bags,
-        )
+    )
 
     train_tf_to_tg_model.log_once(f"Train/Val/Test sizes: {len(train_dataset)}, {len(val_dataset)}, {len(test_dataset)}")
 
-    tf_tg_model = train_tf_to_tg_model.create_new_tf_tg_binding_model(tf_bind_model_path, tf_embeddings_tensor, tf_mask_tensor)
+    tf_tg_model = safe_model.create_new_tf_tg_regulation_model(
+        tf_bind_model_path=Path(tf_bind_model_path),
+        tf_embeddings_tensor=tf_embeddings_tensor,
+        tf_mask_tensor=tf_mask_tensor,
+        checkpoint_path=Path(checkpoint_path) if checkpoint_path else None,
+    )
 
     pooling_mode = "lse"
     pooling_temperature = 1.0
 
     train_tf_to_tg_model.log_once("\nStarting Lightning training...")
 
-    lit_model = train_tf_to_tg_model.tf_to_tg_module.LitTFTGRegulationModel(
+    lit_model = safe_model.tf_to_tg_module.LitTFTGRegulationModel(
         model=tf_tg_model,
         lr=1e-4,
         weight_decay=1e-4,
@@ -643,13 +690,14 @@ if __name__ == "__main__":
     args.pct_true_edges = _coerce_sweep_value("pct_true_edges", args.pct_true_edges, run_config.get("pct_true_edges"), float)
     args.true_false_ratio = _coerce_sweep_value("true_false_ratio", args.true_false_ratio, run_config.get("true_false_ratio"), float)
     args.peak_flank_size = _coerce_sweep_value("peak_flank_size", args.peak_flank_size, run_config.get("peak_flank_size"), int)
+    args.force_reload = args.force_reload or os.environ.get("FORCE_RELOAD", "").lower() in {"1", "true", "yes", "on"}
 
     sample_pairs = None
     max_peaks_per_tg = args.max_peaks_per_tg
     max_cells_per_pair = args.max_cells_per_pair
     pct_true_edges = args.pct_true_edges
     true_false_ratio = args.true_false_ratio
-    peak_flank_size = args.peak_flank_size
+    peak_flank_size = int(args.peak_flank_size)
 
     sweep_setting_hash = build_tf_tg_input_cache(
         sample_pairs=sample_pairs,
@@ -666,6 +714,7 @@ if __name__ == "__main__":
         train_tf_tg_model(
             sweep_setting_hash=sweep_setting_hash,
             tf_bind_model_path=Path(args.tf_bind_model_path),
+            checkpoint_path=Path(args.checkpoint_path) if args.checkpoint_path else None,
             sample_pairs=sample_pairs,
             max_peaks_per_tg=max_peaks_per_tg,
             max_cells_per_pair=max_cells_per_pair,

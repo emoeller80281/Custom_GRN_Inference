@@ -5,12 +5,12 @@
 #SBATCH --time=72:00:00
 #SBATCH -p dense
 #SBATCH -N 1
-#SBATCH --gres=gpu:v100:2
-#SBATCH --ntasks-per-node=2
+#SBATCH --gres=gpu:a100:1
+#SBATCH --ntasks-per-node=1
 #SBATCH -c 8
 #SBATCH --mem=64G
 #SBATCH --signal=SIGUSR1@90
-#SBATCH --array=2-6%2
+#SBATCH --array=0-6%2
 
 set -eo pipefail
 
@@ -123,7 +123,7 @@ true_false_ratio=10.0
 
 echo "[INFO] Starting training..."
 srun python3 ${PROJECT_DIR}/test_simplified_model_multigpu_safe.py \
-    --epochs 250 \
+    --epochs 100 \
     --species $species \
     --cell_type $cell_type \
     --sample_name $sample_name \

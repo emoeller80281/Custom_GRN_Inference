@@ -881,14 +881,16 @@ cell_type_method_auprc = {
     "auprc": [],
     "rand_auprc": [],
 }
+
 if sample_name not in auprc_all_method_dfs:
     raise KeyError(f"Sample {sample_name} not found in auprc_all_method_dfs")
 
 auprc_text_lines = []
-cell_type_method_auprc[sample_name] = {}
+auprc_metric_rows = []
 
 for method in auprc_all_method_dfs[sample_name].keys():
     print(method)
+
     if method not in method_color_dict:
         continue
     
@@ -897,6 +899,11 @@ for method in auprc_all_method_dfs[sample_name].keys():
     y_auprc = auprc_df["_in_gt"].astype(int).to_numpy()
     s_auprc = auprc_df["Score"].astype(float).to_numpy()
 
+    if len(np.unique(y_auprc)) < 2:
+        auprc = np.nan
+        rand_auprc = np.nan
+        continue
+
     auprc = average_precision_score(y_auprc, s_auprc)
     prec, rec, _ = precision_recall_curve(y_auprc, s_auprc)
 
@@ -904,10 +911,12 @@ for method in auprc_all_method_dfs[sample_name].keys():
     rand_prec, rand_rec, _ = precision_recall_curve(y_auprc, rand_scores)
     rand_auprc = average_precision_score(y_auprc, rand_scores)
 
-    cell_type_method_auprc["sample_name"].append(sample_name)
-    cell_type_method_auprc["method"].append(method)
-    cell_type_method_auprc["auprc"].append(auprc)
-    cell_type_method_auprc["rand_auprc"].append(rand_auprc)
+    auprc_metric_rows.append({
+        "sample_name": sample_name,
+        "method": method,
+        "auprc": auprc,
+        "rand_auprc": rand_auprc,
+    })
 
     method_color = method_color_dict.get(method, "#747474")
     auprc_text_lines.append((method, auprc, method_color))
@@ -1037,7 +1046,7 @@ combined_fig.savefig(
 auprc_metric_dir = all_evaluation_plot_dir / "auprc_metrics"
 auprc_metric_dir.mkdir(parents=True, exist_ok=True)
 
-auprc_metrics_df = pd.DataFrame(cell_type_method_auprc)
+auprc_metrics_df = pd.DataFrame(auprc_metric_rows)
 auprc_metrics_df.to_csv(
     auprc_metric_dir / f"{sample_name}_auprc_metrics.csv",
     sep="\t",
