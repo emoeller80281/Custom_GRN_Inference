@@ -4,16 +4,14 @@ metric:
   name: val/auroc
   goal: maximize
 parameters:
-  tf_bind_model_path:
-    value: /gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/dev/notebooks/simple_model_testing/checkpoints/tf_dna_hg38_3683606/epoch=13-val_auroc=0.9566-val_loss=0.2042.ckpt
   max_peaks_per_tg:
-    values: [8, 16, 50, 100]
+    values: [16, 32, 50, 100]
   max_cells_per_pair:
-    values: [8, 16, 32]
+    values: [16, 32, 64]
   pct_true_edges:
-    values: [0.1, 0.25, 0.5]
+    values: [0.25, 0.5, 0.75]
   true_false_ratio:
-    values: [0.5, 1.0, 2.0]
+    values: [1.0, 2.0, 3.0]
 command:
   - ${env}
   - ${interpreter}

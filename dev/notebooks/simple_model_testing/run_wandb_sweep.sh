@@ -15,7 +15,7 @@ set -eo pipefail
 
 PROJECT_DIR="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/dev/notebooks/simple_model_testing"
 SWEEP_CONFIG="${PROJECT_DIR}/wandb_sweep.yaml"
-FORCE_RELOAD=0
+FORCE_RELOAD=1
 
 if [ "${1:-}" = "--force_reload" ]; then
     FORCE_RELOAD=1

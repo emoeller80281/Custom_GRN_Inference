@@ -36,7 +36,6 @@ SWEEP_PARAMETER_NAMES = (
     "batch_size",
     "num_gpus",
     "num_nodes",
-    "sample_pairs",
     "max_peaks_per_tg",
     "max_cells_per_pair",
     "pct_true_edges",
@@ -81,7 +80,6 @@ def _coerce_sweep_value(
         raise ValueError(f"Invalid value for {name}: {value}") from exc
 
 def build_tf_tg_input_cache(
-    sample_pairs: int,
     max_peaks_per_tg: int,
     max_cells_per_pair: int,
     pct_true_edges: float,
@@ -162,6 +160,11 @@ def build_tf_tg_input_cache(
     atac_pseudobulk = pd.read_parquet(input_data_dir / "RE_pseudobulk.parquet")
     peak_to_gene_distance = pd.read_parquet(input_data_dir / "peak_to_gene_dist.parquet")
     rna_pseudobulk = pd.read_parquet(input_data_dir / "TG_pseudobulk.parquet")
+
+    logging.info(f"ATAC peaks BEFORE peak-to-gene filtering: {atac_pseudobulk.shape[0]:,}")
+    valid_peak_ids = set(peak_to_gene_distance["peak_id"])
+    atac_pseudobulk = atac_pseudobulk.loc[atac_pseudobulk.index.isin(valid_peak_ids)].copy()
+    logging.info(f"ATAC peaks AFTER peak-to-gene filtering: {atac_pseudobulk.shape[0]:,}")
     rna_pseudobulk_norm = rna_pseudobulk.copy()
     rna_pseudobulk_norm.index = rna_pseudobulk_norm.index.str.upper()
 
@@ -172,12 +175,8 @@ def build_tf_tg_input_cache(
             config.gt_by_dataset_dict[config.cell_type]
             )
         
-        if config.species == "mm10":
-            merged_ground_truth_df["Source"] = merged_ground_truth_df["Source"].str.capitalize()
-            merged_ground_truth_df["Target"] = merged_ground_truth_df["Target"].str.capitalize()
-        elif config.species == "hg38":
-            merged_ground_truth_df["Source"] = merged_ground_truth_df["Source"].str.upper()
-            merged_ground_truth_df["Target"] = merged_ground_truth_df["Target"].str.upper()
+        merged_ground_truth_df["Source"] = merged_ground_truth_df["Source"].str.upper()
+        merged_ground_truth_df["Target"] = merged_ground_truth_df["Target"].str.upper()
 
         gt_tfs_in_rna = set(merged_ground_truth_df["Source"]).intersection(rna_pseudobulk_norm.index)
         gt_tgs_in_rna = set(merged_ground_truth_df["Target"]).intersection(rna_pseudobulk_norm.index)
@@ -193,7 +192,6 @@ def build_tf_tg_input_cache(
             f"Ground truth edges after RNA TF/TG filtering: {len(merged_ground_truth_df):,} / {n_before_rna_filter:,}"
         )
 
-        merged_ground_truth_df.to_parquet(merged_ground_truth_path, index=False)
     else:
         merged_ground_truth_df = pd.read_parquet(merged_ground_truth_path)
 
@@ -217,7 +215,9 @@ def build_tf_tg_input_cache(
     merged_ground_truth_df.to_parquet(merged_ground_truth_path, index=False)
     
     # Get the map of TF name to index
-    tf_name_to_idx = pd.read_csv(tf_name_to_idx_cache_path).set_index("tf_name")["tf_idx"].to_dict()
+    tf_name_to_idx = pd.read_csv(tf_name_to_idx_cache_path)
+    tf_name_to_idx["tf_name"] = tf_name_to_idx["tf_name"].str.upper()
+    tf_name_to_idx = tf_name_to_idx.set_index("tf_name")["tf_idx"].to_dict()
 
     gt_tfs_in_embeddings = set(tf_name_to_idx.keys()).intersection(merged_ground_truth_df["Source"])
     n_before_tf_embedding_filter = len(merged_ground_truth_df)
@@ -328,22 +328,22 @@ def build_tf_tg_input_cache(
     )
     
     tf_tg_df = pd.concat([tf_tg_labeled_train_df, tf_tg_labeled_val_df, tf_tg_labeled_test_df], ignore_index=True)
+    if tf_tg_df.empty:
+        raise ValueError(
+            "No labeled TF-TG pairs were created across train/val/test. "
+            "Check RNA filtering, TF embedding filtering, chromosome splits, and ground truth overlap."
+        )
+
     max_peaks_real = max(len(tg_to_peak_info.get(tg_name, {}).get("peak_indices", [])) for tg_name in tf_tg_df["tg_id"])
     n_tgs_with_peaks = sum(len(tg_to_peak_info.get(tg, {}).get("peak_indices", [])) > 0 for tg in tf_tg_df["tg_id"].unique())
     logging.info(f"TGs with at least one peak within 100kb: {n_tgs_with_peaks:,} / {tf_tg_df['tg_id'].nunique():,}")
     logging.info(f"Max peaks per TG after filtering/capping: {max_peaks_real:,}")
 
-    def _sample_df(df: pd.DataFrame, n: int | None, seed: int) -> pd.DataFrame:
-        if n is None or len(df) <= n:
-            return df
-        return df.sample(n=n, random_state=seed)
-
-    if sample_pairs is None:
-        sample_pairs = len(tf_tg_labeled_train_df)
-
-    tf_tg_train_subset = _sample_df(tf_tg_labeled_train_df, n=sample_pairs, seed=123)
-    tf_tg_val_subset = _sample_df(tf_tg_labeled_val_df, n=sample_pairs // 2, seed=123)
-    tf_tg_test_subset = _sample_df(tf_tg_labeled_test_df, n=sample_pairs // 4, seed=123)
+    if max_peaks_real == 0:
+        raise ValueError(
+            "No labeled TGs have peaks within 100kb. Check target_id_norm/tg_id matching, "
+            "peak IDs, chromosome filtering, and TSS distance file."
+        )
 
     common_build_kwargs = dict(
         max_peaks_per_tg=max_peaks_per_tg,
@@ -365,21 +365,21 @@ def build_tf_tg_input_cache(
     
     logging.info("\nBuilding training inputs")
     tftg_inputs_train = build_tf_to_tg_train_data.build_tftg_inputs(
-        tf_tg_train_subset,
+        tf_tg_labeled_train_df,
         seed=123,
         **common_build_kwargs,
     )
 
     logging.info("\nBuilding validation inputs")
     tftg_inputs_val = build_tf_to_tg_train_data.build_tftg_inputs(
-        tf_tg_val_subset,
+        tf_tg_labeled_val_df,
         seed=124,
         **common_build_kwargs,
     )
 
     logging.info("\nBuilding test inputs")
     tftg_inputs_test = build_tf_to_tg_train_data.build_tftg_inputs(
-        tf_tg_test_subset,
+        tf_tg_labeled_test_df,
         seed=125,
         **common_build_kwargs,
     )
@@ -426,9 +426,7 @@ def build_tf_tg_input_cache(
 
 def train_tf_tg_model(
     sweep_setting_hash: str,
-    tf_bind_model_path: str | Path,
     checkpoint_path: str | Path | None,
-    sample_pairs: int,
     max_peaks_per_tg: int,
     max_cells_per_pair: int,
     pct_true_edges: float,
@@ -538,6 +536,8 @@ def train_tf_tg_model(
 
     train_tf_to_tg_model.log_once(f"Train/Val/Test sizes: {len(train_dataset)}, {len(val_dataset)}, {len(test_dataset)}")
 
+    tf_bind_model_path = config.tf_dna_model_checkpoints[config.cell_type]
+    
     tf_tg_model = safe_model.create_new_tf_tg_regulation_model(
         tf_bind_model_path=Path(tf_bind_model_path),
         tf_embeddings_tensor=tf_embeddings_tensor,
@@ -593,7 +593,6 @@ def train_tf_tg_model(
         "num_gpus": num_gpus,
         "num_nodes": num_nodes,
         "run_name": run_name,
-        "sample_pairs": sample_pairs,
         "max_peaks_per_tg": max_peaks_per_tg,
         "max_cells_per_pair": max_cells_per_pair,
         "pct_true_edges": pct_true_edges,
@@ -661,13 +660,9 @@ if __name__ == "__main__":
     parser.add_argument("--true_false_ratio", type=str, default="1.0", help="Ratio of true to false edges in the training set (default: 2.0)")
     parser.add_argument("--peak_flank_size", type=str, default="64", help="Size of the flank region around each peak (default: 64)")
     parser.add_argument("--num_cpu", type=int, default=8, help="Number of CPU workers to use for preprocessing")
-    parser.add_argument("--tf_bind_model_path", type=str, required=True, help="Path to the TF→DNA model checkpoint to initialize from")
     parser.add_argument("--checkpoint_path", type=str, required=False, help="Path to a model checkpoint to resume training from")
     parser.add_argument("--force_reload", action="store_true", help="Whether to force reload cached data instead of using existing cache files")
     args = parser.parse_args()
-
-    if args.tf_bind_model_path is None:
-        raise ValueError("--tf_bind_model_path is required to initialize the TF->TG model")
 
     sweep_run = wandb.init(
         project="tf_tg_regulation_prediction",
@@ -692,7 +687,6 @@ if __name__ == "__main__":
     args.peak_flank_size = _coerce_sweep_value("peak_flank_size", args.peak_flank_size, run_config.get("peak_flank_size"), int)
     args.force_reload = args.force_reload or os.environ.get("FORCE_RELOAD", "").lower() in {"1", "true", "yes", "on"}
 
-    sample_pairs = None
     max_peaks_per_tg = args.max_peaks_per_tg
     max_cells_per_pair = args.max_cells_per_pair
     pct_true_edges = args.pct_true_edges
@@ -700,7 +694,6 @@ if __name__ == "__main__":
     peak_flank_size = int(args.peak_flank_size)
 
     sweep_setting_hash = build_tf_tg_input_cache(
-        sample_pairs=sample_pairs,
         max_peaks_per_tg=max_peaks_per_tg,
         max_cells_per_pair=max_cells_per_pair,
         pct_true_edges=pct_true_edges,
@@ -713,9 +706,7 @@ if __name__ == "__main__":
     try:
         train_tf_tg_model(
             sweep_setting_hash=sweep_setting_hash,
-            tf_bind_model_path=Path(args.tf_bind_model_path),
             checkpoint_path=Path(args.checkpoint_path) if args.checkpoint_path else None,
-            sample_pairs=sample_pairs,
             max_peaks_per_tg=max_peaks_per_tg,
             max_cells_per_pair=max_cells_per_pair,
             pct_true_edges=pct_true_edges,
