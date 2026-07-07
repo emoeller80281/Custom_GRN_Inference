@@ -1016,7 +1016,7 @@ def main():
     wandb_logger = None
     if is_rank0:
         wandb_logger = WandbLogger(
-            project="tf_tg_regulation_prediction",
+            project="tf_tg_model_simplified",
             name=run_name,
             save_dir=paths["output_dir"],
         )
