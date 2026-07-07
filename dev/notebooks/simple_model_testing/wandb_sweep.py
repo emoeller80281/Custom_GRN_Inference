@@ -80,6 +80,9 @@ def _coerce_sweep_value(
         raise ValueError(f"Invalid value for {name}: {value}") from exc
 
 def build_tf_tg_input_cache(
+    sample_name: str,
+    cell_type: str,
+    species: str,
     max_peaks_per_tg: int,
     max_cells_per_pair: int,
     pct_true_edges: float,
@@ -88,17 +91,22 @@ def build_tf_tg_input_cache(
     num_cpu: int,
     force_reload: bool,
 ):
-        
-    gene_ref_file = config.gene_ref_file
-    genome_fasta_path = config.genome_fasta_path
-    chrom_sizes_path = config.chrom_sizes_path
     
+    if species == "mm10":
+        gene_ref_file = DATA_DIR / "genome_data" / "genome_annotation" / "mm10" / "Mus_musculus.GRCm39.115.gtf.gz"
+    elif species == "hg38":
+        gene_ref_file = DATA_DIR / "genome_data" / "genome_annotation" / "hg38" / "Homo_sapiens.GRCh38.113.gtf.gz"
+        
+    genome_fasta_path = DATA_DIR / "genome_data" / "reference_genome" / species / f"{species}.fa"
+    chrom_sizes_path = DATA_DIR / "genome_data" / "reference_genome" / species / f"{species}.chrom.sizes"
+        
     assert gene_ref_file.exists(), f"Gene reference file not found: {gene_ref_file}"
     assert genome_fasta_path.exists(), f"Genome FASTA file not found: {genome_fasta_path}"
     assert chrom_sizes_path.exists(), f"Chromosome sizes file not found: {chrom_sizes_path}"
     
+    training_cache_dir = PROJECT_DIR / "data" / f"{cell_type}_cache"
     # Create the training cache directory if it doesn't exist
-    input_data_dir = Path(config.sample_input_data_dir)
+    input_data_dir = Path(PROJECT_DIR / "data" / "sample_input_data" / cell_type / sample_name)
     
     assert input_data_dir.exists(), f"Input data directory does not exist: {input_data_dir}"
     
@@ -111,19 +119,18 @@ def build_tf_tg_input_cache(
         peak_flank_size=peak_flank_size,
     )
     
-    tf_tg_input_cache_dir = config.tf_tg_input_cache_dir / "wandb_sweep" / f"tf_tg_sweep_{sweep_setting_hash}"
-
+    tf_tg_input_cache_dir = training_cache_dir / "tf_tg_training_cache" / sample_name / "wandb_sweep" / f"tf_tg_sweep_{sweep_setting_hash}"
     tf_tg_input_cache_dir.mkdir(parents=True, exist_ok=True)
-    
-    tf_name_to_idx_cache_path = config.tf_name_to_idx_cache_path
-    tf_embedding_cache_path = config.tf_embedding_cache_path
-    tf_mask_cache_path = config.tf_mask_cache_path
-    merged_ground_truth_path = config.merged_ground_truth_cache_path
+
+    tf_name_to_idx_cache_path = training_cache_dir / "tf_name_to_idx.csv"
+    tf_embedding_cache_path = training_cache_dir / "tf_embeddings.pt"
+    tf_mask_cache_path = training_cache_dir / "tf_masks.pt"
+    merged_ground_truth_path = training_cache_dir / f"{cell_type}_merged_ground_truth.parquet"
     
     atac_peak_onehot_cache_path = tf_tg_input_cache_dir / "atac_peak_tensor.pt"
     train_file = tf_tg_input_cache_dir / "tftg_inputs_train.pt"
     val_file = tf_tg_input_cache_dir / "tftg_inputs_val.pt"
-    test_file = tf_tg_input_cache_dir / "tftg_inputs_test.pt"
+    # test_file = tf_tg_input_cache_dir / "tftg_inputs_test.pt"
     
     metadata_file = tf_tg_input_cache_dir / "metadata.json"
     manifest_file = tf_tg_input_cache_dir / "manifest.json"
@@ -135,7 +142,7 @@ def build_tf_tg_input_cache(
         atac_peak_onehot_cache_path,
         train_file,
         val_file,
-        test_file,
+        # test_file,
         metadata_file,
         manifest_file,
     ]
@@ -172,7 +179,7 @@ def build_tf_tg_input_cache(
     if not merged_ground_truth_path.exists() or force_reload:
 
         merged_ground_truth_df: pd.DataFrame = utils.load_ground_truth_files(
-            config.gt_by_dataset_dict[config.cell_type]
+            config.gt_by_dataset_dict[cell_type]
             )
         
         merged_ground_truth_df["Source"] = merged_ground_truth_df["Source"].str.upper()
@@ -230,11 +237,11 @@ def build_tf_tg_input_cache(
 
     tg_id_to_idx = {tg: idx for idx, tg in enumerate(merged_ground_truth_df["Target"].unique())}
     
-    if config.species == "mm10":
+    if species == "mm10":
         train_chroms = [str(i) for i in range(1, 16)]
         val_chroms = [ str(i) for i in range(16, 18)]
         test_chroms = [str(i) for i in range(18, 20)]
-    elif config.species == "hg38":
+    elif species == "hg38":
         train_chroms = [str(i) for i in range(1, 18)]
         val_chroms = [str(i) for i in range(18, 20)]
         test_chroms = [str(i) for i in range(20, 23)]
@@ -246,7 +253,7 @@ def build_tf_tg_input_cache(
         val_chroms=val_chroms,
         test_chroms=test_chroms
         )
-    gt_train_df, gt_val_df, gt_test_df = build_tf_to_tg_train_data.create_train_val_test_splits(
+    gt_train_df, gt_val_df, _ = build_tf_to_tg_train_data.create_train_val_test_splits(
         merged_ground_truth_df, train_genes, val_genes, test_genes
     )
 
@@ -268,18 +275,21 @@ def build_tf_tg_input_cache(
         tf_name_to_idx=tf_name_to_idx,
         tg_id_to_idx=tg_id_to_idx,
     )
-    tf_tg_labeled_test_df = build_tf_to_tg_train_data._create_labeled_df(
-        gt_test_df,
-        pct_true_edges,
-        true_false_ratio,
-        seed=123,
-        tf_name_to_idx=tf_name_to_idx,
-        tg_id_to_idx=tg_id_to_idx,
-    )
+    # tf_tg_labeled_test_df = build_tf_to_tg_train_data._create_labeled_df(
+    #     gt_test_df,
+    #     pct_true_edges,
+    #     true_false_ratio,
+    #     seed=123,
+    #     tf_name_to_idx=tf_name_to_idx,
+    #     tg_id_to_idx=tg_id_to_idx,
+    # )
 
     # Create a map of ATAC peaks to indices in the pseudobulk matrix, filtering to valid chromosomes
     dataset_peaks = atac_pseudobulk.index.to_list()
-    valid_chroms = {f"chr{i}" for i in range(1, 20)}
+    if species == "mm10":
+        valid_chroms = {f"chr{i}" for i in range(1, 20)}
+    else:
+        valid_chroms = {f"chr{i}" for i in range(1, 23)}
     dataset_peaks = [peak for peak in dataset_peaks if peak.split(":", 1)[0] in valid_chroms]
     atac_peak_map = {peak: idx for idx, peak in enumerate(dataset_peaks)}
 
@@ -327,7 +337,7 @@ def build_tf_tg_input_cache(
         max_precompute_peaks=max_peaks_per_tg,
     )
     
-    tf_tg_df = pd.concat([tf_tg_labeled_train_df, tf_tg_labeled_val_df, tf_tg_labeled_test_df], ignore_index=True)
+    tf_tg_df = pd.concat([tf_tg_labeled_train_df, tf_tg_labeled_val_df], ignore_index=True)
     if tf_tg_df.empty:
         raise ValueError(
             "No labeled TF-TG pairs were created across train/val/test. "
@@ -359,7 +369,7 @@ def build_tf_tg_input_cache(
         max_peaks_real=max_peaks_real,
     )
     
-    if all(f.exists() for f in [train_file, val_file, test_file]) and not force_reload:
+    if all(f.exists() for f in [train_file, val_file]) and not force_reload:
         logging.info("Cached input files already exist. Skipping (use --force_reload to override).")
         return sweep_setting_hash
     
@@ -377,17 +387,17 @@ def build_tf_tg_input_cache(
         **common_build_kwargs,
     )
 
-    logging.info("\nBuilding test inputs")
-    tftg_inputs_test = build_tf_to_tg_train_data.build_tftg_inputs(
-        tf_tg_labeled_test_df,
-        seed=125,
-        **common_build_kwargs,
-    )
+    # logging.info("\nBuilding test inputs")
+    # tftg_inputs_test = build_tf_to_tg_train_data.build_tftg_inputs(
+    #     tf_tg_labeled_test_df,
+    #     seed=125,
+    #     **common_build_kwargs,
+    # )
 
     # Save compact split inputs
     torch.save(tftg_inputs_train, train_file)
     torch.save(tftg_inputs_val, val_file)
-    torch.save(tftg_inputs_test, test_file)
+    # torch.save(tftg_inputs_test, test_file)
 
     # Save mapping dictionaries and metadata
     metadata = {
@@ -414,7 +424,7 @@ def build_tf_tg_input_cache(
         "tf_mask_tensor_shape": list(tf_mask_tensor.shape),
         "n_train_rows": int(len(tftg_inputs_train["label"])),
         "n_val_rows": int(len(tftg_inputs_val["label"])),
-        "n_test_rows": int(len(tftg_inputs_test["label"])),
+        # "n_test_rows": int(len(tftg_inputs_test["label"])),
     }
 
     with open(manifest_file, "w") as f:
@@ -425,6 +435,9 @@ def build_tf_tg_input_cache(
     return sweep_setting_hash
 
 def train_tf_tg_model(
+    sample_name: str,
+    cell_type: str,
+    species: str,
     sweep_setting_hash: str,
     checkpoint_path: str | Path | None,
     max_peaks_per_tg: int,
@@ -438,23 +451,22 @@ def train_tf_tg_model(
     batch_size: int = 128,
     wandb_config: dict[str, object] | None = None,
 ):
-    
-    sample_name = config.sample_name
-    
-    output_dir = PROJECT_DIR / "checkpoints" / f"{config.cell_type}" / f"{sample_name}" / "wandb_sweep" / f"tf_tg_train_{sample_name}_{sweep_setting_hash}"
+        
+    output_dir = PROJECT_DIR / "checkpoints" / f"{cell_type}" / f"{sample_name}" / "wandb_sweep" / f"tf_tg_train_{sample_name}_{sweep_setting_hash}"
     
     run_name = f"tf_tg_{sample_name}_{sweep_setting_hash}"
     
-    tf_tg_input_cache_dir = config.tf_tg_input_cache_dir / "wandb_sweep" / f"tf_tg_sweep_{sweep_setting_hash}"
+    training_cache_dir = PROJECT_DIR / "data" / f"{cell_type}_cache"
+    tf_tg_input_cache_dir = training_cache_dir / "tf_tg_training_cache" / sample_name / "wandb_sweep" / f"tf_tg_sweep_{sweep_setting_hash}"
     
     # Load the trained TF embedding and mask tensors from the TF→DNA model cache 
     # (these are needed for the TF→TG model since it uses the pretrained TF peak embedding module)
     tf_embeddings_tensor = torch.load(
-        config.tf_embedding_cache_path,
+        training_cache_dir / "tf_embeddings.pt",
         weights_only=True,
     )
     tf_mask_tensor = torch.load(
-        config.tf_mask_cache_path,
+        training_cache_dir / "tf_masks.pt",
         weights_only=True,
     )
     
@@ -464,7 +476,7 @@ def train_tf_tg_model(
     tf_tg_manifest_cache_path = tf_tg_input_cache_dir / "manifest.json"
     tf_tg_train_cache_path = tf_tg_input_cache_dir / "tftg_inputs_train.pt"
     tf_tg_val_cache_path = tf_tg_input_cache_dir / "tftg_inputs_val.pt"
-    tf_tg_test_cache_path = tf_tg_input_cache_dir / "tftg_inputs_test.pt"
+    # tf_tg_test_cache_path = tf_tg_input_cache_dir / "tftg_inputs_test.pt"
     
     # Load the train/val/test splits of the compact TF-TG input tensors 
     # that were preprocessed and cached by the data preprocessing script
@@ -476,10 +488,10 @@ def train_tf_tg_model(
         tf_tg_val_cache_path,
         weights_only=False,
     )
-    tftg_inputs_test = torch.load(
-        tf_tg_test_cache_path,
-        weights_only=False,
-    )
+    # tftg_inputs_test = torch.load(
+    #     tf_tg_test_cache_path,
+    #     weights_only=False,
+    # )
 
     atac_peak_tensor = torch.load(
         tf_tg_atac_peak_cache_path,
@@ -502,12 +514,12 @@ def train_tf_tg_model(
 
     )
 
-    test_dataset = safe_model.TFTGEdgeBagDataset(
-        tftg_inputs_test,
-        tf_embeddings_tensor=tf_embeddings_tensor,
-        tf_mask_tensor=tf_mask_tensor,
-        atac_peak_tensor=atac_peak_tensor
-    )
+    # test_dataset = safe_model.TFTGEdgeBagDataset(
+    #     tftg_inputs_test,
+    #     tf_embeddings_tensor=tf_embeddings_tensor,
+    #     tf_mask_tensor=tf_mask_tensor,
+    #     atac_peak_tensor=atac_peak_tensor
+    # )
 
     # Create the DataLoaders with the tested batching path from the multigpu-safe script
     train_loader = safe_model.make_dataloader(
@@ -526,17 +538,17 @@ def train_tf_tg_model(
         prefetch_factor=2,
     )
 
-    test_loader = safe_model.make_dataloader(
-        test_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=2,
-        prefetch_factor=2,
-    )
+    # test_loader = safe_model.make_dataloader(
+    #     test_dataset,
+    #     batch_size=batch_size,
+    #     shuffle=False,
+    #     num_workers=2,
+    #     prefetch_factor=2,
+    # )
 
-    train_tf_to_tg_model.log_once(f"Train/Val/Test sizes: {len(train_dataset)}, {len(val_dataset)}, {len(test_dataset)}")
+    train_tf_to_tg_model.log_once(f"Train/Val sizes: {len(train_dataset)}, {len(val_dataset)}")
 
-    tf_bind_model_path = config.tf_dna_model_checkpoints[config.cell_type]
+    tf_bind_model_path = config.tf_dna_model_checkpoints[cell_type]
     
     tf_tg_model = safe_model.create_new_tf_tg_regulation_model(
         tf_bind_model_path=Path(tf_bind_model_path),
@@ -587,6 +599,8 @@ def train_tf_tg_model(
 
     wandb_logger.log_hyperparams({
         "sample_name": sample_name,
+        "cell_type": cell_type,
+        "species": species,
         "epochs": epochs,
         "batch_size": batch_size,
         "num_batches": len(train_loader),
@@ -647,9 +661,10 @@ def train_tf_tg_model(
         val_dataloaders=val_loader,
     )
 
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    
+    parser.add_argument("--sample_name", type=str, help="Sample name for training (e.g., 'E7.5_rep1')")
     parser.add_argument("--epochs", type=str, default="25", help="Number of training epochs")
     parser.add_argument("--num_gpus", type=str, default="1", help="Number of GPU devices to use for training")
     parser.add_argument("--num_nodes", type=str, default="1", help="Number of nodes to use for training")
@@ -676,6 +691,7 @@ if __name__ == "__main__":
         if parameter_name in run_config and run_config[parameter_name] is not None:
             setattr(args, parameter_name, run_config[parameter_name])
 
+    args.sample_name = _coerce_sweep_value("sample_name", args.sample_name, run_config.get("sample_name"), str)
     args.epochs = _coerce_sweep_value("epochs", args.epochs, run_config.get("epochs"), int)
     args.batch_size = _coerce_sweep_value("batch_size", args.batch_size, run_config.get("batch_size"), int)
     args.num_gpus = _coerce_sweep_value("num_gpus", args.num_gpus, run_config.get("num_gpus"), int)
@@ -692,8 +708,24 @@ if __name__ == "__main__":
     pct_true_edges = args.pct_true_edges
     true_false_ratio = args.true_false_ratio
     peak_flank_size = int(args.peak_flank_size)
-
+    
+    sample_to_cell_type_species = {
+        "E7.5_rep1": ("mESC", "mm10"),
+        "E8.5_rep1": ("mESC", "mm10"),
+        "hepatocytes_1": ("mouse_hepatocytes", "mm10"),
+        "hepatocytes_3": ("mouse_hepatocytes", "mm10"),
+        "buffer_1": ("Macrophage", "hg38"),
+        "buffer_2": ("Macrophage", "hg38"),
+        "sample_1": ("K562", "hg38"),
+    }
+    
+    cell_type = sample_to_cell_type_species[args.sample_name][0]
+    species = sample_to_cell_type_species[args.sample_name][1]
+    
     sweep_setting_hash = build_tf_tg_input_cache(
+        sample_name=args.sample_name,
+        cell_type=cell_type,
+        species=species,
         max_peaks_per_tg=max_peaks_per_tg,
         max_cells_per_pair=max_cells_per_pair,
         pct_true_edges=pct_true_edges,
@@ -705,6 +737,9 @@ if __name__ == "__main__":
 
     try:
         train_tf_tg_model(
+            sample_name=args.sample_name,
+            cell_type=cell_type,
+            species=species,
             sweep_setting_hash=sweep_setting_hash,
             checkpoint_path=Path(args.checkpoint_path) if args.checkpoint_path else None,
             max_peaks_per_tg=max_peaks_per_tg,

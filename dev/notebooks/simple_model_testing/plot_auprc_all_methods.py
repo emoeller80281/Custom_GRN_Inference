@@ -51,7 +51,7 @@ warnings.filterwarnings(
 
 tf_tg_input_cache_dir = DATA_DIR / "tf_tg_training_cache"
 
-all_evaluation_plot_dir = PROJECT_DIR / "plots" / "model_vs_test_set_evaluation_figs"
+all_evaluation_plot_dir = PROJECT_DIR / "plots"
 all_evaluation_plot_dir.mkdir(exist_ok=True)
 
 torch.backends.cuda.matmul.allow_tf32 = True

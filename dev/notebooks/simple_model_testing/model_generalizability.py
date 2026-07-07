@@ -282,7 +282,7 @@ if __name__ == "__main__":
     cell_type_cache_dir = DATA_DIR / f"{test_set_cell_type}_cache"
     
     prediction_save_file = RESULT_DIR / "labeled_grns" / f"{model_training_sample}_model_vs_{evaluation_sample}_grn_{subset_size}.csv"
-    metric_save_file = RESULT_DIR / "comparison_metric_files" / f"{model_training_sample}_model_vs_{evaluation_sample}_grn_{subset_size}.csv"
+    metric_save_file = RESULT_DIR / "comparison_metric_files" / f"{model_training_sample}_model_vs_{evaluation_sample}_test_metrics_{subset_size}.csv"
 
     if prediction_save_file.exists() and metric_save_file.exists() and not force_reload:
         logging.info(f"Prediction and metric files already exist for {model_cell_type} {model_training_sample} → {test_set_cell_type} {evaluation_sample}. Skipping evaluation.")

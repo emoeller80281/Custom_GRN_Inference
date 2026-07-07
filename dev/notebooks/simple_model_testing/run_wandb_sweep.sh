@@ -10,12 +10,13 @@
 #SBATCH -c 16
 #SBATCH --mem=128G
 #SBATCH --signal=SIGUSR1@90
+#SBATCH --array=0-4
 
 set -eo pipefail
 
 PROJECT_DIR="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/dev/notebooks/simple_model_testing"
 SWEEP_CONFIG="${PROJECT_DIR}/wandb_sweep.yaml"
-FORCE_RELOAD=1
+FORCE_RELOAD=0
 
 if [ "${1:-}" = "--force_reload" ]; then
     FORCE_RELOAD=1

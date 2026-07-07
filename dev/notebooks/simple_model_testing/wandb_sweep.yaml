@@ -4,6 +4,8 @@ metric:
   name: val/auroc
   goal: maximize
 parameters:
+  sample_name:
+    values: ["hepatocytes_1", "hepatocytes_3", "buffer_1", "buffer_2", "E7.5_rep1", "E8.5_rep1", "sample_1"]
   max_peaks_per_tg:
     values: [16, 32, 50, 100]
   max_cells_per_pair:

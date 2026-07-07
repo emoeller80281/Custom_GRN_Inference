@@ -20,7 +20,6 @@ logging.basicConfig(level=logging.INFO, format='%(levelname)s - %(message)s')
 PROJECT_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/dev/notebooks/simple_model_testing")
 DATA_DIR = PROJECT_DIR / "data"
 CHKPT_DIR = PROJECT_DIR / "checkpoints"
-CHKPT_COPY_DIR = PROJECT_DIR / "checkpoints copy"
 RESULT_DIR = PROJECT_DIR / "testing_results"
 
 sys.path.append(str(PROJECT_DIR))
@@ -546,7 +545,7 @@ def make_parser():
 def build_paths(args):
     cell_type_cache_dir = DATA_DIR / f"{args.cell_type}_cache"
     cache_dir = cell_type_cache_dir / f"{args.sample_name}_simplified_model_cache"
-    output_dir = PROJECT_DIR / "data" / "checkpoints" / "simplified_model" / f"{args.cell_type}_{args.sample_name}_simplified_model_test_{args.job_id}"
+    output_dir = CHKPT_DIR / "simplified_model" / f"{args.cell_type}_{args.sample_name}_simplified_model_test_{args.job_id}"
     return {
         "cell_type_cache_dir": cell_type_cache_dir,
         "cache_dir": cache_dir,
