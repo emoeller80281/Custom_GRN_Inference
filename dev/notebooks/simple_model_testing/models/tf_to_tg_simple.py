@@ -388,7 +388,7 @@ class LitTFTGRegulationModel(pl.LightningModule):
         )
 
     def _shared_step(self, batch, stage: str):
-        labels = batch["label"].float()
+        labels = batch["label"].float().view(-1)
 
         forward_start = None
         if stage == "train":
@@ -396,6 +396,7 @@ class LitTFTGRegulationModel(pl.LightningModule):
             forward_start = time.perf_counter()
 
         edge_logits, _ = self.forward(batch)
+        edge_logits = edge_logits.view(-1)
 
         if forward_start is not None:
             self._sync_if_cuda()
@@ -403,24 +404,48 @@ class LitTFTGRegulationModel(pl.LightningModule):
             self._record_timing("forward", forward_time)
 
         if self.logit_clamp is not None:
-            edge_logits = edge_logits.clamp(min=-self.logit_clamp, max=self.logit_clamp)
+            edge_logits = edge_logits.clamp(
+                min=-self.logit_clamp,
+                max=self.logit_clamp,
+            )
+
+        # Keep only finite logits/labels before loss + metrics
+        valid_mask = torch.isfinite(edge_logits) & torch.isfinite(labels)
+        edge_logits = edge_logits[valid_mask]
+        labels = labels[valid_mask]
+
+        # Empty batch guard
+        if edge_logits.numel() == 0 or labels.numel() == 0:
+            self.log(
+                f"{stage}/empty_batches",
+                torch.tensor(1.0, device=self.device),
+                on_step=False,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                sync_dist=(stage != "train"),
+            )
+
+            # For validation, safely skip this batch
+            if stage == "val":
+                return None
+
+            # For training, return a zero loss connected to the graph
+            # so Lightning/DDP does not crash.
+            return edge_logits.sum() * 0.0
 
         loss = self._loss(edge_logits, labels)
         probs = torch.sigmoid(edge_logits)
 
         if stage == "train":
             acc = self.train_acc(probs, labels.int())
-        elif stage == "val":
-            
-            valid_mask = torch.isfinite(probs) & torch.isfinite(labels)
 
-            probs = probs[valid_mask]
-            labels = labels[valid_mask]
-            
+        elif stage == "val":
             acc = self.val_acc(probs, labels.int())
 
             self.val_probs.append(probs.detach().float().cpu())
             self.val_targets.append(labels.detach().int().cpu())
+
         else:
             raise ValueError(f"Unknown stage: {stage}")
 
@@ -437,6 +462,16 @@ class LitTFTGRegulationModel(pl.LightningModule):
         self.log(
             f"{stage}/acc",
             acc,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+            sync_dist=(stage != "train"),
+        )
+
+        self.log(
+            f"{stage}/empty_batches",
+            torch.tensor(0.0, device=self.device),
             on_step=False,
             on_epoch=True,
             prog_bar=False,

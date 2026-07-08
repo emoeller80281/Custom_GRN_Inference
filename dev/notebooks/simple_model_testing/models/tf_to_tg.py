@@ -361,6 +361,7 @@ class LitTFTGRegulationModel(pl.LightningModule):
         self.val_probs = []
         self.val_targets = []
         self._prev_batch_end_time = None
+        self._epoch_start_time = None
         self._step_start_time = None
         self._backward_start_time = None
         self._timing_window_size = 50
@@ -502,6 +503,8 @@ class LitTFTGRegulationModel(pl.LightningModule):
             self._timing_windows[k].clear()
         self._latest_timing_avgs.clear()
         self._prev_batch_end_time = None
+        self._epoch_start_time = time.perf_counter()
+        
 
     def on_train_batch_start(self, batch, batch_idx):
         self._sync_if_cuda()
@@ -552,6 +555,24 @@ class LitTFTGRegulationModel(pl.LightningModule):
                     logger=True,
                     sync_dist=False,
                 )
+
+    def on_train_epoch_end(self):
+        if self._epoch_start_time is None:
+            return
+
+        self._sync_if_cuda()
+        epoch_time = time.perf_counter() - self._epoch_start_time
+        self._epoch_start_time = None
+
+        self.log(
+            "train/epoch_time",
+            epoch_time,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            logger=True,
+            sync_dist=False,
+        )
 
     def validation_step(self, batch, batch_idx):
         self._shared_step(batch, stage="val")

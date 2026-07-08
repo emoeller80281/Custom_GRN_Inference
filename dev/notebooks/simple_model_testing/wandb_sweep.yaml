@@ -1,19 +1,25 @@
 program: wandb_sweep.py
 method: bayes
 metric:
-  name: val/auroc
+  name: val/auroc.max
   goal: maximize
 parameters:
   sample_name:
     values: ["hepatocytes_1", "hepatocytes_3", "buffer_1", "buffer_2", "E7.5_rep1", "E8.5_rep1", "sample_1"]
+  batch_size:
+    values: [32, 64, 72]
+  d_model:
+    values: [64, 128, 256]
+  tf_peak_chunk_size:
+    values: [64, 128, 256]
   max_peaks_per_tg:
-    values: [16, 32, 50, 100]
+    values: [8, 16, 32, 64]
   max_cells_per_pair:
-    values: [16, 32, 64]
+    values: [8, 16, 32, 64, 128]
   pct_true_edges:
-    values: [0.25, 0.5, 0.75]
+    values: [0.1, 0.25, 0.5, 0.75]
   true_false_ratio:
-    values: [1.0, 2.0, 3.0]
+    values: [0.5, 1.0, 1.5, 2.0]
 command:
   - ${env}
   - ${interpreter}

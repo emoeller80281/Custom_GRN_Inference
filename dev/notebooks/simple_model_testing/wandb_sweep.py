@@ -1,5 +1,4 @@
 import os
-from re import I
 import sys
 import json
 import gtfparse
@@ -25,7 +24,8 @@ import utils
 import config
 import scripts.build_tf_to_tg_train_data as build_tf_to_tg_train_data
 import scripts.train_tf_to_tg_model as train_tf_to_tg_model
-import test_simplified_model_multigpu_safe as safe_model
+import models.tf_to_dna as tf_to_dna_module
+import models.tf_to_tg as tf_to_tg_module
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -33,6 +33,8 @@ import hashlib
 
 SWEEP_PARAMETER_NAMES = (
     "epochs",
+    "d_model",
+    "tf_peak_chunk_size",
     "batch_size",
     "num_gpus",
     "num_nodes",
@@ -79,6 +81,81 @@ def _coerce_sweep_value(
     except (TypeError, ValueError) as exc:
         raise ValueError(f"Invalid value for {name}: {value}") from exc
 
+
+
+def create_new_tf_tg_regulation_model(
+    tf_bind_model_path: Path,
+    tf_embeddings_tensor: torch.Tensor,
+    tf_mask_tensor: torch.Tensor,
+    checkpoint_path: Path | None = None,
+    d_model: int = 128,
+    tf_peak_chunk_size: int = 128,
+    
+) -> tf_to_tg_module.TFTGRegulationModel:
+
+    # 1) Recreate the base TF→DNA model with the same hyperparameters
+    base_model = tf_to_dna_module.TFPeakBindingModel(
+        tf_embedding_dim=128,
+        hidden_dim=128,
+        dropout=0.3,
+        num_layers=4,
+        num_heads=4,
+        dim_head=32,
+    )
+
+    # 2) Wrap in Lightning module and load checkpoint
+    lit_model = tf_to_dna_module.LitTFPeakBindingModel.load_from_checkpoint(
+        checkpoint_path=tf_bind_model_path,
+        model=base_model,
+        tf_embeddings_tensor=tf_embeddings_tensor,
+        tf_mask_tensor=tf_mask_tensor,
+        lr=1e-4,
+        weight_decay=1e-4,
+        pos_weight=None,
+    )
+
+    # 3) Get the trained base model and freeze it
+    trained_tf_peak_model = lit_model.model
+
+    trained_tf_peak_model.eval()
+
+    for p in trained_tf_peak_model.parameters():
+        p.requires_grad = False
+
+    trained_tf_peak_model = torch.compile(
+        trained_tf_peak_model,
+        mode="reduce-overhead",
+        fullgraph=False,
+    )
+
+    # 4) Inject into your TF→TG model
+    tf_tg_model = tf_to_tg_module.TFTGRegulationModel(
+        pretrained_tf_peak_model=trained_tf_peak_model,
+        d_model=d_model,
+        tf_peak_chunk_size=tf_peak_chunk_size,
+    )
+
+    # 5) Optionally load TF→TG checkpoint
+    if checkpoint_path is not None:
+        logging.info(f"Loading TF→TG model weights from checkpoint: {checkpoint_path}")
+
+        tf_tg_ckpt = torch.load(
+            checkpoint_path,
+            map_location="cpu",
+            weights_only=False,
+        )
+
+        fixed = {}
+
+        for key, value in tf_tg_ckpt["state_dict"].items():
+            if key.startswith("model."):
+                key = key[len("model."):]
+            fixed[key] = value
+
+        tf_tg_model.load_state_dict(fixed, strict=True)
+
+    return tf_tg_model
+
 def build_tf_tg_input_cache(
     sample_name: str,
     cell_type: str,
@@ -90,6 +167,7 @@ def build_tf_tg_input_cache(
     peak_flank_size: int,
     num_cpu: int,
     force_reload: bool,
+    sample_pairs: int | None = 100_000,
 ):
     
     if species == "mm10":
@@ -275,6 +353,7 @@ def build_tf_tg_input_cache(
         tf_name_to_idx=tf_name_to_idx,
         tg_id_to_idx=tg_id_to_idx,
     )
+    
     # tf_tg_labeled_test_df = build_tf_to_tg_train_data._create_labeled_df(
     #     gt_test_df,
     #     pct_true_edges,
@@ -337,6 +416,17 @@ def build_tf_tg_input_cache(
         max_precompute_peaks=max_peaks_per_tg,
     )
     
+    def _sample_df(df: pd.DataFrame, n: int | None, seed: int) -> pd.DataFrame:
+        if n is None or len(df) <= n:
+            return df
+        return df.sample(n=n, random_state=seed)
+    
+    if sample_pairs is not None:
+        logging.info(f"Sampling {args.sample_pairs} TF-TG pairs from each of train/val/test splits")
+        tf_tg_labeled_train_df = _sample_df(tf_tg_labeled_train_df, n=sample_pairs, seed=123)
+        tf_tg_labeled_val_df = _sample_df(tf_tg_labeled_val_df, n=sample_pairs, seed=123)
+        # tf_tg_labeled_test_df = _sample_df(tf_tg_labeled_test_df, n=sample_pairs, seed=123)
+    
     tf_tg_df = pd.concat([tf_tg_labeled_train_df, tf_tg_labeled_val_df], ignore_index=True)
     if tf_tg_df.empty:
         raise ValueError(
@@ -386,7 +476,7 @@ def build_tf_tg_input_cache(
         seed=124,
         **common_build_kwargs,
     )
-
+    
     # logging.info("\nBuilding test inputs")
     # tftg_inputs_test = build_tf_to_tg_train_data.build_tftg_inputs(
     #     tf_tg_labeled_test_df,
@@ -433,6 +523,20 @@ def build_tf_tg_input_cache(
     logging.info(f"Wrote training data and metadata to {tf_tg_input_cache_dir}")
     
     return sweep_setting_hash
+
+def make_dataloader(dataset, *, batch_size, shuffle, num_workers, prefetch_factor):
+    kwargs = dict(
+        dataset=dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        pin_memory=torch.cuda.is_available(),
+        persistent_workers=num_workers > 0,
+        collate_fn=train_tf_to_tg_model.collate_tftg_edge_bags,
+    )
+    if num_workers > 0:
+        kwargs["prefetch_factor"] = prefetch_factor
+    return DataLoader(**kwargs)
 
 def train_tf_tg_model(
     sample_name: str,
@@ -499,14 +603,14 @@ def train_tf_tg_model(
     )
     
     # Re-create the datasets and dataloaders using the loaded compact inputs and lookup tensors
-    train_dataset = safe_model.TFTGEdgeBagDataset(
+    train_dataset = train_tf_to_tg_model.TFTGEdgeBagDataset(
         tftg_inputs_train,
         tf_embeddings_tensor=tf_embeddings_tensor,
         tf_mask_tensor=tf_mask_tensor,
         atac_peak_tensor=atac_peak_tensor
     )
 
-    val_dataset = safe_model.TFTGEdgeBagDataset(
+    val_dataset = train_tf_to_tg_model.TFTGEdgeBagDataset(
         tftg_inputs_val,
         tf_embeddings_tensor=tf_embeddings_tensor,
         tf_mask_tensor=tf_mask_tensor,
@@ -514,7 +618,7 @@ def train_tf_tg_model(
 
     )
 
-    # test_dataset = safe_model.TFTGEdgeBagDataset(
+    # test_dataset = train_tf_to_tg_model.TFTGEdgeBagDataset(
     #     tftg_inputs_test,
     #     tf_embeddings_tensor=tf_embeddings_tensor,
     #     tf_mask_tensor=tf_mask_tensor,
@@ -522,7 +626,7 @@ def train_tf_tg_model(
     # )
 
     # Create the DataLoaders with the tested batching path from the multigpu-safe script
-    train_loader = safe_model.make_dataloader(
+    train_loader = make_dataloader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
@@ -530,7 +634,7 @@ def train_tf_tg_model(
         prefetch_factor=4,
     )
 
-    val_loader = safe_model.make_dataloader(
+    val_loader = make_dataloader(
         val_dataset,
         batch_size=batch_size,
         shuffle=False,
@@ -538,7 +642,7 @@ def train_tf_tg_model(
         prefetch_factor=2,
     )
 
-    # test_loader = safe_model.make_dataloader(
+    # test_loader = make_dataloader(
     #     test_dataset,
     #     batch_size=batch_size,
     #     shuffle=False,
@@ -550,19 +654,20 @@ def train_tf_tg_model(
 
     tf_bind_model_path = config.tf_dna_model_checkpoints[cell_type]
     
-    tf_tg_model = safe_model.create_new_tf_tg_regulation_model(
+    tf_tg_model = create_new_tf_tg_regulation_model(
         tf_bind_model_path=Path(tf_bind_model_path),
         tf_embeddings_tensor=tf_embeddings_tensor,
         tf_mask_tensor=tf_mask_tensor,
-        checkpoint_path=Path(checkpoint_path) if checkpoint_path else None,
-    )
+        d_model=args.d_model,
+        tf_peak_chunk_size=args.tf_peak_chunk_size,
+        )
 
     pooling_mode = "lse"
     pooling_temperature = 1.0
 
     train_tf_to_tg_model.log_once("\nStarting Lightning training...")
 
-    lit_model = safe_model.tf_to_tg_module.LitTFTGRegulationModel(
+    lit_model = tf_to_tg_module.LitTFTGRegulationModel(
         model=tf_tg_model,
         lr=1e-4,
         weight_decay=1e-4,
@@ -577,7 +682,7 @@ def train_tf_tg_model(
         filename="epoch={epoch:02d}-val_auroc={val/auroc:.4f}-val_loss={val/loss:.4f}",
         monitor="val/auroc",
         mode="max",
-        save_top_k=100,
+        save_top_k=3,
         save_last=True,
         auto_insert_metric_name=False,
     )
@@ -665,6 +770,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     
     parser.add_argument("--sample_name", type=str, help="Sample name for training (e.g., 'E7.5_rep1')")
+    parser.add_argument("--d_model", type=str, default="128", help="Dimension of the model (default: 128)")
+    parser.add_argument("--tf_peak_chunk_size", type=str, default="64", help="Chunk size for TF peak embeddings (default: 64)")
     parser.add_argument("--epochs", type=str, default="25", help="Number of training epochs")
     parser.add_argument("--num_gpus", type=str, default="1", help="Number of GPU devices to use for training")
     parser.add_argument("--num_nodes", type=str, default="1", help="Number of nodes to use for training")
@@ -677,6 +784,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_cpu", type=int, default=8, help="Number of CPU workers to use for preprocessing")
     parser.add_argument("--checkpoint_path", type=str, required=False, help="Path to a model checkpoint to resume training from")
     parser.add_argument("--force_reload", action="store_true", help="Whether to force reload cached data instead of using existing cache files")
+    parser.add_argument("--sample_pairs", type=int, default=100_000, help="Number of TF-TG pairs to sample for training (default: 10,000)")
     args = parser.parse_args()
 
     sweep_run = wandb.init(
@@ -684,7 +792,7 @@ if __name__ == "__main__":
         config=vars(args),
         job_type="tf_tg_sweep",
     )
-    wandb.define_metric("val/auroc", summary="max")
+    wandb.define_metric("val/auroc.max", summary="max")
     run_config = dict(sweep_run.config)
 
     for parameter_name in SWEEP_PARAMETER_NAMES:
@@ -692,6 +800,8 @@ if __name__ == "__main__":
             setattr(args, parameter_name, run_config[parameter_name])
 
     args.sample_name = _coerce_sweep_value("sample_name", args.sample_name, run_config.get("sample_name"), str)
+    args.d_model = _coerce_sweep_value("d_model", args.d_model, run_config.get("d_model"), int)
+    args.tf_peak_chunk_size = _coerce_sweep_value("tf_peak_chunk_size", args.tf_peak_chunk_size, run_config.get("tf_peak_chunk_size"), int)
     args.epochs = _coerce_sweep_value("epochs", args.epochs, run_config.get("epochs"), int)
     args.batch_size = _coerce_sweep_value("batch_size", args.batch_size, run_config.get("batch_size"), int)
     args.num_gpus = _coerce_sweep_value("num_gpus", args.num_gpus, run_config.get("num_gpus"), int)
@@ -733,6 +843,7 @@ if __name__ == "__main__":
         peak_flank_size=peak_flank_size,
         num_cpu=args.num_cpu,
         force_reload=args.force_reload,
+        sample_pairs=args.sample_pairs,
     )
 
     try:

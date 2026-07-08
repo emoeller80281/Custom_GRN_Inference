@@ -10,7 +10,7 @@
 #SBATCH -c 16
 #SBATCH --mem=128G
 #SBATCH --signal=SIGUSR1@90
-#SBATCH --array=0-4
+#SBATCH --array=0-7
 
 set -eo pipefail
 
