@@ -709,6 +709,7 @@ def train_tf_tg_model(
         "epochs": epochs,
         "batch_size": batch_size,
         "num_batches": len(train_loader),
+        "num_samples": len(train_dataset),
         "num_gpus": num_gpus,
         "num_nodes": num_nodes,
         "run_name": run_name,
@@ -772,12 +773,12 @@ if __name__ == "__main__":
     parser.add_argument("--sample_name", type=str, help="Sample name for training (e.g., 'E7.5_rep1')")
     parser.add_argument("--d_model", type=str, default="128", help="Dimension of the model (default: 128)")
     parser.add_argument("--tf_peak_chunk_size", type=str, default="64", help="Chunk size for TF peak embeddings (default: 64)")
-    parser.add_argument("--epochs", type=str, default="25", help="Number of training epochs")
+    parser.add_argument("--epochs", type=str, default="20", help="Number of training epochs")
     parser.add_argument("--num_gpus", type=str, default="1", help="Number of GPU devices to use for training")
     parser.add_argument("--num_nodes", type=str, default="1", help="Number of nodes to use for training")
     parser.add_argument("--max_peaks_per_tg", type=str, default="64", help="Maximum number of peaks to consider per TG (default: 64)")
     parser.add_argument("--max_cells_per_pair", type=str, default="8", help="Maximum number of cells to sample per TF-TG pair (default: 8)")
-    parser.add_argument("--batch_size", type=str, default="128", help="Batch size for training (default: 32)")
+    parser.add_argument("--batch_size", type=str, default="64", help="Batch size for training (default: 32)")
     parser.add_argument("--pct_true_edges", type=str, default="0.05", help="Percentage of true edges to include in the training set (default: 0.15)")
     parser.add_argument("--true_false_ratio", type=str, default="1.0", help="Ratio of true to false edges in the training set (default: 2.0)")
     parser.add_argument("--peak_flank_size", type=str, default="64", help="Size of the flank region around each peak (default: 64)")

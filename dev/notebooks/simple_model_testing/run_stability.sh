@@ -127,7 +127,7 @@ true_false_ratio=10.0
 
 echo "[INFO] Starting training..."
 srun python3 ${PROJECT_DIR}/stability_model_training.py \
-    --epochs 100 \
+    --epochs 50 \
     --species $species \
     --cell_type $cell_type \
     --sample_name $sample_name \

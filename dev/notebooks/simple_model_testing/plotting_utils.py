@@ -82,7 +82,7 @@ def plot_auroc_auprc(
         plots_to_make.append("prc")
 
     ncols = len(plots_to_make)
-    figsize = (7, 4) if ncols == 2 else (4, 4)
+    figsize = (7, 4.8) if ncols == 2 else (4.5, 4.8)
 
     fig, axes = plt.subplots(
         nrows=1,
@@ -139,7 +139,7 @@ def plot_auroc_auprc(
             ax.legend(
                 handles=[roc_line, rand_roc_line],
                 labels=[f"AUROC = {auroc:.3f}", f"Random = {rand_auroc:.3f}"],
-                bbox_to_anchor=(0.5, -0.28),
+                bbox_to_anchor=(0.5, -0.13),
                 loc="upper center",
                 borderaxespad=0.0,
                 facecolor="none",

@@ -30,133 +30,6 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
 )
 
-def create_labeled_tf_peak_dataset(
-    true_interactions: set[tuple[str, str]],
-    false_interactions: set[tuple[str, str]],
-    tf_name_to_idx: dict[str, int],
-    peak_id_to_idx: dict[str, int],
-    drop_missing: bool = True,
-) -> pd.DataFrame:
-    """
-    Create a labeled TF-peak interaction dataset.
-
-    Labels:
-        true interactions  -> 1
-        false interactions -> 0
-
-    Returns
-    -------
-    pd.DataFrame with columns:
-        tf_name, peak_id, tf_idx, peak_idx, label
-    """
-
-    rows = []
-
-    for tf, peak in true_interactions:
-        rows.append((tf, peak, 1))
-
-    for tf, peak in false_interactions:
-        rows.append((tf, peak, 0))
-
-    df = pd.DataFrame(rows, columns=["tf_name", "peak_id", "label"])
-
-    df["tf_idx"] = df["tf_name"].map(tf_name_to_idx)
-    df["peak_idx"] = df["peak_id"].map(peak_id_to_idx)
-
-    missing_mask = df["tf_idx"].isna() | df["peak_idx"].isna()
-
-    if missing_mask.any():
-        n_missing = missing_mask.sum()
-
-        if drop_missing:
-            print(f"Dropping {n_missing} interactions with missing TF or peak indices.")
-            df = df.loc[~missing_mask].copy()
-        else:
-            missing_examples = df.loc[missing_mask].head()
-            raise ValueError(
-                f"{n_missing} interactions are missing TF or peak indices.\n"
-                f"Examples:\n{missing_examples}"
-            )
-
-    df["tf_idx"] = df["tf_idx"].astype(np.int64)
-    df["peak_idx"] = df["peak_idx"].astype(np.int64)
-    df["label"] = df["label"].astype(np.float32)
-
-    # Optional: shuffle rows
-    df = df.sample(frac=1.0, random_state=123).reset_index(drop=True)
-
-    return df
-
-def load_ordered_tf_embeddings(
-    embedding_dir,
-    tf_name_to_idx,
-    suffix="_protein_embedding.pt",
-    weights_only=False,
-):
-    embedding_dir = Path(embedding_dir)
-
-    # Map TF name -> file path
-    available_files = {}
-
-    for path in embedding_dir.glob(f"*{suffix}"):
-        tf_name = path.name.replace(suffix, "")
-        available_files[tf_name] = path
-
-    n_tfs = len(tf_name_to_idx)
-
-    ordered_tf_names = [None] * n_tfs
-    ordered_embeddings = [None] * n_tfs
-    ordered_lengths = [0] * n_tfs
-
-    missing_tfs = []
-
-    for tf_name, tf_idx in tf_name_to_idx.items():
-        ordered_tf_names[tf_idx] = tf_name
-
-        if tf_name not in available_files:
-            missing_tfs.append(tf_name)
-            continue
-
-        emb = torch.load(
-            available_files[tf_name],
-            weights_only=weights_only,
-            map_location="cpu",
-        )
-
-        # Convert [1, L, D] -> [L, D]
-        if emb.ndim == 3 and emb.shape[0] == 1:
-            emb = emb.squeeze(0)
-
-        emb = emb.float()
-
-        ordered_embeddings[tf_idx] = emb
-        ordered_lengths[tf_idx] = emb.shape[0]
-
-    if len(missing_tfs) > 0:
-        raise FileNotFoundError(
-            f"Missing embeddings for {len(missing_tfs)} TFs. "
-            f"Examples: {missing_tfs[:20]}"
-        )
-
-    lengths = torch.tensor(ordered_lengths, dtype=torch.long)
-
-    embeddings_padded = pad_sequence(
-        ordered_embeddings,
-        batch_first=True,
-        padding_value=0.0,
-    )
-
-    max_len = embeddings_padded.shape[1]
-
-    mask = torch.arange(max_len).unsqueeze(0) < lengths.unsqueeze(1)
-
-    return {
-        "tf_names": ordered_tf_names,
-        "embeddings": embeddings_padded,  # [n_tfs, max_tf_len, embedding_dim]
-        "lengths": lengths,              # [n_tfs]
-        "mask": mask,                    # [n_tfs, max_tf_len]
-    }
-
 class TFPeakEdgeDataset(Dataset):
     def __init__(
         self,
@@ -180,6 +53,7 @@ class TFPeakEdgeDataset(Dataset):
 
         return {
             "tf_idx": self.edge_tf_idx[idx],
+            "peak_idx": peak_idx,
             "peak_embedding": self.peak_tensor[peak_idx],
             "label": self.edge_labels[idx],
         }

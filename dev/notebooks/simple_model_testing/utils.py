@@ -1025,6 +1025,74 @@ def gpu_supports_torch_compile(device):
     major, minor = torch.cuda.get_device_capability(device)
     return major >= 7
 
+def load_tf_dna_model(
+    tf_dna_model_path: Path,
+    tf_embeddings_tensor: torch.Tensor,
+    tf_mask_tensor: torch.Tensor,
+    compile_model: bool = False,
+    device: torch.device | None = None,
+) -> tf_to_dna_module.LitTFPeakBindingModel:
+
+    device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    if compile_model and not gpu_supports_torch_compile(device):
+        if device.type == "cuda":
+            major, minor = torch.cuda.get_device_capability(device)
+            logging.warning(
+                f"Skipping torch.compile because this GPU has compute capability "
+                f"{major}.{minor}; Inductor/Triton requires >= 7.0."
+            )
+        else:
+            logging.warning("Skipping torch.compile because device is not CUDA.")
+
+        compile_model = False
+
+    # -----------------------------
+    # 1. Recreate base TF-DNA model uncompiled
+    # -----------------------------
+    base_model = tf_to_dna_module.TFPeakBindingModel(
+        tf_embedding_dim=128,
+        hidden_dim=128,
+        dropout=0.3,
+        num_layers=4,
+        num_heads=4,
+        dim_head=32,
+    )
+
+    # -----------------------------
+    # 2. Load TF-DNA checkpoint
+    # -----------------------------
+    tf_dna_ckpt = torch.load(
+        tf_dna_model_path,
+        map_location="cpu",
+        weights_only=False,
+    )
+
+    tf_dna_state_dict = tf_dna_ckpt["state_dict"]
+
+    if any("._orig_mod." in key or key.startswith("_orig_mod.") for key in tf_dna_state_dict):
+        logging.info("Detected compiled TF-DNA checkpoint. Stripping _orig_mod prefixes.")
+        tf_dna_state_dict = strip_compiled_prefix_from_state_dict(tf_dna_state_dict)
+
+    lit_tf_dna_model = tf_to_dna_module.LitTFPeakBindingModel(
+        model=base_model,
+        tf_embeddings_tensor=tf_embeddings_tensor,
+        tf_mask_tensor=tf_mask_tensor,
+        lr=1e-4,
+        weight_decay=1e-4,
+        pos_weight=None,
+    )
+
+    lit_tf_dna_model.load_state_dict(tf_dna_state_dict, strict=True)
+
+    if compile_model:
+        logging.info("Compiling loaded TF-DNA core model.")
+        lit_tf_dna_model.model = torch.compile(
+            lit_tf_dna_model.model,
+            mode="reduce-overhead",
+        )
+        
+    return lit_tf_dna_model
 
 def load_tf_tg_regulation_model(
     tf_dna_model_path: Path,

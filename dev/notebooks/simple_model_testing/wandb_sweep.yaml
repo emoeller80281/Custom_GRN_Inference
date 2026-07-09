@@ -1,4 +1,5 @@
 program: wandb_sweep.py
+name: tf_tg_sweep
 method: bayes
 metric:
   name: val/auroc.max
@@ -6,20 +7,20 @@ metric:
 parameters:
   sample_name:
     values: ["hepatocytes_1", "hepatocytes_3", "buffer_1", "buffer_2", "E7.5_rep1", "E8.5_rep1", "sample_1"]
-  batch_size:
-    values: [32, 64, 72]
   d_model:
-    values: [64, 128, 256]
-  tf_peak_chunk_size:
-    values: [64, 128, 256]
+    values: [64, 128, 192, 256, 512, 1024]
   max_peaks_per_tg:
-    values: [8, 16, 32, 64]
+    min: 1
+    max: 100
   max_cells_per_pair:
-    values: [8, 16, 32, 64, 128]
+    min: 1
+    max: 500
   pct_true_edges:
-    values: [0.1, 0.25, 0.5, 0.75]
+    min: 0.01
+    max: 1.00
   true_false_ratio:
-    values: [0.5, 1.0, 1.5, 2.0]
+    min: 0.5
+    max: 5.0
 command:
   - ${env}
   - ${interpreter}
