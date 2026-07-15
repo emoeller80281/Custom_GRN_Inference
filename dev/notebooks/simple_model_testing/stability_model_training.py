@@ -848,11 +848,11 @@ def main():
         filename="epoch={epoch:02d}-val_auroc={val/auroc:.4f}-val_loss={val/loss:.4f}",
         monitor="val/auroc",
         mode="max",
-        save_top_k=3,
+        save_top_k=2,
         save_last=True,
         auto_insert_metric_name=False,
     )
-    early_stopping_callback = EarlyStopping(monitor="val/loss", mode="min", patience=15)
+    early_stopping_callback = EarlyStopping(monitor="val/loss", mode="min", patience=10)
     lr_monitor = LearningRateMonitor(logging_interval="epoch")
 
     wandb_logger = None

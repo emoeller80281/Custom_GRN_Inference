@@ -1,4 +1,5 @@
 import os
+import shutil
 import sys
 import json
 import gtfparse
@@ -183,6 +184,7 @@ def build_tf_tg_input_cache(
     assert chrom_sizes_path.exists(), f"Chromosome sizes file not found: {chrom_sizes_path}"
     
     training_cache_dir = PROJECT_DIR / "data" / f"{cell_type}_cache"
+    
     # Create the training cache directory if it doesn't exist
     input_data_dir = Path(PROJECT_DIR / "data" / "sample_input_data" / cell_type / sample_name)
     
@@ -197,7 +199,10 @@ def build_tf_tg_input_cache(
         peak_flank_size=peak_flank_size,
     )
     
-    tf_tg_input_cache_dir = training_cache_dir / "tf_tg_training_cache" / sample_name / "wandb_sweep" / f"tf_tg_sweep_{sweep_setting_hash}"
+    sweep_cache_dir = PROJECT_DIR / "data" / "sweep_cache"
+    sweep_cache_dir.mkdir(parents=True, exist_ok=True)
+    
+    tf_tg_input_cache_dir = sweep_cache_dir / f"tf_tg_sweep_{sweep_setting_hash}"
     tf_tg_input_cache_dir.mkdir(parents=True, exist_ok=True)
 
     tf_name_to_idx_cache_path = training_cache_dir / "tf_name_to_idx.csv"
@@ -208,10 +213,6 @@ def build_tf_tg_input_cache(
     atac_peak_onehot_cache_path = tf_tg_input_cache_dir / "atac_peak_tensor.pt"
     train_file = tf_tg_input_cache_dir / "tftg_inputs_train.pt"
     val_file = tf_tg_input_cache_dir / "tftg_inputs_val.pt"
-    # test_file = tf_tg_input_cache_dir / "tftg_inputs_test.pt"
-    
-    metadata_file = tf_tg_input_cache_dir / "metadata.json"
-    manifest_file = tf_tg_input_cache_dir / "manifest.json"
     
     required_cache_files = [
         tf_name_to_idx_cache_path,
@@ -220,9 +221,6 @@ def build_tf_tg_input_cache(
         atac_peak_onehot_cache_path,
         train_file,
         val_file,
-        # test_file,
-        metadata_file,
-        manifest_file,
     ]
     
     if all(f.exists() for f in required_cache_files) and not force_reload:
@@ -353,15 +351,6 @@ def build_tf_tg_input_cache(
         tf_name_to_idx=tf_name_to_idx,
         tg_id_to_idx=tg_id_to_idx,
     )
-    
-    # tf_tg_labeled_test_df = build_tf_to_tg_train_data._create_labeled_df(
-    #     gt_test_df,
-    #     pct_true_edges,
-    #     true_false_ratio,
-    #     seed=123,
-    #     tf_name_to_idx=tf_name_to_idx,
-    #     tg_id_to_idx=tg_id_to_idx,
-    # )
 
     # Create a map of ATAC peaks to indices in the pseudobulk matrix, filtering to valid chromosomes
     dataset_peaks = atac_pseudobulk.index.to_list()
@@ -371,10 +360,6 @@ def build_tf_tg_input_cache(
         valid_chroms = {f"chr{i}" for i in range(1, 23)}
     dataset_peaks = [peak for peak in dataset_peaks if peak.split(":", 1)[0] in valid_chroms]
     atac_peak_map = {peak: idx for idx, peak in enumerate(dataset_peaks)}
-
-    # Load cached TF embeddings and masks from TF-DNA model training
-    tf_embeddings_tensor = torch.load(tf_embedding_cache_path, weights_only=True)
-    tf_mask_tensor = torch.load(tf_mask_cache_path, weights_only=True)
 
     # Create or load cached one-hot encodings for ATAC peaks
     # One-hot encodings use ACGT order and uses 'flank_size' bp upstream and downstream of the peak center.
@@ -477,50 +462,10 @@ def build_tf_tg_input_cache(
         **common_build_kwargs,
     )
     
-    # logging.info("\nBuilding test inputs")
-    # tftg_inputs_test = build_tf_to_tg_train_data.build_tftg_inputs(
-    #     tf_tg_labeled_test_df,
-    #     seed=125,
-    #     **common_build_kwargs,
-    # )
-
-    # Save compact split inputs
     torch.save(tftg_inputs_train, train_file)
     torch.save(tftg_inputs_val, val_file)
-    # torch.save(tftg_inputs_test, test_file)
 
-    # Save mapping dictionaries and metadata
-    metadata = {
-        "tf_name_to_idx": tf_name_to_idx,
-        "tg_id_to_idx": tg_id_to_idx,
-        "gene_to_rna_idx": gene_to_rna_idx,
-        "cell_to_idx": cell_to_idx,
-        "max_peaks_per_tg": max_peaks_per_tg,
-        "max_cells_per_pair": max_cells_per_pair,
-        "flank_size": peak_flank_size,
-        "peak_dtype": "uint8",
-    }
-    with open(metadata_file, "w") as f:
-        json.dump(metadata, f, indent=4)
-
-    # Save a manifest to keep track of model settings and dataset versions
-    manifest = {
-        "max_peaks_per_tg": max_peaks_per_tg,
-        "max_cells_per_pair": max_cells_per_pair,
-        "flank_size": peak_flank_size,
-        "atac_peak_tensor_dtype": str(atac_peak_tensor.dtype),
-        "atac_peak_tensor_shape": list(atac_peak_tensor.shape),
-        "tf_embeddings_tensor_shape": list(tf_embeddings_tensor.shape),
-        "tf_mask_tensor_shape": list(tf_mask_tensor.shape),
-        "n_train_rows": int(len(tftg_inputs_train["label"])),
-        "n_val_rows": int(len(tftg_inputs_val["label"])),
-        # "n_test_rows": int(len(tftg_inputs_test["label"])),
-    }
-
-    with open(manifest_file, "w") as f:
-        json.dump(manifest, f, indent=2)
-
-    logging.info(f"Wrote training data and metadata to {tf_tg_input_cache_dir}")
+    logging.info(f"Wrote training data to {tf_tg_input_cache_dir}")
     
     return sweep_setting_hash
 
@@ -556,12 +501,16 @@ def train_tf_tg_model(
     wandb_config: dict[str, object] | None = None,
 ):
         
-    output_dir = PROJECT_DIR / "checkpoints" / f"{cell_type}" / f"{sample_name}" / "wandb_sweep" / f"tf_tg_train_{sample_name}_{sweep_setting_hash}"
+    output_dir = PROJECT_DIR / "checkpoints" / "wandb_sweep" / f"tf_tg_train_{sample_name}_{sweep_setting_hash}"
     
     run_name = f"tf_tg_{sample_name}_{sweep_setting_hash}"
     
     training_cache_dir = PROJECT_DIR / "data" / f"{cell_type}_cache"
-    tf_tg_input_cache_dir = training_cache_dir / "tf_tg_training_cache" / sample_name / "wandb_sweep" / f"tf_tg_sweep_{sweep_setting_hash}"
+    
+    sweep_cache_dir = PROJECT_DIR / "data" / "sweep_cache"
+
+    tf_tg_input_cache_dir = sweep_cache_dir / f"tf_tg_sweep_{sweep_setting_hash}"
+    tf_tg_input_cache_dir.mkdir(parents=True, exist_ok=True)
     
     # Load the trained TF embedding and mask tensors from the TF→DNA model cache 
     # (these are needed for the TF→TG model since it uses the pretrained TF peak embedding module)
@@ -576,11 +525,8 @@ def train_tf_tg_model(
     
     # TF-TG training specific cache files
     tf_tg_atac_peak_cache_path = tf_tg_input_cache_dir / "atac_peak_tensor.pt"
-    tf_tg_metadata_cache_path = tf_tg_input_cache_dir / "metadata.json"
-    tf_tg_manifest_cache_path = tf_tg_input_cache_dir / "manifest.json"
     tf_tg_train_cache_path = tf_tg_input_cache_dir / "tftg_inputs_train.pt"
     tf_tg_val_cache_path = tf_tg_input_cache_dir / "tftg_inputs_val.pt"
-    # tf_tg_test_cache_path = tf_tg_input_cache_dir / "tftg_inputs_test.pt"
     
     # Load the train/val/test splits of the compact TF-TG input tensors 
     # that were preprocessed and cached by the data preprocessing script
@@ -592,10 +538,6 @@ def train_tf_tg_model(
         tf_tg_val_cache_path,
         weights_only=False,
     )
-    # tftg_inputs_test = torch.load(
-    #     tf_tg_test_cache_path,
-    #     weights_only=False,
-    # )
 
     atac_peak_tensor = torch.load(
         tf_tg_atac_peak_cache_path,
@@ -618,13 +560,6 @@ def train_tf_tg_model(
 
     )
 
-    # test_dataset = train_tf_to_tg_model.TFTGEdgeBagDataset(
-    #     tftg_inputs_test,
-    #     tf_embeddings_tensor=tf_embeddings_tensor,
-    #     tf_mask_tensor=tf_mask_tensor,
-    #     atac_peak_tensor=atac_peak_tensor
-    # )
-
     # Create the DataLoaders with the tested batching path from the multigpu-safe script
     train_loader = make_dataloader(
         train_dataset,
@@ -641,14 +576,6 @@ def train_tf_tg_model(
         num_workers=2,
         prefetch_factor=2,
     )
-
-    # test_loader = make_dataloader(
-    #     test_dataset,
-    #     batch_size=batch_size,
-    #     shuffle=False,
-    #     num_workers=2,
-    #     prefetch_factor=2,
-    # )
 
     train_tf_to_tg_model.log_once(f"Train/Val sizes: {len(train_dataset)}, {len(val_dataset)}")
 
@@ -682,8 +609,8 @@ def train_tf_tg_model(
         filename="epoch={epoch:02d}-val_auroc={val/auroc:.4f}-val_loss={val/loss:.4f}",
         monitor="val/auroc",
         mode="max",
-        save_top_k=3,
-        save_last=True,
+        save_top_k=1,
+        save_last=False,
         auto_insert_metric_name=False,
     )
     
@@ -772,17 +699,17 @@ if __name__ == "__main__":
     
     parser.add_argument("--sample_name", type=str, help="Sample name for training (e.g., 'E7.5_rep1')")
     parser.add_argument("--d_model", type=str, default="128", help="Dimension of the model (default: 128)")
-    parser.add_argument("--tf_peak_chunk_size", type=str, default="64", help="Chunk size for TF peak embeddings (default: 64)")
-    parser.add_argument("--epochs", type=str, default="20", help="Number of training epochs")
+    parser.add_argument("--tf_peak_chunk_size", type=str, default="128", help="Chunk size for TF peak embeddings (default: 64)")
+    parser.add_argument("--epochs", type=str, default="25", help="Number of training epochs")
     parser.add_argument("--num_gpus", type=str, default="1", help="Number of GPU devices to use for training")
     parser.add_argument("--num_nodes", type=str, default="1", help="Number of nodes to use for training")
     parser.add_argument("--max_peaks_per_tg", type=str, default="64", help="Maximum number of peaks to consider per TG (default: 64)")
     parser.add_argument("--max_cells_per_pair", type=str, default="8", help="Maximum number of cells to sample per TF-TG pair (default: 8)")
-    parser.add_argument("--batch_size", type=str, default="64", help="Batch size for training (default: 32)")
-    parser.add_argument("--pct_true_edges", type=str, default="0.05", help="Percentage of true edges to include in the training set (default: 0.15)")
-    parser.add_argument("--true_false_ratio", type=str, default="1.0", help="Ratio of true to false edges in the training set (default: 2.0)")
-    parser.add_argument("--peak_flank_size", type=str, default="64", help="Size of the flank region around each peak (default: 64)")
-    parser.add_argument("--num_cpu", type=int, default=8, help="Number of CPU workers to use for preprocessing")
+    parser.add_argument("--batch_size", type=str, default="50", help="Batch size for training (default: 32)")
+    parser.add_argument("--pct_true_edges", type=str, default="0.5", help="Percentage of true edges to include in the training set (default: 0.15)")
+    parser.add_argument("--true_false_ratio", type=str, default="2.0", help="Ratio of true to false edges in the training set (default: 2.0)")
+    parser.add_argument("--peak_flank_size", type=str, default="128", help="Size of the flank region around each peak (default: 64)")
+    parser.add_argument("--num_cpu", type=int, default=12, help="Number of CPU workers to use for preprocessing")
     parser.add_argument("--checkpoint_path", type=str, required=False, help="Path to a model checkpoint to resume training from")
     parser.add_argument("--force_reload", action="store_true", help="Whether to force reload cached data instead of using existing cache files")
     parser.add_argument("--sample_pairs", type=int, default=100_000, help="Number of TF-TG pairs to sample for training (default: 10,000)")
@@ -867,3 +794,20 @@ if __name__ == "__main__":
         )
     finally:
         wandb.finish()
+    
+    # Clean up the sweep cache directory after training to save disk space
+    sweep_cache_dir = (
+        Path(PROJECT_DIR)
+        / "data"
+        / "sweep_cache"
+        / f"tf_tg_sweep_{sweep_setting_hash}"
+    )
+    try:
+        if sweep_cache_dir.exists():
+            shutil.rmtree(sweep_cache_dir)
+            logging.info("Deleted sweep cache directory: %s", sweep_cache_dir)
+    except OSError:
+        logging.exception(
+            "Failed to delete sweep cache directory: %s",
+            sweep_cache_dir,
+        )

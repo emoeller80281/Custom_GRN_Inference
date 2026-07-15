@@ -2,7 +2,7 @@
 #SBATCH --job-name=stability
 #SBATCH --output=LOGS/stability/%x_%A_%a.log
 #SBATCH --error=LOGS/stability/%x_%A_%a.err
-#SBATCH --time=72:00:00
+#SBATCH --time=24:00:00
 #SBATCH -p dense
 #SBATCH -N 1
 #SBATCH --gres=gpu:v100:1
@@ -10,7 +10,7 @@
 #SBATCH -c 8
 #SBATCH --mem=64G
 #SBATCH --signal=SIGUSR1@90
-#SBATCH --array=0-69%5
+#SBATCH --array=0-69%8
 
 set -eo pipefail
 
@@ -85,11 +85,11 @@ export NCCL_DEBUG=INFO
 export PYTHONFAULTHANDLER=1
 
 EXPERIMENT_LIST=(
-    "mm10|mouse_hepatocytes|hepatocytes_1"
-    "mm10|mouse_hepatocytes|hepatocytes_3"
+    # "mm10|mouse_hepatocytes|hepatocytes_1"
+    # "mm10|mouse_hepatocytes|hepatocytes_3"
 
-    "hg38|Macrophage|buffer_1"
-    "hg38|Macrophage|buffer_2"
+    # "hg38|Macrophage|buffer_1"
+    # "hg38|Macrophage|buffer_2"
 
     "mm10|mESC|E7.5_rep1"
     "mm10|mESC|E8.5_rep1"
@@ -140,6 +140,6 @@ srun python3 ${PROJECT_DIR}/stability_model_training.py \
     --peak_flank_size $peak_flank_size \
     --pct_true_edges $pct_true_edges \
     --true_false_ratio $true_false_ratio \
-    --batch_size 30 \
+    --batch_size 45 \
     --sample_pairs 100000
     

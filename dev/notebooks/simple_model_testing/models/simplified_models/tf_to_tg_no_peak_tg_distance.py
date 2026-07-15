@@ -26,7 +26,7 @@ class TFTGRegulationModel(nn.Module):
         self.tf_peak_chunk_size = tf_peak_chunk_size
 
         self.peak_feature_proj = nn.Sequential(
-            nn.Linear(4, d_model),  # binding, accessibility, distance_scaled, distance_weight
+            nn.Linear(2, d_model),  # binding, accessibility
             nn.SiLU(),
             nn.Dropout(dropout),
             nn.Linear(d_model, d_model),
@@ -59,7 +59,6 @@ class TFTGRegulationModel(nn.Module):
 
         self.norm = nn.LayerNorm(d_model)
 
-        # peak_context + tf_expr + tg_expr
         self.classifier = nn.Sequential(
             nn.Linear(d_model * 3, d_model),
             nn.SiLU(),
@@ -144,6 +143,8 @@ class TFTGRegulationModel(nn.Module):
         cell_logits : [E, C]
         """
 
+        del peak_distance
+
         if not torch.is_floating_point(peak_sequences):
             peak_sequences = peak_sequences.float()
 
@@ -159,7 +160,6 @@ class TFTGRegulationModel(nn.Module):
         tf_embedding_edge = tf_embedding         # [E, T, D]
         tf_mask_edge = tf_mask                  # [E, T]
         peak_sequences_edge = peak_sequences    # [E, P, L, 4]
-        peak_distance_edge = peak_distance        # [E, P]
 
         if peak_mask is not None:
             peak_mask_edge = peak_mask            # [E, P]
@@ -219,20 +219,6 @@ class TFTGRegulationModel(nn.Module):
         binding_score = binding_score[:, None, :].expand(E, C, P)  # [E, C, P]
 
         # ------------------------------------------------------------
-        # 3. Distance features
-        # ------------------------------------------------------------
-        abs_distance = peak_distance_edge.abs()
-        distance_scaled = torch.clamp(abs_distance / 250_000.0, 0.0, 1.0)   # [E, P]
-        distance_weight = torch.exp(-abs_distance / 50_000.0)               # [E, P]
-
-        if peak_mask_edge is not None:
-            distance_scaled = distance_scaled.masked_fill(~peak_mask_edge, 0.0)
-            distance_weight = distance_weight.masked_fill(~peak_mask_edge, 0.0)
-
-        distance_scaled = distance_scaled[:, None, :].expand(E, C, P) # [E, C, P]
-        distance_weight = distance_weight[:, None, :].expand(E, C, P) # [E, C, P]
-
-        # ------------------------------------------------------------
         # 4. Cell-specific peak features
         # ------------------------------------------------------------
         if peak_mask_edge is not None:
@@ -244,24 +230,16 @@ class TFTGRegulationModel(nn.Module):
         assert binding_score.shape == peak_accessibility.shape, (
             f"binding_score {binding_score.shape} != peak_accessibility {peak_accessibility.shape}"
         )
-        assert distance_scaled.shape == peak_accessibility.shape, (
-            f"distance_scaled {distance_scaled.shape} != peak_accessibility {peak_accessibility.shape}"
-        )
-        assert distance_weight.shape == peak_accessibility.shape, (
-            f"distance_weight {distance_weight.shape} != peak_accessibility {peak_accessibility.shape}"
-        )
 
         peak_features = torch.stack(
             [
                 binding_score,
-                peak_accessibility,
-                distance_scaled,
-                distance_weight,
+                peak_accessibility
             ],
             dim=-1,
-        )  # [E, C, P, 4]
+        )  # [E, C, P, 2]
 
-        peak_features = peak_features.reshape(EC, P, 4)  # [E*C, P, 4]
+        peak_features = peak_features.reshape(EC, P, 2)  # [E*C, P, 2]
         peak_tokens = self.peak_feature_proj(peak_features)  # [E*C, P, d_model]
 
         # ------------------------------------------------------------
@@ -361,7 +339,6 @@ class LitTFTGRegulationModel(pl.LightningModule):
         self.val_probs = []
         self.val_targets = []
         self._prev_batch_end_time = None
-        self._epoch_start_time = None
         self._step_start_time = None
         self._backward_start_time = None
         self._timing_window_size = 50
@@ -416,7 +393,7 @@ class LitTFTGRegulationModel(pl.LightningModule):
         )
 
     def _shared_step(self, batch, stage: str):
-        labels = batch["label"].float()
+        labels = batch["label"].float().view(-1)
 
         forward_start = None
         if stage == "train":
@@ -424,6 +401,7 @@ class LitTFTGRegulationModel(pl.LightningModule):
             forward_start = time.perf_counter()
 
         edge_logits, _ = self.forward(batch)
+        edge_logits = edge_logits.view(-1)
 
         if forward_start is not None:
             self._sync_if_cuda()
@@ -431,24 +409,48 @@ class LitTFTGRegulationModel(pl.LightningModule):
             self._record_timing("forward", forward_time)
 
         if self.logit_clamp is not None:
-            edge_logits = edge_logits.clamp(min=-self.logit_clamp, max=self.logit_clamp)
+            edge_logits = edge_logits.clamp(
+                min=-self.logit_clamp,
+                max=self.logit_clamp,
+            )
+
+        # Keep only finite logits/labels before loss + metrics
+        valid_mask = torch.isfinite(edge_logits) & torch.isfinite(labels)
+        edge_logits = edge_logits[valid_mask]
+        labels = labels[valid_mask]
+
+        # Empty batch guard
+        if edge_logits.numel() == 0 or labels.numel() == 0:
+            self.log(
+                f"{stage}/empty_batches",
+                torch.tensor(1.0, device=self.device),
+                on_step=False,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                sync_dist=(stage != "train"),
+            )
+
+            # For validation, safely skip this batch
+            if stage == "val":
+                return None
+
+            # For training, return a zero loss connected to the graph
+            # so Lightning/DDP does not crash.
+            return edge_logits.sum() * 0.0
 
         loss = self._loss(edge_logits, labels)
         probs = torch.sigmoid(edge_logits)
 
         if stage == "train":
             acc = self.train_acc(probs, labels.int())
-        elif stage == "val":
-            
-            valid_mask = torch.isfinite(probs) & torch.isfinite(labels)
 
-            probs = probs[valid_mask]
-            labels = labels[valid_mask]
-            
+        elif stage == "val":
             acc = self.val_acc(probs, labels.int())
 
             self.val_probs.append(probs.detach().float().cpu())
             self.val_targets.append(labels.detach().int().cpu())
+
         else:
             raise ValueError(f"Unknown stage: {stage}")
 
@@ -465,6 +467,16 @@ class LitTFTGRegulationModel(pl.LightningModule):
         self.log(
             f"{stage}/acc",
             acc,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=False,
+            logger=True,
+            sync_dist=(stage != "train"),
+        )
+
+        self.log(
+            f"{stage}/empty_batches",
+            torch.tensor(0.0, device=self.device),
             on_step=False,
             on_epoch=True,
             prog_bar=False,
@@ -503,8 +515,6 @@ class LitTFTGRegulationModel(pl.LightningModule):
             self._timing_windows[k].clear()
         self._latest_timing_avgs.clear()
         self._prev_batch_end_time = None
-        self._epoch_start_time = time.perf_counter()
-        
 
     def on_train_batch_start(self, batch, batch_idx):
         self._sync_if_cuda()
@@ -555,25 +565,6 @@ class LitTFTGRegulationModel(pl.LightningModule):
                     logger=True,
                     sync_dist=False,
                 )
-
-    def on_train_epoch_end(self):
-        if self._epoch_start_time is None:
-            return
-
-        self._sync_if_cuda()
-        epoch_time = time.perf_counter() - self._epoch_start_time
-        epoch_time_mins = epoch_time / 60.0
-        self._epoch_start_time = None
-
-        self.log(
-            "train/epoch_time_min",
-            epoch_time_mins,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=True,
-            logger=True,
-            sync_dist=False,
-        )
 
     def validation_step(self, batch, batch_idx):
         self._shared_step(batch, stage="val")
@@ -691,8 +682,8 @@ def move_batch_to_device(batch, device):
         "tf_embedding": batch["tf_embedding"].to(device, non_blocking=True),
         "tf_mask": batch["tf_mask"].to(device, non_blocking=True),
         "peak_sequences": batch["peak_sequences"].to(device, non_blocking=True),
-        "peak_accessibility": batch["peak_accessibility"].to(device, non_blocking=True),
         "peak_distance": batch["peak_distance"].to(device, non_blocking=True),
+        "peak_accessibility": batch["peak_accessibility"].to(device, non_blocking=True),
         "tf_expression": batch["tf_expression"].to(device, non_blocking=True),
         "tg_expression": batch["tg_expression"].to(device, non_blocking=True),
         "label": batch["label"].to(device, non_blocking=True),

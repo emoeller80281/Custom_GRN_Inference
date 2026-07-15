@@ -22,15 +22,7 @@ class TFTGRegulationModel(nn.Module):
     ):
         super().__init__()
 
-        self.tf_peak_model = pretrained_tf_peak_model
-        self.tf_peak_chunk_size = tf_peak_chunk_size
-
-        self.peak_feature_proj = nn.Sequential(
-            nn.Linear(4, d_model),  # binding, accessibility, distance_scaled, distance_weight
-            nn.SiLU(),
-            nn.Dropout(dropout),
-            nn.Linear(d_model, d_model),
-        )
+        del pretrained_tf_peak_model, tf_peak_chunk_size
 
         self.tf_expr_proj = nn.Sequential(
             nn.Linear(1, d_model),
@@ -144,125 +136,10 @@ class TFTGRegulationModel(nn.Module):
         cell_logits : [E, C]
         """
 
-        if not torch.is_floating_point(peak_sequences):
-            peak_sequences = peak_sequences.float()
+        del tf_embedding, tf_mask, peak_sequences, peak_accessibility, peak_distance, peak_mask
 
         E, C = cell_mask.shape
-        _, P, L, nuc_dim = peak_sequences.shape
         EC = E * C
-
-        # ------------------------------------------------------------
-        # 1. Cell-invariant edge-level tensors
-        # ------------------------------------------------------------
-        # These are repeated across cells in your current dataloader.
-        # Use only the first cell to avoid C-fold redundant TF-DNA inference.
-        tf_embedding_edge = tf_embedding         # [E, T, D]
-        tf_mask_edge = tf_mask                  # [E, T]
-        peak_sequences_edge = peak_sequences    # [E, P, L, 4]
-        peak_distance_edge = peak_distance        # [E, P]
-
-        if peak_mask is not None:
-            peak_mask_edge = peak_mask            # [E, P]
-        else:
-            peak_mask_edge = None
-
-        # ------------------------------------------------------------
-        # 2a. Frozen TF-DNA binding model: [E, P]
-        # ------------------------------------------------------------
-
-        # Flatten the peaks into a single batch dimension of ExP
-        peak_seq_flat = peak_sequences_edge.reshape(E * P, L, nuc_dim)
-
-        chunk_size = self.tf_peak_chunk_size
-        if chunk_size is None or chunk_size <= 0:
-            chunk_size = E * P
-
-        with torch.no_grad():
-            binding_logits_flat = torch.empty(
-                E * P,
-                device=peak_sequences_edge.device,
-                dtype=peak_sequences_edge.dtype,
-            )
-
-            for start in range(0, E * P, chunk_size):
-                end = min(start + chunk_size, E * P)
-
-                flat_idx = torch.arange(start, end, device=peak_sequences_edge.device)
-                edge_idx = flat_idx // P
-
-                tf_embedding_chunk = tf_embedding_edge[edge_idx]
-                tf_mask_chunk = tf_mask_edge[edge_idx]
-                peak_seq_chunk = peak_seq_flat[start:end]
-
-                logits_chunk = self.tf_peak_model(
-                    tf_embedding=tf_embedding_chunk,
-                    tf_mask=tf_mask_chunk,
-                    peak_embedding=peak_seq_chunk,
-                )
-
-                # Copy values out before next compiled-model invocation
-                binding_logits_flat[start:end].copy_(logits_chunk)
-
-        binding_logits = binding_logits_flat.reshape(E, P)
-        
-        # ------------------------------------------------------------
-        # 2b. Mask and expand TF-peak binding scores across cells
-        # ------------------------------------------------------------
-        # Sigmoid to convert logits to probabilities
-        binding_score = torch.sigmoid(binding_logits)  # [E, P]
-
-        # If a peak mask is provided, set binding scores of masked peaks to 0
-        if peak_mask_edge is not None:
-            binding_score = binding_score.masked_fill(~peak_mask_edge, 0.0)
-
-        # Reuse TF-peak binding score across cells
-        binding_score = binding_score[:, None, :].expand(E, C, P)  # [E, C, P]
-
-        # ------------------------------------------------------------
-        # 3. Distance features
-        # ------------------------------------------------------------
-        abs_distance = peak_distance_edge.abs()
-        distance_scaled = torch.clamp(abs_distance / 250_000.0, 0.0, 1.0)   # [E, P]
-        distance_weight = torch.exp(-abs_distance / 50_000.0)               # [E, P]
-
-        if peak_mask_edge is not None:
-            distance_scaled = distance_scaled.masked_fill(~peak_mask_edge, 0.0)
-            distance_weight = distance_weight.masked_fill(~peak_mask_edge, 0.0)
-
-        distance_scaled = distance_scaled[:, None, :].expand(E, C, P) # [E, C, P]
-        distance_weight = distance_weight[:, None, :].expand(E, C, P) # [E, C, P]
-
-        # ------------------------------------------------------------
-        # 4. Cell-specific peak features
-        # ------------------------------------------------------------
-        if peak_mask_edge is not None:
-            peak_accessibility = peak_accessibility.masked_fill(
-                ~peak_mask_edge[:, None, :],
-                0.0,
-            )
-            
-        assert binding_score.shape == peak_accessibility.shape, (
-            f"binding_score {binding_score.shape} != peak_accessibility {peak_accessibility.shape}"
-        )
-        assert distance_scaled.shape == peak_accessibility.shape, (
-            f"distance_scaled {distance_scaled.shape} != peak_accessibility {peak_accessibility.shape}"
-        )
-        assert distance_weight.shape == peak_accessibility.shape, (
-            f"distance_weight {distance_weight.shape} != peak_accessibility {peak_accessibility.shape}"
-        )
-
-        peak_features = torch.stack(
-            [
-                binding_score,
-                peak_accessibility,
-                distance_scaled,
-                distance_weight,
-            ],
-            dim=-1,
-        )  # [E, C, P, 4]
-
-        peak_features = peak_features.reshape(EC, P, 4)  # [E*C, P, 4]
-        peak_tokens = self.peak_feature_proj(peak_features)  # [E*C, P, d_model]
 
         # ------------------------------------------------------------
         # 5. Expression tokens
@@ -284,26 +161,22 @@ class TFTGRegulationModel(nn.Module):
         # ------------------------------------------------------------
         key_padding_mask = None
 
-        if peak_mask_edge is not None:
-            key_padding_mask = peak_mask_edge[:, None, :].expand(E, C, P)
-            key_padding_mask = ~key_padding_mask.reshape(EC, P)  # True = ignore
-
-        peak_context, _ = self.peak_attention(
+        gene_self_attention, _ = self.peak_attention(
             query=tg_query,
-            key=peak_tokens,
-            value=peak_tokens,
+            key=tg_query,
+            value=tg_query,
             key_padding_mask=key_padding_mask,
             need_weights=False,
         )
 
-        peak_context = self.norm(peak_context.squeeze(1))  # [E*C, d_model]
+        gene_self_attention = self.norm(gene_self_attention.squeeze(1))  # [E*C, d_model]
 
         # ------------------------------------------------------------
         # 7. Cell-level logits
         # ------------------------------------------------------------
         final = torch.cat(
             [
-                peak_context,
+                gene_self_attention,
                 tf_expr_token,
                 tg_expr_token,
             ],

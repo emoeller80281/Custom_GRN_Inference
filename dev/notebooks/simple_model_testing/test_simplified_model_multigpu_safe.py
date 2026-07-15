@@ -24,7 +24,6 @@ RESULT_DIR = PROJECT_DIR / "testing_results"
 
 sys.path.append(str(PROJECT_DIR))
 
-import models.tf_to_tg_simple as tf_to_tg_module
 import models.tf_to_dna as tf_to_dna_module
 import scripts.build_tf_to_tg_train_data as tf_tg_data_builder
 import utils
@@ -44,75 +43,6 @@ torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 torch.set_float32_matmul_precision("high")
 
-def create_new_tf_tg_regulation_model(
-    tf_bind_model_path: Path,
-    tf_embeddings_tensor: torch.Tensor,
-    tf_mask_tensor: torch.Tensor,
-    checkpoint_path: Path | None = None,
-) -> tf_to_tg_module.TFTGRegulationModel:
-
-    # 1) Recreate the base TF→DNA model with the same hyperparameters
-    base_model = tf_to_dna_module.TFPeakBindingModel(
-        tf_embedding_dim=128,
-        hidden_dim=128,
-        dropout=0.3,
-        num_layers=4,
-        num_heads=4,
-        dim_head=32,
-    )
-
-    # 2) Wrap in Lightning module and load checkpoint
-    lit_model = tf_to_dna_module.LitTFPeakBindingModel.load_from_checkpoint(
-        checkpoint_path=tf_bind_model_path,
-        model=base_model,
-        tf_embeddings_tensor=tf_embeddings_tensor,
-        tf_mask_tensor=tf_mask_tensor,
-        lr=1e-4,
-        weight_decay=1e-4,
-        pos_weight=None,
-    )
-
-    # 3) Get the trained base model and freeze it
-    trained_tf_peak_model = lit_model.model
-
-    trained_tf_peak_model.eval()
-
-    for p in trained_tf_peak_model.parameters():
-        p.requires_grad = False
-
-    trained_tf_peak_model = torch.compile(
-        trained_tf_peak_model,
-        mode="reduce-overhead",
-        fullgraph=False,
-    )
-
-    # 4) Inject into your TF→TG model
-    tf_tg_model = tf_to_tg_module.TFTGRegulationModel(
-        pretrained_tf_peak_model=trained_tf_peak_model,
-        d_model=128,
-        tf_peak_chunk_size=128,
-    )
-
-    # 5) Optionally load TF→TG checkpoint
-    if checkpoint_path is not None:
-        logging.info(f"Loading TF→TG model weights from checkpoint: {checkpoint_path}")
-
-        tf_tg_ckpt = torch.load(
-            checkpoint_path,
-            map_location="cpu",
-            weights_only=False,
-        )
-
-        fixed = {}
-
-        for key, value in tf_tg_ckpt["state_dict"].items():
-            if key.startswith("model."):
-                key = key[len("model."):]
-            fixed[key] = value
-
-        tf_tg_model.load_state_dict(fixed, strict=True)
-
-    return tf_tg_model
 
 def create_tf_tg_index_to_name_mappings(tf_name_to_idx, tg_id_to_idx):
     tf_idx_to_name = {idx: name for name, idx in tf_name_to_idx.items()}
@@ -184,6 +114,7 @@ def prepare_tftg_lookup_tables(
 
 def build_tftg_inputs(
     tf_tg_df,
+    max_peaks_per_tg=None,
     max_cells_per_pair=8,
     seed=123,
     silence=False,
@@ -224,6 +155,7 @@ def build_tftg_inputs(
     tg_indices = []
     peak_indices_all = []
     peak_access_all = []
+    peak_dist_all = []
     peak_masks_all = []
     tf_expr_all = []
     tg_expr_all = []
@@ -253,13 +185,16 @@ def build_tftg_inputs(
         if peak_info is None:
             continue
 
+        peak_ids_real = list(peak_info["peak_ids"])
         peak_indices_real = list(peak_info["peak_indices"])
+        peak_dst_real = list(peak_info["peak_distances"])
 
         n_peaks = len(peak_indices_real)
         if n_peaks == 0:
             continue
 
         peak_indices = np.asarray(peak_indices_real, dtype=np.int64)
+        peak_dst = np.asarray(peak_dst_real, dtype=np.float32)
         peak_mask = np.ones(n_peaks, dtype=bool)
 
         if n_peaks < max_peaks_real:
@@ -269,6 +204,12 @@ def build_tftg_inputs(
                 peak_indices,
                 (0, pad_len),
                 constant_values=0,
+            )
+
+            peak_dst = np.pad(
+                peak_dst,
+                (0, pad_len),
+                constant_values=0.0,
             )
 
             peak_mask = np.pad(
@@ -332,6 +273,7 @@ def build_tftg_inputs(
         tg_indices.append(tg_idx)
         peak_indices_all.append(peak_indices)
         peak_access_all.append(peak_acc_matrix)
+        peak_dist_all.append(peak_dst)
         peak_masks_all.append(peak_mask)
         tf_expr_all.append(tf_expr_vals)
         tg_expr_all.append(tg_expr_vals)
@@ -355,11 +297,11 @@ def build_tftg_inputs(
         "peak_indices": torch.tensor(np.stack(peak_indices_all), dtype=torch.long),
         "peak_accessibility": torch.tensor(np.stack(peak_access_all), dtype=torch.float32),
         "peak_mask": torch.tensor(np.stack(peak_masks_all), dtype=torch.bool),
+        "peak_distance": torch.tensor(np.stack(peak_dist_all), dtype=torch.float32),
 
         "tf_expression": torch.tensor(np.stack(tf_expr_all), dtype=torch.float32),
         "tg_expression": torch.tensor(np.stack(tg_expr_all), dtype=torch.float32),
     }
-
 
 class TFTGEdgeBagDataset(Dataset):
     def __init__(
@@ -401,6 +343,7 @@ class TFTGEdgeBagDataset(Dataset):
             "peak_sequences": peak_sequences,
             "peak_mask": self.inputs["peak_mask"][idx].bool(),
             "peak_accessibility": self.inputs["peak_accessibility"][idx].float(),
+            "peak_distance": self.inputs["peak_distance"][idx].float(),
             "tf_expression": self.inputs["tf_expression"][idx].float(),
             "tg_expression": self.inputs["tg_expression"][idx].float(),
         }
@@ -420,6 +363,7 @@ def collate_tftg_edge_bags(batch):
         "peak_mask": torch.stack([b["peak_mask"] for b in batch]),
 
         "peak_accessibility": torch.stack([b["peak_accessibility"] for b in batch]),
+        "peak_distance": torch.stack([b["peak_distance"] for b in batch]),
         "tf_expression": torch.stack([b["tf_expression"] for b in batch]),
         "tg_expression": torch.stack([b["tg_expression"] for b in batch]),
 
@@ -539,6 +483,7 @@ def make_parser():
     parser.add_argument("--num_workers", type=int, default=6, help="DataLoader workers per rank")
     parser.add_argument("--prefetch_factor", type=int, default=4, help="DataLoader prefetch factor when num_workers > 0")
     parser.add_argument("--cache_wait_poll_seconds", type=int, default=30, help="Seconds between cache-ready checks on nonzero ranks")
+    parser.add_argument("--model_variant", type=str, choices=["normal", "no_peak_tg_distance", "no_peak_info", "no_expr_info", "no_tf_dna_binding"], help="Variant of the simplified model to use")
     return parser
 
 
@@ -920,6 +865,17 @@ def main():
     is_rank0 = global_rank == 0
     use_ddp = world_size > 1 or args.num_gpus * args.num_nodes > 1
     paths = build_paths(args)
+    
+    if args.model_variant == "normal":
+        import models.tf_to_tg as tf_to_tg_module
+    elif args.model_variant == "no_peak_tg_distance":
+        import models.simplified_models.tf_to_tg_no_peak_tg_distance as tf_to_tg_module
+    elif args.model_variant == "no_peak_info":
+        import models.simplified_models.tf_to_tg_no_peak_info as tf_to_tg_module
+    elif args.model_variant == "no_expr_info":
+        import models.simplified_models.tf_to_tg_no_expr_info as tf_to_tg_module
+    elif args.model_variant == "no_tf_dna_binding":
+        import models.simplified_models.tf_to_tg_no_binding as tf_to_tg_module
 
     if is_rank0:
         if args.force_reload or not cache_is_complete(paths):
@@ -978,11 +934,47 @@ def main():
         logging.info(f"Per-rank batch size: {args.batch_size}; train batches per rank before DDP sampling: {len(train_loader):,}")
 
     tf_dna_model_chkpt = tf_dna_checkpoint_for_cell_type(args.cell_type)
-    tf_tg_model = create_new_tf_tg_regulation_model(
-        tf_bind_model_path=tf_dna_model_chkpt,
+    
+    # 1) Recreate the base TF→DNA model with the same hyperparameters
+    base_model = tf_to_dna_module.TFPeakBindingModel(
+        tf_embedding_dim=128,
+        hidden_dim=128,
+        dropout=0.3,
+        num_layers=4,
+        num_heads=4,
+        dim_head=32,
+    )
+
+    # 2) Wrap in Lightning module and load checkpoint
+    lit_model = tf_to_dna_module.LitTFPeakBindingModel.load_from_checkpoint(
+        checkpoint_path=tf_dna_model_chkpt,
+        model=base_model,
         tf_embeddings_tensor=tf_embeddings_tensor,
         tf_mask_tensor=tf_mask_tensor,
-        checkpoint_path=Path(args.checkpoint_path) if args.checkpoint_path else None,
+        lr=1e-4,
+        weight_decay=1e-4,
+        pos_weight=None,
+    )
+
+    # 3) Get the trained base model and freeze it
+    trained_tf_peak_model = lit_model.model
+
+    trained_tf_peak_model.eval()
+
+    for p in trained_tf_peak_model.parameters():
+        p.requires_grad = False
+
+    trained_tf_peak_model = torch.compile(
+        trained_tf_peak_model,
+        mode="reduce-overhead",
+        fullgraph=False,
+    )
+
+    # 4) Inject into your TF→TG model
+    tf_tg_model = tf_to_tg_module.TFTGRegulationModel(
+        pretrained_tf_peak_model=trained_tf_peak_model,
+        d_model=128,
+        tf_peak_chunk_size=128,
     )
 
     pooling_mode = "lse"
@@ -997,7 +989,7 @@ def main():
         enable_timing_sync=False,
     )
 
-    run_name = f"simple_model_{args.sample_name}_{args.job_id}"
+    run_name = f"{args.model_variant}_{args.sample_name}_{args.job_id}"
     paths["output_dir"].mkdir(parents=True, exist_ok=True)
 
     checkpoint_callback = ModelCheckpoint(
@@ -1005,7 +997,7 @@ def main():
         filename="epoch={epoch:02d}-val_auroc={val/auroc:.4f}-val_loss={val/loss:.4f}",
         monitor="val/auroc",
         mode="max",
-        save_top_k=500,
+        save_top_k=2,
         save_last=True,
         auto_insert_metric_name=False,
     )
@@ -1015,12 +1007,15 @@ def main():
     wandb_logger = None
     if is_rank0:
         wandb_logger = WandbLogger(
-            project="tf_tg_model_simplified",
+            project=f"tf_tg_feature_ablation",
             name=run_name,
             save_dir=paths["output_dir"],
         )
         wandb_logger.log_hyperparams({
+            "species": args.species,
+            "cell_type": args.cell_type,
             "sample_name": args.sample_name,
+            "model_variant": args.model_variant,
             "epochs": args.epochs,
             "batch_size_per_rank": args.batch_size,
             "num_batches_per_rank": len(train_loader),

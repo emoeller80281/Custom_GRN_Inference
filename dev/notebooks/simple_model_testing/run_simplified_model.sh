@@ -2,15 +2,15 @@
 #SBATCH --job-name=tf_tg_model_simplified
 #SBATCH --output=LOGS/tf_tg_model_simplified/%x_%A_%a.log
 #SBATCH --error=LOGS/tf_tg_model_simplified/%x_%A_%a.err
-#SBATCH --time=72:00:00
+#SBATCH --time=24:00:00
 #SBATCH -p dense
 #SBATCH -N 1
-#SBATCH --gres=gpu:a100:1
+#SBATCH --gres=gpu:v100:1
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 8
 #SBATCH --mem=64G
 #SBATCH --signal=SIGUSR1@90
-#SBATCH --array=0-6%2
+#SBATCH --array=0-19%8
 
 set -eo pipefail
 
@@ -84,17 +84,37 @@ echo "[INFO] Using nproc_per_node=$NPROC_PER_NODE based on GPUs per node"
 export NCCL_DEBUG=INFO
 export PYTHONFAULTHANDLER=1
 
+# Options for simple_model_variant arg: "no_peak_tg_distance", "no_peak_info", "no_expr_info", "no_peak_dna_binding"
+
 EXPERIMENT_LIST=(
-    "mm10|mouse_hepatocytes|hepatocytes_1"
-    "mm10|mouse_hepatocytes|hepatocytes_3"
+    "mm10|mouse_hepatocytes|hepatocytes_1|normal"
+    "mm10|mouse_hepatocytes|hepatocytes_1|no_peak_tg_distance"
+    "mm10|mouse_hepatocytes|hepatocytes_1|no_peak_info"
+    "mm10|mouse_hepatocytes|hepatocytes_1|no_expr_info"
+    "mm10|mouse_hepatocytes|hepatocytes_1|no_tf_dna_binding"
 
-    "hg38|Macrophage|buffer_1"
-    "hg38|Macrophage|buffer_2"
+    # "mm10|mouse_hepatocytes|hepatocytes_3"
 
-    "mm10|mESC|E7.5_rep1"
-    "mm10|mESC|E8.5_rep1"
+    "hg38|Macrophage|buffer_1|normal"
+    "hg38|Macrophage|buffer_1|no_peak_tg_distance"
+    "hg38|Macrophage|buffer_1|no_peak_info"
+    "hg38|Macrophage|buffer_1|no_expr_info"
+    "hg38|Macrophage|buffer_1|no_tf_dna_binding"
 
-    "hg38|K562|sample_1"
+    # "hg38|Macrophage|buffer_2"
+
+    "mm10|mESC|E7.5_rep1|normal"
+    "mm10|mESC|E7.5_rep1|no_peak_tg_distance"
+    "mm10|mESC|E7.5_rep1|no_peak_info"
+    "mm10|mESC|E7.5_rep1|no_expr_info"
+    "mm10|mESC|E7.5_rep1|no_tf_dna_binding"
+    # "mm10|mESC|E8.5_rep1"
+
+    "hg38|K562|sample_1|normal"
+    "hg38|K562|sample_1|no_peak_tg_distance"
+    "hg38|K562|sample_1|no_peak_info"
+    "hg38|K562|sample_1|no_expr_info"
+    "hg38|K562|sample_1|no_tf_dna_binding"
 )
 
 # ==========================================
@@ -111,19 +131,19 @@ fi
 EXPERIMENT_CONFIG="${EXPERIMENT_LIST[$TASK_ID]}"
 
 # Parse experiment configuration
-IFS='|' read -r species cell_type sample_name <<< "$EXPERIMENT_CONFIG"
+IFS='|' read -r species cell_type sample_name simple_model_variant <<< "$EXPERIMENT_CONFIG"
 
-echo "[INFO] Running experiment with species=$species, cell_type=$cell_type, sample_name=$sample_name"
+echo "[INFO] Running experiment with species=$species, cell_type=$cell_type, sample_name=$sample_name, simple_model_variant=$simple_model_variant"
 
-max_peaks_per_tg=25
-max_cells_per_pair=25
+max_peaks_per_tg=10
+max_cells_per_pair=12
 peak_flank_size=128
-pct_true_edges=1.0
-true_false_ratio=10.0
+pct_true_edges=0.25
+true_false_ratio=2.0
 
 echo "[INFO] Starting training..."
 srun python3 ${PROJECT_DIR}/test_simplified_model_multigpu_safe.py \
-    --epochs 100 \
+    --epochs 25 \
     --species $species \
     --cell_type $cell_type \
     --sample_name $sample_name \
@@ -135,6 +155,7 @@ srun python3 ${PROJECT_DIR}/test_simplified_model_multigpu_safe.py \
     --peak_flank_size $peak_flank_size \
     --pct_true_edges $pct_true_edges \
     --true_false_ratio $true_false_ratio \
-    --batch_size 30 \
+    --batch_size 128 \
+    --model_variant $simple_model_variant \
     --force_reload
     

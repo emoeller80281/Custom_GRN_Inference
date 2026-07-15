@@ -4,6 +4,7 @@ import pandas as pd
 import duckdb
 import pyfaidx
 from pathlib import Path
+import pysam
 from tqdm.auto import tqdm
 import torch
 from torch.utils.data import Dataset, DataLoader, Subset
@@ -1017,6 +1018,28 @@ def strip_compiled_prefix_from_state_dict(state_dict, prefix="_orig_mod."):
 
     return cleaned
 
+def create_index_file_for_fragments(
+    frag_path: Path,
+    force_reload: bool = False
+):
+    if not frag_path.exists():
+        raise FileNotFoundError(f"Fragment file not found: {frag_path}")
+    else:
+        index_file = str(frag_path) + ".tbi"
+
+        if Path(index_file).exists() and not force_reload:
+            logging.info("Found ATAC fragment file index:", index_file)
+
+        else:
+            # Index the fragment file
+            logging.info("Index file not found. Creating index file...")
+            pysam.tabix_index(
+                str(frag_path),
+                preset="bed",
+                force=True
+            )
+            index_file = str(frag_path) + ".tbi"
+            logging.info(f"  - Saved to {index_file}")
 
 def gpu_supports_torch_compile(device):
     if device.type != "cuda":

@@ -1,11 +1,7 @@
 import torch
 import torch.nn as nn
 import pytorch_lightning as pl
-from torchmetrics.classification import (
-    BinaryAccuracy,
-    BinaryAUROC,
-    BinaryAveragePrecision,
-)
+from torchmetrics.classification import BinaryAccuracy
 import numpy as np
 from sklearn.metrics import roc_auc_score, average_precision_score, roc_curve, precision_recall_curve
 import wandb
@@ -26,27 +22,9 @@ class TFTGRegulationModel(nn.Module):
         self.tf_peak_chunk_size = tf_peak_chunk_size
 
         self.peak_feature_proj = nn.Sequential(
-            nn.Linear(4, d_model),  # binding, accessibility, distance_scaled, distance_weight
+            nn.Linear(4, d_model),
             nn.SiLU(),
             nn.Dropout(dropout),
-            nn.Linear(d_model, d_model),
-        )
-
-        self.tf_expr_proj = nn.Sequential(
-            nn.Linear(1, d_model),
-            nn.SiLU(),
-            nn.Linear(d_model, d_model),
-        )
-
-        self.tg_expr_proj = nn.Sequential(
-            nn.Linear(1, d_model),
-            nn.SiLU(),
-            nn.Linear(d_model, d_model),
-        )
-
-        self.tg_query_proj = nn.Sequential(
-            nn.Linear(d_model, d_model),
-            nn.SiLU(),
             nn.Linear(d_model, d_model),
         )
 
@@ -59,9 +37,8 @@ class TFTGRegulationModel(nn.Module):
 
         self.norm = nn.LayerNorm(d_model)
 
-        # peak_context + tf_expr + tg_expr
         self.classifier = nn.Sequential(
-            nn.Linear(d_model * 3, d_model),
+            nn.Linear(d_model, d_model),
             nn.SiLU(),
             nn.Dropout(dropout),
             nn.Linear(d_model, d_model // 2),
@@ -144,6 +121,8 @@ class TFTGRegulationModel(nn.Module):
         cell_logits : [E, C]
         """
 
+        del tf_expression, tg_expression
+
         if not torch.is_floating_point(peak_sequences):
             peak_sequences = peak_sequences.float()
 
@@ -151,26 +130,15 @@ class TFTGRegulationModel(nn.Module):
         _, P, L, nuc_dim = peak_sequences.shape
         EC = E * C
 
-        # ------------------------------------------------------------
-        # 1. Cell-invariant edge-level tensors
-        # ------------------------------------------------------------
-        # These are repeated across cells in your current dataloader.
-        # Use only the first cell to avoid C-fold redundant TF-DNA inference.
         tf_embedding_edge = tf_embedding         # [E, T, D]
         tf_mask_edge = tf_mask                  # [E, T]
         peak_sequences_edge = peak_sequences    # [E, P, L, 4]
-        peak_distance_edge = peak_distance        # [E, P]
 
         if peak_mask is not None:
-            peak_mask_edge = peak_mask            # [E, P]
+            peak_mask_edge = peak_mask
         else:
             peak_mask_edge = None
 
-        # ------------------------------------------------------------
-        # 2a. Frozen TF-DNA binding model: [E, P]
-        # ------------------------------------------------------------
-
-        # Flatten the peaks into a single batch dimension of ExP
         peak_seq_flat = peak_sequences_edge.reshape(E * P, L, nuc_dim)
 
         chunk_size = self.tf_peak_chunk_size
@@ -200,47 +168,33 @@ class TFTGRegulationModel(nn.Module):
                     peak_embedding=peak_seq_chunk,
                 )
 
-                # Copy values out before next compiled-model invocation
                 binding_logits_flat[start:end].copy_(logits_chunk)
 
         binding_logits = binding_logits_flat.reshape(E, P)
-        
-        # ------------------------------------------------------------
-        # 2b. Mask and expand TF-peak binding scores across cells
-        # ------------------------------------------------------------
-        # Sigmoid to convert logits to probabilities
+
         binding_score = torch.sigmoid(binding_logits)  # [E, P]
 
-        # If a peak mask is provided, set binding scores of masked peaks to 0
         if peak_mask_edge is not None:
             binding_score = binding_score.masked_fill(~peak_mask_edge, 0.0)
 
-        # Reuse TF-peak binding score across cells
-        binding_score = binding_score[:, None, :].expand(E, C, P)  # [E, C, P]
-
-        # ------------------------------------------------------------
-        # 3. Distance features
-        # ------------------------------------------------------------
-        abs_distance = peak_distance_edge.abs()
-        distance_scaled = torch.clamp(abs_distance / 250_000.0, 0.0, 1.0)   # [E, P]
-        distance_weight = torch.exp(-abs_distance / 50_000.0)               # [E, P]
+        abs_distance = peak_distance.abs()
+        distance_scaled = torch.clamp(abs_distance / 250_000.0, 0.0, 1.0)
+        distance_weight = torch.exp(-abs_distance / 50_000.0)
 
         if peak_mask_edge is not None:
             distance_scaled = distance_scaled.masked_fill(~peak_mask_edge, 0.0)
             distance_weight = distance_weight.masked_fill(~peak_mask_edge, 0.0)
 
-        distance_scaled = distance_scaled[:, None, :].expand(E, C, P) # [E, C, P]
-        distance_weight = distance_weight[:, None, :].expand(E, C, P) # [E, C, P]
+        binding_score = binding_score[:, None, :].expand(E, C, P)
+        distance_scaled = distance_scaled[:, None, :].expand(E, C, P)
+        distance_weight = distance_weight[:, None, :].expand(E, C, P)
 
-        # ------------------------------------------------------------
-        # 4. Cell-specific peak features
-        # ------------------------------------------------------------
         if peak_mask_edge is not None:
             peak_accessibility = peak_accessibility.masked_fill(
                 ~peak_mask_edge[:, None, :],
                 0.0,
             )
-            
+
         assert binding_score.shape == peak_accessibility.shape, (
             f"binding_score {binding_score.shape} != peak_accessibility {peak_accessibility.shape}"
         )
@@ -265,56 +219,39 @@ class TFTGRegulationModel(nn.Module):
         peak_tokens = self.peak_feature_proj(peak_features)  # [E*C, P, d_model]
 
         # ------------------------------------------------------------
-        # 5. Expression tokens
-        # ------------------------------------------------------------
-        tf_expr_token = self.tf_expr_proj(
-            tf_expression.reshape(EC, 1)
-        )  # [E*C, d_model]
-
-        tg_expr_token = self.tg_expr_proj(
-            tg_expression.reshape(EC, 1)
-        )  # [E*C, d_model]
-
-        tg_query_input = tf_expr_token + tg_expr_token
-
-        tg_query = self.tg_query_proj(tg_query_input).unsqueeze(1)  # [E*C, 1, d_model]
-
-        # ------------------------------------------------------------
-        # 6. TG query attends to linked peak tokens
+        # 5. Peak self-attention
         # ------------------------------------------------------------
         key_padding_mask = None
 
         if peak_mask_edge is not None:
-            key_padding_mask = peak_mask_edge[:, None, :].expand(E, C, P)
-            key_padding_mask = ~key_padding_mask.reshape(EC, P)  # True = ignore
+            key_padding_mask = ~peak_mask_edge[:, None, :].expand(E, C, P)
+            key_padding_mask = key_padding_mask.reshape(EC, P)
 
         peak_context, _ = self.peak_attention(
-            query=tg_query,
+            query=peak_tokens,
             key=peak_tokens,
             value=peak_tokens,
             key_padding_mask=key_padding_mask,
             need_weights=False,
         )
 
-        peak_context = self.norm(peak_context.squeeze(1))  # [E*C, d_model]
+        peak_context = self.norm(peak_context)  # [E*C, P, d_model]
+
+        if key_padding_mask is not None:
+            valid_mask = (~key_padding_mask).unsqueeze(-1)
+            peak_context = peak_context.masked_fill(key_padding_mask.unsqueeze(-1), 0.0)
+            peak_context = peak_context.sum(dim=1) / valid_mask.sum(dim=1).clamp_min(1)
+        else:
+            peak_context = peak_context.mean(dim=1)
 
         # ------------------------------------------------------------
-        # 7. Cell-level logits
+        # 6. Cell-level logits
         # ------------------------------------------------------------
-        final = torch.cat(
-            [
-                peak_context,
-                tf_expr_token,
-                tg_expr_token,
-            ],
-            dim=-1,
-        )  # [E*C, d_model * 3]
-
-        cell_logits = self.classifier(final).squeeze(-1)  # [E*C]
+        cell_logits = self.classifier(peak_context).squeeze(-1)  # [E*C]
         cell_logits = cell_logits.reshape(E, C)           # [E, C]
 
         # ------------------------------------------------------------
-        # 8. Pool cell logits into edge logits
+        # 7. Pool cell logits into edge logits
         # ------------------------------------------------------------
         edge_logits = self.pool_cell_logits(
             cell_logits,

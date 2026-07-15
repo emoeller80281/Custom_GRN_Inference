@@ -1,5 +1,5 @@
 program: wandb_sweep.py
-name: tf_tg_sweep
+name: tf_tg_sweep_refined
 method: bayes
 metric:
   name: val/auroc.max
@@ -10,17 +10,11 @@ parameters:
   d_model:
     values: [64, 128, 192, 256, 512, 1024]
   max_peaks_per_tg:
-    min: 1
+    min: 2
     max: 100
   max_cells_per_pair:
-    min: 1
-    max: 500
-  pct_true_edges:
-    min: 0.01
-    max: 1.00
-  true_false_ratio:
-    min: 0.5
-    max: 5.0
+    min: 2
+    max: 1000
 command:
   - ${env}
   - ${interpreter}
