@@ -2,15 +2,13 @@ import sys
 import pandas as pd
 import numpy as np
 import torch
-import importlib
 import json
 from pathlib import Path
-from torch.utils.data import Dataset, DataLoader, Subset
+from torch.utils.data import DataLoader
 import numpy as np
 from tqdm import tqdm
 import logging
 import matplotlib.pyplot as plt
-import seaborn as sns
 from matplotlib.offsetbox import AnchoredOffsetbox, TextArea, VPacker, HPacker, DrawingArea
 from matplotlib.patches import Rectangle
 
@@ -57,87 +55,6 @@ all_evaluation_plot_dir.mkdir(exist_ok=True)
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 torch.set_float32_matmul_precision("high")
-
-def find_latest_checkpoint(cell_type, sample_name, training_number=None) -> Path:
-    sample_chkpt_dir = CHKPT_DIR / cell_type / sample_name
-    
-    if not sample_chkpt_dir.exists():
-        logging.warning(f"No checkpoints found for {cell_type} {sample_name} in {sample_chkpt_dir}")
-        return None
-    
-    if training_number is not None:
-        slurm_job_dirs = [d for d in sample_chkpt_dir.iterdir() if d.is_dir() and d.name.startswith(f"tf_tg_train_{sample_name}_{training_number}")]
-    else:
-        slurm_job_dirs = [d for d in sample_chkpt_dir.iterdir() if d.is_dir() and d.name.startswith(f"tf_tg_train_{sample_name}_")]
-    
-    if not slurm_job_dirs:
-        logging.warning(f"No checkpoint directories found for {cell_type} {sample_name} in {sample_chkpt_dir}")
-        return None
-    
-    latest_chkpt_dir = max(slurm_job_dirs, key=lambda d: int(d.name.split("_")[-1]))
-    slurm_job_id = latest_chkpt_dir.name.split("_")[-1]
-    
-    chkpt_files = list(latest_chkpt_dir.glob("epoch=*-val_auroc=*-val_loss=*.ckpt"))
-    if not chkpt_files:
-        logging.warning(f"No checkpoint files found for {sample_name} in {latest_chkpt_dir}")
-        return None
-    
-    latest_chkpt_file = max(chkpt_files, key=lambda f: int(f.stem.split("-")[0].split("=")[1]))
-    epoch = latest_chkpt_file.stem.split("-")[0].split("=")[1]
-    
-    logging.info(f"Latest checkpoint for {cell_type} {sample_name}: Job {slurm_job_id} Epoch {epoch}")
-    return latest_chkpt_file
-
-def load_tf_tg_regulation_model(
-    tf_dna_model_path: Path, 
-    tf_tg_model_path: Path,
-    tf_embeddings_tensor: torch.Tensor,
-    tf_mask_tensor: torch.Tensor
-    ) -> tf_to_tg_module.TFTGRegulationModel:
-    
-    # 1) Recreate the base TF→DNA model with the same hyperparameters
-    base_model = tf_to_dna_module.TFPeakBindingModel(
-        tf_embedding_dim=128,
-        hidden_dim=128,
-        dropout=0.3,
-        num_layers=4,
-        num_heads=4,
-        dim_head=32,
-    )
-
-    # 2) Wrap in Lightning module and load checkpoint
-    lit_model = tf_to_dna_module.LitTFPeakBindingModel.load_from_checkpoint(
-        checkpoint_path=tf_dna_model_path,
-        model=base_model,
-        tf_embeddings_tensor=tf_embeddings_tensor,
-        tf_mask_tensor=tf_mask_tensor,
-        lr=1e-4,
-        weight_decay=1e-4,
-        pos_weight=None,
-    )
-
-    # 4) Get the trained TF-DNA model and freeze it
-    trained_tf_peak_model = lit_model.model
-    trained_tf_peak_model.eval()
-    for p in trained_tf_peak_model.parameters():
-        p.requires_grad = False
-
-    # 5) Create the TF-TG model object using the trained TF-DNA model, and load the trained model checkpoint
-    tf_tg_model = tf_to_tg_module.LitTFTGRegulationModel.load_from_checkpoint(
-        checkpoint_path=tf_tg_model_path,
-        model=tf_to_tg_module.TFTGRegulationModel(
-            pretrained_tf_peak_model=trained_tf_peak_model,
-            d_model=128,
-            tf_peak_chunk_size=256,
-        ),
-        lr=1e-4,
-        weight_decay=1e-4,
-        pos_weight=None,
-    )
-    
-    return tf_tg_model
-
-
 
 def generate_model_predictions(model, data_loader, device, tf_idx_to_name, tg_idx_to_name):
     pooling_mode = "lse"

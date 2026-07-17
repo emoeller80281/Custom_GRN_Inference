@@ -1,3 +1,4 @@
+import os
 import sys
 import numpy as np
 import pandas as pd
@@ -7,7 +8,7 @@ from pathlib import Path
 import pysam
 from tqdm.auto import tqdm
 import torch
-from torch.utils.data import Dataset, DataLoader, Subset
+from torch.utils.data import DataLoader, Subset
 import json
 import time
 import requests
@@ -15,6 +16,7 @@ from Bio import Entrez, SeqIO
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 
 PROJECT_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/TETHER")
+CHKPT_DIR = PROJECT_DIR / "checkpoints"
 sys.path.append(str(PROJECT_DIR))
 
 import models.tf_to_tg as tf_to_tg_module
@@ -1228,5 +1230,510 @@ def load_training_cache_dataset(
         persistent_workers=True,
         collate_fn=collate_tftg_edge_bags,
         )
-    
+
     return loader, metadata, manifest, tf_embeddings_tensor, tf_mask_tensor
+
+
+# ---------------------------------------------------------------------------
+# Multi-rank training infrastructure shared by stability_model_training.py,
+# test_simplified_model_multigpu_safe.py, and the wandb sweep entrypoints.
+# ---------------------------------------------------------------------------
+
+def env_int(keys, default=0):
+    for key in keys:
+        value = os.environ.get(key)
+        if value not in (None, ""):
+            try:
+                return int(value)
+            except ValueError:
+                pass
+    return default
+
+
+def get_rank_info():
+    """Return rank information for both torchrun/Lightning and Slurm-launched jobs."""
+    world_size = env_int(["WORLD_SIZE", "SLURM_NTASKS"], 1)
+    global_rank = env_int(["RANK", "SLURM_PROCID"], 0)
+    local_rank = env_int(["LOCAL_RANK", "SLURM_LOCALID"], 0)
+    node_rank = env_int(["NODE_RANK", "SLURM_NODEID"], 0)
+    return global_rank, local_rank, node_rank, world_size
+
+
+def is_global_rank_zero():
+    return get_rank_info()[0] == 0
+
+
+def configure_rank_logging():
+    global_rank, local_rank, node_rank, world_size = get_rank_info()
+    level = logging.INFO if global_rank == 0 else logging.WARNING
+    root = logging.getLogger()
+    root.setLevel(level)
+    for handler in root.handlers:
+        handler.setFormatter(logging.Formatter(
+            fmt=f"%(asctime)s | rank={global_rank}/{world_size} local={local_rank} | %(levelname)s - %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        ))
+    return global_rank, local_rank, node_rank, world_size
+
+
+def atomic_torch_save(obj, path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + f".tmp.{os.getpid()}")
+    torch.save(obj, tmp_path)
+    os.replace(tmp_path, path)
+
+
+def atomic_json_dump(obj, path: Path, indent=2):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + f".tmp.{os.getpid()}")
+    with open(tmp_path, "w") as f:
+        json.dump(obj, f, indent=indent)
+    os.replace(tmp_path, path)
+
+
+def required_cache_files(paths):
+    return [
+        paths["atac_peak_tensor"],
+        paths["metadata"],
+        paths["manifest"],
+        paths["train"],
+        paths["val"],
+        paths["test"],
+    ]
+
+
+def cache_is_complete(paths):
+    return paths["ready"].exists() and all(p.exists() and p.stat().st_size > 0 for p in required_cache_files(paths))
+
+
+def wait_for_cache(paths, poll_seconds=30, timeout_seconds=None):
+    start = time.time()
+    while not cache_is_complete(paths):
+        if paths["failed"].exists():
+            try:
+                msg = paths["failed"].read_text()
+            except Exception:
+                msg = "Rank 0 failed while constructing the TF-TG cache."
+            raise RuntimeError(msg)
+        if timeout_seconds is not None and time.time() - start > timeout_seconds:
+            raise TimeoutError(f"Timed out waiting for rank 0 to finish cache construction in {paths['cache_dir']}")
+        time.sleep(poll_seconds)
+
+
+def get_reference_paths_and_chroms(species: str):
+    project_data_dir = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data")
+    if species == "mm10":
+        gene_ref_file = project_data_dir / "genome_data" / "genome_annotation" / "mm10" / "Mus_musculus.GRCm39.115.gtf.gz"
+        train_chroms = [str(i) for i in range(1, 16)]
+        val_chroms = [str(i) for i in range(16, 18)]
+        test_chroms = [str(i) for i in range(18, 20)]
+        valid_chroms = {f"chr{i}" for i in range(1, 20)}
+    elif species == "hg38":
+        gene_ref_file = project_data_dir / "genome_data" / "genome_annotation" / "hg38" / "Homo_sapiens.GRCh38.113.gtf.gz"
+        train_chroms = [str(i) for i in range(1, 18)]
+        val_chroms = [str(i) for i in range(18, 20)]
+        test_chroms = [str(i) for i in range(20, 23)]
+        valid_chroms = {f"chr{i}" for i in range(1, 23)}
+    else:
+        raise ValueError(f"Unsupported species: {species}")
+
+    genome_fasta_path = project_data_dir / "genome_data" / "reference_genome" / species / f"{species}.fa"
+    chrom_sizes_path = project_data_dir / "genome_data" / "reference_genome" / species / f"{species}.chrom.sizes"
+    return gene_ref_file, genome_fasta_path, chrom_sizes_path, train_chroms, val_chroms, test_chroms, valid_chroms
+
+
+def tf_dna_checkpoint_for_cell_type(cell_type: str):
+    mm10_tf_dna_path = CHKPT_DIR / "tf_dna_mm10_3697823" / "epoch=07-val_auroc=0.9743-val_loss=0.1661.ckpt"
+    hg38_tf_dna_path = CHKPT_DIR / "tf_dna_hg38_3683606" / "epoch=13-val_auroc=0.9566-val_loss=0.2042.ckpt"
+
+    tf_dna_model_checkpoints = {
+        "mESC": mm10_tf_dna_path,
+        "mouse_liver": mm10_tf_dna_path,
+        "mouse_hepatocytes": mm10_tf_dna_path,
+        "iPSC": hg38_tf_dna_path,
+        "Macrophage": hg38_tf_dna_path,
+        "K562": hg38_tf_dna_path
+    }
+
+    return tf_dna_model_checkpoints[cell_type]
+
+
+def validate_tf_name_to_idx(
+    *,
+    tf_name_to_idx,
+    tf_embeddings_tensor,
+    tf_mask_tensor,
+    source,
+):
+    n_tf_embeddings = tf_embeddings_tensor.shape[0]
+    n_tf_masks = tf_mask_tensor.shape[0]
+
+    if n_tf_embeddings != n_tf_masks:
+        raise ValueError(
+            f"TF embedding/mask row mismatch from {source}: "
+            f"tf_embeddings={tuple(tf_embeddings_tensor.shape)}, "
+            f"tf_masks={tuple(tf_mask_tensor.shape)}"
+        )
+
+    if not tf_name_to_idx:
+        raise ValueError(f"Empty tf_name_to_idx loaded from {source}")
+
+    min_idx = min(tf_name_to_idx.values())
+    max_idx = max(tf_name_to_idx.values())
+
+    if min_idx < 0 or max_idx >= n_tf_embeddings:
+        bad = {
+            tf: idx
+            for tf, idx in tf_name_to_idx.items()
+            if idx < 0 or idx >= n_tf_embeddings
+        }
+
+        raise ValueError(
+            f"Incompatible tf_name_to_idx and tf_embeddings_tensor from {source}. "
+            f"Valid TF embedding rows are 0-{n_tf_embeddings - 1}, "
+            f"but map has min={min_idx}, max={max_idx}. "
+            f"Example invalid entries: {list(bad.items())[:20]}"
+        )
+
+
+def load_tf_embedding_resources(paths):
+    """
+    Load TF embeddings, masks, and the matching tf_name_to_idx map.
+
+    Critical: tf_name_to_idx values must index rows of tf_embeddings_tensor.
+    """
+    tf_embeddings_tensor = torch.load(
+        paths["cell_type_cache_dir"] / "tf_embeddings.pt",
+        map_location="cpu",
+        weights_only=True,
+    )
+    tf_mask_tensor = torch.load(
+        paths["cell_type_cache_dir"] / "tf_masks.pt",
+        map_location="cpu",
+        weights_only=True,
+    )
+
+    # Prefer a cell-type-specific TF index map if present.
+    tf_idx_csv = paths["cell_type_cache_dir"] / "tf_name_to_idx.csv"
+    tf_idx_json = paths["cell_type_cache_dir"] / "tf_name_to_idx.json"
+    metadata_json = paths["cell_type_cache_dir"] / "metadata.json"
+
+    if tf_idx_csv.exists():
+        tf_name_to_idx_df = pd.read_csv(tf_idx_csv)
+        tf_name_to_idx_df["tf_name"] = tf_name_to_idx_df["tf_name"].str.upper()
+        tf_name_to_idx = (
+            tf_name_to_idx_df
+            .set_index("tf_name")["tf_idx"]
+            .astype(int)
+            .to_dict()
+        )
+
+    elif tf_idx_json.exists():
+        with open(tf_idx_json) as f:
+            tf_name_to_idx = json.load(f)
+        tf_name_to_idx = {str(k).upper(): int(v) for k, v in tf_name_to_idx.items()}
+
+    elif metadata_json.exists():
+        with open(metadata_json) as f:
+            metadata = json.load(f)
+        tf_name_to_idx = {
+            str(k).upper(): int(v)
+            for k, v in metadata["tf_name_to_idx"].items()
+        }
+
+    else:
+        raise FileNotFoundError(
+            f"No TF index map found in {paths['cell_type_cache_dir']}. "
+            "Expected one of: tf_name_to_idx.csv, tf_name_to_idx.json, metadata.json. "
+            "Do not use config.tf_name_to_idx_cache_path unless it was generated with "
+            "this exact tf_embeddings.pt tensor."
+        )
+
+    validate_tf_name_to_idx(
+        tf_name_to_idx=tf_name_to_idx,
+        tf_embeddings_tensor=tf_embeddings_tensor,
+        tf_mask_tensor=tf_mask_tensor,
+        source=str(paths["cell_type_cache_dir"]),
+    )
+
+    return tf_embeddings_tensor, tf_mask_tensor, tf_name_to_idx
+
+
+def load_training_cache(paths):
+    wait_for_cache(paths, poll_seconds=1, timeout_seconds=None)
+    tftg_inputs_train = torch.load(paths["train"], map_location="cpu", weights_only=False)
+    tftg_inputs_val = torch.load(paths["val"], map_location="cpu", weights_only=False)
+    tftg_inputs_test = torch.load(paths["test"], map_location="cpu", weights_only=False)
+    atac_peak_tensor = torch.load(paths["atac_peak_tensor"], map_location="cpu", weights_only=True)
+    tf_embeddings_tensor, tf_mask_tensor, _ = load_tf_embedding_resources(paths)
+
+    return (
+        tftg_inputs_train,
+        tftg_inputs_val,
+        tftg_inputs_test,
+        atac_peak_tensor,
+        tf_embeddings_tensor,
+        tf_mask_tensor,
+    )
+
+
+# ---------------------------------------------------------------------------
+# TF-TG edge input construction shared by scripts/build_tf_to_tg_train_data.py,
+# stability_model_training.py, test_simplified_model_multigpu_safe.py,
+# wandb_sweep.py, and plot_auprc_all_methods.py.
+# ---------------------------------------------------------------------------
+
+def prepare_tftg_lookup_tables(
+    peak_to_gene,
+    atac_peak_map,
+    atac_pseudobulk,
+    rna_pseudobulk_norm,
+    dataset_peaks,
+    common_cells,
+    max_precompute_peaks=None,
+):
+    valid_peak_set = set(atac_peak_map.keys())
+
+    peak_to_gene_valid = peak_to_gene[
+        peak_to_gene["peak_id"].isin(valid_peak_set)
+    ].copy()
+
+    peak_to_gene_valid["abs_dist"] = peak_to_gene_valid["TSS_dist"].abs()
+
+    tg_to_peak_info = {}
+
+    # Subset to only peaks within 100kb of the TG TSS and sort by distance
+    for tg_norm, sub in peak_to_gene_valid.groupby("target_id_norm", sort=False):
+        sub = sub[sub["abs_dist"] <= 100_000].sort_values("abs_dist")
+
+        if sub.empty:
+            continue
+
+        # Optional cap to only use the closest N peaks per TG
+        if max_precompute_peaks is not None:
+            sub = sub.head(max_precompute_peaks)
+
+        peak_ids = sub["peak_id"].tolist()
+        peak_indices = np.asarray(
+            [atac_peak_map[p] for p in peak_ids],
+            dtype=np.int64,
+        )
+        peak_distances = sub["TSS_dist"].to_numpy(dtype=np.float32)
+
+        tg_to_peak_info[tg_norm] = {
+            "peak_ids": peak_ids,
+            "peak_indices": peak_indices,
+            "peak_distances": peak_distances,
+        }
+
+    cell_to_idx = {cell: i for i, cell in enumerate(common_cells)}
+
+    atac_mat = (
+        atac_pseudobulk
+        .reindex(index=dataset_peaks, columns=common_cells)
+        .fillna(0.0)
+        .to_numpy(dtype=np.float32)
+    )
+
+    rna_mat = (
+        rna_pseudobulk_norm
+        .reindex(columns=common_cells)
+        .fillna(0.0)
+        .to_numpy(dtype=np.float32)
+    )
+
+    gene_to_rna_idx = {gene: i for i, gene in enumerate(rna_pseudobulk_norm.index)}
+
+    return tg_to_peak_info, cell_to_idx, atac_mat, rna_mat, gene_to_rna_idx
+
+
+def build_tftg_inputs(
+    tf_tg_df,
+    max_peaks_per_tg=None,
+    max_cells_per_pair=8,
+    seed=123,
+    silence=False,
+    *,
+    tg_to_peak_info,
+    cell_to_idx,
+    atac_mat,
+    rna_mat,
+    gene_to_rna_idx,
+    common_cells,
+    tf_name_to_idx,
+    tg_id_to_idx,
+    max_peaks_real,
+):
+    """
+    Build one compact item per TF-TG edge.
+
+    Output shapes:
+        label:              [E]
+        tf_idx:             [E]
+        tg_idx:             [E]
+        peak_indices:       [E, P]
+        peak_distance:      [E, P]
+        peak_mask:          [E, P]
+        peak_accessibility: [E, C, P]
+        tf_expression:      [E, C]
+        tg_expression:      [E, C]
+    """
+
+    rng = np.random.default_rng(seed)
+
+    tf_names = []
+    tg_names = []
+    cell_ids_all = []
+    labels = []
+
+    tf_indices = []
+    tg_indices = []
+    peak_indices_all = []
+    peak_access_all = []
+    peak_dist_all = []
+    peak_masks_all = []
+    tf_expr_all = []
+    tg_expr_all = []
+
+    common_cells = list(common_cells)
+    n_common_cells = len(common_cells)
+
+    n_total = len(tf_tg_df)
+    log_every = max(1, n_total // 50)
+
+    for i, row in enumerate(tf_tg_df.itertuples(index=False), start=1):
+        if silence == False:
+            if i == 1 or i % log_every == 0 or i == n_total:
+                logging.info(f"Building compact TF-TG edges: {100 * i / n_total:.1f}% ({i:,}/{n_total:,})")
+
+        tf_name = row.tf_name
+        tg_name = row.tg_id
+        label = float(row.label)
+
+        tf_idx = tf_name_to_idx.get(tf_name)
+        tg_idx = tg_id_to_idx.get(tg_name)
+
+        if tf_idx is None or tg_idx is None:
+            continue
+
+        peak_info = tg_to_peak_info.get(tg_name)
+        if peak_info is None:
+            continue
+
+        peak_ids_real = list(peak_info["peak_ids"])
+        peak_indices_real = list(peak_info["peak_indices"])
+        peak_dst_real = list(peak_info["peak_distances"])
+
+        n_peaks = len(peak_indices_real)
+        if n_peaks == 0:
+            continue
+
+        peak_indices = np.asarray(peak_indices_real, dtype=np.int64)
+        peak_dst = np.asarray(peak_dst_real, dtype=np.float32)
+        peak_mask = np.ones(n_peaks, dtype=bool)
+
+        if n_peaks < max_peaks_real:
+            pad_len = max_peaks_real - n_peaks
+
+            peak_indices = np.pad(
+                peak_indices,
+                (0, pad_len),
+                constant_values=0,
+            )
+
+            peak_dst = np.pad(
+                peak_dst,
+                (0, pad_len),
+                constant_values=0.0,
+            )
+
+            peak_mask = np.pad(
+                peak_mask,
+                (0, pad_len),
+                constant_values=False,
+            )
+
+        # Sample cells
+        if max_cells_per_pair is None or max_cells_per_pair >= n_common_cells:
+            sampled_cells = common_cells
+        else:
+            sampled_cells = rng.choice(
+                common_cells,
+                size=max_cells_per_pair,
+                replace=False,
+            ).tolist()
+
+        sampled_cell_indices = np.asarray(
+            [cell_to_idx[c] for c in sampled_cells],
+            dtype=np.int64,
+        )
+
+        C = len(sampled_cell_indices)
+        P = max_peaks_real
+
+        # ATAC accessibility: [C, P]
+        peak_acc_matrix = np.zeros((C, P), dtype=np.float32)
+        peak_acc_matrix[:, :n_peaks] = atac_mat[
+            np.ix_(peak_indices_real, sampled_cell_indices)
+        ].T
+
+        # RNA expression: [C]
+        tf_rna_idx = gene_to_rna_idx.get(tf_name)
+        tg_rna_idx = gene_to_rna_idx.get(tg_name)
+
+        if tf_rna_idx is None or tg_rna_idx is None:
+            raise ValueError(
+                f"TF or TG missing from RNA matrix after filtering: "
+                f"tf_name={tf_name}, tg_name={tg_name}, "
+                f"tf_rna_idx={tf_rna_idx}, tg_rna_idx={tg_rna_idx}"
+            )
+
+        tf_expr_vals = np.asarray(
+            rna_mat[tf_rna_idx, sampled_cell_indices],
+            dtype=np.float32,
+        ).reshape(-1)
+
+        tg_expr_vals = np.asarray(
+            rna_mat[tg_rna_idx, sampled_cell_indices],
+            dtype=np.float32,
+        ).reshape(-1)
+
+        # Append once per TF-TG edge
+        tf_names.append(tf_name)
+        tg_names.append(tg_name)
+        cell_ids_all.append(sampled_cells)
+        labels.append(label)
+
+        tf_indices.append(tf_idx)
+        tg_indices.append(tg_idx)
+        peak_indices_all.append(peak_indices)
+        peak_access_all.append(peak_acc_matrix)
+        peak_dist_all.append(peak_dst)
+        peak_masks_all.append(peak_mask)
+        tf_expr_all.append(tf_expr_vals)
+        tg_expr_all.append(tg_expr_vals)
+
+    if len(labels) == 0:
+        raise ValueError(
+            "No TF-TG examples were created. Check TF/TG IDs, peak-to-gene mapping, "
+            "and overlap with ATAC/RNA matrices."
+        )
+
+    return {
+        "tf_name": tf_names,
+        "tg_name": tg_names,
+        "cell_ids": cell_ids_all,
+
+        "label": torch.tensor(labels, dtype=torch.float32),
+
+        "tf_idx": torch.tensor(tf_indices, dtype=torch.long),
+        "tg_idx": torch.tensor(tg_indices, dtype=torch.long),
+
+        "peak_indices": torch.tensor(np.stack(peak_indices_all), dtype=torch.long),
+        "peak_accessibility": torch.tensor(np.stack(peak_access_all), dtype=torch.float32),
+        "peak_mask": torch.tensor(np.stack(peak_masks_all), dtype=torch.bool),
+        "peak_distance": torch.tensor(np.stack(peak_dist_all), dtype=torch.float32),
+
+        "tf_expression": torch.tensor(np.stack(tf_expr_all), dtype=torch.float32),
+        "tg_expression": torch.tensor(np.stack(tg_expr_all), dtype=torch.float32),
+    }

@@ -1,4 +1,4 @@
-import os, sys
+import sys
 from pathlib import Path
 import numpy as np
 from sklearn.metrics import (
@@ -15,7 +15,6 @@ from tqdm import tqdm
 PROJECT_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/TETHER")
 sys.path.append(str(PROJECT_DIR))
 
-import plotting_utils
 import models.tf_to_tg as tf_to_tg_module
 
 

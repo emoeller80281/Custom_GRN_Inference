@@ -1,16 +1,13 @@
 import os
 import shutil
 import sys
-import json
-import gtfparse
 import numpy as np
 import pandas as pd
 from pathlib import Path
 import logging
 import json
-from tqdm import tqdm
 
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader
 import pytorch_lightning as pl
 
 import torch

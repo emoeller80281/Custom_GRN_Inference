@@ -1,6 +1,4 @@
-import os, sys
 from typing import Literal
-import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -8,16 +6,16 @@ import seaborn as sns
 from sklearn.metrics import (
     roc_auc_score,
     average_precision_score,
-    accuracy_score,
-    precision_score,
     precision_recall_curve, 
     roc_curve,
 )
+
 
 def _create_random_distribution(scores, seed: int = 42) -> np.ndarray:
     rng = np.random.default_rng(seed)
     arr = np.asarray(scores)   # works for Series or ndarray, no copy if already ndarray
     return rng.uniform(arr.min(), arr.max(), size=arr.shape[0])
+
 
 def _balance_pos_neg(labels, scores):
     true_scores = scores[labels == 1]
@@ -196,6 +194,7 @@ def plot_auroc_auprc(
     fig.tight_layout()
 
     return fig
+
 
 def plot_score_histograms(
     labels,

@@ -10,7 +10,7 @@
 #SBATCH -c 8
 #SBATCH --mem=64G
 #SBATCH --signal=SIGUSR1@90
-#SBATCH --array=0-19%8
+#SBATCH --array=0-14%8
 
 set -eo pipefail
 
@@ -87,34 +87,47 @@ export PYTHONFAULTHANDLER=1
 # Options for simple_model_variant arg: "no_peak_tg_distance", "no_peak_info", "no_expr_info", "no_peak_dna_binding"
 
 EXPERIMENT_LIST=(
-    "mm10|mouse_hepatocytes|hepatocytes_1|normal"
-    "mm10|mouse_hepatocytes|hepatocytes_1|no_peak_tg_distance"
-    "mm10|mouse_hepatocytes|hepatocytes_1|no_peak_info"
-    "mm10|mouse_hepatocytes|hepatocytes_1|no_expr_info"
-    "mm10|mouse_hepatocytes|hepatocytes_1|no_tf_dna_binding"
+    # "mm10|mouse_hepatocytes|hepatocytes_1|normal"
+    # "mm10|mouse_hepatocytes|hepatocytes_1|no_peak_tg_distance"
+    # "mm10|mouse_hepatocytes|hepatocytes_1|no_peak_info"
+    # "mm10|mouse_hepatocytes|hepatocytes_1|no_expr_info"
+    # "mm10|mouse_hepatocytes|hepatocytes_1|no_tf_dna_binding"
 
-    # "mm10|mouse_hepatocytes|hepatocytes_3"
+    "mm10|mouse_hepatocytes|hepatocytes_3|normal"
+    "mm10|mouse_hepatocytes|hepatocytes_3|no_peak_tg_distance"
+    "mm10|mouse_hepatocytes|hepatocytes_3|no_peak_info"
+    "mm10|mouse_hepatocytes|hepatocytes_3|no_expr_info"
+    "mm10|mouse_hepatocytes|hepatocytes_3|no_tf_dna_binding"
 
-    "hg38|Macrophage|buffer_1|normal"
-    "hg38|Macrophage|buffer_1|no_peak_tg_distance"
-    "hg38|Macrophage|buffer_1|no_peak_info"
-    "hg38|Macrophage|buffer_1|no_expr_info"
-    "hg38|Macrophage|buffer_1|no_tf_dna_binding"
+    # "hg38|Macrophage|buffer_1|normal"
+    # "hg38|Macrophage|buffer_1|no_peak_tg_distance"
+    # "hg38|Macrophage|buffer_1|no_peak_info"
+    # "hg38|Macrophage|buffer_1|no_expr_info"
+    # "hg38|Macrophage|buffer_1|no_tf_dna_binding"
 
-    # "hg38|Macrophage|buffer_2"
+    "hg38|Macrophage|buffer_2|normal"
+    "hg38|Macrophage|buffer_2|no_peak_tg_distance"
+    "hg38|Macrophage|buffer_2|no_peak_info"
+    "hg38|Macrophage|buffer_2|no_expr_info"
+    "hg38|Macrophage|buffer_2|no_tf_dna_binding"
 
-    "mm10|mESC|E7.5_rep1|normal"
-    "mm10|mESC|E7.5_rep1|no_peak_tg_distance"
-    "mm10|mESC|E7.5_rep1|no_peak_info"
-    "mm10|mESC|E7.5_rep1|no_expr_info"
-    "mm10|mESC|E7.5_rep1|no_tf_dna_binding"
-    # "mm10|mESC|E8.5_rep1"
+    # "mm10|mESC|E7.5_rep1|normal"
+    # "mm10|mESC|E7.5_rep1|no_peak_tg_distance"
+    # "mm10|mESC|E7.5_rep1|no_peak_info"
+    # "mm10|mESC|E7.5_rep1|no_expr_info"
+    # "mm10|mESC|E7.5_rep1|no_tf_dna_binding"
 
-    "hg38|K562|sample_1|normal"
-    "hg38|K562|sample_1|no_peak_tg_distance"
-    "hg38|K562|sample_1|no_peak_info"
-    "hg38|K562|sample_1|no_expr_info"
-    "hg38|K562|sample_1|no_tf_dna_binding"
+    "mm10|mESC|E8.5_rep1|normal"
+    "mm10|mESC|E8.5_rep1|no_peak_tg_distance"
+    "mm10|mESC|E8.5_rep1|no_peak_info"
+    "mm10|mESC|E8.5_rep1|no_expr_info"
+    "mm10|mESC|E8.5_rep1|no_tf_dna_binding"
+
+    # "hg38|K562|sample_1|normal"
+    # "hg38|K562|sample_1|no_peak_tg_distance"
+    # "hg38|K562|sample_1|no_peak_info"
+    # "hg38|K562|sample_1|no_expr_info"
+    # "hg38|K562|sample_1|no_tf_dna_binding"
 )
 
 # ==========================================
