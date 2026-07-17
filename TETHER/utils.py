@@ -14,7 +14,7 @@ import requests
 from Bio import Entrez, SeqIO
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 
-PROJECT_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/dev/notebooks/simple_model_testing")
+PROJECT_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/TETHER")
 sys.path.append(str(PROJECT_DIR))
 
 import models.tf_to_tg as tf_to_tg_module
@@ -749,75 +749,6 @@ def download_gene_protein_fastas(
         time.sleep(delay)
 
     return saved_files
-
-
-def fetch_chip_atlas_tf_list(tf_list, genome="mm10", num_workers=10) -> pd.DataFrame:
-    
-    def fetch_chip_atlas_tf(tf, genome=genome, threshold="05", timeout=120):
-        tf_canon = tf.replace("-", "")
-        
-        url = (
-            f"https://chip-atlas.dbcls.jp/data/{genome}/assembled/"
-            f"Oth.ALL.{threshold}.{tf_canon}.AllCell.bed"
-        )
-
-        try:
-            with requests.get(url, stream=True, timeout=timeout) as r:
-                r.raise_for_status()
-
-                df = pd.read_csv(
-                    r.raw,
-                    sep="\t",
-                    comment="t",
-                    header=None,
-                    usecols=[0, 1, 2],
-                    names=["peak_chr", "peak_start", "peak_end"],
-                )
-
-            df["source_id"] = tf
-            df["peak_id"] = df["peak_chr"] + ":" + df["peak_start"].astype(str) + "-" + df["peak_end"].astype(str)
-            df = df[["source_id", "peak_id"]]
-            
-            return tf, df, None
-
-        except requests.exceptions.HTTPError as e:
-            return tf, None, e
-        except Exception as e:
-            return tf, None, e
-
-
-    tf_dfs = []
-    failed_tfs = {}
-
-    with ThreadPoolExecutor(max_workers=num_workers) as executor:
-        futures = {
-            executor.submit(fetch_chip_atlas_tf, tf, genome=genome): tf
-            for tf in tf_list
-        }
-
-        for future in as_completed(futures):
-            tf, df, error = future.result()
-
-            if error is not None:
-                failed_tfs[tf] = error
-                logging.info(f"TF '{tf}' not found or failed: {error}")
-                continue
-
-            if df is None or df.empty:
-                failed_tfs[tf] = "empty dataframe"
-                logging.info(f"TF '{tf}' returned no peaks")
-                continue
-
-            tf_dfs.append(df)
-            logging.info(f"Loaded {tf}: {len(df):,} peaks")
-
-    if len(tf_dfs) == 0:
-        logging.warning("No ChIP-Atlas TF BED files were successfully loaded.")
-        chip_atlas_df = pd.DataFrame(columns=["source_id", "peak_id"])
-    else:
-        chip_atlas_df = pd.concat(tf_dfs, ignore_index=True).drop_duplicates()
-
-    return chip_atlas_df
 
 
 def fetch_chip_atlas_tf_list_to_parquet(
