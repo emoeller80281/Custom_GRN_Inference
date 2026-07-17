@@ -17,8 +17,8 @@ from pytorch_lightning.strategies import DDPStrategy
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s - %(message)s')
 
-PROJECT_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/dev/notebooks/simple_model_testing")
-DATA_DIR = PROJECT_DIR / "data"
+PROJECT_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/TETHER")
+DATA_DIR = PROJECT_DIR / "cached_data"
 CHKPT_DIR = PROJECT_DIR / "checkpoints"
 RESULT_DIR = PROJECT_DIR / "testing_results"
 
@@ -553,7 +553,7 @@ def build_and_save_training_cache(args, paths):
 
     try:
         gene_ref_file, genome_fasta_path, chrom_sizes_path, train_chroms, val_chroms, test_chroms, valid_chroms = get_reference_paths_and_chroms(args.species)
-        sample_input_data_dir = PROJECT_DIR / "data" / "sample_input_data" / args.cell_type / args.sample_name
+        sample_input_data_dir = PROJECT_DIR.parent / "data" / "sample_input_data" / args.cell_type / args.sample_name
 
         logging.info("Rank 0 reading ATAC/RNA pseudobulk and peak-to-gene files")
         atac_pseudobulk = pd.read_parquet(sample_input_data_dir / "RE_pseudobulk.parquet")

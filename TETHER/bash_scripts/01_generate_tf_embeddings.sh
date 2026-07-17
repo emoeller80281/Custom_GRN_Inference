@@ -14,14 +14,15 @@ set -eo pipefail
 
 source activate my_env
 
-PROJECT_DIR="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/dev/notebooks/simple_model_testing"
+PROJECT_DIR="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/TETHER"
+DATA_DIR="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data"
 cd "${PROJECT_DIR}"
 
 species="mm10"
 entrez_email="luminarada@gmail.com"
 
 # Download TF protein sequences from ChIP-Atlas and save as FASTA files
-python ${PROJECT_DIR}/download_chipatlas.py \
+python ${PROJECT_DIR}/download_organism_chipatlas.py \
     --species ${species} \
     --entrez_email ${entrez_email} \
     --num_workers 32
@@ -30,8 +31,8 @@ source activate tfbindformer
 # Generate 3Di tokens for TF proteins using Foldseek and ProstT5
 echo ""
 echo "Generating 3Di tokens for TF proteins using Foldseek and ProstT5..."
-FASTA_DIR="${PROJECT_DIR}/data/tf_data/${species}/tf_sequences"
-OUT_DIR="${PROJECT_DIR}/data/tf_data/${species}/tf_3di_output"
+FASTA_DIR="${DATA_DIR}/tf_data/${species}/tf_sequences"
+OUT_DIR="${DATA_DIR}/tf_data/${species}/tf_3di_output"
 TMP_DIR="${OUT_DIR}/tmp"
 WEIGHTS_DIR="${OUT_DIR}/prostt5_weights"
 
@@ -70,7 +71,7 @@ echo "Extracting TF embeddings..."
 python ${PROJECT_DIR}/scripts/extract_tf_embeddings.py \
   --aa_dir ${FASTA_DIR} \
   --di_fasta ${OUT_DIR}/tf_proteins_3di.fasta \
-  --out_dir ${PROJECT_DIR}/data/tf_data/${species}/tf_embeddings/ \
+  --out_dir ${DATA_DIR}/tf_data/${species}/tf_embeddings/ \
   --d_model 128 \
   --device cuda
 

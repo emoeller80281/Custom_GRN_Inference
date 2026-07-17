@@ -183,10 +183,10 @@ def build_tf_tg_input_cache(
     assert genome_fasta_path.exists(), f"Genome FASTA file not found: {genome_fasta_path}"
     assert chrom_sizes_path.exists(), f"Chromosome sizes file not found: {chrom_sizes_path}"
     
-    training_cache_dir = PROJECT_DIR / "data" / f"{cell_type}_cache"
+    training_cache_dir = PROJECT_DIR / "cached_data" / f"{cell_type}_cache"
     
     # Create the training cache directory if it doesn't exist
-    input_data_dir = Path(PROJECT_DIR / "data" / "sample_input_data" / cell_type / sample_name)
+    input_data_dir = Path(DATA_DIR / "sample_input_data" / cell_type / sample_name)
     
     assert input_data_dir.exists(), f"Input data directory does not exist: {input_data_dir}"
     
@@ -199,7 +199,7 @@ def build_tf_tg_input_cache(
         peak_flank_size=peak_flank_size,
     )
     
-    sweep_cache_dir = PROJECT_DIR / "data" / "sweep_cache"
+    sweep_cache_dir = PROJECT_DIR / "cached_data" / "sweep_cache"
     sweep_cache_dir.mkdir(parents=True, exist_ok=True)
     
     tf_tg_input_cache_dir = sweep_cache_dir / f"tf_tg_sweep_{sweep_setting_hash}"
@@ -505,9 +505,9 @@ def train_tf_tg_model(
     
     run_name = f"tf_tg_{sample_name}_{sweep_setting_hash}"
     
-    training_cache_dir = PROJECT_DIR / "data" / f"{cell_type}_cache"
+    training_cache_dir = PROJECT_DIR / "cached_data" / f"{cell_type}_cache"
     
-    sweep_cache_dir = PROJECT_DIR / "data" / "sweep_cache"
+    sweep_cache_dir = PROJECT_DIR / "cached_data" / "sweep_cache"
 
     tf_tg_input_cache_dir = sweep_cache_dir / f"tf_tg_sweep_{sweep_setting_hash}"
     tf_tg_input_cache_dir.mkdir(parents=True, exist_ok=True)

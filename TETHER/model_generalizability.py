@@ -11,8 +11,8 @@ import logging
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s - %(message)s')
 
-PROJECT_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/dev/notebooks/simple_model_testing")
-DATA_DIR = PROJECT_DIR / "data"
+PROJECT_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/TETHER")
+DATA_DIR = PROJECT_DIR / "cached_data"
 CHKPT_DIR = PROJECT_DIR / "checkpoints"
 RESULT_DIR = PROJECT_DIR / "testing_results" / "model_generalizability"
 

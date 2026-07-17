@@ -26,8 +26,8 @@ from sklearn.metrics import (
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s - %(message)s')
 
-PROJECT_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/dev/notebooks/simple_model_testing")
-DATA_DIR = PROJECT_DIR / "data"
+PROJECT_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/TETHER")
+DATA_DIR = PROJECT_DIR / "cached_data"
 CHKPT_DIR = PROJECT_DIR / "checkpoints"
 CHKPT_COPY_DIR = PROJECT_DIR / "checkpoints copy"
 RESULT_DIR = PROJECT_DIR / "testing_results"
@@ -518,7 +518,7 @@ elif species == "hg38":
     val_chroms = [str(i) for i in range(18, 20)]
     test_chroms = [str(i) for i in range(20, 23)]
 
-sample_input_data_dir = PROJECT_DIR / "data" / "sample_input_data" / cell_type / sample_name
+sample_input_data_dir = PROJECT_DIR.parent / "data" / "sample_input_data" / cell_type / sample_name
 
 # Load in the ATAC pseudobulk and filter to only include peaks on the test chromosomes
 atac_pseudobulk = pd.read_parquet(sample_input_data_dir / "RE_pseudobulk.parquet")

@@ -2,7 +2,7 @@ import sys
 import argparse
 from pathlib import Path
 
-PROJECT_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/dev/notebooks/simple_model_testing")
+PROJECT_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/TETHER")
 sys.path.append(str(PROJECT_DIR))
 
 DATA_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data")
@@ -53,7 +53,7 @@ tf_dna_model_checkpoints = {
 # Species-specific paths
 genome_fasta_path = DATA_DIR / "genome_data" / "reference_genome" / species / f"{species}.fa"
 chrom_sizes_path = DATA_DIR / "genome_data" / "reference_genome" / species / f"{species}.chrom.sizes"
-embedding_dir = PROJECT_DIR / "data" / "tf_data" / species / "tf_embeddings"
+embedding_dir = DATA_DIR / "tf_data" / species / "tf_embeddings"
 chip_atlas_cache_dir = DATA_DIR / "ground_truth_files" / f"chip_atlas_{species}_all.csv"
 
 if species == "mm10":
@@ -62,9 +62,9 @@ elif species == "hg38":
     gene_ref_file = DATA_DIR / "genome_data" / "genome_annotation" / "hg38" / "Homo_sapiens.GRCh38.113.gtf.gz"
 
 # Cell type and sample-specific paths
-sample_input_data_dir = PROJECT_DIR / "data" / "sample_input_data" / cell_type / sample_name
+sample_input_data_dir = DATA_DIR / "sample_input_data" / cell_type / sample_name
 
-training_cache_dir = PROJECT_DIR / "data" / f"{cell_type}_cache"
+training_cache_dir = PROJECT_DIR / "cached_data" / f"{cell_type}_cache"
 tf_dna_input_cache_dir = training_cache_dir / "tf_dna_training_cache"
 tf_tg_input_cache_dir = training_cache_dir / "tf_tg_training_cache" / sample_name
 

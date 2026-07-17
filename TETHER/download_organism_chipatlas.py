@@ -11,7 +11,7 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-PROJECT_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/dev/notebooks/simple_model_testing")
+PROJECT_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/TETHER")
 sys.path.append(str(PROJECT_DIR))
 
 import utils
@@ -71,8 +71,8 @@ def main():
 
     DATA_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data")
     
-    tf_sequences_dir = PROJECT_DIR / "data" / "tf_data" / species / "tf_sequences"
-    tf_chip_seq_save_dir = PROJECT_DIR / "data" / "tf_data" / species / "chip_atlas_TF_files"
+    tf_sequences_dir = DATA_DIR / "tf_data" / species / "tf_sequences"
+    tf_chip_seq_save_dir = DATA_DIR / "tf_data" / species / "chip_atlas_TF_files"
     
     tf_sequences_dir.mkdir(parents=True, exist_ok=True)
     tf_chip_seq_save_dir.mkdir(parents=True, exist_ok=True)
