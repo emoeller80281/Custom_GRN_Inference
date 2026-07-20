@@ -2,7 +2,7 @@
 #SBATCH --job-name=tf_tg_model_simplified
 #SBATCH --output=LOGS/tf_tg_model_simplified/%x_%A_%a.log
 #SBATCH --error=LOGS/tf_tg_model_simplified/%x_%A_%a.err
-#SBATCH --time=24:00:00
+#SBATCH --time=72:00:00
 #SBATCH -p dense
 #SBATCH -N 1
 #SBATCH --gres=gpu:v100:1

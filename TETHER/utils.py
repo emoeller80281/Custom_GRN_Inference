@@ -866,6 +866,7 @@ def find_latest_checkpoint(
     sample_name: str, 
     training_number: int|None =None,
     epoch_num: int|None =None,
+    verbose: bool = True
     ) -> Path:
     """
     Find the latest checkpoint file for a given cell type and sample name.
@@ -931,7 +932,8 @@ def find_latest_checkpoint(
         latest_chkpt_file = max(chkpt_files, key=lambda f: int(f.stem.split("-")[0].split("=")[1]))
     epoch = latest_chkpt_file.stem.split("-")[0].split("=")[1]
     
-    logging.info(f"Latest checkpoint for {cell_type} {sample_name}: Job {slurm_job_id} Epoch {epoch}")
+    if verbose:
+        logging.info(f"Latest checkpoint for {cell_type} {sample_name}: Job {slurm_job_id} Epoch {epoch}")
     
     return latest_chkpt_file
 

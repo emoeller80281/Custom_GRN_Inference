@@ -40,6 +40,7 @@ import utils
 import config
 import warnings
 import plotting_utils
+import argparse
 
 warnings.filterwarnings(
     "ignore",
@@ -55,6 +56,36 @@ all_evaluation_plot_dir.mkdir(exist_ok=True)
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 torch.set_float32_matmul_precision("high")
+
+TF_TG_MODEL_CHECKPOINTS = {
+    "mESC": {
+        "E7.5_rep1": CHKPT_DIR / "mESC" / "E7.5_rep1" / "tf_tg_train_E7.5_rep1_3675131" / "epoch_11_best_model.ckpt",
+        # "E7.5_rep1": utils.find_latest_checkpoint(CHKPT_DIR, "mESC", "E7.5_rep1"),
+        "E7.5_rep2": utils.find_latest_checkpoint(CHKPT_DIR, "mESC", "E7.5_rep2"),
+        "E8.5_rep1": utils.find_latest_checkpoint(CHKPT_DIR, "mESC", "E8.5_rep1", training_number="3691937"),
+        "E8.5_rep2": utils.find_latest_checkpoint(CHKPT_DIR, "mESC", "E8.5_rep2", training_number="3691937"),
+    },
+    "iPSC": {
+        "WT_D13_rep1": utils.find_latest_checkpoint(CHKPT_DIR, "iPSC", "WT_D13_rep1"),
+    },
+    "Macrophage": {
+        "buffer_1": utils.find_latest_checkpoint(CHKPT_DIR, "Macrophage", "buffer_1", training_number="3685893"),
+        "buffer_2": utils.find_latest_checkpoint(CHKPT_DIR, "Macrophage", "buffer_2", training_number="3713132"),
+        "buffer_3": utils.find_latest_checkpoint(CHKPT_DIR, "Macrophage", "buffer_3"),
+        "buffer_4": utils.find_latest_checkpoint(CHKPT_DIR, "Macrophage", "buffer_4"),
+    },
+    "K562": {
+        "sample_1": utils.find_latest_checkpoint(CHKPT_DIR, "K562", "sample_1", training_number="3692409"),
+    },
+    "mouse_liver": {
+        "liver_1": utils.find_latest_checkpoint(CHKPT_DIR, "mouse_liver", "liver_1"),
+        "liver_3": utils.find_latest_checkpoint(CHKPT_DIR, "mouse_liver", "liver_3")
+    },
+    "mouse_hepatocytes": {
+        "hepatocytes_1": utils.find_latest_checkpoint(CHKPT_DIR, "mouse_hepatocytes", "hepatocytes_1"),
+        "hepatocytes_3": utils.find_latest_checkpoint(CHKPT_DIR, "mouse_hepatocytes", "hepatocytes_3"),
+    }
+}
 
 def generate_model_predictions(model, data_loader, device, tf_idx_to_name, tg_idx_to_name):
     pooling_mode = "lse"
@@ -143,29 +174,6 @@ def create_tf_tg_index_to_name_mappings(metadata):
     tg_idx_to_name = {idx: name for name, idx in metadata["tg_id_to_idx"].items()}
     return tf_idx_to_name, tg_idx_to_name
 
-def create_tf_tg_label_df(tftg_inputs_test):
-    # Create the TF-TG label DataFrame
-    tftg_inputs_test.keys()
-    test_tf_input = tftg_inputs_test["tf_name"]
-    test_tg_input = tftg_inputs_test["tg_name"]
-    test_labels = tftg_inputs_test["label"]
-
-    # create TF-TG label DataFrame
-    tf_tg_label_df = pd.DataFrame({
-        "Source": test_tf_input,
-        "Target": test_tg_input,
-        "Label": test_labels,
-    })
-
-    tf_tg_label_df = tf_tg_label_df.drop_duplicates(["Source", "Target"])
-
-    gt_df: pd.DataFrame = tf_tg_label_df[tf_tg_label_df["Label"] == 1] 
-    gt_tfs = set(gt_df["Source"].str.upper().unique()) 
-    gt_targets = set(gt_df["Target"].str.upper().unique()) 
-    gt_pairs = set(gt_df["Source"].str.upper() + "\t" + gt_df["Target"].str.upper())
-    
-    return tf_tg_label_df, gt_pairs, gt_tfs, gt_targets
-
 def load_and_standardize_method(name: str, info: dict) -> pd.DataFrame:
     """
     Load a GRN CSV and rename tf_col/target_col/score_col -> Source/Target/Score.
@@ -199,94 +207,6 @@ def load_and_standardize_method(name: str, info: dict) -> pd.DataFrame:
     df["Target"] = df["Target"].astype(str).str.upper()
 
     return df
-
-def compute_metrics(name: str, df: pd.DataFrame, gt_pairs: set, score_threshold: float):            
-    labels = [1 if pair in gt_pairs else 0 for pair in df["Source"] + "\t" + df["Target"]]
-    scores = df["Score"].tolist()
-    
-    labels = np.asarray(labels).astype(int).ravel()
-    scores = np.asarray(scores).astype(float).ravel()
-
-    preds = (scores >= score_threshold).astype(int)
-
-    accuracy = accuracy_score(labels, preds)
-    precision = precision_score(labels, preds, zero_division=0)
-    recall = recall_score(labels, preds, zero_division=0)
-
-    if len(np.unique(labels)) < 2:
-        auroc = np.nan
-        auprc = np.nan
-        rand_auroc = np.nan
-        rand_auprc = np.nan
-    else:
-        auroc = roc_auc_score(labels, scores)
-        auprc = average_precision_score(labels, scores)
-
-        rng = np.random.default_rng(42)
-        rand_scores = rng.permutation(scores)
-
-        rand_auroc = roc_auc_score(labels, rand_scores)
-        rand_auprc = average_precision_score(labels, rand_scores)
-
-    return pd.DataFrame([{
-        "method_name": name,
-        "auroc": auroc,
-        "auprc": auprc,
-        "rand_auroc": rand_auroc,
-        "rand_auprc": rand_auprc,
-        "accuracy": accuracy,
-        "precision": precision,
-        "recall": recall,
-        "n_edges": len(labels),
-        "n_pos": int(labels.sum()),
-        "n_neg": int((labels == 0).sum()),
-        "score_threshold": score_threshold,
-    }])
-    
-def build_full_universe_from_gt(method_df, gt_edges, use_abs_scores=True, missing_score=0.0):
-    universe_tfs = gt_edges["Source"].dropna().unique()
-    universe_tgs = gt_edges["Target"].dropna().unique()
-
-    gt_pairs = set(zip(gt_edges["Source"], gt_edges["Target"]))
-
-    full_universe = (
-        pd.MultiIndex
-        .from_product([universe_tfs, universe_tgs], names=["Source", "Target"])
-        .to_frame(index=False)
-    )
-
-    full_universe["_in_gt"] = [
-        1 if pair in gt_pairs else 0
-        for pair in zip(full_universe["Source"], full_universe["Target"])
-    ]
-
-    method_scores = method_df[["Source", "Target", "Score"]].copy()
-
-    if use_abs_scores:
-        method_scores["Score"] = method_scores["Score"].abs()
-
-    # If method has duplicate Source-Target edges, keep strongest score
-    method_scores = (
-        method_scores
-        .sort_values("Score", ascending=False)
-        .drop_duplicates(["Source", "Target"], keep="first")
-    )
-
-    full_universe = full_universe.merge(
-        method_scores,
-        on=["Source", "Target"],
-        how="left",
-    )
-
-    full_universe["Score"] = full_universe["Score"].fillna(missing_score)
-
-    # print(f"Complete TF-target universe size: {len(full_universe):,}")
-    # print(
-    #     f"Positives in universe: {(full_universe['_in_gt'] == 1).sum():,}"
-    #     f" | Negatives: {(full_universe['_in_gt'] == 0).sum():,}"
-    # )
-
-    return full_universe
 
 def convert_labeled_dataframe_to_indices(true_interactions, false_interactions, tf_name_to_idx, tg_id_to_idx):
     rows = []
@@ -334,41 +254,6 @@ def sample_auprc_10x_negatives(full_universe, random_state=42):
 
     return auprc_df
 
-mm10_tf_dna_path = CHKPT_DIR / "tf_dna_mm10_3671604" / "epoch=08-val_auroc=0.9177-val_loss=0.2783.ckpt"
-hg38_tf_dna_path = CHKPT_DIR / "tf_dna_hg38_3683606" / "epoch=13-val_auroc=0.9566-val_loss=0.2042.ckpt"
-
-tf_tg_model_checkpoints = {
-    "mESC": {
-        "E7.5_rep1": CHKPT_DIR / "mESC" / "E7.5_rep1" / "tf_tg_train_E7.5_rep1_3675131" / "epoch_11_best_model.ckpt",
-        # "E7.5_rep1": utils.find_latest_checkpoint(CHKPT_DIR, "mESC", "E7.5_rep1"),
-        "E7.5_rep2": utils.find_latest_checkpoint(CHKPT_DIR, "mESC", "E7.5_rep2"),
-        "E8.5_rep1": utils.find_latest_checkpoint(CHKPT_DIR, "mESC", "E8.5_rep1", training_number="3691937"),
-        "E8.5_rep2": utils.find_latest_checkpoint(CHKPT_DIR, "mESC", "E8.5_rep2", training_number="3691937"),
-    },
-    "iPSC": {
-        "WT_D13_rep1": utils.find_latest_checkpoint(CHKPT_DIR, "iPSC", "WT_D13_rep1"),
-    },
-    "Macrophage": {
-        "buffer_1": utils.find_latest_checkpoint(CHKPT_DIR, "Macrophage", "buffer_1", training_number="3685893"),
-        "buffer_2": utils.find_latest_checkpoint(CHKPT_DIR, "Macrophage", "buffer_2", training_number="3713132"),
-        "buffer_3": utils.find_latest_checkpoint(CHKPT_DIR, "Macrophage", "buffer_3"),
-        "buffer_4": utils.find_latest_checkpoint(CHKPT_DIR, "Macrophage", "buffer_4"),
-    },
-    "K562": {
-        "sample_1": utils.find_latest_checkpoint(CHKPT_DIR, "K562", "sample_1", training_number="3692409"),
-    },
-    "mouse_liver": {
-        "liver_1": utils.find_latest_checkpoint(CHKPT_DIR, "mouse_liver", "liver_1"),
-        "liver_3": utils.find_latest_checkpoint(CHKPT_DIR, "mouse_liver", "liver_3")
-    },
-    "mouse_hepatocytes": {
-        "hepatocytes_1": utils.find_latest_checkpoint(CHKPT_DIR, "mouse_hepatocytes", "hepatocytes_1"),
-        "hepatocytes_3": utils.find_latest_checkpoint(CHKPT_DIR, "mouse_hepatocytes", "hepatocytes_3"),
-    }
-}
-
-import argparse
-
 def parse_arguments():
     parser = argparse.ArgumentParser(description="Evaluate TF-TG model on multiple datasets and plot AUPRC.")
     parser.add_argument("--output_dir", type=str, default=str(all_evaluation_plot_dir), help="Directory to save evaluation plots.")
@@ -390,7 +275,7 @@ force_reload = args.force_reload
 
 cross_model_cell_type = args.cross_model_cell_type
 cross_model_sample_name = args.cross_model_sample_name
-cross_model_chkpt = tf_tg_model_checkpoints[cross_model_cell_type][cross_model_sample_name]
+cross_model_chkpt = TF_TG_MODEL_CHECKPOINTS[cross_model_cell_type][cross_model_sample_name]
 
 sample_to_title_map = {
     "E7.5_rep1": "mESC-1",
@@ -415,6 +300,7 @@ cross_model_sample_title = sample_to_title_map.get(cross_model_sample_name, cros
 
 project_data_dir = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data")
 
+# Load the genome information for the sample
 auprc_all_method_dfs = {}
 logging.info(f"Evaluating on {cell_type} {sample_name} ({species})")
 if species == "mm10":
@@ -424,8 +310,8 @@ elif species == "hg38":
 
 genome_fasta_path = project_data_dir / "genome_data" / "reference_genome" / f"{species}" / f"{species}.fa"
 chrom_sizes_path = project_data_dir / "genome_data" / "reference_genome" / f"{species}" / f"{species}.chrom.sizes"
-chrom_sizes_path = project_data_dir / "genome_data" / "reference_genome" / f"{species}" / f"{species}.chrom.sizes"
 
+# Specify the train/val/test splits, stratified by chromosome
 if species == "mm10":
     train_chroms = [str(i) for i in range(1, 16)]
     val_chroms = [ str(i) for i in range(16, 18)]
@@ -461,6 +347,7 @@ common_cells = sorted(set(rna_pseudobulk_norm.columns) & set(atac_pseudobulk.col
 cell_type_cache_dir = DATA_DIR / f"{cell_type}_cache"
 merged_ground_truth_df = pd.read_parquet(cell_type_cache_dir / f"{cell_type}_merged_ground_truth.parquet")
 
+# Filter the ground truth to only include TFs and TGs that are present in the RNA pseudobulk
 gt_tfs_in_rna = set(merged_ground_truth_df["Source"]).intersection(rna_pseudobulk_norm.index)
 gt_tgs_in_rna = set(merged_ground_truth_df["Target"]).intersection(rna_pseudobulk_norm.index)
 logging.info(f"Ground truth TFs in RNA pseudobulk: {len(gt_tfs_in_rna)} (Example: {list(gt_tfs_in_rna)[:5]})")
@@ -468,7 +355,6 @@ logging.info(f"Ground truth TGs in RNA pseudobulk: {len(gt_tgs_in_rna)} (Example
 
 n_before_rna_filter = len(merged_ground_truth_df)
 
-# Subset the ground truth to only TFs and TGs present in the rna_pseudobulk 
 merged_ground_truth_df = merged_ground_truth_df[
     merged_ground_truth_df["Source"].isin(gt_tfs_in_rna) &
     merged_ground_truth_df["Target"].isin(gt_tgs_in_rna)
@@ -481,7 +367,7 @@ logging.info(
 
 tf_name_to_idx_cache_path = cell_type_cache_dir / "tf_name_to_idx.csv"
 
-# Get the map of TF name to index
+# Get the map of the TF names to their indices in the TF-DNA model training data
 tf_name_to_idx = pd.read_csv(tf_name_to_idx_cache_path)
 tf_name_to_idx["tf_name"] = tf_name_to_idx["tf_name"].str.upper()
 tf_name_to_idx = tf_name_to_idx.set_index("tf_name")["tf_idx"].to_dict()
@@ -492,6 +378,7 @@ logging.info(f"Ground truth TFs with embeddings: {len(gt_tfs_in_embeddings)} (Ex
 
 n_before_tf_embedding_filter = len(merged_ground_truth_df)
 
+# Filter the ground truth to only include TFs that have embeddings in the TF-DNA model training data
 merged_ground_truth_df = merged_ground_truth_df[
     merged_ground_truth_df["Source"].isin(gt_tfs_in_embeddings)
 ].copy()
@@ -501,8 +388,7 @@ logging.info(
     f"{len(merged_ground_truth_df):,} / {n_before_tf_embedding_filter:,}"
 )
 
-
-# Split genes into train/val/test based on chromosome
+# Split the target genes into train/val/test based on chromosome
 train_genes, val_genes, test_genes = tf_tg_data_builder.split_genes_by_chromosome(
     gene_ref_file,
     train_chroms=train_chroms,
@@ -530,12 +416,6 @@ gt_pairs = (gt_test_df["Source"] + "\t" + gt_test_df["Target"]).drop_duplicates(
 
 gt_lookup = (gt_tfs, gt_tgs, set(gt_pairs))
 
-sample_full_grn_dir = RESULT_DIR / "full_test_grns" / cell_type / sample_name
-sample_full_grn_dir.mkdir(parents=True, exist_ok=True)
-
-cross_tf_tg_df_file = sample_full_grn_dir / f"tf_tg_cross_model_predictions_{cross_model_cell_type}_{cross_model_sample_name}.tsv"
-sample_full_grn_file = sample_full_grn_dir / f"tf_tg_predictions_{cell_type}_{sample_name}.tsv"
-
 # Construct the full universe of possible TF-TG pairs for the test set, 
 # label them based on presence in the ground truth, and merge with method predictions
 full_universe = (
@@ -547,20 +427,34 @@ full_universe = (
 # Create a list of true and false interactions based on whether the candidate edge is in the ground truth
 full_universe["_in_gt"] = (full_universe["Source"] + "\t" + full_universe["Target"]).isin(gt_pairs).astype("int8")
 
-true_df = full_universe[full_universe["_in_gt"] == 1]
-false_df = full_universe[full_universe["_in_gt"] == 0]
+# Sample a subset of the full universe for AUPRC evaluation (all positives + 10x negatives) up front,
+# so inference only needs to score the edges actually used for evaluation instead of the full dense grid
+full_universe_10x_negatives = sample_auprc_10x_negatives(full_universe, random_state=42)
+
+true_df = full_universe_10x_negatives[full_universe_10x_negatives["_in_gt"] == 1]
+false_df = full_universe_10x_negatives[full_universe_10x_negatives["_in_gt"] == 0]
+
+true_interactions = zip(true_df["Source"], true_df["Target"])
+false_interactions = zip(false_df["Source"], false_df["Target"])
+
+sample_full_grn_dir = RESULT_DIR / "full_test_grns" / cell_type / sample_name
+sample_full_grn_dir.mkdir(parents=True, exist_ok=True)
+
+cross_tf_tg_df_file = sample_full_grn_dir / f"tf_tg_cross_model_predictions_{cross_model_cell_type}_{cross_model_sample_name}.tsv"
+sample_full_grn_file = sample_full_grn_dir / f"tf_tg_predictions_{cell_type}_{sample_name}.tsv"
 
 if not sample_full_grn_file.exists() or not cross_tf_tg_df_file.exists() or force_reload == True:
-    true_interactions = zip(true_df["Source"], true_df["Target"])
-    false_interactions = zip(false_df["Source"], false_df["Target"])
 
+    # === CREATE FULL SET OF TF-TG INPUTS FOR ALL POSSIBLE TF-TG PAIRS IN THE TEST SET ===
     # Load the TF and TG name to index mappings from the training cache metadata
     with open(cell_type_cache_dir / "tf_tg_training_cache" / sample_name / "metadata.json", "r") as f:
         metadata = json.load(f)
-        
+    
+    # Load the TF and TG name to index mappings from the metadata
     tf_name_to_idx = metadata["tf_name_to_idx"]
     tg_id_to_idx = metadata["tg_id_to_idx"]
 
+    # Create the reverse mappings from index to TF/TG name
     tf_idx_to_name, tg_idx_to_name = create_tf_tg_index_to_name_mappings(metadata)
 
     # Use the TF and TG name to index mappings to convert the labeled DataFrame of all 
@@ -572,7 +466,7 @@ if not sample_full_grn_file.exists() or not cross_tf_tg_df_file.exists() or forc
         tg_id_to_idx
     )
 
-    # Create the centered one-hot encoded ATAC peak array for the test set
+    # Create the centered one-hot encoded ATAC peak array
     atac_peak_array = utils.create_centered_peak_onehot_array(
         peak_ids=dataset_peaks,
         genome_fasta=genome_fasta_path,
@@ -597,7 +491,6 @@ if not sample_full_grn_file.exists() or not cross_tf_tg_df_file.exists() or forc
         common_cells=common_cells,
         max_precompute_peaks=8,
     )
-    
     
     # Get the max number of peaks within 100Kb of any TG in the test set
     max_peaks_real = max(
@@ -637,7 +530,7 @@ if not sample_full_grn_file.exists() or not cross_tf_tg_df_file.exists() or forc
         weights_only=True,
     )
     
-    # Create the dataset for the test set using the loaded inputs and lookup tensors
+    # Create the PyTorch dataset for the test set
     dataset = TFTGEdgeBagDataset(
         tftg_inputs_test,
         tf_embeddings_tensor=tf_embeddings_tensor,
@@ -645,7 +538,7 @@ if not sample_full_grn_file.exists() or not cross_tf_tg_df_file.exists() or forc
         atac_peak_tensor=atac_peak_tensor
     )
 
-    # Create the DataLoader for the test set
+    # Create the PyTorch DataLoader for the test set
     num_workers = 8
     loader = DataLoader(
         dataset,
@@ -659,7 +552,7 @@ if not sample_full_grn_file.exists() or not cross_tf_tg_df_file.exists() or forc
     )
 
     tf_dna_model_chkpt = config.tf_dna_model_checkpoints[cell_type]
-    tf_tg_model_chkpt = tf_tg_model_checkpoints[cell_type][sample_name]
+    tf_tg_model_chkpt = TF_TG_MODEL_CHECKPOINTS[cell_type][sample_name]
 
     # Generate the model predictions for the test set and create a DataFrame with TF names, TG names, and predicted scores
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -683,6 +576,7 @@ if not sample_full_grn_file.exists() or not cross_tf_tg_df_file.exists() or forc
         prediction_df = pd.read_csv(sample_full_grn_file, sep="\t", header=0)
     
     if not cross_tf_tg_df_file.exists() or force_reload:
+        # Load the TF→TG model trained on the cross-model cell type and sample
         cross_tf_tg_model = utils.load_tf_tg_regulation_model(
             tf_dna_model_chkpt,
             cross_model_chkpt,
@@ -692,6 +586,7 @@ if not sample_full_grn_file.exists() or not cross_tf_tg_df_file.exists() or forc
             device=device
         )
         
+        # Run the cross-trained model on the test set and generate the predictions DataFrame
         cross_model_prediction_df = generate_model_predictions(cross_tf_tg_model.model, loader, device, tf_idx_to_name, tg_idx_to_name)
 
         cross_model_prediction_df.to_csv(cross_tf_tg_df_file, sep="\t", index=False)
@@ -720,6 +615,7 @@ method_info = {
     "FigR":       {"path": figr_path,        "tf_col": "Source",    "target_col": "Target",    "score_col": "Score"},
 }
 
+# Load and standardize the predictions from each method, filtering to only include TFs and TGs present in the ground truth
 standardized_method_dfs = {}
 for method_name, info in method_info.items():
     df_std = load_and_standardize_method(method_name, info)
@@ -735,24 +631,23 @@ standardized_method_dfs[CROSS_MODEL_METHOD] = cross_model_prediction_df
 
 auprc_all_method_dfs[sample_name] = {}
 
-full_universe_10x_negatives = sample_auprc_10x_negatives(full_universe, random_state=42)
-
 labeled_grn_dir = RESULT_DIR / "labeled_auprc_grns" / cell_type / sample_name
 labeled_grn_dir.mkdir(parents=True, exist_ok=True)
 
-# Compute metrics for each method and print results
+# Compute metrics for each inference method
 for method_name, df_std in standardized_method_dfs.items():
     
     method_grn_file = labeled_grn_dir / f"{method_name.lower().replace('+','')}.tsv"
     if method_grn_file.exists() and not force_reload:
         auprc_df = pd.read_csv(method_grn_file, sep="\t", header=0)
     else:
-        # Create the labeled DataFrame for the model predictions vs the test set ground truth
+        # Create a labeled DataFrame of the predicted scores for the method vs the test set ground truth
         method_labeled_df = create_ground_truth_comparison_df(df_std, gt_lookup, "test_chrom_gt")
 
         y = method_labeled_df["_in_gt"].fillna(0).astype(int).to_numpy()
         s = method_labeled_df["Score"].to_numpy()
-                
+        
+        # Only keep the edges that are in the full universe of TF-TG pairs for the test set
         eval_df = full_universe_10x_negatives[["Source", "Target", "_in_gt"]].copy()
 
         auprc_df = eval_df.merge(
@@ -765,10 +660,11 @@ for method_name, df_std in standardized_method_dfs.items():
     
     auprc_all_method_dfs[sample_name][method_name] = auprc_df
     
+    # Save the labeled DataFrame for the method to a TSV file for future reference
     auprc_df.to_csv(labeled_grn_dir / f"{method_name.lower().replace('+','')}.tsv", sep="\t", index=False)
 
 
-
+# ===== PLOTTING AUPRC FOR ALL METHODS =====
 method_color_dict = {
   OWN_MODEL_METHOD: "#4195df",
   CROSS_MODEL_METHOD: "#86C7E7",
@@ -965,7 +861,7 @@ auprc_metric_dir.mkdir(parents=True, exist_ok=True)
 
 auprc_metrics_df = pd.DataFrame(auprc_metric_rows)
 auprc_metrics_df.to_csv(
-    auprc_metric_dir / f"{sample_name}_auprc_metrics.csv",
+    auprc_metric_dir / f"{sample_name}_auprc_metrics.tsv",
     sep="\t",
     index=False,
 )
