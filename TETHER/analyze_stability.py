@@ -272,7 +272,6 @@ def parse_args():
     parser.add_argument("--cell_type", type=str, default=None, help="Model cell type for evaluation.")
     parser.add_argument("--sample_name", type=str, default=None, help="Model training sample for evaluation.")
     parser.add_argument("--subsample_num", type=int, default=None, help="Subsample number for evaluation.")
-    parser.add_argument("--subset_size", type=int, default=None, help="Subset size for evaluation. If None, use the full dataset.")
     parser.add_argument("--batch_size", type=int, default=512, help="Batch size for evaluation.")
     parser.add_argument("--force_reload", action="store_true", help="Force reload of the dataset even if cached.")
     return parser.parse_args()
@@ -284,7 +283,6 @@ def create_tf_tg_index_to_name_mappings(metadata):
 
 if __name__ == "__main__":
     args = parse_args()
-    subset_size = args.subset_size
     batch_size = args.batch_size
 
     cell_type = args.cell_type
@@ -299,8 +297,8 @@ if __name__ == "__main__":
     
     cell_type_cache_dir = DATA_DIR / f"{cell_type}_cache"
     
-    prediction_save_file = RESULT_DIR / "labeled_grns" / f"{sample_name}_stability_{subsample_num}_grn_{subset_size}.csv"
-    metric_save_file = RESULT_DIR / "comparison_metric_files" / f"{sample_name}_stability_{subsample_num}_metrics_{subset_size}.csv"
+    prediction_save_file = RESULT_DIR / "labeled_grns" / f"{sample_name}_stability_{subsample_num}_grn.csv"
+    metric_save_file = RESULT_DIR / "comparison_metric_files" / f"{sample_name}_stability_{subsample_num}_metrics.csv"
 
     if not prediction_save_file.parent.exists():
         prediction_save_file.parent.mkdir(parents=True, exist_ok=True)
@@ -337,7 +335,7 @@ if __name__ == "__main__":
         sample_name=sample_name,
         subsample_num=subsample_num,
         dataset_split_type=dataset_split_type,
-        subset_size=subset_size,
+        subset_size=None,
         show_progress_bar=True,
         compile_model=False,
         batch_size=batch_size,

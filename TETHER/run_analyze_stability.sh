@@ -76,5 +76,4 @@ srun python3 ${PROJECT_DIR}/analyze_stability.py \
     --cell_type "$cell_type" \
     --sample_name "$sample_name" \
     --subsample_num "$SUBSAMPLE_NUMBER" \
-    --subset_size 10000 \
     --batch_size 256
