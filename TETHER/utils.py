@@ -937,6 +937,7 @@ def find_latest_checkpoint(
     
     return latest_chkpt_file
 
+
 def strip_compiled_prefix_from_state_dict(state_dict, prefix="_orig_mod."):
     """
     Remove torch.compile's _orig_mod prefix from state_dict keys.
@@ -952,6 +953,7 @@ def strip_compiled_prefix_from_state_dict(state_dict, prefix="_orig_mod."):
         cleaned[cleaned_key] = value
 
     return cleaned
+
 
 def create_index_file_for_fragments(
     frag_path: Path,
@@ -976,12 +978,14 @@ def create_index_file_for_fragments(
             index_file = str(frag_path) + ".tbi"
             logging.info(f"  - Saved to {index_file}")
 
+
 def gpu_supports_torch_compile(device):
     if device.type != "cuda":
         return False
 
     major, minor = torch.cuda.get_device_capability(device)
     return major >= 7
+
 
 def load_tf_dna_model(
     tf_dna_model_path: Path,
@@ -1051,6 +1055,7 @@ def load_tf_dna_model(
         )
         
     return lit_tf_dna_model
+
 
 def load_tf_tg_regulation_model(
     tf_dna_model_path: Path,
@@ -1168,6 +1173,7 @@ def load_tf_tg_regulation_model(
         )
 
     return lit_tf_tg_model
+
 
 def load_training_cache_dataset(
     sample_name: str,

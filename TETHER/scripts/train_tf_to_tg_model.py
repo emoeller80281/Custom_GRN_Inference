@@ -51,11 +51,15 @@ torch.set_float32_matmul_precision("high")
 def log_once(msg: str) -> None:
     logging.info(msg)
 
-def create_new_tf_tg_binding_model(
+
+def create_new_tf_tg_regulation_model(
     tf_bind_model_path: Path,
     tf_embeddings_tensor: torch.Tensor,
     tf_mask_tensor: torch.Tensor,
     checkpoint_path: Path | None = None,
+    d_model: int = 128,
+    tf_peak_chunk_size: int = 128,
+    
 ) -> tf_to_tg_module.TFTGRegulationModel:
 
     # 1) Recreate the base TF→DNA model with the same hyperparameters
@@ -96,13 +100,13 @@ def create_new_tf_tg_binding_model(
     # 4) Inject into your TF→TG model
     tf_tg_model = tf_to_tg_module.TFTGRegulationModel(
         pretrained_tf_peak_model=trained_tf_peak_model,
-        d_model=128,
-        tf_peak_chunk_size=128,
+        d_model=d_model,
+        tf_peak_chunk_size=tf_peak_chunk_size,
     )
 
     # 5) Optionally load TF→TG checkpoint
     if checkpoint_path is not None:
-        log_once(f"Loading TF→TG model weights from checkpoint: {checkpoint_path}")
+        logging.info(f"Loading TF→TG model weights from checkpoint: {checkpoint_path}")
 
         tf_tg_ckpt = torch.load(
             checkpoint_path,
@@ -195,185 +199,6 @@ def collate_tftg_edge_bags(batch):
     output["cell_mask"] = torch.ones(E, C, dtype=torch.bool)
 
     return output
-        
-        
-@torch.no_grad()
-def _move_batch_to_device(batch, device):
-    moved = {
-        "tf_embedding": batch["tf_embedding"].to(device, non_blocking=True),
-        "tf_mask": batch["tf_mask"].to(device, non_blocking=True),
-        "peak_sequences": batch["peak_sequences"].to(device, non_blocking=True),
-        "peak_accessibility": batch["peak_accessibility"].to(device, non_blocking=True),
-        "peak_distance": batch["peak_distance"].to(device, non_blocking=True),
-        "tf_expression": batch["tf_expression"].to(device, non_blocking=True),
-        "tg_expression": batch["tg_expression"].to(device, non_blocking=True),
-        "label": batch["label"].to(device, non_blocking=True),
-    }
-
-    if "cell_mask" in batch:
-        moved["cell_mask"] = batch["cell_mask"].to(device, non_blocking=True)
-
-    if "peak_mask" in batch:
-        moved["peak_mask"] = batch["peak_mask"].to(device, non_blocking=True)
-
-    return moved
-
-
-@torch.no_grad()
-def evaluate(
-    model,
-    loader,
-    criterion,
-    device,
-    pooling_mode: str = "lse",
-    pooling_temperature: float = 1.0,
-):
-    model.eval()
-    total_loss = 0.0
-    n_edges = 0
-    for batch in loader:
-        batch = _move_batch_to_device(batch, device)
-
-        labels = batch["label"]
-        cell_mask = batch["cell_mask"]
-        E, C = cell_mask.shape
-
-        edge_logits, _ = model.forward(
-            tf_embedding=batch["tf_embedding"],
-            tf_mask=batch["tf_mask"],
-            peak_sequences=batch["peak_sequences"],
-            peak_accessibility=batch["peak_accessibility"],
-            peak_distance=batch["peak_distance"],
-            tf_expression=batch["tf_expression"],
-            tg_expression=batch["tg_expression"],
-            peak_mask=batch.get("peak_mask", None),
-            cell_mask=cell_mask,
-            pooling_mode=pooling_mode,
-            pooling_temperature=pooling_temperature,
-        )
-        loss = criterion(edge_logits, labels)
-        total_loss += loss.item() * E
-        n_edges += E
-    return total_loss / max(n_edges, 1)
-
-def compute_binary_classification_metrics(
-    labels,
-    scores,
-    score_threshold: float = 0.5,
-    random_state: int = 42,
-):
-    """
-    labels: array-like of 0/1 labels
-    scores: array-like of predicted probabilities after sigmoid
-    """
-
-    labels = np.asarray(labels).astype(int).ravel()
-    scores = np.asarray(scores).astype(float).ravel()
-
-    preds = (scores >= score_threshold).astype(int)
-
-    accuracy = accuracy_score(labels, preds)
-    precision = precision_score(labels, preds, zero_division=0)
-
-    if len(np.unique(labels)) < 2:
-        auroc = np.nan
-        auprc = np.nan
-        rand_auroc = np.nan
-        rand_auprc = np.nan
-    else:
-        auroc = roc_auc_score(labels, scores)
-        auprc = average_precision_score(labels, scores)
-
-        rng = np.random.default_rng(random_state)
-        rand_scores = rng.permutation(scores)
-
-        rand_auroc = roc_auc_score(labels, rand_scores)
-        rand_auprc = average_precision_score(labels, rand_scores)
-
-    return {
-        "auroc": auroc,
-        "auprc": auprc,
-        "rand_auroc": rand_auroc,
-        "rand_auprc": rand_auprc,
-        "accuracy": accuracy,
-        "precision": precision,
-        "n_edges": len(labels),
-        "n_pos": int(labels.sum()),
-        "n_neg": int((labels == 0).sum()),
-        "score_threshold": score_threshold,
-    }
-    
-@torch.no_grad()
-def evaluate_with_metrics(
-    model,
-    loader,
-    criterion,
-    device,
-    score_threshold: float = 0.5,
-    random_state: int = 42,
-    pooling_mode: str = "lse",
-    pooling_temperature: float = 1.0,
-):
-    model.eval()
-
-    total_loss = 0.0
-    n_edges = 0
-
-    all_scores = []
-    all_labels = []
-
-    for batch in loader:
-        batch = _move_batch_to_device(batch, device)
-
-        labels = batch["label"]
-        cell_mask = batch["cell_mask"]
-        E, C = cell_mask.shape
-
-        edge_logits, _ = model.forward(
-            tf_embedding=batch["tf_embedding"],
-            tf_mask=batch["tf_mask"],
-            peak_sequences=batch["peak_sequences"],
-            peak_accessibility=batch["peak_accessibility"],
-            peak_distance=batch["peak_distance"],
-            tf_expression=batch["tf_expression"],
-            tg_expression=batch["tg_expression"],
-            peak_mask=batch.get("peak_mask", None),
-            cell_mask=cell_mask,
-            pooling_mode=pooling_mode,
-            pooling_temperature=pooling_temperature,
-        )
-
-        loss = criterion(edge_logits, labels)
-
-        total_loss += loss.item() * E
-        n_edges += E
-
-        scores = torch.sigmoid(edge_logits)
-
-        all_scores.append(scores.detach().cpu().numpy().ravel())
-        all_labels.append(labels.detach().cpu().numpy().ravel())
-
-    mean_loss = total_loss / max(n_edges, 1)
-
-    all_scores = np.concatenate(all_scores)
-    all_labels = np.concatenate(all_labels)
-
-    metrics = compute_binary_classification_metrics(
-        labels=all_labels,
-        scores=all_scores,
-        score_threshold=score_threshold,
-        random_state=random_state,
-    )
-
-    metrics["loss"] = mean_loss
-    metrics["score_min"] = float(all_scores.min())
-    metrics["score_max"] = float(all_scores.max())
-    metrics["score_mean"] = float(all_scores.mean())
-    metrics["score_std"] = float(all_scores.std())
-    metrics["n_pred_pos"] = int((all_scores >= score_threshold).sum())
-
-    return metrics
-
 
 if __name__ == "__main__":
     
@@ -533,7 +358,7 @@ if __name__ == "__main__":
 
     log_once(f"Train/Val/Test sizes: {len(train_dataset)}, {len(val_dataset)}, {len(test_dataset)}")
 
-    tf_tg_model = create_new_tf_tg_binding_model(
+    tf_tg_model = create_new_tf_tg_regulation_model(
         tf_bind_model_path, 
         tf_embeddings_tensor, 
         tf_mask_tensor,
