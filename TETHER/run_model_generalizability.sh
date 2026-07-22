@@ -5,11 +5,11 @@
 #SBATCH --time=72:00:00
 #SBATCH -p dense
 #SBATCH -N 1
-#SBATCH --gres=gpu:a100:1
+#SBATCH --gres=gpu:v100:1
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 8
 #SBATCH --mem=64G
-#SBATCH --array=0-13%3
+#SBATCH --array=0-13%8
 
 set -eo pipefail
 
@@ -41,17 +41,17 @@ done
 CURATED_EXPERIMENT_LIST=(
     # === mESC Evaluations ====
     # Same cell-type, same sample evaluations with own sample test sets
-    "mESC|E7.5_rep1|mESC|E7.5_rep1"
-    "mESC|E8.5_rep1|mESC|E8.5_rep1"
+    # "mESC|E7.5_rep1|mESC|E7.5_rep1"
+    # "mESC|E8.5_rep1|mESC|E8.5_rep1"
 
     # # # Same cell-type, different sample evaluations with mouse hepatocyte test sets
     # "mESC|E7.5_rep1|mESC|E8.5_rep1"
     # "mESC|E8.5_rep1|mESC|E7.5_rep1"
 
     # # # Cross cell-type, same organism evaluations with mESC test sets
-    "mESC|E7.5_rep1|mouse_hepatocytes|hepatocytes_1"
+    # "mESC|E7.5_rep1|mouse_hepatocytes|hepatocytes_1"
     # "mESC|E7.5_rep1|mouse_hepatocytes|hepatocytes_3"
-    "mESC|E8.5_rep1|mouse_hepatocytes|hepatocytes_1"
+    # "mESC|E8.5_rep1|mouse_hepatocytes|hepatocytes_1"
     # "mESC|E8.5_rep1|mouse_hepatocytes|hepatocytes_3"
 
     # # # Cross cell-type, different organism evaluations with Macrophage test sets
@@ -62,17 +62,17 @@ CURATED_EXPERIMENT_LIST=(
     
     # # # ==== Hepatocyte Evaluations ====
     # # # Same cell-type, same sample evaluations with own sample test sets
-    "mouse_hepatocytes|hepatocytes_1|mouse_hepatocytes|hepatocytes_1"
-    "mouse_hepatocytes|hepatocytes_3|mouse_hepatocytes|hepatocytes_3"
+    # "mouse_hepatocytes|hepatocytes_1|mouse_hepatocytes|hepatocytes_1"
+    # "mouse_hepatocytes|hepatocytes_3|mouse_hepatocytes|hepatocytes_3"
     
     # # # Same cell-type, different sample evaluations with mouse hepatocyte test sets
     # "mouse_hepatocytes|hepatocytes_1|mouse_hepatocytes|hepatocytes_3"
     # "mouse_hepatocytes|hepatocytes_3|mouse_hepatocytes|hepatocytes_1"
     
     # # # Cross cell-type, same organism evaluations with mESC test sets
-    "mouse_hepatocytes|hepatocytes_1|mESC|E7.5_rep1"
+    # "mouse_hepatocytes|hepatocytes_1|mESC|E7.5_rep1"
     # "mouse_hepatocytes|hepatocytes_1|mESC|E8.5_rep1"
-    "mouse_hepatocytes|hepatocytes_3|mESC|E7.5_rep1"
+    # "mouse_hepatocytes|hepatocytes_3|mESC|E7.5_rep1"
     # "mouse_hepatocytes|hepatocytes_3|mESC|E8.5_rep1"
     
     # # # Cross cell-type, different organism evaluations with Macrophage test sets
@@ -83,16 +83,16 @@ CURATED_EXPERIMENT_LIST=(
     
     # # # === Macrophage Evaluations ====
     # # # Same cell-type, same sample evaluations with own sample test sets
-    "Macrophage|buffer_1|Macrophage|buffer_1"
-    "Macrophage|buffer_2|Macrophage|buffer_2"
+    # "Macrophage|buffer_1|Macrophage|buffer_1"
+    # "Macrophage|buffer_2|Macrophage|buffer_2"
     
     # # # Same cell-type, different sample evaluations with Macrophage test sets
     # "Macrophage|buffer_1|Macrophage|buffer_2"
     # "Macrophage|buffer_2|Macrophage|buffer_1"
 
     # # Different cell-type, same organism evaluations with K562 test sets
-    "Macrophage|buffer_1|K562|sample_1"
-    "Macrophage|buffer_2|K562|sample_1"
+    # "Macrophage|buffer_1|K562|sample_1"
+    # "Macrophage|buffer_2|K562|sample_1"
 
     # # # Cross cell-type, different organism evaluations with mESC test sets
     # "Macrophage|buffer_1|mESC|E7.5_rep1"
@@ -106,9 +106,30 @@ CURATED_EXPERIMENT_LIST=(
     # "Macrophage|buffer_2|mouse_hepatocytes|hepatocytes_1"
     # "Macrophage|buffer_2|mouse_hepatocytes|hepatocytes_3"
     
-    "K562|sample_1|K562|sample_1"
-    "K562|sample_1|Macrophage|buffer_1"
+    # "K562|sample_1|K562|sample_1"
+    # "K562|sample_1|Macrophage|buffer_1"
     # "K562|sample_1|Macrophage|buffer_2"
+
+
+    # Cross-trained model runs (from samples_to_run)
+    "mouse_hepatocytes|hepatocytes_1|mESC|E7.5_rep1"
+    "mouse_hepatocytes|hepatocytes_1|mESC|E8.5_rep1"
+    "K562|sample_1|Macrophage|buffer_1"
+    "K562|sample_1|Macrophage|buffer_2"
+    "Macrophage|buffer_1|K562|sample_1"
+    "mESC|E7.5_rep1|mouse_hepatocytes|hepatocytes_1"
+    "mESC|E7.5_rep1|mouse_hepatocytes|hepatocytes_3"
+
+    # Own-model runs (model trained and tested on same sample)
+    "mESC|E7.5_rep1|mESC|E7.5_rep1"
+    "mESC|E8.5_rep1|mESC|E8.5_rep1"
+    "Macrophage|buffer_1|Macrophage|buffer_1"
+    "Macrophage|buffer_2|Macrophage|buffer_2"
+    "K562|sample_1|K562|sample_1"
+    "mouse_hepatocytes|hepatocytes_1|mouse_hepatocytes|hepatocytes_1"
+    "mouse_hepatocytes|hepatocytes_3|mouse_hepatocytes|hepatocytes_3"
+    
+
 )
 
 # --- Memory + math ---

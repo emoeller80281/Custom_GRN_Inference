@@ -85,16 +85,16 @@ export NCCL_DEBUG=INFO
 export PYTHONFAULTHANDLER=1
 
 EXPERIMENT_LIST=(
-    # "mm10|mouse_hepatocytes|hepatocytes_1"
-    # "mm10|mouse_hepatocytes|hepatocytes_3"
+    "mm10|mouse_hepatocytes|hepatocytes_1"
+    "mm10|mouse_hepatocytes|hepatocytes_3"
 
     "hg38|Macrophage|buffer_1"
-    # "hg38|Macrophage|buffer_2"
+    "hg38|Macrophage|buffer_2"
 
-    # "mm10|mESC|E7.5_rep1"
-    # "mm10|mESC|E8.5_rep1"
+    "mm10|mESC|E7.5_rep1"
+    "mm10|mESC|E8.5_rep1"
 
-    # "hg38|K562|sample_1"
+    "hg38|K562|sample_1"
 )
 
 NUM_SUBSAMPLES=10
@@ -106,11 +106,6 @@ NUM_SUBSAMPLES=10
 TASK_ID=${SLURM_ARRAY_TASK_ID:-0}
 EXPERIMENT_IDX=$((TASK_ID / NUM_SUBSAMPLES))
 SUBSAMPLE_NUMBER=$((TASK_ID % NUM_SUBSAMPLES))
-
-if [[ ! " 3 " =~ " ${SUBSAMPLE_NUMBER} " ]]; then
-    echo "[INFO] Skipping subsample_number=${SUBSAMPLE_NUMBER} for TASK_ID=${TASK_ID}"
-    exit 0
-fi
 
 if [ ${EXPERIMENT_IDX} -ge ${#EXPERIMENT_LIST[@]} ]; then
     echo "ERROR: SLURM_ARRAY_TASK_ID (${TASK_ID}) exceeds experiment/subsample space (${#EXPERIMENT_LIST[@]} experiments x ${NUM_SUBSAMPLES} subsamples)"
