@@ -9,6 +9,8 @@ macrophage_output/
 reference_networks/
 .venv/
 TETHER/cached_data/
+jupyter_urls/
+jupyter_dense*.sh
 data/tf_data
 data/sample_input_data
 TETHER/checkpoints
