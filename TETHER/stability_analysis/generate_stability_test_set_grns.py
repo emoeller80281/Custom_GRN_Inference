@@ -14,7 +14,7 @@ logging.basicConfig(level=logging.INFO, format='%(levelname)s - %(message)s')
 PROJECT_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/TETHER")
 DATA_DIR = PROJECT_DIR / "cached_data"
 CHKPT_DIR = PROJECT_DIR / "checkpoints"
-RESULT_DIR = PROJECT_DIR / "testing_results" / "model_generalizability"
+RESULT_DIR = PROJECT_DIR / "testing_results" / "stability_results"
 
 sys.path.append(str(PROJECT_DIR))
 
@@ -102,44 +102,62 @@ def load_stability_training_cache_dataset(
 
     return loader, metadata, manifest, tf_embeddings_tensor, tf_mask_tensor
 
-tf_tg_model_checkpoints = {
-    "mESC": {
-        "E7.5_rep1": CHKPT_DIR / "mESC" / "E7.5_rep1" / "tf_tg_train_E7.5_rep1_3675131" / "epoch_11_best_model.ckpt",
-        # "E7.5_rep1": utils.find_latest_checkpoint(CHKPT_DIR, "mESC", "E7.5_rep1"),
-        "E7.5_rep2": utils.find_latest_checkpoint(CHKPT_DIR, "mESC", "E7.5_rep2"),
-        "E8.5_rep1": utils.find_latest_checkpoint(CHKPT_DIR, "mESC", "E8.5_rep1", training_number="3691937"),
-        "E8.5_rep2": utils.find_latest_checkpoint(CHKPT_DIR, "mESC", "E8.5_rep2", training_number="3691937"),
-    },
-    "iPSC": {
-        "WT_D13_rep1": utils.find_latest_checkpoint(CHKPT_DIR, "iPSC", "WT_D13_rep1"),
-    },
-    "Macrophage": {
-        "buffer_1": utils.find_latest_checkpoint(CHKPT_DIR, "Macrophage", "buffer_1", training_number="3685893"),
-        "buffer_2": utils.find_latest_checkpoint(CHKPT_DIR, "Macrophage", "buffer_2", training_number="3713132"),
-        "buffer_3": utils.find_latest_checkpoint(CHKPT_DIR, "Macrophage", "buffer_3"),
-        "buffer_4": utils.find_latest_checkpoint(CHKPT_DIR, "Macrophage", "buffer_4"),
-    },
-    "K562": {
-        "sample_1": utils.find_latest_checkpoint(CHKPT_DIR, "K562", "sample_1", training_number="3692409"),
-    },
-    "mouse_liver": {
-        "liver_1": utils.find_latest_checkpoint(CHKPT_DIR, "mouse_liver", "liver_1"),
-        "liver_3": utils.find_latest_checkpoint(CHKPT_DIR, "mouse_liver", "liver_3")
-    },
-    "mouse_hepatocytes": {
-        "hepatocytes_1": utils.find_latest_checkpoint(CHKPT_DIR, "mouse_hepatocytes", "hepatocytes_1"),
-        "hepatocytes_3": utils.find_latest_checkpoint(CHKPT_DIR, "mouse_hepatocytes", "hepatocytes_3"),
-    }
-}
+def find_latest_stability_checkpoint(
+    checkpoint_dir: Path,
+    epoch_num: int | None = None,
+    verbose: bool = True,
+    ) -> Path:
+    """
+    Find the latest retrained-subsample checkpoint for a stability run.
+
+    Parameters
+    ----------
+    checkpoint_dir : Path
+        The stability subsample directory, e.g.
+        checkpoints/stability/{cell_type}/{sample}/stability_{N}.
+    epoch_num : int, optional
+        The specific epoch number to select a checkpoint from. If None, the
+        highest-epoch checkpoint is returned.
+
+    Returns
+    -------
+    Path or None
+        The path to the selected checkpoint file, or None if none is found.
+    """
+    if not checkpoint_dir.exists():
+        logging.warning(f"No checkpoints found in {checkpoint_dir}")
+        return None
+
+    chkpt_files = list(checkpoint_dir.glob("epoch=*-val_auroc=*-val_loss=*.ckpt"))
+    if not chkpt_files:
+        logging.warning(f"No checkpoint files found in {checkpoint_dir}")
+        return None
+
+    chkpt_nums = [int(f.stem.split("-")[0].split("=")[1]) for f in chkpt_files]
+    if epoch_num is not None:
+        if epoch_num in chkpt_nums:
+            latest_chkpt_file = next(f for f in chkpt_files if int(f.stem.split("-")[0].split("=")[1]) == epoch_num)
+        else:
+            logging.warning(f"Checkpoint for epoch {epoch_num} not found in {checkpoint_dir}. Available epochs: {chkpt_nums}")
+            return None
+    else:
+        latest_chkpt_file = max(chkpt_files, key=lambda f: int(f.stem.split("-")[0].split("=")[1]))
+    epoch = latest_chkpt_file.stem.split("-")[0].split("=")[1]
+
+    if verbose:
+        logging.info(f"Latest stability checkpoint: Epoch {epoch}")
+
+    return latest_chkpt_file
 
 def run_prediction_vs_test_set(
-    tf_tg_model_checkpoints: dict,
+    tf_tg_model_chkpt: Path,
     model_cell_type: str,
     model_training_sample: str,
     test_set_cell_type: str,
     cell_type_cache_dir: Path,
     stability_cache_dir: Path,
     evaluation_sample: str,
+    stability_number: int | None = None,
     dataset_split_type: str = "test",
     subset_size: int | None = None,
     show_progress_bar: bool = True,
@@ -148,10 +166,9 @@ def run_prediction_vs_test_set(
     tf_idx_to_name: dict | None = None,
     tg_idx_to_name: dict | None = None
     ):
-    
-    tf_tg_model_chkpt = tf_tg_model_checkpoints[model_cell_type][model_training_sample]
+
     tf_dna_model_chkpt = config.tf_dna_model_checkpoints[model_cell_type]
-    
+
     if tf_tg_model_chkpt is None:
         logging.warning(f"Skipping evaluation for {model_cell_type} {model_training_sample} → {test_set_cell_type} {evaluation_sample} due to missing TF-TG checkpoint")
         return None
@@ -247,6 +264,7 @@ def run_prediction_vs_test_set(
 
     metrics["Model"] = model_training_sample
     metrics["Test Set"] = evaluation_sample
+    metrics["stability_number"] = stability_number
 
     metric_df = pd.DataFrame([metrics])
     
@@ -267,9 +285,10 @@ def run_prediction_vs_test_set(
     metric_df["batch_size"] = batch_size
 
     col_order = [
-        "Model", 
-        "Test Set", 
-        "auroc", 
+        "Model",
+        "Test Set",
+        "stability_number",
+        "auroc",
         "auprc", 
         "accuracy", 
         "precision", 
@@ -302,7 +321,7 @@ import argparse
 
 def parse_args():
     
-    parser = argparse.ArgumentParser(description="Evaluate model generalizability across different cell types and samples.")
+    parser = argparse.ArgumentParser(description="Evaluate model stability across different cell types and samples.")
     parser.add_argument("--model_cell_type", type=str, default=None, help="Model cell type for evaluation.")
     parser.add_argument("--model_training_sample", type=str, default=None, help="Model training sample for evaluation.")
     parser.add_argument("--test_set_cell_type", type=str, default=None, help="Test set cell type for evaluation.")
@@ -356,15 +375,24 @@ if __name__ == "__main__":
     tg_id_to_idx = metadata["tg_id_to_idx"]
 
     tf_idx_to_name, tg_idx_to_name = create_tf_tg_index_to_name_mappings(metadata)
-        
+
+    # Use the model retrained on subsample `stability_number` of the model's own
+    # training sample. For the cross-trained comparison this is the other sample's
+    # model at the same subsample number.
+    stability_model_dir = CHKPT_DIR / "stability" / model_cell_type / model_training_sample / f"stability_{stability_number}"
+    assert stability_model_dir.exists(), f"Stability checkpoint directory does not exist: {stability_model_dir}"
+
+    tf_tg_model_chkpt = find_latest_stability_checkpoint(stability_model_dir, verbose=True)
+
     comparison_result = run_prediction_vs_test_set(
-        tf_tg_model_checkpoints=tf_tg_model_checkpoints,
+        tf_tg_model_chkpt=tf_tg_model_chkpt,
         model_cell_type=model_cell_type,
         model_training_sample=model_training_sample,
         test_set_cell_type=test_set_cell_type,
         cell_type_cache_dir=cell_type_cache_dir,
         stability_cache_dir=stability_cache_dir,
         evaluation_sample=evaluation_sample,
+        stability_number=stability_number,
         dataset_split_type=dataset_split_type,
         subset_size=subset_size,
         show_progress_bar=True,
