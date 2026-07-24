@@ -126,7 +126,7 @@ pct_true_edges=1.0
 true_false_ratio=10.0
 
 echo "[INFO] Starting training..."
-srun python3 ${PROJECT_DIR}/stability_model_training.py \
+srun python3 ${PROJECT_DIR}/stability_analysis/stability_model_training.py \
     --epochs 50 \
     --species $species \
     --cell_type $cell_type \

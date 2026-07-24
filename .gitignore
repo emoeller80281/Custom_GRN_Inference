@@ -50,6 +50,7 @@ checkpoint.pt
 *.fasta
 *.fa
 *.ckpt
+*.npy
 .code-workspace
 
 # Keep the motif information

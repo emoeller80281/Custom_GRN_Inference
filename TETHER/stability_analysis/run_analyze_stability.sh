@@ -72,7 +72,7 @@ echo "  sample_name=$sample_name"
 echo "  subsample_number=$SUBSAMPLE_NUMBER"
 
 echo "[INFO] Analyzing stability..."
-srun python3 ${PROJECT_DIR}/analyze_stability.py \
+srun python3 ${PROJECT_DIR}/stability_analysis/analyze_stability.py \
     --cell_type "$cell_type" \
     --sample_name "$sample_name" \
     --subsample_num "$SUBSAMPLE_NUMBER" \

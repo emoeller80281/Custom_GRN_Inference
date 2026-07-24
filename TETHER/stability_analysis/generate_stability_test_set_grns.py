@@ -1,0 +1,386 @@
+
+import json
+import sys
+import pandas as pd
+import numpy as np
+import torch
+from pathlib import Path
+from tqdm import tqdm
+import logging
+from torch.utils.data import DataLoader, Subset
+
+logging.basicConfig(level=logging.INFO, format='%(levelname)s - %(message)s')
+
+PROJECT_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/TETHER")
+DATA_DIR = PROJECT_DIR / "cached_data"
+CHKPT_DIR = PROJECT_DIR / "checkpoints"
+RESULT_DIR = PROJECT_DIR / "testing_results" / "model_generalizability"
+
+sys.path.append(str(PROJECT_DIR))
+
+from scripts.train_tf_to_tg_model import TFTGEdgeBagDataset, collate_tftg_edge_bags
+import models.tf_to_tg as tf_to_tg_module
+import stat_utils
+import utils
+import warnings
+import config
+
+warnings.filterwarnings(
+    "ignore",
+    message="You are using `torch.load` with `weights_only=False`.*",
+    category=FutureWarning,
+)
+
+tf_tg_input_cache_dir = DATA_DIR / "tf_tg_training_cache"
+
+all_evaluation_plot_dir = PROJECT_DIR / "plots" / "model_vs_test_set_evaluation_figs"
+all_evaluation_plot_dir.mkdir(parents=True, exist_ok=True)
+
+def load_stability_training_cache_dataset(
+    cell_type_cache_dir: Path,
+    stability_cache_dir: Path,
+    split_type: str = "test",
+    subset_size: int = None,
+    batch_size: int = 512,
+    ) -> DataLoader:
+    
+    assert split_type in ["train", "val", "test"], \
+        "split_type must be one of 'train', 'val', or 'test'"
+        
+    # Load the compact split inputs
+    tftg_inputs_test = torch.load(
+        stability_cache_dir / f"tftg_inputs_{split_type}.pt",
+        weights_only=False,
+    )
+
+    # Load the lookup tensors
+    tf_embeddings_tensor = torch.load(
+        cell_type_cache_dir / "tf_embeddings.pt",
+        weights_only=True,
+    )
+    tf_mask_tensor = torch.load(
+        cell_type_cache_dir / "tf_masks.pt",
+        weights_only=True,
+    )
+    atac_peak_tensor = torch.load(
+        stability_cache_dir / "atac_peak_tensor.pt",
+        weights_only=True,
+    )
+
+    # Load the metadata
+    with open(stability_cache_dir / "metadata.json", "r") as f:
+        metadata = json.load(f)
+
+    # Load the manifest and verify tensor shapes and dtypes match expectations
+    with open(stability_cache_dir / "manifest.json") as f:
+        manifest = json.load(f)
+    
+    assert tuple(manifest["atac_peak_tensor_shape"]) == tuple(atac_peak_tensor.shape)
+    assert manifest["atac_peak_tensor_dtype"] == str(atac_peak_tensor.dtype)
+
+    dataset = TFTGEdgeBagDataset(
+        tftg_inputs_test,
+        tf_embeddings_tensor=tf_embeddings_tensor,
+        tf_mask_tensor=tf_mask_tensor,
+        atac_peak_tensor=atac_peak_tensor
+    )
+    
+    subset_size = min(subset_size, len(dataset)) if subset_size is not None else None
+    
+    if subset_size is not None:
+        dataset = Subset(dataset, list(range(subset_size)))
+
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=8,
+        pin_memory=True,
+        persistent_workers=True,
+        collate_fn=collate_tftg_edge_bags,
+        )
+
+    return loader, metadata, manifest, tf_embeddings_tensor, tf_mask_tensor
+
+tf_tg_model_checkpoints = {
+    "mESC": {
+        "E7.5_rep1": CHKPT_DIR / "mESC" / "E7.5_rep1" / "tf_tg_train_E7.5_rep1_3675131" / "epoch_11_best_model.ckpt",
+        # "E7.5_rep1": utils.find_latest_checkpoint(CHKPT_DIR, "mESC", "E7.5_rep1"),
+        "E7.5_rep2": utils.find_latest_checkpoint(CHKPT_DIR, "mESC", "E7.5_rep2"),
+        "E8.5_rep1": utils.find_latest_checkpoint(CHKPT_DIR, "mESC", "E8.5_rep1", training_number="3691937"),
+        "E8.5_rep2": utils.find_latest_checkpoint(CHKPT_DIR, "mESC", "E8.5_rep2", training_number="3691937"),
+    },
+    "iPSC": {
+        "WT_D13_rep1": utils.find_latest_checkpoint(CHKPT_DIR, "iPSC", "WT_D13_rep1"),
+    },
+    "Macrophage": {
+        "buffer_1": utils.find_latest_checkpoint(CHKPT_DIR, "Macrophage", "buffer_1", training_number="3685893"),
+        "buffer_2": utils.find_latest_checkpoint(CHKPT_DIR, "Macrophage", "buffer_2", training_number="3713132"),
+        "buffer_3": utils.find_latest_checkpoint(CHKPT_DIR, "Macrophage", "buffer_3"),
+        "buffer_4": utils.find_latest_checkpoint(CHKPT_DIR, "Macrophage", "buffer_4"),
+    },
+    "K562": {
+        "sample_1": utils.find_latest_checkpoint(CHKPT_DIR, "K562", "sample_1", training_number="3692409"),
+    },
+    "mouse_liver": {
+        "liver_1": utils.find_latest_checkpoint(CHKPT_DIR, "mouse_liver", "liver_1"),
+        "liver_3": utils.find_latest_checkpoint(CHKPT_DIR, "mouse_liver", "liver_3")
+    },
+    "mouse_hepatocytes": {
+        "hepatocytes_1": utils.find_latest_checkpoint(CHKPT_DIR, "mouse_hepatocytes", "hepatocytes_1"),
+        "hepatocytes_3": utils.find_latest_checkpoint(CHKPT_DIR, "mouse_hepatocytes", "hepatocytes_3"),
+    }
+}
+
+def run_prediction_vs_test_set(
+    tf_tg_model_checkpoints: dict,
+    model_cell_type: str,
+    model_training_sample: str,
+    test_set_cell_type: str,
+    cell_type_cache_dir: Path,
+    stability_cache_dir: Path,
+    evaluation_sample: str,
+    dataset_split_type: str = "test",
+    subset_size: int | None = None,
+    show_progress_bar: bool = True,
+    compile_model: bool = True,
+    batch_size: int = 512,
+    tf_idx_to_name: dict | None = None,
+    tg_idx_to_name: dict | None = None
+    ):
+    
+    tf_tg_model_chkpt = tf_tg_model_checkpoints[model_cell_type][model_training_sample]
+    tf_dna_model_chkpt = config.tf_dna_model_checkpoints[model_cell_type]
+    
+    if tf_tg_model_chkpt is None:
+        logging.warning(f"Skipping evaluation for {model_cell_type} {model_training_sample} → {test_set_cell_type} {evaluation_sample} due to missing TF-TG checkpoint")
+        return None
+
+    # print(f"Loading cached dataset with subset size: {subset_size}")
+    data_loader, metadata, manifest, tf_embeddings_tensor, tf_mask_tensor = load_stability_training_cache_dataset(
+        cell_type_cache_dir=cell_type_cache_dir,
+        stability_cache_dir=stability_cache_dir,
+        split_type=dataset_split_type,
+        subset_size=subset_size,
+        batch_size=batch_size
+        )
+    
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    tf_tg_model = utils.load_tf_tg_regulation_model(
+        tf_dna_model_chkpt, 
+        tf_tg_model_chkpt, 
+        tf_embeddings_tensor, 
+        tf_mask_tensor,
+        compile_model=compile_model,
+        device=device
+        )
+    
+    model = tf_tg_model.model
+    model = model.to(device)
+
+    score_threshold = 0.5
+    pooling_mode = "lse"
+    pooling_temperature = 1.0
+
+    model.eval()
+
+    tf_indices_list = []
+    tg_indices_list = []
+    all_scores = []
+    all_labels = []
+
+    # print(f"Evaluating on {dataset_split_type} set")
+    with torch.inference_mode():
+        for batch in tqdm(data_loader, desc="Evaluating", ncols=100, disable=not show_progress_bar):
+            tf_indices = batch["tf_idx"].detach().cpu().numpy().ravel()
+            tg_indices = batch["tg_idx"].detach().cpu().numpy().ravel()
+            
+            batch = tf_to_tg_module.move_batch_to_device(batch, device)
+
+            labels = batch["label"]
+            cell_mask = batch["cell_mask"]
+
+            edge_logits, _ = model.forward(
+                tf_embedding=batch["tf_embedding"],
+                tf_mask=batch["tf_mask"],
+                peak_sequences=batch["peak_sequences"],
+                peak_accessibility=batch["peak_accessibility"],
+                peak_distance=batch["peak_distance"],
+                tf_expression=batch["tf_expression"],
+                tg_expression=batch["tg_expression"],
+                peak_mask=batch.get("peak_mask", None),
+                cell_mask=cell_mask,
+                pooling_mode=pooling_mode,
+                pooling_temperature=pooling_temperature,
+            )
+
+            scores = torch.sigmoid(edge_logits)
+
+            all_scores.append(scores.detach().cpu().numpy().ravel())
+            all_labels.append(labels.detach().cpu().numpy().ravel())
+            
+            tf_indices_list.append(tf_indices)
+            tg_indices_list.append(tg_indices)
+
+    all_tf_indices_flat = np.concatenate(tf_indices_list)
+    all_tg_indices_flat = np.concatenate(tg_indices_list)
+    all_scores_flat = np.concatenate(all_scores)
+    all_labels_flat = np.concatenate(all_labels)
+
+    tf_names = [tf_idx_to_name[int(idx)].upper() for idx in all_tf_indices_flat]
+    tg_names = [tg_idx_to_name[int(idx)].upper() for idx in all_tg_indices_flat]
+    
+    prediction_df = pd.DataFrame({
+        "Source": tf_names,
+        "Target": tg_names,
+        "Score": all_scores_flat,
+        "Label": all_labels_flat
+    })
+
+    metrics = stat_utils.compute_binary_classification_metrics(
+        labels=all_labels_flat,
+        scores=all_scores_flat,
+        score_threshold=score_threshold,
+        random_state=42,
+    )
+
+    metrics["Model"] = model_training_sample
+    metrics["Test Set"] = evaluation_sample
+
+    metric_df = pd.DataFrame([metrics])
+    
+    # Get info about the dataset size for the test set
+    peaks_per_tg = metadata.get("max_peaks_per_tg", None)
+    cells_per_pair = metadata.get("max_cells_per_pair", None)
+    max_peaks_real = metadata.get("max_peaks_real", None)
+    
+    num_tfs = len(metadata["tf_name_to_idx"])
+    num_tgs = len(metadata["tg_id_to_idx"])
+    
+    metric_df["peaks_per_tg"] = peaks_per_tg
+    metric_df["cells_per_pair"] = cells_per_pair
+    metric_df["max_peaks_real"] = max_peaks_real
+    metric_df["num_tfs"] = num_tfs
+    metric_df["num_tgs"] = num_tgs
+    metric_df["subset_size"] = subset_size
+    metric_df["batch_size"] = batch_size
+
+    col_order = [
+        "Model", 
+        "Test Set", 
+        "auroc", 
+        "auprc", 
+        "accuracy", 
+        "precision", 
+        "early_precision", 
+        "recall", 
+        "f1", 
+        "rand_auroc", 
+        "rand_auprc",
+        "n_edges",
+        "n_pos",
+        "n_neg",
+        "score_threshold",
+        "peaks_per_tg",
+        "cells_per_pair",
+        "max_peaks_real",
+        "num_tfs",
+        "num_tgs",
+        "subset_size",
+        "batch_size"
+        ]
+
+    metric_df = metric_df[col_order]
+            
+    return {
+        "metric_df": metric_df,
+        "prediction_df": prediction_df
+    }
+    
+import argparse
+
+def parse_args():
+    
+    parser = argparse.ArgumentParser(description="Evaluate model generalizability across different cell types and samples.")
+    parser.add_argument("--model_cell_type", type=str, default=None, help="Model cell type for evaluation.")
+    parser.add_argument("--model_training_sample", type=str, default=None, help="Model training sample for evaluation.")
+    parser.add_argument("--test_set_cell_type", type=str, default=None, help="Test set cell type for evaluation.")
+    parser.add_argument("--evaluation_sample", type=str, default=None, help="Evaluation sample for the test set.")
+    parser.add_argument("--stability_number", type=int, default=None, help="Stability number for the evaluation.")
+    parser.add_argument("--subset_size", type=int, default=None, help="Subset size for evaluation. If None, use the full dataset.")
+    parser.add_argument("--batch_size", type=int, default=512, help="Batch size for evaluation.")
+    parser.add_argument("--force_reload", action="store_true", help="Force reload of the dataset even if cached.")
+    return parser.parse_args()
+
+def create_tf_tg_index_to_name_mappings(metadata):
+    tf_idx_to_name = {idx: name for name, idx in metadata["tf_name_to_idx"].items()}
+    tg_idx_to_name = {idx: name for name, idx in metadata["tg_id_to_idx"].items()}
+    return tf_idx_to_name, tg_idx_to_name
+
+if __name__ == "__main__":
+    args = parse_args()
+    subset_size = args.subset_size
+    batch_size = args.batch_size
+
+    model_cell_type = args.model_cell_type
+    model_training_sample = args.model_training_sample
+    test_set_cell_type = args.test_set_cell_type
+    evaluation_sample = args.evaluation_sample
+    stability_number = args.stability_number
+    force_reload = args.force_reload
+
+    # for model_cell_type, model_training_sample, test_set_cell_type, evaluation_sample in tqdm(evaluations, desc="Evaluating model vs test set combinations", ncols=100):
+    logging.info(f"Evaluating {model_cell_type} {model_training_sample} Model → {test_set_cell_type} {evaluation_sample} Test Set")
+
+    dataset_split_type = "test"
+    
+    cell_type_cache_dir = DATA_DIR / f"{test_set_cell_type}_cache"
+    stability_cache_dir = cell_type_cache_dir / f"{evaluation_sample}_stability_cache" / f"stability_{stability_number}"
+    
+    prediction_save_file = RESULT_DIR / "stability_grns" / f"{model_training_sample}_model_vs_{evaluation_sample}_test_grn_{subset_size}_stability_{stability_number}.csv"
+    metric_save_file = RESULT_DIR / "stability_comparison_metric_files" / f"{model_training_sample}_model_vs_{evaluation_sample}_test_metrics_{subset_size}_stability_{stability_number}.csv"
+
+    prediction_save_file.parent.mkdir(parents=True, exist_ok=True)
+    metric_save_file.parent.mkdir(parents=True, exist_ok=True)
+
+    if prediction_save_file.exists() and metric_save_file.exists() and not force_reload:
+        logging.info(f"Prediction and metric files already exist for {model_cell_type} {model_training_sample} → {test_set_cell_type} {evaluation_sample}. Skipping evaluation.")
+        sys.exit(0)
+        
+    # Load the TF and TG name to index mappings from the training cache metadata
+    with open(stability_cache_dir / "metadata.json", "r") as f:
+        metadata = json.load(f)
+        
+    tf_name_to_idx = metadata["tf_name_to_idx"]
+    tg_id_to_idx = metadata["tg_id_to_idx"]
+
+    tf_idx_to_name, tg_idx_to_name = create_tf_tg_index_to_name_mappings(metadata)
+        
+    comparison_result = run_prediction_vs_test_set(
+        tf_tg_model_checkpoints=tf_tg_model_checkpoints,
+        model_cell_type=model_cell_type,
+        model_training_sample=model_training_sample,
+        test_set_cell_type=test_set_cell_type,
+        cell_type_cache_dir=cell_type_cache_dir,
+        stability_cache_dir=stability_cache_dir,
+        evaluation_sample=evaluation_sample,
+        dataset_split_type=dataset_split_type,
+        subset_size=subset_size,
+        show_progress_bar=True,
+        compile_model=False,
+        batch_size=batch_size,
+        tf_idx_to_name=tf_idx_to_name,
+        tg_idx_to_name=tg_idx_to_name
+    )
+        
+    metric_df = comparison_result["metric_df"]
+    prediction_df = comparison_result["prediction_df"]
+    
+    prediction_df.to_csv(prediction_save_file, index=False)
+
+    metric_save_file.parent.mkdir(parents=True, exist_ok=True)
+    
+    metric_df.to_csv(metric_save_file, index=False)
+
+    logging.info("Done!")
