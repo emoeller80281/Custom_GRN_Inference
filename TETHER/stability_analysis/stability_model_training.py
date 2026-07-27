@@ -40,6 +40,10 @@ warnings.filterwarnings(
 
 tf_tg_input_cache_dir = DATA_DIR / "tf_tg_training_cache"
 
+# Base for the per-subsample cell-draw seed (actual seed is base + subsample_number).
+# Changing this re-draws every stability subsample, so treat it as fixed.
+CELL_SUBSAMPLE_SEED_BASE = 1000
+
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 torch.set_float32_matmul_precision("high")
@@ -167,21 +171,31 @@ def build_paths(args):
 
 
 def generate_cell_subsample(rna, atac, percent_subsampling=0.7, num_common_cells=1000, seed=42):
-    np.random.seed(seed)
-    
-    # Get the number of common cells between RNA and ATAC pseudobulk matrices
-    common_cells = list(set(rna.columns) & set(atac.columns))
+    """Draw `percent_subsampling` of the shared cell pool for one stability subsample.
+
+    `seed` must vary per subsample: every subsample draws from the same fixed pool,
+    so the seed is the only thing that makes the draws differ. Two draws at this
+    rate should overlap at percent^2 / (2*percent - percent^2) (0.538 at 0.7); an
+    overlap far below that means the pool itself is moving between subsamples.
+    """
+    rng = np.random.default_rng(seed)
+
+    # Get the number of common cells between RNA and ATAC pseudobulk matrices.
+    # sorted(), not list(set(...)): set iteration order over strings depends on
+    # PYTHONHASHSEED, which differs in every process, so an unsorted pool makes the
+    # num_common_cells slice below a different arbitrary subset in each SLURM task.
+    common_cells = sorted(set(rna.columns) & set(atac.columns))
     if len(common_cells) == 0:
         raise ValueError("No common pseudobulk cell columns between RNA and ATAC matrices.")
-    
+
     # Subset to the first num_common_cells if specified
     if num_common_cells is not None and len(common_cells) > num_common_cells:
         common_cells = common_cells[:num_common_cells]
-        
+
     # Select a random subset of the common cells based on the specified percentage
     num_cells_to_select = int(len(common_cells) * percent_subsampling)
-    selected_cells = np.random.choice(common_cells, size=num_cells_to_select, replace=False)
-    
+    selected_cells = rng.choice(common_cells, size=num_cells_to_select, replace=False)
+
     return selected_cells
 
 def save_multiomic_count_data_to_csv(mdata, rna_csv_file, atac_csv_file, selected_cells):
@@ -230,7 +244,8 @@ def build_and_save_training_cache(args, paths):
             # Generate a subsample of the pseudobulk matrices for testing stability (70% subsampling of the first 1,000 common cells)
             logging.info("Generating subsample of pseudobulk matrices for stability testing")
             selected_cells = generate_cell_subsample(
-                rna_pseudobulk, atac_pseudobulk, percent_subsampling=0.7, num_common_cells=1000, seed=42
+                rna_pseudobulk, atac_pseudobulk, percent_subsampling=0.7, num_common_cells=1000,
+                seed=CELL_SUBSAMPLE_SEED_BASE + subsample_number,
                 )
             
             # Copy the subsampled pseudobulk matrices to multiGRNtools to run the other GRN inference tools on the same dataset
@@ -330,6 +345,15 @@ def build_and_save_training_cache(args, paths):
             gt_test_df, args.pct_true_edges, args.true_false_ratio, seed=125,
             tf_name_to_idx=tf_name_to_idx, tg_id_to_idx=tg_id_to_idx,
         )
+
+        # Canonicalise row order before anything consumes these positionally. Two things
+        # do: _sample_df below draws by position, and build_tftg_inputs walks the rows
+        # against a single RNG stream to pick each edge's cells. Must be unconditional --
+        # build_tftg_inputs runs whether or not --sample_pairs is set.
+        edge_sort_cols = ["tf_name", "tg_id"]
+        tf_tg_labeled_train_df = tf_tg_labeled_train_df.sort_values(edge_sort_cols).reset_index(drop=True)
+        tf_tg_labeled_val_df = tf_tg_labeled_val_df.sort_values(edge_sort_cols).reset_index(drop=True)
+        tf_tg_labeled_test_df = tf_tg_labeled_test_df.sort_values(edge_sort_cols).reset_index(drop=True)
 
         dataset_peaks = [peak for peak in atac_pseudobulk.index.to_list() if peak.split(":", 1)[0] in valid_chroms]
         atac_peak_map = {peak: idx for idx, peak in enumerate(dataset_peaks)}

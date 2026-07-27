@@ -1,5 +1,6 @@
 
 import json
+import re
 import sys
 import pandas as pd
 import numpy as np
@@ -214,57 +215,79 @@ def run_prediction_vs_test_set(
     
 import argparse
 
-def find_latest_stability_checkpoint(
-    checkpoint_dir: Path, 
+_CHECKPOINT_PATTERN = re.compile(
+    r"^epoch=(?P<epoch>\d+)-val_auroc=(?P<val_auroc>[\d.]+)-val_loss=(?P<val_loss>[\d.]+)$"
+)
+
+
+def find_best_stability_checkpoint(
+    checkpoint_dir: Path,
     epoch_num: int|None =None,
     verbose: bool = True
     ) -> Path:
     """
-    Find the latest checkpoint file for a given cell type and sample name.
-    
-    Optionally takes a subsample_number to select a specific subsample.
-    Optionally takes an epoch_num to select a specific epoch.
-    
+    Find the best checkpoint file for a given cell type and sample name.
+
+    Selection is on the validation AUROC encoded in the filename, not on the epoch
+    number. Training keeps only the top-2 checkpoints by val/auroc (plus last.ckpt),
+    so the highest-epoch surviving file is not reliably the best model -- across the
+    checkpoint directories in this repo the two criteria disagree about half the time.
+
+    Kept identical to the copy in generate_stability_test_set_grns.py so the two
+    scripts cannot select different checkpoints for the same run.
+
     Parameters
     ----------
     checkpoint_dir : Path
         The base directory where checkpoints are stored.
     epoch_num : int, optional
-        The specific epoch number to select a checkpoint from.
-        
+        Pin selection to this specific epoch instead of taking the best val AUROC.
+
     Returns
     -------
     Path or None
-        The path to the latest checkpoint file, or None if no checkpoint is found.
-    
+        The path to the selected checkpoint file, or None if no checkpoint is found.
+
     """
-        
+
     if not checkpoint_dir.exists():
         logging.warning(f"No checkpoints found in {checkpoint_dir}")
         return None
-    
-    # Find all checkpoint files in the latest checkpoint directory
+
+    # Find all checkpoint files in the checkpoint directory
     chkpt_files = list(checkpoint_dir.glob("epoch=*-val_auroc=*-val_loss=*.ckpt"))
     if not chkpt_files:
         logging.warning(f"No checkpoint files found in {checkpoint_dir}")
         return None
-    
-    # If epoch_num is specified, find the checkpoint for that epoch. Otherwise, find the latest checkpoint.
-    chkpt_nums = [int(f.stem.split("-")[0].split("=")[1]) for f in chkpt_files]
+
+    parsed_chkpts = []
+    for chkpt_file in chkpt_files:
+        match = _CHECKPOINT_PATTERN.match(chkpt_file.stem)
+        if match is None:
+            logging.warning(f"Skipping checkpoint with unrecognized filename: {chkpt_file.name}")
+            continue
+        parsed_chkpts.append((int(match.group("epoch")), float(match.group("val_auroc")), chkpt_file))
+
+    if not parsed_chkpts:
+        logging.warning(f"No parseable checkpoint files found in {checkpoint_dir}")
+        return None
+
+    # If epoch_num is specified, pin to that epoch. Otherwise take the best val AUROC.
     if epoch_num is not None:
-        if epoch_num in chkpt_nums:
-            latest_chkpt_file = next(f for f in chkpt_files if int(f.stem.split("-")[0].split("=")[1]) == epoch_num)
-        else:
-            logging.warning(f"Checkpoint for epoch {epoch_num} not found in {checkpoint_dir}. Available epochs: {chkpt_nums}")
+        matching = [chkpt for chkpt in parsed_chkpts if chkpt[0] == epoch_num]
+        if not matching:
+            available_epochs = sorted(chkpt[0] for chkpt in parsed_chkpts)
+            logging.warning(f"Checkpoint for epoch {epoch_num} not found in {checkpoint_dir}. Available epochs: {available_epochs}")
             return None
+        epoch, val_auroc, best_chkpt_file = matching[0]
     else:
-        latest_chkpt_file = max(chkpt_files, key=lambda f: int(f.stem.split("-")[0].split("=")[1]))
-    epoch = latest_chkpt_file.stem.split("-")[0].split("=")[1]
-    
+        # Tie-break on the later epoch so the choice is deterministic
+        epoch, val_auroc, best_chkpt_file = max(parsed_chkpts, key=lambda chkpt: (chkpt[1], chkpt[0]))
+
     if verbose:
-        logging.info(f"Latest checkpoint: Epoch {epoch}")
-    
-    return latest_chkpt_file
+        logging.info(f"Selected checkpoint: epoch {epoch}, val AUROC {val_auroc:.4f}")
+
+    return best_chkpt_file
 
 def parse_args():
     
@@ -324,8 +347,8 @@ if __name__ == "__main__":
 
     assert stability_sample_dir.exists(), f"Stability checkpoint directory does not exist: {stability_sample_dir}"
 
-    latest_checkpoint = find_latest_stability_checkpoint(
-        stability_sample_dir, 
+    latest_checkpoint = find_best_stability_checkpoint(
+        stability_sample_dir,
         verbose=True
         )
 

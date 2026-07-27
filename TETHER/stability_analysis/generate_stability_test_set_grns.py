@@ -1,5 +1,7 @@
 
+import hashlib
 import json
+import re
 import sys
 import pandas as pd
 import numpy as np
@@ -33,6 +35,9 @@ warnings.filterwarnings(
 
 tf_tg_input_cache_dir = DATA_DIR / "tf_tg_training_cache"
 
+# Seed for the --subset_size draw. Fixed so every subsample evaluates the same edges.
+SUBSET_SEED = 42
+
 all_evaluation_plot_dir = PROJECT_DIR / "plots" / "model_vs_test_set_evaluation_figs"
 all_evaluation_plot_dir.mkdir(parents=True, exist_ok=True)
 
@@ -42,6 +47,7 @@ def load_stability_training_cache_dataset(
     split_type: str = "test",
     subset_size: int = None,
     batch_size: int = 512,
+    subset_seed: int = SUBSET_SEED,
     ) -> DataLoader:
     
     assert split_type in ["train", "val", "test"], \
@@ -85,10 +91,17 @@ def load_stability_training_cache_dataset(
         atac_peak_tensor=atac_peak_tensor
     )
     
-    subset_size = min(subset_size, len(dataset)) if subset_size is not None else None
-    
     if subset_size is not None:
-        dataset = Subset(dataset, list(range(subset_size)))
+        subset_size = min(subset_size, len(dataset))
+        # Draw the subset at random rather than taking the first N. The cached edges
+        # are ordered by (tf_name, tg_id), so range(subset_size) would keep only the
+        # alphabetically-first TFs. The seed is fixed and the cache order is canonical
+        # across subsamples, so every subsample still evaluates the same edges.
+        subset_rng = np.random.default_rng(subset_seed)
+        subset_indices = sorted(
+            subset_rng.choice(len(dataset), size=subset_size, replace=False).tolist()
+        )
+        dataset = Subset(dataset, subset_indices)
 
     loader = DataLoader(
         dataset,
@@ -102,13 +115,23 @@ def load_stability_training_cache_dataset(
 
     return loader, metadata, manifest, tf_embeddings_tensor, tf_mask_tensor
 
-def find_latest_stability_checkpoint(
+_CHECKPOINT_PATTERN = re.compile(
+    r"^epoch=(?P<epoch>\d+)-val_auroc=(?P<val_auroc>[\d.]+)-val_loss=(?P<val_loss>[\d.]+)$"
+)
+
+
+def find_best_stability_checkpoint(
     checkpoint_dir: Path,
     epoch_num: int | None = None,
     verbose: bool = True,
     ) -> Path:
     """
-    Find the latest retrained-subsample checkpoint for a stability run.
+    Find the best retrained-subsample checkpoint for a stability run.
+
+    Selection is on the validation AUROC encoded in the filename, not on the epoch
+    number. Training keeps only the top-2 checkpoints by val/auroc (plus last.ckpt),
+    so the highest-epoch surviving file is not reliably the best model -- across the
+    checkpoint directories in this repo the two criteria disagree about half the time.
 
     Parameters
     ----------
@@ -116,8 +139,7 @@ def find_latest_stability_checkpoint(
         The stability subsample directory, e.g.
         checkpoints/stability/{cell_type}/{sample}/stability_{N}.
     epoch_num : int, optional
-        The specific epoch number to select a checkpoint from. If None, the
-        highest-epoch checkpoint is returned.
+        Pin selection to this specific epoch instead of taking the best val AUROC.
 
     Returns
     -------
@@ -133,21 +155,33 @@ def find_latest_stability_checkpoint(
         logging.warning(f"No checkpoint files found in {checkpoint_dir}")
         return None
 
-    chkpt_nums = [int(f.stem.split("-")[0].split("=")[1]) for f in chkpt_files]
+    parsed_chkpts = []
+    for chkpt_file in chkpt_files:
+        match = _CHECKPOINT_PATTERN.match(chkpt_file.stem)
+        if match is None:
+            logging.warning(f"Skipping checkpoint with unrecognized filename: {chkpt_file.name}")
+            continue
+        parsed_chkpts.append((int(match.group("epoch")), float(match.group("val_auroc")), chkpt_file))
+
+    if not parsed_chkpts:
+        logging.warning(f"No parseable checkpoint files found in {checkpoint_dir}")
+        return None
+
     if epoch_num is not None:
-        if epoch_num in chkpt_nums:
-            latest_chkpt_file = next(f for f in chkpt_files if int(f.stem.split("-")[0].split("=")[1]) == epoch_num)
-        else:
-            logging.warning(f"Checkpoint for epoch {epoch_num} not found in {checkpoint_dir}. Available epochs: {chkpt_nums}")
+        matching = [chkpt for chkpt in parsed_chkpts if chkpt[0] == epoch_num]
+        if not matching:
+            available_epochs = sorted(chkpt[0] for chkpt in parsed_chkpts)
+            logging.warning(f"Checkpoint for epoch {epoch_num} not found in {checkpoint_dir}. Available epochs: {available_epochs}")
             return None
+        epoch, val_auroc, best_chkpt_file = matching[0]
     else:
-        latest_chkpt_file = max(chkpt_files, key=lambda f: int(f.stem.split("-")[0].split("=")[1]))
-    epoch = latest_chkpt_file.stem.split("-")[0].split("=")[1]
+        # Tie-break on the later epoch so the choice is deterministic
+        epoch, val_auroc, best_chkpt_file = max(parsed_chkpts, key=lambda chkpt: (chkpt[1], chkpt[0]))
 
     if verbose:
-        logging.info(f"Latest stability checkpoint: Epoch {epoch}")
+        logging.info(f"Selected stability checkpoint: epoch {epoch}, val AUROC {val_auroc:.4f}")
 
-    return latest_chkpt_file
+    return best_chkpt_file
 
 def run_prediction_vs_test_set(
     tf_tg_model_chkpt: Path,
@@ -284,6 +318,14 @@ def run_prediction_vs_test_set(
     metric_df["subset_size"] = subset_size
     metric_df["batch_size"] = batch_size
 
+    # Fingerprint the scored edge set. Cross-subsample rank metrics (e.g. top-k Jaccard)
+    # are only comparable when every subsample scored the same edges, so this hash must
+    # match across the subsamples of a sample -- if it does not, those metrics are
+    # measuring which edges were scored rather than how they were ranked.
+    edge_keys = sorted(zip(prediction_df["Source"], prediction_df["Target"]))
+    metric_df["n_test_edges"] = len(edge_keys)
+    metric_df["test_edge_set_hash"] = hashlib.sha1(repr(edge_keys).encode()).hexdigest()[:12]
+
     col_order = [
         "Model",
         "Test Set",
@@ -307,7 +349,9 @@ def run_prediction_vs_test_set(
         "num_tfs",
         "num_tgs",
         "subset_size",
-        "batch_size"
+        "batch_size",
+        "n_test_edges",
+        "test_edge_set_hash"
         ]
 
     metric_df = metric_df[col_order]
@@ -382,7 +426,7 @@ if __name__ == "__main__":
     stability_model_dir = CHKPT_DIR / "stability" / model_cell_type / model_training_sample / f"stability_{stability_number}"
     assert stability_model_dir.exists(), f"Stability checkpoint directory does not exist: {stability_model_dir}"
 
-    tf_tg_model_chkpt = find_latest_stability_checkpoint(stability_model_dir, verbose=True)
+    tf_tg_model_chkpt = find_best_stability_checkpoint(stability_model_dir, verbose=True)
 
     comparison_result = run_prediction_vs_test_set(
         tf_tg_model_chkpt=tf_tg_model_chkpt,

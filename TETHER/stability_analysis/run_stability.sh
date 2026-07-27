@@ -2,7 +2,7 @@
 #SBATCH --job-name=stability
 #SBATCH --output=LOGS/stability/%x_%A_%a.log
 #SBATCH --error=LOGS/stability/%x_%A_%a.err
-#SBATCH --time=24:00:00
+#SBATCH --time=48:00:00
 #SBATCH -p dense
 #SBATCH -N 1
 #SBATCH --gres=gpu:v100:1
@@ -10,7 +10,7 @@
 #SBATCH -c 8
 #SBATCH --mem=64G
 #SBATCH --signal=SIGUSR1@90
-#SBATCH --array=0-9%8
+#SBATCH --array=0-69%8
 
 set -eo pipefail
 
@@ -19,6 +19,12 @@ cd $PROJECT_DIR
 
 echo "Activating conda environment and starting training..."
 source activate my_env
+
+# --- Reproducibility ---
+# Pin the hash seed so set/dict iteration order is identical in every array task.
+# Safe only because generate_cell_subsample seeds off subsample_number: with the old
+# seed=42-for-every-subsample code this would have made all 10 subsamples identical.
+export PYTHONHASHSEED=0
 
 # --- Memory + math ---
 export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:32

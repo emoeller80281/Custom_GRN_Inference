@@ -147,10 +147,14 @@ def create_labeled_tf_tg_dataset(
     tg_id_to_idx: dict[str, int],
     drop_missing: bool = True,
 ) -> pd.DataFrame:
+    # sorted(), not bare set iteration: set order over string tuples depends on
+    # PYTHONHASHSEED, so without this the row order -- and therefore anything
+    # downstream that indexes by position, e.g. df.sample(n=...) -- differs in every
+    # process even with a fixed random_state.
     rows = []
-    for tf, tg in true_interactions:
+    for tf, tg in sorted(true_interactions):
         rows.append((tf, tg, 1))
-    for tf, tg in false_interactions:
+    for tf, tg in sorted(false_interactions):
         rows.append((tf, tg, 0))
 
     df = pd.DataFrame(rows, columns=["tf_name", "tg_id", "label"])

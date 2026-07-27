@@ -1,6 +1,8 @@
+import itertools
 import sys
 from pathlib import Path
 import numpy as np
+import pandas as pd
 from sklearn.metrics import (
     f1_score,
     roc_auc_score,
@@ -16,6 +18,55 @@ PROJECT_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERE
 sys.path.append(str(PROJECT_DIR))
 
 import models.tf_to_tg as tf_to_tg_module
+
+
+def grn_edge_set(df, source_col: str = "Source", target_col: str = "Target"):
+    """Unique upper-cased (source, target) edges in a GRN, ignoring scores."""
+    return set(zip(df[source_col].str.upper(), df[target_col].str.upper()))
+
+
+def calculate_universe_jaccard(df_x, df_y):
+    """Jaccard of two GRNs' full edge sets, with no score cut applied.
+
+    This is the ceiling diagnostic for any top-k Jaccard computed on the same pair.
+    A value of 1.0 means both runs scored exactly the same TF-TG pairs, so a top-k
+    Jaccard between them reflects ranking disagreement alone. Anything below 1.0
+    means the two runs scored partly different edges, and edges present in only one
+    run can never intersect -- so part of the top-k non-overlap is missing edges
+    rather than unstable rankings.
+    """
+    edges_x, edges_y = grn_edge_set(df_x), grn_edge_set(df_y)
+    union = edges_x | edges_y
+
+    return len(edges_x & edges_y) / len(union) if union else np.nan
+
+
+def summarize_universe_overlap(score_dfs_by_subsample, method_name, sample_name=None):
+    """Collapse one group's per-subsample GRNs into a single edge-universe summary row.
+
+    `score_dfs_by_subsample` maps subsample_num -> labeled score df, i.e. one value
+    of the dicts built by the stability GRN loaders.
+    """
+    edge_sets = {num: grn_edge_set(df) for num, df in score_dfs_by_subsample.items()}
+
+    if not edge_sets:
+        return None
+
+    pairwise = [
+        calculate_universe_jaccard(score_dfs_by_subsample[num_x], score_dfs_by_subsample[num_y])
+        for num_x, num_y in itertools.combinations(sorted(edge_sets), 2)
+    ]
+
+    return {
+        "method_name": method_name,
+        "sample_name": sample_name,
+        "n_subsamples": len(edge_sets),
+        "mean_universe_jaccard": float(np.mean(pairwise)) if pairwise else np.nan,
+        "min_universe_jaccard": float(np.min(pairwise)) if pairwise else np.nan,
+        "min_edges": min(len(edges) for edges in edge_sets.values()),
+        "max_edges": max(len(edges) for edges in edge_sets.values()),
+        "core_edges_all_subsamples": len(set.intersection(*edge_sets.values())),
+    }
 
 
 def compute_binary_classification_metrics(
