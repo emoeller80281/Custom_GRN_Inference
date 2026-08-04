@@ -449,6 +449,8 @@ if __name__ == "__main__":
     metric_df = comparison_result["metric_df"]
     prediction_df = comparison_result["prediction_df"]
     
+    prediction_save_file.parent.mkdir(parents=True, exist_ok=True)
+    
     prediction_df.to_csv(prediction_save_file, index=False)
 
     metric_save_file.parent.mkdir(parents=True, exist_ok=True)
