@@ -87,5 +87,4 @@ srun python3 ${PROJECT_DIR}/stability_analysis/generate_stability_test_set_grns.
     --test_set_cell_type "$test_set_cell_type" \
     --evaluation_sample "$evaluation_sample" \
     --stability_number "$SUBSAMPLE_NUMBER" \
-    --batch_size 256 \
-    --force_reload
+    --batch_size 256

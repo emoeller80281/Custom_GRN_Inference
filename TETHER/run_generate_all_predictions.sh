@@ -1,0 +1,132 @@
+#!/bin/bash -l
+#SBATCH --job-name=generate_all_predictions
+#SBATCH --output=LOGS/full_grn/generate_all_predictions_%A/%x_%A_%a.log
+#SBATCH --error=LOGS/full_grn/generate_all_predictions_%A/%x_%A_%a.err
+#SBATCH --time=72:00:00
+#SBATCH -p dense
+#SBATCH -N 1
+#SBATCH --gres=gpu:v100:1
+#SBATCH --ntasks-per-node=1
+#SBATCH -c 8
+#SBATCH --mem=128G
+#SBATCH --array=0-6%7
+
+set -eo pipefail
+
+PROJECT_DIR="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/TETHER"
+cd $PROJECT_DIR
+
+echo "Activating conda environment and starting training..."
+source activate my_env
+
+EXPERIMENT_LIST=(
+    "mm10|mESC|E7.5_rep1|mouse_hepatocytes|hepatocytes_1"
+    "mm10|mESC|E8.5_rep1|mouse_hepatocytes|hepatocytes_1"
+    "hg38|Macrophage|buffer_1|K562|sample_1"
+    "hg38|Macrophage|buffer_2|K562|sample_1"
+    "hg38|K562|sample_1|Macrophage|buffer_1"
+    "mm10|mouse_hepatocytes|hepatocytes_1|mESC|E7.5_rep1"
+    "mm10|mouse_hepatocytes|hepatocytes_3|mESC|E7.5_rep1"
+)
+
+# --- Memory + math ---
+export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:32
+export TORCH_ALLOW_TF32=1
+export NVIDIA_TF32_OVERRIDE=1
+
+# --- Threading ---
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+export BLIS_NUM_THREADS=1
+export KMP_AFFINITY=granularity=fine,compact,1,0
+
+# --- NCCL / networking overrides ---
+# Dynamically find the interface with 10.90.29.* network
+export IFACE=$(ip -o -4 addr show | grep "10.90.29." | awk '{print $2}')
+
+if [ -z "$IFACE" ]; then
+    echo "[ERROR] Could not find interface with 10.90.29.* network on $(hostname)"
+    ip -o -4 addr show  # Show all interfaces for debugging
+    exit 1
+fi
+
+echo "[INFO] Using IFACE=$IFACE on host $(hostname)"
+ip -o -4 addr show "$IFACE"
+
+export NCCL_SOCKET_IFNAME="$IFACE"
+export GLOO_SOCKET_IFNAME="$IFACE"
+
+export NCCL_IB_DISABLE=0
+
+export TORCH_DISTRIBUTED_DEBUG=DETAIL
+
+##### Number of total processes
+echo "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX "
+echo "Nodelist        = " $SLURM_JOB_NODELIST
+echo "Number of nodes = " $SLURM_JOB_NUM_NODES
+echo "Ntasks per node = " $SLURM_NTASKS_PER_NODE
+echo "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX "
+echo ""
+
+# ---------- torchrun multi-node launch ----------
+# Pick the first node as rendezvous/master
+MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
+MASTER_PORT=29500
+export MASTER_ADDR MASTER_PORT
+
+echo "[INFO] MASTER_ADDR=${MASTER_ADDR}, MASTER_PORT=${MASTER_PORT}"
+
+# ---------- Optional network diagnostics ----------
+DEBUG_NET=${DEBUG_NET:-1}   # set to 0 to skip tests once things work
+
+NODES=($(scontrol show hostnames "$SLURM_JOB_NODELIST"))
+MASTER_NODE=${NODES[0]}
+
+echo "[NET] Nodes in this job: ${NODES[*]}"
+echo "[NET] MASTER_NODE=${MASTER_NODE}, IFACE=${IFACE:-<unset>}"
+
+NPROC_PER_NODE=${SLURM_GPUS_ON_NODE:-$(nvidia-smi -L | wc -l)}
+echo "[INFO] Using nproc_per_node=$NPROC_PER_NODE based on GPUs per node"
+
+export NCCL_DEBUG=INFO
+export PYTHONFAULTHANDLER=1
+
+# ==========================================
+#        EXPERIMENT SELECTION
+# ==========================================
+# Get the current experiment based on SLURM_ARRAY_TASK_ID
+TASK_ID=${SLURM_ARRAY_TASK_ID:-0}
+
+if [ ${TASK_ID} -ge ${#EXPERIMENT_LIST[@]} ]; then
+    echo "ERROR: SLURM_ARRAY_TASK_ID (${TASK_ID}) exceeds number of experiments (${#EXPERIMENT_LIST[@]})"
+    exit 1
+fi
+
+EXPERIMENT_CONFIG="${EXPERIMENT_LIST[$TASK_ID]}"
+
+# Parse experiment configuration
+IFS='|' read -r species cell_type sample_name cross_model_cell_type cross_model_sample_name <<< "$EXPERIMENT_CONFIG"
+
+echo "[INFO] Running AUPRC vs other methods for:"
+echo "  species=$species"
+echo "  cell_type=$cell_type"
+echo "  sample_name=$sample_name"
+echo "  cross_model_cell_type=$cross_model_cell_type"
+echo "  cross_model_sample_name=$cross_model_sample_name"
+
+echo "[INFO] Starting training..."
+torchrun \
+  --standalone \
+  --nnodes=1 \
+  --nproc_per_node=1 \
+  ${PROJECT_DIR}/generate_all_predictions.py \
+    --species "$species" \
+    --cell_type "$cell_type" \
+    --sample_name "$sample_name" \
+    --cross_model_cell_type "$cross_model_cell_type" \
+    --cross_model_sample_name "$cross_model_sample_name" \
+    --max_peaks_per_tg 8 \
+    --max_cells_per_pair 25 \
+    --batch_size 512
