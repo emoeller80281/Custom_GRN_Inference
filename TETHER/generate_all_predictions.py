@@ -1,4 +1,8 @@
 import sys
+import time
+import resource
+import threading
+import psutil
 import pandas as pd
 import numpy as np
 import torch
@@ -71,6 +75,173 @@ TF_TG_MODEL_CHECKPOINTS = {
     }
 }
 
+def _process_tree():
+    """This process plus any live children (the DataLoader workers)."""
+    proc = psutil.Process()
+    try:
+        return [proc] + proc.children(recursive=True)
+    except psutil.Error:
+        return [proc]
+
+
+def _tree_cpu_snapshot():
+    """Per-PID cumulative (user, system) CPU seconds across the process tree."""
+    snapshot = {}
+    for proc in _process_tree():
+        try:
+            times = proc.cpu_times()
+            snapshot[proc.pid] = (times.user, times.system)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    return snapshot
+
+
+class _TreeSampler(threading.Thread):
+    """Poll RSS and CPU across the process tree for the duration of a phase.
+
+    Sampling rather than reading endpoints, for two reasons:
+      * ru_maxrss is a monotonic high-water mark for this process alone, so a per-phase
+        peak cannot be obtained by differencing it, and it cannot see child processes.
+      * A child that exits before the phase ends disappears from the tree, taking its
+        CPU time with it. Keeping the last reading seen per PID retains it.
+    """
+
+    def __init__(self, interval=0.2):
+        super().__init__(daemon=True)
+        self.interval = interval
+        self.peak_rss_bytes = 0
+        # pid -> most recent (user, system) cumulative CPU seconds observed
+        self.cpu_last_seen = {}
+        self._stop_event = threading.Event()
+
+    def poll(self):
+        total_rss = 0
+        for proc in _process_tree():
+            try:
+                total_rss += proc.memory_info().rss
+                times = proc.cpu_times()
+                self.cpu_last_seen[proc.pid] = (times.user, times.system)
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+        self.peak_rss_bytes = max(self.peak_rss_bytes, total_rss)
+
+    def run(self):
+        while not self._stop_event.is_set():
+            self.poll()
+            self._stop_event.wait(self.interval)
+
+    def stop(self):
+        self._stop_event.set()
+        self.join(timeout=5)
+        # Final reading so work since the last poll is not lost
+        self.poll()
+
+    def cpu_since(self, baseline):
+        """Total tree CPU consumed relative to a per-PID baseline snapshot."""
+        user = system = 0.0
+        for pid, (last_user, last_system) in self.cpu_last_seen.items():
+            base_user, base_system = baseline.get(pid, (0.0, 0.0))
+            user += max(0.0, last_user - base_user)
+            system += max(0.0, last_system - base_system)
+        return user, system
+
+
+class ResourceProbe:
+    """Capture `/usr/bin/time -v` style resource usage for one phase of work.
+
+    /usr/bin/time is not installed on this cluster, so the equivalent counters are
+    read in-process from getrusage(RUSAGE_SELF). Two things getrusage cannot give us
+    are filled in separately:
+
+      * DataLoader workers are children, and RUSAGE_CHILDREN only counts children that
+        have been reaped -- with persistent_workers=True they stay alive, so their CPU
+        time is invisible to rusage. psutil reads the whole tree instead.
+      * ru_maxrss only ever rises, so a per-phase peak needs sampling, not differencing.
+        The cumulative high-water mark is still reported, clearly labelled.
+    """
+
+    def __init__(self, label, device, sample_interval=0.2):
+        self.label = label
+        self.device = device
+        self.sample_interval = sample_interval
+        self.stats = {}
+
+    def __enter__(self):
+        if self.device.type == "cuda":
+            torch.cuda.synchronize()
+            torch.cuda.reset_peak_memory_stats()
+        self._rusage_start = resource.getrusage(resource.RUSAGE_SELF)
+        self._tree_cpu_baseline = _tree_cpu_snapshot()
+        self._sampler = _TreeSampler(self.sample_interval)
+        self._sampler.start()
+        self._wall_start = time.perf_counter()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        # CUDA work is queued asynchronously; without this we would time the queue,
+        # not the compute.
+        if self.device.type == "cuda":
+            torch.cuda.synchronize()
+        wall_seconds = time.perf_counter() - self._wall_start
+        rusage_end = resource.getrusage(resource.RUSAGE_SELF)
+        self._sampler.stop()
+
+        user_seconds = rusage_end.ru_utime - self._rusage_start.ru_utime
+        system_seconds = rusage_end.ru_stime - self._rusage_start.ru_stime
+        tree_user, tree_system = self._sampler.cpu_since(self._tree_cpu_baseline)
+
+        self.stats = {
+            "phase": self.label,
+            "wall_seconds": round(wall_seconds, 3),
+            "user_seconds": round(user_seconds, 3),
+            "system_seconds": round(system_seconds, 3),
+            "cpu_percent": round(100.0 * (user_seconds + system_seconds) / wall_seconds, 1) if wall_seconds > 0 else 0.0,
+            "tree_user_seconds": round(tree_user, 3),
+            "tree_system_seconds": round(tree_system, 3),
+            "tree_cpu_percent": round(100.0 * (tree_user + tree_system) / wall_seconds, 1) if wall_seconds > 0 else 0.0,
+            # True peak for this phase, summed over main process + DataLoader workers
+            "peak_rss_tree_kb": self._sampler.peak_rss_bytes // 1024,
+            # Monotonic high-water mark for this process only, as /usr/bin/time reports
+            "max_rss_self_kb": rusage_end.ru_maxrss,
+            "major_page_faults": rusage_end.ru_majflt - self._rusage_start.ru_majflt,
+            "minor_page_faults": rusage_end.ru_minflt - self._rusage_start.ru_minflt,
+            "voluntary_ctx_switches": rusage_end.ru_nvcsw - self._rusage_start.ru_nvcsw,
+            "involuntary_ctx_switches": rusage_end.ru_nivcsw - self._rusage_start.ru_nivcsw,
+            "fs_inputs": rusage_end.ru_inblock - self._rusage_start.ru_inblock,
+            "fs_outputs": rusage_end.ru_oublock - self._rusage_start.ru_oublock,
+        }
+
+        if self.device.type == "cuda":
+            self.stats["gpu_peak_allocated_mb"] = round(torch.cuda.max_memory_allocated() / 1024**2, 1)
+            self.stats["gpu_peak_reserved_mb"] = round(torch.cuda.max_memory_reserved() / 1024**2, 1)
+        else:
+            self.stats["gpu_peak_allocated_mb"] = np.nan
+            self.stats["gpu_peak_reserved_mb"] = np.nan
+
+        self.log()
+        return False
+
+    def log(self):
+        s = self.stats
+        logging.info(
+            f"\n=== Resource usage: {self.label} ===\n"
+            f"  Elapsed (wall clock) time (s):        {s['wall_seconds']}\n"
+            f"  User time (s):                        {s['user_seconds']}\n"
+            f"  System time (s):                      {s['system_seconds']}\n"
+            f"  Percent of CPU this phase got:        {s['cpu_percent']}%\n"
+            f"  Process-tree user/system time (s):    {s['tree_user_seconds']} / {s['tree_system_seconds']} "
+            f"({s['tree_cpu_percent']}% -- includes DataLoader workers)\n"
+            f"  Peak RSS, process tree (kbytes):      {s['peak_rss_tree_kb']:,}\n"
+            f"  Maximum resident set size (kbytes):   {s['max_rss_self_kb']:,} (cumulative high-water, this process)\n"
+            f"  Major (requiring I/O) page faults:    {s['major_page_faults']:,}\n"
+            f"  Minor (reclaiming a frame) faults:    {s['minor_page_faults']:,}\n"
+            f"  Voluntary context switches:           {s['voluntary_ctx_switches']:,}\n"
+            f"  Involuntary context switches:         {s['involuntary_ctx_switches']:,}\n"
+            f"  File system inputs / outputs:         {s['fs_inputs']:,} / {s['fs_outputs']:,}\n"
+            f"  GPU peak allocated / reserved (MB):   {s['gpu_peak_allocated_mb']} / {s['gpu_peak_reserved_mb']}"
+        )
+
+
 def generate_model_predictions(model, data_loader, device, tf_idx_to_name, tg_idx_to_name):
     pooling_mode = "lse"
     pooling_temperature = 1.0
@@ -78,8 +249,8 @@ def generate_model_predictions(model, data_loader, device, tf_idx_to_name, tg_id
     model = model.to(device)
     model.eval()
     
-    if device.type == "cuda":
-        model = torch.compile(model, mode="reduce-overhead")
+    # if device.type == "cuda":
+    #     model = torch.compile(model, mode="reduce-overhead")
 
     tf_indices_list = []
     tg_indices_list = []
@@ -315,11 +486,11 @@ tg_id_to_idx = {tg_name: idx for idx, tg_name in enumerate(universe_tgs)}
 tf_idx_to_name = {idx: name for name, idx in tf_name_to_idx.items()}
 tg_idx_to_name = {idx: name for name, idx in tg_id_to_idx.items()}
 
-sample_full_grn_dir = RESULT_DIR / "full_test_grns" / cell_type / sample_name
+sample_full_grn_dir = RESULT_DIR / "full_test_grns"
 sample_full_grn_dir.mkdir(parents=True, exist_ok=True)
 
-cross_tf_tg_df_file = sample_full_grn_dir / f"tf_tg_cross_model_predictions_{cross_model_cell_type}_{cross_model_sample_name}.tsv"
-sample_full_grn_file = sample_full_grn_dir / f"tf_tg_predictions_{cell_type}_{sample_name}.tsv"
+cross_tf_tg_df_file = sample_full_grn_dir / f"{cross_model_sample_name}_model_vs_{sample_name}_test_set_grn.tsv"
+sample_full_grn_file = sample_full_grn_dir / f"{sample_name}_model_vs_{sample_name}_test_set_grn.tsv"
 
 if not sample_full_grn_file.exists() or not cross_tf_tg_df_file.exists() or force_reload == True:
 
@@ -368,7 +539,6 @@ if not sample_full_grn_file.exists() or not cross_tf_tg_df_file.exists() or forc
 
     # Build the compact TF-TG input dataset for the test set
     common_build_kwargs = dict(
-        max_peaks_per_tg=args.max_peaks_per_tg,
         max_cells_per_pair=args.max_cells_per_pair,
         tg_to_peak_info=tg_to_peak_info,
         cell_to_idx=cell_to_idx,
@@ -425,42 +595,86 @@ if not sample_full_grn_file.exists() or not cross_tf_tg_df_file.exists() or forc
     # Generate the model predictions for the test set and create a DataFrame with TF names, TG names, and predicted scores
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
+    # Resource usage is recorded per model. Note the two are not a clean A/B: whichever
+    # model runs first pays torch.compile tracing and DataLoader worker startup, and the
+    # second reuses the same persistent workers. Compare the `inference` phases, and read
+    # the first model's `model_load` as including one-off warmup.
+    resource_records = []
+    n_edges_built = len(tftg_inputs_test["label"])
+
+    def _record(probe, model_type, checkpoint_path):
+        row = dict(probe.stats)
+        row.update({
+            "cell_type": cell_type,
+            "sample_name": sample_name,
+            "model_type": model_type,
+            "model_cell_type": cell_type if model_type == "own" else cross_model_cell_type,
+            "model_sample_name": sample_name if model_type == "own" else cross_model_sample_name,
+            "checkpoint": Path(checkpoint_path).name if checkpoint_path else None,
+            "n_edges": n_edges_built,
+            "n_tfs": len(universe_tfs),
+            "n_tgs": len(universe_tgs),
+            "batch_size": args.batch_size,
+            "max_peaks_per_tg": args.max_peaks_per_tg,
+            "max_cells_per_pair": args.max_cells_per_pair,
+            "num_workers": num_workers,
+            "device": torch.cuda.get_device_name(0) if device.type == "cuda" else "cpu",
+        })
+        if row["phase"].startswith("inference") and row["wall_seconds"] > 0:
+            row["edges_per_second"] = round(n_edges_built / row["wall_seconds"], 1)
+        resource_records.append(row)
+
     if not sample_full_grn_file.exists() or force_reload:
         # Load the TF→TG model
-        tf_tg_model = utils.load_tf_tg_regulation_model(
-            tf_dna_model_chkpt, 
-            tf_tg_model_chkpt, 
-            tf_embeddings_tensor, 
-            tf_mask_tensor,
-            compile_model=True,
-            device=device
-            )
-        
+        with ResourceProbe("model_load (own)", device) as probe:
+            tf_tg_model = utils.load_tf_tg_regulation_model(
+                tf_dna_model_chkpt,
+                tf_tg_model_chkpt,
+                tf_embeddings_tensor,
+                tf_mask_tensor,
+                compile_model=True,
+                device=device
+                )
+        _record(probe, "own", tf_tg_model_chkpt)
+
         # Run the model on the test set and generate the predictions DataFrame
-        prediction_df = generate_model_predictions(tf_tg_model.model, loader, device, tf_idx_to_name, tg_idx_to_name)
-        
+        with ResourceProbe("inference (own)", device) as probe:
+            prediction_df = generate_model_predictions(tf_tg_model.model, loader, device, tf_idx_to_name, tg_idx_to_name)
+        _record(probe, "own", tf_tg_model_chkpt)
+
         prediction_df.to_csv(sample_full_grn_file, sep="\t", index=False)
     else:
+        logging.info(f"{sample_full_grn_file} exists; skipping own-model run (no resource usage recorded)")
         prediction_df = pd.read_csv(sample_full_grn_file, sep="\t", header=0)
-    
+
     if not cross_tf_tg_df_file.exists() or force_reload:
         # Load the TF→TG model trained on the cross-model cell type and sample
-        cross_tf_tg_model = utils.load_tf_tg_regulation_model(
-            tf_dna_model_chkpt,
-            cross_model_chkpt,
-            tf_embeddings_tensor,
-            tf_mask_tensor,
-            compile_model=True,
-            device=device
-        )
-        
+        with ResourceProbe("model_load (cross)", device) as probe:
+            cross_tf_tg_model = utils.load_tf_tg_regulation_model(
+                tf_dna_model_chkpt,
+                cross_model_chkpt,
+                tf_embeddings_tensor,
+                tf_mask_tensor,
+                compile_model=True,
+                device=device
+            )
+        _record(probe, "cross", cross_model_chkpt)
+
         # Run the cross-trained model on the test set and generate the predictions DataFrame
-        cross_model_prediction_df = generate_model_predictions(cross_tf_tg_model.model, loader, device, tf_idx_to_name, tg_idx_to_name)
+        with ResourceProbe("inference (cross)", device) as probe:
+            cross_model_prediction_df = generate_model_predictions(cross_tf_tg_model.model, loader, device, tf_idx_to_name, tg_idx_to_name)
+        _record(probe, "cross", cross_model_chkpt)
 
         cross_model_prediction_df.to_csv(cross_tf_tg_df_file, sep="\t", index=False)
     else:
+        logging.info(f"{cross_tf_tg_df_file} exists; skipping cross-model run (no resource usage recorded)")
         cross_model_prediction_df = pd.read_csv(cross_tf_tg_df_file, sep="\t", header=0)
-    
+
+    if resource_records:
+        resource_usage_file = sample_full_grn_dir / f"resource_usage_{cell_type}_{sample_name}.tsv"
+        pd.DataFrame(resource_records).to_csv(resource_usage_file, sep="\t", index=False)
+        logging.info(f"Wrote resource usage for {len(resource_records)} phases to {resource_usage_file}")
+
 else:
     prediction_df = pd.read_csv(sample_full_grn_file, sep="\t", header=0)
     cross_model_prediction_df = pd.read_csv(cross_tf_tg_df_file, sep="\t", header=0)

@@ -117,7 +117,7 @@ echo "  cross_model_cell_type=$cross_model_cell_type"
 echo "  cross_model_sample_name=$cross_model_sample_name"
 
 echo "[INFO] Starting training..."
-torchrun \
+/usr/bin/time -v torchrun \
   --standalone \
   --nnodes=1 \
   --nproc_per_node=1 \
@@ -129,4 +129,5 @@ torchrun \
     --cross_model_sample_name "$cross_model_sample_name" \
     --max_peaks_per_tg 8 \
     --max_cells_per_pair 25 \
-    --batch_size 512
+    --batch_size 512 \
+    --force_reload
