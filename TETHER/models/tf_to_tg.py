@@ -177,31 +177,89 @@ class TFTGRegulationModel(nn.Module):
         if chunk_size is None or chunk_size <= 0:
             chunk_size = E * P
 
+        # Every edge is padded out to max_peaks_real, which is set by the single TG with
+        # the most nearby peaks, so most slots in a batch are padding -- typically 60-75%
+        # of them. Binding for padded slots is thrown away by the masked_fill below, so
+        # at inference time we score only the real peaks.
+        #
+        # This is gated on eval mode on purpose. tf_peak_model's peak encoder contains
+        # nn.BatchNorm1d, and there is no train() override keeping the frozen submodule
+        # in eval, so during TF-TG training those layers normalise by *batch* statistics
+        # -- which makes the binding output depend on exactly which rows share a chunk.
+        # Skipping rows or repacking chunks there would silently change training results
+        # and stop previously-trained models from being reproducible. In eval mode
+        # BatchNorm uses its running statistics, so the fast path is bitwise identical.
+        skip_padded_peaks = peak_mask_edge is not None and not self.tf_peak_model.training
+
         with torch.no_grad():
-            binding_logits_flat = torch.empty(
+            # zeros, not empty: on the fast path the padded slots are never written, and
+            # a defined value keeps them finite going into the sigmoid before masking
+            binding_logits_flat = torch.zeros(
                 E * P,
                 device=peak_sequences_edge.device,
                 dtype=peak_sequences_edge.dtype,
             )
 
-            for start in range(0, E * P, chunk_size):
-                end = min(start + chunk_size, E * P)
+            if skip_padded_peaks:
+                valid_flat_idx = peak_mask_edge.reshape(-1).nonzero(as_tuple=True)[0]
+                n_valid = int(valid_flat_idx.numel())
 
-                flat_idx = torch.arange(start, end, device=peak_sequences_edge.device)
-                edge_idx = flat_idx // P
+                if n_valid > 0:
+                    # Split the valid slots into equal chunks no larger than chunk_size,
+                    # so every call sees one shape within a batch and torch.compile does
+                    # not re-trace on a ragged tail. Sizing the chunk to the work
+                    # (rather than padding up to chunk_size) matters: padding to whole
+                    # chunk_size blocks costs up to chunk_size - 1 wasted rows, which
+                    # for a large chunk_size or a sparse mask is more work than simply
+                    # scoring everything. Here the padding is at most n_chunks - 1 rows.
+                    n_chunks = (n_valid + chunk_size - 1) // chunk_size
+                    effective_chunk = (n_valid + n_chunks - 1) // n_chunks
 
-                tf_embedding_chunk = tf_embedding_edge[edge_idx]
-                tf_mask_chunk = tf_mask_edge[edge_idx]
-                peak_seq_chunk = peak_seq_flat[start:end]
+                    pad_len = n_chunks * effective_chunk - n_valid
+                    if pad_len:
+                        chunk_idx_source = torch.cat(
+                            [valid_flat_idx, valid_flat_idx[-1].expand(pad_len)]
+                        )
+                    else:
+                        chunk_idx_source = valid_flat_idx
 
-                logits_chunk = self.tf_peak_model(
-                    tf_embedding=tf_embedding_chunk,
-                    tf_mask=tf_mask_chunk,
-                    peak_embedding=peak_seq_chunk,
-                )
+                    for start in range(0, chunk_idx_source.numel(), effective_chunk):
+                        sel = chunk_idx_source[start : start + effective_chunk]
+                        edge_idx = sel // P
 
-                # Copy values out before next compiled-model invocation
-                binding_logits_flat[start:end].copy_(logits_chunk)
+                        logits_chunk = self.tf_peak_model(
+                            tf_embedding=tf_embedding_edge[edge_idx],
+                            tf_mask=tf_mask_edge[edge_idx],
+                            peak_embedding=peak_seq_flat[sel],
+                        )
+
+                        # Scatter only the real entries; the padded tail repeats an
+                        # index already written and must not overwrite it.
+                        n_real = min(effective_chunk, n_valid - start)
+                        # Copy values out before next compiled-model invocation
+                        binding_logits_flat[sel[:n_real]] = logits_chunk[:n_real]
+            else:
+                # Original path, unchanged: score every slot including padding, with the
+                # same ragged final chunk. Used for training and whenever no peak mask
+                # is supplied.
+                for start in range(0, E * P, chunk_size):
+                    end = min(start + chunk_size, E * P)
+
+                    flat_idx = torch.arange(start, end, device=peak_sequences_edge.device)
+                    edge_idx = flat_idx // P
+
+                    tf_embedding_chunk = tf_embedding_edge[edge_idx]
+                    tf_mask_chunk = tf_mask_edge[edge_idx]
+                    peak_seq_chunk = peak_seq_flat[start:end]
+
+                    logits_chunk = self.tf_peak_model(
+                        tf_embedding=tf_embedding_chunk,
+                        tf_mask=tf_mask_chunk,
+                        peak_embedding=peak_seq_chunk,
+                    )
+
+                    # Copy values out before next compiled-model invocation
+                    binding_logits_flat[start:end].copy_(logits_chunk)
 
         binding_logits = binding_logits_flat.reshape(E, P)
         

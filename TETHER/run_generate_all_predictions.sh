@@ -117,7 +117,7 @@ echo "  cross_model_cell_type=$cross_model_cell_type"
 echo "  cross_model_sample_name=$cross_model_sample_name"
 
 echo "[INFO] Starting training..."
-/usr/bin/time -v torchrun \
+torchrun \
   --standalone \
   --nnodes=1 \
   --nproc_per_node=1 \

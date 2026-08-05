@@ -632,6 +632,7 @@ if not sample_full_grn_file.exists() or not cross_tf_tg_df_file.exists() or forc
                 tf_tg_model_chkpt,
                 tf_embeddings_tensor,
                 tf_mask_tensor,
+                tf_peak_chunk_size=256,
                 compile_model=True,
                 device=device
                 )
@@ -655,6 +656,7 @@ if not sample_full_grn_file.exists() or not cross_tf_tg_df_file.exists() or forc
                 cross_model_chkpt,
                 tf_embeddings_tensor,
                 tf_mask_tensor,
+                tf_peak_chunk_size=256,
                 compile_model=True,
                 device=device
             )
