@@ -236,8 +236,16 @@ class TFTGRegulationModel(nn.Module):
                         # Scatter only the real entries; the padded tail repeats an
                         # index already written and must not overwrite it.
                         n_real = min(effective_chunk, n_valid - start)
-                        # Copy values out before next compiled-model invocation
-                        binding_logits_flat[sel[:n_real]] = logits_chunk[:n_real]
+                        # Copy values out before next compiled-model invocation.
+                        # index_copy_ requires matching dtypes, and under autocast the
+                        # TF-DNA model returns reduced precision while this buffer is
+                        # fp32, so cast explicitly -- the .copy_ used on the path below
+                        # would have done it implicitly.
+                        binding_logits_flat.index_copy_(
+                            0,
+                            sel[:n_real],
+                            logits_chunk[:n_real].to(binding_logits_flat.dtype),
+                        )
             else:
                 # Original path, unchanged: score every slot including padding, with the
                 # same ragged final chunk. Used for training and whenever no peak mask

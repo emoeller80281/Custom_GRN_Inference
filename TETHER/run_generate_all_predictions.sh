@@ -9,7 +9,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 8
 #SBATCH --mem=128G
-#SBATCH --array=0-6%7
+#SBATCH --array=1%7
 
 set -eo pipefail
 
@@ -42,55 +42,21 @@ export NUMEXPR_NUM_THREADS=1
 export BLIS_NUM_THREADS=1
 export KMP_AFFINITY=granularity=fine,compact,1,0
 
-# --- NCCL / networking overrides ---
-# Dynamically find the interface with 10.90.29.* network
-export IFACE=$(ip -o -4 addr show | grep "10.90.29." | awk '{print $2}')
+# No NCCL / rendezvous setup here on purpose. generate_all_predictions.py is a plain
+# single-process, single-GPU inference script -- it never calls init_process_group and
+# never reads RANK/LOCAL_RANK. The DDP preamble copied from the training scripts brought
+# two problems with it: the 10.90.29.* interface check would hard-exit an otherwise
+# healthy job, and launching under `torchrun --standalone` pins the c10d rendezvous to
+# localhost:29400, so any two of the seven concurrent array tasks landing on the same
+# node would collide with "Address already in use".
 
-if [ -z "$IFACE" ]; then
-    echo "[ERROR] Could not find interface with 10.90.29.* network on $(hostname)"
-    ip -o -4 addr show  # Show all interfaces for debugging
-    exit 1
-fi
-
-echo "[INFO] Using IFACE=$IFACE on host $(hostname)"
-ip -o -4 addr show "$IFACE"
-
-export NCCL_SOCKET_IFNAME="$IFACE"
-export GLOO_SOCKET_IFNAME="$IFACE"
-
-export NCCL_IB_DISABLE=0
-
-export TORCH_DISTRIBUTED_DEBUG=DETAIL
-
-##### Number of total processes
 echo "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX "
 echo "Nodelist        = " $SLURM_JOB_NODELIST
-echo "Number of nodes = " $SLURM_JOB_NUM_NODES
-echo "Ntasks per node = " $SLURM_NTASKS_PER_NODE
+echo "Host            = " $(hostname)
+echo "GPUs visible    = " $(nvidia-smi -L | wc -l)
 echo "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX "
 echo ""
 
-# ---------- torchrun multi-node launch ----------
-# Pick the first node as rendezvous/master
-MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
-MASTER_PORT=29500
-export MASTER_ADDR MASTER_PORT
-
-echo "[INFO] MASTER_ADDR=${MASTER_ADDR}, MASTER_PORT=${MASTER_PORT}"
-
-# ---------- Optional network diagnostics ----------
-DEBUG_NET=${DEBUG_NET:-1}   # set to 0 to skip tests once things work
-
-NODES=($(scontrol show hostnames "$SLURM_JOB_NODELIST"))
-MASTER_NODE=${NODES[0]}
-
-echo "[NET] Nodes in this job: ${NODES[*]}"
-echo "[NET] MASTER_NODE=${MASTER_NODE}, IFACE=${IFACE:-<unset>}"
-
-NPROC_PER_NODE=${SLURM_GPUS_ON_NODE:-$(nvidia-smi -L | wc -l)}
-echo "[INFO] Using nproc_per_node=$NPROC_PER_NODE based on GPUs per node"
-
-export NCCL_DEBUG=INFO
 export PYTHONFAULTHANDLER=1
 
 # ==========================================
@@ -109,19 +75,15 @@ EXPERIMENT_CONFIG="${EXPERIMENT_LIST[$TASK_ID]}"
 # Parse experiment configuration
 IFS='|' read -r species cell_type sample_name cross_model_cell_type cross_model_sample_name <<< "$EXPERIMENT_CONFIG"
 
-echo "[INFO] Running AUPRC vs other methods for:"
+echo "[INFO] Generating full test-set predictions for:"
 echo "  species=$species"
 echo "  cell_type=$cell_type"
 echo "  sample_name=$sample_name"
 echo "  cross_model_cell_type=$cross_model_cell_type"
 echo "  cross_model_sample_name=$cross_model_sample_name"
 
-echo "[INFO] Starting training..."
-torchrun \
-  --standalone \
-  --nnodes=1 \
-  --nproc_per_node=1 \
-  ${PROJECT_DIR}/generate_all_predictions.py \
+echo "[INFO] Starting inference..."
+python ${PROJECT_DIR}/generate_all_predictions.py \
     --species "$species" \
     --cell_type "$cell_type" \
     --sample_name "$sample_name" \
@@ -129,5 +91,6 @@ torchrun \
     --cross_model_sample_name "$cross_model_sample_name" \
     --max_peaks_per_tg 8 \
     --max_cells_per_pair 25 \
-    --batch_size 512 \
+    --batch_size 128 \
+    --tf_peak_chunk_size 128 \
     --force_reload

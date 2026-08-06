@@ -110,6 +110,7 @@ class _TreeSampler(threading.Thread):
         super().__init__(daemon=True)
         self.interval = interval
         self.peak_rss_bytes = 0
+        self.used_pss = False
         # pid -> most recent (user, system) cumulative CPU seconds observed
         self.cpu_last_seen = {}
         self._stop_event = threading.Event()
@@ -118,7 +119,16 @@ class _TreeSampler(threading.Thread):
         total_rss = 0
         for proc in _process_tree():
             try:
-                total_rss += proc.memory_info().rss
+                # PSS, not RSS: DataLoader workers are forked and share most of their
+                # pages with the parent copy-on-write, so summing RSS across the tree
+                # counts those shared pages once per process. PSS divides each shared
+                # page by the number of processes mapping it, so the tree total is a
+                # real memory figure rather than one that can exceed the node's RAM.
+                try:
+                    total_rss += proc.memory_full_info().pss
+                    self.used_pss = True
+                except (psutil.AccessDenied, AttributeError):
+                    total_rss += proc.memory_info().rss
                 times = proc.cpu_times()
                 self.cpu_last_seen[proc.pid] = (times.user, times.system)
             except (psutil.NoSuchProcess, psutil.AccessDenied):
@@ -199,8 +209,10 @@ class ResourceProbe:
             "tree_user_seconds": round(tree_user, 3),
             "tree_system_seconds": round(tree_system, 3),
             "tree_cpu_percent": round(100.0 * (tree_user + tree_system) / wall_seconds, 1) if wall_seconds > 0 else 0.0,
-            # True peak for this phase, summed over main process + DataLoader workers
+            # True peak for this phase over main process + DataLoader workers, using
+            # PSS so pages shared with forked workers are not counted more than once
             "peak_rss_tree_kb": self._sampler.peak_rss_bytes // 1024,
+            "peak_rss_tree_metric": "pss" if self._sampler.used_pss else "rss",
             # Monotonic high-water mark for this process only, as /usr/bin/time reports
             "max_rss_self_kb": rusage_end.ru_maxrss,
             "major_page_faults": rusage_end.ru_majflt - self._rusage_start.ru_majflt,
@@ -231,7 +243,7 @@ class ResourceProbe:
             f"  Percent of CPU this phase got:        {s['cpu_percent']}%\n"
             f"  Process-tree user/system time (s):    {s['tree_user_seconds']} / {s['tree_system_seconds']} "
             f"({s['tree_cpu_percent']}% -- includes DataLoader workers)\n"
-            f"  Peak RSS, process tree (kbytes):      {s['peak_rss_tree_kb']:,}\n"
+            f"  Peak {s['peak_rss_tree_metric'].upper()}, process tree (kbytes):      {s['peak_rss_tree_kb']:,}\n"
             f"  Maximum resident set size (kbytes):   {s['max_rss_self_kb']:,} (cumulative high-water, this process)\n"
             f"  Major (requiring I/O) page faults:    {s['major_page_faults']:,}\n"
             f"  Minor (reclaiming a frame) faults:    {s['minor_page_faults']:,}\n"
@@ -248,9 +260,23 @@ def generate_model_predictions(model, data_loader, device, tf_idx_to_name, tg_id
 
     model = model.to(device)
     model.eval()
-    
+
     # if device.type == "cuda":
     #     model = torch.compile(model, mode="reduce-overhead")
+
+    # Pick the autocast dtype from the hardware. bf16 needs compute capability 8.0+;
+    # on a V100 (7.0) Inductor logs "does not support bfloat16 compilation natively,
+    # skipping" and silently gives up on compiling the model at all, so the run falls
+    # back to eager after paying the full tracing cost. fp16 is also what these models
+    # were trained under (Lightning precision="16-mixed").
+    if device.type == "cuda":
+        autocast_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        logging.info(
+            f"Autocast dtype: {autocast_dtype} on {torch.cuda.get_device_name(0)} "
+            f"(compute capability {'.'.join(str(c) for c in torch.cuda.get_device_capability(0))})"
+        )
+    else:
+        autocast_dtype = torch.float32
 
     tf_indices_list = []
     tg_indices_list = []
@@ -263,7 +289,7 @@ def generate_model_predictions(model, data_loader, device, tf_idx_to_name, tg_id
 
             batch = tf_to_tg_module.move_batch_to_device(batch, device)
 
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=(device.type == "cuda")):
+            with torch.autocast(device_type="cuda", dtype=autocast_dtype, enabled=(device.type == "cuda")):
                 edge_logits, _ = model(
                     tf_embedding=batch["tf_embedding"],
                     tf_mask=batch["tf_mask"],
@@ -341,8 +367,16 @@ def parse_arguments():
     parser.add_argument("--sample_name", type=str, help="Sample name to evaluate.")
     parser.add_argument("--cross_model_cell_type", type=str, help="Cell type for cross-model evaluation.")
     parser.add_argument("--cross_model_sample_name", type=str, help="Sample name for cross-model evaluation.")
-    parser.add_argument("--max_peaks_per_tg", type=int, default=25, help="Max peaks per TG in each edge bag.")
-    parser.add_argument("--max_cells_per_pair", type=int, default=25, help="Max cells sampled per TF-TG pair.")
+    # Defaults follow bash_scripts/03b_train_tf_to_tg_model.sh, which produced the
+    # checkpoints in TF_TG_MODEL_CHECKPOINTS (max_peaks_per_tg=100, max_cells_per_pair=24).
+    # run_stability.sh uses 25/25, but that trains a *different* set of checkpoints.
+    # Bag geometry is not stored in the .ckpt files (the architecture is bag-size
+    # agnostic) and the training logs for the older jobs are gone, so this cannot be
+    # confirmed from the artefacts. Scoring with a much smaller bag than training changes
+    # what the peak attention and the log-sum-exp pooling see -- override deliberately.
+    parser.add_argument("--max_peaks_per_tg", type=int, default=100, help="Max peaks per TG in each edge bag.")
+    parser.add_argument("--max_cells_per_pair", type=int, default=24, help="Max cells sampled per TF-TG pair.")
+    parser.add_argument("--tf_peak_chunk_size", type=int, default=128, help="Chunk size for TF-peak pairs when running TF-DNA inference")
     parser.add_argument("--batch_size", type=int, default=512, help="Inference batch size.")
 
     parser.add_argument("--force_reload", action="store_true", help="Force reload of data and models.")
@@ -632,11 +666,10 @@ if not sample_full_grn_file.exists() or not cross_tf_tg_df_file.exists() or forc
                 tf_tg_model_chkpt,
                 tf_embeddings_tensor,
                 tf_mask_tensor,
-                tf_peak_chunk_size=256,
+                tf_peak_chunk_size=args.tf_peak_chunk_size,
                 compile_model=True,
                 device=device
                 )
-        _record(probe, "own", tf_tg_model_chkpt)
 
         # Run the model on the test set and generate the predictions DataFrame
         with ResourceProbe("inference (own)", device) as probe:
@@ -656,11 +689,10 @@ if not sample_full_grn_file.exists() or not cross_tf_tg_df_file.exists() or forc
                 cross_model_chkpt,
                 tf_embeddings_tensor,
                 tf_mask_tensor,
-                tf_peak_chunk_size=256,
+                tf_peak_chunk_size=args.tf_peak_chunk_size,
                 compile_model=True,
                 device=device
             )
-        _record(probe, "cross", cross_model_chkpt)
 
         # Run the cross-trained model on the test set and generate the predictions DataFrame
         with ResourceProbe("inference (cross)", device) as probe:
