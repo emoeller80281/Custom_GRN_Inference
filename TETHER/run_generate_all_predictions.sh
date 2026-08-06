@@ -9,7 +9,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 8
 #SBATCH --mem=128G
-#SBATCH --array=1%7
+#SBATCH --array=1-6%7
 
 set -eo pipefail
 
@@ -30,7 +30,10 @@ EXPERIMENT_LIST=(
 )
 
 # --- Memory + math ---
-export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:32
+# PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:32 was inherited from the DDP training
+# script and removed here. It stops the caching allocator splitting blocks over 32 MB,
+# which with ~1 GB per-batch tensors left it unable to reuse large free blocks: a run
+# on Macrophage/buffer_1 reserved 31,650 MB while only 4,455 MB was live.
 export TORCH_ALLOW_TF32=1
 export NVIDIA_TF32_OVERRIDE=1
 
@@ -91,6 +94,6 @@ python ${PROJECT_DIR}/generate_all_predictions.py \
     --cross_model_sample_name "$cross_model_sample_name" \
     --max_peaks_per_tg 8 \
     --max_cells_per_pair 25 \
-    --batch_size 128 \
-    --tf_peak_chunk_size 128 \
+    --batch_size 512 \
+    --tf_peak_chunk_size 256 \
     --force_reload

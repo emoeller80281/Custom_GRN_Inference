@@ -127,6 +127,23 @@ def create_new_tf_tg_regulation_model(
 
 
 class TFTGEdgeBagDataset(Dataset):
+    """
+    One item per TF-TG edge bag.
+
+    `return_tf_indices` controls how the TF protein embedding reaches the model:
+
+      False (default, unchanged): the full [T, D] embedding is gathered here and
+        travels through the collate function and the host-to-device copy for every
+        edge. With T ~= 4000 and a batch of 512 that is ~1 GB of pinned transfer per
+        batch, nearly all of it duplicate -- a batch references only a few hundred
+        distinct TFs, and the whole table is under 2 GB.
+
+      True: only `tf_idx` is returned, and the model gathers from an embedding table
+        held resident on the device (see TFTGRegulationModel.set_tf_embedding_table).
+        Mathematically identical, but the gather happens in device memory instead of
+        across PCIe.
+    """
+
     def __init__(
         self,
         inputs,
@@ -134,11 +151,13 @@ class TFTGEdgeBagDataset(Dataset):
         tf_embeddings_tensor,
         tf_mask_tensor,
         atac_peak_tensor,
+        return_tf_indices=False,
     ):
         self.inputs = inputs
         self.tf_embeddings_tensor = tf_embeddings_tensor
         self.tf_mask_tensor = tf_mask_tensor
         self.atac_peak_tensor = atac_peak_tensor
+        self.return_tf_indices = return_tf_indices
 
     def __len__(self):
         return len(self.inputs["label"])
@@ -150,18 +169,13 @@ class TFTGEdgeBagDataset(Dataset):
         peak_indices = self.inputs["peak_indices"][idx]          # [P]
         peak_sequences = self.atac_peak_tensor[peak_indices]     # [P, L, 4]
 
-        tf_embedding = self.tf_embeddings_tensor[tf_idx]         # [T, D]
-        tf_mask = self.tf_mask_tensor[tf_idx]                    # [T]
-
-        return {
+        item = {
             "label": self.inputs["label"][idx],
             "tf_name": self.inputs["tf_name"][idx],
             "tg_name": self.inputs["tg_name"][idx],
             "cell_ids": self.inputs["cell_ids"][idx],
             "tf_idx": tf_idx,
             "tg_idx": tg_idx,
-            "tf_embedding": tf_embedding.float(),
-            "tf_mask": tf_mask.bool(),
             "peak_indices": peak_indices,
             "peak_sequences": peak_sequences,
             "peak_distance": self.inputs["peak_distance"][idx].float(),
@@ -170,6 +184,12 @@ class TFTGEdgeBagDataset(Dataset):
             "tf_expression": self.inputs["tf_expression"][idx].float(),
             "tg_expression": self.inputs["tg_expression"][idx].float(),
         }
+
+        if not self.return_tf_indices:
+            item["tf_embedding"] = self.tf_embeddings_tensor[tf_idx].float()   # [T, D]
+            item["tf_mask"] = self.tf_mask_tensor[tf_idx].bool()               # [T]
+
+        return item
         
 def collate_tftg_edge_bags(batch):
     output = {
@@ -177,9 +197,6 @@ def collate_tftg_edge_bags(batch):
 
         "tf_idx": torch.stack([b["tf_idx"] for b in batch]).long(),
         "tg_idx": torch.stack([b["tg_idx"] for b in batch]).long(),
-
-        "tf_embedding": torch.stack([b["tf_embedding"] for b in batch]),
-        "tf_mask": torch.stack([b["tf_mask"] for b in batch]),
 
         "peak_indices": torch.stack([b["peak_indices"] for b in batch]),
         "peak_sequences": torch.stack([b["peak_sequences"] for b in batch]),
@@ -194,6 +211,12 @@ def collate_tftg_edge_bags(batch):
         "tg_name": [b["tg_name"] for b in batch],
         "cell_ids": [b["cell_ids"] for b in batch],
     }
+
+    # Absent when the dataset was built with return_tf_indices=True, in which case the
+    # model gathers the embeddings itself from its resident table using tf_idx.
+    if "tf_embedding" in batch[0]:
+        output["tf_embedding"] = torch.stack([b["tf_embedding"] for b in batch])
+        output["tf_mask"] = torch.stack([b["tf_mask"] for b in batch])
 
     E, C = output["tf_expression"].shape
     output["cell_mask"] = torch.ones(E, C, dtype=torch.bool)

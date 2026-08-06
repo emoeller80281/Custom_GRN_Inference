@@ -254,6 +254,20 @@ class ResourceProbe:
         )
 
 
+def attach_tf_embedding_table(lit_model, tf_embeddings_device, tf_mask_device):
+    """
+    Give a loaded model its device-resident TF embedding table.
+
+    torch.compile wraps the core model in an OptimizedModule, so reach through
+    _orig_mod when present to register the buffers on the real module. The tensors
+    are passed in already on-device so the own and cross models share one copy
+    rather than each holding their own ~2 GB.
+    """
+    core_model = getattr(lit_model.model, "_orig_mod", lit_model.model)
+    core_model.set_tf_embedding_table(tf_embeddings_device, tf_mask_device)
+    return lit_model
+
+
 def generate_model_predictions(model, data_loader, device, tf_idx_to_name, tg_idx_to_name):
     pooling_mode = "lse"
     pooling_temperature = 1.0
@@ -264,13 +278,17 @@ def generate_model_predictions(model, data_loader, device, tf_idx_to_name, tg_id
     # if device.type == "cuda":
     #     model = torch.compile(model, mode="reduce-overhead")
 
-    # Pick the autocast dtype from the hardware. bf16 needs compute capability 8.0+;
-    # on a V100 (7.0) Inductor logs "does not support bfloat16 compilation natively,
-    # skipping" and silently gives up on compiling the model at all, so the run falls
-    # back to eager after paying the full tracing cost. fp16 is also what these models
-    # were trained under (Lightning precision="16-mixed").
+    # Pick the autocast dtype from the compute capability, not from
+    # torch.cuda.is_bf16_supported() -- that returns True on a V100 (7.0) because it
+    # counts emulated bf16, so it selected bf16 on hardware with no bf16 tensor cores.
+    # Inductor then logs "does not support bfloat16 compilation natively, skipping" and
+    # gives up on compiling the model at all, so the run falls back to eager after
+    # paying the full tracing cost. Real bf16 needs 8.0+ (Ampere). Below that, fp16 both
+    # compiles and hits the tensor cores, and it is what these models were trained under
+    # (Lightning precision="16-mixed" in train_tf_to_{dna,tg}_model.py).
     if device.type == "cuda":
-        autocast_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        major, _ = torch.cuda.get_device_capability(0)
+        autocast_dtype = torch.bfloat16 if major >= 8 else torch.float16
         logging.info(
             f"Autocast dtype: {autocast_dtype} on {torch.cuda.get_device_name(0)} "
             f"(compute capability {'.'.join(str(c) for c in torch.cuda.get_device_capability(0))})"
@@ -291,8 +309,8 @@ def generate_model_predictions(model, data_loader, device, tf_idx_to_name, tg_id
 
             with torch.autocast(device_type="cuda", dtype=autocast_dtype, enabled=(device.type == "cuda")):
                 edge_logits, _ = model(
-                    tf_embedding=batch["tf_embedding"],
-                    tf_mask=batch["tf_mask"],
+                    tf_embedding=batch.get("tf_embedding", None),
+                    tf_mask=batch.get("tf_mask", None),
                     peak_sequences=batch["peak_sequences"],
                     peak_accessibility=batch["peak_accessibility"],
                     peak_distance=batch["peak_distance"],
@@ -302,6 +320,7 @@ def generate_model_predictions(model, data_loader, device, tf_idx_to_name, tg_id
                     cell_mask=batch["cell_mask"],
                     pooling_mode=pooling_mode,
                     pooling_temperature=pooling_temperature,
+                    tf_idx=batch.get("tf_idx", None),
                 )
 
             scores = torch.sigmoid(edge_logits.float())
@@ -603,11 +622,15 @@ if not sample_full_grn_file.exists() or not cross_tf_tg_df_file.exists() or forc
     )
     
     # Create the PyTorch dataset for the test set
+    # return_tf_indices: ship tf_idx rather than a [T, D] embedding per edge. The model
+    # gathers from a device-resident table instead, which removes ~1 GB of pinned
+    # host-to-device transfer per batch (over 1 TB across a full K562 run).
     dataset = TFTGEdgeBagDataset(
         tftg_inputs_test,
         tf_embeddings_tensor=tf_embeddings_tensor,
         tf_mask_tensor=tf_mask_tensor,
-        atac_peak_tensor=atac_peak_tensor
+        atac_peak_tensor=atac_peak_tensor,
+        return_tf_indices=True,
     )
 
     # Create the PyTorch DataLoader for the test set
@@ -658,6 +681,14 @@ if not sample_full_grn_file.exists() or not cross_tf_tg_df_file.exists() or forc
             row["edges_per_second"] = round(n_edges_built / row["wall_seconds"], 1)
         resource_records.append(row)
 
+    # One device copy of the embedding table, shared by both models below.
+    tf_embeddings_device = tf_embeddings_tensor.to(device).float()
+    tf_mask_device = tf_mask_tensor.to(device).bool()
+    logging.info(
+        f"TF embedding table resident on {device}: {tuple(tf_embeddings_device.shape)} "
+        f"({tf_embeddings_device.numel() * tf_embeddings_device.element_size() / 1024**3:.2f} GB)"
+    )
+
     if not sample_full_grn_file.exists() or force_reload:
         # Load the TF→TG model
         with ResourceProbe("model_load (own)", device) as probe:
@@ -670,6 +701,7 @@ if not sample_full_grn_file.exists() or not cross_tf_tg_df_file.exists() or forc
                 compile_model=True,
                 device=device
                 )
+            attach_tf_embedding_table(tf_tg_model, tf_embeddings_device, tf_mask_device)
 
         # Run the model on the test set and generate the predictions DataFrame
         with ResourceProbe("inference (own)", device) as probe:
@@ -693,6 +725,7 @@ if not sample_full_grn_file.exists() or not cross_tf_tg_df_file.exists() or forc
                 compile_model=True,
                 device=device
             )
+            attach_tf_embedding_table(cross_tf_tg_model, tf_embeddings_device, tf_mask_device)
 
         # Run the cross-trained model on the test set and generate the predictions DataFrame
         with ResourceProbe("inference (cross)", device) as probe:

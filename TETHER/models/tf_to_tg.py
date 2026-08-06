@@ -25,6 +25,13 @@ class TFTGRegulationModel(nn.Module):
         self.tf_peak_model = pretrained_tf_peak_model
         self.tf_peak_chunk_size = tf_peak_chunk_size
 
+        # Optional device-resident TF embedding table, populated by
+        # set_tf_embedding_table(). Registered non-persistent so it never enters
+        # state_dict -- checkpoints keep exactly the keys they already have, and
+        # load_state_dict(strict=True) is unaffected in both directions.
+        self.register_buffer("tf_embedding_table", None, persistent=False)
+        self.register_buffer("tf_mask_table", None, persistent=False)
+
         self.peak_feature_proj = nn.Sequential(
             nn.Linear(4, d_model),  # binding, accessibility, distance_scaled, distance_weight
             nn.SiLU(),
@@ -106,19 +113,35 @@ class TFTGRegulationModel(nn.Module):
         else:
             raise ValueError(f"Unknown pooling mode: {mode}")
 
+    def set_tf_embedding_table(self, tf_embeddings_tensor, tf_mask_tensor):
+        """
+        Hold the TF protein embeddings on the model's device.
+
+        Without this the dataloader ships a [T, D] embedding per edge across PCIe --
+        roughly 1 GB per batch of 512 at T ~= 4000, almost all of it duplicated,
+        because a batch touches only a few hundred distinct TFs. The whole table is
+        under 2 GB, so keeping it resident and gathering on-device removes that
+        transfer entirely. Pass tf_idx to forward() once this is set.
+        """
+        device = next(self.parameters()).device
+        self.tf_embedding_table = tf_embeddings_tensor.to(device).float()
+        self.tf_mask_table = tf_mask_tensor.to(device).bool()
+        return self
+
     def forward(
         self,
-        tf_embedding,
-        tf_mask,
-        peak_sequences,
-        peak_accessibility,
-        peak_distance,
-        tf_expression,
-        tg_expression,
-        cell_mask,
+        tf_embedding=None,
+        tf_mask=None,
+        peak_sequences=None,
+        peak_accessibility=None,
+        peak_distance=None,
+        tf_expression=None,
+        tg_expression=None,
+        cell_mask=None,
         peak_mask=None,
         pooling_mode: str = "lse",
         pooling_temperature: float = 1.0,
+        tf_idx=None,
     ):
         """
         Bag-level forward pass.
@@ -128,8 +151,10 @@ class TFTGRegulationModel(nn.Module):
 
         Parameters
         ----------
-        tf_embedding : [E T, D]
-        tf_mask : [E, T]
+        tf_embedding : [E, T, D], optional
+            Pre-gathered embeddings. Omit and pass `tf_idx` instead to gather from the
+            device-resident table registered by set_tf_embedding_table().
+        tf_mask : [E, T], optional
         peak_sequences : [E, P, L, 4]
         peak_accessibility : [E, C, P]
         peak_distance : [E, P]
@@ -137,12 +162,29 @@ class TFTGRegulationModel(nn.Module):
         tg_expression : [E, C]
         cell_mask : [E, C]
         peak_mask : [E, P], optional
+        tf_idx : [E], optional
+            Row indices into the resident embedding table. Used only when
+            `tf_embedding` is None.
 
         Returns
         -------
         edge_logits : [E]
         cell_logits : [E, C]
         """
+
+        if tf_embedding is None:
+            if tf_idx is None:
+                raise ValueError("forward() needs either tf_embedding or tf_idx.")
+            if self.tf_embedding_table is None:
+                raise ValueError(
+                    "tf_idx was supplied but no embedding table is resident. "
+                    "Call set_tf_embedding_table() first."
+                )
+            # Gathered per chunk below rather than materialising [E, T, D] here, so the
+            # peak memory matches the pre-gathered path instead of exceeding it.
+            tf_idx = tf_idx.to(self.tf_embedding_table.device).long().reshape(-1)
+            if tf_mask is None:
+                tf_mask = self.tf_mask_table
 
         if not torch.is_floating_point(peak_sequences):
             peak_sequences = peak_sequences.float()
@@ -156,10 +198,19 @@ class TFTGRegulationModel(nn.Module):
         # ------------------------------------------------------------
         # These are repeated across cells in your current dataloader.
         # Use only the first cell to avoid C-fold redundant TF-DNA inference.
-        tf_embedding_edge = tf_embedding         # [E, T, D]
-        tf_mask_edge = tf_mask                  # [E, T]
+        tf_embedding_edge = tf_embedding         # [E, T, D], or None when using tf_idx
+        tf_mask_edge = tf_mask                  # [E, T], or the full table when using tf_idx
         peak_sequences_edge = peak_sequences    # [E, P, L, 4]
         peak_distance_edge = peak_distance        # [E, P]
+
+        use_resident_table = tf_embedding_edge is None
+
+        def gather_tf_chunk(edge_idx):
+            """Embeddings and masks for a chunk of edge indices, [chunk, T, D] / [chunk, T]."""
+            if use_resident_table:
+                table_rows = tf_idx[edge_idx]
+                return self.tf_embedding_table[table_rows], self.tf_mask_table[table_rows]
+            return tf_embedding_edge[edge_idx], tf_mask_edge[edge_idx]
 
         if peak_mask is not None:
             peak_mask_edge = peak_mask            # [E, P]
@@ -227,9 +278,11 @@ class TFTGRegulationModel(nn.Module):
                         sel = chunk_idx_source[start : start + effective_chunk]
                         edge_idx = sel // P
 
+                        tf_embedding_chunk, tf_mask_chunk = gather_tf_chunk(edge_idx)
+
                         logits_chunk = self.tf_peak_model(
-                            tf_embedding=tf_embedding_edge[edge_idx],
-                            tf_mask=tf_mask_edge[edge_idx],
+                            tf_embedding=tf_embedding_chunk,
+                            tf_mask=tf_mask_chunk,
                             peak_embedding=peak_seq_flat[sel],
                         )
 
@@ -256,8 +309,7 @@ class TFTGRegulationModel(nn.Module):
                     flat_idx = torch.arange(start, end, device=peak_sequences_edge.device)
                     edge_idx = flat_idx // P
 
-                    tf_embedding_chunk = tf_embedding_edge[edge_idx]
-                    tf_mask_chunk = tf_mask_edge[edge_idx]
+                    tf_embedding_chunk, tf_mask_chunk = gather_tf_chunk(edge_idx)
                     peak_seq_chunk = peak_seq_flat[start:end]
 
                     logits_chunk = self.tf_peak_model(
@@ -455,8 +507,8 @@ class LitTFTGRegulationModel(pl.LightningModule):
     def forward(self, batch):
         
         return self.model(
-            tf_embedding=batch["tf_embedding"],
-            tf_mask=batch["tf_mask"],
+            tf_embedding=batch.get("tf_embedding", None),
+            tf_mask=batch.get("tf_mask", None),
             peak_sequences=batch["peak_sequences"],
             peak_accessibility=batch["peak_accessibility"],
             peak_distance=batch["peak_distance"],
@@ -466,6 +518,7 @@ class LitTFTGRegulationModel(pl.LightningModule):
             peak_mask=batch.get("peak_mask", None),
             pooling_mode=self.pooling_mode,
             pooling_temperature=self.pooling_temperature,
+            tf_idx=batch.get("tf_idx", None),
         )
 
     def _loss(self, logits, labels):
@@ -754,8 +807,6 @@ class LitTFTGRegulationModel(pl.LightningModule):
 @torch.no_grad()
 def move_batch_to_device(batch, device):
     moved = {
-        "tf_embedding": batch["tf_embedding"].to(device, non_blocking=True),
-        "tf_mask": batch["tf_mask"].to(device, non_blocking=True),
         "peak_sequences": batch["peak_sequences"].to(device, non_blocking=True),
         "peak_accessibility": batch["peak_accessibility"].to(device, non_blocking=True),
         "peak_distance": batch["peak_distance"].to(device, non_blocking=True),
@@ -764,11 +815,11 @@ def move_batch_to_device(batch, device):
         "label": batch["label"].to(device, non_blocking=True),
     }
 
-    if "cell_mask" in batch:
-        moved["cell_mask"] = batch["cell_mask"].to(device, non_blocking=True)
-
-    if "peak_mask" in batch:
-        moved["peak_mask"] = batch["peak_mask"].to(device, non_blocking=True)
+    # tf_embedding/tf_mask are absent when the dataset returns indices instead, in
+    # which case tf_idx is what the model needs on-device to gather from its table.
+    for key in ("tf_embedding", "tf_mask", "tf_idx", "cell_mask", "peak_mask"):
+        if key in batch:
+            moved[key] = batch[key].to(device, non_blocking=True)
 
     return moved
 
