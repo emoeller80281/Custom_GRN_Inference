@@ -406,6 +406,16 @@ def parse_arguments():
     parser.add_argument("--batch_size", type=int, default=512, help="Inference batch size.")
 
     parser.add_argument("--force_reload", action="store_true", help="Force reload of data and models.")
+    parser.add_argument(
+        "--all_chromosomes",
+        action="store_true",
+        help=(
+            "Score every chromosome instead of only the held-out test chromosomes, for "
+            "measuring full GRN size and scalability. Predictions on train/val "
+            "chromosomes are NOT held out and must not be used for accuracy metrics. "
+            "Writes to *_full_grn.tsv so the test-set GRNs are left intact."
+        ),
+    )
 
     return parser.parse_args()
 
@@ -465,12 +475,39 @@ elif species == "hg38":
 
 sample_input_data_dir = PROJECT_DIR.parent / "data" / "sample_input_data" / cell_type / sample_name
 
-# Load in the ATAC pseudobulk and filter to only include peaks on the test chromosomes
+# Load in the ATAC pseudobulk. This peak filter -- not the target-gene list -- is what
+# actually confines the run to the test chromosomes: a TG keeps only peaks within range of
+# its TSS, so a gene on any other chromosome ends up with an empty bag and is dropped by
+# build_tftg_inputs. Keeping every peak therefore opens the run up to the whole genome.
 atac_pseudobulk = pd.read_parquet(sample_input_data_dir / "RE_pseudobulk.parquet")
 dataset_peaks = atac_pseudobulk.index.to_list()
-dataset_peaks = [peak for peak in dataset_peaks if peak.split(":", 1)[0].replace("chr", "") in test_chroms]
+if not args.all_chromosomes:
+    dataset_peaks = [peak for peak in dataset_peaks if peak.split(":", 1)[0].replace("chr", "") in test_chroms]
 
-# Create a peak to index map for the peaks on the test chromosomes
+# Drop peaks on sequences absent from chrom.sizes, or _centered_peak_to_onehot raises
+# KeyError mid-encode. The pseudobulk names unplaced scaffolds Ensembl-style
+# ("GL456233.1") while chrom.sizes names the same scaffold UCSC-style
+# ("chrX_GL456233_random"), so they can never match. The test-chromosome filter dropped
+# them as a side effect; scoring every chromosome does not, so drop them explicitly.
+# Measured at 48/224,116 peaks (mESC) and 58/170,825 (K562) -- under 0.03%, and no
+# annotated target gene sits on them.
+chrom_sizes = utils.load_chrom_sizes(chrom_sizes_path)
+n_peaks_before_scaffold_filter = len(dataset_peaks)
+dataset_peaks = [peak for peak in dataset_peaks if utils.parse_peak(peak)[0] in chrom_sizes]
+n_scaffold_peaks = n_peaks_before_scaffold_filter - len(dataset_peaks)
+if n_scaffold_peaks:
+    dropped_chroms = sorted({
+        utils.parse_peak(peak)[0]
+        for peak in atac_pseudobulk.index
+        if utils.parse_peak(peak)[0] not in chrom_sizes
+    })
+    logging.info(
+        f"Dropped {n_scaffold_peaks:,} of {n_peaks_before_scaffold_filter:,} peaks on "
+        f"{len(dropped_chroms)} sequences missing from {chrom_sizes_path.name}: "
+        f"{', '.join(dropped_chroms[:6])}{' ...' if len(dropped_chroms) > 6 else ''}"
+    )
+
+# Create a peak to index map for the peaks being scored
 atac_peak_map = {peak: idx for idx, peak in enumerate(dataset_peaks)}
 
 # Load in the RNA pseudobulk
@@ -506,12 +543,13 @@ train_genes, val_genes, test_genes = tf_tg_data_builder.split_genes_by_chromosom
     )
 
 # Score the full cross product: every TF that has an embedding AND is measured in this
-# dataset, against every target gene on the test chromosomes that is measured in this
-# dataset. Genes with no peak within range are dropped later by build_tftg_inputs.
+# dataset, against every target gene measured in this dataset. Genes with no peak within
+# range are dropped later by build_tftg_inputs, which is what confines the result to the
+# chromosomes whose peaks survived the filter above.
 rna_genes = set(rna_pseudobulk_norm.index)
 
 universe_tfs = sorted(set(tf_name_to_idx) & rna_genes)
-universe_tgs = sorted({str(gene).upper() for gene in test_genes} & rna_genes)
+universe_tgs = sorted({str(gene).upper() for gene in rna_genes})
 
 if not universe_tfs or not universe_tgs:
     raise ValueError(
@@ -519,11 +557,22 @@ if not universe_tfs or not universe_tgs:
         f"{len(universe_tfs)} TFs, {len(universe_tgs)} TGs"
     )
 
+chrom_scope = "all" if args.all_chromosomes else "test"
+logging.info(
+    f"Chromosome scope: {chrom_scope} "
+    + (
+        "(WHOLE GENOME -- includes the training and validation chromosomes, so these "
+        "predictions are not held out and are valid only for GRN size / scalability)"
+        if args.all_chromosomes
+        else f"(held-out chroms {test_chroms[0]}-{test_chroms[-1]}, "
+             f"{len(set(test_genes)):,} genes annotated there)"
+    )
+)
 logging.info(
     f"Prediction universe: {len(universe_tfs):,} TFs "
-    f"(of {len(tf_name_to_idx):,} with embeddings) x {len(universe_tgs):,} test-chromosome TGs "
-    f"(of {len(set(test_genes)):,} on chroms {test_chroms[0]}-{test_chroms[-1]}) "
-    f"= {len(universe_tfs) * len(universe_tgs):,} edges"
+    f"(of {len(tf_name_to_idx):,} with embeddings) x {len(universe_tgs):,} TGs "
+    f"measured in this dataset = {len(universe_tfs) * len(universe_tgs):,} candidate edges "
+    f"over {len(dataset_peaks):,} peaks"
 )
 
 # build_tftg_inputs reads row.tf_name / row.tg_id / row.label, so name the columns to match
@@ -549,8 +598,13 @@ tg_idx_to_name = {idx: name for name, idx in tg_id_to_idx.items()}
 sample_full_grn_dir = RESULT_DIR / "full_test_grns"
 sample_full_grn_dir.mkdir(parents=True, exist_ok=True)
 
-cross_tf_tg_df_file = sample_full_grn_dir / f"{cross_model_sample_name}_model_vs_{sample_name}_test_set_grn.tsv"
-sample_full_grn_file = sample_full_grn_dir / f"{sample_name}_model_vs_{sample_name}_test_set_grn.tsv"
+# Whole-genome runs write to their own files. plot_auprc_all_methods.py and the notebook
+# read *_test_set_grn.tsv expecting held-out edges; overwriting those with predictions that
+# include the training chromosomes would silently inflate every accuracy number.
+grn_suffix = "full_grn" if args.all_chromosomes else "test_set_grn"
+
+cross_tf_tg_df_file = sample_full_grn_dir / f"{cross_model_sample_name}_model_vs_{sample_name}_{grn_suffix}.tsv"
+sample_full_grn_file = sample_full_grn_dir / f"{sample_name}_model_vs_{sample_name}_{grn_suffix}.tsv"
 
 if not sample_full_grn_file.exists() or not cross_tf_tg_df_file.exists() or force_reload == True:
 
@@ -563,7 +617,7 @@ if not sample_full_grn_file.exists() or not cross_tf_tg_df_file.exists() or forc
     atac_peak_array = utils.create_centered_peak_onehot_array(
         peak_ids=dataset_peaks,
         genome_fasta=genome_fasta_path,
-        chrom_sizes=utils.load_chrom_sizes(chrom_sizes_path),
+        chrom_sizes=chrom_sizes,
         peak_id_to_idx=atac_peak_map,
         flank_size=128,
         dtype=np.uint8,
@@ -671,6 +725,8 @@ if not sample_full_grn_file.exists() or not cross_tf_tg_df_file.exists() or forc
         row.update({
             "cell_type": cell_type,
             "sample_name": sample_name,
+            "chrom_scope": chrom_scope,
+            "n_peaks": len(dataset_peaks),
             "model_type": model_type,
             "model_cell_type": cell_type if model_type == "own" else cross_model_cell_type,
             "model_sample_name": sample_name if model_type == "own" else cross_model_sample_name,
@@ -745,7 +801,8 @@ if not sample_full_grn_file.exists() or not cross_tf_tg_df_file.exists() or forc
         cross_model_prediction_df = pd.read_csv(cross_tf_tg_df_file, sep="\t", header=0)
 
     if resource_records:
-        resource_usage_file = sample_full_grn_dir / f"resource_usage_{cell_type}_{sample_name}.tsv"
+        scope_tag = "" if chrom_scope == "test" else "_all_chroms"
+        resource_usage_file = sample_full_grn_dir / f"resource_usage_{cell_type}_{sample_name}{scope_tag}.tsv"
         pd.DataFrame(resource_records).to_csv(resource_usage_file, sep="\t", index=False)
         logging.info(f"Wrote resource usage for {len(resource_records)} phases to {resource_usage_file}")
 

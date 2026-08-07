@@ -21,10 +21,30 @@ import config
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 
+def _format_chroms(chroms: list[str]) -> str:
+    """Render a chromosome list for logging.
+
+    Only for log messages -- the splits themselves are made with isin() on the full list.
+    min()/max() would compare these as strings, where "9" > "15", so ["1".."15"] printed
+    as "1-15" came out as "1-9". Numeric labels are ordered numerically and collapsed to
+    a range only when they are actually contiguous.
+    """
+    numeric = sorted((c for c in chroms if str(c).isdigit()), key=int)
+    other = sorted(str(c) for c in chroms if not str(c).isdigit())
+
+    parts = []
+    if numeric:
+        contiguous = int(numeric[-1]) - int(numeric[0]) == len(numeric) - 1
+        parts.append(f"{numeric[0]}-{numeric[-1]}" if contiguous and len(numeric) > 1
+                     else ", ".join(numeric))
+    parts.extend(other)
+    return ", ".join(parts)
+
+
 def split_genes_by_chromosome(
-    gene_reference_file: Path, 
-    train_chroms: list[str] = None, 
-    val_chroms: list[str] = None, 
+    gene_reference_file: Path,
+    train_chroms: list[str] = None,
+    val_chroms: list[str] = None,
     test_chroms: list[str] = None
     ):
     logging.info(f"Splitting genes into train/val/test based on chromosome:")
@@ -40,15 +60,15 @@ def split_genes_by_chromosome(
     train_genes = gene_chrom[gene_chrom["chrom"].isin(train_chroms)][
         "TG"
     ].unique()
-    logging.info(f"  - Train set: {len(train_genes):,} genes (chroms {min(train_chroms)}-{max(train_chroms)})")
+    logging.info(f"  - Train set: {len(train_genes):,} genes (chroms {_format_chroms(train_chroms)})")
 
     val_genes = gene_chrom[gene_chrom["chrom"].isin(val_chroms)][
         "TG"
     ].unique()
-    logging.info(f"  - Validation set: {len(val_genes):,} genes (chroms {min(val_chroms)}-{max(val_chroms)})")
+    logging.info(f"  - Validation set: {len(val_genes):,} genes (chroms {_format_chroms(val_chroms)})")
 
     test_genes = gene_chrom[gene_chrom["chrom"].isin(test_chroms)]["TG"].unique()
-    logging.info(f"  - Test set: {len(test_genes):,} genes (chroms {min(test_chroms)}-{max(test_chroms)})")
+    logging.info(f"  - Test set: {len(test_genes):,} genes (chroms {_format_chroms(test_chroms)})")
 
     return train_genes, val_genes, test_genes
 
