@@ -1,5 +1,7 @@
 import sys
+import os
 import time
+import hashlib
 import resource
 import threading
 import psutil
@@ -407,6 +409,16 @@ def parse_arguments():
 
     parser.add_argument("--force_reload", action="store_true", help="Force reload of data and models.")
     parser.add_argument(
+        "--force_rebuild_dataset",
+        action="store_true",
+        help=(
+            "Rebuild the peak encoding and TF-TG edge bags even if a matching cache "
+            "exists. The cache already self-invalidates when any input file changes, so "
+            "this is only for forcing a rebuild after a code change to the build itself. "
+            "Distinct from --force_reload, which re-runs inference but reuses the data."
+        ),
+    )
+    parser.add_argument(
         "--all_chromosomes",
         action="store_true",
         help=(
@@ -606,6 +618,58 @@ grn_suffix = "full_grn" if args.all_chromosomes else "test_set_grn"
 cross_tf_tg_df_file = sample_full_grn_dir / f"{cross_model_sample_name}_model_vs_{sample_name}_{grn_suffix}.tsv"
 sample_full_grn_file = sample_full_grn_dir / f"{sample_name}_model_vs_{sample_name}_{grn_suffix}.tsv"
 
+# ==========================================
+#        BUILT-DATASET CACHE
+# ==========================================
+# Encoding every peak and assembling one edge bag per TF-TG pair costs minutes on the
+# test chromosomes but hours genome-wide, and it is entirely determined by the inputs --
+# rerunning with a new checkpoint or new model code repeats all of it for nothing.
+#
+# The cache is keyed by a fingerprint rather than by name alone. CLAUDE.md notes that the
+# existing caches key on cell_type/sample_name only, so upstream data edits are not
+# detected and silently produce stale results; here the size and mtime of every input
+# file are folded in, so an edited pseudobulk invalidates the cache by itself.
+PEAK_FLANK_SIZE = 128
+BUILD_SEED = 125
+
+full_grn_cache_dir = DATA_DIR / "full_grn_dataset_cache"
+full_grn_cache_dir.mkdir(parents=True, exist_ok=True)
+dataset_cache_file = (
+    full_grn_cache_dir
+    / f"{cell_type}_{sample_name}_{chrom_scope}"
+      f"_p{args.max_peaks_per_tg}_c{args.max_cells_per_pair}.pt"
+)
+
+
+def _file_stamp(path):
+    """Identity of an input file, without reading it."""
+    try:
+        st = Path(path).stat()
+        return f"{Path(path).name}:{st.st_size}:{st.st_mtime_ns}"
+    except OSError:
+        return f"{Path(path).name}:missing"
+
+
+def _dataset_fingerprint():
+    parts = [
+        "v1", species, cell_type, sample_name, chrom_scope,
+        str(args.max_peaks_per_tg), str(args.max_cells_per_pair),
+        str(PEAK_FLANK_SIZE), str(BUILD_SEED),
+        # Inputs whose contents decide the built dataset. The genome FASTA and
+        # chrom.sizes decide the one-hot peak encoding; the parquets decide the peaks,
+        # expression and peak-to-gene distances; tf_name_to_idx.csv decides tf_idx.
+        _file_stamp(genome_fasta_path),
+        _file_stamp(chrom_sizes_path),
+        _file_stamp(sample_input_data_dir / "RE_pseudobulk.parquet"),
+        _file_stamp(sample_input_data_dir / "TG_pseudobulk.parquet"),
+        _file_stamp(sample_input_data_dir / "peak_to_gene_dist.parquet"),
+        _file_stamp(tf_name_to_idx_cache_path),
+    ]
+    return hashlib.sha256("|".join(parts).encode()).hexdigest()[:32]
+
+
+dataset_fingerprint = _dataset_fingerprint()
+
 if not sample_full_grn_file.exists() or not cross_tf_tg_df_file.exists() or force_reload == True:
 
     # === CREATE FULL SET OF TF-TG INPUTS FOR ALL POSSIBLE TF-TG PAIRS IN THE TEST SET ===
@@ -613,64 +677,114 @@ if not sample_full_grn_file.exists() or not cross_tf_tg_df_file.exists() or forc
     # full prediction universe. The training cache metadata is deliberately not used
     # here: its tg_id_to_idx spans only ground-truth targets.
 
-    # Create the centered one-hot encoded ATAC peak array
-    atac_peak_array = utils.create_centered_peak_onehot_array(
-        peak_ids=dataset_peaks,
-        genome_fasta=genome_fasta_path,
-        chrom_sizes=chrom_sizes,
-        peak_id_to_idx=atac_peak_map,
-        flank_size=128,
-        dtype=np.uint8,
-        pad_out_of_bounds=True,
-        num_workers=10,
-        show_progress=False,
-        chunk_size=10000,
-    )
-    atac_peak_tensor = torch.as_tensor(atac_peak_array, dtype=torch.uint8).float()
+    cached_dataset = None
+    if dataset_cache_file.exists() and not args.force_rebuild_dataset:
+        blob = torch.load(dataset_cache_file, weights_only=False)
+        if blob.get("fingerprint") == dataset_fingerprint:
+            cached_dataset = blob
+            logging.info(
+                f"Reusing built dataset from {dataset_cache_file.name} "
+                f"({dataset_cache_file.stat().st_size / 2**30:.1f} GB, "
+                f"{len(blob['tftg_inputs']['label']):,} edges)"
+            )
+        else:
+            logging.info(
+                f"{dataset_cache_file.name} exists but its inputs changed "
+                "(fingerprint mismatch) -- rebuilding."
+            )
 
-    # Prepare the lookup tables needed to build the TF-TG input dataset for the test set
-    tg_to_peak_info, cell_to_idx, atac_mat, rna_mat, gene_to_rna_idx = utils.prepare_tftg_lookup_tables(
-        peak_to_gene=peak_to_gene,
-        atac_peak_map=atac_peak_map,
-        atac_pseudobulk=atac_pseudobulk,
-        rna_pseudobulk_norm=rna_pseudobulk_norm,
-        dataset_peaks=dataset_peaks,
-        common_cells=common_cells,
-        max_precompute_peaks=args.max_peaks_per_tg,
-    )
+    if cached_dataset is not None:
+        # Stored as uint8, the dtype the encoder produces; .float() here matches the
+        # build path exactly rather than relying on the Dataset to cast.
+        atac_peak_tensor = cached_dataset["atac_peak_tensor"].float()
+        tftg_inputs_test = cached_dataset["tftg_inputs"]
 
-    n_tgs_with_peaks = sum(
-        len(tg_to_peak_info.get(tg_name, {}).get("peak_indices", [])) > 0
-        for tg_name in gt_test_df["tg_id"].unique()
-    )
-    logging.info(f"Target genes with at least one peak in range: {n_tgs_with_peaks:,} / {len(universe_tgs):,}")
+        # The peak order must line up with atac_peak_map, since peak_indices in the
+        # cached bags address rows of atac_peak_tensor by position.
+        if cached_dataset["dataset_peaks"] != dataset_peaks:
+            raise RuntimeError(
+                f"{dataset_cache_file} holds a different peak set than this run derived "
+                "from the same inputs. Delete it and rerun with --force_rebuild_dataset."
+            )
+    else:
+        # Create the centered one-hot encoded ATAC peak array
+        atac_peak_array = utils.create_centered_peak_onehot_array(
+            peak_ids=dataset_peaks,
+            genome_fasta=genome_fasta_path,
+            chrom_sizes=chrom_sizes,
+            peak_id_to_idx=atac_peak_map,
+            flank_size=PEAK_FLANK_SIZE,
+            dtype=np.uint8,
+            pad_out_of_bounds=True,
+            num_workers=10,
+            show_progress=False,
+            chunk_size=10000,
+        )
+        atac_peak_tensor_u8 = torch.as_tensor(atac_peak_array, dtype=torch.uint8)
+        atac_peak_tensor = atac_peak_tensor_u8.float()
 
-    # Get the max number of peaks within 100Kb of any TG in the test set
-    max_peaks_real = max(
-        len(tg_to_peak_info.get(tg_name, {}).get("peak_indices", []))
-        for tg_name in gt_test_df["tg_id"].unique()
-    )
+        # Prepare the lookup tables needed to build the TF-TG input dataset for the test set
+        tg_to_peak_info, cell_to_idx, atac_mat, rna_mat, gene_to_rna_idx = utils.prepare_tftg_lookup_tables(
+            peak_to_gene=peak_to_gene,
+            atac_peak_map=atac_peak_map,
+            atac_pseudobulk=atac_pseudobulk,
+            rna_pseudobulk_norm=rna_pseudobulk_norm,
+            dataset_peaks=dataset_peaks,
+            common_cells=common_cells,
+            max_precompute_peaks=args.max_peaks_per_tg,
+        )
 
-    # Build the compact TF-TG input dataset for the test set
-    common_build_kwargs = dict(
-        max_cells_per_pair=args.max_cells_per_pair,
-        tg_to_peak_info=tg_to_peak_info,
-        cell_to_idx=cell_to_idx,
-        atac_mat=atac_mat,
-        rna_mat=rna_mat,
-        gene_to_rna_idx=gene_to_rna_idx,
-        common_cells=common_cells,
-        tf_name_to_idx=tf_name_to_idx,
-        tg_id_to_idx=tg_id_to_idx,
-        max_peaks_real=max_peaks_real,
-    )
+        n_tgs_with_peaks = sum(
+            len(tg_to_peak_info.get(tg_name, {}).get("peak_indices", [])) > 0
+            for tg_name in gt_test_df["tg_id"].unique()
+        )
+        logging.info(f"Target genes with at least one peak in range: {n_tgs_with_peaks:,} / {len(universe_tgs):,}")
 
-    tftg_inputs_test = tf_tg_data_builder.build_tftg_inputs(
-        gt_test_df,
-        seed=125,
-        silence=True,
-        **common_build_kwargs,
-    )
+        # Get the max number of peaks within 100Kb of any TG in the test set
+        max_peaks_real = max(
+            len(tg_to_peak_info.get(tg_name, {}).get("peak_indices", []))
+            for tg_name in gt_test_df["tg_id"].unique()
+        )
+
+        # Build the compact TF-TG input dataset for the test set
+        common_build_kwargs = dict(
+            max_cells_per_pair=args.max_cells_per_pair,
+            tg_to_peak_info=tg_to_peak_info,
+            cell_to_idx=cell_to_idx,
+            atac_mat=atac_mat,
+            rna_mat=rna_mat,
+            gene_to_rna_idx=gene_to_rna_idx,
+            common_cells=common_cells,
+            tf_name_to_idx=tf_name_to_idx,
+            tg_id_to_idx=tg_id_to_idx,
+            max_peaks_real=max_peaks_real,
+        )
+
+        tftg_inputs_test = tf_tg_data_builder.build_tftg_inputs(
+            gt_test_df,
+            seed=BUILD_SEED,
+            silence=True,
+            **common_build_kwargs,
+        )
+
+        # Write via a temp file and rename: a job killed mid-save must not leave a
+        # truncated cache that the next run would load and trust.
+        tmp_cache_file = dataset_cache_file.with_suffix(f".tmp{os.getpid()}")
+        torch.save(
+            {
+                "fingerprint": dataset_fingerprint,
+                "tftg_inputs": tftg_inputs_test,
+                "atac_peak_tensor": atac_peak_tensor_u8,
+                "dataset_peaks": dataset_peaks,
+            },
+            tmp_cache_file,
+        )
+        os.replace(tmp_cache_file, dataset_cache_file)
+        logging.info(
+            f"Cached built dataset to {dataset_cache_file} "
+            f"({dataset_cache_file.stat().st_size / 2**30:.1f} GB)"
+        )
+        del atac_peak_tensor_u8
 
     # Load the lookup tensors
     tf_embeddings_tensor = torch.load(
