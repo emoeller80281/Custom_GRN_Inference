@@ -14,7 +14,6 @@ jupyter_dense*.sh
 data/tf_data
 data/sample_input_data
 TETHER/checkpoints
-TETHER/plots
 checkpoint.pt
 .pybiomart
 *wandb/
@@ -52,6 +51,9 @@ checkpoint.pt
 *.ckpt
 *.npy
 .code-workspace
+
+# Keep the plots in TETHER/plots
+!TETHER/plots/**/*.png
 
 # Keep the motif information
 data/databases/motif_information/**
