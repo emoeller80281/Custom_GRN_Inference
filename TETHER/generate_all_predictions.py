@@ -14,7 +14,11 @@ import numpy as np
 from tqdm import tqdm
 import logging
 
-logging.basicConfig(level=logging.INFO, format='%(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%H:%M:%S',
+)
 
 PROJECT_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/TETHER")
 DATA_DIR = PROJECT_DIR / "cached_data"
@@ -47,12 +51,12 @@ torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 torch.set_float32_matmul_precision("high")
 
-# The TF-DNA chunk loop in TFTGRegulationModel runs a variable number of fixed-width
-# chunks depending on how many peak slots in the batch are unpadded, so a run legitimately
-# needs one compiled graph per distinct chunk count (at most max_peaks_per_tg * batch_size
-# / tf_peak_chunk_size of them, rounded up). The default limit of 8 is close enough to that
-# to risk silently falling back to eager partway through a run.
-torch._dynamo.config.cache_size_limit = 32
+# TFTGRegulationModel compiles one graph per distinct (TF crop width, chunk count) pair:
+# ~4 crop rungs times ~2 chunk counts at tf_peak_chunk_size=1024. This limit must sit
+# comfortably above that product. If it does not, the graphs evict each other and every
+# batch recompiles -- which is far worse than never compiling, and it does not announce
+# itself: throughput just oscillates between 0.2 and 30 s/batch for the whole run.
+torch._dynamo.config.cache_size_limit = 128
 
 TF_TG_MODEL_CHECKPOINTS = {
     "mESC": {
@@ -83,6 +87,46 @@ TF_TG_MODEL_CHECKPOINTS = {
         "hepatocytes_3": utils.find_latest_checkpoint(CHKPT_DIR, "mouse_hepatocytes", "hepatocytes_3"),
     }
 }
+
+def format_duration(seconds):
+    """Compact h/m/s, for log lines that span seconds to hours."""
+    seconds = float(seconds)
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m {int(seconds % 60):02d}s"
+    return f"{int(seconds // 3600)}h {int(seconds % 3600 // 60):02d}m {int(seconds % 60):02d}s"
+
+
+class PhaseTimer:
+    """Bracket a build phase with a start line and an elapsed time.
+
+    The dataset build runs for minutes on the test chromosomes and tens of minutes
+    genome-wide, and used to emit nothing at all between the prediction-universe line and
+    the first inference progress bar -- a slow run and a hung one looked identical.
+    """
+
+    def __init__(self, label, **detail):
+        self.label = label
+        self.detail = detail
+
+    def __enter__(self):
+        self.started = time.time()
+        extra = ", ".join(
+            f"{k}={v:,}" if isinstance(v, int) else f"{k}={v}"
+            for k, v in self.detail.items()
+        )
+        logging.info(f"[build] START {self.label}" + (f" ({extra})" if extra else ""))
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        elapsed = format_duration(time.time() - self.started)
+        if exc_type is None:
+            logging.info(f"[build] DONE  {self.label} in {elapsed}")
+        else:
+            logging.error(f"[build] FAILED {self.label} after {elapsed}")
+        return False
+
 
 def _process_tree():
     """This process plus any live children (the DataLoader workers)."""
@@ -679,7 +723,9 @@ if not sample_full_grn_file.exists() or not cross_tf_tg_df_file.exists() or forc
 
     cached_dataset = None
     if dataset_cache_file.exists() and not args.force_rebuild_dataset:
-        blob = torch.load(dataset_cache_file, weights_only=False)
+        with PhaseTimer("load cached dataset",
+                        gb=f"{dataset_cache_file.stat().st_size / 2**30:.1f}"):
+            blob = torch.load(dataset_cache_file, weights_only=False)
         if blob.get("fingerprint") == dataset_fingerprint:
             cached_dataset = blob
             logging.info(
@@ -708,31 +754,34 @@ if not sample_full_grn_file.exists() or not cross_tf_tg_df_file.exists() or forc
             )
     else:
         # Create the centered one-hot encoded ATAC peak array
-        atac_peak_array = utils.create_centered_peak_onehot_array(
-            peak_ids=dataset_peaks,
-            genome_fasta=genome_fasta_path,
-            chrom_sizes=chrom_sizes,
-            peak_id_to_idx=atac_peak_map,
-            flank_size=PEAK_FLANK_SIZE,
-            dtype=np.uint8,
-            pad_out_of_bounds=True,
-            num_workers=10,
-            show_progress=False,
-            chunk_size=10000,
-        )
+        with PhaseTimer("encode peaks to one-hot", peaks=len(dataset_peaks),
+                        window=2 * PEAK_FLANK_SIZE):
+            atac_peak_array = utils.create_centered_peak_onehot_array(
+                peak_ids=dataset_peaks,
+                genome_fasta=genome_fasta_path,
+                chrom_sizes=chrom_sizes,
+                peak_id_to_idx=atac_peak_map,
+                flank_size=PEAK_FLANK_SIZE,
+                dtype=np.uint8,
+                pad_out_of_bounds=True,
+                num_workers=10,
+                show_progress=False,
+                chunk_size=10000,
+            )
         atac_peak_tensor_u8 = torch.as_tensor(atac_peak_array, dtype=torch.uint8)
         atac_peak_tensor = atac_peak_tensor_u8.float()
 
         # Prepare the lookup tables needed to build the TF-TG input dataset for the test set
-        tg_to_peak_info, cell_to_idx, atac_mat, rna_mat, gene_to_rna_idx = utils.prepare_tftg_lookup_tables(
-            peak_to_gene=peak_to_gene,
-            atac_peak_map=atac_peak_map,
-            atac_pseudobulk=atac_pseudobulk,
-            rna_pseudobulk_norm=rna_pseudobulk_norm,
-            dataset_peaks=dataset_peaks,
-            common_cells=common_cells,
-            max_precompute_peaks=args.max_peaks_per_tg,
-        )
+        with PhaseTimer("build peak/expression lookup tables", cells=len(common_cells)):
+            tg_to_peak_info, cell_to_idx, atac_mat, rna_mat, gene_to_rna_idx = utils.prepare_tftg_lookup_tables(
+                peak_to_gene=peak_to_gene,
+                atac_peak_map=atac_peak_map,
+                atac_pseudobulk=atac_pseudobulk,
+                rna_pseudobulk_norm=rna_pseudobulk_norm,
+                dataset_peaks=dataset_peaks,
+                common_cells=common_cells,
+                max_precompute_peaks=args.max_peaks_per_tg,
+            )
 
         n_tgs_with_peaks = sum(
             len(tg_to_peak_info.get(tg_name, {}).get("peak_indices", [])) > 0
@@ -760,26 +809,30 @@ if not sample_full_grn_file.exists() or not cross_tf_tg_df_file.exists() or forc
             max_peaks_real=max_peaks_real,
         )
 
-        tftg_inputs_test = tf_tg_data_builder.build_tftg_inputs(
-            gt_test_df,
-            seed=BUILD_SEED,
-            silence=True,
-            **common_build_kwargs,
-        )
+        with PhaseTimer("assemble TF-TG edge bags", edges=len(gt_test_df),
+                        peaks_per_bag=max_peaks_real,
+                        cells_per_bag=args.max_cells_per_pair):
+            tftg_inputs_test = tf_tg_data_builder.build_tftg_inputs(
+                gt_test_df,
+                seed=BUILD_SEED,
+                silence=False,
+                **common_build_kwargs,
+            )
 
         # Write via a temp file and rename: a job killed mid-save must not leave a
         # truncated cache that the next run would load and trust.
         tmp_cache_file = dataset_cache_file.with_suffix(f".tmp{os.getpid()}")
-        torch.save(
-            {
-                "fingerprint": dataset_fingerprint,
-                "tftg_inputs": tftg_inputs_test,
-                "atac_peak_tensor": atac_peak_tensor_u8,
-                "dataset_peaks": dataset_peaks,
-            },
-            tmp_cache_file,
-        )
-        os.replace(tmp_cache_file, dataset_cache_file)
+        with PhaseTimer("write dataset cache", edges=len(tftg_inputs_test["label"])):
+            torch.save(
+                {
+                    "fingerprint": dataset_fingerprint,
+                    "tftg_inputs": tftg_inputs_test,
+                    "atac_peak_tensor": atac_peak_tensor_u8,
+                    "dataset_peaks": dataset_peaks,
+                },
+                tmp_cache_file,
+            )
+            os.replace(tmp_cache_file, dataset_cache_file)
         logging.info(
             f"Cached built dataset to {dataset_cache_file} "
             f"({dataset_cache_file.stat().st_size / 2**30:.1f} GB)"

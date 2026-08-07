@@ -82,6 +82,6 @@ python ${PROJECT_DIR}/generate_all_predictions.py \
     --max_peaks_per_tg 8 \
     --max_cells_per_pair 25 \
     --batch_size 256 \
-    --tf_peak_chunk_size 256 \
+    --tf_peak_chunk_size 1024 \
     --force_reload \
     --all_chromosomes

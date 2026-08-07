@@ -132,9 +132,20 @@ class TFTGRegulationModel(nn.Module):
         return self
 
     # Crop widths are quantized to this ladder so torch.compile sees a handful of shapes
-    # rather than one per batch. Powers of two keep the ladder short (a 256-multiple
-    # ladder would be ~22 rungs for mm10) at the cost of at most 2x over-cropping.
-    TF_CROP_LADDER = (256, 512, 1024, 2048, 4096)
+    # rather than one per batch.
+    #
+    # Rung count matters more than rung placement, because the edge universe is built
+    # TF-major (MultiIndex.from_product([tfs, tgs])), so a batch holds a single TF and the
+    # crop changes as the run walks from TF to TF. Every distinct (crop, n_chunks) pair
+    # costs an Inductor compile and a CUDA-graph recording, and once the total exceeds
+    # torch._dynamo.config.cache_size_limit they evict each other and recompile forever:
+    # a 5-rung ladder at tf_peak_chunk_size=256 measured 15-38 s/batch spikes recurring
+    # indefinitely, against 0.14-0.57 s/batch on already-compiled shapes.
+    #
+    # Three rungs give up almost nothing: mean crop 869 vs 836 for mm10 (6.43x vs 6.69x)
+    # and 903 vs 882 for hg38 (4.43x vs 4.54x), with only 1.1% / 1.6% of TFs falling
+    # through to the full table width.
+    TF_CROP_LADDER = (512, 1024, 2048)
 
     def _tf_lengths_per_slot(self, tf_idx, tf_mask_edge, use_resident_table, E, P):
         """Real TF protein length for each of the E*P (edge, peak) slots, as [E*P]."""

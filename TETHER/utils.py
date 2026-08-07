@@ -1626,10 +1626,22 @@ def build_tftg_inputs(
     n_total = len(tf_tg_df)
     log_every = max(1, n_total // 50)
 
+    build_started = time.time()
+
     for i, row in enumerate(tf_tg_df.itertuples(index=False), start=1):
         if silence == False:
             if i == 1 or i % log_every == 0 or i == n_total:
-                logging.info(f"Building compact TF-TG edges: {100 * i / n_total:.1f}% ({i:,}/{n_total:,})")
+                # Rate and ETA, not just a percentage: this loop runs for minutes on a
+                # whole-genome universe, and a bare percentage does not say whether it is
+                # progressing at a workable speed until it is nearly over.
+                elapsed = time.time() - build_started
+                rate = i / elapsed if elapsed > 0 else 0.0
+                eta = (n_total - i) / rate if rate > 0 else 0.0
+                logging.info(
+                    f"Building compact TF-TG edges: {100 * i / n_total:.1f}% "
+                    f"({i:,}/{n_total:,}) at {rate:,.0f} edges/s, "
+                    f"elapsed {elapsed / 60:.1f}m, ETA {eta / 60:.1f}m"
+                )
 
         tf_name = row.tf_name
         tg_name = row.tg_id
