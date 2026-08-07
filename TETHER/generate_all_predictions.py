@@ -45,6 +45,13 @@ torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 torch.set_float32_matmul_precision("high")
 
+# The TF-DNA chunk loop in TFTGRegulationModel runs a variable number of fixed-width
+# chunks depending on how many peak slots in the batch are unpadded, so a run legitimately
+# needs one compiled graph per distinct chunk count (at most max_peaks_per_tg * batch_size
+# / tf_peak_chunk_size of them, rounded up). The default limit of 8 is close enough to that
+# to risk silently falling back to eager partway through a run.
+torch._dynamo.config.cache_size_limit = 32
+
 TF_TG_MODEL_CHECKPOINTS = {
     "mESC": {
         "E7.5_rep1": CHKPT_DIR / "mESC" / "E7.5_rep1" / "tf_tg_train_E7.5_rep1_3675131" / "epoch_11_best_model.ckpt",

@@ -252,30 +252,50 @@ class TFTGRegulationModel(nn.Module):
             )
 
             if skip_padded_peaks:
-                valid_flat_idx = peak_mask_edge.reshape(-1).nonzero(as_tuple=True)[0]
-                n_valid = int(valid_flat_idx.numel())
+                mask_flat = peak_mask_edge.reshape(-1)
+                n_valid = int(mask_flat.sum())
 
                 if n_valid > 0:
-                    # Split the valid slots into equal chunks no larger than chunk_size,
-                    # so every call sees one shape within a batch and torch.compile does
-                    # not re-trace on a ragged tail. Sizing the chunk to the work
-                    # (rather than padding up to chunk_size) matters: padding to whole
-                    # chunk_size blocks costs up to chunk_size - 1 wasted rows, which
-                    # for a large chunk_size or a sparse mask is more work than simply
-                    # scoring everything. Here the padding is at most n_chunks - 1 rows.
-                    n_chunks = (n_valid + chunk_size - 1) // chunk_size
-                    effective_chunk = (n_valid + n_chunks - 1) // n_chunks
+                    # Every shape here has to be stable across batches or torch.compile
+                    # re-traces. An earlier version selected slots with .nonzero() and
+                    # sized the chunk exactly to the work; both shapes then tracked
+                    # n_valid, which is data-dependent and near-unique per batch. Dynamo
+                    # guarded on the nonzero() output size and recompiled every batch --
+                    # measured ~45 s/batch against 0.72 s once warm, i.e. slower than
+                    # never compiling at all.
+                    #
+                    # So: order the slots with a fixed-shape stable argsort (valid first)
+                    # instead of nonzero(), and round the chunk width up to CHUNK_QUANTUM.
+                    # That leaves only (width, n_chunks) varying, over a handful of
+                    # combinations. Capping the width at chunk_size bounds memory; the
+                    # quantum as a floor bounds the wasted rows when n_valid << chunk_size
+                    # -- the case that padding up to whole chunk_size blocks got wrong.
+                    #
+                    # Rows past n_valid address genuinely padded slots, so their logits
+                    # are meaningless, but binding_score is masked_fill'd by peak_mask
+                    # below before it is ever used. Computing them is wasted work, never
+                    # wrong work, and it is bounded by one quantum per batch.
+                    CHUNK_QUANTUM = 256
+                    quantized = ((n_valid + CHUNK_QUANTUM - 1) // CHUNK_QUANTUM) * CHUNK_QUANTUM
+                    width = min(chunk_size, max(CHUNK_QUANTUM, quantized))
+                    n_chunks = (n_valid + width - 1) // width
+                    total = n_chunks * width
 
-                    pad_len = n_chunks * effective_chunk - n_valid
-                    if pad_len:
+                    chunk_idx_source = torch.argsort(
+                        mask_flat.to(torch.uint8), descending=True, stable=True
+                    )
+                    if total > chunk_idx_source.numel():
+                        # Only when chunk_size is not a multiple of the quantum. The pad
+                        # repeats an already-masked slot, so it stays harmless.
                         chunk_idx_source = torch.cat(
-                            [valid_flat_idx, valid_flat_idx[-1].expand(pad_len)]
+                            [
+                                chunk_idx_source,
+                                chunk_idx_source[-1].expand(total - chunk_idx_source.numel()),
+                            ]
                         )
-                    else:
-                        chunk_idx_source = valid_flat_idx
 
-                    for start in range(0, chunk_idx_source.numel(), effective_chunk):
-                        sel = chunk_idx_source[start : start + effective_chunk]
+                    for start in range(0, total, width):
+                        sel = chunk_idx_source[start : start + width]
                         edge_idx = sel // P
 
                         tf_embedding_chunk, tf_mask_chunk = gather_tf_chunk(edge_idx)
@@ -286,18 +306,13 @@ class TFTGRegulationModel(nn.Module):
                             peak_embedding=peak_seq_flat[sel],
                         )
 
-                        # Scatter only the real entries; the padded tail repeats an
-                        # index already written and must not overwrite it.
-                        n_real = min(effective_chunk, n_valid - start)
                         # Copy values out before next compiled-model invocation.
                         # index_copy_ requires matching dtypes, and under autocast the
                         # TF-DNA model returns reduced precision while this buffer is
                         # fp32, so cast explicitly -- the .copy_ used on the path below
                         # would have done it implicitly.
                         binding_logits_flat.index_copy_(
-                            0,
-                            sel[:n_real],
-                            logits_chunk[:n_real].to(binding_logits_flat.dtype),
+                            0, sel, logits_chunk.to(binding_logits_flat.dtype)
                         )
             else:
                 # Original path, unchanged: score every slot including padding, with the
