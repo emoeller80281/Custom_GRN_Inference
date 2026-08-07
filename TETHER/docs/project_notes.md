@@ -1,6 +1,8 @@
 # Preprocessing
 
-The samples were processed independently using Muon.
+### Muon Filtering and QC
+
+The table below specifies the thresholds used for filtering each dataset.
 
 | Sample | Min Cells per Gene | Min Genes per Cell | Max Genes per Cell | Min Total Counts | Max Total Counts | Max Pct MT | Min Cells per Peak | Min Peaks per Cell | Max Peaks per Cell | Min Total Peak Counts | Max Total Peak Counts |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -11,6 +13,33 @@ The samples were processed independently using Muon.
 | K562 | 3 | 1000 | 10000 | 500 | 50000 | 20 | 1 | 100 | 20000 | 1000 | 50000 |
 | Mouse Hepatocytes 1 | 20 | 1000 | 6500 | 1000 | 50000 | 20 | 1 | 500 | 25000 | 1000 | 100000 |
 | Mouse Hepatocytes 3 | 20 | 1000 | 6500 | 1000 | 50000 | 20 | 1 | 500 | 25000 | 1000 | 100000 |
+
+These thresholds were used to filter the RNA and ATAC:
+
+#### RNA Filtering
+```python
+mu.pp.filter_var(rna, 'n_cells_by_counts', lambda x: (x >= MIN_CELLS_PER_GENE))
+mu.pp.filter_obs(rna, 'n_genes_by_counts', lambda x: (x >= MIN_GENES_PER_CELL) & (x <= MAX_GENES_PER_CELL))
+mu.pp.filter_obs(rna, 'total_counts', lambda x: (x >= MIN_TOTAL_COUNTS) & (x <= MAX_TOTAL_COUNTS))
+mu.pp.filter_obs(rna, 'pct_counts_mt', lambda x: x <= MAX_PCT_COUNTS_MT)
+```
+
+### ATAC Filtering
+```python
+mu.pp.filter_var(atac, 'n_cells_by_counts', lambda x: x >= MIN_CELLS_PER_PEAK)
+mu.pp.filter_obs(atac, 'n_genes_by_counts', lambda x: (x >= MIN_PEAKS_PER_CELL) & (x <= MAX_PEAKS_PER_CELL))
+mu.pp.filter_obs(atac, 'total_counts', lambda x: (x >= MIN_TOTAL_PEAK_COUNTS) & (x <= MAX_TOTAL_PEAK_COUNTS))
+```
+
+The RNA and ATAC counts per cell were normalized to 1e^{4}, log1p normalized, and scaled. After QC and normalization, a joint RNA-ATAC embedding was generated using [MOFA](https://pmc.ncbi.nlm.nih.gov/articles/PMC6010767/). This was used to calculate the nearest neighbors of each cell in the joint embedding space. Each cell's ATAC and RNA values were combined with its nearest neighbor's values two hops away using multi-hop diffusion. The resulting RNA and ATAC profile of each cell is therefore a weighted average of the molecular profile of cells within two steps of the cell-cell connectivity graph.
+
+Let
+$$C \in \real^{NxN}$$
+
+
+### Pseudobulk Method
+
+After the datasets are filtered and aligned by barcode, the single-cell data is used to generate pseudo-bulked metacells. This reduces the effect of technical dropout in the datasets and homogenizes the cell gene expression. Technical dropout introduces noise and sparsity into the dataset. This can hurt the ability for a predictive model to learn the effects of a low gene expression or peak accessibility value if the value is not consistently measured. Aggregating data from cells with similar expression and accessibility profiles to create metacells smooths the effects of dropout events. We 
 
 <br>
 <br>

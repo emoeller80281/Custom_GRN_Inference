@@ -31,6 +31,8 @@ class TFTGRegulationModel(nn.Module):
         # load_state_dict(strict=True) is unaffected in both directions.
         self.register_buffer("tf_embedding_table", None, persistent=False)
         self.register_buffer("tf_mask_table", None, persistent=False)
+        # Real (unpadded) protein length per TF, used to crop chunks -- see forward().
+        self.register_buffer("tf_length_table", None, persistent=False)
 
         self.peak_feature_proj = nn.Sequential(
             nn.Linear(4, d_model),  # binding, accessibility, distance_scaled, distance_weight
@@ -126,7 +128,34 @@ class TFTGRegulationModel(nn.Module):
         device = next(self.parameters()).device
         self.tf_embedding_table = tf_embeddings_tensor.to(device).float()
         self.tf_mask_table = tf_mask_tensor.to(device).bool()
+        self.tf_length_table = self.tf_mask_table.sum(dim=1).long()
         return self
+
+    # Crop widths are quantized to this ladder so torch.compile sees a handful of shapes
+    # rather than one per batch. Powers of two keep the ladder short (a 256-multiple
+    # ladder would be ~22 rungs for mm10) at the cost of at most 2x over-cropping.
+    TF_CROP_LADDER = (256, 512, 1024, 2048, 4096)
+
+    def _tf_lengths_per_slot(self, tf_idx, tf_mask_edge, use_resident_table, E, P):
+        """Real TF protein length for each of the E*P (edge, peak) slots, as [E*P]."""
+        if use_resident_table:
+            tf_len_edge = self.tf_length_table[tf_idx]          # [E]
+        else:
+            tf_len_edge = tf_mask_edge.sum(dim=1).long()        # [E]
+        return tf_len_edge.repeat_interleave(P)
+
+    def _chunk_crop_lengths(self, tf_len_sorted, n_chunks, width, table_len):
+        """Per-chunk crop width: the chunk's longest TF, rounded up the ladder."""
+        chunk_max = tf_len_sorted.view(n_chunks, width).amax(dim=1)
+        # One sync for the whole loop instead of one per chunk.
+        crops = []
+        for longest in chunk_max.tolist():
+            rung = next(
+                (r for r in self.TF_CROP_LADDER if r >= longest),
+                table_len,
+            )
+            crops.append(min(rung, table_len))
+        return crops
 
     def forward(
         self,
@@ -200,6 +229,7 @@ class TFTGRegulationModel(nn.Module):
         # Use only the first cell to avoid C-fold redundant TF-DNA inference.
         tf_embedding_edge = tf_embedding         # [E, T, D], or None when using tf_idx
         tf_mask_edge = tf_mask                  # [E, T], or the full table when using tf_idx
+        T = tf_mask_edge.shape[1]               # padded protein length of the table
         peak_sequences_edge = peak_sequences    # [E, P, L, 4]
         peak_distance_edge = peak_distance        # [E, P]
 
@@ -281,9 +311,21 @@ class TFTGRegulationModel(nn.Module):
                     n_chunks = (n_valid + width - 1) // width
                     total = n_chunks * width
 
-                    chunk_idx_source = torch.argsort(
-                        mask_flat.to(torch.uint8), descending=True, stable=True
+                    # Order slots by (valid first, then TF protein length). The validity
+                    # key is what the chunking above needs; the length key is what makes
+                    # the crop below worth doing. TF embeddings are padded to the longest
+                    # protein in the table -- 5,588 tokens for mm10 against a median of
+                    # 474 -- and tf_encoder plus the cross-attention run over every padded
+                    # position, so cost is ~linear in the padded length. Grouping slots of
+                    # similar length means each chunk can be cropped near its own longest
+                    # TF instead of the table's.
+                    tf_len_slot = self._tf_lengths_per_slot(
+                        tf_idx, tf_mask_edge, use_resident_table, E, P
                     )
+                    sort_key = torch.where(
+                        mask_flat, tf_len_slot, tf_len_slot + (T + 1)
+                    )
+                    chunk_idx_source = torch.argsort(sort_key, stable=True)
                     if total > chunk_idx_source.numel():
                         # Only when chunk_size is not a multiple of the quantum. The pad
                         # repeats an already-masked slot, so it stays harmless.
@@ -294,11 +336,28 @@ class TFTGRegulationModel(nn.Module):
                             ]
                         )
 
-                    for start in range(0, total, width):
+                    # Longest real TF in each chunk, rounded up to the crop ladder. Read
+                    # in one .tolist() before the loop rather than per chunk: each read
+                    # of a device tensor into Python is a sync and a graph break.
+                    chunk_crop_lengths = self._chunk_crop_lengths(
+                        tf_len_slot[chunk_idx_source[:total]], n_chunks, width, T
+                    )
+
+                    for chunk_i, start in enumerate(range(0, total, width)):
                         sel = chunk_idx_source[start : start + width]
                         edge_idx = sel // P
 
                         tf_embedding_chunk, tf_mask_chunk = gather_tf_chunk(edge_idx)
+
+                        # Drop trailing positions that are padding for every row in this
+                        # chunk. Masks are strict prefixes and the embeddings are zero
+                        # past the mask, so the dropped columns contribute nothing to the
+                        # masked attention or to masked_mean_pool -- exact, not an
+                        # approximation.
+                        crop = chunk_crop_lengths[chunk_i]
+                        if crop < tf_embedding_chunk.shape[1]:
+                            tf_embedding_chunk = tf_embedding_chunk[:, :crop]
+                            tf_mask_chunk = tf_mask_chunk[:, :crop]
 
                         logits_chunk = self.tf_peak_model(
                             tf_embedding=tf_embedding_chunk,
