@@ -85,13 +85,6 @@ export PYTHONFAULTHANDLER=1
 
 max_cells_per_pair=25
 max_peaks_per_tg=25
-
-# A/B switch for the frozen TF-DNA submodule's BatchNorm mode. Empty = historical
-# behaviour (batch statistics, stats mutating during training) -- what every existing
-# checkpoint was trained under. Set to "--keep_tf_dna_in_eval" to use running statistics,
-# which removes the train/inference mismatch and enables the fast path (measured
-# 1822 -> 311 ms/step). Checkpoints from the two settings are NOT comparable; train one
-# sample both ways and compare held-out AUPRC before switching the default.
 peak_flank_size=128
 pct_true_edges=1.0
 true_false_ratio=10.0
