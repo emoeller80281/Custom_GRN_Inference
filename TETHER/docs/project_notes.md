@@ -26,6 +26,8 @@ For more detailed information on the preprocessing pipeline and metacell generat
   <img src="../plots/model_architecture/TF_TG_model.png" width="650">
 </p>
 
+For a detailed review of the model architecture, see [model_architectures.md](./model_architectures.md)
+
 <br>
 <br>
 
@@ -57,9 +59,7 @@ The training, validation, and test datasets were stratified by chromosome to ens
 
 ### Building the Training Data
 
-One-hot encodings of the ATAC peaks sequences were generated using the ATAC-seq pseudobulk dataset. The RNA-seq pseudobulk dataset was used to create a set of candidate TFs and TGs that overlapped with the combined ground truth dataset for the cell type. The full universe of all potential TF-TG edge combinations were generated and labeled based on whether the edge was in the ground truth. For each True edge, 10 False edges were randomly sampled to generate a labeled training dataset. The peaks associated each TG were selected based on whether the center of the peak was located within 100 kb from the transcription start site (TSS) of the TG. TGs with no associated ATAC peaks and were filtered out of the dataset.
-
-The peak information is bagged for each TG 
+One-hot encodings of the ATAC peaks sequences were generated using the ATAC-seq pseudobulk dataset. The RNA-seq pseudobulk dataset was used to create a set of candidate TFs and TGs that overlapped with the combined ground truth dataset for the cell type. The full universe of all potential TF-TG edge combinations were generated and labeled based on whether the edge was in the ground truth. For each True edge, 10 False edges were randomly sampled to generate a labeled training dataset. Peaks associated with each TG were selected based on whether the center of the peak was located within 100 kb from the transcription start site (TSS) of the TG. TGs with no associated ATAC peaks and ATAC peaks with no associated TGs were filtered out of the dataset. 
 
 The training, validation, and test datasets are created by stratifing the TGs and peaks by chromosome, using the same split as the TF-DNA binding model.
 
