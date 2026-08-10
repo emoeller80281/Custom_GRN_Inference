@@ -19,6 +19,7 @@ class TFTGRegulationModel(nn.Module):
         num_heads=4,
         dropout=0.1,
         tf_peak_chunk_size=256,
+        keep_tf_peak_model_in_eval=False,
     ):
         super().__init__()
 
@@ -33,6 +34,10 @@ class TFTGRegulationModel(nn.Module):
         self.register_buffer("tf_mask_table", None, persistent=False)
         # Real (unpadded) protein length per TF, used to crop chunks -- see forward().
         self.register_buffer("tf_length_table", None, persistent=False)
+
+        # See train() below. Default False preserves the behaviour every existing
+        # checkpoint was trained under.
+        self.keep_tf_peak_model_in_eval = keep_tf_peak_model_in_eval
 
         self.peak_feature_proj = nn.Sequential(
             nn.Linear(4, d_model),  # binding, accessibility, distance_scaled, distance_weight
@@ -114,6 +119,32 @@ class TFTGRegulationModel(nn.Module):
 
         else:
             raise ValueError(f"Unknown pooling mode: {mode}")
+
+    def train(self, mode: bool = True):
+        """Standard train()/eval(), except the frozen TF-DNA submodule can be pinned.
+
+        nn.Module.train() recurses, so Lightning calling .train() each epoch flips the
+        pretrained TF-DNA model into train mode even though its parameters have
+        requires_grad=False and it is only ever called under no_grad. Freezing the
+        weights does not freeze the *mode*: its three BatchNorm1d layers then normalise
+        by batch statistics over whatever (TF, peak) pairs happen to share a chunk, and
+        keep overwriting their own running_mean/running_var.
+
+        Measured on the real mm10 checkpoint, that is not a rounding difference --
+        eval-mode and train-mode binding logits differ by mean 1.14 (logit sd 6.13),
+        2.1% of pairs cross the 0.5 probability boundary, and the running means drift
+        1.7-12.6% over 200 batches. It also means the TF-TG model trains against batch
+        statistics and is then evaluated against running statistics.
+
+        Pinning eval fixes that inconsistency and makes the padding-skip/crop fast path
+        legal during training (measured 1822 -> 311 ms/step), but it changes what a newly
+        trained model sees, so it is opt-in: every existing checkpoint was trained with
+        this False.
+        """
+        super().train(mode)
+        if self.keep_tf_peak_model_in_eval:
+            self.tf_peak_model.eval()
+        return self
 
     def set_tf_embedding_table(self, tf_embeddings_tensor, tf_mask_tensor):
         """

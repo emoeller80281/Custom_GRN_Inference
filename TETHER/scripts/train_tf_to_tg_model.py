@@ -59,7 +59,7 @@ def create_new_tf_tg_regulation_model(
     checkpoint_path: Path | None = None,
     d_model: int = 128,
     tf_peak_chunk_size: int = 128,
-    
+    keep_tf_peak_model_in_eval: bool = False,
 ) -> tf_to_tg_module.TFTGRegulationModel:
 
     # 1) Recreate the base TF→DNA model with the same hyperparameters
@@ -102,6 +102,13 @@ def create_new_tf_tg_regulation_model(
         pretrained_tf_peak_model=trained_tf_peak_model,
         d_model=d_model,
         tf_peak_chunk_size=tf_peak_chunk_size,
+        keep_tf_peak_model_in_eval=keep_tf_peak_model_in_eval,
+    )
+    logging.info(
+        "Frozen TF-DNA submodule will run in "
+        + ("EVAL mode during training (running BatchNorm stats, fast path enabled)"
+           if keep_tf_peak_model_in_eval else
+           "TRAIN mode during training (batch BatchNorm stats -- the historical default)")
     )
 
     # 5) Optionally load TF→TG checkpoint
@@ -240,6 +247,20 @@ if __name__ == "__main__":
     parser.add_argument("--num_nodes", type=int, default=1, help="Number of nodes to use for training")
     parser.add_argument("--job_id", type=str, help="SLURM job ID for this training run")
     parser.add_argument("--sample_pairs", type=int, default=None, help="Number of TF-TG pairs to sample for training (default: use all)")
+    parser.add_argument(
+        "--keep_tf_dna_in_eval",
+        action="store_true",
+        help=(
+            "Keep the frozen TF-DNA submodule in eval mode for the whole run, so its "
+            "BatchNorm layers use their running statistics instead of per-batch ones and "
+            "stop mutating those statistics. This is how a frozen feature extractor is "
+            "normally used and it removes a train/inference mismatch, but it changes the "
+            "binding scores the TF-TG model trains against (mean 1.14 logits, 2.1% of "
+            "pairs crossing p=0.5), so checkpoints trained with it are NOT comparable to "
+            "existing ones. Also enables the padding-skip/crop fast path: 1822 -> 311 "
+            "ms/step measured at max_peaks_per_tg=100, max_cells_per_pair=24, batch 32."
+        ),
+    )
     parser.add_argument("--max_peaks_per_tg", type=int, required=False, default=None, help="Maximum number of peaks to consider per TG (default: 64)")
     parser.add_argument("--max_cells_per_pair", type=int, default=8, help="Maximum number of cells to sample per TF-TG pair (default: 8)")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size for training (default: 32)")
@@ -382,10 +403,11 @@ if __name__ == "__main__":
     log_once(f"Train/Val/Test sizes: {len(train_dataset)}, {len(val_dataset)}, {len(test_dataset)}")
 
     tf_tg_model = create_new_tf_tg_regulation_model(
-        tf_bind_model_path, 
-        tf_embeddings_tensor, 
+        tf_bind_model_path,
+        tf_embeddings_tensor,
         tf_mask_tensor,
-        checkpoint_path=checkpoint_path
+        checkpoint_path=checkpoint_path,
+        keep_tf_peak_model_in_eval=args.keep_tf_dna_in_eval,
         )
 
     criterion = torch.nn.BCEWithLogitsLoss()

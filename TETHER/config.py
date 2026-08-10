@@ -16,17 +16,17 @@ CHKPT_DIR = PROJECT_DIR / "checkpoints"
 # cell_type="Macrophage"
 # sample_name="buffer_2"
 
-species = "mm10"
-cell_type="mESC"
-sample_name="E7.5_rep1"
+# species = "mm10"
+# cell_type="mESC"
+# sample_name="E7.5_rep1"
 
 # species = "mm10"
 # cell_type="mouse_liver"
 # sample_name="liver_4"
 
-# species = "mm10"
-# cell_type="mouse_hepatocytes"
-# sample_name="hepatocytes_3"
+species = "mm10"
+cell_type="mouse_hepatocytes"
+sample_name="hepatocytes_3"
 
 # species = "hg38"
 # cell_type="K562"

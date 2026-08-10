@@ -57,6 +57,17 @@ torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 torch.set_float32_matmul_precision("high")
 
+# This script loads its models with compile_model=True. TFTGRegulationModel crops the TF
+# embedding to a per-chunk width, so it compiles one graph per distinct (crop width, chunk
+# count) pair -- around 8-12 of them. The default limit of 8 sits underneath that, and when
+# it is exceeded the graphs evict each other and every batch recompiles: throughput drops
+# to seconds per batch and nothing is logged to say why.
+#
+# On a V100 this is currently masked, because the bfloat16 autocast below makes Inductor
+# skip compilation entirely. On an A100 (compute capability 8.0+) bf16 compiles for real
+# and the limit would bite.
+torch._dynamo.config.cache_size_limit = 128
+
 TF_TG_MODEL_CHECKPOINTS = {
     "mESC": {
         "E7.5_rep1": CHKPT_DIR / "mESC" / "E7.5_rep1" / "tf_tg_train_E7.5_rep1_3675131" / "epoch_11_best_model.ckpt",

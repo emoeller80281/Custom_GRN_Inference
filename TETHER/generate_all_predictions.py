@@ -1,5 +1,6 @@
 import sys
 import os
+import math
 import time
 import hashlib
 import resource
@@ -353,12 +354,54 @@ def generate_model_predictions(model, data_loader, device, tf_idx_to_name, tg_id
     tg_indices_list = []
     all_scores = []
 
+    # Where the loop actually spends its time. A batches/second number cannot distinguish
+    # "the GPU is busy" from "the main process is blocked waiting for the DataLoader",
+    # and those have opposite fixes. Deliberately no torch.cuda.synchronize() is inserted:
+    # that would serialise CPU and GPU and destroy the overlap being measured. Instead:
+    #
+    #   wait_data  time blocked in next(iterator)  -> exposed DataLoader cost
+    #   to_device  host->device copies
+    #   submit     launching the forward (returns immediately, work is async)
+    #   gpu_wait   the .cpu() on the scores, which is the natural sync point, so this is
+    #              GPU compute that was NOT hidden behind anything else
+    #
+    # If wait_data dominates, the input pipeline is the bottleneck. If gpu_wait dominates,
+    # the model is.
+    stage = {"wait_data": 0.0, "to_device": 0.0, "submit": 0.0, "gpu_wait": 0.0}
+    n_timed = 0
+    # Per-batch totals, kept so the tail can be reported. A median hides exactly the
+    # failure this instrumentation exists to catch: mode="reduce-overhead" measured a
+    # 182 ms median against a 2653 ms p90, so the median looked healthy while the run
+    # took 7x longer than it implied. Always read mean and p90 here, not the median.
+    batch_times = []
+    loop_started = time.perf_counter()
+    log_every = max(1, len(data_loader) // 10)
+
+    n_batches = len(data_loader)
+    updates_per_percent = max(1, math.ceil(n_batches / 100))
+
     with torch.inference_mode():
-        for batch in tqdm(data_loader, desc="Evaluating", ncols=100):
+        iterator = iter(data_loader)
+        pbar = tqdm(
+            total=n_batches,
+            desc="Evaluating",
+            ncols=100,
+            miniters=updates_per_percent,
+            mininterval=0,
+        )
+        while True:
+            t0 = time.perf_counter()
+            try:
+                batch = next(iterator)
+            except StopIteration:
+                break
+            t1 = time.perf_counter()
+
             tf_indices = batch["tf_idx"].detach().cpu().numpy().ravel()
             tg_indices = batch["tg_idx"].detach().cpu().numpy().ravel()
 
             batch = tf_to_tg_module.move_batch_to_device(batch, device)
+            t2 = time.perf_counter()
 
             with torch.autocast(device_type="cuda", dtype=autocast_dtype, enabled=(device.type == "cuda")):
                 edge_logits, _ = model(
@@ -377,10 +420,53 @@ def generate_model_predictions(model, data_loader, device, tf_idx_to_name, tg_id
                 )
 
             scores = torch.sigmoid(edge_logits.float())
+            t3 = time.perf_counter()
+
+            scores_host = scores.detach().cpu().numpy().ravel()
+            t4 = time.perf_counter()
+
+            stage["wait_data"] += t1 - t0
+            stage["to_device"] += t2 - t1
+            stage["submit"] += t3 - t2
+            stage["gpu_wait"] += t4 - t3
+            batch_times.append(t4 - t0)
+            n_timed += 1
 
             tf_indices_list.append(tf_indices)
             tg_indices_list.append(tg_indices)
-            all_scores.append(scores.detach().cpu().numpy().ravel())
+            all_scores.append(scores_host)
+
+            pbar.update(1)
+            if n_timed % log_every == 0:
+                elapsed = time.perf_counter() - loop_started
+                parts = " ".join(
+                    f"{k}={100 * v / max(elapsed, 1e-9):4.1f}%" for k, v in stage.items()
+                )
+                logging.info(
+                    f"[loop] {n_timed:,}/{len(data_loader):,} batches, "
+                    f"{elapsed / n_timed * 1000:.0f} ms/batch  |  {parts}"
+                )
+        pbar.close()
+
+    if n_timed:
+        elapsed = time.perf_counter() - loop_started
+        ordered = sorted(batch_times)
+        pct = lambda q: ordered[min(len(ordered) - 1, int(q * len(ordered)))] * 1000
+        logging.info(
+            f"[loop] FINAL {n_timed:,} batches in {format_duration(elapsed)} "
+            f"({elapsed / n_timed * 1000:.0f} ms/batch mean)"
+        )
+        logging.info(
+            f"[loop]   distribution: median {pct(0.5):.0f} ms | p90 {pct(0.9):.0f} ms | "
+            f"p99 {pct(0.99):.0f} ms | max {ordered[-1] * 1000:.0f} ms   "
+            f"(mean/median = {(elapsed / n_timed * 1000) / max(pct(0.5), 1e-9):.1f}x "
+            f"-- a ratio well above 1 means a heavy tail, not slow steady-state work)"
+        )
+        for k, v in stage.items():
+            logging.info(
+                f"[loop]   {k:<10}{v / n_timed * 1000:8.1f} ms/batch  "
+                f"{100 * v / max(elapsed, 1e-9):5.1f}% of loop"
+            )
 
     all_tf_indices_flat = np.concatenate(tf_indices_list)
     all_tg_indices_flat = np.concatenate(tg_indices_list)

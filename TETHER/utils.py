@@ -1049,10 +1049,13 @@ def load_tf_dna_model(
 
     if compile_model:
         logging.info("Compiling loaded TF-DNA core model.")
-        lit_tf_dna_model.model = torch.compile(
-            lit_tf_dna_model.model,
-            mode="reduce-overhead",
-        )
+            # No mode="reduce-overhead". That enables CUDA graphs, which re-record
+            # whenever an input shape reappears after eviction. TFTGRegulationModel
+            # deliberately produces several shapes (one per TF crop width x chunk count),
+            # and measured against plain compile on TF-major batches the median was 1.9x
+            # worse while p90 was 14.6x worse (2653 ms vs 181 ms) -- the tail, not the
+            # median, is what a full run pays. Default mode: 94 ms median / 181 ms p90.
+        lit_tf_dna_model.model = torch.compile(lit_tf_dna_model.model)
         
     return lit_tf_dna_model
 
@@ -1167,10 +1170,13 @@ def load_tf_tg_regulation_model(
     # -----------------------------
     if compile_model:
         logging.info("Compiling loaded TF-TG core model.")
-        lit_tf_tg_model.model = torch.compile(
-            lit_tf_tg_model.model,
-            mode="reduce-overhead",
-        )
+            # No mode="reduce-overhead". That enables CUDA graphs, which re-record
+            # whenever an input shape reappears after eviction. TFTGRegulationModel
+            # deliberately produces several shapes (one per TF crop width x chunk count),
+            # and measured against plain compile on TF-major batches the median was 1.9x
+            # worse while p90 was 14.6x worse (2653 ms vs 181 ms) -- the tail, not the
+            # median, is what a full run pays. Default mode: 94 ms median / 181 ms p90.
+        lit_tf_tg_model.model = torch.compile(lit_tf_tg_model.model)
 
     return lit_tf_tg_model
 
@@ -1631,9 +1637,7 @@ def build_tftg_inputs(
     for i, row in enumerate(tf_tg_df.itertuples(index=False), start=1):
         if silence == False:
             if i == 1 or i % log_every == 0 or i == n_total:
-                # Rate and ETA, not just a percentage: this loop runs for minutes on a
-                # whole-genome universe, and a bare percentage does not say whether it is
-                # progressing at a workable speed until it is nearly over.
+                # Rate and ETA
                 elapsed = time.time() - build_started
                 rate = i / elapsed if elapsed > 0 else 0.0
                 eta = (n_total - i) / rate if rate > 0 else 0.0
