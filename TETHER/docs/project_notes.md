@@ -11,16 +11,43 @@ We trained and evaluated this framework across seven mouse and human single-cell
 # Outline
 ### Introduction
 1. Gene regulatory networks
-    - What are they?
-    - Why are they useful?
+    - What are GRNs?
+        - GRNs are directed networks showing the regulatory relationships between TFs and TGs, where the nodes are the genes and the edges are the regulatory relationships between them.
+    - Why are they important?
+        - Understanding the logical structure of GRNs allows us to make predictions about how perturbations to a gene or set of genes will affect how the cell functions.
+        - The ability to accurately model GRNs will allow researchers to test hypotheses *in-silico* to narrow down candidate drug targets, rather than running large and expensive drug screens.
+        - The ability to accurately model protein folding with AlphaFold2 has demonstrated the usefulness of predictive models in biology for aiding researchers in designing their experiments.
     - Why is it challenging to make them?
+        - Direct effects are difficult to distinguish from indirect effects
+        - Limited amount of data from individual cell types and tissues
+        - Limited and poor-quality cell type-specific ground truth datasets
+        - Non-linear relationships that change gene regulation
+            - TFs interact with each other to regulate genes
+            - TFs change their behavior between different cell types
+        - Bias in which genes are studied; some have more experimental evidence than others
+        - Experimental methods
+            - Experimental results from one cell type and condition are not necessarily generalizable to other conditions and cell types.
+            - Costly and time-consuming
+        - Computational methods
+            - Bulk sequencing doesn't capture cell-cell heterogeneity
+            - Level of RNA expression does not directly translate to the level of protein expression
+            - Sparsity causes high noise in single-cell data
+        - Directed vs Undirected relationships
+            - Co-expression methods don't show direction
         - What have other people tried?
-        - Why haven't they worked?
+            - Co-expression networks
+                - Does not show which genes are regulators and which are targets
+            - Motif scanning
+                - DNA surrounding motifs alters TF binding affinity
     - What would be the benefits of a tool that could produce accurate GRNs?
 2. Single-cell Multiomics
     - What is it?
-    - Why is it better than scRNAseq or scATACseq alone?
-    - Why does it help us with predicting GRNs?
+        - Measure both the gene expression and chromatin accessibility from the same individual cells
+    - Why is it better than scRNAseq or scATACseq alone? Why does it help us with predicting GRNs?
+        - Shows which regions of the chromatin are accessible around a target gene AND the gene expression
+        - Allows us to model the biology of a TF binding to regulatory regions of open chromatin to control TG expression
+    - What are its limitations?
+        - Large number of cells per individual, but each cell is not an independent observation.
 3. What are some other single-cell multiomic GRN inference methods?
     - What have they tried?
     - How have they fallen short?
