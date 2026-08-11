@@ -281,11 +281,11 @@ def load_tether_records() -> tuple[list[dict], pd.DataFrame]:
     records = []
     phase_frames = []
 
-    tsv_files = sorted(tether_resource_dir.glob("resource_usage_*.tsv"))
+    tsv_files = sorted(tether_resource_dir.glob("resource_usage_*_all_chroms.tsv"))
 
     if not tsv_files:
         logging.warning(
-            f"No resource_usage_*.tsv found in {tether_resource_dir}. TETHER rows will "
+            f"No resource_usage_*_all_chroms.tsv found in {tether_resource_dir}. TETHER rows will "
             f"be missing -- generate_all_predictions.py writes these, so re-run it."
         )
         return records, pd.DataFrame()

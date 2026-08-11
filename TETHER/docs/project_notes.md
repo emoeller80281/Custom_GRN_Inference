@@ -1,5 +1,7 @@
 # Project Overview
 
+Eukaryotic cells control the activation and suppression of gene expression through complicated and condition-specific interactions between transcription factors, intermediate DNA binding proteins, and cis-regulatory elements such as enhancers and promoters. Transcription factors bind to these cis-regulatory elements to trigger transcription via the formation of the transcription pre-initiation complex [1](https://www.nature.com/articles/nrg3207). These TF to TG regulatory relationships can be represented by gene regulatory networks, where nodes represent genes and directed edges represent the regulatory relationships between them.
+
 Gene regulatory networks (GRNs) define how cells sense, interpret, and respond to biological signals. These networks are composed of directed edges between transcription factors (TFs) and the target genes (TGs) that they regulate. Changes in patterns of TF-TG regulation can alter cellular identity, developmental programs, and disease-associated transcriptional states. Although experimental approaches such as ChIP-seq, TF knockout screens, and perturb-seq can identify regulatory relationships, these methods are costly, labor-intensive, and often specific to a particular organism, cell type, or experimental condition. As a result, comprehensive and context-specific GRN mapping remains a major challenge.
 
 Single-cell multiomic RNA and ATAC sequencing provides a powerful opportunity to address this challenge by jointly measuring gene expression and chromatin accessibility in individual cells. However, existing computational GRN inference methods often struggle to distinguish true TF-TG regulatory relationships from indirect associations. To improve TF-TG prediction, we developed a new deep learning framework that integrates TF protein structure, DNA sequence, chromatin accessibility, peak-to-gene distance, and TF/TG expression to infer cell type- and context-specific regulatory interactions.
@@ -11,6 +13,7 @@ We trained and evaluated this framework across seven mouse and human single-cell
 # Outline
 ### Introduction
 1. Gene regulatory networks
+    - 
     - What are GRNs?
         - GRNs are directed networks showing the regulatory relationships between TFs and TGs, where the nodes are the genes and the edges are the regulatory relationships between them.
     - Why are they important?
@@ -37,6 +40,7 @@ We trained and evaluated this framework across seven mouse and human single-cell
         - What have other people tried?
             - Co-expression networks
                 - Does not show which genes are regulators and which are targets
+                - Does not include information about the cis-regulatory elements that TFs are using to regulate their TGs
             - Motif scanning
                 - DNA surrounding motifs alters TF binding affinity
     - What would be the benefits of a tool that could produce accurate GRNs?
@@ -46,6 +50,7 @@ We trained and evaluated this framework across seven mouse and human single-cell
     - Why is it better than scRNAseq or scATACseq alone? Why does it help us with predicting GRNs?
         - Shows which regions of the chromatin are accessible around a target gene AND the gene expression
         - Allows us to model the biology of a TF binding to regulatory regions of open chromatin to control TG expression
+        - scRNA-seq alone does not capture the 
     - What are its limitations?
         - Large number of cells per individual, but each cell is not an independent observation.
 3. What are some other single-cell multiomic GRN inference methods?
@@ -58,13 +63,15 @@ We trained and evaluated this framework across seven mouse and human single-cell
 
 ### Methods
 1. Dataset sources
-2. Ground truth sources
-3. Model architectures
+2. Preprocessing
+3. Ground truth sources
+4. Model architectures
     - TF-DNA binding model
     - TF-TG regulation model
-4. Training data generation
-5. Model performance evaluation metrics
-6. Evaluating biological questions using the model
+5. Training data generation
+6. Model performance evaluation metrics
+7. Evaluating biological questions using the model
+    - Identifying genes related to mouse embryogenesis
 
 ### Results
 1. TF-DNA binding prediction performance
@@ -232,3 +239,10 @@ The resources required to generate a GRN using each GRN inference method were re
 </table>
 
 > NOTE: Our method uses one NVIDIA V100 GPU for model inference, while the other methods use only CPUs. 
+
+## References
+
+<p style="padding-left: 2em; text-indent: -2em;">
+  1. Spitz, F., Furlong, E. Transcription factors: from enhancer binding to developmental control. Nat Rev Genet 13, 613–626 (2012). https://doi.org/10.1038/nrg3207
+</p>
+
