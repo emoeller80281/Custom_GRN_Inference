@@ -62,21 +62,25 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import numpy as np
 import pandas as pd
 
-# cluster -> (final label, support tier, one-line justification)
+# cluster -> (expected n_cells, expected centroid label, final label, support tier, justification)
+#
+# The two "expected" fields are a staleness fingerprint, not part of the scientific call: this
+# dict is a pure string-keyed lookup on cluster ID, checked *before* the marker-revalidation
+# branch below, so a rerun that renumbers Leiden clusters would otherwise silently apply an old
+# override to a different population. Captured from final_atlas_labels.csv / this run.
 OVERRIDES = {
-    "2":  ("Caudal Mesoderm", "marker_override",
+    "2":  (3139, "Somitic mesoderm", "Caudal Mesoderm", "marker_override",
            "Tbx6 14.8x rank1, Aldh1a2 4.6x, Hoxb9 3.3x; Pax2/Wt1 depleted"),
-    "18": ("ExE mesoderm", "marker_override",
+    "18": (2068, "Mesenchyme", "ExE mesoderm", "marker_override",
            "Postn 37x rank1, Bmp4 5.4x rank1, Hand1 5.2x rank1; Prrx1 0.42x rank14"),
-    "21": ("Surface ectoderm", "marker_override",
+    "21": (462, "Mesenchyme", "Surface ectoderm", "marker_override",
            "Krt8 2.4x rank1, Krt18 2.8x rank1, Trp63 2.5x; Pdgfra/Prrx1 depleted"),
-    "0":  ("Unresolved (low complexity)", "unresolved",
+    "0":  (4468, "Surface ectoderm", "Unresolved (low complexity)", "unresolved",
            "1439 median genes vs 3159-5166 elsewhere; 46% E7.75_rep1 + 31% E8.5_rep2; "
            "both centroid candidates contradicted; epiblast-like but spans E7.75-E8.5"),
-    "13": ("Unresolved (low complexity)", "unresolved",
+    "13": (156, "Blood progenitors 1", "Unresolved (low complexity)", "unresolved",
            "Runx1 8x but Cd34 0.00 rank23, Klf1 0.00 rank23, Kit rank21, Tal1 0.34x; "
            "lowest complexity of any cluster"),
 }
@@ -114,9 +118,17 @@ def main():
     rows = []
     for c in sorted(cl_to_centroid.index, key=lambda x: int(x) if x.isdigit() else x):
         base = cl_to_centroid[c]
+        actual_n = int((cl == c).sum())
         supported = bool(val.loc[c, "supported"]) if c in val.index else False
         if c in OVERRIDES:
-            final, tier, why = OVERRIDES[c]
+            expected_n, expected_base, final, tier, why = OVERRIDES[c]
+            if actual_n != expected_n or base != expected_base:
+                raise RuntimeError(
+                    f"cluster {c} override is stale: expected {expected_n} cells / centroid "
+                    f"'{expected_base}', found {actual_n} cells / centroid '{base}'. Leiden "
+                    "renumbering likely changed what this cluster ID refers to -- re-run "
+                    "inspect_unresolved_clusters.py and re-adjudicate before trusting this label."
+                )
         elif supported:
             final, tier, why = base, "centroid+marker", (
                 f"canonical markers z={val.loc[c,'z']} rank={val.loc[c,'rank']}")
@@ -126,7 +138,7 @@ def main():
             raise RuntimeError(
                 f"cluster {c} failed marker validation but has no adjudicated override. "
                 "Re-run inspect_unresolved_clusters.py and add a decision.")
-        rows.append({"cluster": c, "n_cells": int((cl == c).sum()),
+        rows.append({"cluster": c, "n_cells": actual_n,
                      "centroid_label": base, "final_label": final,
                      "support": tier, "evidence": why})
     df = pd.DataFrame(rows)
@@ -180,7 +192,7 @@ def main():
         "cells_total": tot,
         "pct_confidently_labelled": round(
             100 * (tot - int(n_by_tier.get("unresolved", 0))) / tot, 1),
-        "overrides": {k: v[0] for k, v in OVERRIDES.items()},
+        "overrides": {k: v[2] for k, v in OVERRIDES.items()},
     }, indent=2, default=str))
 
     if not a.no_write_h5mu:

@@ -19,6 +19,10 @@ import pandas as pd
 import scipy.sparse as sp
 
 # cluster -> (competing candidates, discriminating genes)
+#
+# Cluster IDs are pinned to the specific Leiden run documented in handoff.md. Re-verify these
+# still refer to the same populations (e.g. via n_cells) before reusing this dict after any
+# re-clustering -- nothing here checks that automatically.
 DISPUTES = {
     "0":  (["Surface ectoderm", "Gut", "Epiblast"],
            ["Pou5f1", "Utf1", "Slc7a3", "Nanog",           # epiblast

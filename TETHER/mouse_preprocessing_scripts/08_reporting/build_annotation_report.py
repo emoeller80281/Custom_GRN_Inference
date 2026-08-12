@@ -61,7 +61,6 @@ def main():
     cent = pd.read_csv(d / "centroid_annotation_rna_leiden.csv", dtype={"cluster": str})
     fsum = json.loads((d / "final_labels_summary.json").read_text())
     csum = json.loads((d / "centroid_annotation_summary.json").read_text())
-    comb = json.loads((d / "combine_summary.json").read_text()) if (d / "combine_summary.json").exists() else {}
     tp = pd.read_csv(d / "final_timepoint_composition.csv", index_col=0)
 
     n_cells = fsum["cells_total"]

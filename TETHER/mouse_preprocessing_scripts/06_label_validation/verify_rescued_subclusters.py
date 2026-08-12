@@ -35,6 +35,11 @@ import scipy.sparse as sp
 warnings.filterwarnings("ignore")
 
 # subcluster -> (identity, markers, reference cluster in the integrated object)
+#
+# "reference_cluster" IDs are pinned to the specific Leiden run documented in handoff.md; the
+# genuine/ambient verdict itself only compares against the same-library floor and doesn't
+# depend on this ID being current, but the printed "vs reference cluster" context does. Re-verify
+# before reusing after any re-clustering.
 CANDIDATES = {
     "3": {"identity": "Cardiomyocytes",
           "markers": ["Ttn", "Myh6", "Myl7", "Actc1", "Tnnt2", "Nkx2-5", "Slc8a1"],

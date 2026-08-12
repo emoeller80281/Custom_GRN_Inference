@@ -85,15 +85,17 @@ provenance).
 
 ## 4. The annotation history — read this before re-annotating
 
-Three methods were run. **Two produced confident, wrong answers.** Both failure scripts are
-kept in `05_atlas_annotation/` on purpose, because the failures are easy to repeat.
+Three methods were run. **Two produced confident, wrong answers.** Both failure scripts were
+kept in `05_atlas_annotation/` for a while on purpose, since the failures are easy to repeat —
+as of the 2026-08-12 review pass (§9) they've been **deleted**; nothing downstream ever read
+their output, and the write-up below plus in `README.md` is what needs to survive, not the code.
 
-1. **Marker-signature scoring** (`annotate_combined_pijuansala.py`) — **rejected.** Called
-   2,366 cells PGC while `Dppa3`/`Nanos3` were flat zero, driven by non-specific
+1. **Marker-signature scoring** (`annotate_combined_pijuansala.py`, removed) — **rejected.**
+   Called 2,366 cells PGC while `Dppa3`/`Nanos3` were flat zero, driven by non-specific
    `Prdm1`/`Ifitm3`, and flagged those clusters *confident*. Lesson: a large margin means
    the winner beat the runner-up, not that specific genes drove it.
 
-2. **kNN transfer in a joint Harmony embedding** (`label_transfer_pijuansala.py`) —
+2. **kNN transfer in a joint Harmony embedding** (`label_transfer_pijuansala.py`, removed) —
    **rejected.** Put 32.6% of cells into "Pharyngeal mesoderm", the consensus for 8 of 23
    clusters, including clusters independently verified as Pax6+ neurectoderm, Meox1+
    somitic and Pou5f1-high epiblast, at 0.78–0.89 confidence. The atlas labels were checked
@@ -237,15 +239,107 @@ composition-over-time analyses.**
 
 ## 8. Suggested next steps
 
-1. **Run `estimate_ambient_contamination.py`** (untested — verify it) to get ρ. This is the
-   highest-value next action; it decides everything below.
-2. If ρ is material, **install `celda` and re-run with decontX** from step 02 onward. This
-   is the change most likely to rescue the 4,374 unresolved cells; sub-clustering alone
-   cannot.
-3. Optionally merge sub 3's 94 cardiomyocytes into cluster 22 in `celltype_final`. At 0.2%
+1. **Decide whether this pipeline's output is meant to feed the GRN model at all.** Confirmed
+   by grep (2026-08-12): zero references anywhere in `TETHER/scripts/`, `TETHER/utils.py`,
+   `TETHER/config.py`, `TETHER/muon_preprocessing.py`, or any notebook to `mESC_combined.h5mu`,
+   `celltype_final`, or `mouse_preprocessing_scripts` itself. The GRN model's training cache
+   (`TETHER/cached_data/mESC_cache/`) is already populated from the same raw gastrulation
+   samples via the older, uncoordinated `muon_preprocessing.py` + `config.py` route (see
+   `TETHER/docs/preprocessing_detailed.md`), which has no cell-type annotation step at all.
+   `CLAUDE.md` doesn't mention this pipeline exists. So the entire validated annotation effort
+   here — three methods tried, one calibrated and adopted, marker-validated, cross-checked
+   against a "free" biological timing signal — currently has **no consumer**. Whether/how to
+   wire `celltype_final` into GRN model training, or whether the two pipelines are
+   intentionally meant to stay separate, is a call only the PI can make; at minimum, `CLAUDE.md`
+   should mention this pipeline exists so a future session can discover it.
+2. Ambient RNA correction is unmeasured and, as of 2026-08-12, **deliberately deferred**. No
+   raw/unfiltered droplet matrix exists anywhere for these samples — confirmed directly this
+   session: the `mESC_10x_raw/` directory every script points at as "raw" has zero barcodes
+   below 2,256 UMIs (median 32,752), i.e. it's already a called-cell matrix, not a true raw
+   matrix with an empty-droplet population. That rules out CellBender, SoupX's `autoEstCont`,
+   and any empty-droplet-derived decontX/scAR profile. `scar` (Python-native; installed in
+   `my_env` this session) and R/Bioconductor `celda`'s decontX (not installed — `my_env` has no
+   R at all) both remain technically available, but either would need a manually-supplied
+   ambient profile instead — e.g. cluster 0, already characterized in §6b as ~pure ambient.
+   Revisit only if a real raw matrix becomes available, or the PI decides the manual-profile
+   compromise is worth it.
+3. If ambient correction is later pursued and shows material contamination, re-run from step 02
+   onward. This is the change most likely to rescue the 4,374 unresolved cells; sub-clustering
+   alone cannot.
+4. Optionally merge sub 3's 94 cardiomyocytes into cluster 22 in `celltype_final`. At 0.2%
    of the object it will not move any downstream result — leaving them flagged is equally
    defensible.
-4. Recalibrate cell-cycle scoring before using `phase` for anything.
-5. The CRISPR T-KO/T-WT pair still needs its own analysis, separate from this trajectory.
-6. Nothing here has been committed. `git status` shows the whole workflow directory as new
-   or renamed; the moves used `git mv` where files were already tracked.
+5. Recalibrate cell-cycle scoring before using `phase` for anything.
+6. The CRISPR T-KO/T-WT pair still needs its own analysis, separate from this trajectory.
+7. The workflow described in §1–§7 (as of the previous session) was in fact committed, in
+   `4c2845c`/`c1db006` — this file previously said otherwise. Today's review/cleanup pass (§9)
+   is not yet committed.
+
+---
+
+## 9. Code review & cleanup — 2026-08-12
+
+A follow-up session reviewed this workflow end-to-end against newly-added SciAgent-Skills
+single-cell/multiomics guidance (`scanpy-scrna-seq`, `muon-multiomics-singlecell`,
+`harmony-batch-correction`, `single-cell-annotation-guide`, `anndata-data-structure`), checking
+claims against the actual on-disk outputs (`combine_summary.json`, `final_atlas_labels.csv`,
+`centroid_annotation_rna_leiden.csv`, `marker_genes_top25.csv`) rather than the code alone.
+
+**Net verdict: the pipeline held up well.** The three-method annotation trial plus a rotated-label
+calibration control (6/6 correct labels supported, 0/6 rotated labels supported) is a clean
+execution of the "use multiple independent methods, validate with a control" principle. The
+adopted centroid-correlation method is methodologically convergent with SingleR (Aran et al. 2019,
+*Nat Immunol*) — a peer-reviewed, technology-robust reference-annotation approach — which is
+independent validation that the *design*, not just the calibration outcome, is sound. The
+`ad.concat(join="inner")` reasoning (a gene absent from one sample was filtered, not observed as
+zero) and the explicit scale-then-restore-from-`.layers["counts"]` pattern are both more careful
+than the default scanpy idiom. Several previously-documented library-bug workarounds (harmonypy
+orientation, muon WNN `use_rep` dict, per-chromosome peak-consensus accumulation) were re-verified
+in place and are still doing their job.
+
+Changes made this pass:
+
+- **Removed `annotate_combined_pijuansala.py` and `label_transfer_pijuansala.py`** (plus their
+  `.sh` wrappers) from `05_atlas_annotation/` — see the updated §4 above and `README.md`. Verified
+  first that nothing downstream reads their output and that neither file self-identified as
+  rejected in-file (a future session opening either script cold, or running its `.sh` wrapper,
+  would previously have had no signal it was discouraged).
+- **Closed an `OVERRIDES` staleness gap in `07_final_labels/reconcile_atlas_labels.py`.** The five
+  hand-adjudicated cluster overrides were a pure string-keyed lookup on cluster ID, checked
+  *before* the marker-revalidation branch every other cluster gets — a Leiden renumbering on a
+  future re-run could have silently applied an old override (label + justification) to whatever
+  cluster now holds that ID. Each override now also carries the expected `n_cells` and expected
+  centroid label captured at write time; a mismatch at lookup time raises `RuntimeError` instead
+  of emitting a silent label, consistent with this file's existing fail-loud handling of the
+  sibling case (an unadjudicated cluster).
+- **Closed a per-sample confidence-caveat gap in `03_per_sample_reports/build_scrna_report.py`.**
+  `02`'s per-sample `score_marker_panels()` uses the identical statistical pattern — `score_genes`
+  → z-score across clusters → argmax → margin-as-confidence — as the rejected atlas-level
+  `annotate_combined_pijuansala.py`, on a literal subset of the same PGC marker panel. The report's
+  only confidence caveat (margin < 0.5) fires in the *opposite* direction from the documented
+  failure (which was high-margin, confident, and wrong). Added a check that intersects each
+  cluster's assigned panel against its own top-25 DE genes; an empty intersection is now flagged
+  (both a per-row table flag and a caveat) regardless of margin. Per-sample `cell_type` was and
+  remains a QC-dashboard artifact only — nothing downstream of `02` treats it as ground truth for
+  `celltype_final` — but the report can now catch the specific failure mode it already had the
+  data to catch.
+- Added a one-line staleness caveat to `inspect_unresolved_clusters.py`'s `DISPUTES` dict and
+  `verify_rescued_subclusters.py`'s `CANDIDATES` dict — both hardcode cluster IDs from this same
+  Leiden run. Lower severity than `OVERRIDES` (documentation only, no code guard): both are one-off
+  adjudication tools a human reads once, not steps re-executed on every pipeline run, and
+  `verify_rescued_subclusters.py`'s genuine/ambient verdict doesn't actually depend on the
+  possibly-stale `reference_cluster` ID, only on the candidate's own same-library floor.
+- Documented in `README.md` that `06_label_validation/validate_cluster_annotation.py` must run
+  *after* `07_final_labels/` despite its directory number — it reads `celltype_final`, and its own
+  `.sh` wrapper never passes the `--label` override that would avoid needing it.
+- Removed confirmed-unused imports/variables: `pandas` (`01_qc_scan/qc_scan.py`), `anndata`
+  (`06_label_validation/estimate_ambient_contamination.py`), `numpy`
+  (`07_final_labels/reconcile_atlas_labels.py`), an unused parsed-but-unread `combine_summary.json`
+  load (`08_reporting/build_annotation_report.py`).
+- Reworded a stale comment in `02_per_sample_annotation/annotate_scrna_celltypes.py` claiming its
+  argparse QC defaults mirrored a specific sample's row in `data/qc_filtering_settings.tsv` — they
+  no longer do (4 of 6 values drifted), and are moot in production anyway since the TSV is always
+  found. Now documented as an arbitrary last-resort fallback instead of tied to one sample.
+
+Not resolved this pass, and not something a code review should resolve unilaterally — see §8 item 1
+above.

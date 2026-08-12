@@ -69,7 +69,6 @@ def main():
                    help="Clusters below this quantile of mean expression are the negatives")
     a = p.parse_args()
 
-    import anndata as ad
     import muon as mu
 
     out = Path(a.out_dir)

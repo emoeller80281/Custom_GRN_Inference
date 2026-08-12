@@ -174,6 +174,28 @@ def compute_stats(sample_dir, sample_name):
         for cl, g in top.groupby("cluster", observed=True)["gene"]
     }
 
+    # --- driver-gene check ------------------------------------------------
+    # The z-score margin only says one marker panel outscored the others in aggregate; it
+    # says nothing about whether that panel's own genes are what's actually differential in
+    # this cluster. That gap is exactly what let the rejected annotate_combined_pijuansala.py
+    # (05_atlas_annotation, see handoff.md's annotation-history section) call cells PGC on a
+    # *confident* margin while the panel's two most specific genes, Dppa3 and Nanos3, were
+    # flat zero -- driven instead by non-specific Prdm1/Ifitm3. This per-sample scorer uses
+    # the identical statistical pattern, so the same failure is possible here and the existing
+    # margin<0.5 caveat below would not catch it (that fires in the opposite direction).
+    top_genes_by_cl = {
+        cl: set(g.tolist()) for cl, g in top.groupby("cluster", observed=True)["gene"]
+    }
+    driver_mismatch = sorted(
+        (
+            r["cluster"] for _, r in ann.iterrows()
+            if MOUSE_GASTRULATION_MARKERS.get(r["cell_type"])
+            and not (set(MOUSE_GASTRULATION_MARKERS[r["cell_type"]])
+                     & top_genes_by_cl.get(r["cluster"], set()))
+        ),
+        key=lambda x: int(x),
+    )
+
     stats = {
         "sample": sample_name,
         "summary": summary,
@@ -184,6 +206,7 @@ def compute_stats(sample_dir, sample_name):
         "low_conf_cells": low_cells,
         "low_conf_pct": round(100 * low_cells / a.n_obs, 1),
         "low_conf_clusters": low_clusters,
+        "driver_mismatch_clusters": driver_mismatch,
         "mito": mito,
         "doublet": doublet,
         "vacuous_max_genes": vacuous,
@@ -364,6 +387,8 @@ def build_html(st, sample_dir, sample_name, title):
         margin = r["margin_over_runner_up"]
         if cl in st["cycling_clusters"]:
             flag = '<span class="flag f-low">cell cycle</span>'
+        elif cl in st["driver_mismatch_clusters"]:
+            flag = '<span class="flag f-low">no driver gene</span>'
         elif margin < 0.5:
             flag = f'<span class="flag f-low">vs {esc(r["runner_up"])}</span>'
         else:
@@ -423,6 +448,19 @@ def build_html(st, sample_dir, sample_name, title):
         "have a top lineage that beats the runner-up by less than 0.5 z. Treat the "
         "labels on those clusters as provisional.</li>"
     )
+    if st["driver_mismatch_clusters"]:
+        dm = st["driver_mismatch_clusters"]
+        cav.append(
+            f'<li><b>{len(dm)} cluster{"s" if len(dm) != 1 else ""} '
+            f'(<span class="mono">{", ".join(dm)}</span>) show no evidence of their assigned '
+            "lineage in their own top differentially-expressed genes.</b> A z-score margin "
+            "only means one marker panel outscored the others in aggregate — it says nothing "
+            "about whether that panel's own genes are what's differential in this cluster's "
+            "data, margin size included. This is the exact failure mode that made the "
+            "rejected <span class=\"mono\">annotate_combined_pijuansala.py</span> call cells "
+            "PGC on a confident margin while its two most specific markers sat at zero "
+            "(see handoff.md). Treat these labels as unverified regardless of margin.</li>"
+        )
     if st["cycling_clusters"]:
         cy = ", ".join(st["cycling_clusters"])
         det = "; ".join(

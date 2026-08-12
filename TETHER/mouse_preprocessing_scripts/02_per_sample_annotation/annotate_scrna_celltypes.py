@@ -556,7 +556,11 @@ def parse_args():
                    help="Default: <PROJECT_DIR>/data/processed/<sample_name>_scrna")
     p.add_argument("--cache_dir", default=None, help="scanpy mtx read cache (default: out_dir/cache)")
 
-    # QC thresholds -- defaults are the E7.5_rep1 row of data/qc_filtering_settings.tsv
+    # QC thresholds -- these are an arbitrary last-resort fallback, not tied to any one
+    # sample's row. load_qc_thresholds() overwrites them via setattr for every sample present
+    # in --qc_table (every production sample is), so in practice they only fire if a sample is
+    # missing from the TSV. Don't resync these to a specific sample's row -- the TSV changes
+    # independently and any such pairing will just go stale again.
     p.add_argument("--min_genes", type=int, default=1500)
     p.add_argument("--max_genes", type=int, default=6000)
     p.add_argument("--min_counts", type=int, default=1000)
