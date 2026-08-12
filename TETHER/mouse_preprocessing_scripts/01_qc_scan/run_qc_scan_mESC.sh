@@ -21,6 +21,6 @@ SAMPLES=(E7.5_rep1 E7.5_rep2 E7.75_rep1 E8.0_rep1 E8.0_rep2 E8.5_rep1 E8.5_rep2 
          E8.5_CRISPR_T_WT E8.5_CRISPR_T_KO E8.75_rep1 E8.75_rep2)
 S="${SAMPLES[$SLURM_ARRAY_TASK_ID]}"
 
-python "${PROJECT_DIR}/TETHER/scripts/qc_scan.py" \
+python "${PROJECT_DIR}/TETHER/mouse_preprocessing_scripts/01_qc_scan/qc_scan.py" \
     --input_dir "${RAW_DIR}/${S}" --sample_name "${S}" \
     --out_dir "${PROJECT_DIR}/data/qc_scan"

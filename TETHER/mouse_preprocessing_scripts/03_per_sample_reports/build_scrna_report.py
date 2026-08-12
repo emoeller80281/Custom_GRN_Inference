@@ -27,7 +27,7 @@ import scipy.sparse as sp
 warnings.filterwarnings("ignore")
 
 PROJECT_DIR = "/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
-sys.path.insert(0, f"{PROJECT_DIR}/TETHER/scripts")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "02_per_sample_annotation"))
 from annotate_scrna_celltypes import MOUSE_GASTRULATION_MARKERS  # noqa: E402
 
 # Tirosh et al. 2016 cell-cycle genes, mouse-cased.

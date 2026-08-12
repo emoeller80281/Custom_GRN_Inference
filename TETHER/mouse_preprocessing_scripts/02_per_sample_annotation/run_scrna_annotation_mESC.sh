@@ -15,7 +15,7 @@
 #
 # Thresholds come from data/qc_filtering_settings.tsv, which now carries a row per
 # sample chosen from that sample's own pre-filter QC distributions (see
-# TETHER/scripts/qc_scan.py and data/qc_scan/). MAD alone was abandoned: it is a
+# TETHER/mouse_preprocessing_scripts/01_qc_scan/qc_scan.py and data/qc_scan/). MAD alone was abandoned: it is a
 # relative rule, so on a globally high-mitochondrial sample it set the cap above
 # the bulk of the data and filtered almost nothing.
 
@@ -55,7 +55,7 @@ date
 
 mkdir -p "${OUT_DIR}"
 
-python "${PROJECT_DIR}/TETHER/scripts/annotate_scrna_celltypes.py" \
+python "${PROJECT_DIR}/TETHER/mouse_preprocessing_scripts/02_per_sample_annotation/annotate_scrna_celltypes.py" \
     --input_dir "${RAW_DIR}/${SAMPLE_NAME}" \
     --sample_name "${SAMPLE_NAME}" \
     --out_dir "${OUT_DIR}" \

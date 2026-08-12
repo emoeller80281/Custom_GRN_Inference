@@ -44,7 +44,7 @@ case "${SAMPLE_NAME}" in
 esac
 
 echo "=== report: ${SAMPLE_NAME} -> ${TITLE} ==="
-python "${PROJECT_DIR}/TETHER/scripts/build_scrna_report.py" \
+python "${PROJECT_DIR}/TETHER/mouse_preprocessing_scripts/03_per_sample_reports/build_scrna_report.py" \
     --sample_dir "${OUT_ROOT}/${SAMPLE_NAME}" \
     --sample_name "${SAMPLE_NAME}" \
     --title "${TITLE}"

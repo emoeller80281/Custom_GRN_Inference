@@ -39,12 +39,18 @@ import numpy as np
 import pandas as pd
 import scipy.sparse as sp
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from common.mudata_utils import run_harmony, sanitize_for_h5  # noqa: E402
+
 warnings.filterwarnings("ignore")
 
+# The wild-type gastrulation timecourse. The E8.5 CRISPR T-KO/T-WT pair is a
+# perturbation experiment, not a timepoint, and is deliberately excluded: mixing a
+# genotype contrast into the reference trajectory would let Harmony regress away
+# the very difference that experiment exists to measure.
 SAMPLES = [
     "E7.5_rep1", "E7.5_rep2", "E7.75_rep1", "E8.0_rep1", "E8.0_rep2",
-    "E8.5_rep1", "E8.5_rep2", "E8.5_CRISPR_T_WT", "E8.5_CRISPR_T_KO",
-    "E8.75_rep1", "E8.75_rep2",
+    "E8.5_rep1", "E8.5_rep2", "E8.75_rep1", "E8.75_rep2",
 ]
 
 # Samples whose QC leaves them too small or too stressed to weight equally.
@@ -77,21 +83,28 @@ def build_consensus_peaks(peak_frames, max_width):
     regulatory feature.
     """
     allp = pd.concat(peak_frames, ignore_index=True)
+    # Cast away per-sample Categorical dtypes: samples carry different category sets,
+    # and sorting by category code rather than name would interleave chromosomes.
+    allp["chrom"] = allp["chrom"].astype(str)
     allp = allp.sort_values(["chrom", "start"], kind="mergesort").reset_index(drop=True)
 
     chrom = allp["chrom"].values
     start = allp["start"].values.astype(np.int64)
     end = allp["end"].values.astype(np.int64)
 
-    # A new consensus interval starts at a chromosome change or a gap.
-    new_chrom = np.empty(len(allp), dtype=bool)
-    new_chrom[0] = True
-    new_chrom[1:] = chrom[1:] != chrom[:-1]
-    running_max = np.maximum.accumulate(end)
-    gap = np.empty(len(allp), dtype=bool)
-    gap[0] = True
-    gap[1:] = start[1:] > running_max[:-1]
-    grp = np.cumsum(new_chrom | gap) - 1
+    # A new consensus interval starts at a chromosome change or at a gap. The running
+    # max of `end` MUST be accumulated per chromosome: done globally, chr1's ~195 Mb
+    # coordinates dominate every chromosome sorted after it, no gap is ever detected,
+    # and each later chromosome collapses into a single interval.
+    grp_start = np.zeros(len(allp), dtype=bool)
+    for ch in pd.unique(chrom):
+        m = np.nonzero(chrom == ch)[0]      # contiguous, start-sorted after the sort
+        rm = np.maximum.accumulate(end[m])
+        g = np.empty(len(m), dtype=bool)
+        g[0] = True                          # a new chromosome always opens a group
+        g[1:] = start[m][1:] > rm[:-1]
+        grp_start[m] = g
+    grp = np.cumsum(grp_start) - 1
 
     cons = pd.DataFrame({"chrom": chrom, "start": start, "end": end, "grp": grp})
     cons = cons.groupby("grp").agg(chrom=("chrom", "first"), start=("start", "min"),
@@ -99,27 +112,48 @@ def build_consensus_peaks(peak_frames, max_width):
     cons["width"] = cons["end"] - cons["start"]
     n_all = len(cons)
     cons = cons[cons["width"] <= max_width].reset_index(drop=True)
+    med = int(cons["width"].median()) if len(cons) else 0
     log(f"Consensus peaks: {n_all} merged intervals, {len(cons)} kept "
-        f"(<= {max_width} bp); median width {int(cons['width'].median())}")
+        f"(<= {max_width} bp); median width {med}")
     cons["peak"] = (cons["chrom"].astype(str) + ":" + cons["start"].astype(str)
                     + "-" + cons["end"].astype(str))
+
+    # Sanity guard. Peaks overlap heavily across samples, so the consensus set should
+    # land somewhere near a single sample's peak count -- never a small fraction of it.
+    # A collapse here is silent otherwise: the wide chained intervals get removed by
+    # the width filter and the run continues with most of the genome missing.
+    largest = max(len(f) for f in peak_frames)
+    if len(cons) < 0.5 * largest:
+        raise RuntimeError(
+            f"Consensus collapse: {len(cons)} intervals from a largest input of "
+            f"{largest} peaks across {cons['chrom'].nunique()} chromosomes. "
+            "Expected at least half the largest sample's peak count.")
+    log(f"  spans {cons['chrom'].nunique()} chromosomes; widest {int(cons['width'].max())} bp")
     return cons
 
 
 def map_peaks_to_consensus(var, cons):
     """Sparse (n_sample_peaks x n_consensus) indicator of which consensus peak each falls in."""
     out = np.full(len(var), -1, dtype=np.int64)
-    for ch, idx in var.groupby("chrom", sort=False).groups.items():
-        sub = cons[cons["chrom"] == ch]
-        if sub.empty:
+    # Positional indices throughout: var is indexed by peak name, so groupby().groups
+    # would hand back labels rather than row positions.
+    chroms = var["chrom"].values
+    starts = var["start"].values.astype(np.int64)
+    cons_chrom = cons["chrom"].values
+    cons_start = cons["start"].values
+    cons_end = cons["end"].values
+    for ch in pd.unique(chroms):
+        idx = np.nonzero(chroms == ch)[0]
+        sub_pos = np.nonzero(cons_chrom == ch)[0]
+        if len(idx) == 0 or len(sub_pos) == 0:
             continue
-        idx = np.asarray(idx)
-        s = var["start"].values[idx].astype(np.int64)
-        pos = np.searchsorted(sub["start"].values, s, side="right") - 1
+        s = starts[idx]
+        # cons is sorted by (chrom, start), so sub_pos is contiguous and ordered.
+        pos = np.searchsorted(cons_start[sub_pos], s, side="right") - 1
         ok = pos >= 0
-        cand = sub.index.values[np.clip(pos, 0, len(sub) - 1)]
+        cand = sub_pos[np.clip(pos, 0, len(sub_pos) - 1)]
         # Keep only peaks genuinely contained in the candidate consensus interval.
-        inside = ok & (s < cons["end"].values[cand]) & (s >= cons["start"].values[cand])
+        inside = ok & (s >= cons_start[cand]) & (s < cons_end[cand])
         out[idx[inside]] = cand[inside]
     keep = out >= 0
     rows = np.nonzero(keep)[0]
@@ -230,9 +264,8 @@ def main():
     log(f"Batch mixing before Harmony: {pre}")
 
     log("Running Harmony on RNA PCA (key='sample') ...")
-    sc.external.pp.harmony_integrate(rna, key="sample", basis="X_pca",
-                                     adjusted_basis="X_pca_harmony",
-                                     max_iter_harmony=30, random_state=a.seed)
+    run_harmony(rna, key="sample", basis="X_pca", adjusted_basis="X_pca_harmony",
+                seed=a.seed)
     post = batch_mixing(rna.obsm["X_pca_harmony"], rna.obs["sample"].values, seed=a.seed)
     log(f"Batch mixing after Harmony:  {post}")
     summary["rna_batch_mixing"] = {"before": pre, "after": post}
@@ -294,8 +327,12 @@ def main():
 
         atac = ad.concat(atacs, join="outer", index_unique=None)
         del atacs; gc.collect()
-        atac.var[["chrom", "start", "end", "width"]] = cons[
-            ["chrom", "start", "end", "width"]].values
+        # Column by column, aligned on peak name: a block assignment would make every
+        # one of these object dtype and break the h5mu write.
+        cons_idx = cons.set_index("peak")
+        atac.var["chrom"] = cons_idx.loc[atac.var_names, "chrom"].astype(str).values
+        for col in ("start", "end", "width"):
+            atac.var[col] = cons_idx.loc[atac.var_names, col].astype(np.int64).values
         log(f"Combined ATAC: {atac.n_obs} cells x {atac.n_vars} consensus peaks")
 
         n_cells_peak = np.asarray((atac.X > 0).sum(axis=0)).ravel()
@@ -318,9 +355,8 @@ def main():
 
         pre_a = batch_mixing(atac.obsm["X_lsi"], atac.obs["sample"].values, seed=a.seed)
         log("Running Harmony on ATAC LSI (key='sample') ...")
-        sc.external.pp.harmony_integrate(atac, key="sample", basis="X_lsi",
-                                         adjusted_basis="X_lsi_harmony",
-                                         max_iter_harmony=30, random_state=a.seed)
+        run_harmony(atac, key="sample", basis="X_lsi", adjusted_basis="X_lsi_harmony",
+                    seed=a.seed)
         post_a = batch_mixing(atac.obsm["X_lsi_harmony"], atac.obs["sample"].values,
                               seed=a.seed)
         log(f"ATAC batch mixing before/after: {pre_a} / {post_a}")
@@ -334,24 +370,52 @@ def main():
 
     # ---------------- MuData -------------------------------------------
     log("=== MuData ===")
+    for m in mods.values():
+        sanitize_for_h5(m)
     mdata = mu.MuData(mods)
     mu.pp.intersect_obs(mdata)
     log(f"MuData: {mdata.n_obs} cells across {len(mods)} modalities")
 
     if "atac" in mods:
+        # WNN runs on a slim MuData holding nothing but the two corrected embeddings.
+        # Run against the full objects it dies inside muon on the accumulated
+        # uns/obs metadata; the graph only needs the embeddings, so this sidesteps it.
         try:
-            mu.pp.neighbors(mdata, key_added="wnn", n_neighbors=a.n_neighbors,
+            import traceback
+            slim = {}
+            for name, m in mods.items():
+                rep = "X_pca_harmony" if name == "rna" else "X_lsi_harmony"
+                s = ad.AnnData(
+                    sp.csr_matrix((m.n_obs, 1), dtype=np.float32),
+                    obs=pd.DataFrame(index=m.obs_names.copy()),
+                )
+                s.obsm[rep] = np.asarray(m.obsm[rep], dtype=np.float32)
+                sc.pp.neighbors(s, n_neighbors=a.n_neighbors, use_rep=rep,
+                                random_state=a.seed)
+                slim[name] = s
+            sm = mu.MuData(slim)
+            mu.pp.neighbors(sm, key_added="wnn", n_neighbors=a.n_neighbors,
                             random_state=a.seed)
-            import scanpy as _sc
-            _sc.tl.umap(mdata, neighbors_key="wnn", random_state=a.seed)
-            _sc.tl.leiden(mdata, neighbors_key="wnn", resolution=a.resolution,
-                          key_added="leiden_wnn", flavor="igraph", n_iterations=2,
-                          directed=False, random_state=a.seed)
+            # muon records use_rep as a per-modality dict; scanpy's downstream
+            # _choose_representation does `use_rep in adata.obsm`, and a dict is
+            # unhashable, so umap/leiden raise TypeError unless it is removed.
+            sm.uns["wnn"].get("params", {}).pop("use_rep", None)
+            sc.tl.umap(sm, neighbors_key="wnn", random_state=a.seed)
+            sc.tl.leiden(sm, neighbors_key="wnn", resolution=a.resolution,
+                         key_added="leiden_wnn", flavor="igraph", n_iterations=2,
+                         directed=False, random_state=a.seed)
+            mdata.obsm["X_umap_wnn"] = np.asarray(sm.obsm["X_umap"])
+            mdata.obs["leiden_wnn"] = pd.Categorical(
+                sm.obs.loc[mdata.obs_names, "leiden_wnn"].astype(str).values)
+            # Per-cell modality weights come back as 'rna:mod_weight' / 'atac:mod_weight'.
+            for c in [c for c in sm.obs.columns if "mod_weight" in c]:
+                mdata.obs[c] = sm.obs.loc[mdata.obs_names, c].values
             log(f"WNN Leiden: {mdata.obs['leiden_wnn'].nunique()} clusters")
             summary["wnn_clusters"] = int(mdata.obs["leiden_wnn"].nunique())
         except Exception as exc:  # noqa: BLE001
             log(f"WARNING: WNN failed ({type(exc).__name__}: {exc}); "
-                "per-modality embeddings are still present")
+                "per-modality Harmony embeddings are still present and usable")
+            log(traceback.format_exc())
             summary["wnn_error"] = f"{type(exc).__name__}: {exc}"
 
     h5mu = out / "mESC_combined.h5mu"

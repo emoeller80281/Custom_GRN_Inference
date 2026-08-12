@@ -54,6 +54,7 @@ We trained and evaluated this framework across seven mouse and human single-cell
     - What are its limitations?
         - Large number of cells per individual, but each cell is not an independent observation.
 3. What are some other single-cell multiomic GRN inference methods?
+    - 
     - What have they tried?
     - How have they fallen short?
 4. What is my project?
