@@ -12,6 +12,7 @@ TETHER/cached_data/
 jupyter_urls/
 jupyter_dense*.sh
 data/tf_data
+data/qc_scan
 data/sample_input_data
 TETHER/checkpoints
 checkpoint.pt

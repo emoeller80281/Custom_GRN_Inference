@@ -31,6 +31,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import scanpy as sc
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 from scipy import sparse
 
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -82,6 +83,24 @@ MARKER_PANELS = {
 
 def log(msg):
     print(f"[annotate_scrna] {msg}", flush=True)
+
+
+def frame_panels(fig, color="#3A424C", lw=1.1):
+    """Draw a visible border around every data panel of a figure.
+
+    scanpy's UMAP helpers default to ``frameon=False``. In a multi-panel figure
+    that leaves neighbouring embeddings visually merged: with points plotted edge
+    to edge there is no cue for where one panel stops and the next starts, so it
+    is ambiguous which clusters belong to which plot. Colorbar axes are skipped --
+    they already read as their own element and a box around them looks wrong.
+    """
+    for ax in fig.axes:
+        if ax.get_label() == "<colorbar>" or getattr(ax, "_colorbar", None) is not None:
+            continue
+        for sp in ax.spines.values():
+            sp.set_visible(True)
+            sp.set_color(color)
+            sp.set_linewidth(lw)
 
 
 # ---------------------------------------------------------------------------
@@ -163,6 +182,40 @@ def mad_outlier_bounds(values, n_mads=5.0, log_transform=False):
     return float(lo), float(hi)
 
 
+QC_TABLE = f"{PROJECT_DIR}/data/qc_filtering_settings.tsv"
+
+# qc_filtering_settings.tsv column -> argparse dest
+_QC_COLS = {
+    "Min Cells per Gene": "min_cells_per_gene",
+    "Min Genes per Cell": "min_genes",
+    "Max Genes per Cell": "max_genes",
+    "Min Total Counts": "min_counts",
+    "Max Total Counts": "max_counts",
+    "Max Pct MT": "max_pct_mt",
+}
+
+
+def load_qc_thresholds(sample_name, path=QC_TABLE):
+    """Return this sample's row of the project QC table as an argparse-dest dict.
+
+    Returns None when the sample has no row, so the caller can fall back rather
+    than silently inheriting another sample's numbers -- inheriting the
+    E7.5_rep1 row is exactly how the earlier runs acquired thresholds nobody
+    had chosen for them.
+    """
+    p = Path(path)
+    if not p.exists():
+        log(f"WARNING: QC table {p} not found")
+        return None
+    df = pd.read_csv(p, sep="\t")
+    row = df[df["Sample"].astype(str) == str(sample_name)]
+    if row.empty:
+        return None
+    r = row.iloc[0]
+    vals = {dest: r[col] for col, dest in _QC_COLS.items() if col in row.columns}
+    return {k: (float(v) if k == "max_pct_mt" else int(v)) for k, v in vals.items()}
+
+
 def report_mad_thresholds(rna, n_mads=5.0):
     """Report MAD-derived cutoffs so fixed project thresholds can be sanity checked."""
     report = {}
@@ -187,17 +240,33 @@ def plot_qc(rna, out_dir, tag):
         sc.pl.violin(rna, key, jitter=0.4, ax=ax, show=False, stripplot=False)
         ax.set_title(key)
     fig.suptitle(f"QC metrics ({tag} filtering)")
+    frame_panels(fig)
     fig.tight_layout()
     fig.savefig(out_dir / f"qc_violin_{tag}_filtering.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
 
-    fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
-    sc.pl.scatter(rna, x="total_counts", y="n_genes_by_counts", color="pct_counts_mt",
-                  ax=axes[0], show=False)
+    # Drawn with matplotlib rather than sc.pl.scatter: scanpy attaches the colorbar
+    # in figure coordinates, which lands it between the two panels and over the
+    # right-hand one. append_axes steals the space from the left panel only, so the
+    # bar can never intersect its neighbour.
+    fig, axes = plt.subplots(1, 2, figsize=(12.5, 4.5))
+    pts = axes[0].scatter(rna.obs["total_counts"], rna.obs["n_genes_by_counts"],
+                          c=rna.obs["pct_counts_mt"], s=3, alpha=0.5, cmap="viridis",
+                          linewidths=0, rasterized=True)
+    axes[0].set_xlabel("total_counts")
+    axes[0].set_ylabel("n_genes_by_counts")
     axes[0].set_title("counts vs genes (coloured by % mito)")
-    sc.pl.scatter(rna, x="total_counts", y="pct_counts_mt", ax=axes[1], show=False)
+    cax = make_axes_locatable(axes[0]).append_axes("right", size="4%", pad=0.09)
+    fig.colorbar(pts, cax=cax).set_label("pct_counts_mt", fontsize=9)
+
+    axes[1].scatter(rna.obs["total_counts"], rna.obs["pct_counts_mt"], s=3, alpha=0.5,
+                    color="#57626E", linewidths=0, rasterized=True)
+    axes[1].set_xlabel("total_counts")
+    axes[1].set_ylabel("pct_counts_mt")
     axes[1].set_title("counts vs % mito")
-    fig.tight_layout()
+
+    frame_panels(fig)
+    fig.tight_layout(w_pad=2.5)
     fig.savefig(out_dir / f"qc_scatter_{tag}_filtering.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
 
@@ -223,8 +292,18 @@ def qc_filter(rna, args, out_dir):
     log(f"Cells: {n_start} -> {rna.n_obs} ({100 * rna.n_obs / n_start:.1f}% retained)")
 
     n_genes_start = rna.n_vars
-    sc.pp.filter_genes(rna, min_cells=args.min_cells_per_gene)
-    log(f"Genes: {n_genes_start} -> {rna.n_vars} (min_cells={args.min_cells_per_gene})")
+    # Marker-panel genes are exempt from the detection floor. A rare lineage's
+    # defining genes are precisely the ones a per-gene min_cells cut deletes
+    # (Dppa3/Nanos3 for PGCs, Hba-x/Hbb-y for primitive erythroid), which makes
+    # that lineage unannotatable even when it is present.
+    panel_genes = {g for genes in MARKER_PANELS[args.marker_panel].values() for g in genes}
+    n_cells_per_gene = np.asarray((rna.X > 0).sum(axis=0)).ravel()
+    keep_gene = n_cells_per_gene >= args.min_cells_per_gene
+    rescued = rna.var_names.isin(panel_genes) & ~keep_gene & (n_cells_per_gene > 0)
+    keep_gene = keep_gene | rescued
+    rna = rna[:, keep_gene].copy()
+    log(f"Genes: {n_genes_start} -> {rna.n_vars} (min_cells={args.min_cells_per_gene}, "
+        f"{int(rescued.sum())} marker genes kept below the floor)")
 
     summary = {
         "n_cells_start": int(n_start),
@@ -232,27 +311,55 @@ def qc_filter(rna, args, out_dir):
         "n_genes_start": int(n_genes_start),
         "n_genes_after_qc": int(rna.n_vars),
         "failed_per_criterion": {k: int(v.sum()) for k, v in fails.items()},
+        "n_marker_genes_rescued": int(rescued.sum()),
     }
     return rna, summary
 
 
 def detect_doublets(rna, args):
-    """Scrublet doublet scoring. Non-fatal: some envs lack the dependency."""
+    """Scrublet doublet scoring, with a fallback when its automatic cutoff fails.
+
+    Scrublet picks its threshold from the valley of the *simulated* doublet score
+    histogram. When that histogram is not bimodal it silently returns a threshold
+    above every observed score, calls ~zero doublets, and the sample then looks
+    pristine in the run summary. That failure mode hit 4 of the 11 mESC samples
+    (E8.5_rep2 called 0/11,107), so a low call rate is treated as a failure and
+    the threshold is re-derived from the expected rate instead.
+    """
     if args.skip_doublets:
         log("Doublet detection skipped (--skip_doublets)")
-        return rna, None
+        return rna, None, "skipped"
     try:
-        sc.pp.scrublet(rna, expected_doublet_rate=args.expected_doublet_rate, random_state=args.seed)
+        sc.pp.scrublet(rna, expected_doublet_rate=args.expected_doublet_rate,
+                       random_state=args.seed)
     except Exception as exc:  # noqa: BLE001 - optional step, keep pipeline running
         log(f"WARNING: scrublet failed ({type(exc).__name__}: {exc}); skipping doublet removal")
-        return rna, None
+        return rna, None, "failed"
 
+    method = "scrublet_auto"
     n_doublet = int(rna.obs["predicted_doublet"].sum())
-    log(f"Scrublet: {n_doublet} predicted doublets ({100 * n_doublet / rna.n_obs:.1f}%)")
+    rate = n_doublet / rna.n_obs
+    auto_thr = rna.uns.get("scrublet", {}).get("threshold", float("nan"))
+    log(f"Scrublet auto: {n_doublet} doublets ({100*rate:.1f}%), threshold={auto_thr:.3f}, "
+        f"score max={rna.obs['doublet_score'].max():.3f}")
+
+    # A call rate far under the expected rate means the cutoff never landed.
+    if rate < args.min_doublet_rate:
+        q = 1.0 - args.expected_doublet_rate
+        thr = float(np.quantile(rna.obs["doublet_score"].values, q))
+        rna.obs["predicted_doublet"] = rna.obs["doublet_score"].values > thr
+        n_doublet = int(rna.obs["predicted_doublet"].sum())
+        method = "expected_rate_quantile"
+        log(f"  WARNING: auto threshold failed ({100*rate:.2f}% < "
+            f"{100*args.min_doublet_rate:.1f}% floor). Re-thresholded at the "
+            f"{100*q:.1f}th score percentile ({thr:.3f}) -> {n_doublet} doublets "
+            f"({100*n_doublet/rna.n_obs:.1f}%)")
+        rna.uns["scrublet_fallback_threshold"] = thr
+
     if args.remove_doublets:
         rna = rna[~rna.obs["predicted_doublet"]].copy()
         log(f"Removed doublets -> {rna.n_obs} cells")
-    return rna, n_doublet
+    return rna, n_doublet, method
 
 
 # ---------------------------------------------------------------------------
@@ -386,15 +493,19 @@ def make_plots(rna, top_markers, panel_present, z_scores, out_dir, groupby="leid
 
     fig, axes = plt.subplots(1, 2, figsize=(17, 6.5))
     sc.pl.umap(rna, color=groupby, legend_loc="on data", legend_fontsize=9,
-               title="Leiden clusters", ax=axes[0], show=False, frameon=False)
+               title="Leiden clusters", ax=axes[0], show=False, frameon=True)
     sc.pl.umap(rna, color="cell_type", title="Annotated cell type",
-               ax=axes[1], show=False, frameon=False)
-    fig.tight_layout()
+               ax=axes[1], show=False, frameon=True)
+    frame_panels(fig)
+    fig.tight_layout(w_pad=3.0)
     fig.savefig(out_dir / "umap_clusters_and_celltypes.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
 
     sc.pl.umap(rna, color=["total_counts", "n_genes_by_counts", "pct_counts_mt", "pct_counts_ribo"],
-               ncols=4, show=False, frameon=False)
+               ncols=4, show=False, frameon=True)
+    fig = plt.gcf()
+    frame_panels(fig)
+    fig.subplots_adjust(wspace=0.45)
     plt.savefig(out_dir / "umap_qc_metrics.png", dpi=150, bbox_inches="tight")
     plt.close("all")
 
@@ -426,7 +537,10 @@ def make_plots(rna, top_markers, panel_present, z_scores, out_dir, groupby="leid
     n_res = [c for c in rna.obs.columns if c.startswith("leiden_res")]
     if n_res:
         sc.pl.umap(rna, color=n_res, ncols=3, legend_loc="on data", legend_fontsize=7,
-                   show=False, frameon=False)
+                   show=False, frameon=True)
+        fig = plt.gcf()
+        frame_panels(fig)
+        fig.subplots_adjust(wspace=0.3, hspace=0.3)
         plt.savefig(out_dir / "umap_resolution_sweep.png", dpi=150, bbox_inches="tight")
         plt.close("all")
     log(f"Plots written to {out_dir}")
@@ -450,13 +564,25 @@ def parse_args():
     p.add_argument("--max_pct_mt", type=float, default=20.0)
     p.add_argument("--min_cells_per_gene", type=int, default=20)
     p.add_argument("--use_mad_thresholds", action="store_true",
-                   help="Use 5-MAD data-driven cutoffs instead of the fixed ones above")
+                   help="Use MAD data-driven cutoffs instead of the QC table")
     p.add_argument("--n_mads", type=float, default=5.0)
+    p.add_argument("--mito_ceiling", type=float, default=30.0,
+                   help="Absolute cap the MAD mitochondrial bound may never exceed. "
+                        "MAD is a relative rule, so on a globally high-mito sample it "
+                        "lands above the bulk of the data and filters nothing.")
+    p.add_argument("--qc_table", default=QC_TABLE,
+                   help="TSV of per-sample thresholds (default: data/qc_filtering_settings.tsv)")
+    p.add_argument("--no_qc_table", action="store_true",
+                   help="Ignore the QC table and use the CLI threshold values")
 
     p.add_argument("--skip_doublets", action="store_true", help="Do not run scrublet at all")
     p.add_argument("--keep_doublets", dest="remove_doublets", action="store_false",
                    help="Score doublets but keep them (they are still flagged in .obs)")
     p.add_argument("--expected_doublet_rate", type=float, default=0.08)
+    p.add_argument("--min_doublet_rate", type=float, default=0.02,
+                   help="If scrublet's automatic threshold calls fewer than this "
+                        "fraction, treat it as a failed fit and re-threshold at the "
+                        "expected-rate quantile of the score distribution.")
 
     p.add_argument("--target_sum", type=float, default=1e4)
     p.add_argument("--n_hvg", type=int, default=3000)
@@ -496,17 +622,53 @@ def main():
     rna = compute_qc_metrics(rna)
     plot_qc(rna, out_dir, "pre")
     mad_report = report_mad_thresholds(rna, n_mads=args.n_mads)
-    if args.use_mad_thresholds:
-        args.min_genes = max(1, int(mad_report["n_genes_by_counts"]["lower"]))
-        args.max_genes = int(mad_report["n_genes_by_counts"]["upper"])
-        args.min_counts = max(1, int(mad_report["total_counts"]["lower"]))
-        args.max_counts = int(mad_report["total_counts"]["upper"])
-        args.max_pct_mt = float(mad_report["pct_counts_mt"]["upper"])
-        log("Using MAD-derived thresholds instead of fixed project thresholds")
 
+    threshold_source = "cli_defaults"
+    if args.use_mad_thresholds:
+        # Clamp to the observed range: 5 MADs on a log-scaled skewed distribution
+        # can land past every real value, leaving a bound that filters nothing
+        # (E8.5_rep2 got max_genes=39,114 against 32,285 genes in the reference).
+        obs_max_g = int(rna.obs["n_genes_by_counts"].max())
+        obs_max_c = int(rna.obs["total_counts"].max())
+        args.min_genes = max(1, int(mad_report["n_genes_by_counts"]["lower"]))
+        args.max_genes = min(int(mad_report["n_genes_by_counts"]["upper"]), obs_max_g)
+        args.min_counts = max(1, int(mad_report["total_counts"]["lower"]))
+        args.max_counts = min(int(mad_report["total_counts"]["upper"]), obs_max_c)
+        args.max_pct_mt = min(float(mad_report["pct_counts_mt"]["upper"]), args.mito_ceiling)
+        threshold_source = "mad"
+        log(f"Using {args.n_mads}-MAD thresholds (clamped to data; mito ceiling "
+            f"{args.mito_ceiling}%)")
+    elif not args.no_qc_table:
+        tsv = load_qc_thresholds(args.sample_name, args.qc_table)
+        if tsv is None:
+            log(f"WARNING: no row for '{args.sample_name}' in {args.qc_table}; "
+                "falling back to CLI defaults")
+        else:
+            for k, v in tsv.items():
+                setattr(args, k, v)
+            threshold_source = "qc_filtering_settings.tsv"
+            log(f"Using thresholds from {args.qc_table} for {args.sample_name}")
+
+    log("Thresholds applied: " + ", ".join(
+        f"{k}={getattr(args, k)}" for k in
+        ["min_genes", "max_genes", "min_counts", "max_counts", "max_pct_mt",
+         "min_cells_per_gene"]))
+
+    # Doublet detection first. Scrublet models the observed cell population, so
+    # discarding a third of it beforehand starves the simulated-doublet
+    # distribution its threshold is read from; the earlier ordering under-called
+    # doublets badly (1.5% on E7.5_rep1 against an 8% expectation).
+    n_barcodes_in = int(rna.n_obs)
+    rna, n_doublets, doublet_method = detect_doublets(rna, args)
+    n_after_doublets = int(rna.n_obs)
     rna, qc_summary = qc_filter(rna, args, out_dir)
-    rna, n_doublets = detect_doublets(rna, args)
+    # qc_filter measured its criteria against the post-doublet population; keep both
+    # counts so retention is reported against the barcodes actually loaded.
+    qc_summary["n_cells_criteria_denominator"] = qc_summary["n_cells_start"]
+    qc_summary["n_cells_start"] = n_barcodes_in
+    qc_summary["n_cells_after_doublets"] = n_after_doublets
     qc_summary["n_predicted_doublets"] = n_doublets
+    qc_summary["doublet_method"] = doublet_method
     qc_summary["n_cells_final"] = int(rna.n_obs)
     plot_qc(rna, out_dir, "post")
 
@@ -535,10 +697,11 @@ def main():
         "input_dir": str(args.input_dir),
         "qc": qc_summary,
         "mad_thresholds_reported": mad_report,
+        "threshold_source": threshold_source,
         "thresholds_applied": {
             k: getattr(args, k) for k in
             ["min_genes", "max_genes", "min_counts", "max_counts", "max_pct_mt",
-             "min_cells_per_gene", "use_mad_thresholds"]
+             "min_cells_per_gene", "use_mad_thresholds", "mito_ceiling"]
         },
         "hvg_flavor": hvg_flavor,
         "n_hvg": int(rna.var["highly_variable"].sum()),

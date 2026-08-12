@@ -21,7 +21,6 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
 )
 
-
 def create_labeled_tf_peak_dataset(
     true_interactions: set[tuple[str, str]],
     false_interactions: set[tuple[str, str]],
