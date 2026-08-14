@@ -1,4 +1,5 @@
 
+import math
 import os
 import sys
 import gtfparse
@@ -20,7 +21,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
 import pytorch_lightning as pl
-from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping, LearningRateMonitor, TQDMProgressBar
+from lightning.pytorch.callbacks import Callback, ModelCheckpoint, EarlyStopping, LearningRateMonitor, TQDMProgressBar
 from lightning.pytorch.loggers import WandbLogger
 from pytorch_lightning.utilities import rank_zero_only
 from pytorch_lightning.strategies import DDPStrategy
@@ -149,6 +150,20 @@ class TFTGEdgeBagDataset(Dataset):
         held resident on the device (see TFTGRegulationModel.set_tf_embedding_table).
         Mathematically identical, but the gather happens in device memory instead of
         across PCIe.
+
+    `resample_cells` controls where peak_accessibility/tf_expression/tg_expression come from:
+
+      False (default, unchanged): read straight out of the cached tensors built by
+        build_tf_to_tg_train_data.py, i.e. the same fixed set of cells for a given edge on
+        every epoch of every run. This is what every existing checkpoint was trained under.
+
+      True: redraw `resample_max_cells_per_pair` cell columns from the full atac_mat/rna_mat
+        pseudobulk matrices on every __getitem__ call, so a given edge sees a different cell
+        subset epoch to epoch (and even within an epoch, across workers). Peaks/labels/TF
+        embedding are untouched -- only which cells represent the edge changes. Requires
+        atac_mat/rna_mat/gene_to_rna_idx (see build_tf_to_tg_train_data.py
+        --build_resample_matrices_only) and clamps resample_max_cells_per_pair to the
+        available cell pool so every item has the same C (no per-item cell padding needed).
     """
 
     def __init__(
@@ -159,6 +174,12 @@ class TFTGEdgeBagDataset(Dataset):
         tf_mask_tensor,
         atac_peak_tensor,
         return_tf_indices=False,
+        resample_cells=False,
+        atac_mat=None,
+        rna_mat=None,
+        gene_to_rna_idx=None,
+        idx_to_cell=None,
+        resample_max_cells_per_pair=None,
     ):
         self.inputs = inputs
         self.tf_embeddings_tensor = tf_embeddings_tensor
@@ -166,8 +187,60 @@ class TFTGEdgeBagDataset(Dataset):
         self.atac_peak_tensor = atac_peak_tensor
         self.return_tf_indices = return_tf_indices
 
+        self.resample_cells = resample_cells
+        if resample_cells:
+            assert atac_mat is not None and rna_mat is not None and gene_to_rna_idx is not None, (
+                "resample_cells=True needs atac_mat, rna_mat, and gene_to_rna_idx -- build them "
+                "with `build_tf_to_tg_train_data.py --build_resample_matrices_only` if the cache "
+                "predates this option."
+            )
+            self.atac_mat = atac_mat
+            self.rna_mat = rna_mat
+            self.gene_to_rna_idx = gene_to_rna_idx
+            self.idx_to_cell = idx_to_cell
+            n_pool = atac_mat.shape[1]
+            requested = resample_max_cells_per_pair or n_pool
+            self.max_cells_per_pair = min(requested, n_pool)
+            if requested > n_pool:
+                logging.warning(
+                    f"resample_cells_per_epoch requested {requested} cells/edge but only "
+                    f"{n_pool} are in the pool; clamping to {n_pool}."
+                )
+            # Lazily created per-process so forked DataLoader workers each get an
+            # independently-seeded stream (numpy pulls fresh OS entropy with no seed arg)
+            # instead of all workers replaying the same draws.
+            self._rng = None
+
     def __len__(self):
         return len(self.inputs["label"])
+
+    def _resample_cell_features(self, idx, peak_indices):
+        if self._rng is None:
+            self._rng = np.random.default_rng()
+
+        real_peak_rows = peak_indices[self.inputs["peak_mask"][idx]]   # [n_real], long
+
+        n_pool = self.atac_mat.shape[1]
+        C = self.max_cells_per_pair
+        sampled_cols = self._rng.choice(n_pool, size=C, replace=False)
+        sampled_cols_t = torch.from_numpy(sampled_cols).long()
+
+        P = peak_indices.shape[0]
+        peak_accessibility = torch.zeros(C, P, dtype=torch.float32)
+        acc_real = self.atac_mat[real_peak_rows][:, sampled_cols_t]   # [n_real, C]
+        peak_accessibility[:, : acc_real.shape[0]] = acc_real.T
+
+        tf_rna_idx = self.gene_to_rna_idx[self.inputs["tf_name"][idx]]
+        tg_rna_idx = self.gene_to_rna_idx[self.inputs["tg_name"][idx]]
+        tf_expression = self.rna_mat[tf_rna_idx, sampled_cols_t]      # [C]
+        tg_expression = self.rna_mat[tg_rna_idx, sampled_cols_t]      # [C]
+
+        cell_ids = (
+            [self.idx_to_cell[c] for c in sampled_cols.tolist()]
+            if self.idx_to_cell is not None else None
+        )
+
+        return peak_accessibility, tf_expression, tg_expression, cell_ids
 
     def __getitem__(self, idx):
         tf_idx = self.inputs["tf_idx"][idx]
@@ -176,20 +249,30 @@ class TFTGEdgeBagDataset(Dataset):
         peak_indices = self.inputs["peak_indices"][idx]          # [P]
         peak_sequences = self.atac_peak_tensor[peak_indices]     # [P, L, 4]
 
+        if self.resample_cells:
+            peak_accessibility, tf_expression, tg_expression, cell_ids = (
+                self._resample_cell_features(idx, peak_indices)
+            )
+        else:
+            peak_accessibility = self.inputs["peak_accessibility"][idx].float()
+            tf_expression = self.inputs["tf_expression"][idx].float()
+            tg_expression = self.inputs["tg_expression"][idx].float()
+            cell_ids = self.inputs["cell_ids"][idx]
+
         item = {
             "label": self.inputs["label"][idx],
             "tf_name": self.inputs["tf_name"][idx],
             "tg_name": self.inputs["tg_name"][idx],
-            "cell_ids": self.inputs["cell_ids"][idx],
+            "cell_ids": cell_ids,
             "tf_idx": tf_idx,
             "tg_idx": tg_idx,
             "peak_indices": peak_indices,
             "peak_sequences": peak_sequences,
             "peak_distance": self.inputs["peak_distance"][idx].float(),
             "peak_mask": self.inputs["peak_mask"][idx].bool(),
-            "peak_accessibility": self.inputs["peak_accessibility"][idx].float(),
-            "tf_expression": self.inputs["tf_expression"][idx].float(),
-            "tg_expression": self.inputs["tg_expression"][idx].float(),
+            "peak_accessibility": peak_accessibility,
+            "tf_expression": tf_expression,
+            "tg_expression": tg_expression,
         }
 
         if not self.return_tf_indices:
@@ -198,6 +281,42 @@ class TFTGEdgeBagDataset(Dataset):
 
         return item
         
+class ResidentTFEmbeddingTable(Callback):
+    """Pin the TF embedding table to each rank's GPU for the tf_idx gather path.
+
+    Registered from a callback rather than before `trainer.fit` because
+    `set_tf_embedding_table` places the table on `next(model.parameters()).device`, and
+    the model is still on CPU until the strategy sets it up. Hooking the *_start events
+    runs after device placement and after the DDP wrap, so each rank pins its own copy.
+
+    The table is a non-persistent buffer that is None at wrap time, so it stays out of
+    DDP's buffer list and is never broadcast -- it is identical, read-only, and derived
+    from the same cache file on every rank, so there is nothing to synchronise.
+    """
+
+    def __init__(self, tf_embeddings_tensor, tf_mask_tensor):
+        self.tf_embeddings_tensor = tf_embeddings_tensor
+        self.tf_mask_tensor = tf_mask_tensor
+
+    def _register(self, pl_module):
+        if getattr(pl_module.model, "tf_embedding_table", None) is None:
+            pl_module.model.set_tf_embedding_table(
+                self.tf_embeddings_tensor, self.tf_mask_tensor
+            )
+
+    def on_fit_start(self, trainer, pl_module):
+        self._register(pl_module)
+
+    def on_validation_start(self, trainer, pl_module):
+        self._register(pl_module)
+
+    def on_test_start(self, trainer, pl_module):
+        self._register(pl_module)
+
+    def on_predict_start(self, trainer, pl_module):
+        self._register(pl_module)
+
+
 def collate_tftg_edge_bags(batch):
     output = {
         "label": torch.stack([b["label"] for b in batch]).float(),
@@ -263,6 +382,68 @@ if __name__ == "__main__":
     )
     parser.add_argument("--max_peaks_per_tg", type=int, required=False, default=None, help="Maximum number of peaks to consider per TG (default: 64)")
     parser.add_argument("--max_cells_per_pair", type=int, default=8, help="Maximum number of cells to sample per TF-TG pair (default: 8)")
+    parser.add_argument(
+        "--lr",
+        type=float,
+        default=None,
+        help=(
+            "Base learning rate. Left unset, it is scaled from the reference point this "
+            "model was tuned at (1e-4 at an effective batch of 32, i.e. batch_size 8 on 4 "
+            "GPUs) according to --lr_scale_rule. Pass a value to pin it."
+        ),
+    )
+    parser.add_argument(
+        "--lr_scale_rule",
+        choices=["sqrt", "linear", "none"],
+        default="sqrt",
+        help=(
+            "How to scale the reference LR by effective batch (batch_size * gpus * nodes). "
+            "'sqrt' multiplies by sqrt(ratio) -- the usual choice for Adam-family "
+            "optimizers, where gradient noise falls with sqrt(batch). 'linear' multiplies "
+            "by the ratio, which is the SGD result and tends to overshoot with AdamW. "
+            "'none' keeps the reference LR. Ignored when --lr is given."
+        ),
+    )
+    parser.add_argument(
+        "--warmup_epochs",
+        type=float,
+        default=0.0,
+        help=(
+            "Epochs spent linearly warming the LR from ~0 to its base value. 0 disables "
+            "warmup (historical behaviour). Worth turning on whenever the LR is scaled up: "
+            "ReduceLROnPlateau only reacts after val/loss stalls, so it cannot protect the "
+            "early steps where a large batch at a high LR diverges. Counted in epochs "
+            "rather than a fraction of the run because EarlyStopping usually ends training "
+            "well before --epochs, which would make a percentage-of-total warmup arbitrary. "
+            "1.0 is a reasonable starting point."
+        ),
+    )
+    parser.add_argument(
+        "--tf_embedding_on_device",
+        action="store_true",
+        help=(
+            "Keep the TF protein embedding table resident on each GPU and gather from it by "
+            "tf_idx, instead of the dataloader shipping a full [T, D] embedding with every "
+            "edge. Mathematically identical (same gather, different place), but the per-edge "
+            "copy is 2.86 MB against ~102 KB for the rest of the item, so it dominates "
+            "collate and host-to-device transfer -- and it scales with batch size, which "
+            "otherwise makes a larger --batch_size counterproductive. Costs ~1.3 GB of GPU "
+            "memory per rank."
+        ),
+    )
+    parser.add_argument(
+        "--resample_cells_per_epoch",
+        action="store_true",
+        help=(
+            "Instead of reusing the fixed per-edge cell bag baked into the cache (the "
+            "historical default, used by every existing checkpoint), redraw "
+            "--max_cells_per_pair cells for each training edge from the full pseudobulk "
+            "pool on every access -- a different subset each epoch. Only affects the "
+            "training set; validation/test keep the frozen cached bags so val metrics stay "
+            "comparable across epochs. Requires atac_mat.pt/rna_mat.pt, built by "
+            "build_tf_to_tg_train_data.py --build_resample_matrices_only."
+        ),
+    )
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size for training (default: 32)")
     parser.add_argument("--pct_true_edges", type=float, default=0.15, help="Percentage of true edges to include in the training set (default: 0.15)")
     parser.add_argument("--true_false_ratio", type=float, default=2.0, help="Ratio of true to false edges in the training set (default: 2.0)")
@@ -334,6 +515,43 @@ if __name__ == "__main__":
     tf_name_to_idx = metadata["tf_name_to_idx"]
     tg_id_to_idx = metadata["tg_id_to_idx"]
 
+    # Only loaded when requested: the full peak x cell / gene x cell matrices needed to redraw
+    # cell subsets during training instead of reusing the frozen bag baked into the cache.
+    resample_kwargs = {}
+    if args.resample_cells_per_epoch:
+        for p in (config.tf_tg_atac_mat_cache_path, config.tf_tg_rna_mat_cache_path):
+            if not p.exists():
+                raise FileNotFoundError(
+                    f"--resample_cells_per_epoch needs {p}, which doesn't exist yet. Build it "
+                    "with: python3 scripts/build_tf_to_tg_train_data.py "
+                    "--build_resample_matrices_only (plus the same --max_peaks_per_tg etc as "
+                    "the existing cache)."
+                )
+
+        atac_mat = torch.load(config.tf_tg_atac_mat_cache_path, weights_only=True)
+        rna_mat = torch.load(config.tf_tg_rna_mat_cache_path, weights_only=True)
+        gene_to_rna_idx = metadata["gene_to_rna_idx"]
+
+        cell_to_idx = metadata["cell_to_idx"]
+        idx_to_cell = [None] * len(cell_to_idx)
+        for cell_name, i in cell_to_idx.items():
+            idx_to_cell[i] = cell_name
+
+        log_once(
+            f"--resample_cells_per_epoch enabled: redrawing {max_cells_per_pair} cells/edge "
+            f"from a pool of {atac_mat.shape[1]} for training only "
+            f"(atac_mat {tuple(atac_mat.shape)}, rna_mat {tuple(rna_mat.shape)})."
+        )
+
+        resample_kwargs = dict(
+            resample_cells=True,
+            atac_mat=atac_mat,
+            rna_mat=rna_mat,
+            gene_to_rna_idx=gene_to_rna_idx,
+            idx_to_cell=idx_to_cell,
+            resample_max_cells_per_pair=max_cells_per_pair,
+        )
+
     # Load the manifest and verify tensor shapes and dtypes match expectations
     with open(config.tf_tg_manifest_cache_path) as f:
         manifest = json.load(f)
@@ -344,26 +562,34 @@ if __name__ == "__main__":
     assert manifest["atac_peak_tensor_dtype"] == str(atac_peak_tensor.dtype)
     
     # Re-create the datasets and dataloaders using the loaded compact inputs and lookup tensors
+    # Applies to all three splits: the choice is only about where the gather happens, so
+    # train/val/test must agree or the model would be fed tf_embedding in one loop and
+    # tf_idx in another.
+    tf_source_kwargs = dict(return_tf_indices=args.tf_embedding_on_device)
+
     train_dataset = TFTGEdgeBagDataset(
         tftg_inputs_train,
         tf_embeddings_tensor=tf_embeddings_tensor,
         tf_mask_tensor=tf_mask_tensor,
-        atac_peak_tensor=atac_peak_tensor
+        atac_peak_tensor=atac_peak_tensor,
+        **tf_source_kwargs,
+        **resample_kwargs,
     )
 
     val_dataset = TFTGEdgeBagDataset(
         tftg_inputs_val,
         tf_embeddings_tensor=tf_embeddings_tensor,
         tf_mask_tensor=tf_mask_tensor,
-        atac_peak_tensor=atac_peak_tensor
-
+        atac_peak_tensor=atac_peak_tensor,
+        **tf_source_kwargs,
     )
 
     test_dataset = TFTGEdgeBagDataset(
         tftg_inputs_test,
         tf_embeddings_tensor=tf_embeddings_tensor,
         tf_mask_tensor=tf_mask_tensor,
-        atac_peak_tensor=atac_peak_tensor
+        atac_peak_tensor=atac_peak_tensor,
+        **tf_source_kwargs,
     )
 
     # Create the DataLoaders with the custom collate function for batching edge bags
@@ -448,9 +674,54 @@ if __name__ == "__main__":
 
     log_once("\nStarting Lightning training...")
 
+    # ---- Learning rate and warmup ----------------------------------------------------
+    # The reference point is the configuration this model was tuned at: lr 1e-4 with
+    # batch_size 8 across 4 GPUs, i.e. an effective batch of 32.
+    REFERENCE_LR = 1e-4
+    REFERENCE_EFFECTIVE_BATCH = 32
+
+    effective_batch = batch_size * max(1, num_gpus) * max(1, num_nodes)
+    batch_ratio = effective_batch / REFERENCE_EFFECTIVE_BATCH
+
+    if args.lr is not None:
+        learning_rate = args.lr
+        lr_origin = "pinned via --lr"
+    elif args.lr_scale_rule == "linear":
+        learning_rate = REFERENCE_LR * batch_ratio
+        lr_origin = f"linear scaling of {REFERENCE_LR:g} by {batch_ratio:.2f}x"
+    elif args.lr_scale_rule == "sqrt":
+        learning_rate = REFERENCE_LR * math.sqrt(batch_ratio)
+        lr_origin = f"sqrt scaling of {REFERENCE_LR:g} by sqrt({batch_ratio:.2f})"
+    else:
+        learning_rate = REFERENCE_LR
+        lr_origin = "unscaled reference"
+
+    # trainer.global_step counts optimizer steps on a single rank, and DDP shards the
+    # sampler across ranks -- but len(train_loader) here is still the unsharded length,
+    # because Lightning does not inject the DistributedSampler until fit() starts. Divide
+    # it out, or warmup would be world_size times longer than intended.
+    world_size_for_steps = max(1, num_gpus) * max(1, num_nodes)
+    steps_per_epoch = math.ceil(len(train_loader) / world_size_for_steps)
+    warmup_steps = int(round(args.warmup_epochs * steps_per_epoch))
+
+    log_once(
+        f"Learning rate {learning_rate:.3e} ({lr_origin}); effective batch "
+        f"{effective_batch} = {batch_size} x {num_gpus} GPUs x {num_nodes} nodes "
+        f"({batch_ratio:.2f}x the {REFERENCE_EFFECTIVE_BATCH} reference)."
+    )
+    if warmup_steps > 0:
+        log_once(
+            f"Linear warmup over {warmup_steps:,} steps "
+            f"({args.warmup_epochs:g} epochs at {steps_per_epoch:,} steps/epoch/rank), "
+            f"then ReduceLROnPlateau on val/loss takes over."
+        )
+    else:
+        log_once("No LR warmup (--warmup_epochs 0); ReduceLROnPlateau on val/loss only.")
+
     lit_model = tf_to_tg_module.LitTFTGRegulationModel(
         model=tf_tg_model,
-        lr=1e-4,
+        lr=learning_rate,
+        warmup_steps=warmup_steps,
         weight_decay=1e-4,
         pos_weight=None,
         pooling_mode=pooling_mode,
@@ -476,6 +747,21 @@ if __name__ == "__main__":
 
     lr_monitor = LearningRateMonitor(logging_interval="epoch")
 
+    extra_callbacks = []
+    if args.tf_embedding_on_device:
+        extra_callbacks.append(
+            ResidentTFEmbeddingTable(tf_embeddings_tensor, tf_mask_tensor)
+        )
+        log_once(
+            f"--tf_embedding_on_device enabled: pinning the "
+            f"{tuple(tf_embeddings_tensor.shape)} TF embedding table "
+            f"({tf_embeddings_tensor.numel() * 4 / 1e9:.2f} GB) to each rank and gathering "
+            f"by tf_idx, instead of shipping "
+            f"{tf_embeddings_tensor.shape[1] * tf_embeddings_tensor.shape[2] * 4 / 1e6:.2f} MB "
+            f"per edge ({tf_embeddings_tensor.shape[1] * tf_embeddings_tensor.shape[2] * 4 * batch_size / 1e6:.0f} MB "
+            f"per batch of {batch_size}) through the dataloader."
+        )
+
     wandb_logger = WandbLogger(
         project="tf_tg_regulation_prediction",
         name=run_name,
@@ -494,11 +780,17 @@ if __name__ == "__main__":
         "sample_pairs": sample_pairs,
         "max_peaks_per_tg": max_peaks_per_tg,
         "max_cells_per_pair": max_cells_per_pair,
+        "resample_cells_per_epoch": args.resample_cells_per_epoch,
         "pct_true_edges": pct_true_edges,
         "true_false_ratio": true_false_ratio,
         "pooling_mode": pooling_mode,
         "pooling_temperature": pooling_temperature,
-        "lr": 1e-4,
+        "lr": learning_rate,
+        "lr_scale_rule": args.lr_scale_rule if args.lr is None else "pinned",
+        "effective_batch": effective_batch,
+        "warmup_steps": warmup_steps,
+        "warmup_epochs": args.warmup_epochs,
+        "tf_embedding_on_device": args.tf_embedding_on_device,
         "weight_decay": 1e-4,
         "flank_size": peak_flank_size,
         "max_precompute_peaks": max_peaks_per_tg,
@@ -536,6 +828,7 @@ if __name__ == "__main__":
             checkpoint_callback,
             early_stopping_callback,
             lr_monitor,
+            *extra_callbacks,
         ],
         gradient_clip_val=1.0,
         gradient_clip_algorithm="norm",

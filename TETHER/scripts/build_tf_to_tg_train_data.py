@@ -98,6 +98,90 @@ def create_train_val_test_splits(
 
     return gt_train_df, gt_val_df, gt_test_df
 
+def load_nmp_trajectory_tfs(grn_coef_file: Path) -> set[str]:
+    """TFs the paper's NMP-trajectory GRN considered as candidate regulators.
+
+    `global_chip_GRN_coef.txt.gz` is the TF->gene regression table from
+    Argelaguet et al. 2022, fitted on the metacells of the NMP -> {spinal cord,
+    somitic mesoderm} trajectory. Every TF appearing in it survived in silico
+    ChIP-seq binding, the 50 kb peak-to-gene window, and the variance filters, so
+    it is the broadest defensible definition of "implicated in NMP differentiation".
+    Taking all of them -- not just the ones with significant betas -- keeps any TF
+    the paper evaluated on that trajectory out of training.
+    """
+    if not grn_coef_file.exists():
+        raise FileNotFoundError(
+            f"NMP GRN coefficient file not found: {grn_coef_file}. "
+            "It ships with the Argelaguet et al. 2022 download under "
+            "results/rna_atac/gene_regulatory_networks/metacells/trajectories/nmp/."
+        )
+
+    grn_df = pd.read_csv(grn_coef_file, sep="\t", usecols=["tf"])
+    nmp_tfs = set(grn_df["tf"].astype(str).str.upper().unique())
+
+    logging.info(f"Loaded {len(nmp_tfs)} NMP-trajectory TFs from {grn_coef_file.name}")
+    return nmp_tfs
+
+
+def split_ground_truth_by_tf(
+    ground_truth_df: pd.DataFrame,
+    nmp_tfs: set[str],
+    val_frac: float = 0.15,
+    seed: int = 123,
+):
+    """Split edges by their TF, holding out the NMP-differentiation TFs for test.
+
+    Unlike the chromosome split, which partitions on the *target gene* and lets every
+    TF appear in all three splits, this partitions on the *TF*: a TF's edges land
+    entirely in one split. Train and validation TFs are disjoint from the test TFs, so
+    the model is scored on regulators whose target preferences it has never seen.
+
+    Target genes are deliberately *not* held out -- the same TG can appear in train and
+    test under different TFs. That is the intended generalisation question here
+    ("does this unseen TF regulate this gene?"), and holding out genes as well would
+    shrink the evaluation set without making the TF question any cleaner.
+    """
+    all_tfs = set(ground_truth_df["Source"].unique())
+
+    test_tfs = sorted(all_tfs & nmp_tfs)
+    train_pool = sorted(all_tfs - nmp_tfs)
+
+    if not test_tfs:
+        raise ValueError(
+            "No ground-truth TFs overlap the NMP TF list. Check that TF names are "
+            "upper-cased on both sides."
+        )
+    if len(train_pool) < 2:
+        raise ValueError(
+            f"Only {len(train_pool)} non-NMP TFs available; not enough to train and validate."
+        )
+
+    # Deterministic TF-level validation holdout carved out of the training TFs, so
+    # validation also measures generalisation to unseen TFs rather than unseen edges.
+    rng = np.random.default_rng(seed)
+    n_val = max(1, round(len(train_pool) * val_frac))
+    val_tfs = sorted(rng.choice(train_pool, size=n_val, replace=False).tolist())
+    train_tfs = sorted(set(train_pool) - set(val_tfs))
+
+    gt_train_df = ground_truth_df[ground_truth_df["Source"].isin(train_tfs)].copy()
+    gt_val_df = ground_truth_df[ground_truth_df["Source"].isin(val_tfs)].copy()
+    gt_test_df = ground_truth_df[ground_truth_df["Source"].isin(test_tfs)].copy()
+
+    logging.info("Splitting ground truth by transcription factor:")
+    logging.info(f"  - Train: {len(train_tfs):3d} TFs, {len(gt_train_df):,} interactions")
+    logging.info(f"  - Val:   {len(val_tfs):3d} TFs, {len(gt_val_df):,} interactions")
+    logging.info(f"  - Test:  {len(test_tfs):3d} TFs, {len(gt_test_df):,} interactions (NMP differentiation)")
+    logging.info(f"  - Test TFs: {', '.join(test_tfs)}")
+
+    # Belt and braces: the whole point of this split is that no TF crosses it.
+    assert not (set(train_tfs) & set(test_tfs)), "Train/test TF leakage"
+    assert not (set(val_tfs) & set(test_tfs)), "Val/test TF leakage"
+    assert not (set(train_tfs) & set(val_tfs)), "Train/val TF leakage"
+
+    tf_split = {"train": train_tfs, "val": val_tfs, "test": test_tfs}
+    return gt_train_df, gt_val_df, gt_test_df, tf_split
+
+
 def create_true_false_edges_from_full_universe(
     edge_df: pd.DataFrame,
     tf_col: str = "Source",
@@ -240,7 +324,45 @@ def main():
     parser.add_argument("--true_false_ratio", type=float, default=2.0)
     parser.add_argument("--peak_flank_size", type=int, default=64)
     parser.add_argument("--num_cpu", type=int, default=8)
+    parser.add_argument(
+        "--split_mode",
+        choices=["chromosome", "tf"],
+        default="chromosome",
+        help=(
+            "How to partition train/val/test. 'chromosome' (default) splits on the target "
+            "gene's chromosome. 'tf' splits on the transcription factor, holding out the TFs "
+            "implicated in NMP differentiation for test."
+        ),
+    )
+    parser.add_argument(
+        "--nmp_grn_coef_file",
+        type=Path,
+        default=(
+            config.DATA_DIR / "dropbox_data" / "extracted" / "results" / "rna_atac"
+            / "gene_regulatory_networks" / "metacells" / "trajectories" / "nmp"
+            / "global_chip_GRN_coef.txt.gz"
+        ),
+        help="TF->gene coefficient table defining the NMP-trajectory TFs (--split_mode tf only)",
+    )
+    parser.add_argument(
+        "--val_tf_frac",
+        type=float,
+        default=0.15,
+        help="Fraction of non-NMP TFs held out for validation (--split_mode tf only)",
+    )
     parser.add_argument("--force_reload", action="store_true")
+    parser.add_argument(
+        "--build_resample_matrices_only",
+        action="store_true",
+        help=(
+            "Build and cache atac_mat.pt/rna_mat.pt (the full peak x cell and gene x cell "
+            "pseudobulk matrices) and then exit, skipping ground-truth-edge-bag construction. "
+            "These two files are only needed for --resample_cells_per_epoch in "
+            "train_tf_to_tg_model.py. Use this to backfill them onto a cache that already has "
+            "everything else, without repeating the slow one-hot peak encoding or edge-bag "
+            "build. Ignored (superseded by the full build) if combined with --force_reload."
+        ),
+    )
     args = parser.parse_args()
     
     logging.info(f" === Species: {config.species}, Cell Type: {config.cell_type}, Sample: {config.sample_name} ===\n")
@@ -294,7 +416,11 @@ def main():
         manifest_file,
     ]
     
-    if all(f.exists() for f in required_cache_files) and not args.force_reload:
+    if (
+        all(f.exists() for f in required_cache_files)
+        and not args.force_reload
+        and not args.build_resample_matrices_only
+    ):
         logging.info("All required cache files already exist. Skipping construction (use --force_reload to override).")
         return
 
@@ -394,28 +520,43 @@ def main():
     # Create a map of TG name to index for TGs present in the ground truth (and RNA pseudobulk)
     tg_id_to_idx = {tg: idx for idx, tg in enumerate(merged_ground_truth_df["Target"].unique())}
         
-    if config.species == "mm10":
-        train_chroms = [str(i) for i in range(1, 16)]
-        val_chroms = [ str(i) for i in range(16, 18)]
-        test_chroms = [str(i) for i in range(18, 20)]
-    elif config.species == "hg38":
-        train_chroms = [str(i) for i in range(1, 18)]
-        val_chroms = [str(i) for i in range(18, 20)]
-        test_chroms = [str(i) for i in range(20, 23)]
+    tf_split = None
 
-    # Split genes into train/val/test based on chromosome using the GTF reference file
-    train_genes, val_genes, test_genes = split_genes_by_chromosome(
-        gene_ref_file,
-        train_chroms=train_chroms,
-        val_chroms=val_chroms,
-        test_chroms=test_chroms
+    if args.split_mode == "tf":
+        # Hold out the TFs the paper implicated in NMP -> {spinal cord, somitic mesoderm}
+        # differentiation, and train on every other TF across all cell types. Splitting on
+        # the TF rather than the target chromosome keeps the whole genome available for
+        # training while still evaluating on regulators the model has never seen.
+        nmp_tfs = load_nmp_trajectory_tfs(args.nmp_grn_coef_file)
+        gt_train_df, gt_val_df, gt_test_df, tf_split = split_ground_truth_by_tf(
+            merged_ground_truth_df,
+            nmp_tfs=nmp_tfs,
+            val_frac=args.val_tf_frac,
+            seed=123,
         )
-    
-    # Subset the ground truth to create train/val/test splits based on the target gene chromosome splits
-    # (Only keeps TFs and TGs present in the ground truth and RNA pseudobulk, and only keeps TFs with embeddings)
-    gt_train_df, gt_val_df, gt_test_df = create_train_val_test_splits(
-        merged_ground_truth_df, train_genes, val_genes, test_genes
-    )
+    else:
+        if config.species == "mm10":
+            train_chroms = [str(i) for i in range(1, 16)]
+            val_chroms = [ str(i) for i in range(16, 18)]
+            test_chroms = [str(i) for i in range(18, 20)]
+        elif config.species == "hg38":
+            train_chroms = [str(i) for i in range(1, 18)]
+            val_chroms = [str(i) for i in range(18, 20)]
+            test_chroms = [str(i) for i in range(20, 23)]
+
+        # Split genes into train/val/test based on chromosome using the GTF reference file
+        train_genes, val_genes, test_genes = split_genes_by_chromosome(
+            gene_ref_file,
+            train_chroms=train_chroms,
+            val_chroms=val_chroms,
+            test_chroms=test_chroms
+            )
+
+        # Subset the ground truth to create train/val/test splits based on the target gene chromosome splits
+        # (Only keeps TFs and TGs present in the ground truth and RNA pseudobulk, and only keeps TFs with embeddings)
+        gt_train_df, gt_val_df, gt_test_df = create_train_val_test_splits(
+            merged_ground_truth_df, train_genes, val_genes, test_genes
+        )
     logging.info(f"After subsetting to TFs with embeddings and TGs in RNA pseudobulk:")
     logging.info(f"  - Train interactions: {len(gt_train_df)} (TFs: {gt_train_df['Source'].nunique()}, TGs: {gt_train_df['Target'].nunique()})")
     logging.info(f"  - Val interactions: {len(gt_val_df)} (TFs: {gt_val_df['Source'].nunique()}, TGs: {gt_val_df['Target'].nunique()})")
@@ -509,6 +650,26 @@ def main():
         common_cells=common_cells,
         max_precompute_peaks=max_peaks_per_tg,
     )
+
+    # Full [n_peaks, n_cells] / [n_genes, n_cells] matrices, only needed by
+    # --resample_cells_per_epoch (train_tf_to_tg_model.py draws fresh cell columns from these
+    # every epoch instead of reusing the frozen per-edge bag below). Column order matches
+    # cell_to_idx / metadata["cell_to_idx"] exactly, since both come from this same
+    # prepare_tftg_lookup_tables() call.
+    atac_mat_cache_path = config.tf_tg_atac_mat_cache_path
+    rna_mat_cache_path = config.tf_tg_rna_mat_cache_path
+
+    if not atac_mat_cache_path.exists() or not rna_mat_cache_path.exists() or args.force_reload:
+        logging.info(f"Saving full pseudobulk matrices for --resample_cells_per_epoch to {tf_tg_input_cache_dir}")
+        torch.save(torch.as_tensor(atac_mat, dtype=torch.float32), atac_mat_cache_path)
+        torch.save(torch.as_tensor(rna_mat, dtype=torch.float32), rna_mat_cache_path)
+
+    if args.build_resample_matrices_only:
+        logging.info(
+            "--build_resample_matrices_only set: atac_mat.pt/rna_mat.pt written, "
+            "skipping edge-bag construction."
+        )
+        return
 
     def _sample_df(df: pd.DataFrame, n: int | None, seed: int) -> pd.DataFrame:
         if n is None or len(df) <= n:
@@ -607,12 +768,21 @@ def main():
         "flank_size": peak_flank_size,
         "peak_dtype": "uint8",
         "max_peaks_real": max_peaks_real,
+        "split_mode": args.split_mode,
     }
+    if tf_split is not None:
+        # Persist the exact TF partition -- evaluation needs to know which TFs were held
+        # out, and it is not recoverable from the tensors alone.
+        metadata["tf_split"] = tf_split
     with open(metadata_file, "w") as f:
         json.dump(metadata, f, indent=4)
 
     # Save a manifest to keep track of model settings and dataset versions
     manifest = {
+        "split_mode": args.split_mode,
+        "n_train_tfs": len(tf_split["train"]) if tf_split else None,
+        "n_val_tfs": len(tf_split["val"]) if tf_split else None,
+        "n_test_tfs": len(tf_split["test"]) if tf_split else None,
         "max_peaks_per_tg": max_peaks_per_tg,
         "max_cells_per_pair": max_cells_per_pair,
         "flank_size": peak_flank_size,

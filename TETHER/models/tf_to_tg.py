@@ -570,12 +570,19 @@ class LitTFTGRegulationModel(pl.LightningModule):
         pooling_temperature: float = 1.0,
         logit_clamp: float | None = 20.0,
         enable_timing_sync: bool = False,
+        warmup_steps: int = 0,
     ):
         super().__init__()
 
         self.model = model
         self.lr = lr
         self.weight_decay = weight_decay
+        # Linear LR warmup over the first `warmup_steps` optimizer steps. 0 disables it,
+        # which is the historical behaviour. Needed once the effective batch grows: the
+        # ReduceLROnPlateau below only reacts after val/loss has already stalled, so it
+        # cannot protect the first few hundred steps, which is exactly where a large batch
+        # at a scaled-up LR diverges.
+        self.warmup_steps = int(warmup_steps)
         self.pooling_mode = pooling_mode
         self.pooling_temperature = pooling_temperature
         self.logit_clamp = logit_clamp
@@ -889,6 +896,20 @@ class LitTFTGRegulationModel(pl.LightningModule):
             })
         except Exception as e:
             print("[WARN] PR/ROC curve error:", e)
+
+    def optimizer_step(self, epoch, batch_idx, optimizer, optimizer_closure=None, **kwargs):
+        """Linear LR warmup, applied only while inside the warmup window.
+
+        Deliberately stops touching param_group["lr"] once warmup is over, so
+        ReduceLROnPlateau owns the LR from then on -- the two would otherwise fight, with
+        warmup overwriting every reduction the scheduler made.
+        """
+        if self.warmup_steps > 0 and self.trainer.global_step < self.warmup_steps:
+            scale = float(self.trainer.global_step + 1) / float(self.warmup_steps)
+            for group in optimizer.param_groups:
+                group["lr"] = scale * self.lr
+
+        super().optimizer_step(epoch, batch_idx, optimizer, optimizer_closure, **kwargs)
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(

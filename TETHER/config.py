@@ -20,13 +20,21 @@ CHKPT_DIR = PROJECT_DIR / "checkpoints"
 # cell_type="mESC"
 # sample_name="E7.5_rep1"
 
+# Argelaguet et al. 2022 mouse organogenesis atlas, the paper's own SEACells metacells
+# (1,896 metacells with matched RNA + ATAC, 9 wild-type timecourse libraries E7.5-E8.75,
+# both CRISPR libraries excluded). Built by
+# mouse_preprocessing_scripts/12_tether_training_data/.
+species = "mm10"
+cell_type="mESC"
+sample_name="WT_timecourse_metacells"
+
 # species = "mm10"
 # cell_type="mouse_liver"
 # sample_name="liver_4"
 
-species = "mm10"
-cell_type="mouse_hepatocytes"
-sample_name="hepatocytes_3"
+# species = "mm10"
+# cell_type="mouse_hepatocytes"
+# sample_name="hepatocytes_3"
 
 # species = "hg38"
 # cell_type="K562"
@@ -89,6 +97,12 @@ tf_dna_test_idx_cache_path = tf_dna_input_cache_dir / "test_idx.pt"
 
 # TF-TG training specific cache files
 tf_tg_atac_peak_cache_path = tf_tg_input_cache_dir / "atac_peak_tensor.pt"
+# Full peak x cell / gene x cell pseudobulk matrices -- not needed for the default (frozen
+# per-edge cell bag) training path, only for --resample_cells_per_epoch in
+# train_tf_to_tg_model.py. Built by build_tf_to_tg_train_data.py, optionally on their own via
+# --build_resample_matrices_only for a cache that already has everything else.
+tf_tg_atac_mat_cache_path = tf_tg_input_cache_dir / "atac_mat.pt"
+tf_tg_rna_mat_cache_path = tf_tg_input_cache_dir / "rna_mat.pt"
 tf_tg_metadata_cache_path = tf_tg_input_cache_dir / "metadata.json"
 tf_tg_manifest_cache_path = tf_tg_input_cache_dir / "manifest.json"
 tf_tg_train_cache_path = tf_tg_input_cache_dir / "tftg_inputs_train.pt"

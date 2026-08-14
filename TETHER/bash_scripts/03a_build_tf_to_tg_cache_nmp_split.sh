@@ -1,0 +1,60 @@
+#!/bin/bash -l
+#SBATCH --job-name=build_tf_tg_cache_nmp
+#SBATCH --output=LOGS/build_tf_tg_cache/%x_%j.log
+#SBATCH --error=LOGS/build_tf_tg_cache/%x_%j.err
+#SBATCH --time=72:00:00
+#SBATCH -p compute
+#SBATCH -N 1
+#SBATCH -c 64
+#SBATCH --mem=384G
+
+# Build the TF-TG training cache for the Argelaguet et al. 2022 organogenesis metacells
+# using a TRANSCRIPTION-FACTOR split instead of the usual chromosome split.
+#
+#   test  = TFs the paper's NMP-trajectory GRN implicated in NMP -> {spinal cord,
+#           somitic mesoderm} differentiation
+#   train = every other TF, across all cell types and all chromosomes
+#   val   = a TF-disjoint 15% holdout carved out of the training TFs
+#
+# config.py must be set to: species=mm10, cell_type=mESC,
+# sample_name=WT_timecourse_metacells
+
+set -eo pipefail
+
+PROJECT_DIR="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/TETHER"
+cd $PROJECT_DIR
+
+mkdir -p LOGS/build_tf_tg_cache
+
+echo "Activating conda environment..."
+source activate my_env
+
+# The TF split keeps every chromosome in training, so this cache is built from ~878k
+# ground-truth edges -- roughly 16x what the per-library mESC samples had. At
+# pct_true_edges=1.0 the edge bags would run to ~65 GB, so the true edges are subsampled
+# to 30%. That lands the row counts (~1.8M train) in the same range as the existing
+# E7.5_rep2 / E8.5_rep2 caches, and holds true_false_ratio at the 10.0 those runs used so
+# AUPRC stays comparable across samples.
+#
+# max_cells_per_pair is 64, not the earlier 24: the throughput probe (job 3788640) showed
+# that raising cells/edge costs only ~4% throughput, because the expensive frozen TF-DNA
+# path scales with edges x peaks and not with cells. Training resamples its cells from the
+# full 1,896-metacell pool, but val/test read the frozen bags built here, so building them
+# at 64 keeps evaluation on the same cell count the model trains at.
+max_cells_per_pair=64
+max_peaks_per_tg=25
+peak_flank_size=128
+pct_true_edges=0.3
+true_false_ratio=10.0
+
+echo "[INFO] Building and caching TF-TG training data (TF split)..."
+python3 ${PROJECT_DIR}/scripts/build_tf_to_tg_train_data.py \
+    --split_mode tf \
+    --val_tf_frac 0.15 \
+    --max_cells_per_pair $max_cells_per_pair \
+    --max_peaks_per_tg $max_peaks_per_tg \
+    --pct_true_edges $pct_true_edges \
+    --true_false_ratio $true_false_ratio \
+    --peak_flank_size $peak_flank_size \
+    --num_cpu $SLURM_CPUS_PER_TASK \
+    --force_reload

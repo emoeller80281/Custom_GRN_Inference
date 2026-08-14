@@ -14,6 +14,7 @@ jupyter_dense*.sh
 data/tf_data
 data/qc_scan
 data/sample_input_data
+data/dropbox_data
 TETHER/checkpoints
 checkpoint.pt
 .pybiomart
@@ -26,6 +27,7 @@ checkpoint.pt
 *.jaspar
 *.tsv
 *.motifs
+*.html
 *.log
 *.err
 *.txt
@@ -50,6 +52,8 @@ checkpoint.pt
 *.fasta
 *.fa
 *.ckpt
+*tsv.gz
+*mtx.gz
 *.npy
 .code-workspace
 
