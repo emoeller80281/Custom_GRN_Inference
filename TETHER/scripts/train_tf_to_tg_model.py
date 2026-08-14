@@ -395,9 +395,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--lr_scale_rule",
         choices=["sqrt", "linear", "none"],
-        default="sqrt",
+        default="none",
         help=(
             "How to scale the reference LR by effective batch (batch_size * gpus * nodes). "
+            "Defaults to 'none' so callers that do not pass it keep the historical fixed "
+            "1e-4 -- 03b_train_tf_to_tg_model.sh, wandb_sweep.py and the stability scripts "
+            "all share this entry point, and a silent LR change would not be obvious there. "
             "'sqrt' multiplies by sqrt(ratio) -- the usual choice for Adam-family "
             "optimizers, where gradient noise falls with sqrt(batch). 'linear' multiplies "
             "by the ratio, which is the SGD result and tends to overshoot with AdamW. "
@@ -498,10 +501,9 @@ if __name__ == "__main__":
         config.tf_tg_val_cache_path,
         weights_only=False,
     )
-    tftg_inputs_test = torch.load(
-        config.tf_tg_test_cache_path,
-        weights_only=False,
-    )
+    # The test split is deliberately NOT loaded here -- see build_test_loader() below.
+    # trainer.fit() never touches it, and at 64 cells/edge it is 7.4 GB per rank of file
+    # read and resident RAM that sits idle for the whole run.
 
     atac_peak_tensor = torch.load(
         config.tf_tg_atac_peak_cache_path,
@@ -584,14 +586,6 @@ if __name__ == "__main__":
         **tf_source_kwargs,
     )
 
-    test_dataset = TFTGEdgeBagDataset(
-        tftg_inputs_test,
-        tf_embeddings_tensor=tf_embeddings_tensor,
-        tf_mask_tensor=tf_mask_tensor,
-        atac_peak_tensor=atac_peak_tensor,
-        **tf_source_kwargs,
-    )
-
     # Create the DataLoaders with the custom collate function for batching edge bags
     train_loader = DataLoader(
         train_dataset,
@@ -615,18 +609,46 @@ if __name__ == "__main__":
         collate_fn=collate_tftg_edge_bags,
         )
 
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=6,
-        pin_memory=True,
-        persistent_workers=True,
-        prefetch_factor=4,
-        collate_fn=collate_tftg_edge_bags,
-        )
+    def build_test_loader():
+        """Load the test split and wrap it in a DataLoader, on demand.
 
-    log_once(f"Train/Val/Test sizes: {len(train_dataset)}, {len(val_dataset)}, {len(test_dataset)}")
+        Kept out of the eager path because fit() only ever reads train and val: loading
+        the test tensors up front cost every rank a 7.4 GB read and the RAM to hold it
+        for the duration of training, for nothing. Call this immediately before
+        trainer.test(), so the cost lands once and only if the split is actually scored.
+
+        Test always reads the frozen cached bags -- never the resampled cells -- so a
+        score is reproducible against a fixed set of cells.
+        """
+        log_once(f"Loading test split from {config.tf_tg_test_cache_path} ...")
+        tftg_inputs_test = torch.load(
+            config.tf_tg_test_cache_path,
+            weights_only=False,
+        )
+        test_dataset = TFTGEdgeBagDataset(
+            tftg_inputs_test,
+            tf_embeddings_tensor=tf_embeddings_tensor,
+            tf_mask_tensor=tf_mask_tensor,
+            atac_peak_tensor=atac_peak_tensor,
+            **tf_source_kwargs,
+        )
+        log_once(f"Test split loaded: {len(test_dataset):,} edges")
+        return DataLoader(
+            test_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=6,
+            pin_memory=True,
+            persistent_workers=True,
+            prefetch_factor=4,
+            collate_fn=collate_tftg_edge_bags,
+            )
+
+    # Test size comes from the manifest so reporting it does not pull in the tensors.
+    log_once(
+        f"Train/Val/Test sizes: {len(train_dataset)}, {len(val_dataset)}, "
+        f"{manifest['n_test_rows']} (test not loaded until scored)"
+    )
 
     tf_tg_model = create_new_tf_tg_regulation_model(
         tf_bind_model_path,
@@ -847,3 +869,9 @@ if __name__ == "__main__":
         train_dataloaders=train_loader,
         val_dataloaders=val_loader,
     )
+
+    # No trainer.test() here, deliberately: LitTFTGRegulationModel has no test_step, and
+    # _shared_step accepts only "train"/"val". Test scoring on the held-out TFs happens
+    # against a saved checkpoint in plot_auprc_all_methods.py / generate_all_predictions.py.
+    # build_test_loader() above is the hook to use if that ever moves in-process.
+    log_once(f"Best checkpoint by val/auroc: {checkpoint_callback.best_model_path or '(none)'}")
