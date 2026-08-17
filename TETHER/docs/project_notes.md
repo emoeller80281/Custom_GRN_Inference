@@ -212,11 +212,15 @@ Each boxplot represents the performance of each method across all samples.
   </tr>
 </table>
 
+For each sample, the GRNs for each method were filtered to only contain TFs and TGs which were present in both the multiomic dataset and the sample's combined ground truth. The early precision rate, early recall, early false positive rate, and early percent interaction metrics were calculated using the top 10k scored edges after TF/TG filtering (or the full GRN, whichever was smaller).
+
 ### AUROC Calculation
 
 ### AUPRC Calculation
 
 ### Early Precision Rate Calculation
+
+
 
 $$\text{Early precision}=
 \frac{\text{true edges among top }k}{k}$$
@@ -246,7 +250,7 @@ $$FPR=
 $$\text{F1} = 2\times\frac{\text{Precision}\times\text{Recall}}
 {\text{Precision}+\text{Recall}}$$
 
-### Percent Interaction Calculation
+### Early Percent Interaction Calculation
 
 $$\text{PerInt}=
 100\times

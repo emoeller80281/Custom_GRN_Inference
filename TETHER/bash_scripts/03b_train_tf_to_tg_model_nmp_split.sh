@@ -41,13 +41,26 @@
 # every epoch (training only; val/test stay on the frozen cached bags, which are now built
 # at the same 64 cells so train and eval agree).
 #
-# LR is PINNED at 2.828e-4 rather than scaled, on purpose. That is the value sqrt scaling
-# gave at batch 64, and it trained cleanly for 7 epochs (val AUROC 0.70 -> 0.744). Batch is
-# now 256, and re-applying sqrt scaling would push it to 5.66e-4 -- the wrong direction
-# after run 3788646 produced NaN logits. Holding LR fixed while batch grows is the
-# conservative move: more samples per step means less gradient noise, so the same LR is
-# strictly tamer than before. It also means fewer optimizer steps per epoch (1,542 vs
-# 6,169), so expect slower progress per epoch even if each epoch is faster in wall clock.
+# Batch is 64, NOT larger, and this is a measured decision -- do not raise it without
+# re-tuning lr. Run 3793551 tried batch 256 (effective 1024) at this same lr and overfit:
+#
+#   epoch  train loss   val loss   val AUROC     vs 3788646 @ batch 64
+#     0      0.363       0.3000     0.6737         0.7032
+#     1      0.268       0.2938     0.6941  <-best 0.7297
+#     2      0.249       0.3018     0.6921         0.7444  <- 3788646 best
+#     3      0.185       0.3162     0.6773         0.7306
+#
+# Train loss fell FASTER than at batch 64 while val loss rose for three straight epochs.
+# That is the large-batch generalization gap, not slow convergence: gradient noise scale
+# goes as lr/batch, so 4x the batch at fixed lr is 4x less noise, which finds sharper
+# minima. Batch 256 was 2.8x faster per epoch (25 min vs 72) and still the wrong trade --
+# it never came within 0.05 AUROC of what batch 64 reached in 3 epochs.
+#
+# If batch >64 is retried, raise lr WITH it: the linear rule (1.13e-3 at batch 256) is what
+# restores the noise scale; sqrt (5.66e-4) only half-corrects it.
+#
+# lr 2.828e-4 is what sqrt scaling gave at batch 64, and it trained cleanly for 7 epochs
+# (val AUROC 0.70 -> 0.744) before dying on an fp16 NaN that bf16 now removes.
 #
 # Precision: bf16-mixed, which needs Ampere and is why this now targets a100. fp16 saturates
 # at ~65504 and GradScaler only rescues gradient overflow, not forward activations -- run
@@ -159,7 +172,7 @@ srun python3 ${PROJECT_DIR}/scripts/train_tf_to_tg_model.py \
     --peak_flank_size $peak_flank_size \
     --pct_true_edges $pct_true_edges \
     --true_false_ratio $true_false_ratio \
-    --batch_size 256 \
+    --batch_size 64 \
     --keep_tf_dna_in_eval \
     --tf_embedding_on_device \
     --resample_cells_per_epoch \
