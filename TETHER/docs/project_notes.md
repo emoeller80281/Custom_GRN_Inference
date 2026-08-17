@@ -199,14 +199,66 @@ Each boxplot represents the performance of each method across all samples.
     <td><img src="../plots/model_vs_other_method_boxplots/prc_by_method_boxplot.png" width="400"></td>
   </tr>
   <tr>
-    <td><img src="../plots/model_vs_other_method_boxplots/f1_by_method_boxplot.png" width="400"></td>
     <td><img src="../plots/model_vs_other_method_boxplots/early precision rate_by_method_boxplot.png" width="400"></td>
+    <td><img src="../plots/model_vs_other_method_boxplots/recall_by_method_boxplot.png" width="400"></td>
   </tr>
   <tr>
     <td><img src="../plots/model_vs_other_method_boxplots/fpr_by_method_boxplot.png" width="400"></td>
+    <td><img src="../plots/model_vs_other_method_boxplots/f1_by_method_boxplot.png" width="400"></td>
+  </tr>
+  <tr>
+    <td><img src="../plots/model_vs_other_method_boxplots/perint_by_method_boxplot.png" width="400"></td>
     <td><img src="../plots/model_vs_other_method_boxplots/predictable tf fraction_by_method_boxplot.png" width="400"></td>
   </tr>
 </table>
+
+### AUROC Calculation
+
+### AUPRC Calculation
+
+### Early Precision Rate Calculation
+
+$$\text{Early precision}=
+\frac{\text{true edges among top }k}{k}$$
+
+$$EPR=
+\frac{\text{early precision}}
+{\text{positive prevalence}}$$
+
+### Early Recall Calculation
+
+$$\text{Recall}
+=
+\frac{TP}{TP+FN}
+=
+\frac{|A\cap B|}{|B|}$$
+
+### Early False Positive Rate Calculation
+
+$$FPR=
+\frac{FP}{FP+TN}
+=
+\frac{|A\setminus B|}
+{|U\setminus B|}$$
+
+### F1 Score Calculation
+
+$$\text{F1} = 2\times\frac{\text{Precision}\times\text{Recall}}
+{\text{Precision}+\text{Recall}}$$
+
+### Percent Interaction Calculation
+
+$$\text{PerInt}=
+100\times
+\frac{|A\cap B|}
+{\min(|A|,|B|)}$$
+
+### Predictable TF Fraction Calculation
+
+$$\text{PTF fraction}
+=
+\frac{\text{predictable TFs}}
+{\text{evaluable TFs}}$$
 
 <br>
 <br>

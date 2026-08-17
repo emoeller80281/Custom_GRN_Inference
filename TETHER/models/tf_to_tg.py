@@ -1,3 +1,5 @@
+import logging
+
 import torch
 import torch.nn as nn
 import pytorch_lightning as pl
@@ -601,6 +603,10 @@ class LitTFTGRegulationModel(pl.LightningModule):
 
         self.val_probs = []
         self.val_targets = []
+        # Validation batches dropped because every logit was NaN/Inf. Counted per epoch
+        # and surfaced in on_validation_epoch_end -- a non-zero count means the model has
+        # started diverging, which is worth seeing rather than silently averaging over.
+        self._n_empty_val_batches = 0
         self._prev_batch_end_time = None
         self._epoch_start_time = None
         self._step_start_time = None
@@ -681,16 +687,26 @@ class LitTFTGRegulationModel(pl.LightningModule):
         if stage == "train":
             acc = self.train_acc(probs, labels.int())
         elif stage == "val":
-            
+
             valid_mask = torch.isfinite(probs) & torch.isfinite(labels)
 
             probs = probs[valid_mask]
             labels = labels[valid_mask]
-            
-            acc = self.val_acc(probs, labels.int())
 
-            self.val_probs.append(probs.detach().float().cpu())
-            self.val_targets.append(labels.detach().int().cpu())
+            if probs.numel() == 0:
+                # Every logit in this batch was NaN/Inf, so the finite mask emptied it.
+                # torchmetrics cannot update from an empty tensor -- BinaryAccuracy
+                # reshapes to [0, -1], which raises "cannot reshape tensor of 0 elements".
+                # Left unguarded, one bad batch kills the whole run at the epoch boundary,
+                # which is how job 3788646 lost 8 hours and 7 good epochs. Skip the batch
+                # and let on_validation_epoch_end aggregate whatever else was finite.
+                acc = None
+                self._n_empty_val_batches += 1
+            else:
+                acc = self.val_acc(probs, labels.int())
+
+                self.val_probs.append(probs.detach().float().cpu())
+                self.val_targets.append(labels.detach().int().cpu())
         else:
             raise ValueError(f"Unknown stage: {stage}")
 
@@ -704,15 +720,16 @@ class LitTFTGRegulationModel(pl.LightningModule):
             sync_dist=(stage != "train"),
         )
 
-        self.log(
-            f"{stage}/acc",
-            acc,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=False,
-            logger=True,
-            sync_dist=(stage != "train"),
-        )
+        if acc is not None:
+            self.log(
+                f"{stage}/acc",
+                acc,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+                sync_dist=(stage != "train"),
+            )
 
         return loss
 
@@ -825,9 +842,19 @@ class LitTFTGRegulationModel(pl.LightningModule):
     def on_validation_epoch_start(self):
         self.val_probs.clear()
         self.val_targets.clear()
+        self._n_empty_val_batches = 0
 
     def on_validation_epoch_end(self):
+        if self._n_empty_val_batches:
+            logging.warning(
+                f"{self._n_empty_val_batches} validation batch(es) were entirely "
+                "non-finite and were skipped. The model is producing NaN/Inf logits -- "
+                "treat this epoch's val metrics as unreliable and check for divergence."
+            )
         if not self.val_probs:
+            logging.error(
+                "Every validation batch was non-finite; no val metrics for this epoch."
+            )
             return
         
         probs = torch.cat(self.val_probs, dim=0).view(-1)

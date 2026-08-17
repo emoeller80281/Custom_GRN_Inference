@@ -422,6 +422,18 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument(
+        "--precision",
+        default="16-mixed",
+        help=(
+            "Lightning precision. Default '16-mixed' (fp16) is unchanged. On Ampere or "
+            "newer (A100), prefer 'bf16-mixed': fp16 saturates at ~65504, and GradScaler "
+            "only rescues gradient overflow, not forward activations -- an overflow there "
+            "becomes inf then NaN, which is how run 3788646 died at epoch 7. bf16 carries "
+            "fp32's exponent range at the same speed, removing that failure mode. Not "
+            "supported on V100."
+        ),
+    )
+    parser.add_argument(
         "--tf_embedding_on_device",
         action="store_true",
         help=(
@@ -813,6 +825,7 @@ if __name__ == "__main__":
         "warmup_steps": warmup_steps,
         "warmup_epochs": args.warmup_epochs,
         "tf_embedding_on_device": args.tf_embedding_on_device,
+        "precision": args.precision,
         "weight_decay": 1e-4,
         "flank_size": peak_flank_size,
         "max_precompute_peaks": max_peaks_per_tg,
@@ -843,7 +856,7 @@ if __name__ == "__main__":
         devices=num_gpus,
         num_nodes=num_nodes,
         strategy=strategy,
-        precision="16-mixed",
+        precision=args.precision,
         logger=wandb_logger,
         callbacks=[
             TQDMProgressBar(refresh_rate=25),

@@ -5,7 +5,7 @@
 #SBATCH --time=72:00:00
 #SBATCH -p dense
 #SBATCH -N 1
-#SBATCH --gres=gpu:v100:4
+#SBATCH --gres=gpu:a100:4
 #SBATCH --ntasks-per-node=4
 #SBATCH -c 8
 #SBATCH --mem=384G
@@ -41,10 +41,18 @@
 # every epoch (training only; val/test stay on the frozen cached bags, which are now built
 # at the same 64 cells so train and eval agree).
 #
-# LR: batch 64 on 4 GPUs is an effective batch of 256, 8x the 32 this model was tuned at
-# (batch 8 x 4 GPUs, lr 1e-4). --lr_scale_rule sqrt therefore sets lr = 1e-4*sqrt(8) =
-# 2.83e-4. sqrt rather than linear because linear scaling is the SGD result and overshoots
-# with AdamW -- linear would ask for 8e-4 here. Pass --lr to pin a value instead.
+# LR is PINNED at 2.828e-4 rather than scaled, on purpose. That is the value sqrt scaling
+# gave at batch 64, and it trained cleanly for 7 epochs (val AUROC 0.70 -> 0.744). Batch is
+# now 256, and re-applying sqrt scaling would push it to 5.66e-4 -- the wrong direction
+# after run 3788646 produced NaN logits. Holding LR fixed while batch grows is the
+# conservative move: more samples per step means less gradient noise, so the same LR is
+# strictly tamer than before. It also means fewer optimizer steps per epoch (1,542 vs
+# 6,169), so expect slower progress per epoch even if each epoch is faster in wall clock.
+#
+# Precision: bf16-mixed, which needs Ampere and is why this now targets a100. fp16 saturates
+# at ~65504 and GradScaler only rescues gradient overflow, not forward activations -- run
+# 3788646 hit NaN logits at epoch 7 under 16-mixed. bf16 has fp32's exponent range at the
+# same speed, which removes that failure mode rather than papering over it.
 #
 # Schedule: ReduceLROnPlateau on val/loss was already in configure_optimizers and still
 # owns the decay. --warmup_epochs 1.0 adds the piece a scaled-up LR actually needs, since
@@ -151,11 +159,12 @@ srun python3 ${PROJECT_DIR}/scripts/train_tf_to_tg_model.py \
     --peak_flank_size $peak_flank_size \
     --pct_true_edges $pct_true_edges \
     --true_false_ratio $true_false_ratio \
-    --batch_size 64 \
+    --batch_size 256 \
     --keep_tf_dna_in_eval \
     --tf_embedding_on_device \
     --resample_cells_per_epoch \
-    --lr_scale_rule sqrt \
-    --warmup_epochs 1.0
+    --lr 2.828e-4 \
+    --warmup_epochs 1.0 \
+    --precision bf16-mixed
 
 #     --max_peaks_per_tg $max_peaks_per_tg \
