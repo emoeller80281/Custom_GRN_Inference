@@ -573,6 +573,7 @@ class LitTFTGRegulationModel(pl.LightningModule):
         logit_clamp: float | None = 20.0,
         enable_timing_sync: bool = False,
         warmup_steps: int = 0,
+        fp32_eval: bool = True,
     ):
         super().__init__()
 
@@ -589,6 +590,28 @@ class LitTFTGRegulationModel(pl.LightningModule):
         self.pooling_temperature = pooling_temperature
         self.logit_clamp = logit_clamp
         self.enable_timing_sync = enable_timing_sync
+        # Score val/test outside autocast even when training runs in a mixed precision.
+        #
+        # bf16 keeps fp32's exponent range but spends two mantissa bits doing it (8 vs
+        # fp16's 10). As training spreads the edge logits out, more pairs quantize to the
+        # same bf16 value, and tied scores destroy ranking -- so the METRIC decays even
+        # while the model improves. Measured on run 3793729's own checkpoints (jobs
+        # 3794653/3797681), identical weights and data:
+        #
+        #                       epoch 0   epoch 5
+        #   val pooled  fp32     0.6833    0.6843   <- model flat-to-improving
+        #   val pooled  bf16     0.6740    0.6421   <- what training logged
+        #   val macro   fp32     0.6371    0.6668   <- +0.030 on held-out TFs
+        #
+        # The fp32-vs-bf16 gap grows 0.009 -> 0.042 over five epochs, so a run that is
+        # getting better logs a curve that falls. ModelCheckpoint monitors val/auroc and
+        # EarlyStopping monitors val/loss, so both were steering on that: 3793729 declared
+        # epoch 0 its best model when epoch 5 was measurably better.
+        #
+        # Default True because the alternative is a silently wrong metric. Pass False to
+        # reproduce a pre-fix run's numbers exactly. Training math is untouched either way
+        # -- this only changes how val/test are scored, never how gradients are computed.
+        self.fp32_eval = fp32_eval
 
         self.save_hyperparameters(ignore=["model"])
 
@@ -671,7 +694,14 @@ class LitTFTGRegulationModel(pl.LightningModule):
             self._sync_if_cuda()
             forward_start = time.perf_counter()
 
-        edge_logits, _ = self.forward(batch)
+        if self.fp32_eval and stage != "train":
+            # enabled=False forces fp32 ops regardless of the Trainer's precision. The
+            # compiled TF-DNA submodule records a second CUDA graph for this guard state,
+            # a one-time cost per run rather than per batch.
+            with torch.autocast(device_type=self.device.type, enabled=False):
+                edge_logits, _ = self.forward(batch)
+        else:
+            edge_logits, _ = self.forward(batch)
 
         if forward_start is not None:
             self._sync_if_cuda()

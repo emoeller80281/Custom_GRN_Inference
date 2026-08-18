@@ -119,7 +119,23 @@ def generate_model_predictions(model, data_loader, device, tf_idx_to_name, tg_id
 
             batch = tf_to_tg_module.move_batch_to_device(batch, device)
 
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=(device.type == "cuda")):
+            # Scores are ranked, and bf16's 8-bit mantissa collapses nearby logits onto
+            # identical values -- ties, which AUROC and especially AUPRC read as lost
+            # ranking. Measured on run 3793729's checkpoints, bf16 vs fp32 on the same
+            # weights cost 0.009-0.042 pooled AUROC, and swung AUPRC in BOTH directions
+            # (0.1779 vs 0.1588 at epoch 0; 0.1436 vs 0.1670 at epoch 5).
+            #
+            # That matters more here than in training, because this script compares TETHER
+            # against SCENIC+/LINGER/CellOracle/Pando/FigR/GRaNIE whose scores are read
+            # from files (already computed, unquantized). Running only TETHER's forward in
+            # bf16 penalises TETHER alone -- an asymmetry in the benchmark's favour of the
+            # baselines. Inference here is one-off and not throughput-bound, so fp32 costs
+            # little. Pass --eval_precision bf16 to reproduce pre-fix cached results.
+            with torch.autocast(
+                device_type="cuda",
+                dtype=torch.bfloat16,
+                enabled=(device.type == "cuda" and EVAL_PRECISION == "bf16"),
+            ):
                 edge_logits, _ = model(
                     tf_embedding=batch["tf_embedding"],
                     tf_mask=batch["tf_mask"],
@@ -275,6 +291,16 @@ def parse_arguments():
     parser.add_argument("--cross_model_sample_name", type=str, help="Sample name for cross-model evaluation.")
 
     parser.add_argument("--force_reload", action="store_true", help="Force reload of data and models.")
+    parser.add_argument(
+        "--eval_precision",
+        choices=["fp32", "bf16"],
+        default="fp32",
+        help=(
+            "Arithmetic for the TF-TG forward pass. Default fp32. 'bf16' reproduces the "
+            "pre-2026-08-18 cached predictions, whose ties depress TETHER's AUPRC/AUROC "
+            "relative to the file-loaded external methods."
+        ),
+    )
 
     return parser.parse_args()
 
@@ -283,6 +309,14 @@ species = args.species
 cell_type = args.cell_type
 sample_name = args.sample_name
 force_reload = args.force_reload
+# Read by generate_model_predictions() at call time (it is defined above this point).
+EVAL_PRECISION = args.eval_precision
+logging.info(
+    f"TF-TG forward pass will run in {EVAL_PRECISION}."
+    + ("" if EVAL_PRECISION == "fp32" else
+       " WARNING: bf16 ties depress TETHER's scores relative to the file-loaded"
+       " external methods, which are not quantised.")
+)
 
 cross_model_cell_type = args.cross_model_cell_type
 cross_model_sample_name = args.cross_model_sample_name

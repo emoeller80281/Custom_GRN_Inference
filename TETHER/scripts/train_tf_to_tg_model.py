@@ -434,6 +434,19 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument(
+        "--eval_in_training_precision",
+        action="store_true",
+        help=(
+            "Score val/test under the same autocast as training instead of fp32. Only "
+            "for reproducing a pre-fix run's numbers. bf16 costs two mantissa bits vs "
+            "fp16, and the resulting tied logits corrupt AUROC by an amount that GROWS "
+            "with training (0.009 at epoch 0, 0.042 by epoch 5 on run 3793729) -- which "
+            "made an improving model log a falling curve and made ModelCheckpoint keep "
+            "epoch 0 over a better epoch 5. Leave this off unless you need the old "
+            "numbers back."
+        ),
+    )
+    parser.add_argument(
         "--tf_embedding_on_device",
         action="store_true",
         help=(
@@ -761,6 +774,7 @@ if __name__ == "__main__":
         pooling_mode=pooling_mode,
         pooling_temperature=pooling_temperature,
         enable_timing_sync=False,
+        fp32_eval=not args.eval_in_training_precision,
     )
     
     checkpoint_callback = ModelCheckpoint(
@@ -842,6 +856,12 @@ if __name__ == "__main__":
 
     use_ddp = world_size > 1
     
+    log_once(
+        f"Validation/test scored in fp32 (autocast disabled), training in {args.precision}."
+        if not args.eval_in_training_precision else
+        f"Validation/test scored in {args.precision} (--eval_in_training_precision): "
+        "metrics are NOT comparable across precisions and understate a bf16 run."
+    )
     log_once(f"Num GPUs: {world_size} | Batch size: {batch_size}")
     log_once(f"Num steps per epoch: {len(train_loader)}")
     

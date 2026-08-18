@@ -41,31 +41,43 @@
 # every epoch (training only; val/test stay on the frozen cached bags, which are now built
 # at the same 64 cells so train and eval agree).
 #
-# Batch is 64, NOT larger, and this is a measured decision -- do not raise it without
-# re-tuning lr. Run 3793551 tried batch 256 (effective 1024) at this same lr and overfit:
+# WARNING -- the val/auroc and val/loss this script logs are computed under bf16 autocast
+# and are NOT trustworthy for comparing epochs or runs. Measured on run 3793729's own
+# checkpoints (job 3794653/3797681, per-TF diagnostic, identical weights and data):
 #
-#   epoch  train loss   val loss   val AUROC     vs 3788646 @ batch 64
-#     0      0.363       0.3000     0.6737         0.7032
-#     1      0.268       0.2938     0.6941  <-best 0.7297
-#     2      0.249       0.3018     0.6921         0.7444  <- 3788646 best
-#     3      0.185       0.3162     0.6773         0.7306
+#                       epoch 0   epoch 5     delta
+#   val pooled  fp32     0.6833    0.6843     +0.001
+#   val macro   fp32     0.6371    0.6668     +0.030   <- model genuinely improving
+#   val pooled  bf16     0.6740    0.6421     -0.032   <- what this script logged
+#   train macro fp32     0.6461    0.6500     +0.004
 #
-# Train loss fell FASTER than at batch 64 while val loss rose for three straight epochs.
-# That is the large-batch generalization gap, not slow convergence: gradient noise scale
-# goes as lr/batch, so 4x the batch at fixed lr is 4x less noise, which finds sharper
-# minima. Batch 256 was 2.8x faster per epoch (25 min vs 72) and still the wrong trade --
-# it never came within 0.05 AUROC of what batch 64 reached in 3 epochs.
+# The bf16 penalty GROWS with training (0.009 pooled at epoch 0, 0.042 at epoch 5), so a
+# run that is improving logs a curve that falls. Consequences, all real:
+#   - ModelCheckpoint monitors val/auroc and kept epoch 0 as "best" when epoch 5 is better.
+#   - EarlyStopping monitors val/loss and counts down on the same distorted signal.
+#   - Comparing a bf16 run against an fp16 run (3788646) compares two different rulers.
+# Until validation is forced out of autocast, score checkpoints offline in fp32.
 #
-# If batch >64 is retried, raise lr WITH it: the linear rule (1.13e-3 at batch 256) is what
-# restores the noise scale; sqrt (5.66e-4) only half-corrects it.
+# Batch is 64 only because that reproduces run 3788646's settings. The earlier claim here
+# that batch 256 "overfit" was WRONG: it compared 3793551 (bf16) against 3788646 (fp16),
+# i.e. across precisions. Like-for-like, both bf16, batch 256 was BETTER at every
+# comparable epoch (ep1 0.6941 vs 0.6648, ep2 0.6921 vs 0.6715, ep3 0.6773 vs 0.6696) and
+# 2.8x faster per epoch (25 min vs 45). Batch size is an OPEN question, not a settled one.
 #
-# lr 2.828e-4 is what sqrt scaling gave at batch 64, and it trained cleanly for 7 epochs
-# (val AUROC 0.70 -> 0.744) before dying on an fp16 NaN that bf16 now removes.
+# Also note: train loss fell 0.363 -> 0.19 while train macro AUROC moved only +0.004, so
+# that loss drop is the model growing more confident, not better at ranking. Do not read
+# falling train loss + rising val loss here as overfitting -- the per-TF diagnostic found
+# NO TF memorisation (held-out TFs improved 7x more than trained-on TFs).
+#
+# lr 2.828e-4 is what sqrt scaling gave at batch 64. ReduceLROnPlateau's 10x cut fired
+# after epoch 7 and did NOT help (epoch 8 was slightly worse), which independently rules
+# out lr as the cause of the apparent decline.
 #
 # Precision: bf16-mixed, which needs Ampere and is why this now targets a100. fp16 saturates
 # at ~65504 and GradScaler only rescues gradient overflow, not forward activations -- run
 # 3788646 hit NaN logits at epoch 7 under 16-mixed. bf16 has fp32's exponent range at the
-# same speed, which removes that failure mode rather than papering over it.
+# same speed, which removes that failure mode -- but costs mantissa bits, which is what
+# corrupts the logged metrics above. bf16 for the training math, fp32 for scoring.
 #
 # Schedule: ReduceLROnPlateau on val/loss was already in configure_optimizers and still
 # owns the decay. --warmup_epochs 1.0 adds the piece a scaled-up LR actually needs, since
