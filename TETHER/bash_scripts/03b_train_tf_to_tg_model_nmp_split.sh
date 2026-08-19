@@ -5,7 +5,7 @@
 #SBATCH --time=72:00:00
 #SBATCH -p dense
 #SBATCH -N 1
-#SBATCH --gres=gpu:a100:4
+#SBATCH --gres=gpu:v100:4
 #SBATCH --ntasks-per-node=4
 #SBATCH -c 8
 #SBATCH --mem=384G
@@ -41,9 +41,10 @@
 # every epoch (training only; val/test stay on the frozen cached bags, which are now built
 # at the same 64 cells so train and eval agree).
 #
-# WARNING -- the val/auroc and val/loss this script logs are computed under bf16 autocast
-# and are NOT trustworthy for comparing epochs or runs. Measured on run 3793729's own
-# checkpoints (job 3794653/3797681, per-TF diagnostic, identical weights and data):
+# FIXED 2026-08-18: val/test are now scored in fp32 regardless of --precision
+# (LitTFTGRegulationModel.fp32_eval, default True). The metrics this script logs are
+# trustworthy again. What follows is why that mattered -- measured on run 3793729's own
+# checkpoints (jobs 3794653/3797681/3799232, identical weights and data):
 #
 #                       epoch 0   epoch 5     delta
 #   val pooled  fp32     0.6833    0.6843     +0.001
@@ -51,18 +52,20 @@
 #   val pooled  bf16     0.6740    0.6421     -0.032   <- what this script logged
 #   train macro fp32     0.6461    0.6500     +0.004
 #
-# The bf16 penalty GROWS with training (0.009 pooled at epoch 0, 0.042 at epoch 5), so a
-# run that is improving logs a curve that falls. Consequences, all real:
-#   - ModelCheckpoint monitors val/auroc and kept epoch 0 as "best" when epoch 5 is better.
-#   - EarlyStopping monitors val/loss and counts down on the same distorted signal.
-#   - Comparing a bf16 run against an fp16 run (3788646) compares two different rulers.
-# Until validation is forced out of autocast, score checkpoints offline in fp32.
+# The bf16 penalty was smallest at epoch 0 (0.0094) and 0.018-0.042 thereafter, so bf16
+# systematically favoured the EARLIEST checkpoint. Re-scoring all 16 in fp32 (job 3799232)
+# found the best is epoch 3 (macro 0.6817); the run had kept epoch 0, which ranks 16th of
+# 16 on macro. Rank correlation between the logged metric and fp32 macro: rho = -0.09.
 #
-# Batch is 64 only because that reproduces run 3788646's settings. The earlier claim here
-# that batch 256 "overfit" was WRONG: it compared 3793551 (bf16) against 3788646 (fp16),
-# i.e. across precisions. Like-for-like, both bf16, batch 256 was BETTER at every
-# comparable epoch (ep1 0.6941 vs 0.6648, ep2 0.6921 vs 0.6715, ep3 0.6773 vs 0.6696) and
-# 2.8x faster per epoch (25 min vs 45). Batch size is an OPEN question, not a settled one.
+# Batch is now 256. The earlier claim here that batch 256 "overfit" was WRONG: it compared
+# 3793551 (bf16) against 3788646 (fp16), i.e. across precisions. Like-for-like, both bf16,
+# batch 256 was BETTER at every comparable epoch (ep1 0.6941 vs 0.6648, ep2 0.6921 vs
+# 0.6715, ep3 0.6773 vs 0.6696) and 2.8x faster per epoch (25 min vs 45). With fp32 eval
+# in place, this run finally selects checkpoints on a trustworthy signal.
+#
+# lr stays 2.828e-4: that is the value batch 256 actually ran at when it beat batch 64, so
+# it is the one with evidence behind it. Do NOT also change lr here -- changing batch and
+# lr together, with the metric only just repaired, would make the result uninterpretable.
 #
 # Also note: train loss fell 0.363 -> 0.19 while train macro AUROC moved only +0.004, so
 # that loss drop is the model growing more confident, not better at ranking. Do not read
@@ -73,11 +76,26 @@
 # after epoch 7 and did NOT help (epoch 8 was slightly worse), which independently rules
 # out lr as the cause of the apparent decline.
 #
-# Precision: bf16-mixed, which needs Ampere and is why this now targets a100. fp16 saturates
-# at ~65504 and GradScaler only rescues gradient overflow, not forward activations -- run
-# 3788646 hit NaN logits at epoch 7 under 16-mixed. bf16 has fp32's exponent range at the
-# same speed, which removes that failure mode -- but costs mantissa bits, which is what
-# corrupts the logged metrics above. bf16 for the training math, fp32 for scoring.
+# Hardware: V100, not A100 (the a100 nodes are tied up by multi-day jobs). That forces the
+# precision choice, because all three options behave differently on Volta (sm_70):
+#
+#   16-mixed  native and fast on V100 -- and exactly what produced NaN logits at epoch 7
+#             in run 3788646, on this same hardware. fp16 saturates at ~65504 and GradScaler
+#             rescues gradient overflow only, not forward activations. Not worth repeating.
+#   bf16      torch.cuda.is_bf16_supported() returns True on V100 but there are no bf16
+#             tensor cores before Ampere, and the autocast makes Inductor skip compilation
+#             entirely. Measured in the benchmark on V100: uncompiled bf16 ~2.8 s/it against
+#             warm compiled fp32 ~0.9 s/it. bf16 is the SLOWER option here, not the faster.
+#   32-true   no overflow mode at all, and compiles properly. Volta has no TF32, so this is
+#             genuine fp32 throughout. <- chosen
+#
+# The model is only 207K trainable parameters and is latency-bound rather than compute-bound
+# (GPU util sat at 30-70% even at batch 256), so fp32 costs far less than its FLOP ratio
+# suggests. Note this also makes fp32_eval a no-op: the run is fp32 everywhere.
+#
+# Memory is the one risk: V100 is 32 GB against the A100's 80 GB, and batch 256 measured
+# ~11 GB under bf16 on the A100, so fp32 should land near 20-24 GB. If it OOMs it will do so
+# on the first batch, not hours in -- drop to --batch_size 128 and note it here.
 #
 # Schedule: ReduceLROnPlateau on val/loss was already in configure_optimizers and still
 # owns the decay. --warmup_epochs 1.0 adds the piece a scaled-up LR actually needs, since
@@ -184,12 +202,12 @@ srun python3 ${PROJECT_DIR}/scripts/train_tf_to_tg_model.py \
     --peak_flank_size $peak_flank_size \
     --pct_true_edges $pct_true_edges \
     --true_false_ratio $true_false_ratio \
-    --batch_size 64 \
+    --batch_size 256 \
     --keep_tf_dna_in_eval \
     --tf_embedding_on_device \
     --resample_cells_per_epoch \
     --lr 2.828e-4 \
     --warmup_epochs 1.0 \
-    --precision bf16-mixed
+    --precision 32-true
 
 #     --max_peaks_per_tg $max_peaks_per_tg \

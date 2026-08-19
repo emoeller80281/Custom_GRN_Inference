@@ -21,7 +21,9 @@ checkpoint.pt
 *wandb/
 *.png
 *.csv
+*.graphml
 *.meme
+*.pt
 *.pwm
 *.pfm
 *.jaspar

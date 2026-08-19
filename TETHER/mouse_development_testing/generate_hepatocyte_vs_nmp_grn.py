@@ -379,6 +379,12 @@ def build_tftg_inputs(
         "tg_name": tg_names,
         "cell_ids": cell_ids_all,
 
+        # No ground truth exists for this all-pairs inference set. TFTGEdgeBagDataset
+        # (shared with training/eval, where real labels matter) still expects the key,
+        # so fill it with a placeholder that is never read downstream -- predictions
+        # come from the model's output scores, not batch["label"].
+        "label": torch.zeros(len(tf_indices), dtype=torch.float32),
+
         "tf_idx": torch.tensor(tf_indices, dtype=torch.long),
         "tg_idx": torch.tensor(tg_indices, dtype=torch.long),
 
@@ -499,6 +505,10 @@ if not tftg_inputs_path.is_file():
     torch.save(tftg_inputs, tftg_inputs_path)
 else:
     tftg_inputs = torch.load(tftg_inputs_path, weights_only=True)
+    if "label" not in tftg_inputs:
+        # Cache predates the placeholder "label" field -- patch it in rather than
+        # forcing a rebuild of the (very large) cached tensor.
+        tftg_inputs["label"] = torch.zeros(len(tftg_inputs["tf_idx"]), dtype=torch.float32)
 logging.info("Done!")
 
 
