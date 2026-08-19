@@ -787,9 +787,17 @@ if __name__ == "__main__":
         auto_insert_metric_name=False,
     )
     
+    # Track val/auroc, not val/loss. Run 3799581 showed why: val/loss peaked at epoch 3
+    # and drifted up, so EarlyStopping counted down and killed the run at epoch 18 -- which
+    # turned out to be its BEST epoch by val/auroc (0.7364, a new high on the final epoch).
+    # The run was terminated while still improving on the metric that is actually used to
+    # select the checkpoint. Loss and ranking quality diverge here because loss is dominated
+    # by confidence/calibration: on run 3793729 train loss fell 0.363 -> 0.19 while train
+    # AUROC moved +0.004. Stopping on the metric ModelCheckpoint selects on keeps the two
+    # callbacks consistent.
     early_stopping_callback = EarlyStopping(
-        monitor="val/loss",
-        mode="min",
+        monitor="val/auroc",
+        mode="max",
         patience=15,
     )
 

@@ -626,6 +626,13 @@ class LitTFTGRegulationModel(pl.LightningModule):
 
         self.val_probs = []
         self.val_targets = []
+        # TF id per validation row, so on_validation_epoch_end can group by TF and report
+        # macro-per-TF AUROC. Pooled AUROC mixes within-TF ranking with between-TF score
+        # offsets, and on this data the two disagree: run 3799581 epoch 18 scored 0.7364
+        # pooled against 0.6352 macro, while run 3793729 epoch 3 scored 0.6914 / 0.6817.
+        # Selecting on pooled alone therefore optimises partly for telling TFs apart
+        # rather than for ranking a given TF's targets, which is what a GRN is for.
+        self.val_tf_ids = []
         # Validation batches dropped because every logit was NaN/Inf. Counted per epoch
         # and surfaced in on_validation_epoch_end -- a non-zero count means the model has
         # started diverging, which is worth seeing rather than silently averaging over.
@@ -737,6 +744,12 @@ class LitTFTGRegulationModel(pl.LightningModule):
 
                 self.val_probs.append(probs.detach().float().cpu())
                 self.val_targets.append(labels.detach().int().cpu())
+                # tf_idx is always present in the collated batch, and the valid_mask above
+                # has already dropped non-finite rows -- apply it here so the three stay aligned.
+                tf_ids = batch.get("tf_idx", None)
+                if tf_ids is not None:
+                    tf_ids = tf_ids.reshape(-1)[valid_mask.reshape(-1)]
+                    self.val_tf_ids.append(tf_ids.detach().cpu())
         else:
             raise ValueError(f"Unknown stage: {stage}")
 
@@ -872,6 +885,7 @@ class LitTFTGRegulationModel(pl.LightningModule):
     def on_validation_epoch_start(self):
         self.val_probs.clear()
         self.val_targets.clear()
+        self.val_tf_ids.clear()
         self._n_empty_val_batches = 0
 
     def on_validation_epoch_end(self):
@@ -889,9 +903,15 @@ class LitTFTGRegulationModel(pl.LightningModule):
         
         probs = torch.cat(self.val_probs, dim=0).view(-1)
         targets = torch.cat(self.val_targets, dim=0).view(-1).int()
+        tf_ids = (
+            torch.cat(self.val_tf_ids, dim=0).view(-1).numpy()
+            if len(self.val_tf_ids) == len(self.val_probs) and self.val_tf_ids
+            else None
+        )
 
         self.val_probs.clear()
         self.val_targets.clear()
+        self.val_tf_ids.clear()
 
         targets = np.asarray(targets).astype(float).ravel()
         probs = np.asarray(probs).astype(float).ravel()
@@ -913,6 +933,30 @@ class LitTFTGRegulationModel(pl.LightningModule):
 
         self.log("val/auroc", auroc, prog_bar=True, sync_dist=True)
         self.log("val/auprc", auprc, prog_bar=True, sync_dist=True)
+
+        # Macro-per-TF AUROC: mean of the within-TF AUROCs, which removes the between-TF
+        # score offsets that pooled AUROC rewards. TFs with only one class present have an
+        # undefined AUROC and are skipped -- on the NMP val split that is 4 of 16 TFs, so
+        # this is a mean over the ~12 that can actually be scored.
+        macro = float("nan")
+        if tf_ids is not None:
+            tf_ids_f = tf_ids[finite_mask]
+            per_tf = []
+            for t in np.unique(tf_ids_f):
+                m = tf_ids_f == t
+                y = targets[m]
+                if len(np.unique(y)) < 2:
+                    continue
+                per_tf.append(roc_auc_score(y, probs[m]))
+            if per_tf:
+                macro = float(np.mean(per_tf))
+            # NOTE (DDP): like val/auroc above, this is computed per-rank on that rank's
+            # shard and then averaged by sync_dist -- not a single global macro. With 16 val
+            # TFs over ~218k rows each rank still sees thousands of rows per TF, so the
+            # approximation is close, but the offline fp32 re-score (per_tf_auroc.py) remains
+            # the authoritative number for cross-run comparison.
+            self.log("val/n_scorable_tfs", float(len(per_tf)), sync_dist=True)
+        self.log("val/macro_auroc", macro, prog_bar=True, sync_dist=True)
 
         if not getattr(self.logger, "experiment", None):
             return
