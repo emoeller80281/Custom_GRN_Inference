@@ -568,6 +568,7 @@ class LitTFTGRegulationModel(pl.LightningModule):
         lr: float = 1e-4,
         weight_decay: float = 1e-4,
         pos_weight: float | None = None,
+        per_tf_pos_weight: torch.Tensor | None = None,
         pooling_mode: str = "lse",
         pooling_temperature: float = 1.0,
         logit_clamp: float | None = 20.0,
@@ -613,13 +614,42 @@ class LitTFTGRegulationModel(pl.LightningModule):
         # -- this only changes how val/test are scored, never how gradients are computed.
         self.fp32_eval = fp32_eval
 
-        self.save_hyperparameters(ignore=["model"])
+        self.save_hyperparameters(ignore=["model", "per_tf_pos_weight"])
 
         if pos_weight is not None:
             pos_weight_tensor = torch.tensor([pos_weight], dtype=torch.float32)
             self.register_buffer("pos_weight", pos_weight_tensor)
         else:
             self.pos_weight = None
+
+        # Per-TF positive class weight, indexed by tf_idx: w_t = n_neg_t / n_pos_t computed
+        # over the whole training split (see compute_per_tf_pos_weight in
+        # scripts/train_tf_to_tg_model.py). Off unless --per_tf_pos_weight is passed.
+        #
+        # Why per-TF and not the global scalar `pos_weight` above: the positive rate is not
+        # a property of the dataset here, it is a property of each TF, and it ranges from
+        # 0.0004 to 0.53 across the split. A single global pos_weight is wrong for nearly
+        # every individual TF.
+        #
+        # What this is FOR: plain BCE is minimised partly by getting each TF's absolute
+        # score level right -- push a 40%-positive TF's logits up, a 2%-positive TF's down.
+        # That is a real gradient signal that has nothing to do with ranking targets within
+        # a TF, and it is what the model appears to have spent run 3799581's extra capacity
+        # on: against run 3793729 on the held-out NMP TFs it gained +0.052 pooled AUROC but
+        # only +0.004 macro, with median per-TF AUROC unchanged (0.6039 -> 0.6034) and just
+        # 29 of 52 TFs improving. Re-weighting so every TF's effective positive rate is 0.5
+        # makes the optimal per-TF logit offset identical across TFs, so predicting "how
+        # active is this TF" stops reducing the loss.
+        #
+        # Registered non-persistent so it stays out of state_dict: checkpoints then load
+        # into a model built without it (the eval scripts do exactly that), where it is
+        # None and only the unweighted forward pass is used.
+        if per_tf_pos_weight is not None:
+            self.register_buffer(
+                "per_tf_pos_weight", per_tf_pos_weight.float(), persistent=False
+            )
+        else:
+            self.per_tf_pos_weight = None
 
         self.train_acc = BinaryAccuracy()
         self.val_acc = BinaryAccuracy()
@@ -680,7 +710,21 @@ class LitTFTGRegulationModel(pl.LightningModule):
             tf_idx=batch.get("tf_idx", None),
         )
 
-    def _loss(self, logits, labels):
+    def _loss(self, logits, labels, tf_idx=None):
+        if self.per_tf_pos_weight is not None and tf_idx is not None:
+            # pos_weight broadcasts against target, so a per-element tensor gives each edge
+            # the weight of its own TF. Applied in every stage, not just train: val/loss
+            # feeds ReduceLROnPlateau, and a schedule steered by a different objective from
+            # the one being optimised is worse than a weighted one. Consequence to remember
+            # when reading logs -- val/loss under this flag is NOT comparable to val/loss
+            # from any earlier run. val/auroc and val/macro_auroc still are.
+            weights = self.per_tf_pos_weight[tf_idx.reshape(-1)].reshape(labels.shape)
+            return nn.functional.binary_cross_entropy_with_logits(
+                logits,
+                labels,
+                pos_weight=weights,
+            )
+
         if self.pos_weight is not None:
             return nn.functional.binary_cross_entropy_with_logits(
                 logits,
@@ -718,7 +762,7 @@ class LitTFTGRegulationModel(pl.LightningModule):
         if self.logit_clamp is not None:
             edge_logits = edge_logits.clamp(min=-self.logit_clamp, max=self.logit_clamp)
 
-        loss = self._loss(edge_logits, labels)
+        loss = self._loss(edge_logits, labels, tf_idx=batch.get("tf_idx", None))
         probs = torch.sigmoid(edge_logits)
 
         if stage == "train":

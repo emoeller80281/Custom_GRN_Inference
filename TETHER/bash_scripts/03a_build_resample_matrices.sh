@@ -27,7 +27,7 @@ source activate my_env
 python3 ${PROJECT_DIR}/scripts/build_tf_to_tg_train_data.py \
     --build_resample_matrices_only \
     --split_mode tf \
-    --val_tf_frac 0.15 \
+    --val_tf_frac 0.25 \
     --max_cells_per_pair 24 \
     --max_peaks_per_tg 25 \
     --pct_true_edges 0.3 \

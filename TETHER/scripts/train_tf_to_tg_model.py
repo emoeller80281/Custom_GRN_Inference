@@ -134,6 +134,49 @@ def create_new_tf_tg_regulation_model(
     return tf_tg_model
 
 
+def compute_per_tf_pos_weight(train_inputs, n_tf, max_weight=50.0):
+    """Per-TF positive class weight w_t = n_neg_t / n_pos_t over the whole training split.
+
+    Global counts, deliberately, not per-batch counts. A weight derived from the batch
+    would make an edge's contribution depend on which other edges happened to land beside
+    it, so the same edge carries a different weight in different batches and the gradient
+    picks up a bias (the expectation of a ratio is not the ratio of the expectations).
+    These counts are a fixed property of the split, computed once here.
+
+    TFs absent from the training split, or with no positives, or with no negatives, get
+    weight 1.0 -- there is nothing to balance and w would be 0 or undefined.
+
+    max_weight caps the correction. Positive rates run down to ~4e-4, which would otherwise
+    ask for w ~= 2500 and let a handful of positive edges dominate the gradient. At the
+    median rate (~6%) the uncapped weight is ~16, so a cap of 50 leaves the bulk of the
+    distribution fully corrected and only clips the extreme tail.
+    """
+    labels = train_inputs["label"].reshape(-1).float()
+    tf_idx = train_inputs["tf_idx"].reshape(-1).long()
+
+    n_pos = torch.zeros(n_tf, dtype=torch.float64).index_add_(0, tf_idx, labels.double())
+    n_all = torch.zeros(n_tf, dtype=torch.float64).index_add_(
+        0, tf_idx, torch.ones_like(labels, dtype=torch.float64)
+    )
+    n_neg = n_all - n_pos
+
+    weights = torch.ones(n_tf, dtype=torch.float32)
+    ok = (n_pos > 0) & (n_neg > 0)
+    weights[ok] = (n_neg[ok] / n_pos[ok]).clamp(max=max_weight).float()
+
+    present = n_all > 0
+    capped = ok & ((n_neg / n_pos.clamp(min=1)) > max_weight)
+    rates = (n_pos[present] / n_all[present]).numpy()
+    log_once(
+        f"--per_tf_pos_weight: {int(present.sum())} TFs in the training split, "
+        f"{int(ok.sum())} balanceable, {int(capped.sum())} capped at {max_weight:g}. "
+        f"Positive rate min={rates.min():.4f} median={np.median(rates):.4f} "
+        f"max={rates.max():.4f}; weight median={weights[ok].median():.2f} "
+        f"max={weights[ok].max():.2f}."
+    )
+    return weights
+
+
 class TFTGEdgeBagDataset(Dataset):
     """
     One item per TF-TG edge bag.
@@ -431,6 +474,28 @@ if __name__ == "__main__":
             "becomes inf then NaN, which is how run 3788646 died at epoch 7. bf16 carries "
             "fp32's exponent range at the same speed, removing that failure mode. Not "
             "supported on V100."
+        ),
+    )
+    parser.add_argument(
+        "--per_tf_pos_weight",
+        action="store_true",
+        help=(
+            "Weight the positive class per TF (w_t = n_neg_t / n_pos_t over the training "
+            "split) instead of leaving BCE unweighted. Equalises every TF's effective "
+            "positive rate to 0.5, which removes the incentive to encode a per-TF logit "
+            "offset -- the between-TF shortcut that gained run 3799581 +0.052 pooled AUROC "
+            "on held-out TFs while macro moved only +0.004. Off by default; changes the "
+            "training objective, so val/loss is not comparable to unflagged runs."
+        ),
+    )
+    parser.add_argument(
+        "--per_tf_pos_weight_max",
+        type=float,
+        default=50.0,
+        help=(
+            "Cap on the per-TF positive weight (--per_tf_pos_weight only). Positive rates "
+            "reach ~4e-4, which uncapped would ask for a weight of ~2500 and let a few "
+            "edges dominate the gradient."
         ),
     )
     parser.add_argument(
@@ -765,12 +830,21 @@ if __name__ == "__main__":
     else:
         log_once("No LR warmup (--warmup_epochs 0); ReduceLROnPlateau on val/loss only.")
 
+    per_tf_pos_weight = None
+    if args.per_tf_pos_weight:
+        per_tf_pos_weight = compute_per_tf_pos_weight(
+            tftg_inputs_train,
+            n_tf=tf_embeddings_tensor.shape[0],
+            max_weight=args.per_tf_pos_weight_max,
+        )
+
     lit_model = tf_to_tg_module.LitTFTGRegulationModel(
         model=tf_tg_model,
         lr=learning_rate,
         warmup_steps=warmup_steps,
         weight_decay=1e-4,
         pos_weight=None,
+        per_tf_pos_weight=per_tf_pos_weight,
         pooling_mode=pooling_mode,
         pooling_temperature=pooling_temperature,
         enable_timing_sync=False,

@@ -102,6 +102,33 @@
 # plateau only reacts after val/loss has already stalled and cannot protect the first
 # steps. Warmup is counted in epochs, not a fraction of --epochs, because EarlyStopping
 # (patience 15) normally ends the run well before 250.
+#
+# NEW 2026-08-19 -- --per_tf_pos_weight. Weights the positive class per TF
+# (w_t = n_neg_t / n_pos_t over the training split, capped at 50) instead of leaving BCE
+# unweighted. The problem it targets: plain BCE is minimised partly by getting each TF's
+# absolute score level right, and across this split the optimal constant logit runs from
+# -0.41 at a 40%-positive TF to -3.89 at a 2%-positive one. That 3.5-logit spread is a
+# gradient signal with nothing to do with ranking targets inside a TF, and it looks like
+# where run 3799581's extra capacity went: against run 3793729 on the 52 held-out NMP TFs
+# it gained +0.052 pooled AUROC but only +0.004 macro, median per-TF AUROC was flat
+# (0.6039 -> 0.6034), and just 29 of 52 TFs improved -- a coin flip. Weighting each TF to
+# an effective 50% positive rate makes the optimal offset 0 for every TF, so encoding
+# "how active is this TF" stops paying.
+#
+# The signature of success is unusual and worth stating up front: macro AUROC should rise
+# while pooled AUROC FALLS. Pooled is inflated by exactly the between-TF separation this
+# removes. Do not read a pooled drop here as a regression.
+#
+# val/loss is no longer comparable to any earlier run -- the objective changed. val/auroc
+# and val/macro_auroc still are. ReduceLROnPlateau monitors the weighted val/loss, which
+# is intentional: the schedule should track the objective actually being optimised.
+#
+# Cache: this run REQUIRES the rebuild from 03a_build_tf_to_tg_cache_nmp_split.sh with
+# --val_tf_frac now 0.25 (was 0.15). The old 16-TF validation split had only 12 scorable
+# TFs -- BAZ2A/GCM1 had zero positives, ETV2 one, KDM5B two -- and ETV2's single positive
+# alone accounted for about half the apparent macro gap between the two previous runs.
+# Because train/val TF membership changes, this run's val numbers are NOT comparable to
+# 3793729 or 3799581. The 52-TF test split is unchanged, so test numbers still are.
 
 set -eo pipefail
 
@@ -208,6 +235,7 @@ srun python3 ${PROJECT_DIR}/scripts/train_tf_to_tg_model.py \
     --resample_cells_per_epoch \
     --lr 2.828e-4 \
     --warmup_epochs 1.0 \
+    --per_tf_pos_weight \
     --precision 32-true
 
 #     --max_peaks_per_tg $max_peaks_per_tg \

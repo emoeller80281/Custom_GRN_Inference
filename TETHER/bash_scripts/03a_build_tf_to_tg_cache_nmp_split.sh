@@ -14,7 +14,7 @@
 #   test  = TFs the paper's NMP-trajectory GRN implicated in NMP -> {spinal cord,
 #           somitic mesoderm} differentiation
 #   train = every other TF, across all cell types and all chromosomes
-#   val   = a TF-disjoint 15% holdout carved out of the training TFs
+#   val   = a TF-disjoint 25% holdout carved out of the training TFs (was 15%; see below)
 #
 # config.py must be set to: species=mm10, cell_type=mESC,
 # sample_name=WT_timecourse_metacells
@@ -47,10 +47,27 @@ peak_flank_size=128
 pct_true_edges=0.3
 true_false_ratio=10.0
 
+# val_tf_frac raised 0.15 -> 0.25 on 2026-08-19. At 0.15 the split produced 16 validation
+# TFs of which only 12 were scorable: BAZ2A and GCM1 had ZERO positive edges, ETV2 had 1 and
+# KDM5B had 2 out of ~16,740 each. An AUROC built on a single positive is that one edge's
+# percentile rank, yet it carried the same 1/14 weight in the macro average as a TF with
+# 3,962 positives -- ETV2 alone swung 0.833 -> 0.505 between runs 3793729 and 3799581 and
+# accounted for roughly half the entire apparent macro decline. Macro across run 3799581's
+# 19 checkpoints was 0.6239 +/- 0.0117 with a +0.18 epoch correlation: noise, not signal.
+# 0.25 takes the validation set to ~27 TFs (~22 scorable) at a cost of ~11 training TFs.
+# That trade is worth taking here because the per-TF diagnostic found NO memorisation of
+# training TFs (held-out TFs improved 7x more), so the marginal training TF is currently
+# worth less than the marginal validation TF.
+#
+# NOTE this does not fix the root cause: split_ground_truth_by_tf draws validation TFs
+# uniformly at random from the training pool with no minimum positive-edge count
+# (build_tf_to_tg_train_data.py:162), so ~18% of any draw is unusable. Widening raises the
+# absolute count of scorable TFs without changing that fraction. A minimum-positives
+# constraint on the draw is the actual fix and is not implemented.
 echo "[INFO] Building and caching TF-TG training data (TF split)..."
 python3 ${PROJECT_DIR}/scripts/build_tf_to_tg_train_data.py \
     --split_mode tf \
-    --val_tf_frac 0.15 \
+    --val_tf_frac 0.25 \
     --max_cells_per_pair $max_cells_per_pair \
     --max_peaks_per_tg $max_peaks_per_tg \
     --pct_true_edges $pct_true_edges \
