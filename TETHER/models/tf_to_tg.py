@@ -574,6 +574,11 @@ class LitTFTGRegulationModel(pl.LightningModule):
         logit_clamp: float | None = 20.0,
         enable_timing_sync: bool = False,
         warmup_steps: int = 0,
+        plateau_monitor: str = "val/macro_auroc",
+        plateau_mode: str = "max",
+        plateau_factor: float = 0.5,
+        plateau_patience: int = 8,
+        plateau_cooldown: int = 2,
         fp32_eval: bool = True,
     ):
         super().__init__()
@@ -612,6 +617,11 @@ class LitTFTGRegulationModel(pl.LightningModule):
         # Default True because the alternative is a silently wrong metric. Pass False to
         # reproduce a pre-fix run's numbers exactly. Training math is untouched either way
         # -- this only changes how val/test are scored, never how gradients are computed.
+        self.plateau_monitor = plateau_monitor
+        self.plateau_mode = plateau_mode
+        self.plateau_factor = plateau_factor
+        self.plateau_patience = plateau_patience
+        self.plateau_cooldown = plateau_cooldown
         self.fp32_eval = fp32_eval
 
         self.save_hyperparameters(ignore=["model", "per_tf_pos_weight"])
@@ -983,24 +993,46 @@ class LitTFTGRegulationModel(pl.LightningModule):
         # undefined AUROC and are skipped -- on the NMP val split that is 4 of 16 TFs, so
         # this is a mean over the ~12 that can actually be scored.
         macro = float("nan")
+        macro_ap = float("nan")
         if tf_ids is not None:
             tf_ids_f = tf_ids[finite_mask]
             per_tf = []
+            per_tf_ap = []
             for t in np.unique(tf_ids_f):
                 m = tf_ids_f == t
                 y = targets[m]
                 if len(np.unique(y)) < 2:
                     continue
                 per_tf.append(roc_auc_score(y, probs[m]))
+                per_tf_ap.append(average_precision_score(y, probs[m]))
             if per_tf:
                 macro = float(np.mean(per_tf))
+                macro_ap = float(np.mean(per_tf_ap))
             # NOTE (DDP): like val/auroc above, this is computed per-rank on that rank's
             # shard and then averaged by sync_dist -- not a single global macro. With 16 val
             # TFs over ~218k rows each rank still sees thousands of rows per TF, so the
             # approximation is close, but the offline fp32 re-score (per_tf_auroc.py) remains
             # the authoritative number for cross-run comparison.
             self.log("val/n_scorable_tfs", float(len(per_tf)), sync_dist=True)
-        self.log("val/macro_auroc", macro, prog_bar=True, sync_dist=True)
+
+        # Macro AUPRC alongside macro AUROC. Pooled val/auprc is inflated by the same
+        # between-TF separation that inflates pooled AUROC, so comparing pooled AUPRC across
+        # runs that differ in per-TF calibration compares the wrong thing. This is the
+        # like-for-like precision number. Note its chance level is the mean per-TF positive
+        # rate, not the pooled positive rate.
+        self.log("val/macro_auprc", macro_ap, prog_bar=False, sync_dist=True)
+
+        # ReduceLROnPlateau monitors val/macro_auroc by default (see configure_optimizers).
+        # A NaN would make every comparison False and silently freeze the schedule, so fall
+        # back to pooled AUROC if no TF on this rank was scorable.
+        monitored = macro
+        if not np.isfinite(monitored):
+            monitored = auroc
+            logging.warning(
+                "val/macro_auroc is not finite this epoch (no scorable TFs on this rank); "
+                "logging pooled AUROC in its place so the LR schedule keeps a usable signal."
+            )
+        self.log("val/macro_auroc", monitored, prog_bar=True, sync_dist=True)
 
         if not getattr(self.logger, "experiment", None):
             return
@@ -1063,16 +1095,35 @@ class LitTFTGRegulationModel(pl.LightningModule):
             weight_decay=self.weight_decay,
         )
         
+        # Plateau on the ranking metric, not on val/loss, and cut gently.
+        #
+        # Run 3801811 is the cautionary case. It monitored val/loss with factor=0.1, and
+        # val/loss reached its minimum at epoch 0 (0.4746) and was never beaten again, so
+        # patience=5 fired at the end of epoch 5 (LR 2.828e-4 -> 2.828e-5 at epoch 6) and,
+        # after cooldown=3 plus five more "bad" epochs, again at epoch 15 (-> 2.828e-6).
+        # Two 10x cuts put the LR 100x below its start. The run went flat from epoch 9
+        # onward -- macro 0.6754-0.6772, pooled 0.6781-0.6827 -- and learned nothing for
+        # twelve epochs. Meanwhile the metrics that matter were still climbing when the
+        # first cut landed: macro rose 0.6486 -> 0.6768 across epochs 0-6.
+        #
+        # val/loss is an especially bad plateau signal under --per_tf_pos_weight: with a
+        # median positive weight of 19.3 the loss is dominated by calibration, and the model
+        # grows more confident as it trains, so weighted val/loss drifts UP while ranking
+        # improves. Even unweighted it was a poor signal -- run 3793729 dropped train loss
+        # 0.363 -> 0.19 while train AUROC moved +0.004.
+        #
+        # factor 0.5 rather than 0.1: a 10x cut is a decision, not an adjustment. Halving
+        # gives roughly three usable steps in the range one 10x cut spends in a single move.
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, 
-            mode='min', 
-            factor=0.1, 
-            patience=5, 
-            threshold=1e-4, 
-            threshold_mode='rel', 
-            cooldown=3, 
-            min_lr=1e-7, 
-            eps=1e-08
+            optimizer,
+            mode=self.plateau_mode,
+            factor=self.plateau_factor,
+            patience=self.plateau_patience,
+            threshold=1e-4,
+            threshold_mode='rel',
+            cooldown=self.plateau_cooldown,
+            min_lr=1e-7,
+            eps=1e-08,
             )
 
         return {
@@ -1081,7 +1132,7 @@ class LitTFTGRegulationModel(pl.LightningModule):
                 "scheduler": scheduler,
                 "interval": "epoch",      # Adjust LR per 'epoch' or 'step'
                 "frequency": 1,           # How often to step the scheduler
-                "monitor": "val/loss",    # Metric to track for ReduceLROnPlateau
+                "monitor": self.plateau_monitor,
             },
         }
 

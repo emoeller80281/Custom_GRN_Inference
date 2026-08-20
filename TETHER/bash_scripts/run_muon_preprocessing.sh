@@ -15,10 +15,10 @@ source activate my_env
 
 PROJECT_DIR="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
 
-DATASET_NAME="iPSC_10x_raw"
-SAMPLE_NAME="WT_D25_rep1"
-PROCESSED_DATA_NAME="iPSC_${SAMPLE_NAME}_muon_preprocessing"
-ORGANISM_CODE="hg38"
+DATASET_NAME="mESC_10x_data"
+SAMPLE_NAME="E7.5_rep1"
+PROCESSED_DATA_NAME="${DATASET_NAME}_${SAMPLE_NAME}_muon_preprocessing"
+ORGANISM_CODE="mm10"
 
 TSS_PATH="${PROJECT_DIR}/data/genome_data/genome_annotation/${ORGANISM_CODE}/gene_tss.bed"
 TF_LIST_FILE=""
@@ -33,7 +33,7 @@ RNA_COUNT_FILE=""
 ATAC_COUNT_FILE=""
 RAW_H5_FILE=""
 
-python $PROJECT_DIR/src/multiomic_transformer/utils/muon_preprocessing.py \
+python $PROJECT_DIR/TETHER/muon_preprocessing.py \
     --project-dir "${PROJECT_DIR}" \
     --tss-path "${TSS_PATH}" \
     --raw-data-dir "${RAW_DATA_DIR}" \

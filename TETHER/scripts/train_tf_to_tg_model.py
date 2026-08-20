@@ -477,6 +477,26 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument(
+        "--plateau_monitor",
+        default="val/macro_auroc",
+        help=(
+            "Metric ReduceLROnPlateau watches. Default val/macro_auroc. Do NOT set this to "
+            "val/loss: on run 3801811 val/loss bottomed at epoch 0 and never recovered, so "
+            "the schedule cut the LR 10x at epoch 6 and again at 15 while macro AUROC was "
+            "still climbing, flattening the run for its last twelve epochs."
+        ),
+    )
+    parser.add_argument(
+        "--plateau_mode", default="max", choices=["min", "max"],
+        help="'max' for AUROC-like monitors, 'min' for loss-like ones.",
+    )
+    parser.add_argument(
+        "--plateau_factor", type=float, default=0.5,
+        help="LR multiplier on plateau. Was 0.1; a 10x cut is a decision, not an adjustment.",
+    )
+    parser.add_argument("--plateau_patience", type=int, default=8)
+    parser.add_argument("--plateau_cooldown", type=int, default=2)
+    parser.add_argument(
         "--per_tf_pos_weight",
         action="store_true",
         help=(
@@ -845,6 +865,11 @@ if __name__ == "__main__":
         weight_decay=1e-4,
         pos_weight=None,
         per_tf_pos_weight=per_tf_pos_weight,
+        plateau_monitor=args.plateau_monitor,
+        plateau_mode=args.plateau_mode,
+        plateau_factor=args.plateau_factor,
+        plateau_patience=args.plateau_patience,
+        plateau_cooldown=args.plateau_cooldown,
         pooling_mode=pooling_mode,
         pooling_temperature=pooling_temperature,
         enable_timing_sync=False,

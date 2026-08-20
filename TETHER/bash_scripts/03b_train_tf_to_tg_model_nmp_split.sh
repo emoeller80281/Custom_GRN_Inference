@@ -129,6 +129,35 @@
 # alone accounted for about half the apparent macro gap between the two previous runs.
 # Because train/val TF membership changes, this run's val numbers are NOT comparable to
 # 3793729 or 3799581. The 52-TF test split is unchanged, so test numbers still are.
+#
+# LR SCHEDULE FIXED 2026-08-19 after run 3801811. That run used ReduceLROnPlateau on
+# val/loss with factor=0.1, and it went badly:
+#
+#   epoch   lr          val/loss   val/auroc   val/macro_auroc   val/auprc
+#     0     2.828e-4     0.4746      0.6715         0.6486         0.2134
+#     3     2.828e-4     0.5314      0.6792         0.6652         0.2281
+#     6     2.828e-5 <-  0.5450      0.6958         0.6768         0.2234
+#    15     2.828e-6 <-  0.5364      0.6794         0.6761         0.1976
+#    20     2.828e-6     0.5396      0.6817         0.6772         0.1986
+#
+# val/loss hit its minimum at epoch 0 and was never beaten, so patience=5 fired at the end
+# of epoch 5 and, after cooldown plus five more "bad" epochs, again at epoch 15. Two 10x
+# cuts left the LR 100x below its start and the run learned nothing after epoch 9. The
+# metrics that matter were still climbing when the first cut landed.
+#
+# Under --per_tf_pos_weight val/loss is a particularly bad plateau signal: median positive
+# weight is 19.3, so loss is dominated by calibration and drifts UP as the model sharpens
+# while ranking improves. The scheduler now watches val/macro_auroc (mode max) and halves
+# rather than decimates. Both are CLI-settable (--plateau_monitor/_mode/_factor/_patience).
+#
+# --per_tf_pos_weight_max stays at 50 for this run ON PURPOSE. 21 of 80 training TFs are
+# capped there and the median weight is 19.3, which may well be too aggressive -- but the
+# LR collapse confounds everything after epoch 6 of 3801811, so there is no evidence yet
+# either way. Changing the cap and the schedule together would repeat that mistake.
+#
+# val/macro_auprc is now logged too: pooled val/auprc is inflated by the same between-TF
+# separation as pooled AUROC, so it is the wrong number for judging whether per-TF
+# weighting hurt precision.
 
 set -eo pipefail
 
