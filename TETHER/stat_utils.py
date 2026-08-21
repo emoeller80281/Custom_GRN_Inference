@@ -68,7 +68,6 @@ def summarize_universe_overlap(score_dfs_by_subsample, method_name, sample_name=
         "core_edges_all_subsamples": len(set.intersection(*edge_sets.values())),
     }
 
-
 def compute_binary_classification_metrics(
     labels,
     scores,

@@ -237,7 +237,7 @@ max_cells_per_pair=64
 max_peaks_per_tg=25
 peak_flank_size=128
 pct_true_edges=0.3
-true_false_ratio=10.0
+true_false_ratio=5.0
 
 
 # echo "[INFO] Building and Caching Training Data..."

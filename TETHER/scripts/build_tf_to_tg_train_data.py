@@ -128,6 +128,7 @@ def split_ground_truth_by_tf(
     nmp_tfs: set[str],
     val_frac: float = 0.15,
     seed: int = 123,
+    min_positives_per_tf: int = 0,
 ):
     """Split edges by their TF, holding out the NMP-differentiation TFs for test.
 
@@ -145,6 +146,50 @@ def split_ground_truth_by_tf(
 
     test_tfs = sorted(all_tfs & nmp_tfs)
     train_pool = sorted(all_tfs - nmp_tfs)
+
+    # Drop TFs with too few ground-truth edges to learn from or to score.
+    #
+    # Counted in GROUND-TRUTH edges, not cached positives, because the cache does not exist
+    # yet at this point. The empirical conversion on this dataset is ~0.268 cached positives
+    # per ground-truth edge (pct_true_edges sampling), so a threshold of 200 leaves roughly
+    # 50 positives per TF.
+    #
+    # Why it matters: at the old setting the training pool contained BAZ2A and TAF1 with ZERO
+    # cached positives, KDM5B with 2 and ETV2 with 3. Those contribute nothing learnable, and
+    # under --per_tf_pos_weight they attract the largest weights of all (w = n_neg/n_pos, cap
+    # 50). In validation they are worse than useless: an AUROC built on one positive is that
+    # edge's percentile rank, yet it carries the same 1/N weight in the macro average as a TF
+    # with 3,962 positives. ETV2 alone swung 0.833 -> 0.505 between two runs and accounted for
+    # about half the apparent macro difference.
+    #
+    # Applied to the train/val pool only. The test TFs are fixed by biology -- they are the
+    # NMP-trajectory regulators the whole experiment is about -- and dropping any of them
+    # would silently change the benchmark and break comparison with runs already scored.
+    # Thin test TFs are reported below so they can be excluded at REPORTING time instead,
+    # which leaves the split itself stable.
+    if min_positives_per_tf > 0:
+        counts = ground_truth_df.groupby("Source").size()
+        thin_pool = [tf for tf in train_pool if counts.get(tf, 0) < min_positives_per_tf]
+        train_pool = [tf for tf in train_pool if counts.get(tf, 0) >= min_positives_per_tf]
+        logging.info(
+            f"--min_positives_per_tf {min_positives_per_tf}: dropped {len(thin_pool)} of "
+            f"{len(thin_pool) + len(train_pool)} train/val-pool TFs "
+            f"({', '.join(f'{tf}:{counts.get(tf, 0)}' for tf in sorted(thin_pool)[:12])}"
+            f"{', ...' if len(thin_pool) > 12 else ''})"
+        )
+        thin_test = [tf for tf in test_tfs if counts.get(tf, 0) < min_positives_per_tf]
+        if thin_test:
+            logging.warning(
+                f"{len(thin_test)} TEST TFs also fall below the threshold and were KEPT on "
+                f"purpose (the test split is fixed by biology): "
+                f"{', '.join(f'{tf}:{counts.get(tf, 0)}' for tf in sorted(thin_test))}. "
+                "Consider excluding them when reporting macro metrics."
+            )
+        if len(train_pool) < 2:
+            raise ValueError(
+                f"min_positives_per_tf={min_positives_per_tf} left only {len(train_pool)} "
+                "pool TFs; lower the threshold."
+            )
 
     if not test_tfs:
         raise ValueError(
@@ -350,6 +395,17 @@ def main():
         default=0.15,
         help="Fraction of non-NMP TFs held out for validation (--split_mode tf only)",
     )
+    parser.add_argument(
+        "--min_positives_per_tf",
+        type=int,
+        default=0,
+        help=(
+            "Drop train/val-pool TFs with fewer than this many ground-truth edges (0 = off). "
+            "~0.268 cached positives per ground-truth edge on this dataset, so 200 leaves "
+            "roughly 50 positives per TF. Test TFs are never dropped -- they are fixed by "
+            "biology -- but thin ones are logged."
+        ),
+    )
     parser.add_argument("--force_reload", action="store_true")
     parser.add_argument(
         "--build_resample_matrices_only",
@@ -532,6 +588,7 @@ def main():
             merged_ground_truth_df,
             nmp_tfs=nmp_tfs,
             val_frac=args.val_tf_frac,
+            min_positives_per_tf=args.min_positives_per_tf,
             seed=123,
         )
     else:

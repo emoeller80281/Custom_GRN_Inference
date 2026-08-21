@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 from tqdm import tqdm
 import logging
+import argparse
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s - %(message)s')
 
@@ -19,7 +20,6 @@ RESULT_DIR = PROJECT_DIR / "testing_results" / "model_generalizability"
 sys.path.append(str(PROJECT_DIR))
 
 import models.tf_to_tg as tf_to_tg_module
-import stat_utils
 import utils
 import warnings
 import config
@@ -116,7 +116,6 @@ def run_prediction_vs_test_set(
     model = model.to(device)
 
     criterion = torch.nn.BCEWithLogitsLoss()
-    score_threshold = 0.5
     pooling_mode = "lse"
     pooling_temperature = 1.0
 
@@ -184,67 +183,9 @@ def run_prediction_vs_test_set(
         "Label": all_labels_flat
     })
 
-    metrics = stat_utils.compute_binary_classification_metrics(
-        labels=all_labels_flat,
-        scores=all_scores_flat,
-        score_threshold=score_threshold,
-        random_state=42,
-    )
-
-    metrics["Model"] = model_training_sample
-    metrics["Test Set"] = evaluation_sample
-
-    metric_df = pd.DataFrame([metrics])
+    return prediction_df
     
-    # Get info about the dataset size for the test set
-    peaks_per_tg = metadata.get("max_peaks_per_tg", None)
-    cells_per_pair = metadata.get("max_cells_per_pair", None)
-    max_peaks_real = metadata.get("max_peaks_real", None)
-    
-    num_tfs = len(metadata["tf_name_to_idx"])
-    num_tgs = len(metadata["tg_id_to_idx"])
-    
-    metric_df["peaks_per_tg"] = peaks_per_tg
-    metric_df["cells_per_pair"] = cells_per_pair
-    metric_df["max_peaks_real"] = max_peaks_real
-    metric_df["num_tfs"] = num_tfs
-    metric_df["num_tgs"] = num_tgs
-    metric_df["subset_size"] = subset_size
-    metric_df["batch_size"] = batch_size
 
-    col_order = [
-        "Model", 
-        "Test Set", 
-        "auroc", 
-        "auprc", 
-        "accuracy", 
-        "precision", 
-        "early_precision", 
-        "recall", 
-        "f1", 
-        "rand_auroc", 
-        "rand_auprc",
-        "n_edges",
-        "n_pos",
-        "n_neg",
-        "score_threshold",
-        "peaks_per_tg",
-        "cells_per_pair",
-        "max_peaks_real",
-        "num_tfs",
-        "num_tgs",
-        "subset_size",
-        "batch_size"
-        ]
-
-    metric_df = metric_df[col_order]
-            
-    return {
-        "metric_df": metric_df,
-        "prediction_df": prediction_df
-    }
-    
-import argparse
 
 def parse_args():
     
@@ -282,10 +223,9 @@ if __name__ == "__main__":
     cell_type_cache_dir = DATA_DIR / f"{test_set_cell_type}_cache"
     
     prediction_save_file = RESULT_DIR / "labeled_grns" / f"{model_training_sample}_model_vs_{evaluation_sample}_grn_{subset_size}.csv"
-    metric_save_file = RESULT_DIR / "comparison_metric_files" / f"{model_training_sample}_model_vs_{evaluation_sample}_test_metrics_{subset_size}.csv"
 
-    if prediction_save_file.exists() and metric_save_file.exists() and not force_reload:
-        logging.info(f"Prediction and metric files already exist for {model_cell_type} {model_training_sample} → {test_set_cell_type} {evaluation_sample}. Skipping evaluation.")
+    if prediction_save_file.exists() and not force_reload:
+        logging.info(f"Prediction file already exists for {model_cell_type} {model_training_sample} → {test_set_cell_type} {evaluation_sample}. Skipping evaluation.")
         sys.exit(0)
         
     # Load the TF and TG name to index mappings from the training cache metadata
@@ -297,7 +237,7 @@ if __name__ == "__main__":
 
     tf_idx_to_name, tg_idx_to_name = create_tf_tg_index_to_name_mappings(metadata)
         
-    comparison_result = run_prediction_vs_test_set(
+    prediction_df = run_prediction_vs_test_set(
         tf_tg_model_checkpoints=tf_tg_model_checkpoints,
         model_cell_type=model_cell_type,
         model_training_sample=model_training_sample,
@@ -312,13 +252,6 @@ if __name__ == "__main__":
         tg_idx_to_name=tg_idx_to_name
     )
         
-    metric_df = comparison_result["metric_df"]
-    prediction_df = comparison_result["prediction_df"]
-    
     prediction_df.to_csv(prediction_save_file, index=False)
-
-    metric_save_file.parent.mkdir(parents=True, exist_ok=True)
-    
-    metric_df.to_csv(metric_save_file, index=False)
 
     logging.info("Done!")

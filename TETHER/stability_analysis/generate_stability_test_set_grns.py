@@ -288,78 +288,8 @@ def run_prediction_vs_test_set(
         "Score": all_scores_flat,
         "Label": all_labels_flat
     })
-
-    metrics = stat_utils.compute_binary_classification_metrics(
-        labels=all_labels_flat,
-        scores=all_scores_flat,
-        score_threshold=score_threshold,
-        random_state=42,
-    )
-
-    metrics["Model"] = model_training_sample
-    metrics["Test Set"] = evaluation_sample
-    metrics["stability_number"] = stability_number
-
-    metric_df = pd.DataFrame([metrics])
     
-    # Get info about the dataset size for the test set
-    peaks_per_tg = metadata.get("max_peaks_per_tg", None)
-    cells_per_pair = metadata.get("max_cells_per_pair", None)
-    max_peaks_real = metadata.get("max_peaks_real", None)
-    
-    num_tfs = len(metadata["tf_name_to_idx"])
-    num_tgs = len(metadata["tg_id_to_idx"])
-    
-    metric_df["peaks_per_tg"] = peaks_per_tg
-    metric_df["cells_per_pair"] = cells_per_pair
-    metric_df["max_peaks_real"] = max_peaks_real
-    metric_df["num_tfs"] = num_tfs
-    metric_df["num_tgs"] = num_tgs
-    metric_df["subset_size"] = subset_size
-    metric_df["batch_size"] = batch_size
-
-    # Fingerprint the scored edge set. Cross-subsample rank metrics (e.g. top-k Jaccard)
-    # are only comparable when every subsample scored the same edges, so this hash must
-    # match across the subsamples of a sample -- if it does not, those metrics are
-    # measuring which edges were scored rather than how they were ranked.
-    edge_keys = sorted(zip(prediction_df["Source"], prediction_df["Target"]))
-    metric_df["n_test_edges"] = len(edge_keys)
-    metric_df["test_edge_set_hash"] = hashlib.sha1(repr(edge_keys).encode()).hexdigest()[:12]
-
-    col_order = [
-        "Model",
-        "Test Set",
-        "stability_number",
-        "auroc",
-        "auprc", 
-        "accuracy", 
-        "precision", 
-        "early_precision", 
-        "recall", 
-        "f1", 
-        "rand_auroc", 
-        "rand_auprc",
-        "n_edges",
-        "n_pos",
-        "n_neg",
-        "score_threshold",
-        "peaks_per_tg",
-        "cells_per_pair",
-        "max_peaks_real",
-        "num_tfs",
-        "num_tgs",
-        "subset_size",
-        "batch_size",
-        "n_test_edges",
-        "test_edge_set_hash"
-        ]
-
-    metric_df = metric_df[col_order]
-            
-    return {
-        "metric_df": metric_df,
-        "prediction_df": prediction_df
-    }
+    return prediction_df
     
 import argparse
 
@@ -402,13 +332,11 @@ if __name__ == "__main__":
     stability_cache_dir = cell_type_cache_dir / f"{evaluation_sample}_stability_cache" / f"stability_{stability_number}"
     
     prediction_save_file = RESULT_DIR / "stability_grns" / f"{model_training_sample}_model_vs_{evaluation_sample}_test_grn_{subset_size}_stability_{stability_number}.csv"
-    metric_save_file = RESULT_DIR / "stability_comparison_metric_files" / f"{model_training_sample}_model_vs_{evaluation_sample}_test_metrics_{subset_size}_stability_{stability_number}.csv"
 
     prediction_save_file.parent.mkdir(parents=True, exist_ok=True)
-    metric_save_file.parent.mkdir(parents=True, exist_ok=True)
 
-    if prediction_save_file.exists() and metric_save_file.exists() and not force_reload:
-        logging.info(f"Prediction and metric files already exist for {model_cell_type} {model_training_sample} → {test_set_cell_type} {evaluation_sample}. Skipping evaluation.")
+    if prediction_save_file.exists() and not force_reload:
+        logging.info(f"Prediction file already exists for {model_cell_type} {model_training_sample} → {test_set_cell_type} {evaluation_sample}. Skipping evaluation.")
         sys.exit(0)
         
     # Load the TF and TG name to index mappings from the training cache metadata
@@ -428,7 +356,7 @@ if __name__ == "__main__":
 
     tf_tg_model_chkpt = find_best_stability_checkpoint(stability_model_dir, verbose=True)
 
-    comparison_result = run_prediction_vs_test_set(
+    prediction_df = run_prediction_vs_test_set(
         tf_tg_model_chkpt=tf_tg_model_chkpt,
         model_cell_type=model_cell_type,
         model_training_sample=model_training_sample,
@@ -446,15 +374,6 @@ if __name__ == "__main__":
         tg_idx_to_name=tg_idx_to_name
     )
         
-    metric_df = comparison_result["metric_df"]
-    prediction_df = comparison_result["prediction_df"]
-    
-    prediction_save_file.parent.mkdir(parents=True, exist_ok=True)
-    
     prediction_df.to_csv(prediction_save_file, index=False)
-
-    metric_save_file.parent.mkdir(parents=True, exist_ok=True)
-    
-    metric_df.to_csv(metric_save_file, index=False)
 
     logging.info("Done!")

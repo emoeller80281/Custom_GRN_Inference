@@ -41,11 +41,23 @@ source activate my_env
 # path scales with edges x peaks and not with cells. Training resamples its cells from the
 # full 1,896-metacell pool, but val/test read the frozen bags built here, so building them
 # at 64 keeps evaluation on the same cell count the model trains at.
+# true_false_ratio 10.0 -> 5.0 on 2026-08-20: negatives per positive, so the sampled
+# positive rate goes from ~0.097 to ~0.17. Note this does NOT create more positives -- the
+# positive count per TF is set by pct_true_edges and is unchanged; only the negatives shrink.
+# Two consequences to carry forward: chance AUPRC moves with it, so AUPRC is not comparable
+# to any earlier run, and the per-TF weights w_t = n_neg_t/n_pos_t roughly halve, which
+# shifts what --per_tf_pos_weight_max actually binds on (median weight was 19.29 at 10.0).
+#
+# --min_positives_per_tf 200 drops train/val-pool TFs with fewer than 200 ground-truth
+# edges, about 50 cached positives at this dataset's 0.268 positives-per-GT-edge rate.
+# It removes 8 train and 4 val TFs, among them BAZ2A and TAF1 (ZERO cached positives),
+# KDM5B (2) and ETV2 (3). Test TFs are deliberately exempt: they are the NMP regulators the
+# experiment exists to measure, and dropping any would break comparison with scored runs.
 max_cells_per_pair=64
 max_peaks_per_tg=25
 peak_flank_size=128
 pct_true_edges=0.3
-true_false_ratio=10.0
+true_false_ratio=5.0
 
 # val_tf_frac raised 0.15 -> 0.25 on 2026-08-19. At 0.15 the split produced 16 validation
 # TFs of which only 12 were scorable: BAZ2A and GCM1 had ZERO positive edges, ETV2 had 1 and
@@ -68,6 +80,7 @@ echo "[INFO] Building and caching TF-TG training data (TF split)..."
 python3 ${PROJECT_DIR}/scripts/build_tf_to_tg_train_data.py \
     --split_mode tf \
     --val_tf_frac 0.25 \
+    --min_positives_per_tf 200 \
     --max_cells_per_pair $max_cells_per_pair \
     --max_peaks_per_tg $max_peaks_per_tg \
     --pct_true_edges $pct_true_edges \

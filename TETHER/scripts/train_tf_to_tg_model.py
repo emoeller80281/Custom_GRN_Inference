@@ -135,32 +135,41 @@ def create_new_tf_tg_regulation_model(
 
 
 def stratified_train_subsample(train_inputs, frac, seed=0):
-    """Indices for a per-TF stratified subsample of the training edges.
+    """Indices for a per-(TF, label) stratified subsample of the training edges.
 
-    Stratified rather than uniform for a specific reason: --per_tf_pos_weight derives
-    w_t = n_neg_t / n_pos_t from these very counts. A uniform draw would leave each TF's
-    positive RATE intact only in expectation, and the rare-positive TFs -- the ones the
-    weighting exists for -- have the fewest positives to lose. Taking the same share of
-    every TF keeps each TF's composition, and hence its weight, close to the full-data value.
+    Stratifying on the TF ALONE is not enough, and the failure mode is specific: at frac=0.25
+    a TF-only draw left two of the 82 TFs with zero positive edges, so --per_tf_pos_weight
+    fell back to w=1.0 for them, and the median weight moved 19.29 -> 15.01 (weight
+    correlation against full data only 0.919). Those are precisely the rare-positive TFs the
+    weighting exists to correct, so a cap sweep run on such a subsample would be comparing
+    the wrong thing.
+
+    Drawing the same fraction of each TF's positives and negatives separately keeps every
+    TF's positive COUNT proportional, so w_t = n_neg_t / n_pos_t is preserved to within
+    rounding and no TF can lose its positives entirely.
 
     Returned indices are SORTED. The edge universe is TF-major and the model's TF-crop
     ladder re-records a CUDA graph whenever the crop width changes, so a shuffled subset
     changes crop almost every batch and costs 15-38 s/batch.
     """
     tf_idx = train_inputs["tf_idx"].reshape(-1).numpy()
+    labels = train_inputs["label"].reshape(-1).numpy()
     rng = np.random.default_rng(seed)
+
     keep = []
     for t in np.unique(tf_idx):
-        pos = np.flatnonzero(tf_idx == t)
-        n = max(1, int(round(len(pos) * frac)))
-        keep.append(rng.choice(pos, size=n, replace=False))
+        for lab in (0, 1):
+            pos = np.flatnonzero((tf_idx == t) & (labels == lab))
+            if len(pos) == 0:
+                continue
+            n = max(1, int(round(len(pos) * frac)))
+            keep.append(rng.choice(pos, size=n, replace=False))
     keep = np.sort(np.concatenate(keep))
 
-    labels = train_inputs["label"].reshape(-1).numpy()
     log_once(
         f"--train_subsample_frac {frac:g}: {len(keep):,} of {len(tf_idx):,} training edges "
-        f"({len(keep)/len(tf_idx):.1%}) across {len(np.unique(tf_idx))} TFs. "
-        f"Positive rate {labels.mean():.4f} -> {labels[keep].mean():.4f}."
+        f"({len(keep)/len(tf_idx):.1%}) across {len(np.unique(tf_idx))} TFs, stratified by "
+        f"(TF, label). Positive rate {labels.mean():.4f} -> {labels[keep].mean():.4f}."
     )
     return keep
 
