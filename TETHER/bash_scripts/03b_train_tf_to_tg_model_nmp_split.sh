@@ -136,14 +136,16 @@
 #   epoch   lr          val/loss   val/auroc   val/macro_auroc   val/auprc
 #     0     2.828e-4     0.4746      0.6715         0.6486         0.2134
 #     3     2.828e-4     0.5314      0.6792         0.6652         0.2281
-#     6     2.828e-5 <-  0.5450      0.6958         0.6768         0.2234
-#    15     2.828e-6 <-  0.5364      0.6794         0.6761         0.1976
+#     6     2.828e-4     0.5450      0.6958         0.6768         0.2234  <- best, full LR
+#     7     2.828e-5 <-  0.5508      0.6825         0.6744         0.2017
+#    16     2.828e-6 <-  0.5387      0.6805         0.6768         0.1978
 #    20     2.828e-6     0.5396      0.6817         0.6772         0.1986
 #
-# val/loss hit its minimum at epoch 0 and was never beaten, so patience=5 fired at the end
-# of epoch 5 and, after cooldown plus five more "bad" epochs, again at epoch 15. Two 10x
+# val/loss hit its minimum at epoch 0 and was never beaten, so num_bad_epochs reached
+# 6 > patience=5 at the end of epoch 6 and the cut applied from epoch 7; cooldown=3 covered
+# epochs 7-9, then six more bad epochs (10-15) fired the second cut from epoch 16. Two 10x
 # cuts left the LR 100x below its start and the run learned nothing after epoch 9. The
-# metrics that matter were still climbing when the first cut landed.
+# metric that matters was still climbing right up to the first cut.
 #
 # Under --per_tf_pos_weight val/loss is a particularly bad plateau signal: median positive
 # weight is 19.3, so loss is dominated by calibration and drifts UP as the model sharpens

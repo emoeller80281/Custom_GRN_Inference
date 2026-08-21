@@ -134,6 +134,37 @@ def create_new_tf_tg_regulation_model(
     return tf_tg_model
 
 
+def stratified_train_subsample(train_inputs, frac, seed=0):
+    """Indices for a per-TF stratified subsample of the training edges.
+
+    Stratified rather than uniform for a specific reason: --per_tf_pos_weight derives
+    w_t = n_neg_t / n_pos_t from these very counts. A uniform draw would leave each TF's
+    positive RATE intact only in expectation, and the rare-positive TFs -- the ones the
+    weighting exists for -- have the fewest positives to lose. Taking the same share of
+    every TF keeps each TF's composition, and hence its weight, close to the full-data value.
+
+    Returned indices are SORTED. The edge universe is TF-major and the model's TF-crop
+    ladder re-records a CUDA graph whenever the crop width changes, so a shuffled subset
+    changes crop almost every batch and costs 15-38 s/batch.
+    """
+    tf_idx = train_inputs["tf_idx"].reshape(-1).numpy()
+    rng = np.random.default_rng(seed)
+    keep = []
+    for t in np.unique(tf_idx):
+        pos = np.flatnonzero(tf_idx == t)
+        n = max(1, int(round(len(pos) * frac)))
+        keep.append(rng.choice(pos, size=n, replace=False))
+    keep = np.sort(np.concatenate(keep))
+
+    labels = train_inputs["label"].reshape(-1).numpy()
+    log_once(
+        f"--train_subsample_frac {frac:g}: {len(keep):,} of {len(tf_idx):,} training edges "
+        f"({len(keep)/len(tf_idx):.1%}) across {len(np.unique(tf_idx))} TFs. "
+        f"Positive rate {labels.mean():.4f} -> {labels[keep].mean():.4f}."
+    )
+    return keep
+
+
 def compute_per_tf_pos_weight(train_inputs, n_tf, max_weight=50.0):
     """Per-TF positive class weight w_t = n_neg_t / n_pos_t over the whole training split.
 
@@ -477,6 +508,33 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument(
+        "--selection_metric",
+        default="val/macro_auroc",
+        help=(
+            "Metric ModelCheckpoint and EarlyStopping both use (mode=max). Keep this equal "
+            "to --plateau_monitor: run 3809742 stopped on pooled val/auroc while its LR "
+            "schedule tracked macro, and died at epoch 21 with macro still improving."
+        ),
+    )
+    parser.add_argument("--early_stopping_patience", type=int, default=15)
+    parser.add_argument(
+        "--train_subsample_frac",
+        type=float,
+        default=1.0,
+        help=(
+            "Train on this fraction of the training edges (1.0 = all, the default). "
+            "Stratified per TF so each TF keeps the same share of its edges and its "
+            "positive rate -- and therefore its --per_tf_pos_weight value -- is preserved. "
+            "Validation and test are never subsampled, so metrics stay comparable to full "
+            "runs. Indices are kept sorted: the edge universe is TF-major and the TF-crop "
+            "ladder re-records a CUDA graph whenever the crop width changes, so a scrambled "
+            "order costs 15-38 s/batch. Intended for hyperparameter screening -- at 0.25 an "
+            "epoch costs ~12.6 min instead of ~50.5. Always include a known configuration "
+            "as a control arm: a subsampled run is a proxy, and it is only trustworthy for "
+            "RANKING configurations if the control lands near its full-data trajectory."
+        ),
+    )
+    parser.add_argument(
         "--plateau_monitor",
         default="val/macro_auroc",
         help=(
@@ -494,7 +552,9 @@ if __name__ == "__main__":
         "--plateau_factor", type=float, default=0.5,
         help="LR multiplier on plateau. Was 0.1; a 10x cut is a decision, not an adjustment.",
     )
-    parser.add_argument("--plateau_patience", type=int, default=8)
+    parser.add_argument("--plateau_patience", type=int, default=4,
+        help="Was 8; on a metric as noisy as macro AUROC the counter was reset by "
+             "chance upticks before it could ever reach the threshold.")
     parser.add_argument("--plateau_cooldown", type=int, default=2)
     parser.add_argument(
         "--per_tf_pos_weight",
@@ -678,6 +738,24 @@ if __name__ == "__main__":
     # train/val/test must agree or the model would be fed tf_embedding in one loop and
     # tf_idx in another.
     tf_source_kwargs = dict(return_tf_indices=args.tf_embedding_on_device)
+
+    # Subsample BEFORE the dataset is built, so per-TF weights below are computed from the
+    # data actually trained on rather than from the full split.
+    if args.train_subsample_frac < 1.0:
+        keep_idx = stratified_train_subsample(tftg_inputs_train, args.train_subsample_frac)
+        n_edges = len(tftg_inputs_train["label"])
+        keep_list = keep_idx.tolist()
+
+        def _take(v):
+            # Every entry in this cache is per-edge, but three of them (tf_name, tg_name,
+            # cell_ids) are plain lists and do not accept fancy indexing.
+            if not hasattr(v, "__len__") or len(v) != n_edges:
+                return v
+            if isinstance(v, list):
+                return [v[i] for i in keep_list]
+            return v[keep_idx]
+
+        tftg_inputs_train = {k: _take(v) for k, v in tftg_inputs_train.items()}
 
     train_dataset = TFTGEdgeBagDataset(
         tftg_inputs_train,
@@ -876,10 +954,18 @@ if __name__ == "__main__":
         fp32_eval=not args.eval_in_training_precision,
     )
     
+    # All three callbacks -- selection, stopping, LR -- now agree on val/macro_auroc.
+    # Run 3809742 is why. Its LR scheduler watched val/macro_auroc while these two still
+    # watched pooled val/auroc, so the run was killed at epoch 21 by EarlyStopping counting
+    # 15 non-improving epochs of POOLED AUROC (best 0.6949 at epoch 6) while macro was still
+    # setting new highs as late as epoch 13 (0.6773). The LR scheduler never fired at all:
+    # macro's new bests at epochs 8/11/13 kept resetting num_bad_epochs, which reached 8 at
+    # the final epoch -- one short of the 9 that patience=8 requires. Three callbacks
+    # steering on two different metrics is the same fault as the original val/loss bug.
     checkpoint_callback = ModelCheckpoint(
         dirpath=output_dir,
-        filename="epoch={epoch:02d}-val_auroc={val/auroc:.4f}-val_loss={val/loss:.4f}",
-        monitor="val/auroc",
+        filename="epoch={epoch:02d}-macro={val/macro_auroc:.4f}-val_auroc={val/auroc:.4f}-val_loss={val/loss:.4f}",
+        monitor=args.selection_metric,
         mode="max",
         save_top_k=500,
         save_last=True,
@@ -895,9 +981,9 @@ if __name__ == "__main__":
     # AUROC moved +0.004. Stopping on the metric ModelCheckpoint selects on keeps the two
     # callbacks consistent.
     early_stopping_callback = EarlyStopping(
-        monitor="val/auroc",
+        monitor=args.selection_metric,
         mode="max",
-        patience=15,
+        patience=args.early_stopping_patience,
     )
 
     lr_monitor = LearningRateMonitor(logging_interval="epoch")

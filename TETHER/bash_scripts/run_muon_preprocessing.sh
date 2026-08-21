@@ -1,7 +1,7 @@
-#!/bin/bash
-#SBATCH --job-name=generate_batch_grad_Attrib
-#SBATCH --output=LOGS/transformer_logs/04_testing/%x_%j.log
-#SBATCH --error=LOGS/transformer_logs/04_testing/%x_%j.err
+#!/bin/bash -l
+#SBATCH --job-name=muon_preprocessing
+#SBATCH --output=LOGS/muon_preprocessing/%x_%j.log
+#SBATCH --error=LOGS/muon_preprocessing/%x_%j.err
 #SBATCH --time=12:00:00
 #SBATCH -p compute
 #SBATCH -N 1
@@ -9,22 +9,22 @@
 #SBATCH -c 16
 #SBATCH --mem=128G
 
-set -euo pipefail
+set -eo pipefail
 
 source activate my_env
 
 PROJECT_DIR="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
 
 DATASET_NAME="mESC_10x_data"
+CELL_TYPE="mESC"
 SAMPLE_NAME="E7.5_rep1"
-PROCESSED_DATA_NAME="${DATASET_NAME}_${SAMPLE_NAME}_muon_preprocessing"
 ORGANISM_CODE="mm10"
 
 TSS_PATH="${PROJECT_DIR}/data/genome_data/genome_annotation/${ORGANISM_CODE}/gene_tss.bed"
 TF_LIST_FILE=""
 
 RAW_DATA_DIR="${PROJECT_DIR}/data/raw/${DATASET_NAME}/"
-PROCESSED_DATA_DIR="${PROJECT_DIR}/data/processed/${PROCESSED_DATA_NAME}"
+PROCESSED_DATA_DIR="${PROJECT_DIR}/data/sample_input_data/${CELL_TYPE}"
 
 FRAG_PATH="${RAW_DATA_DIR}/${SAMPLE_NAME}/fragments.tsv.gz"
 

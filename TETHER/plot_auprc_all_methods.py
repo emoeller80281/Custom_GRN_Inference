@@ -63,9 +63,9 @@ torch.set_float32_matmul_precision("high")
 # it is exceeded the graphs evict each other and every batch recompiles: throughput drops
 # to seconds per batch and nothing is logged to say why.
 #
-# On a V100 this is currently masked, because the bfloat16 autocast below makes Inductor
-# skip compilation entirely. On an A100 (compute capability 8.0+) bf16 compiles for real
-# and the limit would bite.
+# This used to be masked on a V100, because the bfloat16 autocast then in use made Inductor
+# skip compilation entirely. Scoring is fp32 by default now (--eval_precision), so the model
+# compiles on every GPU and the limit bites everywhere -- which is why it is raised here.
 torch._dynamo.config.cache_size_limit = 128
 
 TF_TG_MODEL_CHECKPOINTS = {

@@ -520,15 +520,12 @@ def generate_model_predictions(model, data_loader, device, tf_idx_to_name, tg_id
     model = model.to(device)
     model.eval()
 
-    if device.type == "cuda":
-        major, _ = torch.cuda.get_device_capability(0)
-        autocast_dtype = torch.bfloat16 if major >= 8 else torch.float16
-        logging.info(
-            f"Autocast dtype: {autocast_dtype} on {torch.cuda.get_device_name(0)} "
-            f"(compute capability {'.'.join(str(c) for c in torch.cuda.get_device_capability(0))})"
-        )
-    else:
-        autocast_dtype = torch.float32
+    # The compute-capability autocast-dtype picker that used to live here is gone:
+    # predictions are scored in fp32 now, so there is no dtype to choose. Kept for the
+    # record because the reasoning was subtle -- torch.cuda.is_bf16_supported() returns
+    # True on a V100 (7.0) by counting emulated bf16, so it selected bf16 on hardware
+    # with no bf16 tensor cores, and Inductor then skipped compiling the model entirely.
+    # That trade-off no longer applies.
 
     tf_indices_list = []
     tg_indices_list = []
@@ -557,7 +554,16 @@ def generate_model_predictions(model, data_loader, device, tf_idx_to_name, tg_id
 
             batch = tf_to_tg_module.move_batch_to_device(batch, device)
 
-            with torch.autocast(device_type="cuda", dtype=autocast_dtype, enabled=(device.type == "cuda")):
+            # Score in fp32. enabled=False forces fp32 regardless of any ambient
+            # autocast, which is equivalent to removing this block here (no caller
+            # currently wraps it) but stays correct if one ever does.
+            #
+            # Measured on this model: bf16 vs fp32 predictions for the same
+            # checkpoint on mESC/E7.5_rep1 correlate only 0.516 (max score diff
+            # 0.816) and cost 0.031-0.036 AUPRC against external methods that are
+            # loaded from file and therefore unaffected. Quantising only TETHER
+            # while its competitors are exact makes every such comparison unfair.
+            with torch.autocast(device_type="cuda", enabled=False):
                 edge_logits, _ = model(
                     tf_embedding=batch.get("tf_embedding", None),
                     tf_mask=batch.get("tf_mask", None),

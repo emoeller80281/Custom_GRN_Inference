@@ -935,6 +935,7 @@ def integrate_rna_atac(
     
     
 def save_processed_data(mdata: ad.AnnData, sample_processed_data_dir: Path):
+    """Write the integrated MuData object and per-modality feature x cell parquets to disk."""
     def _adata_to_feature_by_cell_df(adata: ad.AnnData) -> pd.DataFrame:
         """
         Convert an AnnData object from cell x feature to feature x cell DataFrame.
@@ -1044,9 +1045,15 @@ def create_metacells(
     # Final row normalization to make sure rows sum to 1
     W = row_norm(W)
     
+    def _to_csr32(mat) -> sp.csr_matrix:
+        """Coerce a dense array or sparse matrix layer to a float32 CSR matrix."""
+        if sp.issparse(mat):
+            return mat.astype(np.float32).tocsr()
+        return sp.csr_matrix(np.asarray(mat, dtype=np.float32, order="C"))
+
     # Apply the diffusion operator to the RNA and ATAC data matrices to get metacell-level profiles.
-    X_rna = sp.csr_matrix(np.asarray(mdata["rna"].layers["log1p"], dtype=np.float32, order="C"))
-    X_atac = sp.csr_matrix(np.asarray(mdata["atac"].layers["tfidf"], dtype=np.float32, order="C"))
+    X_rna = _to_csr32(mdata["rna"].layers["log1p"])
+    X_atac = _to_csr32(mdata["atac"].layers["tfidf"])
 
     X_rna_soft = W @ X_rna      # cells × genes
     X_atac_soft = W @ X_atac    # cells × peaks
@@ -1125,7 +1132,7 @@ if __name__ == "__main__":
     SAMPLE_DATA_DIR = RAW_DATA_DIR / SAMPLE_NAME
     SAMPLE_PROCESSED_DATA_DIR = PROCESSED_DATA_DIR / SAMPLE_NAME
     
-    filtering_setting_df = pd.read_csv(PROJECT_DIR / "dev" / "notebooks" / "muon_preprocessing" /"qc_filtering_settings.tsv", sep="\t")
+    filtering_setting_df = pd.read_csv(PROJECT_DIR / "data" / "qc_filtering_settings.tsv", sep="\t")
     sample_filtering_settings = filtering_setting_df[filtering_setting_df["Sample"] == SAMPLE_NAME]    
     
     # ----- RNA QC thresholds -----
@@ -1146,7 +1153,7 @@ if __name__ == "__main__":
     if not SAMPLE_PROCESSED_DATA_DIR.exists():
         SAMPLE_PROCESSED_DATA_DIR.mkdir(parents=True)
     
-    mdata = load_raw_data(SAMPLE_NAME, SAMPLE_DATA_DIR, rna_count_file, atac_count_file, raw_h5_file)
+    mdata, _ = load_raw_data(SAMPLE_NAME, SAMPLE_DATA_DIR, rna_count_file, atac_count_file, raw_h5_file)
 
     mdata.write(SAMPLE_PROCESSED_DATA_DIR / f"{SAMPLE_NAME}.h5mu")
     
@@ -1169,7 +1176,7 @@ if __name__ == "__main__":
         norm_target_sum = 1e4,
         min_rna_disp = 0.5,
         filter_hvgs = False,
-        tf_list_file = None,
+        tf_list_file = tf_list_file,
         fig_dir=SAMPLE_PROCESSED_DATA_DIR / "preprocessing_figures" / "rna_qc",
         )
     
@@ -1211,6 +1218,8 @@ if __name__ == "__main__":
     
     # Integrate the RNA and ATAC modalities using MOFA+
     integrate_rna_atac(data_processor.mdata, SAMPLE_PROCESSED_DATA_DIR, SAMPLE_NAME, fig_dir=SAMPLE_PROCESSED_DATA_DIR / "integration")
-    
+
+    save_processed_data(data_processor.mdata, SAMPLE_PROCESSED_DATA_DIR)
+
     # Create metacells
-    create_metacells(data_processor.mdata, SAMPLE_PROCESSED_DATA_DIR, hops=2)    
+    create_metacells(data_processor.mdata, SAMPLE_PROCESSED_DATA_DIR, hops=2)

@@ -439,7 +439,16 @@ def generate_model_predictions(
 
             batch = tf_to_tg_module.move_batch_to_device(batch, device)
 
-            with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=(device.type == "cuda")):
+            # Score in fp32. enabled=False forces fp32 regardless of any ambient
+            # autocast, which is equivalent to removing this block here (no caller
+            # currently wraps it) but stays correct if one ever does.
+            #
+            # Measured on this model: bf16 vs fp32 predictions for the same
+            # checkpoint on mESC/E7.5_rep1 correlate only 0.516 (max score diff
+            # 0.816) and cost 0.031-0.036 AUPRC against external methods that are
+            # loaded from file and therefore unaffected. Quantising only TETHER
+            # while its competitors are exact makes every such comparison unfair.
+            with torch.autocast(device_type="cuda", enabled=False):
                 edge_logits, _ = model(
                     tf_embedding=batch["tf_embedding"],
                     tf_mask=batch["tf_mask"],

@@ -1099,12 +1099,14 @@ class LitTFTGRegulationModel(pl.LightningModule):
         #
         # Run 3801811 is the cautionary case. It monitored val/loss with factor=0.1, and
         # val/loss reached its minimum at epoch 0 (0.4746) and was never beaten again, so
-        # patience=5 fired at the end of epoch 5 (LR 2.828e-4 -> 2.828e-5 at epoch 6) and,
-        # after cooldown=3 plus five more "bad" epochs, again at epoch 15 (-> 2.828e-6).
-        # Two 10x cuts put the LR 100x below its start. The run went flat from epoch 9
-        # onward -- macro 0.6754-0.6772, pooled 0.6781-0.6827 -- and learned nothing for
-        # twelve epochs. Meanwhile the metrics that matter were still climbing when the
-        # first cut landed: macro rose 0.6486 -> 0.6768 across epochs 0-6.
+        # num_bad_epochs hit 6 > patience=5 at the end of epoch 6 and the cut applied from
+        # epoch 7 (2.828e-4 -> 2.828e-5). cooldown=3 covered epochs 7-9, then six more bad
+        # epochs (10-15) fired the second cut from epoch 16 (-> 2.828e-6). Two 10x cuts put
+        # the LR 100x below its start, and the run went flat from epoch 9 onward -- macro
+        # 0.6754-0.6772, pooled 0.6784-0.6885 -- learning nothing for twelve epochs.
+        # Meanwhile the metric that matters was still climbing right up to the first cut:
+        # macro rose 0.6486 -> 0.6768 across epochs 0-6, its best epoch being the last one
+        # trained at full LR.
         #
         # val/loss is an especially bad plateau signal under --per_tf_pos_weight: with a
         # median positive weight of 19.3 the loss is dominated by calibration, and the model
