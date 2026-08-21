@@ -630,7 +630,17 @@ if __name__ == "__main__":
     parser.add_argument("--pct_true_edges", type=float, default=0.15, help="Percentage of true edges to include in the training set (default: 0.15)")
     parser.add_argument("--true_false_ratio", type=float, default=2.0, help="Ratio of true to false edges in the training set (default: 2.0)")
     parser.add_argument("--peak_flank_size", type=int, default=128, help="Size of the flank region around peaks (default: 128)")
-    parser.add_argument("--checkpoint_path", type=str, required=False, help="Path to a model checkpoint to resume training from")
+    parser.add_argument("--checkpoint_path", type=str, required=False,
+        help="Path to a checkpoint to WARM-START model weights from. Loads weights only -- "
+             "optimizer state, epoch counter, LR schedule and callback state all start "
+             "fresh, and warmup re-runs. For continuing an interrupted run use "
+             "--resume_from_checkpoint instead.")
+    parser.add_argument("--resume_from_checkpoint", type=str, required=False,
+        help="Path to a checkpoint to genuinely RESUME from (passed to trainer.fit(ckpt_path=...)). "
+             "Restores optimizer moments, epoch counter, LR scheduler and callback state, so "
+             "training continues as though it had never stopped. This is what you want after a "
+             "run dies partway -- warm-starting weights instead would reset the optimizer and "
+             "re-run warmup, which is not comparable to a run that trained continuously.")
     parser.add_argument("--force_reload", action="store_true", help="Whether to force reload cached data instead of using existing cache files")
     args = parser.parse_args()
 
@@ -1097,12 +1107,18 @@ if __name__ == "__main__":
     )
     
     if checkpoint_path is not None:
-        log_once(f"Resuming training from checkpoint: {checkpoint_path}")
+        log_once(
+            f"Warm-starting model weights from: {checkpoint_path} "
+            "(optimizer/epoch/scheduler state NOT restored)"
+        )
+    if args.resume_from_checkpoint is not None:
+        log_once(f"Resuming full training state from: {args.resume_from_checkpoint}")
 
     trainer.fit(
         lit_model,
         train_dataloaders=train_loader,
         val_dataloaders=val_loader,
+        ckpt_path=args.resume_from_checkpoint,
     )
 
     # No trainer.test() here, deliberately: LitTFTGRegulationModel has no test_step, and

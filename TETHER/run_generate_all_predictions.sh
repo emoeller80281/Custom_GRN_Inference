@@ -20,8 +20,8 @@ echo "Activating conda environment and starting training..."
 source activate my_env
 
 EXPERIMENT_LIST=(
-    # "mm10|mESC|E7.5_rep1|mouse_hepatocytes|hepatocytes_1"
-    "mm10|mESC|E7.5_rep2|mouse_hepatocytes|hepatocytes_1"
+    "mm10|mESC|E7.5_rep1|mouse_hepatocytes|hepatocytes_1"
+    # "mm10|mESC|E7.5_rep2|mouse_hepatocytes|hepatocytes_1"
     # "mm10|mESC|E8.5_rep1|mouse_hepatocytes|hepatocytes_1"
     # "hg38|Macrophage|buffer_1|K562|sample_1"
     # "hg38|Macrophage|buffer_2|K562|sample_1"
@@ -34,6 +34,12 @@ EXPERIMENT_LIST=(
 
 export TORCH_ALLOW_TF32=1
 export NVIDIA_TF32_OVERRIDE=1
+
+# 3811170_0 hit a CUDA OOM inside torch._inductor's autotuning benchmark clone
+# (needed ~11GiB on top of 28.39GiB already resident) when --all_chromosomes hit
+# a shape bucket wider than usual. expandable_segments reduces the fragmentation
+# that left only 264MiB free despite 2.71GiB being reserved-but-unallocated.
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # --- Threading ---
 export OMP_NUM_THREADS=1
@@ -84,7 +90,7 @@ python ${PROJECT_DIR}/generate_all_predictions.py \
     --cross_model_sample_name "$cross_model_sample_name" \
     --max_peaks_per_tg 8 \
     --max_cells_per_pair 25 \
-    --batch_size 256 \
+    --batch_size 128 \
     --tf_peak_chunk_size 1024 \
     --force_reload \
     --all_chromosomes

@@ -16,17 +16,17 @@ CHKPT_DIR = PROJECT_DIR / "checkpoints"
 # cell_type="Macrophage"
 # sample_name="buffer_2"
 
-# species = "mm10"
-# cell_type="mESC"
-# sample_name="E7.5_rep1"
+species = "mm10"
+cell_type="mESC"
+sample_name="E7.5_rep1"
 
 # Argelaguet et al. 2022 mouse organogenesis atlas, the paper's own SEACells metacells
 # (1,896 metacells with matched RNA + ATAC, 9 wild-type timecourse libraries E7.5-E8.75,
 # both CRISPR libraries excluded). Built by
 # mouse_preprocessing_scripts/12_tether_training_data/.
-species = "mm10"
-cell_type="mESC"
-sample_name="WT_timecourse_metacells"
+# species = "mm10"
+# cell_type="mESC"
+# sample_name="WT_timecourse_metacells"
 
 # species = "mm10"
 # cell_type="mouse_liver"
