@@ -9,7 +9,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 8
 #SBATCH --mem=192G
-#SBATCH --array=0-6%7
+#SBATCH --array=0%7
 
 set -eo pipefail
 
@@ -20,13 +20,14 @@ echo "Activating conda environment and starting training..."
 source activate my_env
 
 EXPERIMENT_LIST=(
-    "mm10|mESC|E7.5_rep1|mouse_hepatocytes|hepatocytes_1"
-    "mm10|mESC|E8.5_rep1|mouse_hepatocytes|hepatocytes_1"
-    "hg38|Macrophage|buffer_1|K562|sample_1"
-    "hg38|Macrophage|buffer_2|K562|sample_1"
-    "hg38|K562|sample_1|Macrophage|buffer_1"
-    "mm10|mouse_hepatocytes|hepatocytes_1|mESC|E7.5_rep1"
-    "mm10|mouse_hepatocytes|hepatocytes_3|mESC|E7.5_rep1"
+    # "mm10|mESC|E7.5_rep1|mouse_hepatocytes|hepatocytes_1"
+    "mm10|mESC|E7.5_rep2|mouse_hepatocytes|hepatocytes_1"
+    # "mm10|mESC|E8.5_rep1|mouse_hepatocytes|hepatocytes_1"
+    # "hg38|Macrophage|buffer_1|K562|sample_1"
+    # "hg38|Macrophage|buffer_2|K562|sample_1"
+    # "hg38|K562|sample_1|Macrophage|buffer_1"
+    # "mm10|mouse_hepatocytes|hepatocytes_1|mESC|E7.5_rep1"
+    # "mm10|mouse_hepatocytes|hepatocytes_3|mESC|E7.5_rep1"
 
 
 )
