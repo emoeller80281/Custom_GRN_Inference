@@ -9,6 +9,7 @@ macrophage_output/
 reference_networks/
 .venv/
 TETHER/cached_data/
+TETHER/cached_data_old/
 jupyter_urls/
 jupyter_dense*.sh
 data/tf_data

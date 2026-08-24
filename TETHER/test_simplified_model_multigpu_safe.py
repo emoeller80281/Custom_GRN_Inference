@@ -36,7 +36,6 @@ warnings.filterwarnings(
     category=FutureWarning,
 )
 
-tf_tg_input_cache_dir = DATA_DIR / "tf_tg_training_cache"
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -73,11 +72,12 @@ def make_parser():
 
 
 def build_paths(args):
-    cell_type_cache_dir = DATA_DIR / f"{args.cell_type}_cache"
+    cell_type_cache_dir = config.cell_type_cache_dir(args.cell_type)
     cache_dir = cell_type_cache_dir / f"{args.sample_name}_simplified_model_cache"
     output_dir = CHKPT_DIR / "simplified_model" / f"{args.cell_type}_{args.sample_name}_simplified_model_test_{args.job_id}"
     return {
         "cell_type_cache_dir": cell_type_cache_dir,
+        "tf_dna_cache_dir": config.tf_dna_cache_dir_for_cell_type(args.cell_type),
         "cache_dir": cache_dir,
         "output_dir": output_dir,
         "atac_peak_tensor": cache_dir / "atac_peak_tensor.pt",
@@ -231,8 +231,8 @@ def build_and_save_training_cache(args, paths):
         logging.info("Building test TF-TG input dataset on rank 0")
         tftg_inputs_test = utils.build_tftg_inputs(tf_tg_labeled_test_df, seed=125, silence=False, **common_build_kwargs)
 
-        tf_embeddings_tensor = torch.load(paths["cell_type_cache_dir"] / "tf_embeddings.pt", map_location="cpu", weights_only=True)
-        tf_mask_tensor = torch.load(paths["cell_type_cache_dir"] / "tf_masks.pt", map_location="cpu", weights_only=True)
+        tf_embeddings_tensor = torch.load(paths["tf_dna_cache_dir"] / "tf_embeddings.pt", map_location="cpu", weights_only=True)
+        tf_mask_tensor = torch.load(paths["tf_dna_cache_dir"] / "tf_masks.pt", map_location="cpu", weights_only=True)
 
         metadata = {
             "tf_name_to_idx": tf_name_to_idx,

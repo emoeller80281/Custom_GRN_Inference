@@ -30,7 +30,6 @@ warnings.filterwarnings(
     category=FutureWarning,
 )
 
-tf_tg_input_cache_dir = DATA_DIR / "tf_tg_training_cache"
 
 all_evaluation_plot_dir = PROJECT_DIR / "plots" / "model_vs_test_set_evaluation_figs"
 all_evaluation_plot_dir.mkdir(exist_ok=True)
@@ -88,7 +87,7 @@ def run_prediction_vs_test_set(
         return None
 
 
-    cell_type_cache_dir = DATA_DIR / f"{test_set_cell_type}_cache"
+    cell_type_cache_dir = config.cell_type_cache_dir(test_set_cell_type)
 
     # print(f"Loading cached dataset with subset size: {subset_size}")
     data_loader, metadata, manifest, tf_embeddings_tensor, tf_mask_tensor = utils.load_training_cache_dataset(
@@ -220,7 +219,7 @@ if __name__ == "__main__":
 
     dataset_split_type = "test"
     
-    cell_type_cache_dir = DATA_DIR / f"{test_set_cell_type}_cache"
+    cell_type_cache_dir = config.cell_type_cache_dir(test_set_cell_type)
     
     prediction_save_file = RESULT_DIR / "labeled_grns" / f"{model_training_sample}_model_vs_{evaluation_sample}_grn_{subset_size}.csv"
 
@@ -229,7 +228,7 @@ if __name__ == "__main__":
         sys.exit(0)
         
     # Load the TF and TG name to index mappings from the training cache metadata
-    with open(cell_type_cache_dir / "tf_tg_training_cache" / evaluation_sample / "metadata.json", "r") as f:
+    with open(cell_type_cache_dir / evaluation_sample / "metadata.json", "r") as f:
         metadata = json.load(f)
         
     tf_name_to_idx = metadata["tf_name_to_idx"]

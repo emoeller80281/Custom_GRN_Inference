@@ -10,6 +10,8 @@ from tqdm.auto import tqdm
 import torch
 from torch.utils.data import DataLoader, Subset
 import json
+
+import config
 import time
 import requests
 from Bio import Entrez, SeqIO
@@ -1181,6 +1183,17 @@ def load_tf_tg_regulation_model(
     return lit_tf_tg_model
 
 
+def tf_dna_cache_dir_for(cell_type_cache_dir: Path) -> Path:
+    """The species TF-DNA cache holding the TF tables, given a cell-type cache dir.
+
+    Layout is cached_data/<species>/{tf_dna_cache, <cell_type>_cache}, so the TF-DNA cache
+    is the cell-type cache's sibling. tf_embeddings.pt / tf_masks.pt / tf_name_to_idx.csv
+    live there because they are species-level -- every cell type of a species previously
+    held a byte-identical copy.
+    """
+    return Path(cell_type_cache_dir).parent / config.TF_DNA_CACHE_DIRNAME
+
+
 def load_training_cache_dataset(
     sample_name: str,
     cell_type_cache_dir: Path, 
@@ -1191,33 +1204,36 @@ def load_training_cache_dataset(
     
     assert split_type in ["train", "val", "test"], \
         "split_type must be one of 'train', 'val', or 'test'"
+
+    sample_cache_dir = Path(cell_type_cache_dir) / sample_name
+    tf_dna_dir = tf_dna_cache_dir_for(cell_type_cache_dir)
     
     # Load the compact split inputs
     tftg_inputs_test = torch.load(
-        cell_type_cache_dir / "tf_tg_training_cache" / sample_name / f"tftg_inputs_{split_type}.pt",
+        sample_cache_dir / f"tftg_inputs_{split_type}.pt",
         weights_only=False,
     )
 
     # Load the lookup tensors
     tf_embeddings_tensor = torch.load(
-        cell_type_cache_dir / "tf_embeddings.pt",
+        tf_dna_dir / "tf_embeddings.pt",
         weights_only=True,
     )
     tf_mask_tensor = torch.load(
-        cell_type_cache_dir / "tf_masks.pt",
+        tf_dna_dir / "tf_masks.pt",
         weights_only=True,
     )
     atac_peak_tensor = torch.load(
-        cell_type_cache_dir / "tf_tg_training_cache" / sample_name / "atac_peak_tensor.pt",
+        sample_cache_dir / "atac_peak_tensor.pt",
         weights_only=True,
     )
 
     # Load the metadata
-    with open(cell_type_cache_dir / "tf_tg_training_cache" / sample_name / "metadata.json", "r") as f:
+    with open(sample_cache_dir / "metadata.json", "r") as f:
         metadata = json.load(f)
 
     # Load the manifest and verify tensor shapes and dtypes match expectations
-    with open(cell_type_cache_dir / "tf_tg_training_cache" / sample_name / "manifest.json") as f:
+    with open(sample_cache_dir / "manifest.json") as f:
         manifest = json.load(f)
     
     assert tuple(manifest["atac_peak_tensor_shape"]) == tuple(atac_peak_tensor.shape)
@@ -1416,21 +1432,26 @@ def load_tf_embedding_resources(paths):
 
     Critical: tf_name_to_idx values must index rows of tf_embeddings_tensor.
     """
+    # Callers may pass the TF-DNA cache explicitly; otherwise it is the cell-type cache's
+    # sibling under cached_data/<species>/.
+    tf_dna_dir = paths.get("tf_dna_cache_dir") or tf_dna_cache_dir_for(
+        paths["cell_type_cache_dir"]
+    )
+
     tf_embeddings_tensor = torch.load(
-        paths["cell_type_cache_dir"] / "tf_embeddings.pt",
+        tf_dna_dir / "tf_embeddings.pt",
         map_location="cpu",
         weights_only=True,
     )
     tf_mask_tensor = torch.load(
-        paths["cell_type_cache_dir"] / "tf_masks.pt",
+        tf_dna_dir / "tf_masks.pt",
         map_location="cpu",
         weights_only=True,
     )
 
-    # Prefer a cell-type-specific TF index map if present.
-    tf_idx_csv = paths["cell_type_cache_dir"] / "tf_name_to_idx.csv"
-    tf_idx_json = paths["cell_type_cache_dir"] / "tf_name_to_idx.json"
-    metadata_json = paths["cell_type_cache_dir"] / "metadata.json"
+    tf_idx_csv = tf_dna_dir / "tf_name_to_idx.csv"
+    tf_idx_json = tf_dna_dir / "tf_name_to_idx.json"
+    metadata_json = tf_dna_dir / "metadata.json"
 
     if tf_idx_csv.exists():
         tf_name_to_idx_df = pd.read_csv(tf_idx_csv)
@@ -1457,7 +1478,7 @@ def load_tf_embedding_resources(paths):
 
     else:
         raise FileNotFoundError(
-            f"No TF index map found in {paths['cell_type_cache_dir']}. "
+            f"No TF index map found in {tf_dna_dir}. "
             "Expected one of: tf_name_to_idx.csv, tf_name_to_idx.json, metadata.json. "
             "Do not use config.tf_name_to_idx_cache_path unless it was generated with "
             "this exact tf_embeddings.pt tensor."
@@ -1467,7 +1488,7 @@ def load_tf_embedding_resources(paths):
         tf_name_to_idx=tf_name_to_idx,
         tf_embeddings_tensor=tf_embeddings_tensor,
         tf_mask_tensor=tf_mask_tensor,
-        source=str(paths["cell_type_cache_dir"]),
+        source=str(tf_dna_dir),
     )
 
     return tf_embeddings_tensor, tf_mask_tensor, tf_name_to_idx

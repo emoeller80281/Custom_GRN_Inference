@@ -12,13 +12,13 @@ CHKPT_DIR = PROJECT_DIR / "checkpoints"
 # cell_type="iPSC"
 # sample_name="WT_D13_rep1"
 
-# species = "hg38"
-# cell_type="Macrophage"
-# sample_name="buffer_2"
+species = "hg38"
+cell_type="Macrophage"
+sample_name="buffer_2"
 
-species = "mm10"
-cell_type="mESC"
-sample_name="E7.5_rep1"
+# species = "mm10"
+# cell_type="mESC"
+# sample_name="E7.5_rep1"
 
 # Argelaguet et al. 2022 mouse organogenesis atlas, the paper's own SEACells metacells
 # (1,896 metacells with matched RNA + ATAC, 9 wild-type timecourse libraries E7.5-E8.75,
@@ -44,7 +44,62 @@ assert cell_type in {"Macrophage", "mESC", "K562", "iPSC", "mouse_liver", "mouse
     f"Invalid cell type: {cell_type}. Select from: 'Macrophage', 'mESC', 'K562', 'iPSC', 'mouse_liver', 'mouse_hepatocytes'"
 assert species in {"mm10", "hg38"}, \
     f"Invalid species: {species}. Select from: 'mm10', 'hg38'"
-    
+
+# Species is a property of the cell type, not an independent choice. The CLI entry points
+# take --cell_type without --species, so the cache layout below has to be derivable from
+# the cell type alone.
+cell_type_to_species = {
+    "mESC": "mm10",
+    "mouse_liver": "mm10",
+    "mouse_hepatocytes": "mm10",
+    "iPSC": "hg38",
+    "Macrophage": "hg38",
+    "K562": "hg38",
+}
+
+assert cell_type_to_species[cell_type] == species, \
+    f"cell_type {cell_type!r} belongs to {cell_type_to_species[cell_type]}, but species is set to {species!r}."
+
+
+def species_for_cell_type(cell_type_name: str) -> str:
+    try:
+        return cell_type_to_species[cell_type_name]
+    except KeyError:
+        raise ValueError(
+            f"Unknown cell type {cell_type_name!r}. Add it to config.cell_type_to_species. "
+            f"Known: {sorted(cell_type_to_species)}"
+        ) from None
+
+
+def species_cache_dir(species_name: str) -> Path:
+    """cached_data/<species>/ -- the root everything cached now hangs off."""
+    return PROJECT_DIR / "cached_data" / species_name
+
+
+TF_DNA_CACHE_DIRNAME = "tf_dna_cache"
+
+
+def tf_dna_cache_dir(species_name: str) -> Path:
+    """TF-DNA training cache, one per species.
+
+    Its contents -- the ChIP-Atlas edge set, the peak universe, the one-hot peak tensor --
+    depend only on the genome, never on the cell type. Keeping it per cell type meant
+    byte-identical 30 GB copies under iPSC_cache and K562_cache.
+    """
+    return species_cache_dir(species_name) / TF_DNA_CACHE_DIRNAME
+
+
+def tf_dna_cache_dir_for_cell_type(cell_type_name: str) -> Path:
+    """The species TF-DNA cache a given cell type draws its TF tables from."""
+    return tf_dna_cache_dir(species_for_cell_type(cell_type_name))
+
+
+def cell_type_cache_dir(cell_type_name: str, species_name: str | None = None) -> Path:
+    """cached_data/<species>/<cell_type>_cache/ -- TF-TG caches and the TF embedding table."""
+    species_name = species_name or species_for_cell_type(cell_type_name)
+    return species_cache_dir(species_name) / f"{cell_type_name}_cache"
+
+
 # TF-DNA model checkpoints for the different cell types
 mm10_tf_dna_path = CHKPT_DIR / "tf_dna_mm10_3697823" / "epoch=07-val_auroc=0.9743-val_loss=0.1661.ckpt"
 hg38_tf_dna_path = CHKPT_DIR / "tf_dna_hg38_3683606" / "epoch=13-val_auroc=0.9566-val_loss=0.2042.ckpt"
@@ -72,14 +127,16 @@ elif species == "hg38":
 # Cell type and sample-specific paths
 sample_input_data_dir = DATA_DIR / "sample_input_data" / cell_type / sample_name
 
-training_cache_dir = PROJECT_DIR / "cached_data" / f"{cell_type}_cache"
-tf_dna_input_cache_dir = training_cache_dir / "tf_dna_training_cache"
-tf_tg_input_cache_dir = training_cache_dir / "tf_tg_training_cache" / sample_name
+training_cache_dir = PROJECT_DIR / "cached_data" / species / f"{cell_type}_tf_tg_cache"
+tf_dna_input_cache_dir = PROJECT_DIR / "cached_data" / species / "tf_dna_cache"
+tf_tg_input_cache_dir = training_cache_dir / sample_name
 
-# Shared cache files for both TF-to-TG and TF-to-DNA training
-tf_name_to_idx_cache_path = training_cache_dir / "tf_name_to_idx.csv"
-tf_embedding_cache_path = training_cache_dir / "tf_embeddings.pt"
-tf_mask_cache_path = training_cache_dir / "tf_masks.pt"
+# Shared by TF-to-DNA and TF-to-TG training. These are species-level: the TF set comes from
+# the species' ChIP-Atlas edges, so every cell type of a species had a byte-identical copy.
+# They live with the TF-DNA cache, and tf_idx everywhere indexes rows of this one table.
+tf_name_to_idx_cache_path = tf_dna_input_cache_dir / "tf_name_to_idx.csv"
+tf_embedding_cache_path = tf_dna_input_cache_dir / "tf_embeddings.pt"
+tf_mask_cache_path = tf_dna_input_cache_dir / "tf_masks.pt"
 
 # Cache file for the merged ground truth dataset for the TF-TG true edges
 merged_ground_truth_cache_path = training_cache_dir / f"{cell_type}_merged_ground_truth.parquet"

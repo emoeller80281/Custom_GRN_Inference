@@ -43,7 +43,6 @@ warnings.filterwarnings(
     category=FutureWarning,
 )
 
-tf_tg_input_cache_dir = DATA_DIR / "tf_tg_training_cache"
 
 all_evaluation_plot_dir = PROJECT_DIR / "plots"
 all_evaluation_plot_dir.mkdir(exist_ok=True)
@@ -671,9 +670,10 @@ peak_to_gene["target_id_norm"] = peak_to_gene["target_id"].str.upper()
 common_cells = sorted(set(rna_pseudobulk_norm.columns) & set(atac_pseudobulk.columns))
 
 # Load the merged ground truth
-cell_type_cache_dir = DATA_DIR / f"{cell_type}_cache"
+cell_type_cache_dir = config.cell_type_cache_dir(cell_type)
 
-tf_name_to_idx_cache_path = cell_type_cache_dir / "tf_name_to_idx.csv"
+tf_dna_cache_dir = config.tf_dna_cache_dir_for_cell_type(cell_type)
+tf_name_to_idx_cache_path = tf_dna_cache_dir / "tf_name_to_idx.csv"
 
 # Get the map of the TF names to their indices in the TF-DNA model training data.
 # These indices address rows of tf_embeddings.pt / tf_masks.pt, so this mapping is the
@@ -933,11 +933,11 @@ if not sample_full_grn_file.exists() or not cross_tf_tg_df_file.exists() or forc
 
     # Load the lookup tensors
     tf_embeddings_tensor = torch.load(
-        cell_type_cache_dir / "tf_embeddings.pt",
+        tf_dna_cache_dir / "tf_embeddings.pt",
         weights_only=True,
     )
     tf_mask_tensor = torch.load(
-        cell_type_cache_dir / "tf_masks.pt",
+        tf_dna_cache_dir / "tf_masks.pt",
         weights_only=True,
     )
     

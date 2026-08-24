@@ -445,8 +445,9 @@ tg_id_to_idx = {tg: idx for idx, tg in enumerate(dataset_tgs)}
 atac_peak_map = {peak: idx for idx, peak in enumerate(dataset_peaks)}
 
 logging.info("Loading cached TF name to index map")
-training_cache_dir = DATA_DIR / "mESC_cache"
-tf_name_to_idx_cache_path = training_cache_dir / "tf_name_to_idx.csv"
+training_cache_dir = config.cell_type_cache_dir("mESC")
+tf_dna_cache_dir = config.tf_dna_cache_dir_for_cell_type("mESC")
+tf_name_to_idx_cache_path = tf_dna_cache_dir / "tf_name_to_idx.csv"
 
 tf_name_to_idx = pd.read_csv(tf_name_to_idx_cache_path)
 tf_name_to_idx = tf_name_to_idx[tf_name_to_idx["tf_name"].str.upper().isin(tg_id_to_idx.keys())]
@@ -629,11 +630,11 @@ tf_dna_model_chkpt = config.tf_dna_model_checkpoints["mESC"]
 
 # Load the lookup tensors
 tf_embeddings_tensor = torch.load(
-    training_cache_dir / "tf_embeddings.pt",
+    tf_dna_cache_dir / "tf_embeddings.pt",
     weights_only=True,
 )
 tf_mask_tensor = torch.load(
-    training_cache_dir / "tf_masks.pt",
+    tf_dna_cache_dir / "tf_masks.pt",
     weights_only=True,
 )
 

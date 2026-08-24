@@ -33,7 +33,6 @@ warnings.filterwarnings(
     category=FutureWarning,
 )
 
-tf_tg_input_cache_dir = DATA_DIR / "tf_tg_training_cache"
 
 # Seed for the --subset_size draw. Fixed so every subsample evaluates the same edges.
 SUBSET_SEED = 42
@@ -61,11 +60,11 @@ def load_stability_training_cache_dataset(
 
     # Load the lookup tensors
     tf_embeddings_tensor = torch.load(
-        cell_type_cache_dir / "tf_embeddings.pt",
+        config.tf_dna_cache_dir_for_cell_type(test_set_cell_type) / "tf_embeddings.pt",
         weights_only=True,
     )
     tf_mask_tensor = torch.load(
-        cell_type_cache_dir / "tf_masks.pt",
+        config.tf_dna_cache_dir_for_cell_type(test_set_cell_type) / "tf_masks.pt",
         weights_only=True,
     )
     atac_peak_tensor = torch.load(
@@ -328,7 +327,7 @@ if __name__ == "__main__":
 
     dataset_split_type = "test"
     
-    cell_type_cache_dir = DATA_DIR / f"{test_set_cell_type}_cache"
+    cell_type_cache_dir = config.cell_type_cache_dir(test_set_cell_type)
     stability_cache_dir = cell_type_cache_dir / f"{evaluation_sample}_stability_cache" / f"stability_{stability_number}"
     
     prediction_save_file = RESULT_DIR / "stability_grns" / f"{model_training_sample}_model_vs_{evaluation_sample}_test_grn_{subset_size}_stability_{stability_number}.csv"

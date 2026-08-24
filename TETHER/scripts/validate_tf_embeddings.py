@@ -32,6 +32,7 @@ cache rebuild starts.
 
 import argparse
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -57,6 +58,22 @@ def load_pooled_embeddings(embedding_dir):
     files = sorted(embedding_dir.glob(f"*{EMBEDDING_SUFFIX}"))
     if not files:
         raise FileNotFoundError(f"No {EMBEDDING_SUFFIX} files in {embedding_dir}")
+
+    # A directory holding two generations at once is the quietest way for all of this to
+    # go wrong: the checks still run, on a mixture, and report a number that is neither
+    # generation's. It happened -- a changed output suffix meant new files sat beside old
+    # ones instead of replacing them, and the mixture scored ortholog AUROC 0.73 where the
+    # new embeddings alone scored 0.99. Timestamps are the cheap tell.
+    mtimes = [p.stat().st_mtime for p in files]
+    span_hours = (max(mtimes) - min(mtimes)) / 3600
+    if span_hours > 24:
+        oldest = datetime.fromtimestamp(min(mtimes)).strftime("%Y-%m-%d %H:%M")
+        newest = datetime.fromtimestamp(max(mtimes)).strftime("%Y-%m-%d %H:%M")
+        print(
+            f"\n  WARNING  {embedding_dir} holds files written {span_hours / 24:.1f} days apart\n"
+            f"           ({oldest} .. {newest}). If these are two generations, every check\n"
+            f"           below is measuring a mixture. Delete the directory and re-project."
+        )
 
     pooled, top_directions = {}, {}
     for path in files:

@@ -180,7 +180,7 @@ def build_tf_tg_input_cache(
     assert genome_fasta_path.exists(), f"Genome FASTA file not found: {genome_fasta_path}"
     assert chrom_sizes_path.exists(), f"Chromosome sizes file not found: {chrom_sizes_path}"
     
-    training_cache_dir = PROJECT_DIR / "cached_data" / f"{cell_type}_cache"
+    training_cache_dir = config.cell_type_cache_dir(cell_type)
     
     # Create the training cache directory if it doesn't exist
     input_data_dir = Path(DATA_DIR / "sample_input_data" / cell_type / sample_name)
@@ -202,9 +202,10 @@ def build_tf_tg_input_cache(
     tf_tg_input_cache_dir = sweep_cache_dir / f"tf_tg_sweep_{sweep_setting_hash}"
     tf_tg_input_cache_dir.mkdir(parents=True, exist_ok=True)
 
-    tf_name_to_idx_cache_path = training_cache_dir / "tf_name_to_idx.csv"
-    tf_embedding_cache_path = training_cache_dir / "tf_embeddings.pt"
-    tf_mask_cache_path = training_cache_dir / "tf_masks.pt"
+    tf_dna_cache_dir = config.tf_dna_cache_dir_for_cell_type(cell_type)
+    tf_name_to_idx_cache_path = tf_dna_cache_dir / "tf_name_to_idx.csv"
+    tf_embedding_cache_path = tf_dna_cache_dir / "tf_embeddings.pt"
+    tf_mask_cache_path = tf_dna_cache_dir / "tf_masks.pt"
     merged_ground_truth_path = training_cache_dir / f"{cell_type}_merged_ground_truth.parquet"
     
     atac_peak_onehot_cache_path = tf_tg_input_cache_dir / "atac_peak_tensor.pt"
@@ -502,7 +503,7 @@ def train_tf_tg_model(
     
     run_name = f"tf_tg_{sample_name}_{sweep_setting_hash}"
     
-    training_cache_dir = PROJECT_DIR / "cached_data" / f"{cell_type}_cache"
+    training_cache_dir = config.cell_type_cache_dir(cell_type)
     
     sweep_cache_dir = PROJECT_DIR / "cached_data" / "sweep_cache"
 
@@ -512,11 +513,11 @@ def train_tf_tg_model(
     # Load the trained TF embedding and mask tensors from the TF→DNA model cache 
     # (these are needed for the TF→TG model since it uses the pretrained TF peak embedding module)
     tf_embeddings_tensor = torch.load(
-        training_cache_dir / "tf_embeddings.pt",
+        config.tf_dna_cache_dir_for_cell_type(cell_type) / "tf_embeddings.pt",
         weights_only=True,
     )
     tf_mask_tensor = torch.load(
-        training_cache_dir / "tf_masks.pt",
+        config.tf_dna_cache_dir_for_cell_type(cell_type) / "tf_masks.pt",
         weights_only=True,
     )
     

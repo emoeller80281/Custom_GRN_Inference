@@ -64,8 +64,15 @@ above and checks that orthologs and DBD families come out where they should.
 """
 
 PROSTT5_DIM = 2048  # 1024 (AA pass) + 1024 (3Di pass), concatenated per residue
-RAW_SUFFIX = "_protein_raw.pt"
-OUT_SUFFIX = "_protein_embedding.pt"
+# The FASTA basenames already end in "_protein" (Adnp_protein.fasta), so these are
+# appended to that: Adnp_protein_raw.pt -> Adnp_protein_embedding.pt. That output name
+# is what build_tf_to_dna_train_data.py globs for ("*_protein_embedding.pt"), and it is
+# what the previous version of this script wrote -- so a rerun overwrites the old file
+# in place. Appending "_protein_*" here instead produces Adnp_protein_protein_*.pt,
+# which still matches that glob but does NOT collide with the old name: the directory
+# then holds two generations at once and every consumer silently reads both.
+RAW_SUFFIX = "_raw.pt"
+OUT_SUFFIX = "_embedding.pt"
 
 
 # ---------------------------------------------------------------------------

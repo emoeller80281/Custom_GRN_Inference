@@ -63,9 +63,24 @@ Numbered batch scripts in `TETHER/bash_scripts/` define the canonical order:
 | 03a | `03a_build_tf_to_tg_cache.sh` → `scripts/build_tf_to_tg_train_data.py` | build & cache TF–TG edge bags |
 | 03b | `03b_train_tf_to_tg_model.sh` → `scripts/train_tf_to_tg_model.py` | train TF–TG regulation model |
 
-Cache-build steps take `--force_reload` to ignore existing caches; without it they reuse whatever is
-in `TETHER/cached_data/{cell_type}_cache/`. Caching is keyed only by cell_type/sample_name, so
-upstream data changes are **not** auto-detected — pass `--force_reload` or delete the cache.
+Caches live under `TETHER/cached_data/{species}/`:
+
+```
+cached_data/{species}/tf_dna_cache/                      # one per species (step 02a)
+cached_data/{species}/{cell_type}_cache/                 # TF embedding table, ground truth
+cached_data/{species}/{cell_type}_cache/tf_tg_training_cache/{sample_name}/   # step 03a
+```
+
+The TF–DNA cache is species-level because its contents (ChIP-Atlas edges, peak universe, one-hot
+peak tensor) depend only on the genome — holding it per cell type produced byte-identical 30 GB
+copies. Build these paths with `config.cell_type_cache_dir(cell_type)` and
+`config.tf_dna_cache_dir(species)` rather than assembling them by hand;
+`config.cell_type_to_species` maps a cell type to its genome, which is what the `--cell_type`-only
+entry points need.
+
+Cache-build steps take `--force_reload` to ignore existing caches. Caching is keyed only by
+species/cell_type/sample_name, so upstream data changes are **not** auto-detected — pass
+`--force_reload` or delete the cache.
 
 ## Evaluation & analysis scripts (in `TETHER/`)
 
