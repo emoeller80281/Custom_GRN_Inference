@@ -2,6 +2,7 @@
 from ast import arg
 import os
 import sys
+import math
 import numpy as np
 import pandas as pd
 from pathlib import Path
@@ -10,7 +11,7 @@ import argparse
 
 import torch
 from torch.nn.utils.rnn import pad_sequence
-from torch.utils.data import Dataset, DataLoader, Subset
+from torch.utils.data import Dataset, DataLoader, Subset, Sampler
 
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping, LearningRateMonitor, TQDMProgressBar
@@ -29,6 +30,102 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
 )
+
+class LengthGroupedBatchSampler(Sampler):
+    """Batch edges whose TFs have similar protein length, so each batch can be cropped short.
+
+    The TF encoder and cross-attention run over the padded table width (5,588 for mm10),
+    while the average training edge sits behind a 558-residue protein -- about 10x of the
+    work is padding. LitTFPeakBindingModel._shared_step crops each batch to its own longest
+    real protein, but that only pays off if a batch's proteins are similar lengths: with
+    globally shuffled edges a batch of 512 almost always contains one long protein, and the
+    crop measured just 1.2x. Grouping by length first is what turns it into ~7.5x.
+
+    Randomness is preserved at two levels so this is not simply "train in length order":
+    edges are shuffled, cut into megabatches of `megabatch_multiplier` batches, sorted by
+    length only *within* a megabatch, and the resulting batches are then shuffled again.
+    A batch is therefore length-homogeneous while the epoch order stays random.
+
+    What this does change: batch composition now correlates with protein length, so the
+    three BatchNorm1d layers in the peak encoder see a different distribution per batch than
+    under uniform shuffling, and gradient noise is no longer i.i.d. across batches. This is
+    on unconditionally; to fall back to uniform shuffling, pass `shuffle=True` DataLoaders
+    with `batch_size=` instead of `batch_sampler=` below. Checkpoints trained with grouping
+    are not directly comparable to older ones -- check val AUROC before assuming they are.
+
+    DDP: every rank builds the identical batch list (same seed and epoch) and then takes a
+    strided slice of it, so ranks never share an edge and always get equal batch counts.
+    Lightning must be told not to wrap this -- see use_distributed_sampler=False.
+    """
+
+    def __init__(
+        self,
+        lengths,
+        batch_size: int,
+        shuffle: bool = True,
+        seed: int = 0,
+        num_replicas: int = 1,
+        rank: int = 0,
+        megabatch_multiplier: int = 64,
+    ):
+        self.lengths = np.asarray(lengths)
+        self.batch_size = int(batch_size)
+        self.shuffle = bool(shuffle)
+        self.seed = int(seed)
+        self.num_replicas = max(1, int(num_replicas))
+        self.rank = int(rank)
+        self.megabatch = self.batch_size * int(megabatch_multiplier)
+        self.epoch = 0
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = int(epoch)
+
+    def _build_batches(self):
+        n = len(self.lengths)
+        rng = np.random.default_rng(self.seed + self.epoch)
+        order = rng.permutation(n) if self.shuffle else np.arange(n)
+
+        batches = []
+        for start in range(0, n, self.megabatch):
+            chunk = order[start : start + self.megabatch]
+            chunk = chunk[np.argsort(self.lengths[chunk], kind="stable")]
+            for b in range(0, len(chunk), self.batch_size):
+                batches.append(chunk[b : b + self.batch_size].tolist())
+
+        if self.shuffle:
+            rng.shuffle(batches)
+
+        if self.num_replicas > 1:
+            # Truncate to a multiple of world size: an uneven batch count deadlocks DDP at
+            # the end of an epoch, because ranks synchronise per step.
+            usable = (len(batches) // self.num_replicas) * self.num_replicas
+            batches = batches[self.rank : usable : self.num_replicas]
+
+        return batches
+
+    def __iter__(self):
+        batches = self._build_batches()
+        # Lightning calls set_epoch on the batch sampler, but advance anyway so the order
+        # still varies if it ever stops doing so. Every rank advances identically.
+        self.epoch += 1
+        yield from batches
+
+    def __len__(self):
+        n = len(self.lengths)
+        full, remainder = divmod(n, self.megabatch)
+        n_batches = full * (self.megabatch // self.batch_size)
+        if remainder:
+            n_batches += math.ceil(remainder / self.batch_size)
+        if self.num_replicas > 1:
+            n_batches = n_batches // self.num_replicas
+        return n_batches
+
+
+def edge_lengths_for(subset_idx, edge_tf_idx_tensor, tf_mask_tensor):
+    """Real protein length behind each edge of a split, in that split's own order."""
+    tf_lengths = tf_mask_tensor.sum(dim=1).long()
+    return tf_lengths[edge_tf_idx_tensor[subset_idx]].numpy()
+
 
 class TFPeakEdgeDataset(Dataset):
     def __init__(
@@ -65,6 +162,7 @@ if __name__ == "__main__":
     argparser.add_argument("--num_nodes", type=int, default=1, help="Number of nodes to use for training")
     argparser.add_argument("--model_dim", type=int, default=128, help="Dimension of the model")
     argparser.add_argument("--batch_size", type=int, default=64, help="Batch size for training")
+    argparser.add_argument("--seed", type=int, default=123, help="Seed for length-grouped batch shuffling")
     argparser.add_argument("--num_layers", type=int, default=4, help="Number of layers in the model")
     argparser.add_argument("--job_id", type=str, required=True, help="SLURM job ID for this training run")
     argparser.add_argument("--checkpoint_path", type=str, required=False, help="Path to a model checkpoint to resume training from")
@@ -76,6 +174,7 @@ if __name__ == "__main__":
     num_nodes = args.num_nodes
     model_dim = args.model_dim
     batch_size = args.batch_size
+    seed = args.seed
     num_layers = args.num_layers
     job_id = args.job_id
     checkpoint_path = args.checkpoint_path
@@ -132,8 +231,9 @@ if __name__ == "__main__":
     val_idx: torch.Tensor = torch.load(tf_dna_val_idx_cache_path, weights_only=True)
     test_idx: torch.Tensor = torch.load(tf_dna_test_idx_cache_path, weights_only=True)
 
-    if peak_tensor.dtype == torch.uint8:
-        peak_tensor = peak_tensor.float()
+    # Deliberately NOT upcast here. Materialising the whole one-hot as float32 costs 4x
+    # RAM (62 GB vs 15.6 GB for hg38 at a 256 bp window) to save a per-batch cast that
+    # LitTFPeakBindingModel._shared_step already does.
 
     edge_dataset = TFPeakEdgeDataset(
         edge_tf_idx=edge_tf_idx_tensor,
@@ -146,11 +246,30 @@ if __name__ == "__main__":
     val_dataset = Subset(edge_dataset, val_idx.tolist())
     test_dataset = Subset(edge_dataset, test_idx.tolist())
 
+    # Length-grouped batching. Batches hold TFs of similar protein length so the model can
+    # crop each one short -- see LengthGroupedBatchSampler and _shared_step's ladder crop.
+    # Val and test are grouped too (no shuffle needed): the metrics are order-invariant, so
+    # it is free speed there.
+    global_rank, _, _, world_size = utils.get_rank_info()
+    ddp_kwargs = dict(num_replicas=world_size, rank=global_rank) if world_size > 1 else {}
+
+    train_sampler = LengthGroupedBatchSampler(
+        edge_lengths_for(train_idx, edge_tf_idx_tensor, tf_mask_tensor),
+        batch_size=batch_size, shuffle=True, seed=seed, **ddp_kwargs,
+    )
+    val_sampler = LengthGroupedBatchSampler(
+        edge_lengths_for(val_idx, edge_tf_idx_tensor, tf_mask_tensor),
+        batch_size=batch_size, shuffle=False, **ddp_kwargs,
+    )
+    test_sampler = LengthGroupedBatchSampler(
+        edge_lengths_for(test_idx, edge_tf_idx_tensor, tf_mask_tensor),
+        batch_size=batch_size, shuffle=False, **ddp_kwargs,
+    )
+
     # Create dataloaders for each split
     train_loader = DataLoader(
         train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
+        batch_sampler=train_sampler,
         num_workers=8,
         pin_memory=True,
         persistent_workers=True,
@@ -159,8 +278,7 @@ if __name__ == "__main__":
 
     val_loader = DataLoader(
         val_dataset,
-        batch_size=batch_size,
-        shuffle=False,
+        batch_sampler=val_sampler,
         num_workers=4,
         pin_memory=True,
         persistent_workers=True,
@@ -169,8 +287,7 @@ if __name__ == "__main__":
 
     test_loader = DataLoader(
         test_dataset,
-        batch_size=batch_size,
-        shuffle=False,
+        batch_sampler=test_sampler,
         num_workers=4,
         pin_memory=True,
         persistent_workers=True,
@@ -235,13 +352,7 @@ if __name__ == "__main__":
         "run_name": run_name,
     })
     
-    world_size = int(
-        os.environ.get(
-            "WORLD_SIZE",
-            os.environ.get("SLURM_NTASKS", "1"),
-        )
-    )
-
+    # world_size / global_rank were resolved above, before the samplers were built.
     use_ddp = world_size > 1
     
     trainer = pl.Trainer(
@@ -250,6 +361,9 @@ if __name__ == "__main__":
         devices=num_gpus,
         num_nodes=num_nodes,
         strategy=DDPStrategy(broadcast_buffers=False) if use_ddp else "auto",
+        # LengthGroupedBatchSampler already shards across ranks; letting Lightning wrap
+        # it in a DistributedSampler would shard the shards.
+        use_distributed_sampler=False,
         precision="16-mixed",
         logger=wandb_logger,
         callbacks=[

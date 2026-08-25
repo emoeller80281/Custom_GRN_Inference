@@ -126,6 +126,12 @@ def main():
     argparser.add_argument("--pct_true_edges", type=float, default=0.25)
     argparser.add_argument("--true_false_ratio", type=float, default=0.25)
     argparser.add_argument("--force_reload", action="store_true")
+    # MUST match --peak_flank_size in build_tf_to_tg_train_data.py. The TF-TG model calls
+    # the frozen TF-DNA model on ITS peak windows, so a mismatch means the binding model
+    # is used on a window width it never trained on: the conv stack is length-agnostic
+    # (L -> L/16 tokens) so nothing errors, but masked_mean_pool then averages a motif
+    # over twice as much flanking sequence.
+    argparser.add_argument("--peak_flank_size", type=int, default=128)
     args = argparser.parse_args()
     
     species = config.species
@@ -358,15 +364,18 @@ def main():
             genome_fasta=genome_fasta_path,
             chrom_sizes=chrom_sizes,
             peak_id_to_idx=tf_dna_peak_id_to_idx,
-            flank_size=64,
+            flank_size=args.peak_flank_size,
             dtype=np.uint8,
             pad_out_of_bounds=True,
             num_workers=64,
             show_progress=True,
             chunk_size=100_000,
         )
+        # Kept as uint8. A one-hot has no information beyond 0/1, so float32 on disk is a
+        # 4x tax for nothing -- 31 GB vs 7.8 GB for hg38. Every consumer casts on use:
+        # LitTFPeakBindingModel._shared_step calls .float() per batch, and
+        # TFTGRegulationModel.forward has an explicit is_floating_point() check.
         peak_tensor = torch.as_tensor(peak_onehot_array, dtype=torch.uint8)
-        peak_tensor = peak_tensor.float()
         torch.save(peak_tensor, tf_dna_peak_onehot_cache_path)
         logging.info("    Done. Created/Loaded peak one-hot encodings.")
 

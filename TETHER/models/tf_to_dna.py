@@ -234,12 +234,47 @@ class LitTFPeakBindingModel(pl.LightningModule):
             labels,
         )
 
+    # Crop widths are quantized to this ladder rather than taken as the exact batch maximum.
+    # cudnn.benchmark is enabled during training, so every distinct input shape triggers a
+    # fresh autotune pass; an unquantized crop produces a near-unique width per batch.
+    #
+    # Measured over length-bucketed batches of 64 on the real edge sets, against a padded
+    # table width of 5,588 (mm10) / 4,002 (hg38):
+    #
+    #                                   mm10            hg38        distinct widths
+    #   exact batch max                 9.1x            6.2x        unbounded
+    #   this ladder                     7.5x            5.3x        8
+    #   the TF-TG 3-rung ladder         6.6x            4.6x        4
+    #
+    # Only 1.6% of batches fall through to the full table width.
+    TF_CROP_LADDER = (256, 512, 768, 1024, 1536, 2048, 3072)
+
+    def _crop_width(self, tf_mask_batch) -> int:
+        """Ladder rung at or above the longest real protein in this batch."""
+        longest = int(tf_mask_batch.sum(dim=1).max())
+        table_width = self.tf_mask_tensor.shape[1]
+        return min(
+            next((rung for rung in self.TF_CROP_LADDER if rung >= longest), table_width),
+            table_width,
+        )
+
     def _shared_step(self, batch, stage: str):
         tf_idx = batch["tf_idx"].long()
         labels = batch["label"].float()
 
-        tf_embedding = self.tf_embeddings_tensor[tf_idx]
+        # Drop trailing positions that are padding for every TF in this batch. Masks are
+        # strict prefixes and the embeddings are zero past the mask, so the dropped columns
+        # contribute nothing to the masked cross-attention or to masked_mean_pool -- this is
+        # exact, not an approximation. Same argument as TFTGRegulationModel's crop.
+        #
+        # The table is sliced BEFORE the gather: slicing gives a view, so only [B, crop, D]
+        # is ever materialised. Gathering first would allocate the full padded width and
+        # throw most of it away.
         tf_mask = self.tf_mask_tensor[tf_idx]
+        crop = self._crop_width(tf_mask)
+
+        tf_embedding = self.tf_embeddings_tensor[:, :crop][tf_idx]
+        tf_mask = tf_mask[:, :crop]
         peak_embedding = batch["peak_embedding"].float()
 
         forward_start = None

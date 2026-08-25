@@ -101,8 +101,8 @@ def cell_type_cache_dir(cell_type_name: str, species_name: str | None = None) ->
 
 
 # TF-DNA model checkpoints for the different cell types
-mm10_tf_dna_path = CHKPT_DIR / "tf_dna_mm10_3697823" / "epoch=07-val_auroc=0.9743-val_loss=0.1661.ckpt"
-hg38_tf_dna_path = CHKPT_DIR / "tf_dna_hg38_3683606" / "epoch=13-val_auroc=0.9566-val_loss=0.2042.ckpt"
+mm10_tf_dna_path = CHKPT_DIR / "tf_dna_mm10_3831017" / "epoch=05-val_auroc=0.9460-val_loss=0.1880.ckpt"
+hg38_tf_dna_path = CHKPT_DIR / "tf_dna_hg38_3831693" / "epoch=02-val_auroc=0.9642-val_loss=0.1702.ckpt"
 
 tf_dna_model_checkpoints = {
     "mESC": mm10_tf_dna_path,

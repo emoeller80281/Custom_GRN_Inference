@@ -367,7 +367,7 @@ def main():
     parser.add_argument("--max_cells_per_pair", type=int, default=8)
     parser.add_argument("--pct_true_edges", type=float, default=0.15)
     parser.add_argument("--true_false_ratio", type=float, default=2.0)
-    parser.add_argument("--peak_flank_size", type=int, default=64)
+    parser.add_argument("--peak_flank_size", type=int, default=128)  # must match 02a
     parser.add_argument("--num_cpu", type=int, default=8)
     parser.add_argument(
         "--split_mode",
