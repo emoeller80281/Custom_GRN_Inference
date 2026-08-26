@@ -64,7 +64,7 @@ TF_DNA_CACHE="cached_data/mm10/tf_dna_cache_prefix_embeddings"
 #   KO  429 of 50,093 TGs truncated (0.9%),   4,642 peak-links dropped
 #   WT  506 of 49,617 TGs truncated (1.0%),   5,688 peak-links dropped
 # Peaks are ordered by |TSS_dist|, so what is dropped is each TG's most distant peaks.
-MAX_PEAKS_PER_TG=25
+MAX_PEAKS_PER_TG=8
 MAX_CELLS_PER_PAIR=24
 
 export TORCH_ALLOW_TF32=1
@@ -135,7 +135,7 @@ python ${PROJECT_DIR}/generate_all_predictions.py \
     --skip_own_model \
     --max_peaks_per_tg $MAX_PEAKS_PER_TG \
     --max_cells_per_pair $MAX_CELLS_PER_PAIR \
-    --batch_size 128 \
+    --batch_size 64 \
     --tf_peak_chunk_size 1024 \
     --force_reload \
     --all_chromosomes

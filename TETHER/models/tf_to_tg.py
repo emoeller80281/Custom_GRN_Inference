@@ -13,6 +13,8 @@ from sklearn.metrics import roc_auc_score, average_precision_score, roc_curve, p
 import wandb
 import time
 
+from models.tf_to_dna import TF_CROP_LADDER
+
 class TFTGRegulationModel(nn.Module):
     def __init__(
         self,
@@ -164,21 +166,23 @@ class TFTGRegulationModel(nn.Module):
         self.tf_length_table = self.tf_mask_table.sum(dim=1).long()
         return self
 
-    # Crop widths are quantized to this ladder so torch.compile sees a handful of shapes
-    # rather than one per batch.
+    # Imported from models/tf_to_dna.py so both models crop the TF protein axis to the
+    # same widths. That module carries the full rationale; the short version is that this
+    # class is the constraint which sets the rung count.
     #
-    # Rung count matters more than rung placement, because the edge universe is built
-    # TF-major (MultiIndex.from_product([tfs, tgs])), so a batch holds a single TF and the
-    # crop changes as the run walks from TF to TF. Every distinct (crop, n_chunks) pair
-    # costs an Inductor compile and a CUDA-graph recording, and once the total exceeds
-    # torch._dynamo.config.cache_size_limit they evict each other and recompile forever:
+    # The edge universe is built TF-major (MultiIndex.from_product([tfs, tgs])), so a batch
+    # holds a single TF and the crop changes as the run walks from TF to TF. Every distinct
+    # (crop, n_chunks) pair costs an Inductor compile and a CUDA-graph recording, counted
+    # against torch._dynamo.config.cache_size_limit -- which train_tf_to_tg_model.py leaves
+    # at torch's default of 8, unlike generate_all_predictions.py which raises it to 128.
+    # Once the total exceeds the limit the graphs evict each other and recompile forever:
     # a 5-rung ladder at tf_peak_chunk_size=256 measured 15-38 s/batch spikes recurring
     # indefinitely, against 0.14-0.57 s/batch on already-compiled shapes.
     #
-    # Three rungs give up almost nothing: mean crop 869 vs 836 for mm10 (6.43x vs 6.69x)
-    # and 903 vs 882 for hg38 (4.43x vs 4.54x), with only 1.1% / 1.6% of TFs falling
-    # through to the full table width.
-    TF_CROP_LADDER = (512, 1024, 2048)
+    # Three rungs give up little: mean crop 869 against an optimal 836 for mm10
+    # (6.43x vs 6.69x) and 903 against 882 for hg38 (4.43x vs 4.54x), with 1.1% / 1.6% of
+    # TFs falling through to the full table width.
+    TF_CROP_LADDER = TF_CROP_LADDER
 
     def _tf_lengths_per_slot(self, tf_idx, tf_mask_edge, use_resident_table, E, P):
         """Real TF protein length for each of the E*P (edge, peak) slots, as [E*P]."""

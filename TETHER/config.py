@@ -9,37 +9,10 @@ sys.path.append(str(PROJECT_DIR))
 DATA_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/data")
 CHKPT_DIR = PROJECT_DIR / "checkpoints"
 
-# species = "hg38"
-# cell_type="iPSC"
-# sample_name="WT_D13_rep1"
-
-species = "hg38"
-cell_type="Macrophage"
-sample_name="buffer_2"
-
-# species = "mm10"
-# cell_type="mESC"
-# sample_name="E7.5_rep1"
-
-# Argelaguet et al. 2022 mouse organogenesis atlas, the paper's own SEACells metacells
-# (1,896 metacells with matched RNA + ATAC, 9 wild-type timecourse libraries E7.5-E8.75,
-# both CRISPR libraries excluded). Built by
-# mouse_preprocessing_scripts/12_tether_training_data/.
-# species = "mm10"
-# cell_type="mESC"
-# sample_name="WT_timecourse_metacells"
-
-# species = "mm10"
-# cell_type="mouse_liver"
-# sample_name="liver_4"
-
-# species = "mm10"
-# cell_type="mouse_hepatocytes"
-# sample_name="hepatocytes_3"
-
-# species = "hg38"
-# cell_type="K562"
-# sample_name="sample_1"
+# Default
+species = "mm10"
+cell_type="mESC"
+sample_name="E7.5_rep1"
 
 # Species is a property of the cell type, not an independent choice. The CLI entry points
 # take --cell_type without --species, so the cache layout below has to be derivable from
@@ -54,16 +27,7 @@ cell_type_to_species = {
 }
 
 # --- Environment overrides ---------------------------------------------------------
-# Batch jobs set the dataset here instead of editing the block above. That is what lets
-# 03a/03b run as SLURM arrays: every array task imports this same file, but each one gets
-# its own dataset from its own environment, so concurrent tasks cannot collide the way
-# they would if the selection lived only in the source.
-#
-# The names match the shell variables the batch scripts parse out of EXPERIMENT_LIST, so
-# the .sh only has to export what it already read:
-#
-#   IFS='|' read -r species cell_type sample_name <<< "$EXPERIMENT_CONFIG"
-#   export species cell_type sample_name
+# Batch jobs set the dataset here instead of editing the block above
 #
 # Species follows the cell type unless it is pinned explicitly, so overriding the cell
 # type alone can never leave the pair inconsistent.
@@ -136,8 +100,8 @@ def cell_type_cache_dir(cell_type_name: str, species_name: str | None = None) ->
 
 
 # TF-DNA model checkpoints for the different cell types
-mm10_tf_dna_path = CHKPT_DIR / "tf_dna_mm10_3831017" / "epoch=12-val_auroc=0.9491-val_loss=0.1838.ckpt"
-hg38_tf_dna_path = CHKPT_DIR / "tf_dna_hg38_3831693" / "epoch=09-val_auroc=0.9688-val_loss=0.1599.ckpt"
+mm10_tf_dna_path = CHKPT_DIR / "new_tf_dna_models" / "mm10_3831017_epoch_12.ckpt"
+hg38_tf_dna_path = CHKPT_DIR / "new_tf_dna_models" / "hg38_3831693_epoch_9.ckpt"
 
 tf_dna_model_checkpoints = {
     "mESC": mm10_tf_dna_path,

@@ -10,7 +10,7 @@
 #SBATCH -c 8
 #SBATCH --mem=64G
 #SBATCH --signal=SIGUSR1@90
-#SBATCH --array=0-8%4
+#SBATCH --array=0
 
 set -eo pipefail
 
@@ -156,7 +156,7 @@ srun python3 ${PROJECT_DIR}/scripts/train_tf_to_tg_model.py \
     --keep_tf_dna_in_eval \
     --tf_embedding_on_device \
     --resample_cells_per_epoch \
-    --lr 2.828e-4 \
+    --lr 5.66e-4 \
     --warmup_epochs 1.0 \
     --per_tf_pos_weight \
     --precision 32-true

@@ -33,6 +33,16 @@ sys.path.append(str(PROJECT_DIR))
 import models.tf_to_tg as tf_to_tg_module
 import models.tf_to_dna as tf_to_dna_module
 import config
+# Same sampler the TF-DNA trainer uses, applied to peak counts instead of protein
+# lengths. It is generic over `lengths`, so it is imported rather than duplicated.
+from scripts.batch_samplers import LengthGroupedBatchSampler
+
+# NOTE: utils is deliberately NOT imported at module level. utils.py does
+#     from scripts.train_tf_to_tg_model import TFTGEdgeBagDataset, collate_tftg_edge_bags
+# so importing it from here is circular and breaks every consumer of this module
+# (generate_all_predictions.py, plot_auprc_all_methods.py, ...). The same loop is why
+# LengthGroupedBatchSampler lives in scripts/batch_samplers.py rather than in the TF-DNA
+# trainer, which imports utils itself. get_rank_info is imported locally where used.
 import argparse
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -400,6 +410,22 @@ class ResidentTFEmbeddingTable(Callback):
         self._register(pl_module)
 
 
+# Crop ladder for the peak axis, the same idea as models/tf_to_dna.TF_CROP_LADDER applied
+# to a different axis. Bags are padded to the widest TG in the split (P = 90-100 on the
+# mESC reps) while the median edge has 3 real peaks, so most of every bag is padding.
+#
+# Cropping to the exact batch maximum saves the most, but produces a new tensor shape per
+# batch: measured over one epoch of E7.5_rep1 at batch 256 it gave 22 distinct widths
+# (25 for E8.5_rep1). That is the condition both TF_CROP_LADDERs exist to avoid -- each new
+# shape costs an Inductor compile and a CUDA-graph recording, and the peak width multiplies
+# against (crop, n_chunks) rather than adding to it.
+#
+# These rungs cut that to at most 6 shapes for mean width 9.0 against 6.4 exact -- roughly
+# 40% of the trim's saving given back, still ~10x narrower than the padded width. Geometric
+# rather than even because the distribution is heavily skewed (median 3, max 90).
+PEAK_CROP_LADDER = (4, 8, 16, 32, 64)
+
+
 def collate_tftg_edge_bags(batch):
     output = {
         "label": torch.stack([b["label"] for b in batch]).float(),
@@ -429,6 +455,32 @@ def collate_tftg_edge_bags(batch):
 
     E, C = output["tf_expression"].shape
     output["cell_mask"] = torch.ones(E, C, dtype=torch.bool)
+
+    # Trim the padded peak axis to what this batch actually uses.
+    #
+    # Bags are padded to the widest TG in the whole split (P = 90-100 on the mESC reps)
+    # while the median edge has 3 real peaks, so ~97% of every peak slot is padding.
+    # key_padding_mask makes the attention ignore those slots but does not make them
+    # cheap: peak_feature_proj and MultiheadAttention still materialise [E*C, P, d_model],
+    # and the padded peak_sequences are still shipped host->device.
+    #
+    # Cutting to a rung at or above the last column any edge actually uses is exact -- the
+    # dropped columns are padding for every row, so nothing that could have been attended
+    # to is removed. This is a no-op unless batches are peak-homogeneous, which is what
+    # LengthGroupedBatchSampler below arranges; under uniform shuffling one wide edge
+    # drags the whole batch back to full width.
+    used_columns = output["peak_mask"].any(dim=0)
+    if bool(used_columns.any()):
+        used = int(torch.nonzero(used_columns)[-1]) + 1
+        padded = output["peak_mask"].shape[1]
+        # Round the used width UP to a ladder rung, never down -- a rung below `used`
+        # would drop a real peak.
+        width = min(next((rung for rung in PEAK_CROP_LADDER if rung >= used), padded), padded)
+        if width < padded:
+            for key in ("peak_indices", "peak_sequences", "peak_distance", "peak_mask"):
+                output[key] = output[key][:, :width].contiguous()
+            # [E, C, P] -- the peak axis is last here.
+            output["peak_accessibility"] = output["peak_accessibility"][:, :, :width].contiguous()
 
     return output
 
@@ -524,6 +576,14 @@ if __name__ == "__main__":
             "to --plateau_monitor: run 3809742 stopped on pooled val/auroc while its LR "
             "schedule tracked macro, and died at epoch 21 with macro still improving."
         ),
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=123,
+        help="Seed for LengthGroupedBatchSampler's per-epoch shuffle. Every rank must use "
+             "the same value: ranks build the identical batch list and take a strided "
+             "slice of it, so a differing seed would give them overlapping edges.",
     )
     parser.add_argument("--early_stopping_patience", type=int, default=15)
     parser.add_argument(
@@ -793,11 +853,41 @@ if __name__ == "__main__":
         **tf_source_kwargs,
     )
 
+    # Group edges by how many real peaks they carry, so collate_tftg_edge_bags can trim the
+    # peak axis. The trim is worthless on its own: with uniform shuffling a batch of 256
+    # almost always contains one 90-peak edge, so the batch stays at full width. Grouping is
+    # what makes the median batch narrow.
+    #
+    # Val and test are grouped without shuffling -- the metrics are order-invariant there, so
+    # it is free speed.
+    #
+    # Two consequences worth knowing. Batch composition now correlates with peak count, so
+    # gradient noise is no longer i.i.d. across batches, and checkpoints are not strictly
+    # comparable to runs trained under uniform shuffling. And the sampler truncates each
+    # split to a whole multiple of world_size batches (an uneven count deadlocks DDP), so up
+    # to world_size-1 batches are dropped per split per epoch.
+    from utils import get_rank_info  # local: see the note beside the imports
+
+    global_rank, _, _, sampler_world_size = get_rank_info()
+    ddp_kwargs = dict(num_replicas=sampler_world_size, rank=global_rank) if sampler_world_size > 1 else {}
+
+    def peak_counts(inputs):
+        """Real peaks per edge, in the split's own order."""
+        return inputs["peak_mask"].sum(dim=1).numpy()
+
+    train_sampler = LengthGroupedBatchSampler(
+        peak_counts(tftg_inputs_train),
+        batch_size=batch_size, shuffle=True, seed=args.seed, **ddp_kwargs,
+    )
+    val_sampler = LengthGroupedBatchSampler(
+        peak_counts(tftg_inputs_val),
+        batch_size=batch_size, shuffle=False, **ddp_kwargs,
+    )
+
     # Create the DataLoaders with the custom collate function for batching edge bags
     train_loader = DataLoader(
         train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
+        batch_sampler=train_sampler,
         num_workers=6,
         pin_memory=True,
         persistent_workers=True,
@@ -807,8 +897,7 @@ if __name__ == "__main__":
 
     val_loader = DataLoader(
         val_dataset,
-        batch_size=batch_size,
-        shuffle=False,
+        batch_sampler=val_sampler,
         num_workers=6,
         pin_memory=True,
         persistent_workers=True,
@@ -840,10 +929,13 @@ if __name__ == "__main__":
             **tf_source_kwargs,
         )
         log_once(f"Test split loaded: {len(test_dataset):,} edges")
+        test_sampler = LengthGroupedBatchSampler(
+            peak_counts(tftg_inputs_test),
+            batch_size=batch_size, shuffle=False, **ddp_kwargs,
+        )
         return DataLoader(
             test_dataset,
-            batch_size=batch_size,
-            shuffle=False,
+            batch_sampler=test_sampler,
             num_workers=6,
             pin_memory=True,
             persistent_workers=True,
@@ -1088,6 +1180,10 @@ if __name__ == "__main__":
         devices=num_gpus,
         num_nodes=num_nodes,
         strategy=strategy,
+        # The batch samplers above already shard by rank. Left at the default, Lightning
+        # would wrap them in a DistributedSampler as well and each rank would see a
+        # shard of a shard.
+        use_distributed_sampler=False,
         precision=args.precision,
         logger=wandb_logger,
         callbacks=[
