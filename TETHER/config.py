@@ -1,3 +1,4 @@
+import os
 import sys
 import argparse
 from pathlib import Path
@@ -40,11 +41,6 @@ sample_name="buffer_2"
 # cell_type="K562"
 # sample_name="sample_1"
 
-assert cell_type in {"Macrophage", "mESC", "K562", "iPSC", "mouse_liver", "mouse_hepatocytes"}, \
-    f"Invalid cell type: {cell_type}. Select from: 'Macrophage', 'mESC', 'K562', 'iPSC', 'mouse_liver', 'mouse_hepatocytes'"
-assert species in {"mm10", "hg38"}, \
-    f"Invalid species: {species}. Select from: 'mm10', 'hg38'"
-
 # Species is a property of the cell type, not an independent choice. The CLI entry points
 # take --cell_type without --species, so the cache layout below has to be derivable from
 # the cell type alone.
@@ -57,8 +53,47 @@ cell_type_to_species = {
     "K562": "hg38",
 }
 
+# --- Environment overrides ---------------------------------------------------------
+# Batch jobs set the dataset here instead of editing the block above. That is what lets
+# 03a/03b run as SLURM arrays: every array task imports this same file, but each one gets
+# its own dataset from its own environment, so concurrent tasks cannot collide the way
+# they would if the selection lived only in the source.
+#
+# The names match the shell variables the batch scripts parse out of EXPERIMENT_LIST, so
+# the .sh only has to export what it already read:
+#
+#   IFS='|' read -r species cell_type sample_name <<< "$EXPERIMENT_CONFIG"
+#   export species cell_type sample_name
+#
+# Species follows the cell type unless it is pinned explicitly, so overriding the cell
+# type alone can never leave the pair inconsistent.
+_env_cell_type = os.environ.get("cell_type")
+_env_sample_name = os.environ.get("sample_name")
+_env_species = os.environ.get("species")
+
+if _env_cell_type:
+    cell_type = _env_cell_type
+if _env_sample_name:
+    sample_name = _env_sample_name
+if _env_species:
+    species = _env_species
+elif _env_cell_type:
+    species = cell_type_to_species.get(cell_type, species)
+
+dataset_source = "environment" if (_env_cell_type or _env_sample_name or _env_species) else "config.py"
+
+assert cell_type in {"Macrophage", "mESC", "K562", "iPSC", "mouse_liver", "mouse_hepatocytes"}, \
+    f"Invalid cell type: {cell_type}. Select from: 'Macrophage', 'mESC', 'K562', 'iPSC', 'mouse_liver', 'mouse_hepatocytes'"
+assert species in {"mm10", "hg38"}, \
+    f"Invalid species: {species}. Select from: 'mm10', 'hg38'"
+
 assert cell_type_to_species[cell_type] == species, \
     f"cell_type {cell_type!r} belongs to {cell_type_to_species[cell_type]}, but species is set to {species!r}."
+
+
+def describe_dataset() -> str:
+    """One line naming the active dataset and where it came from, for job logs."""
+    return f"{species}/{cell_type}/{sample_name} (from {dataset_source})"
 
 
 def species_for_cell_type(cell_type_name: str) -> str:
@@ -101,8 +136,8 @@ def cell_type_cache_dir(cell_type_name: str, species_name: str | None = None) ->
 
 
 # TF-DNA model checkpoints for the different cell types
-mm10_tf_dna_path = CHKPT_DIR / "tf_dna_mm10_3831017" / "epoch=05-val_auroc=0.9460-val_loss=0.1880.ckpt"
-hg38_tf_dna_path = CHKPT_DIR / "tf_dna_hg38_3831693" / "epoch=02-val_auroc=0.9642-val_loss=0.1702.ckpt"
+mm10_tf_dna_path = CHKPT_DIR / "tf_dna_mm10_3831017" / "epoch=12-val_auroc=0.9491-val_loss=0.1838.ckpt"
+hg38_tf_dna_path = CHKPT_DIR / "tf_dna_hg38_3831693" / "epoch=09-val_auroc=0.9688-val_loss=0.1599.ckpt"
 
 tf_dna_model_checkpoints = {
     "mESC": mm10_tf_dna_path,

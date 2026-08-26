@@ -542,6 +542,39 @@ def parse_arguments():
     parser.add_argument("--tf_peak_chunk_size", type=int, default=128, help="Chunk size for TF-peak pairs when running TF-DNA inference")
     parser.add_argument("--batch_size", type=int, default=512, help="Inference batch size.")
 
+    parser.add_argument(
+        "--tf_dna_checkpoint",
+        type=str,
+        default=None,
+        help=(
+            "Override config.tf_dna_model_checkpoints for this run. A TF-TG checkpoint is "
+            "only valid with the frozen TF-DNA model it was trained against -- that path is "
+            "recorded in the TF-TG run's wandb config.yaml. config.py tracks whichever "
+            "TF-DNA model is current, which is not necessarily that one."
+        ),
+    )
+    parser.add_argument(
+        "--tf_dna_cache_dir",
+        type=str,
+        default=None,
+        help=(
+            "Override where tf_embeddings.pt / tf_masks.pt / tf_name_to_idx.csv are read "
+            "from. Needed when scoring with checkpoints trained before the 2026-08-24 "
+            "embedding fix: those models expect the per-TF random-basis embeddings, and "
+            "feeding them the current shared-PCA table produces meaningless scores "
+            "*without* raising an error, since only the values differ, not the shapes."
+        ),
+    )
+    parser.add_argument(
+        "--skip_own_model",
+        action="store_true",
+        help=(
+            "Only run the cross-trained model. Use this when the sample has no model of "
+            "its own -- a newly preprocessed sample scored with an existing model, say. "
+            "Without it, TF_TG_MODEL_CHECKPOINTS[cell_type][sample_name] must have an "
+            "entry. The *_model_vs_* output for the own model is not written."
+        ),
+    )
     parser.add_argument("--force_reload", action="store_true", help="Force reload of data and models.")
     parser.add_argument(
         "--force_rebuild_dataset",
@@ -575,6 +608,23 @@ force_reload = args.force_reload
 cross_model_cell_type = args.cross_model_cell_type
 cross_model_sample_name = args.cross_model_sample_name
 cross_model_chkpt = TF_TG_MODEL_CHECKPOINTS[cross_model_cell_type][cross_model_sample_name]
+
+skip_own_model = args.skip_own_model
+own_model_chkpt = None
+if skip_own_model:
+    logging.info(f"--skip_own_model: scoring {sample_name} with the cross-trained model only")
+else:
+    # Resolved here rather than at inference time: the dataset build takes minutes to
+    # tens of minutes, and a missing entry should not surface after all of it.
+    try:
+        own_model_chkpt = TF_TG_MODEL_CHECKPOINTS[cell_type][sample_name]
+    except KeyError:
+        known = ", ".join(sorted(TF_TG_MODEL_CHECKPOINTS.get(cell_type, {}))) or "(none)"
+        raise SystemExit(
+            f"No TF-TG checkpoint registered for {cell_type}/{sample_name}. "
+            f"Known {cell_type} samples: {known}. "
+            f"Pass --skip_own_model to score with the cross-trained model alone."
+        )
 
 sample_to_title_map = {
     "E7.5_rep1": "mESC-1",
@@ -672,7 +722,13 @@ common_cells = sorted(set(rna_pseudobulk_norm.columns) & set(atac_pseudobulk.col
 # Load the merged ground truth
 cell_type_cache_dir = config.cell_type_cache_dir(cell_type)
 
-tf_dna_cache_dir = config.tf_dna_cache_dir_for_cell_type(cell_type)
+tf_dna_cache_dir = (
+    Path(args.tf_dna_cache_dir)
+    if args.tf_dna_cache_dir
+    else config.tf_dna_cache_dir_for_cell_type(cell_type)
+)
+if args.tf_dna_cache_dir:
+    logging.info(f"TF embedding tables overridden -> {tf_dna_cache_dir}")
 tf_name_to_idx_cache_path = tf_dna_cache_dir / "tf_name_to_idx.csv"
 
 # Get the map of the TF names to their indices in the TF-DNA model training data.
@@ -806,7 +862,11 @@ def _dataset_fingerprint():
 
 dataset_fingerprint = _dataset_fingerprint()
 
-if not sample_full_grn_file.exists() or not cross_tf_tg_df_file.exists() or force_reload == True:
+required_output_files = (
+    [cross_tf_tg_df_file] if skip_own_model else [sample_full_grn_file, cross_tf_tg_df_file]
+)
+
+if any(not f.exists() for f in required_output_files) or force_reload == True:
 
     # === CREATE FULL SET OF TF-TG INPUTS FOR ALL POSSIBLE TF-TG PAIRS IN THE TEST SET ===
     # tf_name_to_idx / tg_id_to_idx and their reverse mappings are built above from the
@@ -966,8 +1026,13 @@ if not sample_full_grn_file.exists() or not cross_tf_tg_df_file.exists() or forc
         collate_fn=collate_tftg_edge_bags,
     )
 
-    tf_dna_model_chkpt = config.tf_dna_model_checkpoints[cell_type]
-    tf_tg_model_chkpt = TF_TG_MODEL_CHECKPOINTS[cell_type][sample_name]
+    tf_dna_model_chkpt = (
+        Path(args.tf_dna_checkpoint)
+        if args.tf_dna_checkpoint
+        else config.tf_dna_model_checkpoints[cell_type]
+    )
+    logging.info(f"Frozen TF-DNA checkpoint: {tf_dna_model_chkpt}")
+    tf_tg_model_chkpt = own_model_chkpt
 
     # Generate the model predictions for the test set and create a DataFrame with TF names, TG names, and predicted scores
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -1011,7 +1076,10 @@ if not sample_full_grn_file.exists() or not cross_tf_tg_df_file.exists() or forc
         f"({tf_embeddings_device.numel() * tf_embeddings_device.element_size() / 1024**3:.2f} GB)"
     )
 
-    if not sample_full_grn_file.exists() or force_reload:
+    prediction_df = None
+    if skip_own_model:
+        logging.info("Skipping own-model run (--skip_own_model)")
+    elif not sample_full_grn_file.exists() or force_reload:
         # Load the TF→TG model
         with ResourceProbe("model_load (own)", device) as probe:
             tf_tg_model = utils.load_tf_tg_regulation_model(
@@ -1066,5 +1134,7 @@ if not sample_full_grn_file.exists() or not cross_tf_tg_df_file.exists() or forc
         logging.info(f"Wrote resource usage for {len(resource_records)} phases to {resource_usage_file}")
 
 else:
-    prediction_df = pd.read_csv(sample_full_grn_file, sep="\t", header=0)
+    prediction_df = (
+        None if skip_own_model else pd.read_csv(sample_full_grn_file, sep="\t", header=0)
+    )
     cross_model_prediction_df = pd.read_csv(cross_tf_tg_df_file, sep="\t", header=0)

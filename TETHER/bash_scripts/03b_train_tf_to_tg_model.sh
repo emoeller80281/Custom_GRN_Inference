@@ -1,7 +1,7 @@
 #!/bin/bash -l
 #SBATCH --job-name=tf_tg_model
-#SBATCH --output=LOGS/tf_tg_model/%x_%j.log
-#SBATCH --error=LOGS/tf_tg_model/%x_%j.err
+#SBATCH --output=LOGS/tf_tg_model/%x_%A_%a.log
+#SBATCH --error=LOGS/tf_tg_model/%x_%A_%a.err
 #SBATCH --time=72:00:00
 #SBATCH -p dense
 #SBATCH -N 1
@@ -10,6 +10,7 @@
 #SBATCH -c 8
 #SBATCH --mem=64G
 #SBATCH --signal=SIGUSR1@90
+#SBATCH --array=0-8%4
 
 set -eo pipefail
 
@@ -18,6 +19,48 @@ cd $PROJECT_DIR
 
 echo "Activating conda environment and starting training..."
 source activate my_env
+
+# ==========================================
+#        DATASET SELECTION
+# ==========================================
+# One entry per array task, as "species|cell_type|sample_name". Keep #SBATCH --array
+# above in sync with the length of this list (a task past the end exits with an error
+# rather than silently running the wrong dataset).
+#
+# These are exported as TETHER_* and picked up by config.py, so config.py itself never
+# needs editing to run a batch -- every array task reads the same file but resolves its
+# own dataset from its own environment.
+EXPERIMENT_LIST=(
+    "mm10|mESC|E7.5_rep1"
+    "mm10|mESC|E7.5_rep2"
+    "mm10|mESC|E8.5_rep1"
+    "mm10|mESC|E8.5_rep2"
+    "mm10|mouse_hepatocytes|hepatocytes_1"
+    "mm10|mouse_hepatocytes|hepatocytes_3"
+    "hg38|Macrophage|buffer_1"
+    "hg38|Macrophage|buffer_2"
+    "hg38|K562|sample_1"
+)
+
+TASK_ID=${SLURM_ARRAY_TASK_ID:-0}
+
+if [ ${TASK_ID} -ge ${#EXPERIMENT_LIST[@]} ]; then
+    echo "ERROR: SLURM_ARRAY_TASK_ID (${TASK_ID}) exceeds number of experiments (${#EXPERIMENT_LIST[@]})"
+    exit 1
+fi
+
+EXPERIMENT_CONFIG="${EXPERIMENT_LIST[$TASK_ID]}"
+
+# Parse experiment configuration
+IFS='|' read -r species cell_type sample_name <<< "$EXPERIMENT_CONFIG"
+
+# config.py reads these three from the environment. species is exported explicitly so an
+# inconsistent species/cell_type pair in the list above trips config.py's assert rather
+# than being silently corrected.
+export species cell_type sample_name
+
+echo "[INFO] Array task ${TASK_ID}: ${species} / ${cell_type} / ${sample_name}"
+python3 -c "import config; print('[INFO] config.py resolved:', config.describe_dataset())"
 
 # --- Memory + math ---
 export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:32
@@ -83,12 +126,11 @@ echo "[INFO] Using nproc_per_node=$NPROC_PER_NODE based on GPUs per node"
 export NCCL_DEBUG=INFO
 export PYTHONFAULTHANDLER=1
 
-max_cells_per_pair=25
+max_cells_per_pair=64
 max_peaks_per_tg=25
 peak_flank_size=128
-pct_true_edges=1.0
-true_false_ratio=10.0
-
+pct_true_edges=0.3
+true_false_ratio=5.0
 
 # echo "[INFO] Building and Caching Training Data..."
 # python3 ${PROJECT_DIR}/scripts/build_tf_to_tg_train_data.py \
@@ -110,7 +152,11 @@ srun python3 ${PROJECT_DIR}/scripts/train_tf_to_tg_model.py \
     --peak_flank_size $peak_flank_size \
     --pct_true_edges $pct_true_edges \
     --true_false_ratio $true_false_ratio \
-    --batch_size 8 \
-    --keep_tf_dna_in_eval
-
-#     --max_peaks_per_tg $max_peaks_per_tg \
+    --batch_size 256 \
+    --keep_tf_dna_in_eval \
+    --tf_embedding_on_device \
+    --resample_cells_per_epoch \
+    --lr 2.828e-4 \
+    --warmup_epochs 1.0 \
+    --per_tf_pos_weight \
+    --precision 32-true
