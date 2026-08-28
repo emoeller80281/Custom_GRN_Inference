@@ -15,6 +15,8 @@ import muon as mu
 import time
 import gtfparse
 
+import argparse
+
 logging.basicConfig(level=logging.INFO, format='%(levelname)s - %(message)s')
 
 PROJECT_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/TETHER")
@@ -28,7 +30,6 @@ sys.path.append(str(PROJECT_DIR))
 
 import warnings
 
-import math
 from tqdm import tqdm
 from torch.utils.data import DataLoader
 
@@ -397,13 +398,76 @@ def build_tftg_inputs(
         "tg_expression": torch.tensor(np.stack(tg_expr_all), dtype=torch.float32),
     }
 
-hepatocyte_tf_tg_model = utils.find_latest_checkpoint(CHKPT_DIR, "mouse_hepatocytes", "hepatocytes_1")
+parser = argparse.ArgumentParser(
+    description=(
+        "Score TF-TG edges for a chosen mESC sample's metacells using the "
+        "hepatocytes_1-trained TF-TG model."
+    )
+)
+parser.add_argument(
+    "--sample_name",
+    type=str,
+    default="E8.5_rep1",
+    help=(
+        "mESC sample directory under data/sample_input_data/mESC/ to load "
+        "pseudobulk RNA/ATAC data from, e.g. E8.5_rep1, E8.5_CRISPR_T_KO, "
+        "E8.5_CRISPR_T_WT. Default: E8.5_rep1."
+    ),
+)
+parser.add_argument(
+    "--metacell_file",
+    type=str,
+    default=None,
+    help=(
+        "Path to a comma-separated file of metacell/barcode IDs (a subset "
+        "of --sample_name's own pseudobulk columns) to restrict scoring "
+        "to. Relative paths are resolved against mouse_development_testing/. "
+        "Defaults to 'E8.5_rep1_NMP_metacells.txt' only when "
+        "--sample_name=E8.5_rep1; required otherwise, since each sample's "
+        "metacell list lives in its own barcode namespace."
+    ),
+)
+parser.add_argument(
+    "--prediction_output_file",
+    type=str,
+    default=None,
+    help=(
+        "Output CSV path for the predicted TF-TG edge scores. Relative "
+        "paths are resolved against mouse_development_testing/. Defaults "
+        "to 'hepatocyte_model_vs_{sample_name}_NMP_metacell_GRN.csv'."
+    ),
+)
+args = parser.parse_args()
 
-logging.info("loading sample data")
-atac_pseudobulk, peak_to_gene, rna_pseudobulk_norm = load_pseudobulk_data("mESC", "E8.5_rep1")
+sample_name = args.sample_name
 
-logging.info("Loading E8.5_rep1 NMP metacell barcodes")
-metacell_file = output_dir / "E8.5_rep1_NMP_metacells.txt"
+if args.metacell_file is not None:
+    metacell_file = Path(args.metacell_file)
+    if not metacell_file.is_absolute():
+        metacell_file = output_dir / metacell_file
+elif sample_name == "E8.5_rep1":
+    metacell_file = output_dir / "E8.5_rep1_NMP_metacells.txt"
+else:
+    parser.error(
+        f"--metacell_file is required when --sample_name is not "
+        f"E8.5_rep1 (got --sample_name={sample_name!r})"
+    )
+
+if args.prediction_output_file is not None:
+    prediction_output_file = Path(args.prediction_output_file)
+    if not prediction_output_file.is_absolute():
+        prediction_output_file = output_dir / prediction_output_file
+else:
+    prediction_output_file = (
+        output_dir / f"hepatocyte_model_vs_{sample_name}_NMP_metacell_GRN.csv"
+    )
+
+hepatocyte_tf_tg_model = utils.find_latest_checkpoint(CHKPT_DIR, "mouse_hepatocytes", "hepatocytes_1", training_number="3709466")
+
+logging.info(f"loading sample data for {sample_name}")
+atac_pseudobulk, peak_to_gene, rna_pseudobulk_norm = load_pseudobulk_data("mESC", sample_name)
+
+logging.info(f"Loading NMP metacell barcodes from {metacell_file}")
 metacell_df = pd.read_csv(metacell_file, header=None, index_col=None)
 nmp_metacell_list = metacell_df.iloc[0, :].to_list()
 
@@ -484,7 +548,7 @@ max_peaks_real = max(
 logging.info("Building TF-TG model inputs")
 common_build_kwargs = dict(
     max_peaks_per_tg=25,
-    max_cells_per_pair=150,
+    max_cells_per_pair=50,
     tg_to_peak_info=tg_to_peak_info,
     cell_to_idx=cell_to_idx,
     atac_mat=atac_mat,
@@ -496,7 +560,7 @@ common_build_kwargs = dict(
     max_peaks_real=max_peaks_real,
 )
 
-tftg_inputs_path = output_dir / "E8.5_rep1_NMP_lineage_tftg_inputs.pt"
+tftg_inputs_path = output_dir / f"{sample_name}_NMP_lineage_tftg_inputs.pt"
 if not tftg_inputs_path.is_file():
     tftg_inputs = build_tftg_inputs(
         all_edge_combo_df,
@@ -533,16 +597,22 @@ def generate_model_predictions(model, data_loader, device, tf_idx_to_name, tg_id
     all_scores = []
 
     n_batches = len(data_loader)
-    updates_per_percent = max(1, math.ceil(n_batches / 100))
 
     with torch.inference_mode():
         iterator = iter(data_loader)
+        # Time-based throttling (mininterval), not count-based (miniters): torch.compile
+        # being active anywhere in this loop defeats miniters entirely -- confirmed by
+        # direct reproduction, even with a compile that never recompiles after its first
+        # call, so it isn't about graph breaks/recompiles specifically. mininterval
+        # survives it. This also degrades better than a fixed update-every-N-batches
+        # count would given the per-batch cost here is wildly non-uniform (compile
+        # warm-up, GPU contention), where a positive time interval still spaces prints
+        # out sensibly and count-based miniters would not, even if it did throttle.
         pbar = tqdm(
             total=n_batches,
             desc="Evaluating",
             ncols=100,
-            miniters=updates_per_percent,
-            mininterval=0,
+            mininterval=2.0,
         )
         while True:
             try:
@@ -650,7 +720,7 @@ dataset = TFTGEdgeBagDataset(
 num_workers = 8
 loader = DataLoader(
     dataset,
-    batch_size=16,
+    batch_size=1024,
     shuffle=False,
     num_workers=num_workers,
     pin_memory=True,
@@ -679,4 +749,5 @@ tg_idx_to_name = {idx: name for name, idx in tg_id_to_idx.items()}
 
 prediction_df = generate_model_predictions(tf_tg_model.model, loader, device, tf_idx_to_name, tg_idx_to_name)
 
-prediction_df.to_csv(output_dir / "hepatocyte_model_vs_E8.5_rep1_NMP_metacell_GRN.csv")
+logging.info(f"Saving predictions to {prediction_output_file}")
+prediction_df.to_csv(prediction_output_file)

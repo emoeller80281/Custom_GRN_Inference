@@ -1,3 +1,4 @@
+import inspect
 import os
 import sys
 import numpy as np
@@ -1066,7 +1067,15 @@ def load_tf_tg_regulation_model(
     tf_peak_chunk_size: int = 128,
     compile_model: bool = False,
     device: torch.device | None = None,
+    model_module=None,
 ) -> tf_to_tg_module.LitTFTGRegulationModel:
+    """
+    model_module lets a caller load a checkpoint trained against a different
+    TFTGRegulationModel definition than the default models.tf_to_tg -- e.g.
+    models.tf_to_tg_testing while it is under active architecture changes there.
+    Defaults to models.tf_to_tg (unchanged behaviour for every existing checkpoint).
+    """
+    model_module = model_module or tf_to_tg_module
 
     device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -1144,13 +1153,21 @@ def load_tf_tg_regulation_model(
     # -----------------------------
     # 4. Recreate TF-TG model uncompiled
     # -----------------------------
-    tf_tg_core_model = tf_to_tg_module.TFTGRegulationModel(
+    tf_tg_kwargs = dict(
         pretrained_tf_peak_model=trained_tf_peak_model,
         d_model=128,
         tf_peak_chunk_size=tf_peak_chunk_size,
     )
+    # tf_binding_hidden_dim only exists on models.tf_to_tg_testing's TFTGRegulationModel
+    # (see models/tf_to_tg.py vs tf_to_tg_testing.py) -- pass it only when the target
+    # class actually accepts it, so this stays a no-op against the original module.
+    init_params = inspect.signature(model_module.TFTGRegulationModel.__init__).parameters
+    if "tf_binding_hidden_dim" in init_params:
+        tf_tg_kwargs["tf_binding_hidden_dim"] = 128 // 2  # matches base_model's hidden_dim above
 
-    lit_tf_tg_model = tf_to_tg_module.LitTFTGRegulationModel(
+    tf_tg_core_model = model_module.TFTGRegulationModel(**tf_tg_kwargs)
+
+    lit_tf_tg_model = model_module.LitTFTGRegulationModel(
         model=tf_tg_core_model,
         lr=1e-4,
         weight_decay=1e-4,

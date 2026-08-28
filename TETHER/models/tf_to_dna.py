@@ -113,11 +113,20 @@ class TFPeakBindingModel(nn.Module):
         denom = mask.sum(dim=1).clamp(min=1.0)
         return summed / denom
 
-    def forward(self, tf_embedding, tf_mask, peak_embedding):
+    def forward(self, tf_embedding, tf_mask, peak_embedding, return_hidden: bool = False):
         """
         tf_embedding:   [B, max_tf_len, 128]
         tf_mask:        [B, max_tf_len]
         peak_embedding: [B, 512, 4]
+
+        return_hidden=False (default): returns logits [B], unchanged from before this
+        flag existed -- every existing caller keeps working with no code change.
+
+        return_hidden=True: also returns the classifier's pre-final-Linear activation
+        [B, hidden_dim // 2], i.e. everything self.classifier does except the last
+        Linear(hidden_dim//2, 1). Sliced from the same nn.Sequential rather than split
+        into separate submodules, so state_dict keys -- and therefore existing
+        checkpoints -- are unaffected.
         """
 
         # Encode TF tokens
@@ -156,8 +165,11 @@ class TFPeakBindingModel(nn.Module):
 
         # Classify TF-peak pair
         joint = torch.cat([tf_pooled, peak_pooled], dim=-1)
-        logits = self.classifier(joint).squeeze(-1)
+        hidden = self.classifier[:-1](joint)              # [B, hidden_dim // 2]
+        logits = self.classifier[-1](hidden).squeeze(-1)  # [B]
 
+        if return_hidden:
+            return logits, hidden
         return logits
     
 

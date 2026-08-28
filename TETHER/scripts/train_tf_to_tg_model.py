@@ -30,12 +30,27 @@ DATA_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE
 PROJECT_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/TETHER")
 sys.path.append(str(PROJECT_DIR))
 
-import models.tf_to_tg as tf_to_tg_module
+# The frozen TF-DNA submodule is compiled (see create_new_tf_tg_regulation_model), and
+# Dynamo caches one entry per distinct input shape for it. Torch's default limit is 8.
+#
+# The TF crop ladder alone produces 4 distinct widths per species, so the default leaves
+# almost no headroom, and nothing announces itself when it runs out: the graphs evict each
+# other, every batch recompiles, and throughput just oscillates instead of erroring. Two
+# ordinary config changes would cross the line on their own -- raising
+# --tf_peak_chunk_size above CHUNK_QUANTUM (256), which unpins the chunk width, or dropping
+# --keep_tf_dna_in_eval, which switches to the ragged-final-chunk path and adds a second
+# shape per crop.
+#
+# 128 matches generate_all_predictions.py, so training and inference have the same budget.
+# Raising the limit only permits more cached graphs; it does not create them.
+torch._dynamo.config.cache_size_limit = 128
+
+import models.tf_to_tg_testing as tf_to_tg_module
 import models.tf_to_dna as tf_to_dna_module
 import config
 # Same sampler the TF-DNA trainer uses, applied to peak counts instead of protein
 # lengths. It is generic over `lengths`, so it is imported rather than duplicated.
-from scripts.batch_samplers import LengthGroupedBatchSampler
+from scripts.batch_samplers import LengthGroupedBatchSampler, dataloader_worker_init
 
 # NOTE: utils is deliberately NOT imported at module level. utils.py does
 #     from scripts.train_tf_to_tg_model import TFTGEdgeBagDataset, collate_tftg_edge_bags
@@ -74,9 +89,10 @@ def create_new_tf_tg_regulation_model(
 ) -> tf_to_tg_module.TFTGRegulationModel:
 
     # 1) Recreate the base TF→DNA model with the same hyperparameters
+    tf_dna_hidden_dim = 128  # matches base_model's hidden_dim below
     base_model = tf_to_dna_module.TFPeakBindingModel(
         tf_embedding_dim=128,
-        hidden_dim=128,
+        hidden_dim=tf_dna_hidden_dim,
         dropout=0.3,
         num_layers=4,
         num_heads=4,
@@ -102,17 +118,27 @@ def create_new_tf_tg_regulation_model(
     for p in trained_tf_peak_model.parameters():
         p.requires_grad = False
 
-    trained_tf_peak_model = torch.compile(
-        trained_tf_peak_model,
-        mode="reduce-overhead",
-        fullgraph=False,
-    )
+    # Plain torch.compile, matching utils.load_tf_{dna,tg}_model on the inference path.
+    #
+    # No mode="reduce-overhead". That enables CUDA graphs, which re-record whenever an
+    # input shape reappears after eviction. TFTGRegulationModel deliberately produces
+    # several shapes (one per TF crop width x chunk count), and measured against plain
+    # compile on TF-major batches the median was 1.9x worse while p90 was 14.6x worse
+    # (2653 ms vs 181 ms) -- the tail, not the median, is what a full run pays. Default
+    # mode: 94 ms median / 181 ms p90.
+    #
+    # Inference was fixed in f440ef2 ("Remove CUDA graphs from inference and fix the
+    # recompile storm they masked"); that commit edited this file but not this call, so
+    # training kept re-recording graphs for another two weeks. The two paths compile the
+    # same submodule over the same shapes, so they should compile it the same way.
+    trained_tf_peak_model = torch.compile(trained_tf_peak_model)
 
     # 4) Inject into your TF→TG model
     tf_tg_model = tf_to_tg_module.TFTGRegulationModel(
         pretrained_tf_peak_model=trained_tf_peak_model,
         d_model=d_model,
         tf_peak_chunk_size=tf_peak_chunk_size,
+        tf_binding_hidden_dim=tf_dna_hidden_dim // 2,
         keep_tf_peak_model_in_eval=keep_tf_peak_model_in_eval,
     )
     logging.info(
@@ -142,6 +168,28 @@ def create_new_tf_tg_regulation_model(
         tf_tg_model.load_state_dict(fixed, strict=True)
 
     return tf_tg_model
+
+
+def _take_rows(inputs, keep_idx, n_edges):
+    """Select `keep_idx` rows from every per-edge entry in `inputs`.
+
+    Shared by stratified_train_subsample and filter_low_positive_tfs below -- both filter
+    the same dict of per-edge tensors/lists at the same point in the pipeline (after load,
+    before TFTGEdgeBagDataset construction).
+    """
+    keep_list = keep_idx.tolist() if torch.is_tensor(keep_idx) else list(keep_idx)
+    keep_idx_t = keep_idx if torch.is_tensor(keep_idx) else torch.as_tensor(keep_idx)
+
+    def _take(v):
+        # Every entry in this cache is per-edge, but three of them (tf_name, tg_name,
+        # cell_ids) are plain lists and do not accept fancy indexing.
+        if not hasattr(v, "__len__") or len(v) != n_edges:
+            return v
+        if isinstance(v, list):
+            return [v[i] for i in keep_list]
+        return v[keep_idx_t]
+
+    return {k: _take(v) for k, v in inputs.items()}
 
 
 def stratified_train_subsample(train_inputs, frac, seed=0):
@@ -184,7 +232,7 @@ def stratified_train_subsample(train_inputs, frac, seed=0):
     return keep
 
 
-def compute_per_tf_pos_weight(train_inputs, n_tf, max_weight=50.0):
+def compute_per_tf_pos_weight(train_inputs, n_tf, max_weight=10.0):
     """Per-TF positive class weight w_t = n_neg_t / n_pos_t over the whole training split.
 
     Global counts, deliberately, not per-batch counts. A weight derived from the batch
@@ -198,8 +246,13 @@ def compute_per_tf_pos_weight(train_inputs, n_tf, max_weight=50.0):
 
     max_weight caps the correction. Positive rates run down to ~4e-4, which would otherwise
     ask for w ~= 2500 and let a handful of positive edges dominate the gradient. At the
-    median rate (~6%) the uncapped weight is ~16, so a cap of 50 leaves the bulk of the
-    distribution fully corrected and only clips the extreme tail.
+    median rate (~6%) the uncapped weight is ~16, so even a cap of 10 leaves most of the
+    distribution under-corrected relative to the uncapped ratio -- deliberately: a TF whose
+    positive rate is this extreme is better handled by dropping it via
+    --min_tf_positive_count (see filter_low_positive_tfs below) than by asking a single
+    gradient multiplier to both balance its classes AND dominate the batch. 50 was measured
+    to let a handful of near-empty-positive TFs swamp the gradient early in training; 10
+    still fully corrects any TF down to a 10% positive rate.
     """
     labels = train_inputs["label"].reshape(-1).float()
     tf_idx = train_inputs["tf_idx"].reshape(-1).long()
@@ -225,6 +278,32 @@ def compute_per_tf_pos_weight(train_inputs, n_tf, max_weight=50.0):
         f"max={weights[ok].max():.2f}."
     )
     return weights
+
+
+def filter_low_positive_tfs(train_inputs, n_tf, min_positive_count):
+    """Drop TRAINING rows for any TF with fewer than min_positive_count positives.
+
+    A TF with too few positives to estimate a stable pos_weight also has too few to learn
+    a reliable per-TF boundary from -- row-exclusion is no worse than down-weighting it,
+    and it keeps compute_per_tf_pos_weight's counts drawn from the split actually trained
+    on. Only the train split is filtered; val/test keep every row so a dropped TF's
+    validation AUROC still surfaces rather than being hidden.
+    """
+    tf_idx = train_inputs["tf_idx"].reshape(-1).long()
+    labels = train_inputs["label"].reshape(-1).float()
+
+    n_pos = torch.zeros(n_tf, dtype=torch.float64).index_add_(0, tf_idx, labels.double())
+    keep_tfs = (n_pos >= min_positive_count).nonzero(as_tuple=True)[0]
+    keep_idx = torch.isin(tf_idx, keep_tfs).nonzero(as_tuple=True)[0]
+
+    n_dropped_tfs = int((n_pos < min_positive_count).sum())
+    log_once(
+        f"--min_tf_positive_count {min_positive_count}: dropping {n_dropped_tfs} TF(s) "
+        f"with fewer than {min_positive_count} positive training edges, removing "
+        f"{len(tf_idx) - len(keep_idx):,} of {len(tf_idx):,} training rows "
+        f"({(len(tf_idx) - len(keep_idx)) / max(1, len(tf_idx)):.1%})."
+    )
+    return keep_idx
 
 
 class TFTGEdgeBagDataset(Dataset):
@@ -426,6 +505,8 @@ class ResidentTFEmbeddingTable(Callback):
 PEAK_CROP_LADDER = (4, 8, 16, 32, 64)
 
 
+
+
 def collate_tftg_edge_bags(batch):
     output = {
         "label": torch.stack([b["label"] for b in batch]).float(),
@@ -509,7 +590,7 @@ if __name__ == "__main__":
             "BatchNorm layers use their running statistics instead of per-batch ones and "
             "stop mutating those statistics. This is how a frozen feature extractor is "
             "normally used and it removes a train/inference mismatch, but it changes the "
-            "binding scores the TF-TG model trains against (mean 1.14 logits, 2.1% of "
+            "binding scores the TF-TG model trains against (mean 1.14 logits, 2.1%% of "
             "pairs crossing p=0.5), so checkpoints trained with it are NOT comparable to "
             "existing ones. Also enables the padding-skip/crop fast path: 1822 -> 311 "
             "ms/step measured at max_peaks_per_tg=100, max_cells_per_pair=24, batch 32."
@@ -605,7 +686,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--plateau_monitor",
-        default="val/macro_auroc",
+        default="val/auroc",
         help=(
             "Metric ReduceLROnPlateau watches. Default val/macro_auroc. Do NOT set this to "
             "val/loss: on run 3801811 val/loss bottomed at epoch 0 and never recovered, so "
@@ -640,11 +721,23 @@ if __name__ == "__main__":
     parser.add_argument(
         "--per_tf_pos_weight_max",
         type=float,
-        default=50.0,
+        default=10.0,
         help=(
             "Cap on the per-TF positive weight (--per_tf_pos_weight only). Positive rates "
             "reach ~4e-4, which uncapped would ask for a weight of ~2500 and let a few "
-            "edges dominate the gradient."
+            "edges dominate the gradient. A TF whose positive rate is that extreme is "
+            "better excluded via --min_tf_positive_count than corrected by raising this cap."
+        ),
+    )
+    parser.add_argument(
+        "--min_tf_positive_count",
+        type=int,
+        default=0,
+        help=(
+            "Drop training rows for any TF with fewer than this many positive training "
+            "edges (0 disables). Complements --per_tf_pos_weight_max: a lower cap "
+            "under-corrects TFs whose positive rate is too extreme to balance usefully, "
+            "so drop them instead of asking the loss to compensate."
         ),
     )
     parser.add_argument(
@@ -822,19 +915,22 @@ if __name__ == "__main__":
     # data actually trained on rather than from the full split.
     if args.train_subsample_frac < 1.0:
         keep_idx = stratified_train_subsample(tftg_inputs_train, args.train_subsample_frac)
-        n_edges = len(tftg_inputs_train["label"])
-        keep_list = keep_idx.tolist()
+        tftg_inputs_train = _take_rows(
+            tftg_inputs_train, keep_idx, len(tftg_inputs_train["label"])
+        )
 
-        def _take(v):
-            # Every entry in this cache is per-edge, but three of them (tf_name, tg_name,
-            # cell_ids) are plain lists and do not accept fancy indexing.
-            if not hasattr(v, "__len__") or len(v) != n_edges:
-                return v
-            if isinstance(v, list):
-                return [v[i] for i in keep_list]
-            return v[keep_idx]
-
-        tftg_inputs_train = {k: _take(v) for k, v in tftg_inputs_train.items()}
+    # Applied after subsampling (not before) so a TF pushed below threshold by the
+    # subsample draw is still caught, and before compute_per_tf_pos_weight below so its
+    # counts and --per_tf_pos_weight_max's cap only ever see the TFs actually trained on.
+    if args.min_tf_positive_count > 0:
+        keep_idx = filter_low_positive_tfs(
+            tftg_inputs_train,
+            n_tf=tf_embeddings_tensor.shape[0],
+            min_positive_count=args.min_tf_positive_count,
+        )
+        tftg_inputs_train = _take_rows(
+            tftg_inputs_train, keep_idx, len(tftg_inputs_train["label"])
+        )
 
     train_dataset = TFTGEdgeBagDataset(
         tftg_inputs_train,
@@ -892,6 +988,7 @@ if __name__ == "__main__":
         pin_memory=True,
         persistent_workers=True,
         prefetch_factor=4,
+        worker_init_fn=dataloader_worker_init,
         collate_fn=collate_tftg_edge_bags,
         )
 
@@ -902,6 +999,7 @@ if __name__ == "__main__":
         pin_memory=True,
         persistent_workers=True,
         prefetch_factor=4,
+        worker_init_fn=dataloader_worker_init,
         collate_fn=collate_tftg_edge_bags,
         )
 
@@ -940,6 +1038,7 @@ if __name__ == "__main__":
             pin_memory=True,
             persistent_workers=True,
             prefetch_factor=4,
+            worker_init_fn=dataloader_worker_init,
             collate_fn=collate_tftg_edge_bags,
             )
 

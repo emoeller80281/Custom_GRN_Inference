@@ -11,6 +11,7 @@ and fail with "cannot import name ... from partially initialized module". This m
 depends on nothing in the project, so both trainers can import it freely.
 """
 
+import gc
 import math
 
 import numpy as np
@@ -105,3 +106,26 @@ class LengthGroupedBatchSampler(Sampler):
         if self.num_replicas > 1:
             n_batches = n_batches // self.num_replicas
         return n_batches
+
+
+def dataloader_worker_init(worker_id: int) -> None:
+    """Make a forked DataLoader worker ignore everything it inherited from the parent.
+
+    torch.compile builds Triton/MLIR objects in the parent process, and each
+    mlir::MLIRContext owns an llvm::StdThreadPool. DataLoader workers are forked, so a
+    worker inherits those objects but none of the pool's threads. The worker never uses
+    them -- but the first cyclic-GC pass that happens to collect one runs ~MLIRContext,
+    which calls pthread_cond_destroy on a condition variable whose threads do not exist
+    here, and the worker wedges in futex forever. Batches come back in strict round-robin
+    order, so one wedged worker stops the whole loader: GPU utilisation falls to 0% and
+    the caller sits in _try_get_data until the job is killed.
+
+    The hang is timing-dependent -- it lands wherever the GC threshold happens to trip --
+    which is why it hit different samples at different steps and looked in turn like an
+    allocator, shared-memory, or GPU-contention problem.
+
+    gc.freeze() moves every object alive at fork time into a permanent generation the
+    collector never scans, so those destructors never run in the child. Objects the worker
+    allocates afterwards are collected normally, so this does not leak.
+    """
+    gc.freeze()

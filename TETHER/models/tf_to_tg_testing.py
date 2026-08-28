@@ -23,12 +23,20 @@ class TFTGRegulationModel(nn.Module):
         num_heads=4,
         dropout=0.1,
         tf_peak_chunk_size=256,
+        tf_binding_hidden_dim=64,
         keep_tf_peak_model_in_eval=False,
     ):
         super().__init__()
 
         self.tf_peak_model = pretrained_tf_peak_model
         self.tf_peak_chunk_size = tf_peak_chunk_size
+        # Width of the TF-DNA submodule's pre-final-Linear hidden activation (its
+        # classifier's hidden_dim // 2), requested via forward(..., return_hidden=True)
+        # and used in place of a collapsed scalar binding logit -- see peak_feature_proj
+        # below and section 2b of forward(). Fixed at construction time because
+        # nn.Linear needs its input width statically; cannot be inferred at runtime from
+        # a (possibly torch.compile-wrapped) submodule.
+        self.tf_binding_hidden_dim = tf_binding_hidden_dim
 
         # Optional device-resident TF embedding table, populated by
         # set_tf_embedding_table(). Registered non-persistent so it never enters
@@ -44,7 +52,9 @@ class TFTGRegulationModel(nn.Module):
         self.keep_tf_peak_model_in_eval = keep_tf_peak_model_in_eval
 
         self.peak_feature_proj = nn.Sequential(
-            nn.Linear(4, d_model),  # binding, accessibility, distance_scaled, distance_weight
+            # TF-DNA fused hidden embedding (replaces the collapsed sigmoid(logit)
+            # binding scalar) + accessibility, distance_scaled, distance_weight.
+            nn.Linear(tf_binding_hidden_dim + 3, d_model),
             nn.SiLU(),
             nn.Dropout(dropout),
             nn.Linear(d_model, d_model),
@@ -57,6 +67,18 @@ class TFTGRegulationModel(nn.Module):
         )
 
         self.tg_expr_proj = nn.Sequential(
+            nn.Linear(1, d_model),
+            nn.SiLU(),
+            nn.Linear(d_model, d_model),
+        )
+
+        # Projects the edge-level TF/TG cross-cell expression correlation (a single
+        # scalar per edge, computed in forward() before any per-cell reshape -- see
+        # section 4b) into a token broadcast to every cell's classifier input. This is
+        # the only place in the model that lets a cell's score be informed by what the
+        # OTHER sampled cells for the same edge look like; peak_attention and the
+        # classifier both operate row-independently over E*C otherwise.
+        self.corr_proj = nn.Sequential(
             nn.Linear(1, d_model),
             nn.SiLU(),
             nn.Linear(d_model, d_model),
@@ -77,9 +99,9 @@ class TFTGRegulationModel(nn.Module):
 
         self.norm = nn.LayerNorm(d_model)
 
-        # peak_context + tf_expr + tg_expr
+        # peak_context + tf_expr + tg_expr + edge_corr
         self.classifier = nn.Sequential(
-            nn.Linear(d_model * 3, d_model),
+            nn.Linear(d_model * 4, d_model),
             nn.SiLU(),
             nn.Dropout(dropout),
             nn.Linear(d_model, d_model // 2),
@@ -337,9 +359,14 @@ class TFTGRegulationModel(nn.Module):
 
         with torch.no_grad():
             # zeros, not empty: on the fast path the padded slots are never written, and
-            # a defined value keeps them finite going into the sigmoid before masking
-            binding_logits_flat = torch.zeros(
+            # a defined value keeps them finite going into masked_fill below.
+            #
+            # Only the fused hidden embedding is kept -- the scalar logit the submodule
+            # also returns is discarded (as `_`) rather than collapsed into peak_features,
+            # which is the whole point of requesting return_hidden=True below.
+            binding_hidden_flat = torch.zeros(
                 E * P,
+                self.tf_binding_hidden_dim,
                 device=peak_sequences_edge.device,
                 dtype=peak_sequences_edge.dtype,
             )
@@ -364,10 +391,10 @@ class TFTGRegulationModel(nn.Module):
                     # quantum as a floor bounds the wasted rows when n_valid << chunk_size
                     # -- the case that padding up to whole chunk_size blocks got wrong.
                     #
-                    # Rows past n_valid address genuinely padded slots, so their logits
-                    # are meaningless, but binding_score is masked_fill'd by peak_mask
-                    # below before it is ever used. Computing them is wasted work, never
-                    # wrong work, and it is bounded by one quantum per batch.
+                    # Rows past n_valid address genuinely padded slots, so their hidden
+                    # embeddings are meaningless, but binding_hidden is masked_fill'd by
+                    # peak_mask below before it is ever used. Computing them is wasted
+                    # work, never wrong work, and it is bounded by one quantum per batch.
                     CHUNK_QUANTUM = 256
                     quantized = ((n_valid + CHUNK_QUANTUM - 1) // CHUNK_QUANTUM) * CHUNK_QUANTUM
                     width = min(chunk_size, max(CHUNK_QUANTUM, quantized))
@@ -422,10 +449,11 @@ class TFTGRegulationModel(nn.Module):
                             tf_embedding_chunk = tf_embedding_chunk[:, :crop]
                             tf_mask_chunk = tf_mask_chunk[:, :crop]
 
-                        logits_chunk = self.tf_peak_model(
+                        _, hidden_chunk = self.tf_peak_model(
                             tf_embedding=tf_embedding_chunk,
                             tf_mask=tf_mask_chunk,
                             peak_embedding=peak_seq_flat[sel],
+                            return_hidden=True,
                         )
 
                         # Copy values out before next compiled-model invocation.
@@ -433,8 +461,8 @@ class TFTGRegulationModel(nn.Module):
                         # TF-DNA model returns reduced precision while this buffer is
                         # fp32, so cast explicitly -- the .copy_ used on the path below
                         # would have done it implicitly.
-                        binding_logits_flat.index_copy_(
-                            0, sel, logits_chunk.to(binding_logits_flat.dtype)
+                        binding_hidden_flat.index_copy_(
+                            0, sel, hidden_chunk.to(binding_hidden_flat.dtype)
                         )
             else:
                 # Original path, unchanged: score every slot including padding, with the
@@ -449,29 +477,31 @@ class TFTGRegulationModel(nn.Module):
                     tf_embedding_chunk, tf_mask_chunk = gather_tf_chunk(edge_idx)
                     peak_seq_chunk = peak_seq_flat[start:end]
 
-                    logits_chunk = self.tf_peak_model(
+                    _, hidden_chunk = self.tf_peak_model(
                         tf_embedding=tf_embedding_chunk,
                         tf_mask=tf_mask_chunk,
                         peak_embedding=peak_seq_chunk,
+                        return_hidden=True,
                     )
 
                     # Copy values out before next compiled-model invocation
-                    binding_logits_flat[start:end].copy_(logits_chunk)
+                    binding_hidden_flat[start:end].copy_(hidden_chunk)
 
-        binding_logits = binding_logits_flat.reshape(E, P)
-        
-        # ------------------------------------------------------------
-        # 2b. Mask and expand TF-peak binding scores across cells
-        # ------------------------------------------------------------
-        # Sigmoid to convert logits to probabilities
-        binding_score = torch.sigmoid(binding_logits)  # [E, P]
+        binding_hidden = binding_hidden_flat.reshape(E, P, self.tf_binding_hidden_dim)
 
-        # If a peak mask is provided, set binding scores of masked peaks to 0
+        # ------------------------------------------------------------
+        # 2b. Mask and expand TF-peak binding hidden embedding across cells
+        # ------------------------------------------------------------
+        # peak_features below uses this fused hidden embedding, not sigmoid(logit) --
+        # the whole point is that the fused representation reaches the TF-TG model
+        # instead of being collapsed to one probability first.
         if peak_mask_edge is not None:
-            binding_score = binding_score.masked_fill(~peak_mask_edge, 0.0)
+            binding_hidden = binding_hidden.masked_fill(~peak_mask_edge[:, :, None], 0.0)
 
-        # Reuse TF-peak binding score across cells
-        binding_score = binding_score[:, None, :].expand(E, C, P)  # [E, C, P]
+        # Reuse TF-peak binding hidden embedding across cells
+        binding_hidden = binding_hidden[:, None, :, :].expand(
+            E, C, P, self.tf_binding_hidden_dim
+        )  # [E, C, P, H]
 
         # ------------------------------------------------------------
         # 3. Distance features
@@ -496,8 +526,9 @@ class TFTGRegulationModel(nn.Module):
                 0.0,
             )
             
-        assert binding_score.shape == peak_accessibility.shape, (
-            f"binding_score {binding_score.shape} != peak_accessibility {peak_accessibility.shape}"
+        assert binding_hidden.shape == (E, C, P, self.tf_binding_hidden_dim), (
+            f"binding_hidden {binding_hidden.shape} != expected "
+            f"{(E, C, P, self.tf_binding_hidden_dim)}"
         )
         assert distance_scaled.shape == peak_accessibility.shape, (
             f"distance_scaled {distance_scaled.shape} != peak_accessibility {peak_accessibility.shape}"
@@ -506,18 +537,47 @@ class TFTGRegulationModel(nn.Module):
             f"distance_weight {distance_weight.shape} != peak_accessibility {peak_accessibility.shape}"
         )
 
-        peak_features = torch.stack(
-            [
-                binding_score,
-                peak_accessibility,
-                distance_scaled,
-                distance_weight,
-            ],
+        scalar_features = torch.stack(
+            [peak_accessibility, distance_scaled, distance_weight],
             dim=-1,
-        )  # [E, C, P, 4]
+        )  # [E, C, P, 3]
 
-        peak_features = peak_features.reshape(EC, P, 4)  # [E*C, P, 4]
+        peak_features = torch.cat([binding_hidden, scalar_features], dim=-1)
+        # [E, C, P, tf_binding_hidden_dim + 3]
+
+        peak_features = peak_features.reshape(EC, P, self.tf_binding_hidden_dim + 3)
         peak_tokens = self.peak_feature_proj(peak_features)  # [E*C, P, d_model]
+
+        # ------------------------------------------------------------
+        # 4b. Edge-level cross-cell expression correlation
+        # ------------------------------------------------------------
+        # tf_expression/tg_expression are still [E, C] here, before the per-cell reshape
+        # just below. This is the only point in forward() where more than one cell of a
+        # given edge is visible at once -- peak_attention and the classifier both operate
+        # row-independently over E*C, so a cross-cell statistic can only be computed here.
+        mask_f = cell_mask.float()                                     # [E, C]
+        n_valid = mask_f.sum(dim=1)                                    # [E]
+
+        tf_mean = (tf_expression * mask_f).sum(dim=1) / n_valid.clamp_min(1)
+        tg_mean = (tg_expression * mask_f).sum(dim=1) / n_valid.clamp_min(1)
+
+        tf_centered = (tf_expression - tf_mean[:, None]) * mask_f
+        tg_centered = (tg_expression - tg_mean[:, None]) * mask_f
+
+        cov = (tf_centered * tg_centered).sum(dim=1)
+        denom = torch.sqrt((tf_centered ** 2).sum(dim=1) * (tg_centered ** 2).sum(dim=1))
+
+        # Undefined for <2 unmasked cells or zero-variance expression (a constant TF or
+        # TG value across the sampled cells) -- fall back to 0.0 ("no correlation
+        # signal") rather than NaN. This is a learned input feature, not a reported
+        # statistic, so the fallback doesn't need to be more principled than that.
+        safe = (n_valid >= 2) & (denom > 1e-8)
+        edge_corr = torch.where(safe, cov / denom.clamp_min(1e-8), torch.zeros_like(cov))
+        edge_corr = edge_corr.clamp(-1.0, 1.0)  # numerical guard against fp roundoff past +-1
+
+        corr_token = self.corr_proj(edge_corr[:, None])                # [E, d_model]
+        corr_token = corr_token[:, None, :].expand(E, C, corr_token.shape[-1])
+        corr_token = corr_token.reshape(EC, -1)                        # [E*C, d_model]
 
         # ------------------------------------------------------------
         # 5. Expression tokens
@@ -577,9 +637,10 @@ class TFTGRegulationModel(nn.Module):
                 peak_context,
                 tf_expr_token,
                 tg_expr_token,
+                corr_token,
             ],
             dim=-1,
-        )  # [E*C, d_model * 3]
+        )  # [E*C, d_model * 4]
 
         cell_logits = self.classifier(final).squeeze(-1)  # [E*C]
         cell_logits = cell_logits.reshape(E, C)           # [E, C]

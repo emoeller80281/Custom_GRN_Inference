@@ -5,12 +5,12 @@
 #SBATCH --time=72:00:00
 #SBATCH -p dense
 #SBATCH -N 1
-#SBATCH --gres=gpu:v100:4
-#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:a100:1
+#SBATCH --ntasks-per-node=1
 #SBATCH -c 8
 #SBATCH --mem=64G
 #SBATCH --signal=SIGUSR1@90
-#SBATCH --array=0
+#SBATCH --array=1-8
 
 set -eo pipefail
 
@@ -63,7 +63,23 @@ echo "[INFO] Array task ${TASK_ID}: ${species} / ${cell_type} / ${sample_name}"
 python3 -c "import config; print('[INFO] config.py resolved:', config.describe_dataset())"
 
 # --- Memory + math ---
-export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:32
+# max_split_size_mb:32 forbids splitting blocks above 32 MB, which fragments badly once
+# tensor shapes vary -- and they now vary from three directions at once: PEAK_CROP_LADDER
+# (up to 6 peak widths), TF_CROP_LADDER (4 crop widths), and the chunked peak_attention.
+# When the allocator cannot find a block it falls back to cudaFree/cudaMalloc with a device
+# synchronise, which presents as GPU utilisation at 0% with no error and no crash.
+#
+# expandable_segments:True is what run_generate_all_predictions.sh switched to after
+# hitting exactly this on the inference side ("only 264MiB free despite 2.71GiB being
+# reserved-but-unallocated"). Training and inference now use the same allocator policy.
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+# Diagnostic for the GPU-idle stalls seen in job 3856449 (tasks 0/4/6 collapsed from
+# ~2.2 it/s to ~0.01 it/s and stayed there). Prints one line per Dynamo recompile naming
+# the guard that failed. If a stall shows recompiles here, the cause is shape churn; if the
+# log stays silent through a stall, it is the allocator and the setting above is the fix.
+# Cheap and low-volume -- safe to leave on until the question is settled.
+export TORCH_LOGS=recompiles
 export TORCH_ALLOW_TF32=1
 export NVIDIA_TF32_OVERRIDE=1
 
@@ -126,11 +142,11 @@ echo "[INFO] Using nproc_per_node=$NPROC_PER_NODE based on GPUs per node"
 export NCCL_DEBUG=INFO
 export PYTHONFAULTHANDLER=1
 
-max_cells_per_pair=64
+max_cells_per_pair=100
 max_peaks_per_tg=25
 peak_flank_size=128
-pct_true_edges=0.3
-true_false_ratio=5.0
+pct_true_edges=1.0
+true_false_ratio=10.0
 
 # echo "[INFO] Building and Caching Training Data..."
 # python3 ${PROJECT_DIR}/scripts/build_tf_to_tg_train_data.py \
@@ -152,11 +168,14 @@ srun python3 ${PROJECT_DIR}/scripts/train_tf_to_tg_model.py \
     --peak_flank_size $peak_flank_size \
     --pct_true_edges $pct_true_edges \
     --true_false_ratio $true_false_ratio \
-    --batch_size 256 \
+    --batch_size 512 \
     --keep_tf_dna_in_eval \
     --tf_embedding_on_device \
     --resample_cells_per_epoch \
-    --lr 5.66e-4 \
+    --lr_scale_rule sqrt \
     --warmup_epochs 1.0 \
     --per_tf_pos_weight \
-    --precision 32-true
+    --per_tf_pos_weight_max 10 \
+    --precision 32-true \
+    --early_stopping_patience 10 \
+    --min_tf_positive_count 5

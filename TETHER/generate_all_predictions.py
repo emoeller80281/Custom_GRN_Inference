@@ -24,14 +24,14 @@ logging.basicConfig(
 PROJECT_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/TETHER")
 DATA_DIR = PROJECT_DIR / "cached_data"
 CHKPT_DIR = PROJECT_DIR / "checkpoints"
-CHKPT_COPY_DIR = PROJECT_DIR / "checkpoints copy"
-RESULT_DIR = PROJECT_DIR / "testing_results"
+RESULT_DIR = PROJECT_DIR / "new_testing_results"
 
 sys.path.append(str(PROJECT_DIR))
 
-import models.tf_to_tg as tf_to_tg_module
+import models.tf_to_tg_testing as tf_to_tg_module
 import scripts.build_tf_to_tg_train_data as tf_tg_data_builder
 from scripts.train_tf_to_tg_model import TFTGEdgeBagDataset, collate_tftg_edge_bags
+from scripts.batch_samplers import dataloader_worker_init
 import utils
 import config
 import warnings
@@ -60,27 +60,17 @@ torch._dynamo.config.cache_size_limit = 128
 
 TF_TG_MODEL_CHECKPOINTS = {
     "mESC": {
-        "E7.5_rep1": CHKPT_DIR / "mESC" / "E7.5_rep1" / "tf_tg_train_E7.5_rep1_3675131" / "epoch_11_best_model.ckpt",
-        # "E7.5_rep1": utils.find_latest_checkpoint(CHKPT_DIR, "mESC", "E7.5_rep1"),
+        "E7.5_rep1": utils.find_latest_checkpoint(CHKPT_DIR, "mESC", "E7.5_rep1"),
         "E7.5_rep2": utils.find_latest_checkpoint(CHKPT_DIR, "mESC", "E7.5_rep2"),
-        "E8.5_rep1": utils.find_latest_checkpoint(CHKPT_DIR, "mESC", "E8.5_rep1", training_number="3691937"),
-        "E8.5_rep2": utils.find_latest_checkpoint(CHKPT_DIR, "mESC", "E8.5_rep2", training_number="3691937"),
-    },
-    "iPSC": {
-        "WT_D13_rep1": utils.find_latest_checkpoint(CHKPT_DIR, "iPSC", "WT_D13_rep1"),
+        "E8.5_rep1": utils.find_latest_checkpoint(CHKPT_DIR, "mESC", "E8.5_rep1"),
+        "E8.5_rep2": utils.find_latest_checkpoint(CHKPT_DIR, "mESC", "E8.5_rep2"),
     },
     "Macrophage": {
-        "buffer_1": utils.find_latest_checkpoint(CHKPT_DIR, "Macrophage", "buffer_1", training_number="3685893"),
-        "buffer_2": utils.find_latest_checkpoint(CHKPT_DIR, "Macrophage", "buffer_2", training_number="3713132"),
-        "buffer_3": utils.find_latest_checkpoint(CHKPT_DIR, "Macrophage", "buffer_3"),
-        "buffer_4": utils.find_latest_checkpoint(CHKPT_DIR, "Macrophage", "buffer_4"),
+        "buffer_1": utils.find_latest_checkpoint(CHKPT_DIR, "Macrophage", "buffer_1"),
+        "buffer_2": utils.find_latest_checkpoint(CHKPT_DIR, "Macrophage", "buffer_2"),
     },
     "K562": {
-        "sample_1": utils.find_latest_checkpoint(CHKPT_DIR, "K562", "sample_1", training_number="3692409"),
-    },
-    "mouse_liver": {
-        "liver_1": utils.find_latest_checkpoint(CHKPT_DIR, "mouse_liver", "liver_1"),
-        "liver_3": utils.find_latest_checkpoint(CHKPT_DIR, "mouse_liver", "liver_3")
+        "sample_1": utils.find_latest_checkpoint(CHKPT_DIR, "K562", "sample_1"),
     },
     "mouse_hepatocytes": {
         "hepatocytes_1": utils.find_latest_checkpoint(CHKPT_DIR, "mouse_hepatocytes", "hepatocytes_1"),
@@ -1013,16 +1003,47 @@ if any(not f.exists() for f in required_output_files) or force_reload == True:
         return_tf_indices=True,
     )
 
+    # Visit edges in order of how many real peaks they carry.
+    #
+    # collate_tftg_edge_bags cuts the peak axis to a PEAK_CROP_LADDER rung at or above the
+    # widest edge in the batch, but the width is set by that single widest edge -- so the
+    # cut is only worth anything when a batch is peak-homogeneous. The prediction universe
+    # is built TF-major (MultiIndex.from_product([tfs, tgs])), so a batch of consecutive
+    # rows is one TF against 256 unrelated genes whose peak counts vary from 1 to 90, and
+    # nearly every batch ends up at the top rung.
+    #
+    # Measured on E7.5_rep1's real bags at batch 256, against a padded width of 90:
+    #
+    #   consecutive order (TF-major)   mean width 68.1    1.32x
+    #   sorted by peak count           mean width  8.1   11.10x
+    #
+    # This is the same order-dependence LengthGroupedBatchSampler exists for on the
+    # training side, but inference needs none of that machinery: there is no gradient
+    # noise to keep i.i.d. and no BatchNorm reading batch statistics, so a plain global
+    # sort is both simpler and tighter than megabatch-local sorting.
+    #
+    # Safe because nothing downstream depends on row order: generate_model_predictions
+    # collects tf_idx/tg_idx per batch, maps them to names, and finishes with
+    # groupby(["Source", "Target"]).median(), which reorders anyway.
+    peak_counts = tftg_inputs_test["peak_mask"].sum(dim=1)
+    peak_sorted_order = torch.argsort(peak_counts, stable=True).tolist()
+    logging.info(
+        f"Edge order: sorted by peak count "
+        f"(min {int(peak_counts.min())}, median {int(peak_counts.median())}, "
+        f"max {int(peak_counts.max())} real peaks per edge)"
+    )
+
     # Create the PyTorch DataLoader for the test set
     num_workers = 8
     loader = DataLoader(
         dataset,
         batch_size=args.batch_size,
-        shuffle=False,
+        sampler=peak_sorted_order,
         num_workers=num_workers,
         pin_memory=True,
         persistent_workers=(num_workers > 0),
         prefetch_factor=2 if num_workers > 0 else None,
+        worker_init_fn=dataloader_worker_init,
         collate_fn=collate_tftg_edge_bags,
     )
 
@@ -1089,7 +1110,8 @@ if any(not f.exists() for f in required_output_files) or force_reload == True:
                 tf_mask_tensor,
                 tf_peak_chunk_size=args.tf_peak_chunk_size,
                 compile_model=True,
-                device=device
+                device=device,
+                model_module=tf_to_tg_module,
                 )
             attach_tf_embedding_table(tf_tg_model, tf_embeddings_device, tf_mask_device)
 
@@ -1113,7 +1135,8 @@ if any(not f.exists() for f in required_output_files) or force_reload == True:
                 tf_mask_tensor,
                 tf_peak_chunk_size=args.tf_peak_chunk_size,
                 compile_model=True,
-                device=device
+                device=device,
+                model_module=tf_to_tg_module,
             )
             attach_tf_embedding_table(cross_tf_tg_model, tf_embeddings_device, tf_mask_device)
 
