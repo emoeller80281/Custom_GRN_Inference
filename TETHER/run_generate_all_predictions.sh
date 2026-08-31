@@ -9,7 +9,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH -c 8
 #SBATCH --mem=192G
-#SBATCH --array=0
+#SBATCH --array=0-7
 
 set -eo pipefail
 
@@ -34,29 +34,12 @@ EXPERIMENT_LIST=(
 
 )
 
-# Bag geometry from the training run itself, not the script defaults:
-#   wandb argv       --max_cells_per_pair 24, --max_peaks_per_tg not passed (uncapped)
-#   training cache   max_peaks_real = 59, max_cells_per_pair = 24
-#
-# 59 (the widest bag the model ever saw) was tried first and OOMed both array tasks of
-# job 3855147 after ~45 min, in exactly the inductor-autotuning clone described below:
-# 10.91 GiB requested on top of 28.80 GiB resident, on a 31.73 GiB V100. Peak count sets
-# the widest shape bucket, so it is the effective lever; 25 cuts that dimension ~2.4x.
-#
-# Cost of 25 vs 59, measured on these samples' peak_to_gene_dist tables:
-#   KO  429 of 50,093 TGs truncated (0.9%),   4,642 peak-links dropped
-#   WT  506 of 49,617 TGs truncated (1.0%),   5,688 peak-links dropped
-# Peaks are ordered by |TSS_dist|, so what is dropped is each TG's most distant peaks.
+
 MAX_PEAKS_PER_TG=25
 MAX_CELLS_PER_PAIR=100
 
 export TORCH_ALLOW_TF32=1
 export NVIDIA_TF32_OVERRIDE=1
-
-# 3811170_0 hit a CUDA OOM inside torch._inductor's autotuning benchmark clone
-# (needed ~11GiB on top of 28.39GiB already resident) when --all_chromosomes hit
-# a shape bucket wider than usual. expandable_segments reduces the fragmentation
-# that left only 264MiB free despite 2.71GiB being reserved-but-unallocated.
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # --- Threading ---
@@ -102,6 +85,15 @@ echo "  cross_model_sample_name=$cross_model_sample_name"
 echo "[INFO] TF embedding tables      : $TF_DNA_CACHE"
 echo "[INFO] Bag geometry             : ${MAX_PEAKS_PER_TG} peaks x ${MAX_CELLS_PER_PAIR} cells"
 
+FULL_GRN_DIR="${PROJECT_DIR}/new_testing_results/full_test_grns"
+SAMPLE_FULL_GRN_FILE="${FULL_GRN_DIR}/${sample_name}_model_vs_${sample_name}_full_grn.tsv"
+CROSS_TF_TG_FILE="${FULL_GRN_DIR}/${cross_model_sample_name}_model_vs_${sample_name}_full_grn.tsv"
+if [ -f "$SAMPLE_FULL_GRN_FILE" ] && [ -f "$CROSS_TF_TG_FILE" ]; then
+    echo "[INFO] $SAMPLE_FULL_GRN_FILE and $CROSS_TF_TG_FILE already exist -- full GRN already completed. Skipping."
+    echo "[INFO] Delete the relevant file (or add --force_reload below) to force a rerun."
+    exit 0
+fi
+
 # NOTE: keep comments ABOVE this command. A comment line between backslash-continued
 # argument lines silently comments out every remaining flag -- `bash -n` still passes,
 # and the run proceeds on argparse defaults.
@@ -113,10 +105,10 @@ python ${PROJECT_DIR}/generate_all_predictions.py \
     --cross_model_cell_type "$cross_model_cell_type" \
     --cross_model_sample_name "$cross_model_sample_name" \
     --tf_dna_cache_dir "$TF_DNA_CACHE" \
-    --skip_own_model \
     --max_peaks_per_tg $MAX_PEAKS_PER_TG \
     --max_cells_per_pair $MAX_CELLS_PER_PAIR \
     --batch_size 256 \
     --tf_peak_chunk_size 1024 \
-    --all_chromosomes \
-    --force_reload
+    --all_chromosomes
+    
+    # --force_reload
