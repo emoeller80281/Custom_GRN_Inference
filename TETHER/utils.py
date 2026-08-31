@@ -1615,16 +1615,29 @@ def build_tftg_inputs(
     """
     Build one compact item per TF-TG edge.
 
+    Peak/expression data is stored compactly rather than duplicated per edge:
+      - peak_indices/peak_distance/peak_mask ARE identical across every edge sharing a TG
+        (every TF paired with a given TG sees the same peak set), so they're stored once
+        per TG and gathered via tg_idx at read time (see TFTGEdgeBagDataset.__getitem__).
+      - peak_accessibility/tf_expression/tg_expression are NOT shared across edges on the
+        same TG -- each edge draws its own independent random cell subset (see the cell
+        sampling below) -- so instead of materializing the [C, P] / [C] values here, only
+        the sampled cell column indices are stored (cell_indices), and the actual values
+        are gathered lazily from atac_mat/rna_mat at read time. Same numbers (same rng
+        draws), ~90% less storage.
+
     Output shapes:
         label:              [E]
         tf_idx:             [E]
         tg_idx:             [E]
-        peak_indices:       [E, P]
-        peak_distance:      [E, P]
-        peak_mask:          [E, P]
-        peak_accessibility: [E, C, P]
-        tf_expression:      [E, C]
-        tg_expression:      [E, C]
+        cell_indices:       [E, C]   int64 column indices into atac_mat / rna_mat
+        tg_peak_indices:    [G, P]   G = len(tg_id_to_idx); gather rows via tg_idx
+        tg_peak_distance:   [G, P]
+        tg_peak_mask:       [G, P]
+
+    Callers must also persist atac_mat/rna_mat/gene_to_rna_idx (returned by
+    prepare_tftg_lookup_tables) alongside this dict -- TFTGEdgeBagDataset needs them to
+    reconstruct peak_accessibility/tf_expression/tg_expression per item.
     """
 
     rng = np.random.default_rng(seed)
@@ -1636,12 +1649,7 @@ def build_tftg_inputs(
 
     tf_indices = []
     tg_indices = []
-    peak_indices_all = []
-    peak_access_all = []
-    peak_dist_all = []
-    peak_masks_all = []
-    tf_expr_all = []
-    tg_expr_all = []
+    cell_indices_all = []
 
     common_cells = list(common_cells)
     n_common_cells = len(common_cells)
@@ -1742,17 +1750,14 @@ def build_tftg_inputs(
             sampled_cells = common_cells_arr[sampled_positions].tolist()
             sampled_cell_indices = common_cell_rows[sampled_positions]
 
-        C = len(sampled_cell_indices)
-        P = max_peaks_real
+        # peak_accessibility/tf_expression/tg_expression are gathered lazily at
+        # Dataset.__getitem__ time from atac_mat/rna_mat via sampled_cell_indices (see the
+        # docstring) -- only the indices are kept here, not the [C, P] / [C] values
+        # themselves. `atac_mat`/`n_peaks`/`peak_rows` are unused past this point for this
+        # edge; kept in the loop above only to preserve the existing tg_bag_cache shape.
 
-        # ATAC accessibility: [C, P]. This is what np.ix_ builds internally, without
-        # re-deriving the open mesh (and the peak index array) on every edge.
-        peak_acc_matrix = np.zeros((C, P), dtype=np.float32)
-        peak_acc_matrix[:, :n_peaks] = atac_mat[
-            peak_rows[:, None], sampled_cell_indices[None, :]
-        ].T
-
-        # RNA expression: [C]
+        # RNA expression: validate the TF/TG resolve in the RNA matrix. The actual values
+        # are gathered lazily, same as accessibility above, not materialized here.
         tf_rna_idx = gene_to_rna_idx.get(tf_name)
         tg_rna_idx = gene_to_rna_idx.get(tg_name)
 
@@ -1763,16 +1768,6 @@ def build_tftg_inputs(
                 f"tf_rna_idx={tf_rna_idx}, tg_rna_idx={tg_rna_idx}"
             )
 
-        tf_expr_vals = np.asarray(
-            rna_mat[tf_rna_idx, sampled_cell_indices],
-            dtype=np.float32,
-        ).reshape(-1)
-
-        tg_expr_vals = np.asarray(
-            rna_mat[tg_rna_idx, sampled_cell_indices],
-            dtype=np.float32,
-        ).reshape(-1)
-
         # Append once per TF-TG edge
         tf_names.append(tf_name)
         tg_names.append(tg_name)
@@ -1781,18 +1776,33 @@ def build_tftg_inputs(
 
         tf_indices.append(tf_idx)
         tg_indices.append(tg_idx)
-        peak_indices_all.append(peak_indices)
-        peak_access_all.append(peak_acc_matrix)
-        peak_dist_all.append(peak_dst)
-        peak_masks_all.append(peak_mask)
-        tf_expr_all.append(tf_expr_vals)
-        tg_expr_all.append(tg_expr_vals)
+        cell_indices_all.append(sampled_cell_indices)
 
     if len(labels) == 0:
         raise ValueError(
             "No TF-TG examples were created. Check TF/TG IDs, peak-to-gene mapping, "
             "and overlap with ATAC/RNA matrices."
         )
+
+    # TG-level peak table: one row per TG in the global tg_id_to_idx universe, built from
+    # tg_bag_cache (already deduplicated per TG by the loop above -- every edge sharing a
+    # TG has the identical peak set/distances/mask). Rows for TGs that never produced an
+    # edge (tg_bag_cache[name] is None, or absent from tg_id_to_idx) are left zero-filled;
+    # no edge's tg_idx ever addresses them, so their content doesn't matter.
+    n_tg_total = len(tg_id_to_idx)
+    tg_peak_indices_arr = np.zeros((n_tg_total, max_peaks_real), dtype=np.int64)
+    tg_peak_distance_arr = np.zeros((n_tg_total, max_peaks_real), dtype=np.float32)
+    tg_peak_mask_arr = np.zeros((n_tg_total, max_peaks_real), dtype=bool)
+    for tg_name, bag in tg_bag_cache.items():
+        if bag is None:
+            continue
+        row = tg_id_to_idx.get(tg_name)
+        if row is None:
+            continue
+        peak_idx_row, peak_dst_row, peak_mask_row, _, _ = bag
+        tg_peak_indices_arr[row] = peak_idx_row
+        tg_peak_distance_arr[row] = peak_dst_row
+        tg_peak_mask_arr[row] = peak_mask_row
 
     return {
         "tf_name": tf_names,
@@ -1803,12 +1813,9 @@ def build_tftg_inputs(
 
         "tf_idx": torch.tensor(tf_indices, dtype=torch.long),
         "tg_idx": torch.tensor(tg_indices, dtype=torch.long),
+        "cell_indices": torch.tensor(np.stack(cell_indices_all), dtype=torch.long),
 
-        "peak_indices": torch.tensor(np.stack(peak_indices_all), dtype=torch.long),
-        "peak_accessibility": torch.tensor(np.stack(peak_access_all), dtype=torch.float32),
-        "peak_mask": torch.tensor(np.stack(peak_masks_all), dtype=torch.bool),
-        "peak_distance": torch.tensor(np.stack(peak_dist_all), dtype=torch.float32),
-
-        "tf_expression": torch.tensor(np.stack(tf_expr_all), dtype=torch.float32),
-        "tg_expression": torch.tensor(np.stack(tg_expr_all), dtype=torch.float32),
+        "tg_peak_indices": torch.tensor(tg_peak_indices_arr, dtype=torch.long),
+        "tg_peak_distance": torch.tensor(tg_peak_distance_arr, dtype=torch.float32),
+        "tg_peak_mask": torch.tensor(tg_peak_mask_arr, dtype=torch.bool),
     }

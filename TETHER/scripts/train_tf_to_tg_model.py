@@ -170,26 +170,37 @@ def create_new_tf_tg_regulation_model(
     return tf_tg_model
 
 
+# Keys in the cached dict indexed by TG (gather via tg_idx), not by edge -- row-filtering
+# an edge subset must never touch these; every kept edge's tg_idx still points at the same,
+# unchanged TG row. Listed explicitly rather than relying only on the length check in
+# _take_rows below, which would happen to also skip them (len(v) == n_tg != n_edges) but
+# silently, with no signal if a future reshape ever made that coincidentally untrue.
+TG_LEVEL_KEYS = {"tg_peak_indices", "tg_peak_distance", "tg_peak_mask"}
+
+
 def _take_rows(inputs, keep_idx, n_edges):
     """Select `keep_idx` rows from every per-edge entry in `inputs`.
 
     Shared by stratified_train_subsample and filter_low_positive_tfs below -- both filter
     the same dict of per-edge tensors/lists at the same point in the pipeline (after load,
-    before TFTGEdgeBagDataset construction).
+    before TFTGEdgeBagDataset construction). TG-level tables (TG_LEVEL_KEYS) pass through
+    untouched -- every kept edge's tg_idx still indexes the same TG rows.
     """
     keep_list = keep_idx.tolist() if torch.is_tensor(keep_idx) else list(keep_idx)
     keep_idx_t = keep_idx if torch.is_tensor(keep_idx) else torch.as_tensor(keep_idx)
 
-    def _take(v):
-        # Every entry in this cache is per-edge, but three of them (tf_name, tg_name,
-        # cell_ids) are plain lists and do not accept fancy indexing.
+    def _take(k, v):
+        if k in TG_LEVEL_KEYS:
+            return v
+        # Every remaining entry in this cache is per-edge, but three of them (tf_name,
+        # tg_name, cell_ids) are plain lists and do not accept fancy indexing.
         if not hasattr(v, "__len__") or len(v) != n_edges:
             return v
         if isinstance(v, list):
             return [v[i] for i in keep_list]
         return v[keep_idx_t]
 
-    return {k: _take(v) for k, v in inputs.items()}
+    return {k: _take(k, v) for k, v in inputs.items()}
 
 
 def stratified_train_subsample(train_inputs, frac, seed=0):
@@ -323,19 +334,26 @@ class TFTGEdgeBagDataset(Dataset):
         Mathematically identical, but the gather happens in device memory instead of
         across PCIe.
 
-    `resample_cells` controls where peak_accessibility/tf_expression/tg_expression come from:
+    peak_indices/peak_distance/peak_mask are stored once per TG (`inputs["tg_peak_*"]`,
+    gathered here via tg_idx), and peak_accessibility/tf_expression/tg_expression are never
+    materialized in the cache at all -- only `inputs["cell_indices"]` (the C sampled cell
+    columns for that edge) is, and the actual values are gathered here from atac_mat/rna_mat.
+    Both are therefore required unconditionally now, not just for resample_cells=True.
 
-      False (default, unchanged): read straight out of the cached tensors built by
-        build_tf_to_tg_train_data.py, i.e. the same fixed set of cells for a given edge on
-        every epoch of every run. This is what every existing checkpoint was trained under.
+    `resample_cells` controls WHICH cell columns are used:
+
+      False (default, unchanged): use the fixed `inputs["cell_indices"][idx]` columns
+        chosen once at build time by build_tf_to_tg_train_data.py, i.e. the same cells for
+        a given edge on every epoch of every run. This is what every existing checkpoint
+        was trained under, and produces bit-identical accessibility/expression values to
+        the old fully-materialized cache -- only the storage changed.
 
       True: redraw `resample_max_cells_per_pair` cell columns from the full atac_mat/rna_mat
         pseudobulk matrices on every __getitem__ call, so a given edge sees a different cell
         subset epoch to epoch (and even within an epoch, across workers). Peaks/labels/TF
-        embedding are untouched -- only which cells represent the edge changes. Requires
-        atac_mat/rna_mat/gene_to_rna_idx (see build_tf_to_tg_train_data.py
-        --build_resample_matrices_only) and clamps resample_max_cells_per_pair to the
-        available cell pool so every item has the same C (no per-item cell padding needed).
+        embedding are untouched -- only which cells represent the edge changes. Clamps
+        resample_max_cells_per_pair to the available cell pool so every item has the same C
+        (no per-item cell padding needed).
     """
 
     def __init__(
@@ -345,11 +363,11 @@ class TFTGEdgeBagDataset(Dataset):
         tf_embeddings_tensor,
         tf_mask_tensor,
         atac_peak_tensor,
+        atac_mat,
+        rna_mat,
+        gene_to_rna_idx,
         return_tf_indices=False,
         resample_cells=False,
-        atac_mat=None,
-        rna_mat=None,
-        gene_to_rna_idx=None,
         idx_to_cell=None,
         resample_max_cells_per_pair=None,
     ):
@@ -359,18 +377,23 @@ class TFTGEdgeBagDataset(Dataset):
         self.atac_peak_tensor = atac_peak_tensor
         self.return_tf_indices = return_tf_indices
 
+        # torch.as_tensor, not a bare assignment: some callers hand this a numpy array
+        # fresh out of prepare_tftg_lookup_tables (a cache-miss build), others a tensor
+        # already round-tripped through torch.load (a cache hit / the training cache).
+        # Indexing a numpy array with a length-1 torch LongTensor silently collapses to a
+        # scalar select (numpy treats it as __index__-able) instead of preserving the row
+        # as a [1, n_cells] slice the way indexing a torch tensor does -- and edges with
+        # exactly one real peak are common (this build's own log reported "min 1 real
+        # peaks per edge"). Normalizing here means _gather_cell_features never has to care
+        # which kind of array-like it was handed.
+        self.atac_mat = torch.as_tensor(atac_mat, dtype=torch.float32)
+        self.rna_mat = torch.as_tensor(rna_mat, dtype=torch.float32)
+        self.gene_to_rna_idx = gene_to_rna_idx
+        self.idx_to_cell = idx_to_cell
+
         self.resample_cells = resample_cells
         if resample_cells:
-            assert atac_mat is not None and rna_mat is not None and gene_to_rna_idx is not None, (
-                "resample_cells=True needs atac_mat, rna_mat, and gene_to_rna_idx -- build them "
-                "with `build_tf_to_tg_train_data.py --build_resample_matrices_only` if the cache "
-                "predates this option."
-            )
-            self.atac_mat = atac_mat
-            self.rna_mat = rna_mat
-            self.gene_to_rna_idx = gene_to_rna_idx
-            self.idx_to_cell = idx_to_cell
-            n_pool = atac_mat.shape[1]
+            n_pool = self.atac_mat.shape[1]
             requested = resample_max_cells_per_pair or n_pool
             self.max_cells_per_pair = min(requested, n_pool)
             if requested > n_pool:
@@ -386,26 +409,41 @@ class TFTGEdgeBagDataset(Dataset):
     def __len__(self):
         return len(self.inputs["label"])
 
-    def _resample_cell_features(self, idx, peak_indices):
+    def _gather_cell_features(self, peak_indices, peak_mask, cell_cols, tf_name, tg_name):
+        """peak_accessibility/tf_expression/tg_expression for one edge, from atac_mat/rna_mat.
+
+        Shared by the default (fixed inputs["cell_indices"]) and resample_cells (freshly
+        redrawn every call) paths -- identical computation, only the source of cell_cols
+        differs.
+        """
+        real_peak_rows = peak_indices[peak_mask]   # [n_real], long
+
+        C = cell_cols.shape[0]
+        P = peak_indices.shape[0]
+        peak_accessibility = torch.zeros(C, P, dtype=torch.float32)
+        acc_real = self.atac_mat[real_peak_rows][:, cell_cols]   # [n_real, C]
+        peak_accessibility[:, : acc_real.shape[0]] = acc_real.T
+
+        tf_rna_idx = self.gene_to_rna_idx[tf_name]
+        tg_rna_idx = self.gene_to_rna_idx[tg_name]
+        tf_expression = self.rna_mat[tf_rna_idx, cell_cols]      # [C]
+        tg_expression = self.rna_mat[tg_rna_idx, cell_cols]      # [C]
+
+        return peak_accessibility, tf_expression, tg_expression
+
+    def _resample_cell_features(self, idx, peak_indices, peak_mask):
         if self._rng is None:
             self._rng = np.random.default_rng()
-
-        real_peak_rows = peak_indices[self.inputs["peak_mask"][idx]]   # [n_real], long
 
         n_pool = self.atac_mat.shape[1]
         C = self.max_cells_per_pair
         sampled_cols = self._rng.choice(n_pool, size=C, replace=False)
-        sampled_cols_t = torch.from_numpy(sampled_cols).long()
+        cell_cols = torch.from_numpy(sampled_cols).long()
 
-        P = peak_indices.shape[0]
-        peak_accessibility = torch.zeros(C, P, dtype=torch.float32)
-        acc_real = self.atac_mat[real_peak_rows][:, sampled_cols_t]   # [n_real, C]
-        peak_accessibility[:, : acc_real.shape[0]] = acc_real.T
-
-        tf_rna_idx = self.gene_to_rna_idx[self.inputs["tf_name"][idx]]
-        tg_rna_idx = self.gene_to_rna_idx[self.inputs["tg_name"][idx]]
-        tf_expression = self.rna_mat[tf_rna_idx, sampled_cols_t]      # [C]
-        tg_expression = self.rna_mat[tg_rna_idx, sampled_cols_t]      # [C]
+        peak_accessibility, tf_expression, tg_expression = self._gather_cell_features(
+            peak_indices, peak_mask, cell_cols,
+            self.inputs["tf_name"][idx], self.inputs["tg_name"][idx],
+        )
 
         cell_ids = (
             [self.idx_to_cell[c] for c in sampled_cols.tolist()]
@@ -418,17 +456,20 @@ class TFTGEdgeBagDataset(Dataset):
         tf_idx = self.inputs["tf_idx"][idx]
         tg_idx = self.inputs["tg_idx"][idx]
 
-        peak_indices = self.inputs["peak_indices"][idx]          # [P]
+        peak_indices = self.inputs["tg_peak_indices"][tg_idx]    # [P]
+        peak_mask = self.inputs["tg_peak_mask"][tg_idx]          # [P]
         peak_sequences = self.atac_peak_tensor[peak_indices]     # [P, L, 4]
 
         if self.resample_cells:
             peak_accessibility, tf_expression, tg_expression, cell_ids = (
-                self._resample_cell_features(idx, peak_indices)
+                self._resample_cell_features(idx, peak_indices, peak_mask)
             )
         else:
-            peak_accessibility = self.inputs["peak_accessibility"][idx].float()
-            tf_expression = self.inputs["tf_expression"][idx].float()
-            tg_expression = self.inputs["tg_expression"][idx].float()
+            cell_cols = self.inputs["cell_indices"][idx]         # [C]
+            peak_accessibility, tf_expression, tg_expression = self._gather_cell_features(
+                peak_indices, peak_mask, cell_cols,
+                self.inputs["tf_name"][idx], self.inputs["tg_name"][idx],
+            )
             cell_ids = self.inputs["cell_ids"][idx]
 
         item = {
@@ -440,11 +481,11 @@ class TFTGEdgeBagDataset(Dataset):
             "tg_idx": tg_idx,
             "peak_indices": peak_indices,
             "peak_sequences": peak_sequences,
-            "peak_distance": self.inputs["peak_distance"][idx].float(),
-            "peak_mask": self.inputs["peak_mask"][idx].bool(),
-            "peak_accessibility": peak_accessibility,
-            "tf_expression": tf_expression,
-            "tg_expression": tg_expression,
+            "peak_distance": self.inputs["tg_peak_distance"][tg_idx].float(),
+            "peak_mask": peak_mask.bool(),
+            "peak_accessibility": peak_accessibility.float(),
+            "tf_expression": tf_expression.float(),
+            "tg_expression": tg_expression.float(),
         }
 
         if not self.return_tf_indices:
@@ -859,23 +900,27 @@ if __name__ == "__main__":
     tf_name_to_idx = metadata["tf_name_to_idx"]
     tg_id_to_idx = metadata["tg_id_to_idx"]
 
-    # Only loaded when requested: the full peak x cell / gene x cell matrices needed to redraw
-    # cell subsets during training instead of reusing the frozen bag baked into the cache.
+    # atac_mat/rna_mat/gene_to_rna_idx are always needed now: TFTGEdgeBagDataset gathers
+    # peak_accessibility/tf_expression/tg_expression from them via inputs["cell_indices"],
+    # regardless of --resample_cells_per_epoch (that flag only controls whether the cell
+    # columns used are the fixed ones baked into the cache, or freshly redrawn every call).
+    for p in (config.tf_tg_atac_mat_cache_path, config.tf_tg_rna_mat_cache_path):
+        if not p.exists():
+            raise FileNotFoundError(
+                f"{p} is required -- peak_accessibility/tf_expression/tg_expression are "
+                "gathered from it at read time, not stored in the edge-bag cache. Build it "
+                "with: python3 scripts/build_tf_to_tg_train_data.py "
+                "--build_resample_matrices_only (plus the same --max_peaks_per_tg etc as "
+                "the existing cache), or rebuild the whole cache."
+            )
+
+    atac_mat = torch.load(config.tf_tg_atac_mat_cache_path, weights_only=True)
+    rna_mat = torch.load(config.tf_tg_rna_mat_cache_path, weights_only=True)
+    gene_to_rna_idx = metadata["gene_to_rna_idx"]
+    dataset_kwargs = dict(atac_mat=atac_mat, rna_mat=rna_mat, gene_to_rna_idx=gene_to_rna_idx)
+
     resample_kwargs = {}
     if args.resample_cells_per_epoch:
-        for p in (config.tf_tg_atac_mat_cache_path, config.tf_tg_rna_mat_cache_path):
-            if not p.exists():
-                raise FileNotFoundError(
-                    f"--resample_cells_per_epoch needs {p}, which doesn't exist yet. Build it "
-                    "with: python3 scripts/build_tf_to_tg_train_data.py "
-                    "--build_resample_matrices_only (plus the same --max_peaks_per_tg etc as "
-                    "the existing cache)."
-                )
-
-        atac_mat = torch.load(config.tf_tg_atac_mat_cache_path, weights_only=True)
-        rna_mat = torch.load(config.tf_tg_rna_mat_cache_path, weights_only=True)
-        gene_to_rna_idx = metadata["gene_to_rna_idx"]
-
         cell_to_idx = metadata["cell_to_idx"]
         idx_to_cell = [None] * len(cell_to_idx)
         for cell_name, i in cell_to_idx.items():
@@ -889,9 +934,6 @@ if __name__ == "__main__":
 
         resample_kwargs = dict(
             resample_cells=True,
-            atac_mat=atac_mat,
-            rna_mat=rna_mat,
-            gene_to_rna_idx=gene_to_rna_idx,
             idx_to_cell=idx_to_cell,
             resample_max_cells_per_pair=max_cells_per_pair,
         )
@@ -899,12 +941,18 @@ if __name__ == "__main__":
     # Load the manifest and verify tensor shapes and dtypes match expectations
     with open(config.tf_tg_manifest_cache_path) as f:
         manifest = json.load(f)
-    
+
     log_once(json.dumps(manifest, indent=2))
 
     assert tuple(manifest["atac_peak_tensor_shape"]) == tuple(atac_peak_tensor.shape)
     assert manifest["atac_peak_tensor_dtype"] == str(atac_peak_tensor.dtype)
-    
+    assert manifest.get("tftg_format_version") == 2, (
+        f"{config.tf_tg_manifest_cache_path} predates the compact edge-bag format "
+        "(peak_accessibility/tf_expression/tg_expression are now gathered from atac_mat/"
+        "rna_mat instead of stored per-edge). Rebuild the cache with "
+        "scripts/build_tf_to_tg_train_data.py."
+    )
+
     # Re-create the datasets and dataloaders using the loaded compact inputs and lookup tensors
     # Applies to all three splits: the choice is only about where the gather happens, so
     # train/val/test must agree or the model would be fed tf_embedding in one loop and
@@ -937,6 +985,7 @@ if __name__ == "__main__":
         tf_embeddings_tensor=tf_embeddings_tensor,
         tf_mask_tensor=tf_mask_tensor,
         atac_peak_tensor=atac_peak_tensor,
+        **dataset_kwargs,
         **tf_source_kwargs,
         **resample_kwargs,
     )
@@ -946,6 +995,7 @@ if __name__ == "__main__":
         tf_embeddings_tensor=tf_embeddings_tensor,
         tf_mask_tensor=tf_mask_tensor,
         atac_peak_tensor=atac_peak_tensor,
+        **dataset_kwargs,
         **tf_source_kwargs,
     )
 
@@ -969,7 +1019,7 @@ if __name__ == "__main__":
 
     def peak_counts(inputs):
         """Real peaks per edge, in the split's own order."""
-        return inputs["peak_mask"].sum(dim=1).numpy()
+        return inputs["tg_peak_mask"][inputs["tg_idx"]].sum(dim=1).numpy()
 
     train_sampler = LengthGroupedBatchSampler(
         peak_counts(tftg_inputs_train),
@@ -1024,6 +1074,7 @@ if __name__ == "__main__":
             tf_embeddings_tensor=tf_embeddings_tensor,
             tf_mask_tensor=tf_mask_tensor,
             atac_peak_tensor=atac_peak_tensor,
+            **dataset_kwargs,
             **tf_source_kwargs,
         )
         log_once(f"Test split loaded: {len(test_dataset):,} edges")

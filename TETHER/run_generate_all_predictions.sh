@@ -109,6 +109,7 @@ python ${PROJECT_DIR}/generate_all_predictions.py \
     --max_cells_per_pair $MAX_CELLS_PER_PAIR \
     --batch_size 256 \
     --tf_peak_chunk_size 1024 \
+    --no_compile \
     --all_chromosomes
     
     # --force_reload

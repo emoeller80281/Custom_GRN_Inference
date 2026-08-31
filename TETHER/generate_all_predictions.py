@@ -531,6 +531,20 @@ def parse_arguments():
     parser.add_argument("--max_cells_per_pair", type=int, default=24, help="Max cells sampled per TF-TG pair.")
     parser.add_argument("--tf_peak_chunk_size", type=int, default=128, help="Chunk size for TF-peak pairs when running TF-DNA inference")
     parser.add_argument("--batch_size", type=int, default=512, help="Inference batch size.")
+    parser.add_argument(
+        "--no_compile",
+        action="store_true",
+        help=(
+            "Skip torch.compile for the TF-TG model. compile_model=True is otherwise "
+            "hardcoded. The edge stream is sorted by peak count and cropped to a small "
+            "ladder of widths specifically to bound recompiles to a handful, but that can "
+            "still thrash on some samples -- observed on mouse_hepatocytes/hepatocytes_1: "
+            "stuck recompiling for 5+ minutes across ~20 consecutive batches around 17%% "
+            "through the run, each costing 8-40s against a steady-state ~0.35s/it. "
+            "py-spy confirmed the process was live inside torch._inductor.compile_fx, not "
+            "GPU contention or I/O. Use this flag when that's suspected."
+        ),
+    )
 
     parser.add_argument(
         "--tf_dna_checkpoint",
@@ -834,7 +848,11 @@ def _file_stamp(path):
 
 def _dataset_fingerprint():
     parts = [
-        "v1", species, cell_type, sample_name, chrom_scope,
+        # v2: peak_accessibility/tf_expression/tg_expression are no longer materialized
+        # per-edge -- the cache now stores cell_indices + shared atac_mat/rna_mat instead
+        # and gathers lazily. Bumping this forces every v1 (pre-existing) cache to be
+        # treated as stale and rebuilt, rather than misread under the new schema.
+        "v2", species, cell_type, sample_name, chrom_scope,
         str(args.max_peaks_per_tg), str(args.max_cells_per_pair),
         str(PEAK_FLANK_SIZE), str(BUILD_SEED),
         # Inputs whose contents decide the built dataset. The genome FASTA and
@@ -886,6 +904,11 @@ if any(not f.exists() for f in required_output_files) or force_reload == True:
         # build path exactly rather than relying on the Dataset to cast.
         atac_peak_tensor = cached_dataset["atac_peak_tensor"].float()
         tftg_inputs_test = cached_dataset["tftg_inputs"]
+        # peak_accessibility/tf_expression/tg_expression aren't stored in tftg_inputs_test
+        # (see build_tftg_inputs) -- TFTGEdgeBagDataset gathers them from these at read time.
+        atac_mat = cached_dataset["atac_mat"]
+        rna_mat = cached_dataset["rna_mat"]
+        gene_to_rna_idx = cached_dataset["gene_to_rna_idx"]
 
         # The peak order must line up with atac_peak_map, since peak_indices in the
         # cached bags address rows of atac_peak_tensor by position.
@@ -971,6 +994,12 @@ if any(not f.exists() for f in required_output_files) or force_reload == True:
                     "tftg_inputs": tftg_inputs_test,
                     "atac_peak_tensor": atac_peak_tensor_u8,
                     "dataset_peaks": dataset_peaks,
+                    # peak_accessibility/tf_expression/tg_expression are gathered from
+                    # these at read time rather than materialized per edge -- see
+                    # utils.build_tftg_inputs and TFTGEdgeBagDataset.
+                    "atac_mat": torch.as_tensor(atac_mat, dtype=torch.float32),
+                    "rna_mat": torch.as_tensor(rna_mat, dtype=torch.float32),
+                    "gene_to_rna_idx": gene_to_rna_idx,
                 },
                 tmp_cache_file,
             )
@@ -1000,6 +1029,9 @@ if any(not f.exists() for f in required_output_files) or force_reload == True:
         tf_embeddings_tensor=tf_embeddings_tensor,
         tf_mask_tensor=tf_mask_tensor,
         atac_peak_tensor=atac_peak_tensor,
+        atac_mat=atac_mat,
+        rna_mat=rna_mat,
+        gene_to_rna_idx=gene_to_rna_idx,
         return_tf_indices=True,
     )
 
@@ -1025,7 +1057,7 @@ if any(not f.exists() for f in required_output_files) or force_reload == True:
     # Safe because nothing downstream depends on row order: generate_model_predictions
     # collects tf_idx/tg_idx per batch, maps them to names, and finishes with
     # groupby(["Source", "Target"]).median(), which reorders anyway.
-    peak_counts = tftg_inputs_test["peak_mask"].sum(dim=1)
+    peak_counts = tftg_inputs_test["tg_peak_mask"][tftg_inputs_test["tg_idx"]].sum(dim=1)
     peak_sorted_order = torch.argsort(peak_counts, stable=True).tolist()
     logging.info(
         f"Edge order: sorted by peak count "
@@ -1109,7 +1141,7 @@ if any(not f.exists() for f in required_output_files) or force_reload == True:
                 tf_embeddings_tensor,
                 tf_mask_tensor,
                 tf_peak_chunk_size=args.tf_peak_chunk_size,
-                compile_model=True,
+                compile_model=not args.no_compile,
                 device=device,
                 model_module=tf_to_tg_module,
                 )
@@ -1134,7 +1166,7 @@ if any(not f.exists() for f in required_output_files) or force_reload == True:
                 tf_embeddings_tensor,
                 tf_mask_tensor,
                 tf_peak_chunk_size=args.tf_peak_chunk_size,
-                compile_model=True,
+                compile_model=not args.no_compile,
                 device=device,
                 model_module=tf_to_tg_module,
             )

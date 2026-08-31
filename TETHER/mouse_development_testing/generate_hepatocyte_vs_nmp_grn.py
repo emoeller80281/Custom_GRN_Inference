@@ -123,281 +123,12 @@ def generate_atac_peak_tensor(atac_pseudobulk, species="mm10"):
     
     return atac_peak_tensor
 
-def prepare_tftg_lookup_tables(
-    peak_to_gene,
-    atac_peak_map,
-    atac_pseudobulk,
-    rna_pseudobulk_norm,
-    dataset_peaks,
-    common_cells,
-    max_precompute_peaks=None,
-):
-    valid_peak_set = set(atac_peak_map.keys())
-
-    peak_to_gene_valid = peak_to_gene[
-        peak_to_gene["peak_id"].isin(valid_peak_set)
-    ].copy()
-
-    peak_to_gene_valid["abs_dist"] = peak_to_gene_valid["TSS_dist"].abs()
-
-    tg_to_peak_info = {}
-
-    # Subset to only peaks within 100kb of the TG TSS and sort by distance
-    for tg_norm, sub in peak_to_gene_valid.groupby("target_id_norm", sort=False):
-        sub = sub[sub["abs_dist"] <= 100_000].sort_values("abs_dist")
-
-        if sub.empty:
-            continue
-
-        # Optional cap to only use the closest N peaks per TG
-        if max_precompute_peaks is not None:
-            sub = sub.head(max_precompute_peaks)
-
-        peak_ids = sub["peak_id"].tolist()
-        peak_indices = np.asarray(
-            [atac_peak_map[p] for p in peak_ids],
-            dtype=np.int64,
-        )
-        peak_distances = sub["TSS_dist"].to_numpy(dtype=np.float32)
-
-        tg_to_peak_info[tg_norm] = {
-            "peak_ids": peak_ids,
-            "peak_indices": peak_indices,
-            "peak_distances": peak_distances,
-        }
-
-    cell_to_idx = {cell: i for i, cell in enumerate(common_cells)}
-
-    atac_mat = (
-        atac_pseudobulk
-        .reindex(index=dataset_peaks, columns=common_cells)
-        .fillna(0.0)
-        .to_numpy(dtype=np.float32)
-    )
-
-    rna_mat = (
-        rna_pseudobulk_norm
-        .reindex(columns=common_cells)
-        .fillna(0.0)
-        .to_numpy(dtype=np.float32)
-    )
-
-    gene_to_rna_idx = {gene: i for i, gene in enumerate(rna_pseudobulk_norm.index)}
-
-    return tg_to_peak_info, cell_to_idx, atac_mat, rna_mat, gene_to_rna_idx
-
-def build_tftg_inputs(
-    tf_tg_df,
-    max_peaks_per_tg=None,
-    max_cells_per_pair=8,
-    seed=123,
-    silence=False,
-    *,
-    tg_to_peak_info,
-    cell_to_idx,
-    atac_mat,
-    rna_mat,
-    gene_to_rna_idx,
-    common_cells,
-    tf_name_to_idx,
-    tg_id_to_idx,
-    max_peaks_real,
-):
-    """
-    Build one compact item per TF-TG edge.
-
-    Output shapes:
-        tf_idx:             [E]
-        tg_idx:             [E]
-        peak_indices:       [E, P]
-        peak_distance:      [E, P]
-        peak_mask:          [E, P]
-        peak_accessibility: [E, C, P]
-        tf_expression:      [E, C]
-        tg_expression:      [E, C]
-    """
-
-    rng = np.random.default_rng(seed)
-
-    tf_names = []
-    tg_names = []
-    cell_ids_all = []
-
-    tf_indices = []
-    tg_indices = []
-    peak_indices_all = []
-    peak_access_all = []
-    peak_dist_all = []
-    peak_masks_all = []
-    tf_expr_all = []
-    tg_expr_all = []
-
-    common_cells = list(common_cells)
-    n_common_cells = len(common_cells)
-
-    # rng.choice() re-runs np.asarray() on its first argument every call, so passing a
-    # Python list of thousands of cell-name strings re-converted the whole list per edge:
-    # measured 417 us/edge against 8.3 us when drawing positions from an int, which was
-    # ~77% of the entire build. Draw positions and index once instead. This is the same
-    # draw, not an approximation -- Generator.choice picks positions and then indexes, so
-    # rng.choice(names, k) == names[rng.choice(len(names), k)] for a given seed (verified
-    # bit-identical over 2,000 consecutive draws).
-    common_cells_arr = np.asarray(common_cells)
-    common_cell_rows = np.asarray(
-        [cell_to_idx[c] for c in common_cells], dtype=np.int64
-    )
-    take_all_cells = max_cells_per_pair is None or max_cells_per_pair >= n_common_cells
-
-    # Per-TG padded peak bags. Every TF is paired with every TG, so without this the same
-    # three np.pad calls repeat once per TF for each TG -- another ~40 us/edge.
-    tg_bag_cache = {}
-
-    n_total = len(tf_tg_df)
-    log_every = max(1, n_total // 50)
-
-    build_started = time.time()
-
-    for i, row in enumerate(tf_tg_df.itertuples(index=False), start=1):
-        if silence == False:
-            if i == 1 or i % log_every == 0 or i == n_total:
-                # Rate and ETA
-                elapsed = time.time() - build_started
-                rate = i / elapsed if elapsed > 0 else 0.0
-                eta = (n_total - i) / rate if rate > 0 else 0.0
-                logging.info(
-                    f"Building compact TF-TG edges: {100 * i / n_total:.1f}% "
-                    f"({i:,}/{n_total:,}) at {rate:,.0f} edges/s, "
-                    f"elapsed {elapsed / 60:.1f}m, ETA {eta / 60:.1f}m"
-                )
-
-        tf_name = row.Source
-        tg_name = row.Target
-
-        tf_idx = tf_name_to_idx.get(tf_name)
-        tg_idx = tg_id_to_idx.get(tg_name)
-
-        if tf_idx is None or tg_idx is None:
-            continue
-
-        bag = tg_bag_cache.get(tg_name, 0)
-        if bag == 0:
-            peak_info = tg_to_peak_info.get(tg_name)
-            if peak_info is None:
-                tg_bag_cache[tg_name] = None
-                continue
-
-            peak_indices_real = list(peak_info["peak_indices"])
-            peak_dst_real = list(peak_info["peak_distances"])
-
-            n_peaks = len(peak_indices_real)
-            if n_peaks == 0:
-                tg_bag_cache[tg_name] = None
-                continue
-
-            peak_indices = np.asarray(peak_indices_real, dtype=np.int64)
-            peak_dst = np.asarray(peak_dst_real, dtype=np.float32)
-            peak_mask = np.ones(n_peaks, dtype=bool)
-
-            if n_peaks < max_peaks_real:
-                pad_len = max_peaks_real - n_peaks
-                peak_indices = np.pad(peak_indices, (0, pad_len), constant_values=0)
-                peak_dst = np.pad(peak_dst, (0, pad_len), constant_values=0.0)
-                peak_mask = np.pad(peak_mask, (0, pad_len), constant_values=False)
-
-            # Shared by every edge on this TG from here on, and np.stack copies them into
-            # the output, so freeze them rather than trust that nobody writes through.
-            for arr in (peak_indices, peak_dst, peak_mask):
-                arr.flags.writeable = False
-
-            bag = (peak_indices, peak_dst, peak_mask, n_peaks,
-                   np.asarray(peak_indices_real, dtype=np.int64))
-            tg_bag_cache[tg_name] = bag
-        elif bag is None:
-            continue
-
-        peak_indices, peak_dst, peak_mask, n_peaks, peak_rows = bag
-
-        # Sample cells
-        if take_all_cells:
-            sampled_cells = common_cells
-            sampled_cell_indices = common_cell_rows
-        else:
-            sampled_positions = rng.choice(
-                n_common_cells,
-                size=max_cells_per_pair,
-                replace=False,
-            )
-            sampled_cells = common_cells_arr[sampled_positions].tolist()
-            sampled_cell_indices = common_cell_rows[sampled_positions]
-
-        C = len(sampled_cell_indices)
-        P = max_peaks_real
-
-        # ATAC accessibility: [C, P]. This is what np.ix_ builds internally, without
-        # re-deriving the open mesh (and the peak index array) on every edge.
-        peak_acc_matrix = np.zeros((C, P), dtype=np.float32)
-        peak_acc_matrix[:, :n_peaks] = atac_mat[
-            peak_rows[:, None], sampled_cell_indices[None, :]
-        ].T
-
-        # RNA expression: [C]
-        tf_rna_idx = gene_to_rna_idx.get(tf_name)
-        tg_rna_idx = gene_to_rna_idx.get(tg_name)
-
-        if tf_rna_idx is None or tg_rna_idx is None:
-            raise ValueError(
-                f"TF or TG missing from RNA matrix after filtering: "
-                f"tf_name={tf_name}, tg_name={tg_name}, "
-                f"tf_rna_idx={tf_rna_idx}, tg_rna_idx={tg_rna_idx}"
-            )
-
-        tf_expr_vals = np.asarray(
-            rna_mat[tf_rna_idx, sampled_cell_indices],
-            dtype=np.float32,
-        ).reshape(-1)
-
-        tg_expr_vals = np.asarray(
-            rna_mat[tg_rna_idx, sampled_cell_indices],
-            dtype=np.float32,
-        ).reshape(-1)
-
-        # Append once per TF-TG edge
-        tf_names.append(tf_name)
-        tg_names.append(tg_name)
-        cell_ids_all.append(sampled_cells)
-
-        tf_indices.append(tf_idx)
-        tg_indices.append(tg_idx)
-        peak_indices_all.append(peak_indices)
-        peak_access_all.append(peak_acc_matrix)
-        peak_dist_all.append(peak_dst)
-        peak_masks_all.append(peak_mask)
-        tf_expr_all.append(tf_expr_vals)
-        tg_expr_all.append(tg_expr_vals)
-
-    return {
-        "tf_name": tf_names,
-        "tg_name": tg_names,
-        "cell_ids": cell_ids_all,
-
-        # No ground truth exists for this all-pairs inference set. TFTGEdgeBagDataset
-        # (shared with training/eval, where real labels matter) still expects the key,
-        # so fill it with a placeholder that is never read downstream -- predictions
-        # come from the model's output scores, not batch["label"].
-        "label": torch.zeros(len(tf_indices), dtype=torch.float32),
-
-        "tf_idx": torch.tensor(tf_indices, dtype=torch.long),
-        "tg_idx": torch.tensor(tg_indices, dtype=torch.long),
-
-        "peak_indices": torch.tensor(np.stack(peak_indices_all), dtype=torch.long),
-        "peak_accessibility": torch.tensor(np.stack(peak_access_all), dtype=torch.float32),
-        "peak_mask": torch.tensor(np.stack(peak_masks_all), dtype=torch.bool),
-        "peak_distance": torch.tensor(np.stack(peak_dist_all), dtype=torch.float32),
-
-        "tf_expression": torch.tensor(np.stack(tf_expr_all), dtype=torch.float32),
-        "tg_expression": torch.tensor(np.stack(tg_expr_all), dtype=torch.float32),
-    }
-
+# prepare_tftg_lookup_tables/build_tftg_inputs used to be duplicated here (drifted from
+# utils.py's versions -- e.g. this file's build used row.Source/row.Target and a
+# placeholder all-zero label, since there's no ground truth for the all-pairs prediction
+# universe). Now calling utils.prepare_tftg_lookup_tables/utils.build_tftg_inputs directly
+# (see the call site below) so the compact edge-bag format change lands here too instead
+# of needing a second, easily-forgotten fix.
 parser = argparse.ArgumentParser(
     description=(
         "Score TF-TG edges for a chosen mESC sample's metacells using the "
@@ -529,7 +260,7 @@ all_edge_combo_df = (
 )
 
 logging.info("Preparing TF/TG lookup tables")
-tg_to_peak_info, cell_to_idx, atac_mat, rna_mat, gene_to_rna_idx = prepare_tftg_lookup_tables(
+tg_to_peak_info, cell_to_idx, atac_mat, rna_mat, gene_to_rna_idx = utils.prepare_tftg_lookup_tables(
     peak_to_gene=peak_to_gene,
     atac_peak_map=atac_peak_map,
     atac_pseudobulk=atac_pseudobulk,
@@ -561,19 +292,29 @@ common_build_kwargs = dict(
 )
 
 tftg_inputs_path = output_dir / f"{sample_name}_NMP_lineage_tftg_inputs.pt"
-if not tftg_inputs_path.is_file():
-    tftg_inputs = build_tftg_inputs(
-        all_edge_combo_df,
+tftg_inputs = (
+    torch.load(tftg_inputs_path, weights_only=True) if tftg_inputs_path.is_file() else None
+)
+
+# Rebuild if missing, or if it predates the compact edge-bag format (peak_accessibility/
+# tf_expression/tg_expression are now gathered from atac_mat/rna_mat at read time instead
+# of stored per-edge -- see utils.build_tftg_inputs; "cell_indices" is that format's
+# signature key). Replaces the old missing-"label" patch with the same idea: don't try to
+# patch a stale cache, just rebuild it.
+if tftg_inputs is None or "cell_indices" not in tftg_inputs:
+    logging.info("Building TF-TG model inputs")
+    # utils.build_tftg_inputs expects tf_name/tg_id/label columns. No ground truth exists
+    # for this all-pairs inference universe, so label is a placeholder never read
+    # downstream -- predictions come from the model's output scores, not batch["label"].
+    edge_df = all_edge_combo_df.rename(columns={"Source": "tf_name", "Target": "tg_id"})
+    edge_df["label"] = 0.0
+
+    tftg_inputs = utils.build_tftg_inputs(
+        edge_df,
         seed=123,
         **common_build_kwargs,
     )
     torch.save(tftg_inputs, tftg_inputs_path)
-else:
-    tftg_inputs = torch.load(tftg_inputs_path, weights_only=True)
-    if "label" not in tftg_inputs:
-        # Cache predates the placeholder "label" field -- patch it in rather than
-        # forcing a rebuild of the (very large) cached tensor.
-        tftg_inputs["label"] = torch.zeros(len(tftg_inputs["tf_idx"]), dtype=torch.float32)
 logging.info("Done!")
 
 
@@ -713,6 +454,9 @@ dataset = TFTGEdgeBagDataset(
     tf_embeddings_tensor=tf_embeddings_tensor,
     tf_mask_tensor=tf_mask_tensor,
     atac_peak_tensor=atac_peak_tensor,
+    atac_mat=atac_mat,
+    rna_mat=rna_mat,
+    gene_to_rna_idx=gene_to_rna_idx,
     return_tf_indices=True,
 )
 

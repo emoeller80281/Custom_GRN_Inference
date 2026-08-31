@@ -413,10 +413,12 @@ def main():
         help=(
             "Build and cache atac_mat.pt/rna_mat.pt (the full peak x cell and gene x cell "
             "pseudobulk matrices) and then exit, skipping ground-truth-edge-bag construction. "
-            "These two files are only needed for --resample_cells_per_epoch in "
-            "train_tf_to_tg_model.py. Use this to backfill them onto a cache that already has "
-            "everything else, without repeating the slow one-hot peak encoding or edge-bag "
-            "build. Ignored (superseded by the full build) if combined with --force_reload."
+            "TFTGEdgeBagDataset requires these two files unconditionally now (it gathers "
+            "peak_accessibility/tf_expression/tg_expression from them at read time) -- "
+            "--resample_cells_per_epoch additionally redraws fresh cell columns from them "
+            "every epoch. Use this to backfill them onto a cache that already has everything "
+            "else, without repeating the slow one-hot peak encoding or edge-bag build. "
+            "Ignored (superseded by the full build) if combined with --force_reload."
         ),
     )
     args = parser.parse_args()
@@ -456,10 +458,10 @@ def main():
     train_file = config.tf_tg_train_cache_path
     val_file = config.tf_tg_val_cache_path
     test_file = config.tf_tg_test_cache_path
-    
+
     metadata_file = config.tf_tg_metadata_cache_path
     manifest_file = config.tf_tg_manifest_cache_path
-    
+
     required_cache_files = [
         tf_name_to_idx_cache_path,
         tf_embedding_cache_path,
@@ -470,15 +472,39 @@ def main():
         test_file,
         metadata_file,
         manifest_file,
+        # Required unconditionally now (not just for --resample_cells_per_epoch) --
+        # TFTGEdgeBagDataset gathers peak_accessibility/tf_expression/tg_expression from
+        # these at read time. A cache built before this existed would otherwise pass the
+        # completeness check below despite missing them.
+        config.tf_tg_atac_mat_cache_path,
+        config.tf_tg_rna_mat_cache_path,
     ]
     
+    def _manifest_is_current_format():
+        """False for a pre-existing manifest that predates the compact edge-bag format
+        (peak_accessibility/tf_expression/tg_expression gathered from atac_mat/rna_mat at
+        read time instead of stored per-edge) -- forces a rebuild instead of silently
+        trusting stale-format tftg_inputs_{train,val,test}.pt files."""
+        if not manifest_file.exists():
+            return False
+        try:
+            with open(manifest_file) as f:
+                return json.load(f).get("tftg_format_version") == 2
+        except (json.JSONDecodeError, OSError):
+            return False
+
     if (
         all(f.exists() for f in required_cache_files)
         and not args.force_reload
         and not args.build_resample_matrices_only
     ):
-        logging.info("All required cache files already exist. Skipping construction (use --force_reload to override).")
-        return
+        if _manifest_is_current_format():
+            logging.info("All required cache files already exist. Skipping construction (use --force_reload to override).")
+            return
+        logging.info(
+            f"{manifest_file} predates the compact edge-bag format -- rebuilding "
+            "(this happens once per cache)."
+        )
 
     # Load the input data for the sample
     required_input_files = [
@@ -708,16 +734,18 @@ def main():
         max_precompute_peaks=max_peaks_per_tg,
     )
 
-    # Full [n_peaks, n_cells] / [n_genes, n_cells] matrices, only needed by
-    # --resample_cells_per_epoch (train_tf_to_tg_model.py draws fresh cell columns from these
-    # every epoch instead of reusing the frozen per-edge bag below). Column order matches
-    # cell_to_idx / metadata["cell_to_idx"] exactly, since both come from this same
+    # Full [n_peaks, n_cells] / [n_genes, n_cells] matrices. Required unconditionally now:
+    # peak_accessibility/tf_expression/tg_expression are gathered from these at
+    # TFTGEdgeBagDataset.__getitem__ time via inputs["cell_indices"] rather than stored
+    # per-edge in tftg_inputs_{train,val,test}.pt (see build_tftg_inputs). Also what
+    # --resample_cells_per_epoch draws fresh cell columns from every epoch. Column order
+    # matches cell_to_idx / metadata["cell_to_idx"] exactly, since both come from this same
     # prepare_tftg_lookup_tables() call.
     atac_mat_cache_path = config.tf_tg_atac_mat_cache_path
     rna_mat_cache_path = config.tf_tg_rna_mat_cache_path
 
     if not atac_mat_cache_path.exists() or not rna_mat_cache_path.exists() or args.force_reload:
-        logging.info(f"Saving full pseudobulk matrices for --resample_cells_per_epoch to {tf_tg_input_cache_dir}")
+        logging.info(f"Saving full pseudobulk matrices to {tf_tg_input_cache_dir}")
         torch.save(torch.as_tensor(atac_mat, dtype=torch.float32), atac_mat_cache_path)
         torch.save(torch.as_tensor(rna_mat, dtype=torch.float32), rna_mat_cache_path)
 
@@ -836,6 +864,11 @@ def main():
 
     # Save a manifest to keep track of model settings and dataset versions
     manifest = {
+        # 2: peak_accessibility/tf_expression/tg_expression are gathered from atac_mat/
+        # rna_mat at read time instead of stored per-edge (see build_tftg_inputs);
+        # peak_indices/peak_distance/peak_mask are stored once per TG, not per edge.
+        # train_tf_to_tg_model.py asserts this before trusting a cache.
+        "tftg_format_version": 2,
         "split_mode": args.split_mode,
         "n_train_tfs": len(tf_split["train"]) if tf_split else None,
         "n_val_tfs": len(tf_split["val"]) if tf_split else None,
