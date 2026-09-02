@@ -15,10 +15,13 @@ jupyter_dense*.sh
 data/tf_data
 data/qc_scan
 data/sample_input_data
+data/standard_sample_input_data
+data/sample_input_data_standardized
 data/dropbox_data
 TETHER/checkpoints
 checkpoint.pt
 .pybiomart
+TETHER/new_model_debugging
 *wandb/
 *.png
 *.csv
