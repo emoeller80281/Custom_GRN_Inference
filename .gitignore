@@ -10,10 +10,13 @@ reference_networks/
 .venv/
 TETHER/cached_data/
 TETHER/cached_data_old/
+TETHER/cached_data_standardized
+TETHER/cached_data_full_pos
 jupyter_urls/
 jupyter_dense*.sh
 data/tf_data
 data/qc_scan
+data/cell_label_reference_datasets
 data/sample_input_data
 data/standard_sample_input_data
 data/sample_input_data_standardized
