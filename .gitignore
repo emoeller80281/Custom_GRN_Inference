@@ -11,6 +11,7 @@ reference_networks/
 TETHER/cached_data/
 TETHER/cached_data_old/
 TETHER/cached_data_standardized
+TETHER/cached_data_balanced
 TETHER/cached_data_full_pos
 jupyter_urls/
 jupyter_dense*.sh
