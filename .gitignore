@@ -21,11 +21,14 @@ data/cell_label_reference_datasets
 data/sample_input_data
 data/standard_sample_input_data
 data/sample_input_data_standardized
+data/sample_input_data_celltype_masked
 data/dropbox_data
+skills-lock.json
 TETHER/checkpoints
 checkpoint.pt
 .pybiomart
 TETHER/new_model_debugging
+TETHER/cell_type_specific_model_variant
 *wandb/
 *.png
 *.csv
@@ -66,6 +69,10 @@ TETHER/new_model_debugging
 *mtx.gz
 *.npy
 .code-workspace
+.claude
+TETHER/.claude
+.agents
+.pytest_cache
 
 calculate_gpu_cost.py
 

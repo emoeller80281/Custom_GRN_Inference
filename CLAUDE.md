@@ -10,3 +10,5 @@ Communicate with professional tone. keep information density high by cutting wha
 - Use normal sentences, spoken fluently, with one thought each.
 - Do not use any jargon that I have not also used in this session.
 - Apply ASD-STE100 principles to all responses.
+
+**IMPORTANT: Never run compute (python, R, or scripts) directly on the gateway node (hostname contains hgtw). Check hostname first. On the gateway, use srun or sbatch.**
