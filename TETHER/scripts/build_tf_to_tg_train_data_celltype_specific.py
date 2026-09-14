@@ -7,6 +7,7 @@ import pandas as pd
 from pathlib import Path
 import logging
 import json
+import muon as mu
 
 import torch
 import argparse
@@ -14,12 +15,13 @@ import argparse
 PROJECT_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/TETHER")
 sys.path.append(str(PROJECT_DIR))
 
+DATA_DIR = PROJECT_DIR / "data"
+
 import utils
 from utils import prepare_tftg_lookup_tables, build_tftg_inputs
 import config
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-
 
 def _format_chroms(chroms: list[str]) -> str:
     """Render a chromosome list for logging.
@@ -72,6 +74,7 @@ def split_genes_by_chromosome(
 
     return train_genes, val_genes, test_genes
 
+
 def create_train_val_test_splits(
     ground_truth_df: pd.DataFrame,
     train_genes: np.ndarray,
@@ -97,30 +100,6 @@ def create_train_val_test_splits(
     logging.info(f"Test interactions: {len(gt_test_df)}")
 
     return gt_train_df, gt_val_df, gt_test_df
-
-def load_nmp_trajectory_tfs(grn_coef_file: Path) -> set[str]:
-    """TFs the paper's NMP-trajectory GRN considered as candidate regulators.
-
-    `global_chip_GRN_coef.txt.gz` is the TF->gene regression table from
-    Argelaguet et al. 2022, fitted on the metacells of the NMP -> {spinal cord,
-    somitic mesoderm} trajectory. Every TF appearing in it survived in silico
-    ChIP-seq binding, the 50 kb peak-to-gene window, and the variance filters, so
-    it is the broadest defensible definition of "implicated in NMP differentiation".
-    Taking all of them -- not just the ones with significant betas -- keeps any TF
-    the paper evaluated on that trajectory out of training.
-    """
-    if not grn_coef_file.exists():
-        raise FileNotFoundError(
-            f"NMP GRN coefficient file not found: {grn_coef_file}. "
-            "It ships with the Argelaguet et al. 2022 download under "
-            "results/rna_atac/gene_regulatory_networks/metacells/trajectories/nmp/."
-        )
-
-    grn_df = pd.read_csv(grn_coef_file, sep="\t", usecols=["tf"])
-    nmp_tfs = set(grn_df["tf"].astype(str).str.upper().unique())
-
-    logging.info(f"Loaded {len(nmp_tfs)} NMP-trajectory TFs from {grn_coef_file.name}")
-    return nmp_tfs
 
 
 def split_ground_truth_by_tf(
@@ -289,6 +268,7 @@ def create_true_false_edges_from_full_universe(
 
     return true_edges, false_edges
 
+
 def create_labeled_tf_tg_dataset(
     true_interactions: set[tuple[str, str]],
     false_interactions: set[tuple[str, str]],
@@ -329,6 +309,7 @@ def create_labeled_tf_tg_dataset(
 
     return df.sample(frac=1.0, random_state=123).reset_index(drop=True)
 
+
 def _create_labeled_df(
     gt_df: pd.DataFrame,
     pct_true_edges: float = 0.15,
@@ -362,6 +343,9 @@ def _create_labeled_df(
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--sample_names", type=str, nargs="+", required=True)
+    parser.add_argument("--tissues", type=str, nargs="+", required=True)
+    parser.add_argument("--species", type=str, required=True, choices=["mm10", "hg38"])
     parser.add_argument("--sample_pairs", type=int, default=None)
     parser.add_argument("--max_peaks_per_tg", type=int, default=None)
     parser.add_argument("--max_cells_per_pair", type=int, default=8)
@@ -369,32 +353,6 @@ def main():
     parser.add_argument("--true_false_ratio", type=float, default=2.0)
     parser.add_argument("--peak_flank_size", type=int, default=128)  # must match 02a
     parser.add_argument("--num_cpu", type=int, default=8)
-    parser.add_argument(
-        "--split_mode",
-        choices=["chromosome", "tf"],
-        default="chromosome",
-        help=(
-            "How to partition train/val/test. 'chromosome' (default) splits on the target "
-            "gene's chromosome. 'tf' splits on the transcription factor, holding out the TFs "
-            "implicated in NMP differentiation for test."
-        ),
-    )
-    parser.add_argument(
-        "--nmp_grn_coef_file",
-        type=Path,
-        default=(
-            config.DATA_DIR / "dropbox_data" / "extracted" / "results" / "rna_atac"
-            / "gene_regulatory_networks" / "metacells" / "trajectories" / "nmp"
-            / "global_chip_GRN_coef.txt.gz"
-        ),
-        help="TF->gene coefficient table defining the NMP-trajectory TFs (--split_mode tf only)",
-    )
-    parser.add_argument(
-        "--val_tf_frac",
-        type=float,
-        default=0.15,
-        help="Fraction of non-NMP TFs held out for validation (--split_mode tf only)",
-    )
     parser.add_argument(
         "--min_positives_per_tf",
         type=int,
@@ -427,475 +385,484 @@ def main():
     # -----------------------------------
     args = parser.parse_args()
     
-    logging.info(f" === Species: {config.species}, Cell Type: {config.cell_type} ===\n")
-    
+    sample_names = args.sample_names
+    tissues = args.tissues
+    species = args.species
     max_peaks_per_tg = args.max_peaks_per_tg
     max_cells_per_pair = args.max_cells_per_pair
     pct_true_edges = args.pct_true_edges
     true_false_ratio = args.true_false_ratio
     peak_flank_size = args.peak_flank_size
     num_cpu = args.num_cpu
-        
+    
     # Only use peaks from standard chromosomes (chr1-chr19 for mm10, chr1-chr22 for hg38) to avoid issues with 
     # non-standard chromosomes and contigs
-    if config.species == "mm10":
+    if species == "mm10":
         valid_chroms = {f"chr{i}" for i in range(1, 20)}
         
         train_chroms = [str(i) for i in range(1, 16)]
         val_chroms = [ str(i) for i in range(16, 18)]
         test_chroms = [str(i) for i in range(18, 20)]
-    elif config.species == "hg38":
+        
+        gene_ref_file = DATA_DIR / "genome_data" / "genome_annotation" / "mm10" / "Mus_musculus.GRCm39.115.gtf.gz"
+        
+        
+    elif species == "hg38":
         valid_chroms = {f"chr{i}" for i in range(1, 23)}
         
         train_chroms = [str(i) for i in range(1, 18)]
         val_chroms = [str(i) for i in range(18, 20)]
         test_chroms = [str(i) for i in range(20, 23)]
-    
-    # -----------------------------------
-    # DIRECTORIES
-    # -----------------------------------
-    gene_ref_file = config.gene_ref_file
-    genome_fasta_path = config.genome_fasta_path
-    chrom_sizes_path = config.chrom_sizes_path
-   
-    assert gene_ref_file.exists(), f"Gene reference file not found: {gene_ref_file}"
-    assert genome_fasta_path.exists(), f"Genome FASTA file not found: {genome_fasta_path}"
-    assert chrom_sizes_path.exists(), f"Chromosome sizes file not found: {chrom_sizes_path}"
-    
-    input_data_dir = Path(config.sample_input_data_dir)
-    assert input_data_dir.exists(), f"Input data directory does not exist: {input_data_dir}"
-    
-    tf_tg_input_cache_dir = config.tf_tg_input_cache_dir
-    tf_tg_input_cache_dir.mkdir(parents=True, exist_ok=True)
-    
-    tf_name_to_idx_cache_path = config.tf_name_to_idx_cache_path
-    tf_embedding_cache_path = config.tf_embedding_cache_path
-    tf_mask_cache_path = config.tf_mask_cache_path
-    merged_ground_truth_path = config.merged_ground_truth_cache_path
-    
-    atac_peak_onehot_cache_path = config.tf_tg_atac_peak_cache_path
-    train_file = config.tf_tg_train_cache_path
-    val_file = config.tf_tg_val_cache_path
-    test_file = config.tf_tg_test_cache_path
-
-    metadata_file = config.tf_tg_metadata_cache_path
-    manifest_file = config.tf_tg_manifest_cache_path
-
-    required_cache_files = [
-        tf_name_to_idx_cache_path,
-        tf_embedding_cache_path,
-        tf_mask_cache_path,
-        atac_peak_onehot_cache_path,
-        train_file,
-        val_file,
-        test_file,
-        metadata_file,
-        manifest_file,
-        config.tf_tg_atac_mat_cache_path,
-        config.tf_tg_rna_mat_cache_path,
-    ]
-    
-    def _manifest_is_current_format():
-        """False for a pre-existing manifest that predates the compact edge-bag format
-        (peak_accessibility/tf_expression/tg_expression gathered from atac_mat/rna_mat at
-        read time instead of stored per-edge) -- forces a rebuild instead of silently
-        trusting stale-format tftg_inputs_{train,val,test}.pt files."""
-        if not manifest_file.exists():
-            return False
-        try:
-            with open(manifest_file) as f:
-                return json.load(f).get("tftg_format_version") == 2
-        except (json.JSONDecodeError, OSError):
-            return False
-
-    if (
-        all(f.exists() for f in required_cache_files)
-        and not args.force_reload
-        and not args.build_resample_matrices_only
-    ):
-        if _manifest_is_current_format():
-            logging.info("All required cache files already exist. Skipping construction (use --force_reload to override).")
-            return
-        logging.info(
-            f"{manifest_file} predates the compact edge-bag format -- rebuilding "
-            "(this happens once per cache)."
-        )
-
-    # -----------------------------------
-    # DATA LOADING
-    # -----------------------------------
-    # Load the input data for the sample
-    required_input_files = [
-        "RE_pseudobulk.parquet",
-        "peak_to_gene_dist.parquet",
-        "TG_pseudobulk.parquet"
-    ]
-    
-    for filename in required_input_files:
-        file_path = input_data_dir / filename
-        if not file_path.exists():
-            raise FileNotFoundError(f"Required input file not found: {file_path}")
-    
-    # Read in the ATAC and RNA pseudobulk data, and the peak-to-gene distance file
-    atac_pseudobulk = pd.read_parquet(input_data_dir / "RE_pseudobulk.parquet")
-    peak_to_gene_distance = pd.read_parquet(input_data_dir / "peak_to_gene_dist.parquet")
-    rna_pseudobulk = pd.read_parquet(input_data_dir / "TG_pseudobulk.parquet")
-    
-    logging.info(f"ATAC peaks BEFORE peak-to-gene filtering: {atac_pseudobulk.shape[0]:,}")
-    # Keep only ATAC peaks that are present in the peak-to-gene distance table
-    valid_peak_ids = set(peak_to_gene_distance["peak_id"])
-
-    atac_pseudobulk = atac_pseudobulk.loc[
-        atac_pseudobulk.index.isin(valid_peak_ids)
-    ].copy()
-    logging.info(f"ATAC peaks AFTER peak-to-gene filtering: {atac_pseudobulk.shape[0]:,}")
-    
-    rna_pseudobulk_norm = rna_pseudobulk.copy()
-    rna_pseudobulk_norm.index = rna_pseudobulk_norm.index.str.upper()
-
-    common_cells = sorted(set(rna_pseudobulk_norm.columns) & set(atac_pseudobulk.columns))
-    
-    if len(common_cells) == 0:
-        raise ValueError(
-            "No common pseudobulk cell columns between RNA and ATAC matrices."
-        )
-
-    logging.info(f"Common RNA/ATAC pseudobulk columns: {len(common_cells):,}")
         
-    peak_to_gene = peak_to_gene_distance.copy()
-    peak_to_gene["target_id_norm"] = peak_to_gene["target_id"].str.upper()
-
-    # Load and merge the ground truth files, or load from cache if already merged
-    if not merged_ground_truth_path.exists() or args.force_reload:
-        merged_ground_truth_df = utils.load_ground_truth_files(
-            config.gt_by_dataset_dict[config.cell_type]
-        )
-    else:
-        merged_ground_truth_df = pd.read_parquet(merged_ground_truth_path)
-
-    merged_ground_truth_df["Source"] = merged_ground_truth_df["Source"].str.upper()
-    merged_ground_truth_df["Target"] = merged_ground_truth_df["Target"].str.upper()
-
-    if not merged_ground_truth_path.exists() or args.force_reload:
-        merged_ground_truth_df.to_parquet(merged_ground_truth_path, index=False)
+        gene_ref_file = DATA_DIR / "genome_data" / "genome_annotation" / "hg38" / "Homo_sapiens.GRCh38.113.gtf.gz"
     
-    # -----------------------------------
-    # DATA FILTERING
-    # -----------------------------------
-    gt_tfs_in_rna = set(merged_ground_truth_df["Source"]).intersection(rna_pseudobulk_norm.index)
-    gt_tgs_in_rna = set(merged_ground_truth_df["Target"]).intersection(rna_pseudobulk_norm.index)
-    logging.info(f"Ground truth TFs in RNA pseudobulk: {len(gt_tfs_in_rna)} (Example: {list(gt_tfs_in_rna)[:5]})")
-    logging.info(f"Ground truth TGs in RNA pseudobulk: {len(gt_tgs_in_rna)} (Example: {list(gt_tgs_in_rna)[:5]})")
     
-    n_before_rna_filter = len(merged_ground_truth_df)
-
-    # Subset the ground truth to only TFs and TGs present in the rna_pseudobulk 
-    merged_ground_truth_df = merged_ground_truth_df[
-        merged_ground_truth_df["Source"].isin(gt_tfs_in_rna) &
-        merged_ground_truth_df["Target"].isin(gt_tgs_in_rna)
-    ].copy()
+    logging.info(f" === Species: {species} ===\n")
+    for sample_name, tissue in zip(sample_names, tissues):
+        logging.info(f" Building for Sample: {sample_name}, Tissue: {tissue}\n")
+            
+        # -----------------------------------
+        # DIRECTORIES
+        # -----------------------------------
+        genome_fasta_path = DATA_DIR / "genome_data" / "reference_genome" / species / f"{species}.fa"
+        chrom_sizes_path = DATA_DIR / "genome_data" / "reference_genome" / species / f"{species}.chrom.sizes"
     
-    logging.info(
-        f"Ground truth edges after RNA TF/TG filtering: "
-        f"{len(merged_ground_truth_df):,} / {n_before_rna_filter:,}"
-    )
-
-    # TF name to index mapping
-    tf_name_to_idx = pd.read_csv(tf_name_to_idx_cache_path)
-    tf_name_to_idx["tf_name"] = tf_name_to_idx["tf_name"].str.upper()
-    tf_name_to_idx = tf_name_to_idx.set_index("tf_name")["tf_idx"].to_dict()
-    
-    # ATAC peak to index mapping (only keep peaks on valid chromosomes)
-    dataset_peaks = atac_pseudobulk.index.to_list()
-    dataset_peaks = [peak for peak in dataset_peaks if peak.split(":", 1)[0] in valid_chroms]
-    atac_peak_map = {peak: idx for idx, peak in enumerate(dataset_peaks)}
-    
-    # Filter ground truth to only TFs with embeddings
-    # (i.e. were present in the TF-DNA model training data)
-    gt_tfs_in_embeddings = set(tf_name_to_idx.keys()).intersection(gt_tfs_in_rna)
-    logging.info(f"Ground truth TFs with embeddings: {len(gt_tfs_in_embeddings)} (Example: {list(gt_tfs_in_embeddings)[:5]})")
-    
-    n_before_tf_embedding_filter = len(merged_ground_truth_df)
-
-    merged_ground_truth_df = merged_ground_truth_df[
-        merged_ground_truth_df["Source"].isin(gt_tfs_in_embeddings)
-    ].copy()
-
-    logging.info(
-        f"Ground truth edges after filtering to TFs with embeddings: "
-        f"{len(merged_ground_truth_df):,} / {n_before_tf_embedding_filter:,}"
-    )
-
-    # Create a map of TG name to index for TGs present in the ground truth (and RNA pseudobulk)
-    tg_id_to_idx = {tg: idx for idx, tg in enumerate(merged_ground_truth_df["Target"].unique())}
-
-    # -----------------------------------
-    # TRAIN / VAL / TEST SPLITS
-    # -----------------------------------
-    # Split genes into train/val/test based on chromosome using the GTF reference file
-    train_genes, val_genes, test_genes = split_genes_by_chromosome(
-        gene_ref_file,
-        train_chroms=train_chroms,
-        val_chroms=val_chroms,
-        test_chroms=test_chroms
-        )
-
-    # NOTE: I NEED TO REWORK THIS SO THE LABELED DF IS CREATED BEFORE THE SPLITS
-    
-    # Subset the ground truth to create train/val/test splits based on the target gene chromosome splits
-    # (Only keeps TFs and TGs present in the ground truth and RNA pseudobulk, and only keeps TFs with embeddings)
-    gt_train_df, gt_val_df, gt_test_df = create_train_val_test_splits(
-        merged_ground_truth_df, train_genes, val_genes, test_genes
-    )
-    
-    logging.info(f"After subsetting to TFs with embeddings and TGs in RNA pseudobulk:")
-    logging.info(f"  - Train interactions: {len(gt_train_df)} (TFs: {gt_train_df['Source'].nunique()}, TGs: {gt_train_df['Target'].nunique()})")
-    logging.info(f"  - Val interactions: {len(gt_val_df)} (TFs: {gt_val_df['Source'].nunique()}, TGs: {gt_val_df['Target'].nunique()})")
-    logging.info(f"  - Test interactions: {len(gt_test_df)} (TFs: {gt_test_df['Source'].nunique()}, TGs: {gt_test_df['Target'].nunique()})")
-
-    # -----------------------------------
-    # DATA LABELING
-    # -----------------------------------
-    # Create labeled TF-TG datasets for train/val/test splits
-    # (samples true and false edges according to pct_true_edges and true_false_ratio)
-    tf_tg_labeled_train_df = _create_labeled_df(
-        gt_train_df,
-        pct_true_edges,
-        true_false_ratio,
-        seed=123,
-        tf_name_to_idx=tf_name_to_idx,
-        tg_id_to_idx=tg_id_to_idx,
-    )
-    tf_tg_labeled_val_df = _create_labeled_df(
-        gt_val_df,
-        pct_true_edges,
-        true_false_ratio,
-        seed=124,
-        tf_name_to_idx=tf_name_to_idx,
-        tg_id_to_idx=tg_id_to_idx,
-    )
-    tf_tg_labeled_test_df = _create_labeled_df(
-        gt_test_df,
-        pct_true_edges,
-        true_false_ratio,
-        seed=125,
-        tf_name_to_idx=tf_name_to_idx,
-        tg_id_to_idx=tg_id_to_idx,
-    )
-
-
-
-    # Load cached TF embeddings and masks from TF-DNA model training
-    tf_embeddings_tensor = torch.load(tf_embedding_cache_path, weights_only=True)
-    tf_mask_tensor = torch.load(tf_mask_cache_path, weights_only=True)
-
-    # -----------------------------------
-    # ATAC CENTERED PEAK ONE-HOT ENCODINGS
-    # -----------------------------------
-    # Create or load cached one-hot encodings for ATAC peaks
-    # One-hot encodings use ACGT order and uses 'flank_size' bp upstream and downstream of the peak center.    
-    if os.path.exists(atac_peak_onehot_cache_path) and not args.force_reload:
-        atac_peak_tensor = torch.load(atac_peak_onehot_cache_path, weights_only=True)
+        assert gene_ref_file.exists(), f"Gene reference file not found: {gene_ref_file}"
+        assert genome_fasta_path.exists(), f"Genome FASTA file not found: {genome_fasta_path}"
+        assert chrom_sizes_path.exists(), f"Chromosome sizes file not found: {chrom_sizes_path}"
         
-        expected_n_peaks = len(dataset_peaks)
+        input_data_dir = DATA_DIR / "sample_input_data" / tissue / sample_name
+        assert input_data_dir.exists(), f"Input data directory does not exist: {input_data_dir}"
+        
+        training_cache_dir = PROJECT_DIR / "cached_data" / species / f"{tissue}_tf_tg_cache"
+        tf_dna_input_cache_dir = PROJECT_DIR / "cached_data" / species / "tf_dna_cache"
+        tf_tg_input_cache_dir = training_cache_dir / sample_name
+    
+        tf_tg_input_cache_dir.mkdir(parents=True, exist_ok=True)
+        
+        tf_name_to_idx_cache_path = tf_dna_input_cache_dir / "tf_name_to_idx.csv"
+        tf_embedding_cache_path = tf_dna_input_cache_dir / "tf_embeddings.pt"
+        tf_mask_cache_path = tf_dna_input_cache_dir / "tf_masks.pt"
+                
+        atac_peak_onehot_cache_path = tf_tg_input_cache_dir / "atac_peak_tensor.pt"
+        train_file = tf_tg_input_cache_dir / "tftg_inputs_train.pt"
+        val_file = tf_tg_input_cache_dir / "tftg_inputs_val.pt"
+        test_file = tf_tg_input_cache_dir / "tftg_inputs_test.pt"
 
-        if atac_peak_tensor.shape[0] != expected_n_peaks:
+        metadata_file = tf_tg_input_cache_dir / "metadata.json"
+        manifest_file = tf_tg_input_cache_dir / "manifest.json"
+        
+        atac_mat_cache_path = tf_tg_input_cache_dir / "atac_mat.pt"
+        rna_mat_cache_path = tf_tg_input_cache_dir / "rna_mat.pt"
+
+        required_cache_files = [
+            tf_name_to_idx_cache_path,
+            tf_embedding_cache_path,
+            tf_mask_cache_path,
+            atac_peak_onehot_cache_path,
+            train_file,
+            val_file,
+            test_file,
+            metadata_file,
+            manifest_file,
+            atac_mat_cache_path,
+            rna_mat_cache_path,
+        ]
+        
+        cell_type_specific_gt_dir = DATA_DIR / "ground_truth_files" / "cell_type_specific"
+        
+        def _manifest_is_current_format():
+            """False for a pre-existing manifest that predates the compact edge-bag format
+            (peak_accessibility/tf_expression/tg_expression gathered from atac_mat/rna_mat at
+            read time instead of stored per-edge) -- forces a rebuild instead of silently
+            trusting stale-format tftg_inputs_{train,val,test}.pt files."""
+            if not manifest_file.exists():
+                return False
+            try:
+                with open(manifest_file) as f:
+                    return json.load(f).get("tftg_format_version") == 2
+            except (json.JSONDecodeError, OSError):
+                return False
+
+        if (
+            all(f.exists() for f in required_cache_files)
+            and not args.force_reload
+            and not args.build_resample_matrices_only
+        ):
+            if _manifest_is_current_format():
+                logging.info("All required cache files already exist. Skipping construction (use --force_reload to override).")
+                return
+            logging.info(
+                f"{manifest_file} predates the compact edge-bag format -- rebuilding "
+                "(this happens once per cache)."
+            )
+
+        # -----------------------------------
+        # DATA LOADING
+        # -----------------------------------
+        # Load the input data for the sample
+        required_input_files = [
+            "RE_pseudobulk.parquet",
+            "peak_to_gene_dist.parquet",
+            "TG_pseudobulk.parquet"
+        ]
+        
+        for filename in required_input_files:
+            file_path = input_data_dir / filename
+            if not file_path.exists():
+                raise FileNotFoundError(f"Required input file not found: {file_path}")
+        
+        mdata = mu.read(input_data_dir / f"{sample_name}_rna_atac.h5mu")
+        logging.info(f"Loaded MuData object:")
+        logging.info(f"  {mdata.n_obs:,} cells")
+        logging.info(f"  {mdata.mod['rna'].n_vars:,} genes.")
+        logging.info(f"  {mdata.mod['atac'].n_vars:,} peaks.")
+        
+        rna_adata = mdata.mod["rna"]
+        atac_adata = mdata.mod["atac"]
+        
+        # Uppercase gene names in mdata
+        rna_adata.var_names = rna_adata.var_names.str.upper()
+            
+        # Uppercase gene names in the peak-to-gene distance variable
+        atac_adata.var["nearest_gene"] = atac_adata.var["nearest_gene"].str.upper()
+        
+        # Load the cell type to ground truth map file
+        sample_gt_map_df = pd.read_csv(
+            cell_type_specific_gt_dir / f"{tissue}_cell_type_map.tsv", 
+            sep="\t", 
+            comment="#", 
+            header=0, 
+            index_col=None
+            )
+
+        
+        for cell_type in rna_adata.obs["cell_type"].unique():
+            logging.info(f"Building TF-TG training data for cell type: {cell_type}")
+            
+            cell_type_gt_files = []
+            celltype_gt_rows = sample_gt_map_df[sample_gt_map_df["dataset_cell_type"] == cell_type]
+            
+            # Ground truth file structure:
+            # ChIP-Atlas: Oth.<source_class>.05.AllAg.<source_term>.bed
+            # ReMAP: <source_term>.bed
+            celltype_gt_rows = celltype_gt_rows[["source", "source_class", "source_term"]]
+            
+
+            merged_ground_truth_df["Source"] = merged_ground_truth_df["Source"].str.upper()
+            merged_ground_truth_df["Target"] = merged_ground_truth_df["Target"].str.upper()
+
+            if not merged_ground_truth_path.exists() or args.force_reload:
+                merged_ground_truth_df.to_parquet(merged_ground_truth_path, index=False)
+            
+            # -----------------------------------
+            # DATA FILTERING
+            # -----------------------------------
+            gt_tfs_in_rna = set(merged_ground_truth_df["Source"]).intersection(rna_pseudobulk_norm.index)
+            gt_tgs_in_rna = set(merged_ground_truth_df["Target"]).intersection(rna_pseudobulk_norm.index)
+            logging.info(f"Ground truth TFs in RNA pseudobulk: {len(gt_tfs_in_rna)} (Example: {list(gt_tfs_in_rna)[:5]})")
+            logging.info(f"Ground truth TGs in RNA pseudobulk: {len(gt_tgs_in_rna)} (Example: {list(gt_tgs_in_rna)[:5]})")
+            
+            n_before_rna_filter = len(merged_ground_truth_df)
+
+            # Subset the ground truth to only TFs and TGs present in the rna_pseudobulk 
+            merged_ground_truth_df = merged_ground_truth_df[
+                merged_ground_truth_df["Source"].isin(gt_tfs_in_rna) &
+                merged_ground_truth_df["Target"].isin(gt_tgs_in_rna)
+            ].copy()
+            
+            logging.info(
+                f"Ground truth edges after RNA TF/TG filtering: "
+                f"{len(merged_ground_truth_df):,} / {n_before_rna_filter:,}"
+            )
+
+            # TF name to index mapping
+            tf_name_to_idx = pd.read_csv(tf_name_to_idx_cache_path)
+            tf_name_to_idx["tf_name"] = tf_name_to_idx["tf_name"].str.upper()
+            tf_name_to_idx = tf_name_to_idx.set_index("tf_name")["tf_idx"].to_dict()
+            
+            # ATAC peak to index mapping (only keep peaks on valid chromosomes)
+            dataset_peaks = atac_pseudobulk.index.to_list()
+            dataset_peaks = [peak for peak in dataset_peaks if peak.split(":", 1)[0] in valid_chroms]
+            atac_peak_map = {peak: idx for idx, peak in enumerate(dataset_peaks)}
+            
+            # Filter ground truth to only TFs with embeddings
+            # (i.e. were present in the TF-DNA model training data)
+            gt_tfs_in_embeddings = set(tf_name_to_idx.keys()).intersection(gt_tfs_in_rna)
+            logging.info(f"Ground truth TFs with embeddings: {len(gt_tfs_in_embeddings)} (Example: {list(gt_tfs_in_embeddings)[:5]})")
+            
+            n_before_tf_embedding_filter = len(merged_ground_truth_df)
+
+            merged_ground_truth_df = merged_ground_truth_df[
+                merged_ground_truth_df["Source"].isin(gt_tfs_in_embeddings)
+            ].copy()
+
+            logging.info(
+                f"Ground truth edges after filtering to TFs with embeddings: "
+                f"{len(merged_ground_truth_df):,} / {n_before_tf_embedding_filter:,}"
+            )
+
+            # Create a map of TG name to index for TGs present in the ground truth (and RNA pseudobulk)
+            tg_id_to_idx = {tg: idx for idx, tg in enumerate(merged_ground_truth_df["Target"].unique())}
+
+            # -----------------------------------
+            # TRAIN / VAL / TEST SPLITS
+            # -----------------------------------
+            # Split genes into train/val/test based on chromosome using the GTF reference file
+            train_genes, val_genes, test_genes = split_genes_by_chromosome(
+                gene_ref_file,
+                train_chroms=train_chroms,
+                val_chroms=val_chroms,
+                test_chroms=test_chroms
+                )
+
+            # NOTE: I NEED TO REWORK THIS SO THE LABELED DF IS CREATED BEFORE THE SPLITS
+            
+            # Subset the ground truth to create train/val/test splits based on the target gene chromosome splits
+            # (Only keeps TFs and TGs present in the ground truth and RNA pseudobulk, and only keeps TFs with embeddings)
+            gt_train_df, gt_val_df, gt_test_df = create_train_val_test_splits(
+                merged_ground_truth_df, train_genes, val_genes, test_genes
+            )
+            
+            logging.info(f"After subsetting to TFs with embeddings and TGs in RNA pseudobulk:")
+            logging.info(f"  - Train interactions: {len(gt_train_df)} (TFs: {gt_train_df['Source'].nunique()}, TGs: {gt_train_df['Target'].nunique()})")
+            logging.info(f"  - Val interactions: {len(gt_val_df)} (TFs: {gt_val_df['Source'].nunique()}, TGs: {gt_val_df['Target'].nunique()})")
+            logging.info(f"  - Test interactions: {len(gt_test_df)} (TFs: {gt_test_df['Source'].nunique()}, TGs: {gt_test_df['Target'].nunique()})")
+
+            # -----------------------------------
+            # DATA LABELING
+            # -----------------------------------
+            # Create labeled TF-TG datasets for train/val/test splits
+            # (samples true and false edges according to pct_true_edges and true_false_ratio)
+            tf_tg_labeled_train_df = _create_labeled_df(
+                gt_train_df,
+                pct_true_edges,
+                true_false_ratio,
+                seed=123,
+                tf_name_to_idx=tf_name_to_idx,
+                tg_id_to_idx=tg_id_to_idx,
+            )
+            tf_tg_labeled_val_df = _create_labeled_df(
+                gt_val_df,
+                pct_true_edges,
+                true_false_ratio,
+                seed=124,
+                tf_name_to_idx=tf_name_to_idx,
+                tg_id_to_idx=tg_id_to_idx,
+            )
+            tf_tg_labeled_test_df = _create_labeled_df(
+                gt_test_df,
+                pct_true_edges,
+                true_false_ratio,
+                seed=125,
+                tf_name_to_idx=tf_name_to_idx,
+                tg_id_to_idx=tg_id_to_idx,
+            )
+
+            # -----------------------------------
+            # ATAC PEAK CENTERED ONE-HOT ENCODINGS
+            # -----------------------------------
+            # Create or load cached one-hot encodings for ATAC peaks
+            # One-hot encodings use ACGT order and uses 'flank_size' bp upstream and downstream of the peak center.    
+            if os.path.exists(atac_peak_onehot_cache_path) and not args.force_reload:
+                atac_peak_tensor = torch.load(atac_peak_onehot_cache_path, weights_only=True)
+                
+                expected_n_peaks = len(dataset_peaks)
+
+                if atac_peak_tensor.shape[0] != expected_n_peaks:
+                    raise ValueError(
+                        f"ATAC one-hot tensor has {atac_peak_tensor.shape[0]:,} peaks, "
+                        f"but current dataset_peaks has {expected_n_peaks:,}. "
+                        "Delete the cached ATAC peak tensor or rerun with --force_reload."
+                    )
+                
+            else:
+                logging.info("Creating centered peak one-hot encodings for ATAC peaks...")
+                atac_peak_array = utils.create_centered_peak_onehot_array(
+                    peak_ids=dataset_peaks,
+                    genome_fasta=genome_fasta_path,
+                    chrom_sizes=utils.load_chrom_sizes(chrom_sizes_path),
+                    peak_id_to_idx=atac_peak_map,
+                    flank_size=peak_flank_size,
+                    dtype=np.uint8,
+                    pad_out_of_bounds=True,
+                    num_workers=num_cpu,
+                    show_progress=True,
+                    chunk_size=10000,
+                )
+                atac_peak_tensor = torch.as_tensor(atac_peak_array, dtype=torch.uint8)
+                atac_peak_tensor = atac_peak_tensor.float()
+                torch.save(atac_peak_tensor, atac_peak_onehot_cache_path)
+                
+            if atac_peak_tensor.dtype == torch.uint8:
+                atac_peak_tensor = atac_peak_tensor.float()
+                
+            # -----------------------------------
+            # PREPARE LOOKUP TABLES
+            # -----------------------------------
+            # Need to also keep track of the celltype for each cell
+            tg_to_peak_info, cell_to_idx, atac_mat, rna_mat, gene_to_rna_idx = prepare_tftg_lookup_tables(
+                peak_to_gene=peak_to_gene,
+                atac_peak_map=atac_peak_map,
+                atac_pseudobulk=atac_pseudobulk,
+                rna_pseudobulk_norm=rna_pseudobulk_norm,
+                dataset_peaks=dataset_peaks,
+                common_cells=common_cells,
+                max_precompute_peaks=max_peaks_per_tg,
+            )
+
+
+
+
+            if args.build_resample_matrices_only:
+                logging.info(
+                    "--build_resample_matrices_only set: atac_mat.pt/rna_mat.pt written, "
+                    "skipping edge-bag construction."
+                )
+                return
+
+            def _sample_df(df: pd.DataFrame, n: int | None, seed: int) -> pd.DataFrame:
+                if n is None or len(df) <= n:
+                    return df
+                return df.sample(n=n, random_state=seed)
+
+            # Optionally sample a subset of TF-TG pairs for faster testing and debugging 
+            if args.sample_pairs is not None:
+                tf_tg_labeled_train_df = _sample_df(tf_tg_labeled_train_df, n=args.sample_pairs, seed=123)
+                tf_tg_labeled_val_df = _sample_df(tf_tg_labeled_val_df, n=args.sample_pairs, seed=123)
+                tf_tg_labeled_test_df = _sample_df(tf_tg_labeled_test_df, n=args.sample_pairs, seed=123)
+            
+            # -----------------------------------
+            # BUILD TF-TG INPUT DATASETS
+            # -----------------------------------
+            # Determine the maximum number of peaks to consider across all TGs in the dataset 
+            # to ensure consistent tensor shapes
+            tf_tg_df = pd.concat([tf_tg_labeled_train_df, tf_tg_labeled_val_df, tf_tg_labeled_test_df], ignore_index=True)
+        
+        
+        
+        if tf_tg_df.empty:
             raise ValueError(
-                f"ATAC one-hot tensor has {atac_peak_tensor.shape[0]:,} peaks, "
-                f"but current dataset_peaks has {expected_n_peaks:,}. "
-                "Delete the cached ATAC peak tensor or rerun with --force_reload."
+                "No labeled TF-TG pairs were created across train/val/test. "
+                "Check RNA filtering, TF embedding filtering, chromosome splits, and ground truth overlap."
             )
         
-    else:
-        logging.info("Creating centered peak one-hot encodings for ATAC peaks...")
-        atac_peak_array = utils.create_centered_peak_onehot_array(
-            peak_ids=dataset_peaks,
-            genome_fasta=genome_fasta_path,
-            chrom_sizes=utils.load_chrom_sizes(chrom_sizes_path),
-            peak_id_to_idx=atac_peak_map,
-            flank_size=peak_flank_size,
-            dtype=np.uint8,
-            pad_out_of_bounds=True,
-            num_workers=num_cpu,
-            show_progress=True,
-            chunk_size=10000,
+        max_peaks_real = max(
+            len(tg_to_peak_info.get(tg_name, {}).get("peak_indices", []))
+            for tg_name in tf_tg_df["tg_id"]
         )
-        atac_peak_tensor = torch.as_tensor(atac_peak_array, dtype=torch.uint8)
-        atac_peak_tensor = atac_peak_tensor.float()
-        torch.save(atac_peak_tensor, atac_peak_onehot_cache_path)
         
-    if atac_peak_tensor.dtype == torch.uint8:
-        atac_peak_tensor = atac_peak_tensor.float()
-
-    # -----------------------------------
-    # PREPARE LOOKUP TABLES
-    # -----------------------------------
-    # Need to also keep track of the celltype for each cell
-    tg_to_peak_info, cell_to_idx, atac_mat, rna_mat, gene_to_rna_idx = prepare_tftg_lookup_tables(
-        peak_to_gene=peak_to_gene,
-        atac_peak_map=atac_peak_map,
-        atac_pseudobulk=atac_pseudobulk,
-        rna_pseudobulk_norm=rna_pseudobulk_norm,
-        dataset_peaks=dataset_peaks,
-        common_cells=common_cells,
-        max_precompute_peaks=max_peaks_per_tg,
-    )
-
-    # Full [n_peaks, n_cells] / [n_genes, n_cells] matrices. Required unconditionally now:
-    # peak_accessibility/tf_expression/tg_expression are gathered from these at
-    # TFTGEdgeBagDataset.__getitem__ time via inputs["cell_indices"] rather than stored
-    # per-edge in tftg_inputs_{train,val,test}.pt (see build_tftg_inputs). Also what
-    # --resample_cells_per_epoch draws fresh cell columns from every epoch. Column order
-    # matches cell_to_idx / metadata["cell_to_idx"] exactly, since both come from this same
-    # prepare_tftg_lookup_tables() call.
-    atac_mat_cache_path = config.tf_tg_atac_mat_cache_path
-    rna_mat_cache_path = config.tf_tg_rna_mat_cache_path
-
-    if not atac_mat_cache_path.exists() or not rna_mat_cache_path.exists() or args.force_reload:
-        logging.info(f"Saving full pseudobulk matrices to {tf_tg_input_cache_dir}")
-        torch.save(torch.as_tensor(atac_mat, dtype=torch.float32), atac_mat_cache_path)
-        torch.save(torch.as_tensor(rna_mat, dtype=torch.float32), rna_mat_cache_path)
-
-    if args.build_resample_matrices_only:
-        logging.info(
-            "--build_resample_matrices_only set: atac_mat.pt/rna_mat.pt written, "
-            "skipping edge-bag construction."
+        # Check that at least some TGs have peaks within 100kb, otherwise the model will have no signal to learn from
+        n_tgs_with_peaks = sum(
+            len(tg_to_peak_info.get(tg, {}).get("peak_indices", [])) > 0
+            for tg in tf_tg_df["tg_id"].unique()
         )
-        return
+        
+        logging.info(f"TGs with at least one peak within 100kb: {n_tgs_with_peaks:,} / {tf_tg_df['tg_id'].nunique():,}")
+        logging.info(f"Max peaks per TG after filtering/capping: {max_peaks_real:,}")
 
-    def _sample_df(df: pd.DataFrame, n: int | None, seed: int) -> pd.DataFrame:
-        if n is None or len(df) <= n:
-            return df
-        return df.sample(n=n, random_state=seed)
-
-    # Optionally sample a subset of TF-TG pairs for faster testing and debugging 
-    if args.sample_pairs is not None:
-        tf_tg_labeled_train_df = _sample_df(tf_tg_labeled_train_df, n=args.sample_pairs, seed=123)
-        tf_tg_labeled_val_df = _sample_df(tf_tg_labeled_val_df, n=args.sample_pairs, seed=123)
-        tf_tg_labeled_test_df = _sample_df(tf_tg_labeled_test_df, n=args.sample_pairs, seed=123)
-    
-    # -----------------------------------
-    # BUILD TF-TG INPUT DATASETS
-    # -----------------------------------
-    # Determine the maximum number of peaks to consider across all TGs in the dataset 
-    # to ensure consistent tensor shapes
-    tf_tg_df = pd.concat([tf_tg_labeled_train_df, tf_tg_labeled_val_df, tf_tg_labeled_test_df], ignore_index=True)
-    
-    if tf_tg_df.empty:
-        raise ValueError(
-            "No labeled TF-TG pairs were created across train/val/test. "
-            "Check RNA filtering, TF embedding filtering, chromosome splits, and ground truth overlap."
+        if max_peaks_real == 0:
+            raise ValueError(
+                "No labeled TGs have peaks within 100kb. Check target_id_norm/tg_id matching, "
+                "peak IDs, chromosome filtering, and TSS distance file."
+            )
+        
+        common_build_kwargs = dict(
+            max_peaks_per_tg=max_peaks_per_tg,
+            max_cells_per_pair=max_cells_per_pair,
+            tg_to_peak_info=tg_to_peak_info,
+            cell_to_idx=cell_to_idx,
+            atac_mat=atac_mat,
+            rna_mat=rna_mat,
+            gene_to_rna_idx=gene_to_rna_idx,
+            common_cells=common_cells,
+            tf_name_to_idx=tf_name_to_idx,
+            tg_id_to_idx=tg_id_to_idx,
+            max_peaks_real=max_peaks_real,
         )
-    
-    max_peaks_real = max(
-        len(tg_to_peak_info.get(tg_name, {}).get("peak_indices", []))
-        for tg_name in tf_tg_df["tg_id"]
-    )
-    
-    # Check that at least some TGs have peaks within 100kb, otherwise the model will have no signal to learn from
-    n_tgs_with_peaks = sum(
-        len(tg_to_peak_info.get(tg, {}).get("peak_indices", [])) > 0
-        for tg in tf_tg_df["tg_id"].unique()
-    )
-    
-    logging.info(f"TGs with at least one peak within 100kb: {n_tgs_with_peaks:,} / {tf_tg_df['tg_id'].nunique():,}")
-    logging.info(f"Max peaks per TG after filtering/capping: {max_peaks_real:,}")
-
-    if max_peaks_real == 0:
-        raise ValueError(
-            "No labeled TGs have peaks within 100kb. Check target_id_norm/tg_id matching, "
-            "peak IDs, chromosome filtering, and TSS distance file."
+        
+        if all(f.exists() for f in [train_file, val_file, test_file]) and not args.force_reload:
+            logging.info("Cached input files already exist. Skipping (use --force_reload to override).")
+            return
+        
+        # Build the compact TF-TG input datasets for train/val/test splits
+        logging.info("\nBuilding training inputs")
+        tftg_inputs_train = build_tftg_inputs(
+            tf_tg_labeled_train_df,
+            seed=123,
+            **common_build_kwargs,
         )
-    
-    common_build_kwargs = dict(
-        max_peaks_per_tg=max_peaks_per_tg,
-        max_cells_per_pair=max_cells_per_pair,
-        tg_to_peak_info=tg_to_peak_info,
-        cell_to_idx=cell_to_idx,
-        atac_mat=atac_mat,
-        rna_mat=rna_mat,
-        gene_to_rna_idx=gene_to_rna_idx,
-        common_cells=common_cells,
-        tf_name_to_idx=tf_name_to_idx,
-        tg_id_to_idx=tg_id_to_idx,
-        max_peaks_real=max_peaks_real,
-    )
-    
-    if all(f.exists() for f in [train_file, val_file, test_file]) and not args.force_reload:
-        logging.info("Cached input files already exist. Skipping (use --force_reload to override).")
-        return
-    
-    # Build the compact TF-TG input datasets for train/val/test splits
-    logging.info("\nBuilding training inputs")
-    tftg_inputs_train = build_tftg_inputs(
-        tf_tg_labeled_train_df,
-        seed=123,
-        **common_build_kwargs,
-    )
 
-    logging.info("\nBuilding validation inputs")
-    tftg_inputs_val = build_tftg_inputs(
-        tf_tg_labeled_val_df,
-        seed=124,
-        **common_build_kwargs,
-    )
+        logging.info("\nBuilding validation inputs")
+        tftg_inputs_val = build_tftg_inputs(
+            tf_tg_labeled_val_df,
+            seed=124,
+            **common_build_kwargs,
+        )
 
-    logging.info("\nBuilding test inputs")
-    tftg_inputs_test = build_tftg_inputs(
-        tf_tg_labeled_test_df,
-        seed=125,
-        **common_build_kwargs,
-    )
+        logging.info("\nBuilding test inputs")
+        tftg_inputs_test = build_tftg_inputs(
+            tf_tg_labeled_test_df,
+            seed=125,
+            **common_build_kwargs,
+        )
+            
+        # -----------------------------------
+        # SAVE DATA TO CACHE
+        # -----------------------------------
+        # Save compact split inputs
+        torch.save(tftg_inputs_train, train_file)
+        torch.save(tftg_inputs_val, val_file)
+        torch.save(tftg_inputs_test, test_file)
+        
+        if not atac_mat_cache_path.exists() or not rna_mat_cache_path.exists() or args.force_reload:
+            logging.info(f"Saving full pseudobulk matrices to {tf_tg_input_cache_dir}")
+            torch.save(torch.as_tensor(atac_mat, dtype=torch.float32), atac_mat_cache_path)
+            torch.save(torch.as_tensor(rna_mat, dtype=torch.float32), rna_mat_cache_path)
 
-    # -----------------------------------
-    # SAVE DATA TO CACHE
-    # -----------------------------------
-    # Save compact split inputs
-    torch.save(tftg_inputs_train, train_file)
-    torch.save(tftg_inputs_val, val_file)
-    torch.save(tftg_inputs_test, test_file)
+        # Save mapping dictionaries and metadata
+        metadata = {
+            "tf_name_to_idx": tf_name_to_idx,
+            "tg_id_to_idx": tg_id_to_idx,
+            "gene_to_rna_idx": gene_to_rna_idx,
+            "cell_to_idx": cell_to_idx,
+            "max_peaks_per_tg": max_peaks_per_tg,
+            "max_cells_per_pair": max_cells_per_pair,
+            "flank_size": peak_flank_size,
+            "peak_dtype": "uint8",
+            "max_peaks_real": max_peaks_real,
+        }
 
-    # Save mapping dictionaries and metadata
-    metadata = {
-        "tf_name_to_idx": tf_name_to_idx,
-        "tg_id_to_idx": tg_id_to_idx,
-        "gene_to_rna_idx": gene_to_rna_idx,
-        "cell_to_idx": cell_to_idx,
-        "max_peaks_per_tg": max_peaks_per_tg,
-        "max_cells_per_pair": max_cells_per_pair,
-        "flank_size": peak_flank_size,
-        "peak_dtype": "uint8",
-        "max_peaks_real": max_peaks_real,
-        "split_mode": args.split_mode,
-    }
+        with open(metadata_file, "w") as f:
+            json.dump(metadata, f, indent=4)
+        
+        # Load cached TF embeddings and masks from TF-DNA model training
+        tf_embeddings_tensor = torch.load(tf_embedding_cache_path, weights_only=True)
+        tf_mask_tensor = torch.load(tf_mask_cache_path, weights_only=True)
 
-    with open(metadata_file, "w") as f:
-        json.dump(metadata, f, indent=4)
+        # Save a manifest to keep track of model settings and dataset versions
+        manifest = {
+            # 2: peak_accessibility/tf_expression/tg_expression are gathered from atac_mat/
+            # rna_mat at read time instead of stored per-edge (see build_tftg_inputs);
+            # peak_indices/peak_distance/peak_mask are stored once per TG, not per edge.
+            # train_tf_to_tg_model.py asserts this before trusting a cache.
+            "tftg_format_version": 2,
+            "max_peaks_per_tg": max_peaks_per_tg,
+            "max_cells_per_pair": max_cells_per_pair,
+            "flank_size": peak_flank_size,
+            "atac_peak_tensor_dtype": str(atac_peak_tensor.dtype),
+            "atac_peak_tensor_shape": list(atac_peak_tensor.shape),
+            "tf_embeddings_tensor_shape": list(tf_embeddings_tensor.shape),
+            "tf_mask_tensor_shape": list(tf_mask_tensor.shape),
+            "n_train_rows": int(len(tftg_inputs_train["label"])),
+            "n_val_rows": int(len(tftg_inputs_val["label"])),
+            "n_test_rows": int(len(tftg_inputs_test["label"])),
+        }
 
-    # Save a manifest to keep track of model settings and dataset versions
-    manifest = {
-        # 2: peak_accessibility/tf_expression/tg_expression are gathered from atac_mat/
-        # rna_mat at read time instead of stored per-edge (see build_tftg_inputs);
-        # peak_indices/peak_distance/peak_mask are stored once per TG, not per edge.
-        # train_tf_to_tg_model.py asserts this before trusting a cache.
-        "tftg_format_version": 2,
-        "split_mode": args.split_mode,
-        "max_peaks_per_tg": max_peaks_per_tg,
-        "max_cells_per_pair": max_cells_per_pair,
-        "flank_size": peak_flank_size,
-        "atac_peak_tensor_dtype": str(atac_peak_tensor.dtype),
-        "atac_peak_tensor_shape": list(atac_peak_tensor.shape),
-        "tf_embeddings_tensor_shape": list(tf_embeddings_tensor.shape),
-        "tf_mask_tensor_shape": list(tf_mask_tensor.shape),
-        "n_train_rows": int(len(tftg_inputs_train["label"])),
-        "n_val_rows": int(len(tftg_inputs_val["label"])),
-        "n_test_rows": int(len(tftg_inputs_test["label"])),
-    }
+        with open(manifest_file, "w") as f:
+            json.dump(manifest, f, indent=2)
 
-    with open(manifest_file, "w") as f:
-        json.dump(manifest, f, indent=2)
-
-    logging.info(f"Wrote training data and metadata to {tf_tg_input_cache_dir}")
+        logging.info(f"Wrote training data and metadata to {tf_tg_input_cache_dir}")
 
 
 if __name__ == "__main__":
