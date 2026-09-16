@@ -1286,8 +1286,25 @@ def main():
                                  patience=args.early_stopping_patience, check_finite=True)],
         accumulate_grad_batches=args.accumulate_grad_batches,
         gradient_clip_val=args.gradient_clip_val, log_every_n_steps=10,
+        # A full step-zero validation below replaces Lightning's two-batch sanity check.
+        num_sanity_val_steps=0 if args.resume_from_checkpoint is None else 2,
         fast_dev_run=args.fast_dev_run)
     try:
+        if args.resume_from_checkpoint is None:
+            logging.info("Evaluating the untrained model on the validation set at step 0")
+            untrained_results = trainer.validate(
+                module,
+                dataloaders=loaders["val"],
+                verbose=True,
+            )
+            untrained_metrics = {
+                key: float(value)
+                for key, value in (untrained_results[0] if untrained_results else {}).items()
+            }
+            (args.output_dir / "untrained_val_metrics.json").write_text(
+                json.dumps(untrained_metrics, indent=2)
+            )
+
         trainer.fit(module, loaders["train"], loaders["val"],
                     ckpt_path=str(args.resume_from_checkpoint) if args.resume_from_checkpoint else None)
         if "test" in loaders and not args.fast_dev_run:
