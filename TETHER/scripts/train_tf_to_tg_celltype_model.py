@@ -1,8 +1,9 @@
 #!/usr/bin/env python
 """Train cell-type-specific TF->TG edge bags on one GPU (or CPU).
 
-Defaults follow the liver notebook, using every eligible edge. TF-DNA binding
-scores are cached per split and invalidated when their exact inputs change.
+Defaults follow the liver notebook, using every eligible edge. Prepared inputs,
+TF-DNA binding scores, and input scaling are reused across matching new runs and
+invalidated when their data or preprocessing configuration changes.
 Example: python scripts/train_tf_to_tg_celltype_model.py --wandb_mode offline
 
 Training-only holdouts retain their chromosome-held-out validation/test edges:
@@ -38,6 +39,120 @@ import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping, LearningRateMonitor, TQDMProgressBar
 from pytorch_lightning.loggers import WandbLogger, CSVLogger
 from models.tf_to_tg_celltype import LitTFTGRegulationModel
+
+
+PREPARED_CACHE_VERSION = 1
+
+
+def _file_identity(path):
+    """Return the inexpensive identity used to invalidate prepared-data caches."""
+    path = Path(path).resolve()
+    stat = path.stat()
+    return {
+        "path": str(path),
+        "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+    }
+
+
+def _optional_file_identity(path):
+    path = Path(path)
+    return _file_identity(path) if path.is_file() else None
+
+
+def _atomic_write_json(path, value):
+    path = Path(path)
+    temporary_path = path.with_name(f"{path.name}.tmp-{os.getpid()}")
+    temporary_path.write_text(json.dumps(value, indent=2, sort_keys=True))
+    os.replace(temporary_path, path)
+
+
+def _atomic_torch_save(value, path):
+    path = Path(path)
+    temporary_path = path.with_name(f"{path.name}.tmp-{os.getpid()}")
+    torch.save(value, temporary_path)
+    os.replace(temporary_path, path)
+
+
+def _cache_digest(value):
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha1(encoded).hexdigest()[:16]
+
+
+def build_run_cache_manifest(args, source_specs, holdout_samples, holdout_celltypes):
+    """Describe every input that can change prepared edges, binding, or scaling."""
+    data_dir = args.data_dir
+    if args.species == "mm10":
+        default_gene_ref = (
+            data_dir / "genome_data/genome_annotation/mm10" /
+            "Mus_musculus.GRCm39.115.gtf.gz"
+        )
+    else:
+        default_gene_ref = (
+            data_dir / "genome_data/genome_annotation/hg38" /
+            "Homo_sapiens.GRCh38.113.gtf.gz"
+        )
+    gene_ref = args.gene_ref_file or default_gene_ref
+    reference_dir = data_dir / "genome_data/reference_genome" / args.species
+    ground_truth_root = data_dir / "ground_truth_files/cell_type_specific"
+    tf_dna_cache = PROJECT_DIR / "cached_data" / args.species / "tf_dna_cache"
+
+    sources = []
+    for tissue, sample_name in source_specs:
+        ground_truth_dir = ground_truth_root / args.species / tissue
+        ground_truth_files = sorted(ground_truth_dir.glob("*_ground_truth.parquet"))
+        if not ground_truth_files:
+            raise FileNotFoundError(
+                f"No ground-truth parquet files found in {ground_truth_dir}"
+            )
+        sources.append({
+            "tissue": tissue,
+            "sample_name": sample_name,
+            "multiome": _file_identity(
+                data_dir / "processed" / tissue / sample_name / "multiome_processed.h5mu"
+            ),
+            "label_map": _optional_file_identity(
+                ground_truth_root / f"{tissue}_label_map.tsv"
+            ),
+            "ground_truth": [_file_identity(path) for path in ground_truth_files],
+        })
+
+    return {
+        "cache_version": PREPARED_CACHE_VERSION,
+        "species": args.species,
+        "datasets": [f"{tissue}:{sample}" for tissue, sample in source_specs],
+        "holdout_samples": sorted(":".join(spec) for spec in holdout_samples),
+        "holdout_celltypes": sorted(holdout_celltypes),
+        "settings": {
+            "seed": args.seed,
+            "max_cells_per_pair": args.max_cells_per_pair,
+            "max_peaks_per_tg": args.max_peaks_per_tg,
+            "peak_flank_size": args.peak_flank_size,
+            "true_false_ratio": args.true_false_ratio,
+            "balance_tf": args.balance_tf,
+            "balance_tg": args.balance_tg,
+            "min_cells_per_slice": args.min_cells_per_slice,
+            "min_tfs_per_slice": args.min_tfs_per_slice,
+            "max_gt_density": args.max_gt_density,
+            "scaler_edges_per_sample": (
+                min(args.scaler_edges_per_sample, args.batch_size)
+                if args.fast_dev_run else args.scaler_edges_per_sample
+            ),
+            "fast_dev_run": args.fast_dev_run,
+        },
+        "references": {
+            "gene_reference": _file_identity(gene_ref),
+            "genome_fasta": _file_identity(reference_dir / f"{args.species}.fa"),
+            "chromosome_sizes": _file_identity(
+                reference_dir / f"{args.species}.chrom.sizes"
+            ),
+            "tf_name_to_idx": _file_identity(tf_dna_cache / "tf_name_to_idx.csv"),
+            "tf_embeddings": _file_identity(tf_dna_cache / "tf_embeddings.pt"),
+            "tf_masks": _file_identity(tf_dna_cache / "tf_masks.pt"),
+            "tf_dna_checkpoint": _file_identity(args.tf_dna_checkpoint),
+        },
+        "sources": sources,
+    }
 
 
 class TwoPercentProgressBar(TQDMProgressBar):
@@ -824,6 +939,56 @@ def load_or_precompute_binding_scores(
     return scores, cache_path
 
 
+def save_prepared_cache(
+    output_dir,
+    sample_name,
+    splits,
+    cell_pools,
+    atac_peak_tensor,
+    input_manifest,
+):
+    """Publish a complete prepared source, with the manifest written last."""
+    output_dir = Path(output_dir)
+    for name, frame in splits.items():
+        edge_path = output_dir / f"edges_{name}.parquet"
+        temporary_path = edge_path.with_name(
+            f"{edge_path.name}.tmp-{os.getpid()}.parquet"
+        )
+        frame.to_parquet(temporary_path, index=False)
+        os.replace(temporary_path, edge_path)
+
+    pool_metadata = []
+    pool_arrays = {}
+    for index, ((pool_sample, cell_type), cell_indices) in enumerate(
+        sorted(cell_pools.items())
+    ):
+        array_key = f"pool_{index}"
+        pool_arrays[array_key] = np.asarray(cell_indices, dtype=np.int64)
+        pool_metadata.append({
+            "array_key": array_key,
+            "sample_id": pool_sample,
+            "cell_type": cell_type,
+        })
+    cell_pools_path = output_dir / "cell_pools.npz"
+    temporary_pool_path = cell_pools_path.with_name(
+        f"{cell_pools_path.name}.tmp-{os.getpid()}.npz"
+    )
+    np.savez_compressed(temporary_pool_path, **pool_arrays)
+    os.replace(temporary_pool_path, cell_pools_path)
+
+    peak_path = output_dir / "prepared" / sample_name / "atac_peak_tensor.pt"
+    _atomic_torch_save(atac_peak_tensor, peak_path)
+    _atomic_write_json(output_dir / "prepared_manifest.json", {
+        "inputs": input_manifest,
+        "outputs": {
+            "splits": list(splits),
+            "cell_pools": pool_metadata,
+            "atac_peak_tensor_shape": list(atac_peak_tensor.shape),
+            "atac_peak_tensor_dtype": str(atac_peak_tensor.dtype),
+        },
+    })
+
+
 def prepare_data(args):
     import muon as mu
     import utils
@@ -858,13 +1023,6 @@ def prepare_data(args):
 
     if args.gene_ref_file is not None:
         gene_ref_file = args.gene_ref_file
-    # Split genes into train/val/test based on chromosome using the GTF reference file
-    train_genes, val_genes, test_genes = split_genes_by_chromosome(
-        gene_ref_file,
-        train_chroms=train_chroms,
-        val_chroms=val_chroms,
-        test_chroms=test_chroms
-        )
     logging.info(f" Building for Sample: {sample_name}, Tissue: {tissue}\n")
     
     genome_fasta_path = DATA_DIR / "genome_data" / "reference_genome" / species / f"{species}.fa"
@@ -888,6 +1046,8 @@ def prepare_data(args):
     tf_mask_cache_path = tf_dna_input_cache_dir / "tf_masks.pt"
         
     atac_peak_onehot_cache_path = tf_tg_input_cache_dir / "atac_peak_tensor.pt"
+    prepared_manifest_path = args.output_dir / "prepared_manifest.json"
+    cell_pools_cache_path = args.output_dir / "cell_pools.npz"
 
 
     cell_type_specific_gt_dir = DATA_DIR / "ground_truth_files" / "cell_type_specific"
@@ -966,6 +1126,80 @@ def prepare_data(args):
     print("ATAC:", atac_mat.shape)
     print("Sequence peaks:", len(dataset_peaks))
     print("Annotated cell types:", rna_sample.obs["celltype"].nunique())
+
+    if prepared_manifest_path.is_file():
+        try:
+            cached_manifest = json.loads(prepared_manifest_path.read_text())
+            if cached_manifest.get("inputs") == args.prepared_cache_manifest:
+                split_names = cached_manifest["outputs"]["splits"]
+                if not {"train", "val"}.issubset(split_names):
+                    raise ValueError("cached splits do not include train and validation")
+                if not set(split_names).issubset({"train", "val", "test"}):
+                    raise ValueError(f"unknown cached split names: {split_names}")
+                splits = {
+                    name: pd.read_parquet(args.output_dir / f"edges_{name}.parquet")
+                    for name in split_names
+                }
+                atac_peak_tensor = torch.load(
+                    atac_peak_onehot_cache_path,
+                    map_location="cpu",
+                    weights_only=True,
+                )
+                expected_peak_shape = (len(dataset_peaks), 2 * peak_flank_size, 4)
+                if (tuple(atac_peak_tensor.shape) != expected_peak_shape
+                        or atac_peak_tensor.dtype != torch.uint8):
+                    raise ValueError(
+                        f"cached ATAC peak tensor is {tuple(atac_peak_tensor.shape)} "
+                        f"{atac_peak_tensor.dtype}; expected {expected_peak_shape} torch.uint8"
+                    )
+
+                cell_pools = {}
+                with np.load(cell_pools_cache_path, allow_pickle=False) as pool_archive:
+                    for pool in cached_manifest["outputs"]["cell_pools"]:
+                        indices = pool_archive[pool["array_key"]].astype(
+                            np.int64, copy=False
+                        )
+                        if indices.size and (
+                            indices.min() < 0 or indices.max() >= rna_mat.shape[0]
+                        ):
+                            raise ValueError(
+                                f"cached cell pool {pool['cell_type']} is out of bounds"
+                            )
+                        cell_pools[(pool["sample_id"], pool["cell_type"])] = indices
+
+                cached_celltypes = {
+                    (sample_name, cell_type)
+                    for frame in splits.values()
+                    for cell_type in frame["cell_type"].unique()
+                }
+                if not cached_celltypes.issubset(cell_pools):
+                    raise ValueError("cached edges reference a missing cell pool")
+
+                logging.info(
+                    "%s:%s loaded prepared inputs from %s",
+                    tissue, sample_name, args.output_dir,
+                )
+                return (
+                    splits, cell_pools, atac_mat, rna_mat, atac_peak_tensor,
+                    tf_embedding_cache_path, tf_mask_cache_path,
+                )
+            logging.info(
+                "%s:%s prepared cache manifest changed; rebuilding",
+                tissue, sample_name,
+            )
+        except Exception as error:
+            logging.warning(
+                "%s:%s could not load prepared cache from %s (%s); rebuilding",
+                tissue, sample_name, args.output_dir, error,
+            )
+
+    # The GTF and ground-truth files are only needed on a prepared-cache miss.
+    train_genes, val_genes, test_genes = split_genes_by_chromosome(
+        gene_ref_file,
+        train_chroms=train_chroms,
+        val_chroms=val_chroms,
+        test_chroms=test_chroms,
+    )
 
     # -----------------------------------
     # SAMPLE-LEVEL TF TABLES
@@ -1081,7 +1315,6 @@ def prepare_data(args):
         chunk_size=10000,
     )
     atac_peak_tensor = torch.as_tensor(atac_peak_array, dtype=torch.uint8)
-    torch.save(atac_peak_tensor, atac_peak_onehot_cache_path)
 
     assert atac_mat.shape[1] == len(dataset_peaks)
     assert atac_peak_tensor.shape[0] == len(dataset_peaks)
@@ -1230,8 +1463,19 @@ def prepare_data(args):
 
     if gt_train_df["peak_atac_cols"].map(len).max() == 0:
         raise ValueError("No training TGs have candidate peaks")
-    for name, frame in splits.items():
-        frame.to_parquet(args.output_dir / f"edges_{name}.parquet", index=False)
+
+    save_prepared_cache(
+        args.output_dir,
+        sample_name,
+        splits,
+        cell_pools,
+        atac_peak_tensor,
+        args.prepared_cache_manifest,
+    )
+    logging.info(
+        "%s:%s saved prepared inputs to %s",
+        tissue, sample_name, args.output_dir,
+    )
     return splits, cell_pools, atac_mat, rna_mat, atac_peak_tensor, tf_embedding_cache_path, tf_mask_cache_path
 
 
@@ -1262,6 +1506,13 @@ def parse_args():
     parser.add_argument("--tf_dna_checkpoint", type=Path,
                         help="Required for hg38; defaults to the notebook checkpoint for mm10")
     parser.add_argument("--output_dir", type=Path)
+    parser.add_argument(
+        "--cache_dir",
+        type=Path,
+        help=("Exact directory for reusable prepared inputs, binding scores, and "
+              "input scaling. By default, a stable directory is selected from "
+              "the data and preprocessing configuration."),
+    )
     parser.add_argument("--resume_from_checkpoint", type=Path)
     parser.add_argument("--job_id", default=os.environ.get("SLURM_JOB_ID", "local"))
     parser.add_argument("--epochs", type=int, default=250)
@@ -1368,8 +1619,6 @@ def main():
         raise ValueError("This launcher supports one process and one GPU per run")
     pl.seed_everything(args.seed, workers=True)
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    config = {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()}
-    (args.output_dir / "run_config.json").write_text(json.dumps(config, indent=2))
     dataset_values = args.dataset or [f"{args.tissue}:{args.sample_name}"]
     source_specs = [tuple(value.split(":", 1)) for value in dataset_values]
     if len(set(source_specs)) != len(source_specs):
@@ -1385,15 +1634,44 @@ def main():
         )
     holdout_celltypes = set(args.holdout_celltype)
 
+    cache_manifest = build_run_cache_manifest(
+        args, source_specs, holdout_samples, holdout_celltypes,
+    )
+    cache_key = _cache_digest(cache_manifest)
+    if args.cache_dir is None:
+        args.cache_dir = (
+            PROJECT_DIR / "cached_data" / args.species /
+            "celltype_tf_tg" / cache_key
+        )
+    args.cache_dir.mkdir(parents=True, exist_ok=True)
+    run_cache_manifest_path = args.cache_dir / "cache_manifest.json"
+    if run_cache_manifest_path.is_file():
+        existing_cache_manifest = json.loads(run_cache_manifest_path.read_text())
+        if existing_cache_manifest != cache_manifest:
+            raise ValueError(
+                f"Cache directory belongs to a different data configuration: "
+                f"{args.cache_dir}. Choose another --cache_dir or remove the override."
+            )
+    else:
+        _atomic_write_json(run_cache_manifest_path, cache_manifest)
+    logging.info("Prepared-data cache: %s (key %s)", args.cache_dir, cache_key)
+
+    config = {
+        key: str(value) if isinstance(value, Path) else value
+        for key, value in vars(args).items()
+    }
+    config["cache_key"] = cache_key
+    _atomic_write_json(args.output_dir / "run_config.json", config)
+
     prepared_sources = []
     for tissue, sample_name in source_specs:
         source_args = copy.copy(args)
         source_args.tissue = tissue
         source_args.sample_name = sample_name
         source_args.output_dir = (
-            args.output_dir if len(source_specs) == 1 else
-            args.output_dir / "prepared_sources" / f"{tissue}__{sample_name}"
+            args.cache_dir / "prepared_sources" / f"{tissue}__{sample_name}"
         )
+        source_args.prepared_cache_manifest = cache_manifest
         source_args.output_dir.mkdir(parents=True, exist_ok=True)
         prepared = prepare_data(source_args)
         prepared_sources.append({
@@ -1542,8 +1820,8 @@ def main():
         for split_name, parts in dataset_parts.items() if parts
     }
 
-    scaler_path = args.output_dir / "input_scaler.json"
-    scaler_manifest_path = args.output_dir / "input_scaler_manifest.json"
+    scaler_path = args.cache_dir / "input_scaler.json"
+    scaler_manifest_path = args.cache_dir / "input_scaler_manifest.json"
     scaler_manifest = {
         "datasets": [f"{tissue}:{sample}" for tissue, sample in source_specs],
         "scaler_train_datasets": scaler_train_sources,
@@ -1555,6 +1833,8 @@ def main():
             if args.fast_dev_run else args.scaler_edges_per_sample
         ),
         "seed": args.seed,
+        "cache_key": cache_key,
+        "max_cells_per_pair": args.max_cells_per_pair,
         "input_space": "per_sample_depth_normalized_log1p_X",
     }
     cached_manifest = (
@@ -1578,12 +1858,13 @@ def main():
             drop_last=False,
         )
         input_scaler = validate_input_scaler(fit_shared_input_scaler(scaler_loader))
-        scaler_path.write_text(json.dumps(input_scaler, indent=2))
-        scaler_manifest_path.write_text(json.dumps(scaler_manifest, indent=2))
+        _atomic_write_json(scaler_path, input_scaler)
+        _atomic_write_json(scaler_manifest_path, scaler_manifest)
         logging.info("Saved shared input scaling to %s", scaler_path)
     config["input_scaler"] = input_scaler
+    config["input_scaler_path"] = str(scaler_path)
 
-    (args.output_dir / "run_config.json").write_text(json.dumps(config, indent=2))
+    _atomic_write_json(args.output_dir / "run_config.json", config)
     train_sampler = (
         make_sample_balanced_sampler(dataset_parts["train"], args.seed)
         if args.balance_samples else None
@@ -1599,6 +1880,7 @@ def main():
             num_workers=args.num_workers,
             persistent_workers=args.num_workers > 0,
             pin_memory=use_cuda,
+            prefetch_factor=4 if args.num_workers > 0 else None,
             drop_last=False,
         )
 
@@ -1614,11 +1896,49 @@ def main():
     if args.wandb_mode == "disabled":
         logger = CSVLogger(str(args.output_dir), name="metrics")
     else:
+        import wandb
         logger = WandbLogger(
-            project=args.wandb_project, entity=args.wandb_entity, name=args.run_name,
-            save_dir=str(args.output_dir), offline=args.wandb_mode == "offline",
-            id=args.wandb_run_id, resume="allow" if args.wandb_run_id else None,
-            log_model=False)
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            name=args.run_name,
+            save_dir=str(args.output_dir),
+            offline=args.wandb_mode == "offline",
+            id=args.wandb_run_id,
+            resume="allow" if args.wandb_run_id else None,
+            log_model=False,
+            save_code=True,
+        )
+
+        prepared_sources_dir = args.cache_dir / "prepared_sources"
+        if not prepared_sources_dir.is_dir():
+            raise FileNotFoundError(
+                f"Prepared sources directory does not exist: {prepared_sources_dir}"
+            )
+
+        run = logger.experiment
+
+        artifact = wandb.Artifact(
+            name="prepared-sources",
+            type="dataset",
+            description="Prepared cell-type TF–TG training sources",
+            metadata={
+                "run_id": run.id,
+                "species": args.species,
+                "cache_key": cache_key,
+                "max_cells_per_pair": args.max_cells_per_pair,
+                "max_peaks_per_tg": args.max_peaks_per_tg,
+            },
+        )
+        artifact.add_dir(
+            str(prepared_sources_dir),
+            name="prepared_sources",
+        )
+
+        run.log_artifact(
+            artifact,
+            aliases=["latest", f"run-{run.id}"],
+        )
+
     logger.log_hyperparams(config)
     checkpoint = ModelCheckpoint(
         dirpath=args.output_dir / "checkpoints", filename="epoch-{epoch:03d}",
