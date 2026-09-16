@@ -314,6 +314,7 @@ def create_centered_peak_onehot_array(
     show_progress: bool = True,
     num_workers: int = 1,
     chunk_size: int = 1000,
+    progress_miniters: int | None = None,
 ):
     """
     Create a stacked one-hot encoded DNA array using an existing peak_id_to_idx map.
@@ -341,6 +342,8 @@ def create_centered_peak_onehot_array(
         Number of worker processes to use. Use 1 to run serially.
     chunk_size : int
         Number of peaks per worker task when num_workers > 1.
+    progress_miniters : int or None
+        Minimum completed peaks between progress updates. None keeps the default.
 
     Returns
     -------
@@ -382,7 +385,9 @@ def create_centered_peak_onehot_array(
         desc="One-hot peaks",
         disable=not show_progress,
         dynamic_ncols=True,
-        miniters=max(num_encoded_peaks // 1000, 1),
+        miniters=(max(num_encoded_peaks // 1000, 1)
+                  if progress_miniters is None else max(progress_miniters, 1)),
+        maxinterval=10.0 if progress_miniters is None else float("inf"),
     )
 
     if num_workers <= 1:

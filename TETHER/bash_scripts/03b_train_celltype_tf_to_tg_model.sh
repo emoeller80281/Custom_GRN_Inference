@@ -1,0 +1,43 @@
+#!/bin/bash -l
+#SBATCH --job-name=celltype_tf_tg
+#SBATCH --output=LOGS/celltype_tf_tg_%j.log
+#SBATCH --error=LOGS/celltype_tf_tg_%j.err
+#SBATCH --time=72:00:00
+#SBATCH --partition=dense
+#SBATCH --nodes=1
+#SBATCH --gres=gpu:a100:1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=64G
+#SBATCH --signal=SIGUSR1@90
+
+# Submit from the repository root (which contains LOGS):
+# sbatch TETHER/bash_scripts/03b_train_celltype_tf_to_tg_model.sh
+# Extra CLI arguments override the defaults below.
+set -eo pipefail
+PROJECT_DIR="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/TETHER"
+cd "$PROJECT_DIR"
+source activate my_env
+set -u
+export PYTHONUNBUFFERED=1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+
+srun python -u scripts/train_tf_to_tg_celltype_model.py \
+    --species mm10 \
+    --tissue mouse_liver \
+    --sample_name liver_sample \
+    --epochs 250 \
+    --accelerator gpu \
+    --batch_size 64 \
+    --max_cells_per_pair 64 \
+    --max_peaks_per_tg 25 \
+    --binding_chunk_size 128 \
+    --num_workers "${SLURM_CPUS_PER_TASK:-4}" \
+    --job_id "${SLURM_JOB_ID:-local}" \
+    --precision 32-true \
+    --wandb_project celltype-TF-TG \
+    "$@"

@@ -30,30 +30,15 @@ class TFTGRegulationModel(nn.Module):
 
         self.tf_peak_model = pretrained_tf_peak_model
         self.tf_peak_chunk_size = tf_peak_chunk_size
-        # Width of the TF-DNA submodule's pre-final-Linear hidden activation (its
-        # classifier's hidden_dim // 2), requested via forward(..., return_hidden=True)
-        # and used in place of a collapsed scalar binding logit -- see peak_feature_proj
-        # below and section 2b of forward(). Fixed at construction time because
-        # nn.Linear needs its input width statically; cannot be inferred at runtime from
-        # a (possibly torch.compile-wrapped) submodule.
         self.tf_binding_hidden_dim = tf_binding_hidden_dim
 
-        # Optional device-resident TF embedding table, populated by
-        # set_tf_embedding_table(). Registered non-persistent so it never enters
-        # state_dict -- checkpoints keep exactly the keys they already have, and
-        # load_state_dict(strict=True) is unaffected in both directions.
         self.register_buffer("tf_embedding_table", None, persistent=False)
         self.register_buffer("tf_mask_table", None, persistent=False)
-        # Real (unpadded) protein length per TF, used to crop chunks -- see forward().
         self.register_buffer("tf_length_table", None, persistent=False)
 
-        # See train() below. Default False preserves the behaviour every existing
-        # checkpoint was trained under.
         self.keep_tf_peak_model_in_eval = keep_tf_peak_model_in_eval
 
         self.peak_feature_proj = nn.Sequential(
-            # TF-DNA fused hidden embedding (replaces the collapsed sigmoid(logit)
-            # binding scalar) + accessibility, distance_scaled, distance_weight.
             nn.Linear(tf_binding_hidden_dim + 3, d_model),
             nn.SiLU(),
             nn.Dropout(dropout),
@@ -72,12 +57,6 @@ class TFTGRegulationModel(nn.Module):
             nn.Linear(d_model, d_model),
         )
 
-        # Projects the edge-level TF/TG cross-cell expression correlation (a single
-        # scalar per edge, computed in forward() before any per-cell reshape -- see
-        # section 4b) into a token broadcast to every cell's classifier input. This is
-        # the only place in the model that lets a cell's score be informed by what the
-        # OTHER sampled cells for the same edge look like; peak_attention and the
-        # classifier both operate row-independently over E*C otherwise.
         self.corr_proj = nn.Sequential(
             nn.Linear(1, d_model),
             nn.SiLU(),
@@ -147,26 +126,6 @@ class TFTGRegulationModel(nn.Module):
             raise ValueError(f"Unknown pooling mode: {mode}")
 
     def train(self, mode: bool = True):
-        """Standard train()/eval(), except the frozen TF-DNA submodule can be pinned.
-
-        nn.Module.train() recurses, so Lightning calling .train() each epoch flips the
-        pretrained TF-DNA model into train mode even though its parameters have
-        requires_grad=False and it is only ever called under no_grad. Freezing the
-        weights does not freeze the *mode*: its three BatchNorm1d layers then normalise
-        by batch statistics over whatever (TF, peak) pairs happen to share a chunk, and
-        keep overwriting their own running_mean/running_var.
-
-        Measured on the real mm10 checkpoint, that is not a rounding difference --
-        eval-mode and train-mode binding logits differ by mean 1.14 (logit sd 6.13),
-        2.1% of pairs cross the 0.5 probability boundary, and the running means drift
-        1.7-12.6% over 200 batches. It also means the TF-TG model trains against batch
-        statistics and is then evaluated against running statistics.
-
-        Pinning eval fixes that inconsistency and makes the padding-skip/crop fast path
-        legal during training (measured 1822 -> 311 ms/step), but it changes what a newly
-        trained model sees, so it is opt-in: every existing checkpoint was trained with
-        this False.
-        """
         super().train(mode)
         if self.keep_tf_peak_model_in_eval:
             self.tf_peak_model.eval()
@@ -343,27 +302,9 @@ class TFTGRegulationModel(nn.Module):
         if chunk_size is None or chunk_size <= 0:
             chunk_size = E * P
 
-        # Every edge is padded out to max_peaks_real, which is set by the single TG with
-        # the most nearby peaks, so most slots in a batch are padding -- typically 60-75%
-        # of them. Binding for padded slots is thrown away by the masked_fill below, so
-        # at inference time we score only the real peaks.
-        #
-        # This is gated on eval mode on purpose. tf_peak_model's peak encoder contains
-        # nn.BatchNorm1d, and there is no train() override keeping the frozen submodule
-        # in eval, so during TF-TG training those layers normalise by *batch* statistics
-        # -- which makes the binding output depend on exactly which rows share a chunk.
-        # Skipping rows or repacking chunks there would silently change training results
-        # and stop previously-trained models from being reproducible. In eval mode
-        # BatchNorm uses its running statistics, so the fast path is bitwise identical.
         skip_padded_peaks = peak_mask_edge is not None and not self.tf_peak_model.training
 
         with torch.no_grad():
-            # zeros, not empty: on the fast path the padded slots are never written, and
-            # a defined value keeps them finite going into masked_fill below.
-            #
-            # Only the fused hidden embedding is kept -- the scalar logit the submodule
-            # also returns is discarded (as `_`) rather than collapsed into peak_features,
-            # which is the whole point of requesting return_hidden=True below.
             binding_hidden_flat = torch.zeros(
                 E * P,
                 self.tf_binding_hidden_dim,
@@ -376,39 +317,12 @@ class TFTGRegulationModel(nn.Module):
                 n_valid = int(mask_flat.sum())
 
                 if n_valid > 0:
-                    # Every shape here has to be stable across batches or torch.compile
-                    # re-traces. An earlier version selected slots with .nonzero() and
-                    # sized the chunk exactly to the work; both shapes then tracked
-                    # n_valid, which is data-dependent and near-unique per batch. Dynamo
-                    # guarded on the nonzero() output size and recompiled every batch --
-                    # measured ~45 s/batch against 0.72 s once warm, i.e. slower than
-                    # never compiling at all.
-                    #
-                    # So: order the slots with a fixed-shape stable argsort (valid first)
-                    # instead of nonzero(), and round the chunk width up to CHUNK_QUANTUM.
-                    # That leaves only (width, n_chunks) varying, over a handful of
-                    # combinations. Capping the width at chunk_size bounds memory; the
-                    # quantum as a floor bounds the wasted rows when n_valid << chunk_size
-                    # -- the case that padding up to whole chunk_size blocks got wrong.
-                    #
-                    # Rows past n_valid address genuinely padded slots, so their hidden
-                    # embeddings are meaningless, but binding_hidden is masked_fill'd by
-                    # peak_mask below before it is ever used. Computing them is wasted
-                    # work, never wrong work, and it is bounded by one quantum per batch.
                     CHUNK_QUANTUM = 256
                     quantized = ((n_valid + CHUNK_QUANTUM - 1) // CHUNK_QUANTUM) * CHUNK_QUANTUM
                     width = min(chunk_size, max(CHUNK_QUANTUM, quantized))
                     n_chunks = (n_valid + width - 1) // width
                     total = n_chunks * width
 
-                    # Order slots by (valid first, then TF protein length). The validity
-                    # key is what the chunking above needs; the length key is what makes
-                    # the crop below worth doing. TF embeddings are padded to the longest
-                    # protein in the table -- 5,588 tokens for mm10 against a median of
-                    # 474 -- and tf_encoder plus the cross-attention run over every padded
-                    # position, so cost is ~linear in the padded length. Grouping slots of
-                    # similar length means each chunk can be cropped near its own longest
-                    # TF instead of the table's.
                     tf_len_slot = self._tf_lengths_per_slot(
                         tf_idx, tf_mask_edge, use_resident_table, E, P
                     )
@@ -417,8 +331,7 @@ class TFTGRegulationModel(nn.Module):
                     )
                     chunk_idx_source = torch.argsort(sort_key, stable=True)
                     if total > chunk_idx_source.numel():
-                        # Only when chunk_size is not a multiple of the quantum. The pad
-                        # repeats an already-masked slot, so it stays harmless.
+
                         chunk_idx_source = torch.cat(
                             [
                                 chunk_idx_source,
@@ -682,37 +595,11 @@ class LitTFTGRegulationModel(pl.LightningModule):
         self.model = model
         self.lr = lr
         self.weight_decay = weight_decay
-        # Linear LR warmup over the first `warmup_steps` optimizer steps. 0 disables it,
-        # which is the historical behaviour. Needed once the effective batch grows: the
-        # ReduceLROnPlateau below only reacts after val/loss has already stalled, so it
-        # cannot protect the first few hundred steps, which is exactly where a large batch
-        # at a scaled-up LR diverges.
         self.warmup_steps = int(warmup_steps)
         self.pooling_mode = pooling_mode
         self.pooling_temperature = pooling_temperature
         self.logit_clamp = logit_clamp
         self.enable_timing_sync = enable_timing_sync
-        # Score val/test outside autocast even when training runs in a mixed precision.
-        #
-        # bf16 keeps fp32's exponent range but spends two mantissa bits doing it (8 vs
-        # fp16's 10). As training spreads the edge logits out, more pairs quantize to the
-        # same bf16 value, and tied scores destroy ranking -- so the METRIC decays even
-        # while the model improves. Measured on run 3793729's own checkpoints (jobs
-        # 3794653/3797681), identical weights and data:
-        #
-        #                       epoch 0   epoch 5
-        #   val pooled  fp32     0.6833    0.6843   <- model flat-to-improving
-        #   val pooled  bf16     0.6740    0.6421   <- what training logged
-        #   val macro   fp32     0.6371    0.6668   <- +0.030 on held-out TFs
-        #
-        # The fp32-vs-bf16 gap grows 0.009 -> 0.042 over five epochs, so a run that is
-        # getting better logs a curve that falls. ModelCheckpoint monitors val/auroc and
-        # EarlyStopping monitors val/loss, so both were steering on that: 3793729 declared
-        # epoch 0 its best model when epoch 5 was measurably better.
-        #
-        # Default True because the alternative is a silently wrong metric. Pass False to
-        # reproduce a pre-fix run's numbers exactly. Training math is untouched either way
-        # -- this only changes how val/test are scored, never how gradients are computed.
         self.plateau_monitor = plateau_monitor
         self.plateau_mode = plateau_mode
         self.plateau_factor = plateau_factor
