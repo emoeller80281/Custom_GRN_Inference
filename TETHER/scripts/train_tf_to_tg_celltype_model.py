@@ -4,8 +4,12 @@
 Defaults follow the liver notebook, using every eligible edge. TF-DNA binding
 scores are cached per split and invalidated when their exact inputs change.
 Example: python scripts/train_tf_to_tg_celltype_model.py --wandb_mode offline
+
+Training-only holdouts retain their chromosome-held-out validation/test edges:
+  --holdout_sample mESC:E7.5_rep1 --holdout_celltype "Definitive endoderm"
 """
 import argparse
+import copy
 import hashlib
 import json
 import logging
@@ -22,7 +26,13 @@ import numpy as np
 import pandas as pd
 import torch
 from scipy import sparse
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import (
+    ConcatDataset,
+    DataLoader,
+    Dataset,
+    Subset,
+    WeightedRandomSampler,
+)
 from tqdm import tqdm
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping, LearningRateMonitor, TQDMProgressBar
@@ -541,6 +551,104 @@ class TFTGEdgeBagDataset(Dataset):
 
         return item
 
+
+def make_balanced_scaler_dataset(train_datasets, edges_per_sample, seed):
+    """Draw the same number of unique, deterministic train edges from each sample."""
+    if not train_datasets:
+        raise ValueError("At least one training dataset is required to fit scaling")
+    if edges_per_sample <= 0:
+        raise ValueError("edges_per_sample must be positive")
+
+    sample_size = min(edges_per_sample, *(len(dataset) for dataset in train_datasets))
+    logging.info(
+        "Fitting shared scaling with %,d unique training edges from each of %d samples",
+        sample_size,
+        len(train_datasets),
+    )
+    rng = np.random.default_rng(seed)
+    subsets = []
+    for dataset in train_datasets:
+        if len(dataset) == 0:
+            raise ValueError("Cannot fit scaling from an empty training dataset")
+        indices = rng.choice(
+            len(dataset),
+            size=sample_size,
+            replace=False,
+        )
+        subsets.append(Subset(dataset, indices.tolist()))
+    return ConcatDataset(subsets)
+
+
+@torch.no_grad()
+def fit_shared_input_scaler(loader):
+    """Fit global moments from real entries in depth-normalized/log1p train inputs."""
+    totals = {
+        name: {"sum": 0.0, "sum_sq": 0.0, "count": 0}
+        for name in ("tf_expression", "tg_expression", "peak_accessibility")
+    }
+
+    def update(name, values):
+        values = values.double()
+        totals[name]["sum"] += values.sum().item()
+        totals[name]["sum_sq"] += values.square().sum().item()
+        totals[name]["count"] += values.numel()
+
+    for batch in tqdm(loader, desc="Fitting shared input scaling"):
+        cell_mask = batch["cell_mask"].bool()
+        peak_mask = batch["peak_mask"].bool()
+        update("tf_expression", batch["tf_expression"][cell_mask])
+        update("tg_expression", batch["tg_expression"][cell_mask])
+        accessibility_mask = cell_mask[:, :, None] & peak_mask[:, None, :]
+        update(
+            "peak_accessibility",
+            batch["peak_accessibility"][accessibility_mask],
+        )
+
+    scaler = {}
+    for name, values in totals.items():
+        if values["count"] == 0:
+            raise ValueError(f"No real values were available for {name} scaling")
+        mean = values["sum"] / values["count"]
+        variance = max(values["sum_sq"] / values["count"] - mean ** 2, 1e-12)
+        scaler[name] = {
+            "mean": float(mean),
+            "std": float(math.sqrt(variance)),
+            "count": int(values["count"]),
+        }
+    return scaler
+
+
+def validate_input_scaler(scaler):
+    expected = {"tf_expression", "tg_expression", "peak_accessibility"}
+    if set(scaler) != expected:
+        raise ValueError(f"Input scaler keys are {set(scaler)}; expected {expected}")
+    for name, values in scaler.items():
+        if not {"mean", "std", "count"}.issubset(values):
+            raise ValueError(f"Input scaler entry {name} is incomplete")
+        if (not math.isfinite(float(values["mean"]))
+                or not math.isfinite(float(values["std"]))
+                or float(values["std"]) <= 0
+                or int(values["count"]) <= 0):
+            raise ValueError(f"Input scaler entry {name} is invalid: {values}")
+    return scaler
+
+
+def make_sample_balanced_sampler(datasets, seed):
+    """Give every source sample equal expected probability during joint training."""
+    if len(datasets) < 2:
+        return None
+    weights = torch.cat([
+        torch.full((len(dataset),), 1.0 / len(dataset), dtype=torch.double)
+        for dataset in datasets
+    ])
+    generator = torch.Generator().manual_seed(seed)
+    return WeightedRandomSampler(
+        weights,
+        num_samples=sum(len(dataset) for dataset in datasets),
+        replacement=True,
+        generator=generator,
+    )
+
 @torch.no_grad()
 def precompute_binding_scores(
     labeled_df,
@@ -838,8 +946,8 @@ def prepare_data(args):
     }
 
     # Matrices remain cells × features.
-    atac_mat = atac_sample.layers["counts"]
-    rna_mat = rna_sample.layers["counts"]
+    atac_mat = atac_sample.X
+    rna_mat = rna_sample.X
 
 
     # --------------------------------------------------
@@ -1130,6 +1238,22 @@ def parse_args():
     parser.add_argument("--species", choices=["mm10", "hg38"], default="mm10")
     parser.add_argument("--tissue", default="mouse_liver")
     parser.add_argument("--sample_name", default="liver_sample")
+    parser.add_argument(
+        "--dataset", action="append", metavar="TISSUE:SAMPLE",
+        help=("Repeat to train jointly across samples, for example "
+              "--dataset mouse_liver:liver_sample --dataset mESC:E7.5_rep1. "
+              "When omitted, --tissue and --sample_name define one dataset."),
+    )
+    parser.add_argument(
+        "--holdout_sample", action="append", default=[], metavar="TISSUE:SAMPLE",
+        help=("Repeat to exclude a complete source sample from training while retaining "
+              "its chromosome-held-out validation and test edges."),
+    )
+    parser.add_argument(
+        "--holdout_celltype", action="append", default=[], metavar="CELLTYPE",
+        help=("Repeat to exclude a pooled cell-type slice from training in every sample "
+              "while retaining its validation and test edges. Matching is exact."),
+    )
     parser.add_argument("--data_dir", type=Path, default=PROJECT_DIR.parent / "data")
     parser.add_argument("--gene_ref_file", type=Path,
                         help="Override the notebook's species-specific gene annotation")
@@ -1152,6 +1276,14 @@ def parse_args():
     parser.add_argument("--min_tfs_per_slice", type=int, default=5)
     parser.add_argument("--max_gt_density", type=float, default=.60)
     parser.add_argument("--resample_cells", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--balance_samples", action=argparse.BooleanOptionalAction, default=True,
+        help="Give every source sample equal expected training probability",
+    )
+    parser.add_argument(
+        "--scaler_edges_per_sample", type=int, default=100000,
+        help="Equal number of training edges per sample used to fit shared scaling",
+    )
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument("--d_model", type=int, default=128)
     parser.add_argument("--num_heads", type=int, default=4)
@@ -1179,8 +1311,28 @@ def parse_args():
                 "accumulate_grad_batches"):
         if getattr(args, key) <= 0:
             parser.error(f"--{key} must be positive")
-    if args.num_workers < 0 or args.d_model % args.num_heads or args.d_model < 2:
-        parser.error("num_workers must be nonnegative; d_model >= 2 and divisible by num_heads")
+    if (args.num_workers < 0 or args.scaler_edges_per_sample <= 0
+            or args.d_model % args.num_heads or args.d_model < 2):
+        parser.error(
+            "num_workers must be nonnegative; scaler_edges_per_sample must be "
+            "positive; d_model >= 2 and divisible by num_heads"
+        )
+    if args.dataset:
+        malformed = [value for value in args.dataset
+                     if value.count(":") != 1 or not all(value.split(":"))]
+        if malformed:
+            parser.error(f"--dataset values must be TISSUE:SAMPLE; invalid: {malformed}")
+    malformed_holdouts = [
+        value for value in args.holdout_sample
+        if value.count(":") != 1 or not all(value.split(":"))
+    ]
+    if malformed_holdouts:
+        parser.error(
+            "--holdout_sample values must be TISSUE:SAMPLE; invalid: "
+            f"{malformed_holdouts}"
+        )
+    if any(not value.strip() for value in args.holdout_celltype):
+        parser.error("--holdout_celltype values must be nonempty")
     if args.lr <= 0 or args.pooling_temperature <= 0 or args.pos_weight <= 0:
         parser.error("lr, pooling_temperature, and pos_weight must be positive")
     if args.true_false_ratio < 0 or not 0 < args.max_gt_density <= 1:
@@ -1196,7 +1348,13 @@ def parse_args():
     if not args.tf_dna_checkpoint.is_file():
         parser.error(f"TF-DNA checkpoint not found: {args.tf_dna_checkpoint}")
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    args.run_name = args.run_name or f"celltype_{args.sample_name}_{args.job_id}_{stamp}"
+    if args.dataset:
+        default_sample_label = (
+            "joint" if len(args.dataset) > 1 else args.dataset[0].split(":", 1)[1]
+        )
+    else:
+        default_sample_label = args.sample_name
+    args.run_name = args.run_name or f"celltype_{default_sample_label}_{args.job_id}_{stamp}"
     args.output_dir = args.output_dir or PROJECT_DIR / "checkpoints/celltype_tf_tg" / args.run_name
     return args
 
@@ -1210,7 +1368,63 @@ def main():
     args.output_dir.mkdir(parents=True, exist_ok=True)
     config = {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()}
     (args.output_dir / "run_config.json").write_text(json.dumps(config, indent=2))
-    splits, pools, atac, rna, peaks, embedding_path, mask_path = prepare_data(args)
+    dataset_values = args.dataset or [f"{args.tissue}:{args.sample_name}"]
+    source_specs = [tuple(value.split(":", 1)) for value in dataset_values]
+    if len(set(source_specs)) != len(source_specs):
+        raise ValueError(f"Duplicate --dataset entries: {source_specs}")
+    holdout_samples = {
+        tuple(value.split(":", 1)) for value in args.holdout_sample
+    }
+    unknown_holdout_samples = holdout_samples - set(source_specs)
+    if unknown_holdout_samples:
+        raise ValueError(
+            "Holdout samples must match a configured dataset: "
+            f"{sorted(unknown_holdout_samples)}"
+        )
+    holdout_celltypes = set(args.holdout_celltype)
+
+    prepared_sources = []
+    for tissue, sample_name in source_specs:
+        source_args = copy.copy(args)
+        source_args.tissue = tissue
+        source_args.sample_name = sample_name
+        source_args.output_dir = (
+            args.output_dir if len(source_specs) == 1 else
+            args.output_dir / "prepared_sources" / f"{tissue}__{sample_name}"
+        )
+        source_args.output_dir.mkdir(parents=True, exist_ok=True)
+        prepared = prepare_data(source_args)
+        prepared_sources.append({
+            "tissue": tissue,
+            "sample_name": sample_name,
+            "output_dir": source_args.output_dir,
+            "splits": prepared[0],
+            "pools": prepared[1],
+            "atac": prepared[2],
+            "rna": prepared[3],
+            "peaks": prepared[4],
+            "embedding_path": prepared[5],
+            "mask_path": prepared[6],
+        })
+
+    available_train_celltypes = {
+        cell_type
+        for source in prepared_sources
+        for cell_type in source["splits"]["train"]["cell_type"].unique()
+    }
+    unknown_holdout_celltypes = holdout_celltypes - available_train_celltypes
+    if unknown_holdout_celltypes:
+        raise ValueError(
+            "Holdout cell types do not match any training cell-type slice: "
+            f"{sorted(unknown_holdout_celltypes)}"
+        )
+
+    embedding_paths = {str(source["embedding_path"].resolve()) for source in prepared_sources}
+    mask_paths = {str(source["mask_path"].resolve()) for source in prepared_sources}
+    if len(embedding_paths) != 1 or len(mask_paths) != 1:
+        raise ValueError("Joint datasets must share the same TF embeddings and masks")
+    embedding_path = prepared_sources[0]["embedding_path"]
+    mask_path = prepared_sources[0]["mask_path"]
     embeddings = torch.load(embedding_path, map_location="cpu", weights_only=True)
     masks = torch.load(mask_path, map_location="cpu", weights_only=True)
     from models.tf_to_dna import TFPeakBindingModel, LitTFPeakBindingModel
@@ -1225,46 +1439,158 @@ def main():
         raise RuntimeError("GPU requested but CUDA is unavailable")
     device = torch.device("cuda" if use_cuda else "cpu")
     binding_model.requires_grad_(False).eval().to(device)
-    datasets = {}
-    for name, frame in splits.items():
-        if frame.empty:
-            continue
-        scores, binding_cache_file = load_or_precompute_binding_scores(
-            name,
-            frame,
-            binding_model,
-            prepared_dir=args.output_dir / "prepared",
-            tf_dna_checkpoint=args.tf_dna_checkpoint,
-            tf_embeddings_tensor=embeddings,
-            tf_mask_tensor=masks,
-            atac_peak_tensor=peaks,
-            max_peaks_per_tg=args.max_peaks_per_tg,
-            device=device,
-            chunk_size=args.binding_chunk_size,
+    dataset_parts = {"train": [], "val": [], "test": []}
+    scaler_train_parts = []
+    scaler_train_sources = []
+    for source in prepared_sources:
+        source_key = f"{source['tissue']}__{source['sample_name']}"
+        for split_name, frame in source["splits"].items():
+            if frame.empty:
+                continue
+            original_edge_count = len(frame)
+            if split_name == "train":
+                if (source["tissue"], source["sample_name"]) in holdout_samples:
+                    frame = frame.iloc[0:0].copy()
+                elif holdout_celltypes:
+                    frame = frame.loc[
+                        ~frame["cell_type"].isin(holdout_celltypes)
+                    ].reset_index(drop=True)
+                removed_edge_count = original_edge_count - len(frame)
+                if removed_edge_count:
+                    logging.info(
+                        "%s: removed %,d of %,d training edges for holdout selection",
+                        source_key,
+                        removed_edge_count,
+                        original_edge_count,
+                    )
+                config[f"{source_key}_train_holdout_edges"] = removed_edge_count
+                config[f"{source_key}_train_original_edges"] = original_edge_count
+                config[f"{source_key}_train_edges"] = len(frame)
+                if frame.empty:
+                    continue
+            scores, binding_cache_file = load_or_precompute_binding_scores(
+                split_name,
+                frame,
+                binding_model,
+                prepared_dir=source["output_dir"] / "prepared",
+                tf_dna_checkpoint=args.tf_dna_checkpoint,
+                tf_embeddings_tensor=embeddings,
+                tf_mask_tensor=masks,
+                atac_peak_tensor=source["peaks"],
+                max_peaks_per_tg=args.max_peaks_per_tg,
+                device=device,
+                chunk_size=args.binding_chunk_size,
+            )
+            dataset_kwargs = dict(
+                tf_embeddings_tensor=None,
+                tf_mask_tensor=None,
+                atac_peak_tensor=source["peaks"],
+                atac_mat=source["atac"],
+                rna_mat=source["rna"],
+                cell_pools=source["pools"],
+                max_peaks_per_tg=args.max_peaks_per_tg,
+                resample_max_cells_per_pair=args.max_cells_per_pair,
+                binding_scores=scores,
+                seed=args.seed,
+            )
+            dataset_parts[split_name].append(TFTGEdgeBagDataset(
+                frame,
+                resample_cells=split_name == "train" and args.resample_cells,
+                **dataset_kwargs,
+            ))
+            if split_name == "train":
+                scaler_train_parts.append(TFTGEdgeBagDataset(
+                    frame, resample_cells=False, **dataset_kwargs,
+                ))
+                scaler_train_sources.append(
+                    f"{source['tissue']}:{source['sample_name']}"
+                )
+            config[f"{source_key}_{split_name}_edges"] = len(frame)
+            config[f"{source_key}_{split_name}_positive_fraction"] = float(frame.label.mean())
+            config[f"{source_key}_{split_name}_celltypes"] = sorted(
+                frame.cell_type.unique().tolist()
+            )
+            config[f"{source_key}_{split_name}_binding_cache"] = str(binding_cache_file)
+
+    if not dataset_parts["train"] or not dataset_parts["val"]:
+        raise ValueError("Joint training requires train and validation data")
+    datasets = {
+        split_name: (parts[0] if len(parts) == 1 else ConcatDataset(parts))
+        for split_name, parts in dataset_parts.items() if parts
+    }
+
+    scaler_path = args.output_dir / "input_scaler.json"
+    scaler_manifest_path = args.output_dir / "input_scaler_manifest.json"
+    scaler_manifest = {
+        "datasets": [f"{tissue}:{sample}" for tissue, sample in source_specs],
+        "scaler_train_datasets": scaler_train_sources,
+        "holdout_samples": sorted(":".join(spec) for spec in holdout_samples),
+        "holdout_celltypes": sorted(holdout_celltypes),
+        "train_edges": [len(dataset) for dataset in scaler_train_parts],
+        "edges_per_sample": (
+            min(args.scaler_edges_per_sample, args.batch_size)
+            if args.fast_dev_run else args.scaler_edges_per_sample
+        ),
+        "seed": args.seed,
+        "input_space": "per_sample_depth_normalized_log1p_X",
+    }
+    cached_manifest = (
+        json.loads(scaler_manifest_path.read_text())
+        if scaler_manifest_path.exists() else None
+    )
+    if scaler_path.exists() and cached_manifest == scaler_manifest:
+        input_scaler = validate_input_scaler(json.loads(scaler_path.read_text()))
+        logging.info("Loaded shared input scaling from %s", scaler_path)
+    else:
+        scaler_dataset = make_balanced_scaler_dataset(
+            scaler_train_parts, scaler_manifest["edges_per_sample"], args.seed,
         )
-        datasets[name] = TFTGEdgeBagDataset(
-            frame, tf_embeddings_tensor=None, tf_mask_tensor=None,
-            atac_peak_tensor=peaks, atac_mat=atac, rna_mat=rna, cell_pools=pools,
-            max_peaks_per_tg=args.max_peaks_per_tg,
-            resample_max_cells_per_pair=args.max_cells_per_pair,
-            resample_cells=name == "train" and args.resample_cells,
-            binding_scores=scores, seed=args.seed)
-        config[f"{name}_edges"] = len(frame)
-        config[f"{name}_positive_fraction"] = float(frame.label.mean())
-        config[f"{name}_celltypes"] = sorted(frame.cell_type.unique().tolist())
-        config[f"{name}_binding_cache"] = str(binding_cache_file)
+        scaler_loader = DataLoader(
+            scaler_dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=args.num_workers,
+            persistent_workers=args.num_workers > 0,
+            pin_memory=False,
+            drop_last=False,
+        )
+        input_scaler = validate_input_scaler(fit_shared_input_scaler(scaler_loader))
+        scaler_path.write_text(json.dumps(input_scaler, indent=2))
+        scaler_manifest_path.write_text(json.dumps(scaler_manifest, indent=2))
+        logging.info("Saved shared input scaling to %s", scaler_path)
+    config["input_scaler"] = input_scaler
+
     del binding_model, base, embeddings, masks
     if use_cuda:
         torch.cuda.empty_cache()
     (args.output_dir / "run_config.json").write_text(json.dumps(config, indent=2))
-    loaders = {name: DataLoader(
-        dataset, batch_size=args.batch_size, shuffle=name == "train",
-        num_workers=args.num_workers, persistent_workers=args.num_workers > 0,
-        pin_memory=use_cuda, drop_last=False,
-    ) for name, dataset in datasets.items()}
+    train_sampler = (
+        make_sample_balanced_sampler(dataset_parts["train"], args.seed)
+        if args.balance_samples else None
+    )
+    loaders = {}
+    for split_name, dataset in datasets.items():
+        sampler = train_sampler if split_name == "train" else None
+        loaders[split_name] = DataLoader(
+            dataset,
+            batch_size=args.batch_size,
+            sampler=sampler,
+            shuffle=split_name == "train" and sampler is None,
+            num_workers=args.num_workers,
+            persistent_workers=args.num_workers > 0,
+            pin_memory=use_cuda,
+            drop_last=False,
+        )
+
+    scaler_hparams = {
+        f"{name}_{stat}": input_scaler[name][stat]
+        for name in ("tf_expression", "tg_expression", "peak_accessibility")
+        for stat in ("mean", "std")
+    }
     module = LitTFTGRegulationModel(**{key: getattr(args, key) for key in (
         "d_model", "num_heads", "dropout", "lr", "weight_decay",
-        "pooling_temperature", "pos_weight", "plateau_patience")})
+        "pooling_temperature", "pos_weight", "plateau_patience")},
+        **scaler_hparams)
     if args.wandb_mode == "disabled":
         logger = CSVLogger(str(args.output_dir), name="metrics")
     else:

@@ -12,6 +12,12 @@ class SimpleTFTGRegulationModel(nn.Module):
         d_model=128,
         num_heads=4,
         dropout=0.1,
+        tf_expression_mean=0.0,
+        tf_expression_std=1.0,
+        tg_expression_mean=0.0,
+        tg_expression_std=1.0,
+        peak_accessibility_mean=0.0,
+        peak_accessibility_std=1.0,
     ):
         super().__init__()
 
@@ -19,6 +25,26 @@ class SimpleTFTGRegulationModel(nn.Module):
         if self.tf_peak_model is not None:
             self.tf_peak_model.requires_grad_(False)
             self.tf_peak_model.eval()
+
+        # Values in the input matrices are already depth-normalized and log1p
+        # transformed. These shared statistics are fitted from training edges only.
+        # They are reconstructed from Lightning hyperparameters when loading a
+        # checkpoint, so non-persistent buffers preserve old-checkpoint compatibility.
+        scaler_values = {
+            "tf_expression_mean": tf_expression_mean,
+            "tf_expression_std": tf_expression_std,
+            "tg_expression_mean": tg_expression_mean,
+            "tg_expression_std": tg_expression_std,
+            "peak_accessibility_mean": peak_accessibility_mean,
+            "peak_accessibility_std": peak_accessibility_std,
+        }
+        for name in (
+            "tf_expression_std", "tg_expression_std", "peak_accessibility_std"
+        ):
+            if float(scaler_values[name]) <= 0:
+                raise ValueError(f"{name} must be positive")
+        for name, value in scaler_values.items():
+            self.register_buffer(name, torch.tensor(float(value)), persistent=False)
 
         # Binding, accessibility, scaled distance, distance weight.
         self.peak_feature_proj = nn.Sequential(
@@ -83,6 +109,23 @@ class SimpleTFTGRegulationModel(nn.Module):
 
         B, C, P = accessibility.shape
 
+        # Standardize real entries and restore padding to zero. Biological zeros are
+        # real measurements and remain part of the train-fitted distribution.
+        tf_expression = (
+            batch["tf_expression"].float() - self.tf_expression_mean
+        ) / self.tf_expression_std
+        tg_expression = (
+            batch["tg_expression"].float() - self.tg_expression_mean
+        ) / self.tg_expression_std
+        accessibility = (
+            accessibility - self.peak_accessibility_mean
+        ) / self.peak_accessibility_std
+        tf_expression = tf_expression.masked_fill(~cell_mask, 0)
+        tg_expression = tg_expression.masked_fill(~cell_mask, 0)
+        accessibility = accessibility.masked_fill(
+            ~(cell_mask[:, :, None] & peak_mask[:, None, :]), 0
+        )
+
         if "binding_score" in batch:
             binding = batch["binding_score"]
         else:
@@ -128,10 +171,10 @@ class SimpleTFTGRegulationModel(nn.Module):
 
         # 4. Expression-conditioned query.
         tf_token = self.tf_expr_proj(
-            batch["tf_expression"].float().reshape(B * C, 1)
+            tf_expression.reshape(B * C, 1)
         )
         tg_token = self.tg_expr_proj(
-            batch["tg_expression"].float().reshape(B * C, 1)
+            tg_expression.reshape(B * C, 1)
         )
 
         query = self.tg_query_proj(
@@ -192,11 +235,20 @@ class LitTFTGRegulationModel(pl.LightningModule):
 
     def __init__(self, d_model=128, num_heads=4, dropout=0.1, lr=1e-4,
                  weight_decay=1e-4, pooling_temperature=1.0, pos_weight=1.0,
-                 plateau_patience=4):
+                 plateau_patience=4, tf_expression_mean=0.0,
+                 tf_expression_std=1.0, tg_expression_mean=0.0,
+                 tg_expression_std=1.0, peak_accessibility_mean=0.0,
+                 peak_accessibility_std=1.0):
         super().__init__()
         self.save_hyperparameters()
         self.model = SimpleTFTGRegulationModel(
-            d_model=d_model, num_heads=num_heads, dropout=dropout)
+            d_model=d_model, num_heads=num_heads, dropout=dropout,
+            tf_expression_mean=tf_expression_mean,
+            tf_expression_std=tf_expression_std,
+            tg_expression_mean=tg_expression_mean,
+            tg_expression_std=tg_expression_std,
+            peak_accessibility_mean=peak_accessibility_mean,
+            peak_accessibility_std=peak_accessibility_std)
         self.register_buffer("pos_weight", torch.tensor(float(pos_weight)))
         self._predictions = {"val": [], "test": []}
 
@@ -217,7 +269,8 @@ class LitTFTGRegulationModel(pl.LightningModule):
                  on_step=False, on_epoch=True, batch_size=len(labels))
         if stage != "train":
             self._predictions[stage].append((
-                probs.cpu(), labels.int().cpu(), list(batch["cell_type"])))
+                probs.cpu(), labels.int().cpu(),
+                list(batch["sample_id"]), list(batch["cell_type"])))
         return loss
 
     def training_step(self, batch, batch_idx):
@@ -241,20 +294,32 @@ class LitTFTGRegulationModel(pl.LightningModule):
             return
         probs = torch.cat([b[0] for b in batches]).numpy()
         labels = torch.cat([b[1] for b in batches]).numpy()
-        slices = np.asarray([s for b in batches for s in b[2]])
+        samples = np.asarray([s for b in batches for s in b[2]])
+        slices = np.asarray([s for b in batches for s in b[3]])
         batches.clear()
-        groups = [(None, np.ones(len(labels), dtype=bool))]
-        groups.extend((s, slices == s) for s in np.unique(slices))
+        unique_samples = np.unique(samples)
+        groups = [(None, None, np.ones(len(labels), dtype=bool))]
+        if len(unique_samples) == 1:
+            groups.extend(("celltype", s, slices == s) for s in np.unique(slices))
+        else:
+            for sample in unique_samples:
+                sample_mask = samples == sample
+                groups.append(("sample", sample, sample_mask))
+                for cell_type in np.unique(slices[sample_mask]):
+                    groups.append((
+                        f"sample/{sample}/celltype", cell_type,
+                        sample_mask & (slices == cell_type),
+                    ))
         macro = {"auroc": [], "auprc": []}
-        for name, mask in groups:
+        for group, name, mask in groups:
             if len(np.unique(labels[mask])) < 2:
                 continue
             values = {"auroc": roc_auc_score(labels[mask], probs[mask]),
                       "auprc": average_precision_score(labels[mask], probs[mask])}
             for metric, value in values.items():
-                key = f"{stage}/{metric}" if name is None else f"{stage}/celltype/{name}/{metric}"
+                key = f"{stage}/{metric}" if name is None else f"{stage}/{group}/{name}/{metric}"
                 self.log(key, float(value), prog_bar=name is None)
-                if name is not None:
+                if group == "celltype" or (group and group.endswith("/celltype")):
                     macro[metric].append(value)
         for metric, values in macro.items():
             if values:
