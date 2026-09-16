@@ -561,8 +561,8 @@ def make_balanced_scaler_dataset(train_datasets, edges_per_sample, seed):
 
     sample_size = min(edges_per_sample, *(len(dataset) for dataset in train_datasets))
     logging.info(
-        "Fitting shared scaling with %,d unique training edges from each of %d samples",
-        sample_size,
+        "Fitting shared scaling with %s unique training edges from each of %d samples",
+        f"{sample_size:,}",
         len(train_datasets),
     )
     rng = np.random.default_rng(seed)
@@ -666,6 +666,8 @@ def precompute_binding_scores(
     Rows align with labeled_df's positional order, which is what the dataset uses
     after reset_index(drop=True). Distinct (tf_idx, peak_col) pairs are computed
     once and scattered, so a pair shared by several edges costs one forward pass.
+    TF embeddings, masks, and the current sample's peak sequences are already
+    resident on ``device``; only their row indices are transferred per chunk.
     """
     n_edges = len(labeled_df)
     out = torch.zeros(n_edges, max_peaks_per_tg, dtype=torch.float32)
@@ -699,13 +701,13 @@ def precompute_binding_scores(
                           miniters=max(1, math.ceil(len(chunks) / 50)),
                           maxinterval=float("inf")):
             chunk = unique_pairs[start:start + chunk_size]
-            tf_chunk = torch.from_numpy(chunk[:, 0]).long()
-            peak_chunk = torch.from_numpy(chunk[:, 1]).long()
+            tf_chunk = torch.from_numpy(chunk[:, 0]).to(device=device, dtype=torch.long)
+            peak_chunk = torch.from_numpy(chunk[:, 1]).to(device=device, dtype=torch.long)
 
             logits = peak_model(
-                tf_embedding=tf_embeddings_tensor[tf_chunk].float().to(device),
-                tf_mask=tf_mask_tensor[tf_chunk].bool().to(device),
-                peak_embedding=atac_peak_tensor[peak_chunk].float().to(device),
+                tf_embedding=tf_embeddings_tensor.index_select(0, tf_chunk),
+                tf_mask=tf_mask_tensor.index_select(0, tf_chunk),
+                peak_embedding=atac_peak_tensor.index_select(0, peak_chunk).float(),
             )
             unique_scores[start:start + len(chunk)] = logits.reshape(-1).sigmoid().cpu()
     finally:
@@ -1439,11 +1441,22 @@ def main():
         raise RuntimeError("GPU requested but CUDA is unavailable")
     device = torch.device("cuda" if use_cuda else "cpu")
     binding_model.requires_grad_(False).eval().to(device)
+    embeddings = embeddings.to(device=device, dtype=torch.float32)
+    masks = masks.to(device=device, dtype=torch.bool)
+    logging.info(
+        "Keeping TF embeddings %s and masks %s resident on %s for binding-score calculation",
+        tuple(embeddings.shape), tuple(masks.shape), device,
+    )
     dataset_parts = {"train": [], "val": [], "test": []}
     scaler_train_parts = []
     scaler_train_sources = []
     for source in prepared_sources:
         source_key = f"{source['tissue']}__{source['sample_name']}"
+        binding_peak_tensor = source["peaks"].to(device=device, dtype=torch.uint8)
+        logging.info(
+            "%s: keeping ATAC peak tensor %s resident on %s for binding-score calculation",
+            source_key, tuple(binding_peak_tensor.shape), device,
+        )
         for split_name, frame in source["splits"].items():
             if frame.empty:
                 continue
@@ -1458,10 +1471,10 @@ def main():
                 removed_edge_count = original_edge_count - len(frame)
                 if removed_edge_count:
                     logging.info(
-                        "%s: removed %,d of %,d training edges for holdout selection",
+                        "%s: removed %s of %s training edges for holdout selection",
                         source_key,
-                        removed_edge_count,
-                        original_edge_count,
+                        f"{removed_edge_count:,}",
+                        f"{original_edge_count:,}",
                     )
                 config[f"{source_key}_train_holdout_edges"] = removed_edge_count
                 config[f"{source_key}_train_original_edges"] = original_edge_count
@@ -1476,7 +1489,7 @@ def main():
                 tf_dna_checkpoint=args.tf_dna_checkpoint,
                 tf_embeddings_tensor=embeddings,
                 tf_mask_tensor=masks,
-                atac_peak_tensor=source["peaks"],
+                atac_peak_tensor=binding_peak_tensor,
                 max_peaks_per_tg=args.max_peaks_per_tg,
                 device=device,
                 chunk_size=args.binding_chunk_size,
@@ -1511,6 +1524,16 @@ def main():
                 frame.cell_type.unique().tolist()
             )
             config[f"{source_key}_{split_name}_binding_cache"] = str(binding_cache_file)
+
+        del binding_peak_tensor
+        if use_cuda:
+            torch.cuda.empty_cache()
+        logging.info("%s: released ATAC peak tensor from %s", source_key, device)
+
+    del binding_model, base, embeddings, masks
+    if use_cuda:
+        torch.cuda.empty_cache()
+    logging.info("Released binding model, TF embeddings, and TF masks from %s", device)
 
     if not dataset_parts["train"] or not dataset_parts["val"]:
         raise ValueError("Joint training requires train and validation data")
@@ -1560,9 +1583,6 @@ def main():
         logging.info("Saved shared input scaling to %s", scaler_path)
     config["input_scaler"] = input_scaler
 
-    del binding_model, base, embeddings, masks
-    if use_cuda:
-        torch.cuda.empty_cache()
     (args.output_dir / "run_config.json").write_text(json.dumps(config, indent=2))
     train_sampler = (
         make_sample_balanced_sampler(dataset_parts["train"], args.seed)

@@ -2,7 +2,7 @@
 #SBATCH --job-name=celltype_tf_tg
 #SBATCH --output=LOGS/celltype_tf_tg_%j.log
 #SBATCH --error=LOGS/celltype_tf_tg_%j.err
-#SBATCH --time=72:00:00
+#SBATCH --time=24:00:00
 #SBATCH --partition=dense
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:a100:1
@@ -28,14 +28,16 @@ export NUMEXPR_NUM_THREADS=1
 
 srun python -u scripts/train_tf_to_tg_celltype_model.py \
     --species mm10 \
-    --tissue mouse_liver \
-    --sample_name liver_sample \
+    --dataset mouse_liver:liver_sample \
+    --dataset mESC:E7.5_rep1 \
+    --holdout_celltype "Neurectoderm" \
+    --holdout_celltype "Fibroblasts" \
     --epochs 250 \
     --accelerator gpu \
     --batch_size 64 \
     --max_cells_per_pair 64 \
     --max_peaks_per_tg 25 \
-    --binding_chunk_size 128 \
+    --binding_chunk_size 512 \
     --num_workers "${SLURM_CPUS_PER_TASK:-4}" \
     --job_id "${SLURM_JOB_ID:-local}" \
     --precision 32-true \
