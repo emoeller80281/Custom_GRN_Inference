@@ -1,4 +1,6 @@
 """Cell-type edge-bag model from test_build_celltype_tf_tg_data.ipynb."""
+import time
+
 import torch
 import torch.nn as nn
 import pytorch_lightning as pl
@@ -238,7 +240,7 @@ class LitTFTGRegulationModel(pl.LightningModule):
                  plateau_patience=4, tf_expression_mean=0.0,
                  tf_expression_std=1.0, tg_expression_mean=0.0,
                  tg_expression_std=1.0, peak_accessibility_mean=0.0,
-                 peak_accessibility_std=1.0):
+                 peak_accessibility_std=1.0, enable_timing_sync=False):
         super().__init__()
         self.save_hyperparameters()
         self.model = SimpleTFTGRegulationModel(
@@ -251,12 +253,48 @@ class LitTFTGRegulationModel(pl.LightningModule):
             peak_accessibility_std=peak_accessibility_std)
         self.register_buffer("pos_weight", torch.tensor(float(pos_weight)))
         self._predictions = {"val": [], "test": []}
+        self._celltype_metric_history = {"val": {}, "test": {}}
+        self._hidden_wandb_metrics = set()
+        self._prev_batch_end_time = None
+        self._epoch_start_time = None
+        self._step_start_time = None
+        self._backward_start_time = None
+        self._timing_window_size = 50
+        self._timing_windows = {
+            "load": [],
+            "h2d": [],
+            "forward": [],
+            "backward": [],
+            "step": [],
+        }
+        self._latest_timing_avgs = {}
+
+    def _sync_if_cuda(self, device=None):
+        if self.hparams.enable_timing_sync and torch.cuda.is_available():
+            torch.cuda.synchronize(device)
+
+    def _record_timing(self, name, value):
+        window = self._timing_windows[name]
+        window.append(value)
+        if len(window) > self._timing_window_size:
+            window.pop(0)
+        self._latest_timing_avgs[name] = sum(window) / len(window)
 
     def forward(self, batch):
         return self.model(batch, self.hparams.pooling_temperature)
 
     def _step(self, batch, stage):
+        forward_start = None
+        if stage == "train":
+            self._sync_if_cuda()
+            forward_start = time.perf_counter()
+
         logits, _ = self(batch)
+
+        if forward_start is not None:
+            self._sync_if_cuda()
+            self._record_timing("forward", time.perf_counter() - forward_start)
+
         labels = batch["label"].float()
         loss = nn.functional.binary_cross_entropy_with_logits(
             logits.float(), labels, pos_weight=self.pos_weight)
@@ -276,6 +314,79 @@ class LitTFTGRegulationModel(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         return self._step(batch, "train")
 
+    def on_before_batch_transfer(self, batch, dataloader_idx):
+        if not self.training:
+            return batch
+        if self._prev_batch_end_time is not None:
+            self._record_timing(
+                "load", time.perf_counter() - self._prev_batch_end_time
+            )
+        return batch
+
+    def transfer_batch_to_device(self, batch, device, dataloader_idx):
+        if not self.training:
+            return super().transfer_batch_to_device(batch, device, dataloader_idx)
+        start_time = time.perf_counter()
+        batch = super().transfer_batch_to_device(batch, device, dataloader_idx)
+        self._sync_if_cuda(device)
+        self._record_timing("h2d", time.perf_counter() - start_time)
+        return batch
+
+    def on_train_epoch_start(self):
+        for window in self._timing_windows.values():
+            window.clear()
+        self._latest_timing_avgs.clear()
+        self._prev_batch_end_time = None
+        self._epoch_start_time = time.perf_counter()
+
+    def on_train_batch_start(self, batch, batch_idx):
+        self._sync_if_cuda()
+        self._step_start_time = time.perf_counter()
+
+    def on_before_backward(self, loss):
+        self._sync_if_cuda()
+        self._backward_start_time = time.perf_counter()
+
+    def optimizer_step(self, epoch, batch_idx, optimizer, optimizer_closure):
+        start_time = self._backward_start_time or time.perf_counter()
+        result = super().optimizer_step(
+            epoch, batch_idx, optimizer, optimizer_closure
+        )
+        self._sync_if_cuda()
+        self._record_timing("backward", time.perf_counter() - start_time)
+        self._backward_start_time = None
+        return result
+
+    def on_train_batch_end(self, outputs, batch, batch_idx):
+        if self._step_start_time is None:
+            return
+        self._sync_if_cuda()
+        self._record_timing("step", time.perf_counter() - self._step_start_time)
+        self._step_start_time = None
+        self._prev_batch_end_time = time.perf_counter()
+
+        if batch_idx % 50 == 0:
+            for name, avg_value in self._latest_timing_avgs.items():
+                self.log(
+                    f"train/{name}_time_avg", avg_value,
+                    on_step=True, on_epoch=False, prog_bar=False,
+                    logger=True, sync_dist=False,
+                )
+
+    def on_train_epoch_end(self):
+        if self._epoch_start_time is None:
+            return
+        self._sync_if_cuda()
+        epoch_time_mins = (
+            time.perf_counter() - self._epoch_start_time
+        ) / 60.0
+        self._epoch_start_time = None
+        self.log(
+            "train/epoch_time_min", epoch_time_mins,
+            on_step=False, on_epoch=True, prog_bar=True,
+            logger=True, sync_dist=False,
+        )
+
     def validation_step(self, batch, batch_idx):
         self._step(batch, "val")
 
@@ -287,6 +398,52 @@ class LitTFTGRegulationModel(pl.LightningModule):
 
     def on_test_epoch_start(self):
         self._predictions["test"].clear()
+
+    def _record_celltype_metric(self, stage, key, value):
+        # The explicit step-zero validation is epoch 0. Validation after the first
+        # training epoch is epoch 1, although Lightning's current_epoch is still 0.
+        epoch = int(self.current_epoch)
+        if stage == "val" and self.global_step > 0:
+            epoch += 1
+
+        series = self._celltype_metric_history[stage].setdefault(
+            key.removeprefix(f"{stage}/"), {"epochs": [], "values": []}
+        )
+        if series["epochs"] and series["epochs"][-1] == epoch:
+            series["values"][-1] = float(value)
+        else:
+            series["epochs"].append(epoch)
+            series["values"].append(float(value))
+
+        experiment = getattr(self.logger, "experiment", None)
+        if (key not in self._hidden_wandb_metrics
+                and callable(getattr(experiment, "define_metric", None))):
+            # Retain the scalar history and summary without creating one automatic
+            # W&B panel for every sample/cell-type/metric combination.
+            experiment.define_metric(key, hidden=True)
+            self._hidden_wandb_metrics.add(key)
+
+    def _log_combined_celltype_metrics(self, stage):
+        history = self._celltype_metric_history[stage]
+        experiment = getattr(self.logger, "experiment", None)
+        if (not history or self.global_rank != 0
+                or not callable(getattr(experiment, "define_metric", None))):
+            return
+
+        import wandb
+
+        ordered = sorted(history.items())
+        chart = wandb.plot.line_series(
+            xs=[series["epochs"] for _, series in ordered],
+            ys=[series["values"] for _, series in ordered],
+            keys=[name for name, _ in ordered],
+            title=f"{stage.capitalize()} cell-type AUROC and AUPRC",
+            xname="Epoch",
+        )
+        self.logger.log_metrics(
+            {f"{stage}/celltype_auroc_auprc": chart},
+            step=self.global_step,
+        )
 
     def _epoch_metrics(self, stage):
         batches = self._predictions[stage]
@@ -318,13 +475,26 @@ class LitTFTGRegulationModel(pl.LightningModule):
                       "auprc": average_precision_score(labels[mask], probs[mask])}
             for metric, value in values.items():
                 key = f"{stage}/{metric}" if name is None else f"{stage}/{group}/{name}/{metric}"
+                is_celltype = group == "celltype" or (
+                    group and group.endswith("/celltype")
+                )
+                if is_celltype:
+                    self._record_celltype_metric(stage, key, value)
                 self.log(key, float(value), prog_bar=name is None)
-                if group == "celltype" or (group and group.endswith("/celltype")):
+                if is_celltype:
                     macro[metric].append(value)
         for metric, values in macro.items():
             if values:
                 self.log(f"{stage}/macro_celltype_{metric}", float(np.mean(values)))
-        self.log(f"{stage}/n_scorable_celltypes", float(len(macro["auroc"])))
+        self._log_combined_celltype_metrics(stage)
+
+    def on_save_checkpoint(self, checkpoint):
+        checkpoint["celltype_metric_history"] = self._celltype_metric_history
+
+    def on_load_checkpoint(self, checkpoint):
+        history = checkpoint.get("celltype_metric_history")
+        if history is not None:
+            self._celltype_metric_history = history
 
     def on_validation_epoch_end(self):
         self._epoch_metrics("val")

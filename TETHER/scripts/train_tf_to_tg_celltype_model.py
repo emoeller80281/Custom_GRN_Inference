@@ -1909,36 +1909,6 @@ def main():
             save_code=True,
         )
 
-        prepared_sources_dir = args.cache_dir / "prepared_sources"
-        if not prepared_sources_dir.is_dir():
-            raise FileNotFoundError(
-                f"Prepared sources directory does not exist: {prepared_sources_dir}"
-            )
-
-        run = logger.experiment
-
-        artifact = wandb.Artifact(
-            name="prepared-sources",
-            type="dataset",
-            description="Prepared cell-type TF–TG training sources",
-            metadata={
-                "run_id": run.id,
-                "species": args.species,
-                "cache_key": cache_key,
-                "max_cells_per_pair": args.max_cells_per_pair,
-                "max_peaks_per_tg": args.max_peaks_per_tg,
-            },
-        )
-        artifact.add_dir(
-            str(prepared_sources_dir),
-            name="prepared_sources",
-        )
-
-        run.log_artifact(
-            artifact,
-            aliases=["latest", f"run-{run.id}"],
-        )
-
     logger.log_hyperparams(config)
     checkpoint = ModelCheckpoint(
         dirpath=args.output_dir / "checkpoints", filename="epoch-{epoch:03d}",
