@@ -32,7 +32,7 @@ export NUMEXPR_NUM_THREADS=1
 
 srun python -u scripts/train_tf_to_tg_celltype_model.py \
     --species mm10 \
-    --dataset mouse_liver:liver_sample \
+    --dataset mESC:E7.5_rep1 \
     --epochs 250 \
     --accelerator gpu \
     --batch_size 512 \

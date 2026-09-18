@@ -1288,9 +1288,9 @@ def prepare_data(args):
     label_map_path = cell_type_specific_gt_dir / f"{tissue}_label_map.tsv"
     if label_map_path.exists():
         label_map = pd.read_csv(label_map_path, sep="\t", comment="#")
-        slice_members = label_map.groupby("slice")["paper_celltype"].apply(list).to_dict()
+        slice_members = label_map.groupby("celltype_group")["celltype"].apply(list).to_dict()
         logging.info(f"{label_map_path.name}: {len(slice_members)} slices from "
-                     f"{label_map['paper_celltype'].nunique()} annotated types")
+                     f"{label_map['celltype'].nunique()} annotated types")
     else:
         slice_members = {c: [c] for c in celltype_counts.index}
         logging.info(f"No {label_map_path.name}; one slice per annotated cell type "
@@ -1670,24 +1670,33 @@ def parse_args():
 
 def main():
     args = parse_args()
+    
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    
     if int(os.environ.get("WORLD_SIZE", "1")) > 1 or int(os.environ.get("SLURM_NTASKS", "1")) > 1:
         raise ValueError("This launcher supports one process and one GPU per run")
+    
     pl.seed_everything(args.seed, workers=True)
+    
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    
     dataset_values = args.dataset or [f"{args.tissue}:{args.sample_name}"]
+    
     source_specs = [tuple(value.split(":", 1)) for value in dataset_values]
     if len(set(source_specs)) != len(source_specs):
         raise ValueError(f"Duplicate --dataset entries: {source_specs}")
+    
     holdout_samples = {
         tuple(value.split(":", 1)) for value in args.holdout_sample
     }
+    
     unknown_holdout_samples = holdout_samples - set(source_specs)
     if unknown_holdout_samples:
         raise ValueError(
             "Holdout samples must match a configured dataset: "
             f"{sorted(unknown_holdout_samples)}"
         )
+        
     holdout_celltypes = set(args.holdout_celltype)
 
     cache_manifest = build_run_cache_manifest(
@@ -1699,6 +1708,7 @@ def main():
             PROJECT_DIR / "cached_data" / args.species /
             "celltype_tf_tg" / cache_key
         )
+        
     args.cache_dir.mkdir(parents=True, exist_ok=True)
     run_cache_manifest_path = args.cache_dir / "cache_manifest.json"
     if run_cache_manifest_path.is_file():
@@ -1757,23 +1767,37 @@ def main():
 
     embedding_paths = {str(source["embedding_path"].resolve()) for source in prepared_sources}
     mask_paths = {str(source["mask_path"].resolve()) for source in prepared_sources}
+    
     if len(embedding_paths) != 1 or len(mask_paths) != 1:
         raise ValueError("Joint datasets must share the same TF embeddings and masks")
+    
     embedding_path = prepared_sources[0]["embedding_path"]
     mask_path = prepared_sources[0]["mask_path"]
+    
     embeddings = torch.load(embedding_path, map_location="cpu", weights_only=True)
     masks = torch.load(mask_path, map_location="cpu", weights_only=True)
+    
     from models.tf_to_dna import TFPeakBindingModel, LitTFPeakBindingModel
+    
     base = TFPeakBindingModel(tf_embedding_dim=128, hidden_dim=128, dropout=.3,
                               num_layers=4, num_heads=4, dim_head=32)
+    
     binding_model = LitTFPeakBindingModel.load_from_checkpoint(
-        str(args.tf_dna_checkpoint), map_location="cpu", model=base,
-        tf_embeddings_tensor=embeddings, tf_mask_tensor=masks,
-        lr=1e-4, weight_decay=1e-4, pos_weight=None).model
+        str(args.tf_dna_checkpoint), 
+        map_location="cpu", 
+        model=base,
+        tf_embeddings_tensor=embeddings, 
+        tf_mask_tensor=masks,
+        lr=1e-4, 
+        weight_decay=1e-4, 
+        pos_weight=None
+        ).model
+    
     use_cuda = args.accelerator != "cpu" and torch.cuda.is_available()
     if args.accelerator == "gpu" and not use_cuda:
         raise RuntimeError("GPU requested but CUDA is unavailable")
     device = torch.device("cuda" if use_cuda else "cpu")
+    
     binding_model.requires_grad_(False).eval().to(device)
     embeddings = embeddings.to(device=device, dtype=torch.float32)
     masks = masks.to(device=device, dtype=torch.bool)
@@ -1781,6 +1805,7 @@ def main():
         "Keeping TF embeddings %s and masks %s resident on %s for binding-score calculation",
         tuple(embeddings.shape), tuple(masks.shape), device,
     )
+    
     dataset_parts = {"train": [], "val": [], "test": []}
     scaler_train_parts = []
     scaler_train_sources = []
@@ -1815,6 +1840,7 @@ def main():
                 config[f"{source_key}_train_edges"] = len(frame)
                 if frame.empty:
                     continue
+                
             scores, binding_cache_file, gpu_usage = load_or_precompute_binding_scores(
                 split_name,
                 frame,
@@ -1828,6 +1854,7 @@ def main():
                 device=device,
                 chunk_size=args.binding_chunk_size,
             )
+            
             dataset_kwargs = dict(
                 tf_embeddings_tensor=None,
                 tf_mask_tensor=None,
@@ -1840,11 +1867,13 @@ def main():
                 binding_scores=scores,
                 seed=args.seed,
             )
+            
             dataset_parts[split_name].append(TFTGEdgeBagDataset(
                 frame,
                 resample_cells=split_name == "train" and args.resample_cells,
                 **dataset_kwargs,
             ))
+            
             if split_name == "train":
                 scaler_train_parts.append(TFTGEdgeBagDataset(
                     frame, resample_cells=False, **dataset_kwargs,
@@ -1852,6 +1881,7 @@ def main():
                 scaler_train_sources.append(
                     f"{source['tissue']}:{source['sample_name']}"
                 )
+                
             config[f"{source_key}_{split_name}_edges"] = len(frame)
             config[f"{source_key}_{split_name}_positive_fraction"] = float(frame.label.mean())
             config[f"{source_key}_{split_name}_celltypes"] = sorted(
@@ -1945,10 +1975,12 @@ def main():
         for name in ("tf_expression", "tg_expression", "peak_accessibility")
         for stat in ("mean", "std")
     }
+    
     module = LitTFTGRegulationModel(**{key: getattr(args, key) for key in (
         "d_model", "num_heads", "dropout", "lr", "weight_decay",
         "pooling_temperature", "pos_weight", "plateau_patience")},
         **scaler_hparams)
+    
     if args.wandb_mode == "disabled":
         logger = CSVLogger(str(args.output_dir), name="metrics")
     else:
@@ -1966,10 +1998,12 @@ def main():
         )
 
     logger.log_hyperparams(config)
+    
     checkpoint = ModelCheckpoint(
         dirpath=args.output_dir / "checkpoints", filename="epoch-{epoch:03d}",
         auto_insert_metric_name=False, monitor="val/loss", mode="min",
         save_top_k=1, save_last=True)
+    
     trainer = pl.Trainer(
         accelerator=args.accelerator, devices=1, max_epochs=args.epochs,
         precision=args.precision, logger=logger, default_root_dir=str(args.output_dir),
@@ -1980,7 +2014,9 @@ def main():
         gradient_clip_val=args.gradient_clip_val, log_every_n_steps=10,
         # A full step-zero validation below replaces Lightning's two-batch sanity check.
         num_sanity_val_steps=0 if args.resume_from_checkpoint is None else 2,
-        fast_dev_run=args.fast_dev_run)
+        fast_dev_run=args.fast_dev_run
+    )
+    
     try:
         if args.resume_from_checkpoint is None:
             logging.info("Evaluating the untrained model on the validation set at step 0")
