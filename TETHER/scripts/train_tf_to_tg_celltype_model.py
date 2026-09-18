@@ -19,9 +19,12 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
+import time
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_DIR))
+
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:64,garbage_collection_threshold:0.6"
 
 import numpy as np
 import pandas as pd
@@ -569,8 +572,11 @@ class TFTGEdgeBagDataset(Dataset):
         tf_idx = int(row.tf_embedding_idx)
 
         # These lists must already be sorted/capped together during preparation.
-        peak_cols = np.asarray(row.peak_atac_cols, dtype=np.int64)
-        distances = np.asarray(row.peak_distances, dtype=np.float32)
+        # PyArrow-backed parquet columns can expose read-only NumPy views. PyTorch
+        # warns when torch.from_numpy shares those buffers, even though these tensors
+        # are only copied into padded outputs below. Own writable arrays explicitly.
+        peak_cols = np.array(row.peak_atac_cols, dtype=np.int64, copy=True)
+        distances = np.array(row.peak_distances, dtype=np.float32, copy=True)
 
         n_peaks = len(peak_cols)
         if len(distances) != n_peaks or not 0 <= n_peaks <= self.P:
@@ -775,65 +781,113 @@ def precompute_binding_scores(
     max_peaks_per_tg,
     device,
     chunk_size=1024,
+    full_tqdm=False,
 ):
-    """Binding score for every (edge, peak slot) in labeled_df, as [n_edges, P] float32.
-
-    Rows align with labeled_df's positional order, which is what the dataset uses
-    after reset_index(drop=True). Distinct (tf_idx, peak_col) pairs are computed
-    once and scattered, so a pair shared by several edges costs one forward pass.
-    TF embeddings, masks, and the current sample's peak sequences are already
-    resident on ``device``; only their row indices are transferred per chunk.
-    """
+    """Binding score for every (edge, peak slot) in labeled_df, as [n_edges, P] float32."""
     n_edges = len(labeled_df)
     out = torch.zeros(n_edges, max_peaks_per_tg, dtype=torch.float32)
 
-    # Flatten every occupied slot into parallel arrays.
+    if n_edges == 0:
+        return out, {}
+
+    # Vectorized extraction from dataframe
+    tf_ids_base = labeled_df['tf_embedding_idx'].to_numpy(dtype=int)
+    peak_cols_list = labeled_df['peak_atac_cols'].to_list()
+    
     edge_rows, slots, tf_ids, peak_cols = [], [], [], []
-    for row_position, (_, row) in enumerate(labeled_df.iterrows()):
-        cols = row.peak_atac_cols
-        tf_id = int(row.tf_embedding_idx)
-        for slot, peak_col in enumerate(cols[:max_peaks_per_tg]):
-            edge_rows.append(row_position)
-            slots.append(slot)
-            tf_ids.append(tf_id)
-            peak_cols.append(int(peak_col))
+    for row_position, cols in enumerate(peak_cols_list):
+        valid_cols = cols[:max_peaks_per_tg]
+        n_slots = len(valid_cols)
+        
+        edge_rows.extend([row_position] * n_slots)
+        slots.extend(range(n_slots))
+        tf_ids.extend([tf_ids_base[row_position]] * n_slots)
+        peak_cols.extend(map(int, valid_cols))
 
     if not edge_rows:
-        return out
+        return out, {}
 
     edge_rows = np.asarray(edge_rows)
     slots = np.asarray(slots)
     pairs = np.stack([np.asarray(tf_ids), np.asarray(peak_cols)], axis=1)
 
     unique_pairs, inverse = np.unique(pairs, axis=0, return_inverse=True)
-    unique_scores = torch.zeros(len(unique_pairs), dtype=torch.float32)
 
     was_training = peak_model.training
     peak_model.eval()
-    try:
-        chunks = range(0, len(unique_pairs), chunk_size)
-        for start in tqdm(chunks, desc="Binding scores",
-                          miniters=max(1, math.ceil(len(chunks) / 50)),
-                          maxinterval=float("inf")):
-            chunk = unique_pairs[start:start + chunk_size]
-            tf_chunk = torch.from_numpy(chunk[:, 0]).to(device=device, dtype=torch.long)
-            peak_chunk = torch.from_numpy(chunk[:, 1]).to(device=device, dtype=torch.long)
+    
+    torch.cuda.reset_peak_memory_stats()
+    total_pairs = len(unique_pairs)
+    
+    # Cast peak tensor to float globally once to keep the inner loop fast
+    # (Since it was passed as uint8 in your script)
+    atac_peak_tensor_float = atac_peak_tensor.to(dtype=torch.float32)
+    
+    # Move the unique pairs indices to the GPU once
+    unique_pairs_gpu = torch.from_numpy(unique_pairs).to(device=device, dtype=torch.long)
+    unique_scores_gpu = torch.zeros(total_pairs, device=device, dtype=torch.float16)
 
-            logits = peak_model(
-                tf_embedding=tf_embeddings_tensor.index_select(0, tf_chunk),
-                tf_mask=tf_mask_tensor.index_select(0, tf_chunk),
-                peak_embedding=atac_peak_tensor.index_select(0, peak_chunk).float(),
-            )
-            unique_scores[start:start + len(chunk)] = logits.reshape(-1).sigmoid().cpu()
+    gpu_usage = {}
+    miniters = 1 if full_tqdm else max(1, math.ceil(total_pairs / chunk_size / 50))
+    
+    global_start_time = time.time()
+
+    try:
+        chunks = range(0, total_pairs, chunk_size)
+        pbar = tqdm(chunks, desc="Binding scores", miniters=miniters, maxinterval=float("inf"))
+        
+        with torch.inference_mode():
+            for start in pbar:
+                chunk = unique_pairs_gpu[start:start + chunk_size]
+                current_end = start + len(chunk)
+                
+                tf_chunk = chunk[:, 0]
+                peak_chunk = chunk[:, 1]
+                
+                # --- FIX: Direct indexing natively handles N-Dimensional tensors ---
+                tf_emb = tf_embeddings_tensor[tf_chunk]
+                tf_msk = tf_mask_tensor[tf_chunk]
+                pk_emb = atac_peak_tensor_float[peak_chunk]
+                
+                gpu_mem_reserved = torch.cuda.memory_reserved(device=device) / 1e9
+                gpu_mem_allocated = torch.cuda.memory_allocated(device=device) / 1e9
+
+                with torch.amp.autocast(dtype=torch.float16, device_type="cuda"):
+                    logits = peak_model(
+                        tf_embedding=tf_emb,
+                        tf_mask=tf_msk,
+                        peak_embedding=pk_emb,
+                    )
+                    scores = logits.reshape(-1).sigmoid()
+                
+                unique_scores_gpu[start:current_end] = scores
+                
+                step_time = time.time() - global_start_time
+                
+                pbar.set_postfix({
+                    "pairs_processed": f"{current_end}/{total_pairs}",
+                    "gpu_res": f"{gpu_mem_reserved:.2f}GB",
+                    "gpu_alloc": f"{gpu_mem_allocated:.2f}GB",
+                })
+                
+                gpu_usage[start] = {
+                    "time": step_time,
+                    "reserved": gpu_mem_reserved,
+                    "allocated": gpu_mem_allocated,
+                }
     finally:
-        peak_model.train(was_training)
+        peak_model.train(was_training) 
+
+    # Bring calculated GPU values down to the CPU before structural mapping
+    unique_scores = unique_scores_gpu.cpu().float()
 
     out[edge_rows, slots] = unique_scores[inverse]
 
     print(f"{len(unique_pairs):,} distinct (TF, peak) pairs for "
           f"{len(edge_rows):,} slots across {n_edges:,} edges "
           f"({out.numel() * 4 / 1e6:.1f} MB)")
-    return out
+          
+    return out, gpu_usage
 
 
 def binding_score_cache_path(
@@ -882,6 +936,7 @@ def load_or_precompute_binding_scores(
     max_peaks_per_tg,
     device,
     chunk_size,
+    full_tqdm=False,
 ):
     """Load a valid split cache or compute and atomically save it."""
     expected_shape = (len(labeled_df), max_peaks_per_tg)
@@ -918,7 +973,7 @@ def load_or_precompute_binding_scores(
                 split_name, cache_path, error,
             )
 
-    scores = precompute_binding_scores(
+    scores, gpu_usage = precompute_binding_scores(
         labeled_df,
         peak_model,
         tf_embeddings_tensor=tf_embeddings_tensor,
@@ -927,6 +982,7 @@ def load_or_precompute_binding_scores(
         max_peaks_per_tg=max_peaks_per_tg,
         device=device,
         chunk_size=chunk_size,
+        full_tqdm=full_tqdm
     )
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = cache_path.with_suffix(f"{cache_path.suffix}.tmp-{os.getpid()}")
@@ -936,7 +992,7 @@ def load_or_precompute_binding_scores(
         "%s: cached binding scores %s at %s",
         split_name, tuple(scores.shape), cache_path,
     )
-    return scores, cache_path
+    return scores, cache_path, gpu_usage
 
 
 def save_prepared_cache(
@@ -1759,7 +1815,7 @@ def main():
                 config[f"{source_key}_train_edges"] = len(frame)
                 if frame.empty:
                     continue
-            scores, binding_cache_file = load_or_precompute_binding_scores(
+            scores, binding_cache_file, gpu_usage = load_or_precompute_binding_scores(
                 split_name,
                 frame,
                 binding_model,

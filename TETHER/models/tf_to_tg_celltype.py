@@ -5,7 +5,12 @@ import torch
 import torch.nn as nn
 import pytorch_lightning as pl
 import numpy as np
-from sklearn.metrics import roc_auc_score, average_precision_score
+from sklearn.metrics import (
+    average_precision_score,
+    precision_recall_curve,
+    roc_auc_score,
+    roc_curve,
+)
 
 class SimpleTFTGRegulationModel(nn.Module):
     def __init__(
@@ -204,7 +209,12 @@ class SimpleTFTGRegulationModel(nn.Module):
                 value=peak_tokens[selected],
                 key_padding_mask=~valid_peaks[selected], need_weights=False,
             )
-            peak_context[selected] = self.norm(attended.squeeze(1))
+            
+            normalized_context = self.norm(attended.squeeze(1))
+            peak_context[selected] = normalized_context.to(
+                device=peak_context.device,
+                dtype=peak_context.dtype,
+            )
 
         # 6. One logit per sampled cell.
         features = torch.cat(
@@ -426,24 +436,88 @@ class LitTFTGRegulationModel(pl.LightningModule):
     def _log_combined_celltype_metrics(self, stage):
         history = self._celltype_metric_history[stage]
         experiment = getattr(self.logger, "experiment", None)
-        if (not history or self.global_rank != 0
+        if (stage != "val" or not history or self.global_rank != 0
                 or not callable(getattr(experiment, "define_metric", None))):
             return
 
         import wandb
 
-        ordered = sorted(history.items())
-        chart = wandb.plot.line_series(
-            xs=[series["epochs"] for _, series in ordered],
-            ys=[series["values"] for _, series in ordered],
-            keys=[name for name, _ in ordered],
-            title=f"{stage.capitalize()} cell-type AUROC and AUPRC",
-            xname="Epoch",
-        )
-        self.logger.log_metrics(
-            {f"{stage}/celltype_auroc_auprc": chart},
-            step=self.global_step,
-        )
+        charts = {}
+        for metric, title in (
+            ("auroc", "Validation AUROC by cell type"),
+            ("auprc", "Validation AUPRC by cell type"),
+            ("acc", "Validation accuracy by cell type"),
+        ):
+            suffix = f"/{metric}"
+            ordered = sorted(
+                (name.removesuffix(suffix), series)
+                for name, series in history.items()
+                if name.endswith(suffix)
+            )
+            if not ordered:
+                continue
+            charts[f"val/celltype_{metric}_history"] = wandb.plot.line_series(
+                xs=[series["epochs"] for _, series in ordered],
+                ys=[series["values"] for _, series in ordered],
+                keys=[name for name, _ in ordered],
+                title=title,
+                xname="Epoch",
+            )
+        if charts:
+            self.logger.log_metrics(charts, step=self.global_step)
+
+    @staticmethod
+    def _sample_curve(x, y, max_points=100):
+        if len(x) <= max_points:
+            return x, y
+        indices = np.linspace(0, len(x) - 1, max_points).astype(int)
+        return x[indices], y[indices]
+
+    def _log_validation_curves(
+        self,
+        overall_roc,
+        overall_pr,
+        celltype_roc,
+        celltype_pr_lift,
+    ):
+        experiment = getattr(self.logger, "experiment", None)
+        if (self.global_rank != 0
+                or not callable(getattr(experiment, "define_metric", None))):
+            return
+
+        import wandb
+
+        charts = {}
+        if overall_roc is not None:
+            charts["val/overall_roc_curve"] = wandb.plot.line_series(
+                xs=[overall_roc[0]], ys=[overall_roc[1]], keys=["Overall"],
+                title="Validation overall ROC curve", xname="False positive rate",
+            )
+        if overall_pr is not None:
+            charts["val/overall_precision_recall_curve"] = wandb.plot.line_series(
+                xs=[overall_pr[0]], ys=[overall_pr[1]], keys=["Overall"],
+                title="Validation overall precision-recall curve", xname="Recall",
+            )
+        if celltype_roc:
+            charts["val/celltype_roc_curves"] = wandb.plot.line_series(
+                xs=[curve[1] for curve in celltype_roc],
+                ys=[curve[2] for curve in celltype_roc],
+                keys=[curve[0] for curve in celltype_roc],
+                title="Validation ROC curves by cell type",
+                xname="False positive rate",
+            )
+        if celltype_pr_lift:
+            charts["val/celltype_precision_recall_lift_curves"] = (
+                wandb.plot.line_series(
+                    xs=[[0.0, 1.0]] + [curve[1] for curve in celltype_pr_lift],
+                    ys=[[1.0, 1.0]] + [curve[2] for curve in celltype_pr_lift],
+                    keys=["Baseline"] + [curve[0] for curve in celltype_pr_lift],
+                    title="Validation precision-recall lift by cell type",
+                    xname="Recall",
+                )
+            )
+        if charts:
+            self.logger.log_metrics(charts, step=self.global_step)
 
     def _epoch_metrics(self, stage):
         batches = self._predictions[stage]
@@ -468,25 +542,71 @@ class LitTFTGRegulationModel(pl.LightningModule):
                         sample_mask & (slices == cell_type),
                     ))
         macro = {"auroc": [], "auprc": []}
+        overall_roc = None
+        overall_pr = None
+        celltype_roc = []
+        celltype_pr_lift = []
         for group, name, mask in groups:
-            if len(np.unique(labels[mask])) < 2:
+            group_labels = labels[mask]
+            group_probs = probs[mask]
+            is_celltype = group == "celltype" or (
+                group and group.endswith("/celltype")
+            )
+            if is_celltype:
+                accuracy = float(
+                    ((group_probs >= .5) == group_labels.astype(bool)).mean()
+                )
+                accuracy_key = f"{stage}/{group}/{name}/acc"
+                self._record_celltype_metric(
+                    stage, accuracy_key, accuracy
+                )
+                self.log(accuracy_key, accuracy)
+
+            if len(np.unique(group_labels)) < 2:
                 continue
-            values = {"auroc": roc_auc_score(labels[mask], probs[mask]),
-                      "auprc": average_precision_score(labels[mask], probs[mask])}
+            values = {"auroc": roc_auc_score(group_labels, group_probs),
+                      "auprc": average_precision_score(group_labels, group_probs)}
             for metric, value in values.items():
                 key = f"{stage}/{metric}" if name is None else f"{stage}/{group}/{name}/{metric}"
-                is_celltype = group == "celltype" or (
-                    group and group.endswith("/celltype")
-                )
                 if is_celltype:
                     self._record_celltype_metric(stage, key, value)
                 self.log(key, float(value), prog_bar=name is None)
                 if is_celltype:
                     macro[metric].append(value)
+
+            if stage != "val":
+                continue
+            fpr, tpr, _ = roc_curve(group_labels, group_probs)
+            precision, recall, _ = precision_recall_curve(
+                group_labels, group_probs
+            )
+            fpr, tpr = self._sample_curve(fpr, tpr)
+            # sklearn returns PR points from high to low recall. Reverse them so
+            # W&B draws the x-axis from low to high recall.
+            recall, precision = self._sample_curve(
+                recall[::-1], precision[::-1]
+            )
+            if name is None:
+                overall_roc = (fpr, tpr)
+                overall_pr = (recall, precision)
+            elif is_celltype:
+                curve_name = (
+                    str(name) if group == "celltype"
+                    else f"{group.removeprefix('sample/').removesuffix('/celltype')}/{name}"
+                )
+                celltype_roc.append((curve_name, fpr, tpr))
+                positive_rate = float(group_labels.mean())
+                celltype_pr_lift.append((
+                    curve_name, recall, precision / positive_rate
+                ))
         for metric, values in macro.items():
             if values:
                 self.log(f"{stage}/macro_celltype_{metric}", float(np.mean(values)))
         self._log_combined_celltype_metrics(stage)
+        if stage == "val":
+            self._log_validation_curves(
+                overall_roc, overall_pr, celltype_roc, celltype_pr_lift
+            )
 
     def on_save_checkpoint(self, checkpoint):
         checkpoint["celltype_metric_history"] = self._celltype_metric_history
