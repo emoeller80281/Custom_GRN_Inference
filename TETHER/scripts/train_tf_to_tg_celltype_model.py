@@ -962,7 +962,7 @@ def load_or_precompute_binding_scores(
                     "%s: loaded cached binding scores %s from %s",
                     split_name, tuple(scores.shape), cache_path,
                 )
-                return scores, cache_path
+                return scores, cache_path, None
             logging.warning(
                 "%s: ignoring binding cache with shape %s; expected %s",
                 split_name, getattr(scores, "shape", None), expected_shape,
@@ -1111,7 +1111,7 @@ def prepare_data(args):
     # -----------------------------------
     # DATA LOADING
     # -----------------------------------
-
+    print(f"\n{species} {tissue} {sample_name}")
     # Load the processed Muon object
     mdata = mu.read(input_data_dir / "multiome_processed.h5mu")
     logging.info(f"Loaded MuData object:")

@@ -28,11 +28,18 @@ export OPENBLAS_NUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
 
 #    --dataset mouse_liver:liver_sample \
-
+# --dataset mESC:E7.5_rep1 \
 
 srun python -u scripts/train_tf_to_tg_celltype_model.py \
     --species mm10 \
+    --dataset mouse_liver:liver_sample \
     --dataset mESC:E7.5_rep1 \
+    --dataset mESC:E7.5_rep2 \
+    --dataset mESC:E8.0_rep1 \
+    --dataset mESC:E8.0_rep2 \
+    --dataset mESC:E8.5_rep1 \
+    --dataset mESC:E8.5_rep2 \
+    --holdout_sample mouse_liver:liver_sample \
     --epochs 250 \
     --accelerator gpu \
     --batch_size 512 \
