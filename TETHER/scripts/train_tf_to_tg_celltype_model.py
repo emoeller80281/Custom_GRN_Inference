@@ -701,8 +701,9 @@ def make_balanced_scaler_dataset(train_datasets, edges_per_sample, seed):
 
 
 @torch.no_grad()
-def fit_shared_input_scaler(loader):
+def fit_shared_input_scaler(loader, full_tqdm=False):
     """Fit global moments from real entries in depth-normalized/log1p train inputs."""
+    miniters = 1 if full_tqdm else max(1, math.ceil(len(loader) / 50))
     totals = {
         name: {"sum": 0.0, "sum_sq": 0.0, "count": 0}
         for name in ("tf_expression", "tg_expression", "peak_accessibility")
@@ -714,7 +715,13 @@ def fit_shared_input_scaler(loader):
         totals[name]["sum_sq"] += values.square().sum().item()
         totals[name]["count"] += values.numel()
 
-    for batch in tqdm(loader, desc="Fitting shared input scaling"):
+    progress = tqdm(
+        loader,
+        desc="Fitting shared input scaling",
+        miniters=miniters,
+        maxinterval=float("inf"),
+    )
+    for batch in progress:
         cell_mask = batch["cell_mask"].bool()
         peak_mask = batch["peak_mask"].bool()
         update("tf_expression", batch["tf_expression"][cell_mask])
@@ -864,11 +871,16 @@ def precompute_binding_scores(
                 
                 step_time = time.time() - global_start_time
                 
-                pbar.set_postfix({
-                    "pairs_processed": f"{current_end}/{total_pairs}",
-                    "gpu_res": f"{gpu_mem_reserved:.2f}GB",
-                    "gpu_alloc": f"{gpu_mem_allocated:.2f}GB",
-                })
+                # refresh=False leaves the redraw to pbar's own miniters gate.
+                # The default refresh=True redraws every step and ignores miniters.
+                pbar.set_postfix(
+                    {
+                        "pairs_processed": f"{current_end}/{total_pairs}",
+                        "gpu_res": f"{gpu_mem_reserved:.2f}GB",
+                        "gpu_alloc": f"{gpu_mem_allocated:.2f}GB",
+                    },
+                    refresh=False,
+                )
                 
                 gpu_usage[start] = {
                     "time": step_time,
