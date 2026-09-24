@@ -561,9 +561,13 @@ class TFTGEdgeBagDataset(Dataset):
             cols = torch.as_tensor(cols, dtype=torch.long, device=matrix.device)
             return matrix.index_select(0, rows).index_select(1, cols).float()
 
-        block = matrix[rows][:, cols]
-        if sparse.issparse(block):
-            block = block.toarray()
+        if sparse.issparse(matrix):
+            block = matrix[rows][:, cols].toarray()
+        else:
+            # One cells x features gather. matrix[rows][:, cols] first copies every
+            # column of the selected rows: on a dense 147k-peak ATAC matrix that is
+            # ~75 MB per edge (float64) to keep 25 values.
+            block = matrix[np.ix_(rows, cols)]
 
         return torch.as_tensor(np.asarray(block), dtype=torch.float32)
 
@@ -834,6 +838,13 @@ def precompute_binding_scores(
     unique_pairs_gpu = torch.from_numpy(unique_pairs).to(device=device, dtype=torch.long)
     unique_scores_gpu = torch.zeros(total_pairs, device=device, dtype=torch.float16)
 
+    # Real protein length per TF, kept on the CPU so each chunk's crop width costs no
+    # GPU sync. peak_model is the bare TFPeakBindingModel, which does not crop the padded
+    # TF axis itself (only LitTFPeakBindingModel._shared_step does).
+    from models.tf_to_dna import TF_CROP_LADDER
+    tf_lengths = tf_mask_tensor.sum(dim=1).cpu().numpy()
+    table_width = tf_mask_tensor.shape[1]
+
     gpu_usage = {}
     miniters = 1 if full_tqdm else max(1, math.ceil(total_pairs / chunk_size / 50))
     
@@ -851,9 +862,19 @@ def precompute_binding_scores(
                 tf_chunk = chunk[:, 0]
                 peak_chunk = chunk[:, 1]
                 
-                # --- FIX: Direct indexing natively handles N-Dimensional tensors ---
-                tf_emb = tf_embeddings_tensor[tf_chunk]
-                tf_msk = tf_mask_tensor[tf_chunk]
+                # Crop the padded TF axis to the ladder rung at or above the longest
+                # protein in this chunk, as LitTFPeakBindingModel does. Masks are strict
+                # prefixes and the embeddings are zero past them, so the scores are
+                # unchanged. Without the crop every chunk runs all 5,588 positions and
+                # gathers a ~3 GB embedding block. Slice before the gather so only
+                # [chunk, crop, D] is materialised.
+                longest = int(tf_lengths[unique_pairs[start:current_end, 0]].max())
+                crop = min(
+                    next((rung for rung in TF_CROP_LADDER if rung >= longest), table_width),
+                    table_width,
+                )
+                tf_emb = tf_embeddings_tensor[:, :crop][tf_chunk]
+                tf_msk = tf_mask_tensor[:, :crop][tf_chunk]
                 pk_emb = atac_peak_tensor_float[peak_chunk]
                 
                 gpu_mem_reserved = torch.cuda.memory_reserved(device=device) / 1e9
