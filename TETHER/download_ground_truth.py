@@ -34,7 +34,9 @@ Usage:
 
 import argparse
 import logging
+import os
 import shutil
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -57,6 +59,11 @@ CHIPATLAS_URL = (
     "https://chip-atlas.dbcls.jp/data/{organism}/assembled/"
     "Oth.{cls}.05.AllAg.{term}.bed"
 )
+
+# Several build jobs can share chipatlas/ and remap/. Every temporary file carries this
+# host.pid tag, and a BED only appears under its final name once it is complete (atomic
+# rename), so a job never reads or deletes another job's half-written file.
+TMP_TAG = f"{socket.gethostname()}.{os.getpid()}"
 
 
 def read_map(map_path: Path, organism: str, include_optin: bool) -> pd.DataFrame:
@@ -86,11 +93,13 @@ def fetch_chipatlas(rows: pd.DataFrame, organism: str, out_dir: Path, force: boo
     for _, r in rows.iterrows():
         fname = f"Oth.{r.source_class}.05.AllAg.{r.source_term}.bed"
         dest = out_dir / fname.replace("/", "_")
+        tmp = dest.with_name(f"{dest.name}.{TMP_TAG}.partial")
 
         # An earlier notebook already pulled some of these into data/ground_truth_files/.
         shared = SHARED_GT_DIR / fname
         if not dest.exists() and shared.exists() and not force:
-            shutil.copy(shared, dest)
+            shutil.copy(shared, tmp)
+            tmp.replace(dest)
             logging.info("  reused %s from ground_truth_files/", fname)
             got[r.source_term] = dest
             continue
@@ -103,17 +112,18 @@ def fetch_chipatlas(rows: pd.DataFrame, organism: str, out_dir: Path, force: boo
         try:
             with requests.get(url, stream=True, timeout=120) as resp:
                 resp.raise_for_status()
-                tmp = dest.with_suffix(".partial")
                 with open(tmp, "wb") as fh:
                     for chunk in resp.iter_content(chunk_size=1 << 20):
                         fh.write(chunk)
-                tmp.rename(dest)
+                tmp.replace(dest)
             logging.info("  downloaded %s (%.1f MB)", fname, dest.stat().st_size / 1e6)
             got[r.source_term] = dest
         except requests.HTTPError as exc:
             # Not fatal: a cell type can be absent at this q-value. The breadth report is
             # what records the consequence, so log loudly and carry on.
             logging.warning("  MISSING %s -- %s", fname, exc)
+        finally:
+            tmp.unlink(missing_ok=True)
     return got
 
 
@@ -137,10 +147,12 @@ def fetch_remap(rows: pd.DataFrame, organism: str, out_dir: Path, force: bool) -
             f"{organism}/MACS2/remap2022_all_macs2_{organism}_v1_0.bed.gz"
         )
 
-    wanted_file = out_dir / ".wanted_biotypes.txt"
+    wanted_file = out_dir / f".wanted_biotypes.{TMP_TAG}.txt"
     wanted_file.write_text("\n".join(pending) + "\n")
     logging.info("  streaming %s once for %d biotypes...", src.name, len(pending))
 
+    # awk writes <biotype>.bed.<tag>.partial; each one is renamed to <biotype>.bed only after
+    # the whole stream has finished, so an existing <biotype>.bed is always complete.
     decomp = "pigz -dc" if shutil.which("pigz") else "gunzip -c"
     awk = r'''
       NR==FNR { want[$0]=1; next }
@@ -148,14 +160,23 @@ def fetch_remap(rows: pd.DataFrame, organism: str, out_dir: Path, force: bool) -
         n = split($4, a, ".");
         bt = a[3]; for (i = 4; i <= n; i++) bt = bt "." a[i];
         u = index(bt, "_"); if (u > 0) bt = substr(bt, 1, u - 1);
-        if (bt in want) print > (outdir "/" bt ".bed");
+        if (bt in want) print > (outdir "/" bt ".bed." tag ".partial");
       }
     '''
     cmd = (
-        f"{decomp} {src} | awk -v outdir={out_dir} -F'\\t' '{awk}' {wanted_file} -"
+        f"{decomp} {src} | awk -v outdir={out_dir} -v tag={TMP_TAG} -F'\\t' '{awk}' "
+        f"{wanted_file} -"
     )
-    subprocess.run(cmd, shell=True, check=True, executable="/bin/bash")
-    wanted_file.unlink()
+    partial = {b: out_dir / f"{b}.bed.{TMP_TAG}.partial" for b in pending}
+    try:
+        subprocess.run(cmd, shell=True, check=True, executable="/bin/bash")
+        for b, p in partial.items():
+            if p.exists():
+                p.replace(out_dir / f"{b}.bed")
+    finally:
+        wanted_file.unlink(missing_ok=True)
+        for p in partial.values():
+            p.unlink(missing_ok=True)
 
     got = {}
     for b in biotypes:

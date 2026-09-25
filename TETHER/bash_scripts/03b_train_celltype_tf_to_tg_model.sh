@@ -34,20 +34,24 @@ export NUMEXPR_NUM_THREADS=1
 # --dataset mESC:E8.0_rep2 \
 # --dataset mESC:E8.5_rep1 \
 # --dataset mESC:E8.5_rep2 \
+# --dataset kidney:Ctrl_4weeks_1 \
+# --dataset kidney:Ctrl_4weeks_2 \
+# --dataset kidney:Ctrl_6months_1 \
 
 srun python -u scripts/train_tf_to_tg_celltype_model.py \
     --species mm10 \
-    --dataset kidney:Ctrl_4weeks_1 \
-    --dataset kidney:Ctrl_4weeks_2 \
-    --dataset kidney:Ctrl_6months_1 \
     --dataset mESC:E7.5_rep1 \
+    --dataset mESC:E7.5_rep2 \
+    --dataset mESC:E8.0_rep1 \
+    --dataset mESC:E8.0_rep2 \
+    --dataset mESC:E8.5_rep1 \
+    --dataset mESC:E8.5_rep2 \
     --dataset mouse_liver:liver_sample \
     --holdout_sample mouse_liver:liver_sample \
-    --holdout_sample mESC:E7.5_rep1 \
     --epochs 250 \
     --accelerator gpu \
     --batch_size 512 \
-    --max_cells_per_pair 64 \
+    --max_cells_per_pair 25 \
     --max_peaks_per_tg 25 \
     --binding_chunk_size 1024 \
     --num_workers "${SLURM_CPUS_PER_TASK:-4}" \
