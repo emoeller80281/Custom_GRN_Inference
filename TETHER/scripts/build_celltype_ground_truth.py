@@ -203,6 +203,10 @@ def main() -> None:
     ap.add_argument("--map", type=Path, default=HERE / "cell_type_map.tsv")
     ap.add_argument("--gt_dir", type=Path, default=HERE / "ground_truth")
     ap.add_argument("--out_dir", type=Path, default=HERE / "ground_truth")
+    ap.add_argument("--dataset", default=None,
+                    help="write to <out_dir>/<organism>/<dataset>/ instead of "
+                         "<out_dir>/<organism>/, so datasets that share slice names "
+                         "(B cells, Endothelial) do not overwrite each other")
     ap.add_argument("--reports", type=Path, default=HERE / "reports")
     ap.add_argument("--tss_bed", type=Path, default=None)
     ap.add_argument("--max_tss_dist", type=int, default=DEFAULT_MAX_TSS_DIST)
@@ -244,6 +248,8 @@ def main() -> None:
     emb_tfs = load_embedding_tfs(args.organism)
 
     out_dir = args.out_dir / args.organism
+    if args.dataset:
+        out_dir = out_dir / args.dataset
     out_dir.mkdir(parents=True, exist_ok=True)
     args.reports.mkdir(parents=True, exist_ok=True)
 

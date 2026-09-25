@@ -9,16 +9,21 @@
 #SBATCH -c 8
 #SBATCH --mem=64G
 #
-# Peaks -> per-slice TF-TG edges for the mESC slices, then the provenance check.
-# Run after: python3 download_ground_truth.py --organism mm10 --map cell_type_map_mesc.tsv
+# Peaks -> per-slice TF-TG edges for one dataset's cell type map, then the provenance check.
+# Everything is written under data/ground_truth_files/cell_type_specific/ (GT_DIR):
+#   chipatlas/, remap/                  peak sets, shared by every dataset's map
+#   mm10/<CELL_TYPE>/                   <slice>_ground_truth.parquet
+#   reports/gt_breadth_mm10_<CELL_TYPE>.tsv
+# CELL_TYPE is the dataset prefix of <CELL_TYPE>_cell_type_map.tsv in GT_DIR.
 
 set -eo pipefail
 
-CELL_TYPE="mESC"
+CELL_TYPE="GSE209610_kidney_controls"
 
-PROJECT_DIR="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/"
+PROJECT_DIR="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
 HERE="${PROJECT_DIR}/TETHER"
 GT_DIR="${PROJECT_DIR}/data/ground_truth_files/cell_type_specific"
+MAP="${GT_DIR}/${CELL_TYPE}_cell_type_map.tsv"
 
 cd "$HERE"
 
@@ -30,14 +35,19 @@ export TMPDIR="$HERE/.sorttmp"
 
 mkdir -p "$TMPDIR"
 
+python3 -u "$HERE/download_ground_truth.py" --organism mm10 \
+    --map "$MAP" \
+    --out_dir "$GT_DIR"
+
 python3 -u "$HERE/scripts/build_celltype_ground_truth.py" --organism mm10 \
-    --map "$HERE/${CELL_TYPE}_cell_type_map.tsv" \
+    --map "$MAP" \
     --gt_dir "$GT_DIR" \
     --out_dir "$GT_DIR" \
+    --dataset "$CELL_TYPE" \
     --reports "${GT_DIR}/reports" \
-    --report_tag mm10_${CELL_TYPE} \
-    --max_tss_dist 100000 \
+    --report_tag "mm10_${CELL_TYPE}" \
+    --max_tss_dist 100000
 
-python3 -u "$HERE/scripts/verify_ground_truth.py" --organism mm10 \
-    --map "$HERE/cell_type_map_mesc.tsv" \
-    --gt_dir "$HERE/ground_truth/mesc/mm10"
+python3 -u "$HERE/verify_ground_truth.py" --organism mm10 \
+    --map "$MAP" \
+    --gt_dir "${GT_DIR}/mm10/${CELL_TYPE}"

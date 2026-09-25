@@ -37,8 +37,12 @@ export NUMEXPR_NUM_THREADS=1
 
 srun python -u scripts/train_tf_to_tg_celltype_model.py \
     --species mm10 \
-    --dataset mouse_liver:liver_sample \
+    --dataset kidney:Ctrl_4weeks_1 \
+    --dataset kidney:Ctrl_4weeks_2 \
+    --dataset kidney:Ctrl_6months_1 \
     --dataset mESC:E7.5_rep1 \
+    --dataset mouse_liver:liver_sample \
+    --holdout_sample mouse_liver:liver_sample \
     --holdout_sample mESC:E7.5_rep1 \
     --epochs 250 \
     --accelerator gpu \
@@ -50,5 +54,4 @@ srun python -u scripts/train_tf_to_tg_celltype_model.py \
     --job_id "${SLURM_JOB_ID:-local}" \
     --precision 32-true \
     --wandb_project celltype-TF-TG \
-    --resume_from_checkpoint /gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/TETHER/checkpoints/celltype_tf_tg/celltype_joint_3884482_20260922_182318_756745/checkpoints/epoch-013.ckpt
     "$@"
