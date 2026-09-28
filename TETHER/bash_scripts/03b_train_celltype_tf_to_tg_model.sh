@@ -10,6 +10,8 @@
 #SBATCH --cpus-per-task=24
 #SBATCH --mem=128G
 #SBATCH --signal=SIGUSR1@90
+# A requeued job reuses the same log files; append so the earlier attempt is kept.
+#SBATCH --open-mode=append
 
 # Submit from the repository root (which contains LOGS):
 # sbatch TETHER/bash_scripts/03b_train_celltype_tf_to_tg_model.sh
@@ -58,4 +60,5 @@ srun python -u scripts/train_tf_to_tg_celltype_model.py \
     --job_id "${SLURM_JOB_ID:-local}" \
     --precision 32-true \
     --wandb_project celltype-TF-TG \
+    --resume_from_checkpoint /gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/TETHER/checkpoints/celltype_tf_tg/celltype_joint_3887934_20260925_174112_485147/checkpoints/epoch-045.ckpt
     "$@"

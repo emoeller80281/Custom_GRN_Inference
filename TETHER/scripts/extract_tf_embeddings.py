@@ -41,22 +41,9 @@ per residue. That is too wide to hold as a padded [n_tfs, max_len, d] table on t
 it has to be reduced -- but the reduction has to be the SAME function for every TF, or the
 embeddings are not comparable to each other.
 
-An earlier version built
-
-    proj = nn.Sequential(nn.Linear(2048, 1024), nn.GELU(), nn.Linear(1024, d_model))
-
-*inside* the per-TF function, with no seed. Every TF was therefore projected through a
-freshly initialised random network, i.e. into its own random basis. Each TF's embedding
-stayed internally coherent (first-half vs second-half mean cosine 0.80) while every
-cross-TF relationship was destroyed. Measured on the resulting cache:
-
-    SD of cosine between mean-pooled TFs          0.0883   (1/sqrt(128) = 0.0884)
-    mean |cos| between per-TF top PC directions   0.0707   (independent bases predict 0.071)
-    AUROC separating same-DBD-family TF pairs      0.497   (chance)
-
-So: run ProstT5 once and keep the raw 2048-d output (`--stage raw`), fit ONE PCA across
-the residues of every TF of every species (`--stage fit`), then apply that single saved
-projection to all of them (`--stage project`). The projection is written to disk so a TF
+ProstT5 runs once and keeps the raw 2048-d output (`--stage raw`). A shared PCA is fit across
+the residues of every TF of every species (`--stage fit`), then is applied to all of 
+them (`--stage project`). The projection is written to disk so a TF
 embedded months later lands in the same basis instead of a new one.
 
 Run `scripts/validate_tf_embeddings.py` afterwards -- it re-measures the three numbers

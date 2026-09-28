@@ -1696,8 +1696,25 @@ def parse_args():
         )
     else:
         default_sample_label = args.sample_name
-    args.run_name = args.run_name or f"celltype_{default_sample_label}_{args.job_id}_{stamp}"
+    run_prefix = f"celltype_{default_sample_label}_{args.job_id}"
+    if args.output_dir is None and args.run_name is None and args.job_id != "local":
+        # A SLURM requeue reruns this script under the same job ID. Lightning saves
+        # hpc_ckpt_N.ckpt in the previous attempt's output directory and resumes only
+        # when default_root_dir points there, so reuse it instead of a new timestamp.
+        previous = sorted(
+            (PROJECT_DIR / "checkpoints/celltype_tf_tg").glob(f"{run_prefix}_*"),
+            key=lambda path: path.stat().st_mtime,
+        )
+        if previous:
+            args.output_dir = previous[-1]
+            args.run_name = args.output_dir.name
+    args.run_name = args.run_name or f"{run_prefix}_{stamp}"
     args.output_dir = args.output_dir or PROJECT_DIR / "checkpoints/celltype_tf_tg" / args.run_name
+    if args.wandb_run_id is None:
+        # Continue the same W&B run after a requeue. Run directories end in "-<run id>".
+        latest_wandb_run = args.output_dir / "wandb" / "latest-run"
+        if latest_wandb_run.exists():
+            args.wandb_run_id = latest_wandb_run.resolve().name.rsplit("-", 1)[-1]
     return args
 
 
@@ -2031,11 +2048,18 @@ def main():
         )
 
     logger.log_hyperparams(config)
-    
+
+    # With ckpt_path=None under SLURM, Lightning loads the newest hpc_ckpt_N.ckpt in
+    # default_root_dir, which the auto-requeue handler wrote before the time limit.
+    resuming = (args.resume_from_checkpoint is not None
+                or any(args.output_dir.glob("hpc_ckpt_*.ckpt")))
+    if resuming:
+        logging.info("Resuming training in %s", args.output_dir)
+
     checkpoint = ModelCheckpoint(
         dirpath=args.output_dir / "checkpoints", filename="epoch-{epoch:03d}",
         auto_insert_metric_name=False, monitor="val/loss", mode="min",
-        save_top_k=1, save_last=True)
+        save_top_k=3, save_last=True)
     
     trainer = pl.Trainer(
         accelerator=args.accelerator, devices=1, max_epochs=args.epochs,
@@ -2046,12 +2070,12 @@ def main():
         accumulate_grad_batches=args.accumulate_grad_batches,
         gradient_clip_val=args.gradient_clip_val, log_every_n_steps=10,
         # A full step-zero validation below replaces Lightning's two-batch sanity check.
-        num_sanity_val_steps=0 if args.resume_from_checkpoint is None else 2,
+        num_sanity_val_steps=2 if resuming else 0,
         fast_dev_run=args.fast_dev_run
     )
-    
+
     try:
-        if args.resume_from_checkpoint is None:
+        if not resuming:
             logging.info("Evaluating the untrained model on the validation set at step 0")
             untrained_results = trainer.validate(
                 module,

@@ -58,18 +58,18 @@ class TFPeakBindingModel(nn.Module):
         )
 
         # Peak DNA sequence encoder:
-        # [B, 4, 512] -> [B, 32, hidden_dim]
+        # [B, 4, 256] -> [B, 32, hidden_dim]
         self.peak_encoder = nn.Sequential(
             # First Conv layer to capture local motifs 
             # (sets of 15 nucleotides, roughly the size of a TF binding motif)
-            # [B, 4, 512] -> [B, 64, 128]
+            # [B, 4, 256] -> [B, 64, 64]
             nn.Conv1d(4, 64, kernel_size=15, padding=7),
             nn.BatchNorm1d(64),
             nn.GELU(),
-            nn.MaxPool1d(4),  # 512 -> 128
+            nn.MaxPool1d(4),  # 256 -> 64
 
             # Second Conv layer to reduce dimensionality
-            # [B, 64, 128] -> [B, 128, 32]
+            # [B, 64, 64] -> [B, 128, 32]
             nn.Conv1d(64, 128, kernel_size=9, padding=4),
             nn.BatchNorm1d(128),
             nn.GELU(),
@@ -117,7 +117,7 @@ class TFPeakBindingModel(nn.Module):
         """
         tf_embedding:   [B, max_tf_len, 128]
         tf_mask:        [B, max_tf_len]
-        peak_embedding: [B, 512, 4]
+        peak_embedding: [B, 256, 4]
 
         return_hidden=False (default): returns logits [B], unchanged from before this
         flag existed -- every existing caller keeps working with no code change.
@@ -135,7 +135,7 @@ class TFPeakBindingModel(nn.Module):
 
         # Encode peak tokens
         peak_x = peak_embedding.transpose(1, 2)
-        # [B, 512, 4] -> [B, 4, 512]
+        # [B, 256, 4] -> [B, 4, 256]
 
         peak_tokens = self.peak_encoder(peak_x)
         # [B, hidden_dim, 32]
