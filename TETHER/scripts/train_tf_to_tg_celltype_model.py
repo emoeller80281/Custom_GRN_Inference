@@ -34,8 +34,8 @@ from torch.utils.data import (
     ConcatDataset,
     DataLoader,
     Dataset,
+    Sampler,
     Subset,
-    WeightedRandomSampler,
 )
 from tqdm import tqdm
 import pytorch_lightning as pl
@@ -765,21 +765,53 @@ def validate_input_scaler(scaler):
     return scaler
 
 
-def make_sample_balanced_sampler(datasets, seed):
+class SampleBalancedSampler(Sampler):
+    """Draw a source sample uniformly, then a row uniformly inside it.
+
+    Same distribution as a WeightedRandomSampler with 1/len(dataset) weights,
+    but avoids torch.multinomial, which caps at 2^24 categories.
+    """
+
+    def __init__(self, datasets, seed, edges_per_sample=None):
+        self.sizes = torch.tensor([len(d) for d in datasets], dtype=torch.long)
+        
+        self.offsets = torch.cumsum(self.sizes, 0) - self.sizes
+        
+        if edges_per_sample is None:
+            edges_per_sample = int(self.sizes.min())
+        if edges_per_sample <= 0:
+            raise ValueError(f"edges_per_sample must be positive, got {edges_per_sample}")
+        
+        # Number of samples to draw per epocy (default is the size of the smallest sample)
+        self.num_samples = edges_per_sample * len(self.sizes)
+        
+        self.generator = torch.Generator().manual_seed(seed)
+        logging.info(
+            "Sample-balanced epoch: %s edges from each of %d samples = %s per epoch "
+            "(%s training edges in total)",
+            f"{edges_per_sample:,}", len(self.sizes),
+            f"{self.num_samples:,}", f"{int(self.sizes.sum()):,}",
+        )
+
+    def __len__(self):
+        return self.num_samples
+
+    def __iter__(self):
+        which = torch.randint(
+            len(self.sizes), (self.num_samples,), generator=self.generator
+        )
+        within = (
+            torch.rand(self.num_samples, generator=self.generator, dtype=torch.double)
+            * self.sizes[which]
+        ).long()
+        yield from (self.offsets[which] + within).tolist()
+
+
+def make_sample_balanced_sampler(datasets, seed, edges_per_sample=None):
     """Give every source sample equal expected probability during joint training."""
     if len(datasets) < 2:
         return None
-    weights = torch.cat([
-        torch.full((len(dataset),), 1.0 / len(dataset), dtype=torch.double)
-        for dataset in datasets
-    ])
-    generator = torch.Generator().manual_seed(seed)
-    return WeightedRandomSampler(
-        weights,
-        num_samples=sum(len(dataset) for dataset in datasets),
-        replacement=True,
-        generator=generator,
-    )
+    return SampleBalancedSampler(datasets, seed, edges_per_sample)
 
 @torch.no_grad()
 def precompute_binding_scores(
@@ -1185,6 +1217,20 @@ def prepare_data(args):
     atac_sample.var["nearest_gene"] = (
         atac_sample.var["nearest_gene"].str.upper()
     )
+
+    # Some deposits carry two rows that differ only by case (SHARE-seq skin has
+    # both "PISD" and "Pisd"). Keep the row with the most total counts.
+    if not rna_sample.var_names.is_unique:
+        gene_totals = np.asarray(rna_sample.X.sum(axis=0)).ravel()
+        order = np.argsort(-gene_totals, kind="stable")
+        keep_genes = np.zeros(rna_sample.n_vars, dtype=bool)
+        keep_genes[order[~rna_sample.var_names[order].duplicated()]] = True
+        logging.warning(
+            f"Dropping {int((~keep_genes).sum())} RNA genes whose names collide "
+            f"after uppercasing: "
+            f"{sorted(set(rna_sample.var_names[~keep_genes]))[:10]}"
+        )
+        rna_sample = rna_sample[:, keep_genes].copy()
 
     assert rna_sample.var_names.is_unique, (
         "Uppercasing produced duplicate RNA gene names."
@@ -1623,6 +1669,11 @@ def parse_args():
         help="Give every source sample equal expected training probability",
     )
     parser.add_argument(
+        "--train_edges_per_sample", type=int, default=None,
+        help="With --balance_samples, edges drawn from each source sample per "
+             "epoch (default: size of the smallest training sample)",
+    )
+    parser.add_argument(
         "--scaler_edges_per_sample", type=int, default=100000,
         help="Equal number of training edges per sample used to fit shared scaling",
     )
@@ -2002,7 +2053,9 @@ def main():
 
     _atomic_write_json(args.output_dir / "run_config.json", config)
     train_sampler = (
-        make_sample_balanced_sampler(dataset_parts["train"], args.seed)
+        make_sample_balanced_sampler(
+            dataset_parts["train"], args.seed, args.train_edges_per_sample
+        )
         if args.balance_samples else None
     )
     loaders = {}

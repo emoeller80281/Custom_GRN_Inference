@@ -2,7 +2,7 @@
 #SBATCH --job-name=celltype_tf_tg
 #SBATCH --output=LOGS/celltype_tf_tg_%j.log
 #SBATCH --error=LOGS/celltype_tf_tg_%j.err
-#SBATCH --time=48:00:00
+#SBATCH --time=72:00:00
 #SBATCH --partition=dense
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:a100:1
@@ -40,6 +40,10 @@ export NUMEXPR_NUM_THREADS=1
 # --dataset kidney:Ctrl_4weeks_2 \
 # --dataset kidney:Ctrl_6months_1 \
 
+# --dataset GSE140203_shareseq:skin_late_anagen \
+# --dataset GSE140203_shareseq:brain \
+# --dataset 10x_E18_mouse_brain:brain \
+
 srun python -u scripts/train_tf_to_tg_celltype_model.py \
     --species mm10 \
     --dataset mESC:E7.5_rep1 \
@@ -48,6 +52,12 @@ srun python -u scripts/train_tf_to_tg_celltype_model.py \
     --dataset mESC:E8.0_rep2 \
     --dataset mESC:E8.5_rep1 \
     --dataset mESC:E8.5_rep2 \
+    --dataset kidney:Ctrl_4weeks_1 \
+    --dataset kidney:Ctrl_4weeks_2 \
+    --dataset kidney:Ctrl_6months_1 \
+    --dataset GSE140203_shareseq:skin_late_anagen \
+    --dataset GSE140203_shareseq:brain \
+    --dataset 10x_E18_mouse_brain:brain \
     --dataset mouse_liver:liver_sample \
     --holdout_sample mouse_liver:liver_sample \
     --epochs 250 \
@@ -60,5 +70,4 @@ srun python -u scripts/train_tf_to_tg_celltype_model.py \
     --job_id "${SLURM_JOB_ID:-local}" \
     --precision 32-true \
     --wandb_project celltype-TF-TG \
-    --resume_from_checkpoint /gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/TETHER/checkpoints/celltype_tf_tg/celltype_joint_3887934_20260925_174112_485147/checkpoints/epoch-045.ckpt
     "$@"
