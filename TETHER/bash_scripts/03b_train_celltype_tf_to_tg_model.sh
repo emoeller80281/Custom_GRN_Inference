@@ -70,4 +70,6 @@ srun python -u scripts/train_tf_to_tg_celltype_model.py \
     --job_id "${SLURM_JOB_ID:-local}" \
     --precision 32-true \
     --wandb_project celltype-TF-TG \
+    --balance_tf \
+    --balance_tg \
     "$@"

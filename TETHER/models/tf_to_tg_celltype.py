@@ -109,6 +109,7 @@ class SimpleTFTGRegulationModel(nn.Module):
             raise ValueError("pooling_temperature must be positive")
         if not batch["cell_mask"].any(dim=1).all():
             raise ValueError("Every edge must contain at least one real cell")
+        
         accessibility = batch["peak_accessibility"].float()
         distance = batch["peak_distance"].float()
         peak_mask = batch["peak_mask"].bool()
