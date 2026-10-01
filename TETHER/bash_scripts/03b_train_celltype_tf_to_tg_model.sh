@@ -39,10 +39,13 @@ export NUMEXPR_NUM_THREADS=1
 # --dataset kidney:Ctrl_4weeks_1 \
 # --dataset kidney:Ctrl_4weeks_2 \
 # --dataset kidney:Ctrl_6months_1 \
-
 # --dataset GSE140203_shareseq:skin_late_anagen \
 # --dataset GSE140203_shareseq:brain \
 # --dataset 10x_E18_mouse_brain:brain \
+# --dataset GSE246464_HSC:young_rep1 \
+# --dataset GSE246464_HSC:young_rep2 \
+# --dataset GSE246464_HSC:old_rep1 \
+# --dataset GSE246464_HSC:old_rep2 \
 
 srun python -u scripts/train_tf_to_tg_celltype_model.py \
     --species mm10 \
@@ -58,8 +61,17 @@ srun python -u scripts/train_tf_to_tg_celltype_model.py \
     --dataset GSE140203_shareseq:skin_late_anagen \
     --dataset GSE140203_shareseq:brain \
     --dataset 10x_E18_mouse_brain:brain \
+    --dataset GSE246464_HSC:young_rep1 \
+    --dataset GSE246464_HSC:young_rep2 \
+    --dataset GSE246464_HSC:old_rep1 \
+    --dataset GSE246464_HSC:old_rep2 \
     --dataset mouse_liver:liver_sample \
     --holdout_sample mouse_liver:liver_sample \
+    --holdout_celltype B cells \
+    --holdout_celltype Endothelial \
+    --holdout_celltype Fibroblasts \
+    --holdout_celltype Hepatocytes \
+    --holdout_celltype T cells \
     --epochs 250 \
     --accelerator gpu \
     --batch_size 512 \
@@ -69,7 +81,5 @@ srun python -u scripts/train_tf_to_tg_celltype_model.py \
     --num_workers "${SLURM_CPUS_PER_TASK:-4}" \
     --job_id "${SLURM_JOB_ID:-local}" \
     --precision 32-true \
-    --wandb_project celltype-TF-TG \
-    --balance_tf \
-    --balance_tg \
+    --wandb_project celltype-TF-TG
     "$@"
