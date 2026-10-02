@@ -13,10 +13,20 @@
 # A requeued job reuses the same log files; append so the earlier attempt is kept.
 #SBATCH --open-mode=append
 
+# Trains from the per-sample caches built by 03c_build_celltype_data.sh.
 # Submit from the repository root (which contains LOGS):
-# sbatch TETHER/bash_scripts/03b_train_celltype_tf_to_tg_model.sh
+#   sbatch TETHER/bash_scripts/03d_train_cached_celltype_tf_to_tg_model.sh
+# To start as soon as every cache job succeeds:
+#   sbatch --dependency=afterok:<03c array job ID> TETHER/bash_scripts/03d_train_cached_celltype_tf_to_tg_model.sh
 # Extra CLI arguments override the defaults below.
-# Matching submissions reuse the stable prepared-data cache automatically.
+#
+# --species, --max_cells_per_pair, --max_peaks_per_tg and the other preprocessing
+# settings must match 03c. The job stops early and lists the expected cache paths
+# if any sample has no complete cache.
+#
+# Cell types of a --holdout_sample that also appear in another sample's training
+# split are held out of training automatically. Add --holdout_celltype for more,
+# or --no-auto_holdout_celltypes to turn this off.
 set -eo pipefail
 PROJECT_DIR="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/TETHER"
 cd "$PROJECT_DIR"
@@ -29,25 +39,7 @@ export MKL_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
 
-# --dataset mouse_liver:liver_sample \
-# --dataset mESC:E7.5_rep1 \
-# --dataset mESC:E7.5_rep2 \
-# --dataset mESC:E8.0_rep1 \
-# --dataset mESC:E8.0_rep2 \
-# --dataset mESC:E8.5_rep1 \
-# --dataset mESC:E8.5_rep2 \
-# --dataset kidney:Ctrl_4weeks_1 \
-# --dataset kidney:Ctrl_4weeks_2 \
-# --dataset kidney:Ctrl_6months_1 \
-# --dataset GSE140203_shareseq:skin_late_anagen \
-# --dataset GSE140203_shareseq:brain \
-# --dataset 10x_E18_mouse_brain:brain \
-# --dataset GSE246464_HSC:young_rep1 \
-# --dataset GSE246464_HSC:young_rep2 \
-# --dataset GSE246464_HSC:old_rep1 \
-# --dataset GSE246464_HSC:old_rep2 \
-
-srun python -u scripts/train_tf_to_tg_celltype_model.py \
+srun python -u scripts/train_cached_tf_to_tg_celltype_model.py \
     --species mm10 \
     --dataset mESC:E7.5_rep1 \
     --dataset mESC:E7.5_rep2 \
@@ -67,17 +59,11 @@ srun python -u scripts/train_tf_to_tg_celltype_model.py \
     --dataset GSE246464_HSC:old_rep2 \
     --dataset mouse_liver:liver_sample \
     --holdout_sample mouse_liver:liver_sample \
-    --holdout_celltype "B cells" \
-    --holdout_celltype "Endothelial" \
-    --holdout_celltype "Fibroblasts" \
-    --holdout_celltype "Hepatocytes" \
-    --holdout_celltype "T cells" \
+    --max_cells_per_pair 25 \
+    --max_peaks_per_tg 25 \
     --epochs 250 \
     --accelerator gpu \
     --batch_size 512 \
-    --max_cells_per_pair 25 \
-    --max_peaks_per_tg 25 \
-    --binding_chunk_size 1024 \
     --num_workers "${SLURM_CPUS_PER_TASK:-4}" \
     --job_id "${SLURM_JOB_ID:-local}" \
     --precision 32-true \
