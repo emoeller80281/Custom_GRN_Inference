@@ -58,10 +58,13 @@ srun python -u scripts/train_cached_tf_to_tg_celltype_model.py \
     --dataset GSE246464_HSC:old_rep1 \
     --dataset GSE246464_HSC:old_rep2 \
     --dataset mouse_liver:liver_sample \
-    --holdout_sample mouse_liver:liver_sample \
+    --holdout_sample GSE246464_HSC:young_rep1 \
+    --holdout_sample GSE246464_HSC:young_rep2 \
+    --holdout_sample GSE246464_HSC:old_rep1 \
+    --holdout_sample GSE246464_HSC:old_rep2 \
     --max_cells_per_pair 25 \
     --max_peaks_per_tg 25 \
-    --epochs 250 \
+    --epochs 10 \
     --accelerator gpu \
     --batch_size 512 \
     --num_workers "${SLURM_CPUS_PER_TASK:-4}" \

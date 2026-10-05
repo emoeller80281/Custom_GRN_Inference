@@ -1328,7 +1328,7 @@ def prepare_data(args):
                 tissue, sample_name, args.output_dir, error,
             )
 
-    # The GTF and ground-truth files are only needed on a prepared-cache miss.
+    # The GTF and ground-truth files are only needed if the prepared cache is missing.
     train_genes, val_genes, test_genes = split_genes_by_chromosome(
         gene_ref_file,
         train_chroms=train_chroms,
@@ -1921,6 +1921,8 @@ def main():
             if frame.empty:
                 continue
             original_edge_count = len(frame)
+            
+            # Remove holdout samples and celltypes from the training set
             if split_name == "train":
                 if (source["tissue"], source["sample_name"]) in holdout_samples:
                     frame = frame.iloc[0:0].copy()
@@ -1941,7 +1943,8 @@ def main():
                 config[f"{source_key}_train_edges"] = len(frame)
                 if frame.empty:
                     continue
-                
+            
+            # Create TF-peak binding scores
             scores, binding_cache_file, gpu_usage = load_or_precompute_binding_scores(
                 split_name,
                 frame,
@@ -1956,6 +1959,7 @@ def main():
                 chunk_size=args.binding_chunk_size,
             )
             
+            # Prepare TFTGEdgeBagDataset
             dataset_kwargs = dict(
                 tf_embeddings_tensor=None,
                 tf_mask_tensor=None,
@@ -1975,6 +1979,7 @@ def main():
                 **dataset_kwargs,
             ))
             
+            # Add the dataset to be measured for the scaler if the split is "train"
             if split_name == "train":
                 scaler_train_parts.append(TFTGEdgeBagDataset(
                     frame, resample_cells=False, **dataset_kwargs,
@@ -1982,7 +1987,8 @@ def main():
                 scaler_train_sources.append(
                     f"{source['tissue']}:{source['sample_name']}"
                 )
-                
+            
+            # Update the configuration with information about the current source and split
             config[f"{source_key}_{split_name}_edges"] = len(frame)
             config[f"{source_key}_{split_name}_positive_fraction"] = float(frame.label.mean())
             config[f"{source_key}_{split_name}_celltypes"] = sorted(
@@ -1990,7 +1996,7 @@ def main():
             )
             config[f"{source_key}_{split_name}_binding_cache"] = str(binding_cache_file)
 
-        del binding_peak_tensor
+        # Delete the binding peak tensor to free up memory
         if use_cuda:
             torch.cuda.empty_cache()
         logging.info("%s: released ATAC peak tensor from %s", source_key, device)
@@ -2002,11 +2008,14 @@ def main():
 
     if not dataset_parts["train"] or not dataset_parts["val"]:
         raise ValueError("Joint training requires train and validation data")
+    
+    # Concatenate the train/val/test datasets into a single dataset per split
     datasets = {
-        split_name: (parts[0] if len(parts) == 1 else ConcatDataset(parts))
-        for split_name, parts in dataset_parts.items() if parts
+        split_name: (split_dataset[0] if len(split_dataset) == 1 else ConcatDataset(split_dataset))
+        for split_name, split_dataset in dataset_parts.items() if split_dataset
     }
 
+    # Create the manifest for the scaler to track the datasets and holdout information
     scaler_path = args.cache_dir / "input_scaler.json"
     scaler_manifest_path = args.cache_dir / "input_scaler_manifest.json"
     scaler_manifest = {
@@ -2024,14 +2033,20 @@ def main():
         "max_cells_per_pair": args.max_cells_per_pair,
         "input_space": "per_sample_depth_normalized_log1p_X",
     }
+    
+    # Load the cached manifest if it exists
     cached_manifest = (
         json.loads(scaler_manifest_path.read_text())
         if scaler_manifest_path.exists() else None
     )
+    
+    # If the scaler exists, check that it matches the current manifest
     if scaler_path.exists() and cached_manifest == scaler_manifest:
         input_scaler = validate_input_scaler(json.loads(scaler_path.read_text()))
         logging.info("Loaded shared input scaling from %s", scaler_path)
     else:
+        # If the scaler does not exist or does not match the manifest, create a new one.
+        # The balanced dataset uses the same number of edges per sample.
         scaler_dataset = make_balanced_scaler_dataset(
             scaler_train_parts, scaler_manifest["edges_per_sample"], args.seed,
         )
@@ -2058,6 +2073,8 @@ def main():
         )
         if args.balance_samples else None
     )
+    
+    # Create the data loaders for each dataset split
     loaders = {}
     for split_name, dataset in datasets.items():
         sampler = train_sampler if split_name == "train" else None
@@ -2072,18 +2089,21 @@ def main():
             prefetch_factor=4 if args.num_workers > 0 else None,
             drop_last=False,
         )
-
+    
+    # Prepare the hyperparameters for the input scaler
     scaler_hparams = {
         f"{name}_{stat}": input_scaler[name][stat]
         for name in ("tf_expression", "tg_expression", "peak_accessibility")
         for stat in ("mean", "std")
     }
     
+    # Create the TF-TG regulation model
     module = LitTFTGRegulationModel(**{key: getattr(args, key) for key in (
         "d_model", "num_heads", "dropout", "lr", "weight_decay",
         "pooling_temperature", "pos_weight", "plateau_patience")},
         **scaler_hparams)
     
+    # Set up the WandB logger
     if args.wandb_mode == "disabled":
         logger = CSVLogger(str(args.output_dir), name="metrics")
     else:
@@ -2109,19 +2129,34 @@ def main():
     if resuming:
         logging.info("Resuming training in %s", args.output_dir)
 
+    # Set up the model checkpoint callback
     checkpoint = ModelCheckpoint(
         dirpath=args.output_dir / "checkpoints", filename="epoch-{epoch:03d}",
         auto_insert_metric_name=False, monitor="val/loss", mode="min",
         save_top_k=3, save_last=True)
     
+    # Set up the Lightning trainer
     trainer = pl.Trainer(
-        accelerator=args.accelerator, devices=1, max_epochs=args.epochs,
-        precision=args.precision, logger=logger, default_root_dir=str(args.output_dir),
-        callbacks=[checkpoint, TwoPercentProgressBar(), LearningRateMonitor(logging_interval="epoch"),
-                   EarlyStopping(monitor="val/loss", mode="min",
-                                 patience=args.early_stopping_patience, check_finite=True)],
+        accelerator=args.accelerator, 
+        devices=1, 
+        max_epochs=args.epochs,
+        precision=args.precision, 
+        logger=logger, 
+        default_root_dir=str(args.output_dir),
+        callbacks=[
+            checkpoint, 
+            TwoPercentProgressBar(), 
+            LearningRateMonitor(logging_interval="epoch"),
+            EarlyStopping(
+                monitor="val/loss", 
+                mode="min",
+                patience=args.early_stopping_patience, 
+                check_finite=True
+                )
+            ],
         accumulate_grad_batches=args.accumulate_grad_batches,
-        gradient_clip_val=args.gradient_clip_val, log_every_n_steps=10,
+        gradient_clip_val=args.gradient_clip_val, 
+        log_every_n_steps=50,
         # A full step-zero validation below replaces Lightning's two-batch sanity check.
         num_sanity_val_steps=2 if resuming else 0,
         fast_dev_run=args.fast_dev_run
@@ -2143,12 +2178,20 @@ def main():
                 json.dumps(untrained_metrics, indent=2)
             )
 
-        trainer.fit(module, loaders["train"], loaders["val"],
-                    ckpt_path=str(args.resume_from_checkpoint) if args.resume_from_checkpoint else None)
+        trainer.fit(
+            model=module, 
+            train_dataloaders=loaders["train"], 
+            val_dataloaders=loaders["val"],
+            ckpt_path=str(args.resume_from_checkpoint) if args.resume_from_checkpoint else None
+            )
+        
+        # After training, evaluate the model on the test set if available
         if "test" in loaders and not args.fast_dev_run:
             metrics = trainer.test(module, loaders["test"], ckpt_path="best")
             (args.output_dir / "test_metrics.json").write_text(json.dumps(metrics, indent=2))
+            
         logging.info("Best checkpoint: %s", checkpoint.best_model_path)
+        
     finally:
         if isinstance(logger, WandbLogger):
             import wandb

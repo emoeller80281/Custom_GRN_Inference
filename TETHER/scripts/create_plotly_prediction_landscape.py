@@ -1,31 +1,174 @@
 """Interactive 3D Plotly landscape of TF-TG edge predictions over the five model inputs.
 
-Uses the same 5D prediction grid as create_bokeh_prediction_landscape.py. The page
-shows a 3D surface for two checked features (height = edge probability); sliders
-set the other three. Plotly's built-in sliders cannot combine several independent
-sliders, so the controls are plain HTML and a short script slices the embedded
-5D array and redraws the surface with Plotly.react.
+The script runs the trained model on a 5D grid of
+(binding_score, peak_accessibility, peak_distance, tf_expression, tg_expression).
+The page shows a 3D surface for two checked features (height = edge probability);
+sliders set the other three. Plotly's built-in sliders cannot combine several
+independent sliders, so the controls are plain HTML and a short script slices the
+embedded 5D array and redraws the surface with Plotly.react.
 
-Run on a dense GPU node:
+Every grid point sets all five inputs for every cell and every peak of an edge.
+All peak tokens are then identical, so attention returns the same context for
+any number of peaks, and every cell gets the same logit. The pooled edge logit
+T * (logsumexp(l / T) - log n) then equals that cell logit. The prediction is
+therefore the same for every edge, so the grid uses one cell and one peak per
+point and needs no data.
+
+Run on a dense GPU node (a few seconds on a CPU compute node also works):
     srun --partition=dense --gres=gpu:1 --cpus-per-task=4 --mem=16G --time=00:30:00 \
         python TETHER/scripts/create_plotly_prediction_landscape.py
 """
+import argparse
 import base64
 import json
 import logging
+import sys
+import time
+from pathlib import Path
 
 import numpy as np
+import torch
 from plotly.offline import get_plotlyjs
 
-from create_bokeh_prediction_landscape import (
-    FEATURES,
-    PROJECT_DIR,
-    compute_landscape,
-    parse_args,
-    slider_defaults,
-)
+PROJECT_DIR = Path(__file__).resolve().parents[1]
+sys.path.append(str(PROJECT_DIR))
 
+import models.tf_to_tg_celltype as tf_to_tg_module
+
+DEFAULT_CHECKPOINT = (
+    PROJECT_DIR / "checkpoints" / "celltype_tf_tg"
+    / "celltype_joint_3887934_20260925_174112_485147" / "checkpoints" / "last.ckpt"
+)
 DEFAULT_OUTPUT = PROJECT_DIR / "new_plots" / "prediction_landscapes" / "plotly_landscape.html"
+
+# Model input name, display label, factor from model units to display units.
+FEATURES = [
+    ("binding_score", "Binding score", 1.0),
+    ("peak_accessibility", "Peak accessibility (raw)", 1.0),
+    ("peak_distance", "|TSS distance| (kb)", 1e-3),
+    ("tf_expression", "TF expression (raw log1p)", 1.0),
+    ("tg_expression", "TG expression (raw log1p)", 1.0),
+]
+FEATURE_NAMES = [name for name, _, _ in FEATURES]
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--checkpoint", type=Path, default=DEFAULT_CHECKPOINT)
+    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--n-grid", type=int, default=15,
+                        help="Grid points per feature (total points = n_grid ** 5).")
+    parser.add_argument("--expr-sd", type=float, default=4.0,
+                        help="Upper grid limit for expression and accessibility, "
+                             "as scaler mean + expr_sd * scaler std.")
+    parser.add_argument("--max-distance-kb", type=float, default=250.0,
+                        help="Upper distance limit; the model's scaled distance saturates at 250 kb.")
+    parser.add_argument("--range", action="append", default=[], metavar="NAME=LO,HI",
+                        help="Override one grid range in model units (distance in bp), "
+                             "e.g. --range peak_accessibility=0,1.5. Can be repeated.")
+    parser.add_argument("--chunk-size", type=int, default=65536)
+    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    args = parser.parse_args()
+    if args.n_grid < 2:
+        parser.error("--n-grid must be at least 2")
+    return args
+
+
+def default_ranges(hparams, expr_sd, max_distance_kb):
+    """Grid limits in model units. Expression and accessibility come from the checkpoint scaler."""
+    def scaler_hi(prefix):
+        return hparams[f"{prefix}_mean"] + expr_sd * hparams[f"{prefix}_std"]
+
+    return {
+        "binding_score": (0.0, 1.0),                         # sigmoid output of the TF-DNA model
+        "peak_accessibility": (0.0, scaler_hi("peak_accessibility")),
+        "peak_distance": (0.0, max_distance_kb * 1e3),       # forward() uses |distance|
+        "tf_expression": (0.0, scaler_hi("tf_expression")),
+        "tg_expression": (0.0, scaler_hi("tg_expression")),
+    }
+
+
+def apply_range_overrides(ranges, overrides):
+    for item in overrides:
+        name, _, values = item.partition("=")
+        if name not in ranges:
+            raise ValueError(f"Unknown feature in --range: {name!r}; choose from {FEATURE_NAMES}")
+        lo, hi = (float(v) for v in values.split(","))
+        if hi <= lo:
+            raise ValueError(f"--range {item}: HI must be larger than LO")
+        ranges[name] = (lo, hi)
+    return ranges
+
+
+def slider_defaults(hparams):
+    """Starting slider positions in model units: scaler means for the scaled inputs."""
+    return {
+        "binding_score": 0.5,
+        "peak_accessibility": hparams["peak_accessibility_mean"],
+        "peak_distance": 50_000.0,     # the model's distance-weight decay length
+        "tf_expression": hparams["tf_expression_mean"],
+        "tg_expression": hparams["tg_expression_mean"],
+    }
+
+
+def predict_grid(lit_model, grids, device, chunk_size):
+    """Edge probabilities for every combination of grid values. Returns shape [n] * 5."""
+    mesh = np.meshgrid(*(grids[name] for name in FEATURE_NAMES), indexing="ij")
+    flat = {
+        name: torch.as_tensor(values.ravel(), dtype=torch.float32)
+        for name, values in zip(FEATURE_NAMES, mesh)
+    }
+    n_points = mesh[0].size
+    preds = np.empty(n_points, dtype=np.float32)
+
+    lit_model.eval().to(device)
+    with torch.inference_mode():
+        for start in range(0, n_points, chunk_size):
+            end = min(start + chunk_size, n_points)
+            n = end - start
+
+            # One edge per grid point, with one cell (C=1) and one peak (P=1).
+            batch = {
+                "binding_score": flat["binding_score"][start:end, None],                # [n, P]
+                "peak_distance": flat["peak_distance"][start:end, None],                # [n, P]
+                "peak_accessibility": flat["peak_accessibility"][start:end, None, None],  # [n, C, P]
+                "tf_expression": flat["tf_expression"][start:end, None],                # [n, C]
+                "tg_expression": flat["tg_expression"][start:end, None],                # [n, C]
+                "cell_mask": torch.ones(n, 1, dtype=torch.bool),
+                "peak_mask": torch.ones(n, 1, dtype=torch.bool),
+            }
+            batch = {k: v.to(device) for k, v in batch.items()}
+
+            edge_logits, _ = lit_model(batch)   # full model, including the saved scaler
+            preds[start:end] = edge_logits.sigmoid().float().cpu().numpy()
+
+    return preds.reshape(mesh[0].shape)
+
+
+def compute_landscape(args):
+    """Load the checkpoint and predict the 5D grid. Returns (preds, grids, ranges, hparams)."""
+    logging.info(f"Loading checkpoint {args.checkpoint}")
+    lit_model = tf_to_tg_module.LitTFTGRegulationModel.load_from_checkpoint(
+        str(args.checkpoint), map_location="cpu",
+    )
+    hparams = dict(lit_model.hparams)
+
+    ranges = default_ranges(hparams, args.expr_sd, args.max_distance_kb)
+    ranges = apply_range_overrides(ranges, args.range)
+    grids = {name: np.linspace(lo, hi, args.n_grid) for name, (lo, hi) in ranges.items()}
+    for name, (lo, hi) in ranges.items():
+        logging.info(f"  {name}: {lo:.4g} to {hi:.4g}")
+
+    n_points = args.n_grid ** len(FEATURES)
+    logging.info(f"Predicting {n_points:,} grid points on {args.device}")
+    start = time.perf_counter()
+    preds = predict_grid(lit_model, grids, args.device, args.chunk_size)
+    logging.info(f"  done in {time.perf_counter() - start:.1f} s; "
+                 f"probability range {preds.min():.3f} to {preds.max():.3f}")
+    return preds, grids, ranges, hparams
 
 # Pure functions, kept apart from the page wiring so they can be tested with Node.
 JS_CORE = r"""
@@ -330,7 +473,7 @@ def build_page(preds, grids, defaults, ranges, checkpoint):
 
 
 def main():
-    args = parse_args(DEFAULT_OUTPUT, __doc__)
+    args = parse_args()
     preds, grids, ranges, hparams = compute_landscape(args)
     html = build_page(preds, grids, slider_defaults(hparams), ranges, args.checkpoint)
 

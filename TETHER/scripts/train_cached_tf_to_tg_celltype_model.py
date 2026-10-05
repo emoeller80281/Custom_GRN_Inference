@@ -86,7 +86,8 @@ def parse_args():
               "By default, a stable directory is selected from the run configuration."),
     )
     parser.add_argument("--resume_from_checkpoint", type=Path)
-    parser.add_argument("--job_id", default=os.environ.get("SLURM_JOB_ID", "local"))
+    parser.add_argument("--run_name", type=str)
+    parser.add_argument("--slurm_id", default=os.environ.get("SLURM_JOB_ID", "local"))
     parser.add_argument("--epochs", type=int, default=250)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--resample_cells", action=argparse.BooleanOptionalAction, default=True)
@@ -120,7 +121,6 @@ def parse_args():
     parser.add_argument("--wandb_entity")
     parser.add_argument("--wandb_run_id", help="Reuse with --resume_from_checkpoint to resume W&B")
     parser.add_argument("--wandb_mode", choices=["online", "offline", "disabled"], default="online")
-    parser.add_argument("--run_name")
     parser.add_argument("--fast_dev_run", action="store_true",
                         help="Run one train/validation batch after loading the cached data")
     args = parser.parse_args()
@@ -149,9 +149,9 @@ def parse_args():
         parser.error("dropout must be in [0, 1); weight decay and gradient clipping must be nonnegative")
 
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    default_sample_label = "joint" if len(source_specs) > 1 else source_specs[0][1]
-    run_prefix = f"celltype_{default_sample_label}_{args.job_id}"
-    if args.output_dir is None and args.run_name is None and args.job_id != "local":
+    run_name = args.run_name if args.run_name is not None else "joint" if len(source_specs) > 1 else source_specs[0][1]
+    run_prefix = f"celltype_{run_name}"
+    if args.output_dir is None and args.run_name is None and args.slurm_id != "local":
         # A SLURM requeue reruns this script under the same job ID. Lightning saves
         # hpc_ckpt_N.ckpt in the previous attempt's output directory and resumes only
         # when default_root_dir points there, so reuse it instead of a new timestamp.
@@ -162,8 +162,10 @@ def parse_args():
         if previous:
             args.output_dir = previous[-1]
             args.run_name = args.output_dir.name
-    args.run_name = args.run_name or f"{run_prefix}_{stamp}"
-    args.output_dir = args.output_dir or PROJECT_DIR / "checkpoints/celltype_tf_tg" / args.run_name
+    
+    run_prefix_full = f"{run_prefix}_{args.slurm_id}_{stamp}"
+    args.output_dir = args.output_dir or PROJECT_DIR / "checkpoints/celltype_tf_tg" / run_prefix_full
+    
     if args.wandb_run_id is None:
         # Continue the same W&B run after a requeue. Run directories end in "-<run id>".
         latest_wandb_run = args.output_dir / "wandb" / "latest-run"
@@ -294,6 +296,7 @@ def main():
         key: str(value) if isinstance(value, Path) else value
         for key, value in vars(args).items()
     }
+    config["slurm_id"] = os.environ.get("SLURM_JOB_ID", "local")
     config["cache_key"] = cache_key
     config["sample_cache_dirs"] = sample_cache_dirs
     _atomic_write_json(args.output_dir / "run_config.json", config)
@@ -348,7 +351,9 @@ def main():
                         # The notebooks find training binding scores by the content
                         # hash of the holdout-filtered frame.
                         binding_cache_file = binding_score_cache_path(
-                            source["output_dir"] / "prepared", "train", frame,
+                            source["output_dir"] / "prepared", 
+                            "train", 
+                            frame,
                             tf_dna_checkpoint=args.tf_dna_checkpoint,
                             max_peaks_per_tg=args.max_peaks_per_tg,
                         )
@@ -499,11 +504,23 @@ def main():
         save_top_k=3, save_last=True)
 
     trainer = pl.Trainer(
-        accelerator=args.accelerator, devices=1, max_epochs=args.epochs,
-        precision=args.precision, logger=logger, default_root_dir=str(args.output_dir),
-        callbacks=[checkpoint, TwoPercentProgressBar(), LearningRateMonitor(logging_interval="epoch"),
-                   EarlyStopping(monitor="val/loss", mode="min",
-                                 patience=args.early_stopping_patience, check_finite=True)],
+        accelerator=args.accelerator,
+        devices=1,
+        max_epochs=args.epochs,
+        precision=args.precision,
+        logger=logger,
+        default_root_dir=str(args.output_dir),
+        callbacks=[
+            checkpoint, 
+            TwoPercentProgressBar(), 
+            LearningRateMonitor(logging_interval="epoch"),
+            EarlyStopping(
+                monitor="val/loss", 
+                mode="min",
+                patience=args.early_stopping_patience, 
+                check_finite=True
+                )
+            ],
         accumulate_grad_batches=args.accumulate_grad_batches,
         gradient_clip_val=args.gradient_clip_val, log_every_n_steps=10,
         # A full step-zero validation below replaces Lightning's two-batch sanity check.
