@@ -49,7 +49,7 @@ from models.tf_to_tg_celltype import LitTFTGRegulationModel  # noqa: E402
 
 mudata.set_options(pull_on_update=False)
 
-GRN_COLUMNS = ["SampleID", "CellType", "Source", "Target", "Score", "Label"]
+GRN_COLUMNS = ["Tissue", "SampleID", "CellType", "Source", "Target", "Score", "Label"]
 CHROMOSOME_SPLITS = ("train", "val", "test")
 
 
@@ -320,7 +320,7 @@ def predict(model, edges, binding_scores, source, run_config, args, device, desc
     return torch.cat(logits).sigmoid().numpy(), dataset.inputs
 
 
-def to_grn(inputs, probabilities):
+def to_grn(inputs, probabilities, tissue):
     return (
         inputs[["sample_id", "cell_type", "tf_name", "tg_id", "label"]]
         .rename(columns={
@@ -331,6 +331,7 @@ def to_grn(inputs, probabilities):
             "label": "Label",
         })
         .assign(
+            Tissue=tissue,
             Score=probabilities,
             Source=lambda frame: frame["Source"].astype(str).str.upper(),
             Target=lambda frame: frame["Target"].astype(str).str.upper(),
@@ -410,7 +411,7 @@ def main():
                     model, edges, scores, source, run_config, args, device,
                     desc=f"{sample_name} test",
                 )
-                test_grns.append(to_grn(inputs, probabilities))
+                test_grns.append(to_grn(inputs, probabilities, tissue))
             del source
             gc.collect()
 
@@ -436,7 +437,7 @@ def main():
                 model, edges, scores, source, run_config, args, device,
                 desc=f"{sample_name} {split_name}",
             )
-            split_grns.append(to_grn(inputs, probabilities))
+            split_grns.append(to_grn(inputs, probabilities, tissue))
         del source
         gc.collect()
 
