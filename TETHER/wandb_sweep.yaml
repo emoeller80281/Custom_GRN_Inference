@@ -1,22 +1,93 @@
 program: wandb_sweep.py
-name: tf_tg_sweep_refined
+project: celltype-TF-TG
+name: celltype_tf_tg_sweep
 method: bayes
 metric:
-  name: val/auroc.max
+  # Best epoch's value, written by wandb_sweep.py. Alternatives: val/auroc_best,
+  # val/auprc_best, val/macro_celltype_auprc_best.
+  name: val/macro_celltype_auroc_best
   goal: maximize
+# Every parameter becomes a flag of scripts/train_cached_tf_to_tg_celltype_model.py.
+# Lists repeat the flag; true/false become --flag / --no-flag.
 parameters:
-  sample_name:
-    values: ["hepatocytes_1", "hepatocytes_3", "buffer_1", "buffer_2", "E7.5_rep1", "E8.5_rep1", "sample_1"]
-  d_model:
-    values: [64, 128, 192, 256, 512, 1024]
+  # ---- Fixed: datasets and holdouts (same as 03d) ----
+  species:
+    value: mm10
+  dataset:
+    value:
+      - mESC:E7.5_rep1
+      - mESC:E7.5_rep2
+      - mESC:E8.0_rep1
+      - mESC:E8.0_rep2
+      - mESC:E8.5_rep1
+      - mESC:E8.5_rep2
+      - kidney:Ctrl_4weeks_1
+      - kidney:Ctrl_4weeks_2
+      - kidney:Ctrl_6months_1
+      - GSE140203_shareseq:skin_late_anagen
+      - GSE140203_shareseq:shareseq_brain
+      - 10x_E18_mouse_brain:E18_brain
+      - GSE246464_HSC:young_rep1
+      - GSE246464_HSC:young_rep2
+      - GSE246464_HSC:old_rep1
+      - GSE246464_HSC:old_rep2
+      - mouse_liver:liver_sample
+  holdout_sample:
+    value:
+      - mouse_liver:liver_sample
+  auto_holdout_celltypes:
+    value: true
+
+  # ---- Fixed: select the 03c sample caches (must match 03c) ----
   max_peaks_per_tg:
-    min: 2
-    max: 100
+    value: 25
+  # 03c built with max_cells_per_pair 25, so min_cells_per_slice defaulted to 50.
+  # Pinning it keeps the cache key fixed while max_cells_per_pair is swept.
+  min_cells_per_slice:
+    value: 50
+
+  # ---- Fixed: training run ----
+  epochs:
+    value: 10
+  accelerator:
+    value: gpu
+  precision:
+    value: 32-true
+
+  # ---- Swept ----
+  # At most 50 (min_cells_per_slice), so every bag is a real subsample.
   max_cells_per_pair:
-    min: 2
-    max: 1000
+    values: [8, 16, 25, 32, 50]
+  batch_size:
+    values: [128, 256, 512]
+  d_model:
+    values: [64, 128, 256]
+  # Every d_model above is divisible by every num_heads value.
+  num_heads:
+    values: [2, 4, 8]
+  # 1 = the current model. Each extra layer is cross-attention + feed-forward.
+  num_cross_attn_layers:
+    values: [1, 2, 3, 4]
+  dropout:
+    distribution: uniform
+    min: 0.0
+    max: 0.4
+  lr:
+    distribution: log_uniform_values
+    min: 1.0e-5
+    max: 1.0e-3
+  weight_decay:
+    distribution: log_uniform_values
+    min: 1.0e-6
+    max: 1.0e-2
+  pooling_temperature:
+    distribution: log_uniform_values
+    min: 0.25
+    max: 4.0
+  pos_weight:
+    values: [1.0, 2.0, 4.0]
 command:
+  # No ${args}: wandb_sweep.py reads the values from wandb.config.
   - ${env}
   - ${interpreter}
   - ${program}
-  - ${args}

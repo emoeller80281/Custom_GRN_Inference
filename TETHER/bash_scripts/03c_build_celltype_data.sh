@@ -1,7 +1,7 @@
 #!/bin/bash -l
 #SBATCH --job-name=celltype_data
-#SBATCH --output=LOGS/celltype_data_%A_%a.log
-#SBATCH --error=LOGS/celltype_data_%A_%a.err
+#SBATCH --output=LOGS/build_tf_tg_cache/celltype_data_%A_%a.log
+#SBATCH --error=LOGS/build_tf_tg_cache/celltype_data_%A_%a.err
 #SBATCH --time=24:00:00
 #SBATCH --partition=dense
 #SBATCH --nodes=1
@@ -9,7 +9,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=128G
-#SBATCH --array=0-16%8
+#SBATCH --array=0-16%9
 
 # Builds one sample cache (prepared edges + TF-DNA binding scores) per array task.
 # Submit from the repository root (which contains LOGS):
@@ -42,8 +42,8 @@ DATASETS=(
     "kidney:Ctrl_4weeks_2"
     "kidney:Ctrl_6months_1"
     "GSE140203_shareseq:skin_late_anagen"
-    "GSE140203_shareseq:brain"
-    "10x_E18_mouse_brain:brain"
+    "GSE140203_shareseq:shareseq_brain"
+    "10x_E18_mouse_brain:E18_brain"
     "GSE246464_HSC:young_rep1"
     "GSE246464_HSC:young_rep2"
     "GSE246464_HSC:old_rep1"
@@ -62,8 +62,8 @@ echo "[INFO] Array task ${TASK_ID}: ${DATASET} on $(hostname)"
 srun python -u scripts/build_tf_to_tg_celltype_data.py \
     --species mm10 \
     --dataset "$DATASET" \
-    --max_cells_per_pair 25 \
-    --max_peaks_per_tg 25 \
+    --max_cells_per_pair 50 \
+    --max_peaks_per_tg 50 \
     --binding_chunk_size 512 \
     --num_workers "${SLURM_CPUS_PER_TASK:-4}" \
     "$@"

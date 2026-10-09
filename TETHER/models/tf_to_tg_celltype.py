@@ -12,6 +12,38 @@ from sklearn.metrics import (
     roc_curve,
 )
 
+class CrossAttentionBlock(nn.Module):
+    """Refine the per-cell peak context with one more pass over the peak tokens."""
+
+    def __init__(self, d_model, num_heads, dropout):
+        super().__init__()
+        self.attention = nn.MultiheadAttention(
+            embed_dim=d_model,
+            num_heads=num_heads,
+            dropout=dropout,
+            batch_first=True,
+        )
+        self.attention_norm = nn.LayerNorm(d_model)
+        self.feed_forward = nn.Sequential(
+            nn.Linear(d_model, 2 * d_model),
+            nn.SiLU(),
+            nn.Dropout(dropout),
+            nn.Linear(2 * d_model, d_model),
+        )
+        self.feed_forward_norm = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, context, peak_tokens, key_padding_mask):
+        attended, _ = self.attention(
+            query=context.unsqueeze(1), key=peak_tokens, value=peak_tokens,
+            key_padding_mask=key_padding_mask, need_weights=False,
+        )
+        context = self.attention_norm(context + self.dropout(attended.squeeze(1)))
+        return self.feed_forward_norm(
+            context + self.dropout(self.feed_forward(context))
+        )
+
+
 class SimpleTFTGRegulationModel(nn.Module):
     def __init__(
         self,
@@ -19,6 +51,7 @@ class SimpleTFTGRegulationModel(nn.Module):
         d_model=128,
         num_heads=4,
         dropout=0.1,
+        num_cross_attn_layers=1,
         tf_expression_mean=0.0,
         tf_expression_std=1.0,
         tg_expression_mean=0.0,
@@ -87,6 +120,15 @@ class SimpleTFTGRegulationModel(nn.Module):
         )
 
         self.norm = nn.LayerNorm(d_model)
+
+        # Layers after the first. The first keeps the names peak_attention and norm,
+        # so one-layer checkpoints load unchanged.
+        if num_cross_attn_layers < 1:
+            raise ValueError("num_cross_attn_layers must be at least 1")
+        self.extra_cross_attention = nn.ModuleList(
+            CrossAttentionBlock(d_model, num_heads, dropout)
+            for _ in range(num_cross_attn_layers - 1)
+        )
 
         self.classifier = nn.Sequential(
             nn.Linear(3 * d_model, d_model),
@@ -212,6 +254,11 @@ class SimpleTFTGRegulationModel(nn.Module):
             )
             
             normalized_context = self.norm(attended.squeeze(1))
+            for block in self.extra_cross_attention:
+                normalized_context = block(
+                    normalized_context, peak_tokens[selected],
+                    ~valid_peaks[selected],
+                )
             peak_context[selected] = normalized_context.to(
                 device=peak_context.device,
                 dtype=peak_context.dtype,
@@ -251,11 +298,13 @@ class LitTFTGRegulationModel(pl.LightningModule):
                  plateau_patience=4, tf_expression_mean=0.0,
                  tf_expression_std=1.0, tg_expression_mean=0.0,
                  tg_expression_std=1.0, peak_accessibility_mean=0.0,
-                 peak_accessibility_std=1.0, enable_timing_sync=False):
+                 peak_accessibility_std=1.0, enable_timing_sync=False,
+                 num_cross_attn_layers=1):
         super().__init__()
         self.save_hyperparameters()
         self.model = SimpleTFTGRegulationModel(
             d_model=d_model, num_heads=num_heads, dropout=dropout,
+            num_cross_attn_layers=num_cross_attn_layers,
             tf_expression_mean=tf_expression_mean,
             tf_expression_std=tf_expression_std,
             tg_expression_mean=tg_expression_mean,
@@ -627,6 +676,6 @@ class LitTFTGRegulationModel(pl.LightningModule):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.hparams.lr,
                                       weight_decay=self.hparams.weight_decay)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode="min", factor=.5, patience=self.hparams.plateau_patience)
+            optimizer, mode="min", factor=.1, patience=self.hparams.plateau_patience, cooldown=2)
         return {"optimizer": optimizer, "lr_scheduler": {
             "scheduler": scheduler, "monitor": "val/loss"}}

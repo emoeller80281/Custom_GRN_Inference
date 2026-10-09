@@ -59,7 +59,7 @@ from pytorch_lightning.loggers import CSVLogger, WandbLogger  # noqa: E402
 from models.tf_to_tg_celltype import LitTFTGRegulationModel  # noqa: E402
 
 
-def parse_args():
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -106,6 +106,8 @@ def parse_args():
     )
     parser.add_argument("--d_model", type=int, default=128)
     parser.add_argument("--num_heads", type=int, default=4)
+    parser.add_argument("--num_cross_attn_layers", type=int, default=1,
+                        help="Cross-attention layers from the cell query to the peaks")
     parser.add_argument("--dropout", type=float, default=.1)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
@@ -123,10 +125,11 @@ def parse_args():
     parser.add_argument("--wandb_mode", choices=["online", "offline", "disabled"], default="online")
     parser.add_argument("--fast_dev_run", action="store_true",
                         help="Run one train/validation batch after loading the cached data")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     source_specs = finalize_data_args(parser, args)
 
-    for key in ("epochs", "batch_size", "num_heads", "d_model", "accumulate_grad_batches"):
+    for key in ("epochs", "batch_size", "num_heads", "d_model", "accumulate_grad_batches",
+                "num_cross_attn_layers"):
         if getattr(args, key) <= 0:
             parser.error(f"--{key} must be positive")
     if args.scaler_edges_per_sample <= 0 or args.d_model % args.num_heads or args.d_model < 2:
@@ -185,8 +188,9 @@ def link_sample_cache(cache_dir, tissue, sample_name, sample_dir):
     os.replace(temporary_link, link)
 
 
-def main():
-    args, source_specs = parse_args()
+def main(argv=None, extra_callbacks=()):
+    """argv and extra_callbacks let wandb_sweep.py run this in-process."""
+    args, source_specs = parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
@@ -471,7 +475,7 @@ def main():
         for stat in ("mean", "std")
     }
     module = LitTFTGRegulationModel(**{key: getattr(args, key) for key in (
-        "d_model", "num_heads", "dropout", "lr", "weight_decay",
+        "d_model", "num_heads", "num_cross_attn_layers", "dropout", "lr", "weight_decay",
         "pooling_temperature", "pos_weight", "plateau_patience")},
         **scaler_hparams)
 
@@ -517,14 +521,15 @@ def main():
             EarlyStopping(
                 monitor="val/loss", 
                 mode="min",
-                patience=args.early_stopping_patience, 
+                patience=args.early_stopping_patience,
                 check_finite=True
-                )
+                ),
+            *extra_callbacks,
             ],
         accumulate_grad_batches=args.accumulate_grad_batches,
-        gradient_clip_val=args.gradient_clip_val, log_every_n_steps=10,
+        gradient_clip_val=args.gradient_clip_val, log_every_n_steps=50,
         # A full step-zero validation below replaces Lightning's two-batch sanity check.
-        num_sanity_val_steps=2 if resuming else 0,
+        num_sanity_val_steps=1 if resuming else 0,
         fast_dev_run=args.fast_dev_run,
     )
 

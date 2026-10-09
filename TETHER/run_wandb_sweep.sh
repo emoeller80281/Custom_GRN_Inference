@@ -10,7 +10,7 @@
 #SBATCH -c 16
 #SBATCH --mem=128G
 #SBATCH --signal=SIGUSR1@90
-#SBATCH --array=0-7
+#SBATCH --array=0-3
 
 set -eo pipefail
 
@@ -90,12 +90,12 @@ export PYTHONFAULTHANDLER=1
 
 echo "[INFO] Sweep config: $SWEEP_CONFIG"
 echo "[INFO] Sweep path: $SWEEP_ID"
-echo "[INFO] W&B project: tf_tg_regulation_prediction"
+echo "[INFO] W&B project: celltype-TF-TG"
 
 if [ "$FORCE_RELOAD" -eq 1 ]; then
     export FORCE_RELOAD=1
     echo "[INFO] FORCE_RELOAD=1 will be passed to wandb_sweep.py"
 fi
 
-echo "[INFO] Starting W&B agent on a 1-node / 4-GPU allocation..."
+echo "[INFO] Starting W&B agent on a 1-GPU allocation..."
 srun --ntasks=1 wandb agent "$SWEEP_ID"

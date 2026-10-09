@@ -1,7 +1,7 @@
 #!/bin/bash -l
 #SBATCH --job-name=celltype_tf_tg
-#SBATCH --output=LOGS/celltype_tf_tg_%j.log
-#SBATCH --error=LOGS/celltype_tf_tg_%j.err
+#SBATCH --output=LOGS/celltype_tf_tg/celltype_tf_tg_%j.log
+#SBATCH --error=LOGS/celltype_tf_tg/celltype_tf_tg_%j.err
 #SBATCH --time=72:00:00
 #SBATCH --partition=dense
 #SBATCH --nodes=1
@@ -51,24 +51,27 @@ srun python -u scripts/train_cached_tf_to_tg_celltype_model.py \
     --dataset kidney:Ctrl_4weeks_2 \
     --dataset kidney:Ctrl_6months_1 \
     --dataset GSE140203_shareseq:skin_late_anagen \
-    --dataset GSE140203_shareseq:brain \
-    --dataset 10x_E18_mouse_brain:brain \
+    --dataset GSE140203_shareseq:shareseq_brain \
+    --dataset 10x_E18_mouse_brain:E18_brain \
     --dataset GSE246464_HSC:young_rep1 \
     --dataset GSE246464_HSC:young_rep2 \
     --dataset GSE246464_HSC:old_rep1 \
     --dataset GSE246464_HSC:old_rep2 \
     --dataset mouse_liver:liver_sample \
-    --holdout_sample GSE246464_HSC:young_rep1 \
-    --holdout_sample GSE246464_HSC:young_rep2 \
-    --holdout_sample GSE246464_HSC:old_rep1 \
-    --holdout_sample GSE246464_HSC:old_rep2 \
-    --max_cells_per_pair 25 \
-    --max_peaks_per_tg 25 \
-    --epochs 10 \
+    --max_cells_per_pair 50 \
+    --max_peaks_per_tg 50 \
+    --epochs 250 \
+    --early_stopping_patience 250 \
+    --plateau_patience 15 \
+    --lr 6.67e-4 \
+    --dropout 0.01 \
+    --num_heads 8 \
+    --d_model 64 \
+    --num_cross_attn_layers 2 \
     --accelerator gpu \
-    --batch_size 512 \
+    --batch_size 128 \
     --num_workers "${SLURM_CPUS_PER_TASK:-4}" \
-    --job_id "${SLURM_JOB_ID:-local}" \
+    --run_name "long_training" \
     --precision 32-true \
     --wandb_project celltype-TF-TG \
     "$@"
