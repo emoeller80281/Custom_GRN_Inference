@@ -108,7 +108,6 @@ def binding_score_cache_path(
     return Path(prepared_dir) / f"binding_scores_{split_name}_{cache_key}.pt"
 
 
-
 def _format_chroms(chroms: list[str]) -> str:
     """Render a chromosome list for logging.
 

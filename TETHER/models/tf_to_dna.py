@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import pytorch_lightning as pl
-from torchmetrics.classification import BinaryAUROC, BinaryAveragePrecision, BinaryAccuracy
 
 from bidirectional_cross_attention import BidirectionalCrossAttentionTransformer
 
@@ -12,25 +11,9 @@ from sklearn.metrics import (
 import wandb
 import time
 
-# Canonical crop ladder for the TF protein axis. Both this model and
-# TFTGRegulationModel (models/tf_to_tg.py) import it, so a protein of a given length is
-# cropped to the same width wherever it is scored.
-#
-# The rung count is set by the tighter of the two consumers, which is TF-TG, not this one.
-# This trainer pays a cudnn.benchmark autotune per distinct shape -- cheap, amortises, and
-# it could comfortably afford the 7-rung ladder (256, 512, 768, 1024, 1536, 2048, 3072)
-# that used to live here. TF-TG instead pays a full Inductor compile and CUDA-graph
-# recording per distinct (crop, n_chunks) pair, against
-# torch._dynamo.config.cache_size_limit, which train_tf_to_tg_model.py leaves at torch's
-# default of 8. Seven rungs produce eight distinct widths on their own, filling that budget
-# before n_chunks is even considered; a 5-rung version already measured 15-38 s/batch
-# spikes recurring indefinitely against 0.14-0.57 s/batch warm.
-#
-# Cost of that consistency, measured on the real tables: this trainer's mean crop goes
-# 742 -> 869 for mm10 (7.53x -> 6.43x saving) and 757 -> 903 for hg38 (5.29x -> 4.43x).
-# To widen it, first set torch._dynamo.config.cache_size_limit in
-# scripts/train_tf_to_tg_model.py the way generate_all_predictions.py already does, then
-# move both models up together by editing this one line.
+# Crops TF lengths to the nearest rung in this ladder, rather than the exact batch maximum. This
+# reduces the number of distinct input shapes for the compiled model to reduce recompilation overhead
+# while also not padding every TF to the largest one in the dataset.
 TF_CROP_LADDER = (512, 1024, 2048)
 
 
@@ -270,18 +253,7 @@ class LitTFPeakBindingModel(pl.LightningModule):
 
     # Crop widths are quantized to a ladder rather than taken as the exact batch maximum.
     # cudnn.benchmark is enabled during training, so every distinct input shape triggers a
-    # fresh autotune pass; an unquantized crop produces a near-unique width per batch.
-    #
-    # Measured over length-bucketed batches of 64 on the real edge sets, against a padded
-    # table width of 5,588 (mm10) / 4,002 (hg38):
-    #
-    #                                   mm10            hg38        distinct widths
-    #   exact batch max                 9.1x            6.2x        unbounded
-    #   7-rung ladder                   7.5x            5.3x        8
-    #   the shared ladder below         6.6x            4.6x        4
-    #
-    # 1.1% (mm10) / 1.6% (hg38) of TFs fall through to the full table width. See the
-    # module-level TF_CROP_LADDER for why the shared value is the narrower one.
+    # fresh autotune pass
     TF_CROP_LADDER = TF_CROP_LADDER
 
     def _crop_width(self, tf_mask_batch) -> int:

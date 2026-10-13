@@ -45,7 +45,7 @@ import pandas as pd
 import requests
 
 HERE = Path(__file__).resolve().parent
-PROJECT_DIR = HERE.parent
+PROJECT_DIR = HERE.parents[2]
 DATA_DIR = PROJECT_DIR / "data"
 
 # ChIP-Atlas BEDs already downloaded for earlier work; reuse instead of refetching.

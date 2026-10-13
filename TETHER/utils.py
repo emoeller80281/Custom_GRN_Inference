@@ -22,7 +22,6 @@ PROJECT_DIR = Path("/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERE
 CHKPT_DIR = PROJECT_DIR / "checkpoints"
 sys.path.append(str(PROJECT_DIR))
 
-import models.tf_to_tg as tf_to_tg_module
 import models.tf_to_dna as tf_to_dna_module
 
 import logging
@@ -956,6 +955,25 @@ def strip_compiled_prefix_from_state_dict(state_dict, prefix="_orig_mod."):
         cleaned[cleaned_key] = value
 
     return cleaned
+
+
+def env_int(keys, default=0):
+    for key in keys:
+        value = os.environ.get(key)
+        if value not in (None, ""):
+            try:
+                return int(value)
+            except ValueError:
+                pass
+    return default
+
+def get_rank_info():
+    """Return rank information for both torchrun/Lightning and Slurm-launched jobs."""
+    world_size = env_int(["WORLD_SIZE", "SLURM_NTASKS"], 1)
+    global_rank = env_int(["RANK", "SLURM_PROCID"], 0)
+    local_rank = env_int(["LOCAL_RANK", "SLURM_LOCALID"], 0)
+    node_rank = env_int(["NODE_RANK", "SLURM_NODEID"], 0)
+    return global_rank, local_rank, node_rank, world_size
 
 
 def gpu_supports_torch_compile(device):

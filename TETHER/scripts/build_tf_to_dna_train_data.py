@@ -126,11 +126,6 @@ def main():
     argparser.add_argument("--pct_true_edges", type=float, default=0.25)
     argparser.add_argument("--true_false_ratio", type=float, default=0.25)
     argparser.add_argument("--force_reload", action="store_true")
-    # MUST match --peak_flank_size in build_tf_to_tg_train_data.py. The TF-TG model calls
-    # the frozen TF-DNA model on ITS peak windows, so a mismatch means the binding model
-    # is used on a window width it never trained on: the conv stack is length-agnostic
-    # (L -> L/16 tokens) so nothing errors, but masked_mean_pool then averages a motif
-    # over twice as much flanking sequence.
     argparser.add_argument("--peak_flank_size", type=int, default=128)
     args = argparser.parse_args()
     
@@ -193,6 +188,7 @@ def main():
     
     # Can skip reading in the true edges if edge_cache_files and map_cache_files exist
     if not all(f.exists() for f in map_cache_files + edge_cache_files) or args.force_reload:
+        # Loads the ChIP-Atlas data for the species to filter the TFs with embeddings to those in the ChIP-Atlas data
         logging.info("Loading true edges...")
         true_edge_file = DATA_DIR / "ground_truth_files" / f"chip_atlas_{species}_all.parquet"
         true_edge_df = pd.read_parquet(true_edge_file)

@@ -35,17 +35,20 @@ from sklearn.metrics import roc_auc_score
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from train_tf_to_tg_celltype_model import (  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from scripts.train_cached_tf_to_tg_celltype_model import (
     PROJECT_DIR,
     TFTGEdgeBagDataset,
-    binding_score_cache_path,
-    load_or_precompute_binding_scores,
 )
-from build_tf_to_tg_celltype_data import BINDING_MANIFEST, load_binding_model  # noqa: E402
 
-sys.path.insert(0, str(PROJECT_DIR))
-from models.tf_to_tg_celltype import LitTFTGRegulationModel  # noqa: E402
+from scripts.build_tf_to_tg_celltype_data import (
+    BINDING_MANIFEST,
+    load_binding_model,
+    load_or_precompute_binding_scores,
+    binding_score_cache_path
+)
+
+from models.tf_to_tg_celltype import LitTFTGRegulationModel
 
 mudata.set_options(pull_on_update=False)
 

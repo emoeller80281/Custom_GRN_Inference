@@ -18,7 +18,7 @@ PROJECT_DIR="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOE
 
 cd "$PROJECT_DIR"
 
-SWEEP_CONFIG="${PROJECT_DIR}/wandb_sweep.yaml"
+SWEEP_CONFIG="${PROJECT_DIR}/scripts/wandb_sweep.yaml"
 FORCE_RELOAD=0
 
 if [ "${1:-}" = "--force_reload" ]; then

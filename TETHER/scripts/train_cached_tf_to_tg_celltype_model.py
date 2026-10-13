@@ -34,9 +34,9 @@ from scipy import sparse
 import torch
 from torch.utils.data import ConcatDataset, DataLoader, Sampler, Subset, Dataset
 from tqdm import tqdm
-from batch_samplers import SampleBalancedSampler
+from scripts.batch_samplers import SampleBalancedSampler
 
-from build_tf_to_tg_celltype_data import (  # noqa: E402
+from scripts.build_tf_to_tg_celltype_data import (  # noqa: E402
     BINDING_MANIFEST,
     SAMPLE_CACHE_VERSION,
     add_data_args,

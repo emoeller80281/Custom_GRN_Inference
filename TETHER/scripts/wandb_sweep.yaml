@@ -1,4 +1,4 @@
-program: wandb_sweep.py
+program: scripts/wandb_sweep.py
 project: celltype-TF-TG
 name: celltype_tf_tg_sweep
 method: bayes

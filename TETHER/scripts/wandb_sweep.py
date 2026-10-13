@@ -22,9 +22,8 @@ import pytorch_lightning as pl
 from pytorch_lightning.trainer.states import TrainerFn
 import wandb
 
-PROJECT_DIR = Path(__file__).resolve().parent
+PROJECT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_DIR))
-sys.path.insert(0, str(PROJECT_DIR / "scripts"))
 
 import scripts.train_cached_tf_to_tg_celltype_model as train_celltype  # noqa: E402
 

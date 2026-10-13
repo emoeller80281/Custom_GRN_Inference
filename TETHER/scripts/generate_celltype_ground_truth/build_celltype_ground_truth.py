@@ -41,7 +41,7 @@ from pathlib import Path
 import pandas as pd
 
 HERE = Path(__file__).resolve().parent
-PROJECT_DIR = HERE.parent.parent
+PROJECT_DIR = HERE.parents[2]
 DATA_DIR = PROJECT_DIR / "data"
 TF_IDX = PROJECT_DIR / "TETHER" / "cached_data" / "{organism}" / "tf_dna_cache" / "tf_name_to_idx.csv"
 
