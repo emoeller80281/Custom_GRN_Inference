@@ -34,9 +34,7 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:64,garbage_collection
 import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import (
-    Sampler,
-)
+from torch.utils.data import Sampler
 from tqdm import tqdm
 
 SAMPLE_CACHE_VERSION = 1
@@ -164,68 +162,10 @@ def split_genes_by_chromosome(
     return train_genes, val_genes, test_genes
 
 
-def validate_input_scaler(scaler):
-    expected = {"tf_expression", "tg_expression", "peak_accessibility"}
-    if set(scaler) != expected:
-        raise ValueError(f"Input scaler keys are {set(scaler)}; expected {expected}")
-    for name, values in scaler.items():
-        if not {"mean", "std", "count"}.issubset(values):
-            raise ValueError(f"Input scaler entry {name} is incomplete")
-        if (not math.isfinite(float(values["mean"]))
-                or not math.isfinite(float(values["std"]))
-                or float(values["std"]) <= 0
-                or int(values["count"]) <= 0):
-            raise ValueError(f"Input scaler entry {name} is invalid: {values}")
-    return scaler
 
 
-class SampleBalancedSampler(Sampler):
-    """Draw a source sample uniformly, then a row uniformly inside it.
-
-    Same distribution as a WeightedRandomSampler with 1/len(dataset) weights,
-    but avoids torch.multinomial, which caps at 2^24 categories.
-    """
-
-    def __init__(self, datasets, seed, edges_per_sample=None):
-        self.sizes = torch.tensor([len(d) for d in datasets], dtype=torch.long)
-        
-        self.offsets = torch.cumsum(self.sizes, 0) - self.sizes
-        
-        if edges_per_sample is None:
-            edges_per_sample = int(self.sizes.min())
-        if edges_per_sample <= 0:
-            raise ValueError(f"edges_per_sample must be positive, got {edges_per_sample}")
-        
-        # Number of samples to draw per epocy (default is the size of the smallest sample)
-        self.num_samples = edges_per_sample * len(self.sizes)
-        
-        self.generator = torch.Generator().manual_seed(seed)
-        logging.info(
-            "Sample-balanced epoch: %s edges from each of %d samples = %s per epoch "
-            "(%s training edges in total)",
-            f"{edges_per_sample:,}", len(self.sizes),
-            f"{self.num_samples:,}", f"{int(self.sizes.sum()):,}",
-        )
-
-    def __len__(self):
-        return self.num_samples
-
-    def __iter__(self):
-        which = torch.randint(
-            len(self.sizes), (self.num_samples,), generator=self.generator
-        )
-        within = (
-            torch.rand(self.num_samples, generator=self.generator, dtype=torch.double)
-            * self.sizes[which]
-        ).long()
-        yield from (self.offsets[which] + within).tolist()
 
 
-def make_sample_balanced_sampler(datasets, seed, edges_per_sample=None):
-    """Give every source sample equal expected probability during joint training."""
-    if len(datasets) < 2:
-        return None
-    return SampleBalancedSampler(datasets, seed, edges_per_sample)
 
 @torch.no_grad()
 def precompute_binding_scores(

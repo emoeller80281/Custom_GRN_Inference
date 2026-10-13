@@ -12,7 +12,9 @@ depends on nothing in the project, so both trainers can import it freely.
 """
 
 import gc
+import logging
 import math
+import torch
 
 import numpy as np
 from torch.utils.data import Sampler
@@ -129,3 +131,45 @@ def dataloader_worker_init(worker_id: int) -> None:
     allocates afterwards are collected normally, so this does not leak.
     """
     gc.freeze()
+
+
+class SampleBalancedSampler(Sampler):
+    """Draw a source sample uniformly, then a row uniformly inside it.
+
+    Same distribution as a WeightedRandomSampler with 1/len(dataset) weights,
+    but avoids torch.multinomial, which caps at 2^24 categories.
+    """
+
+    def __init__(self, datasets, seed, edges_per_sample=None):
+        self.sizes = torch.tensor([len(d) for d in datasets], dtype=torch.long)
+        
+        self.offsets = torch.cumsum(self.sizes, 0) - self.sizes
+        
+        if edges_per_sample is None:
+            edges_per_sample = int(self.sizes.min())
+        if edges_per_sample <= 0:
+            raise ValueError(f"edges_per_sample must be positive, got {edges_per_sample}")
+        
+        # Number of samples to draw per epoch (default is the size of the smallest sample)
+        self.num_samples = edges_per_sample * len(self.sizes)
+        
+        self.generator = torch.Generator().manual_seed(seed)
+        logging.info(
+            "Sample-balanced epoch: %s edges from each of %d samples = %s per epoch "
+            "(%s training edges in total)",
+            f"{edges_per_sample:,}", len(self.sizes),
+            f"{self.num_samples:,}", f"{int(self.sizes.sum()):,}",
+        )
+
+    def __len__(self):
+        return self.num_samples
+
+    def __iter__(self):
+        which = torch.randint(
+            len(self.sizes), (self.num_samples,), generator=self.generator
+        )
+        within = (
+            torch.rand(self.num_samples, generator=self.generator, dtype=torch.double)
+            * self.sizes[which]
+        ).long()
+        yield from (self.offsets[which] + within).tolist()

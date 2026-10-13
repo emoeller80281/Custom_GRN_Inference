@@ -43,9 +43,7 @@ from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping, Learning
 from pytorch_lightning.loggers import WandbLogger, CSVLogger
 from models.tf_to_tg_celltype import LitTFTGRegulationModel
 
-
 PREPARED_CACHE_VERSION = 1
-
 
 def _file_identity(path):
     """Return the inexpensive identity used to invalidate prepared-data caches."""

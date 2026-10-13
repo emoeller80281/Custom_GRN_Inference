@@ -19,28 +19,23 @@ import argparse
 import json
 import logging
 import os
+import math
 import sys
 from datetime import datetime
 from pathlib import Path
 
-import numpy as np
-import torch
-from torch.utils.data import ConcatDataset, DataLoader
+PROJECT_DIR = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_DIR))
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from train_tf_to_tg_celltype_model import (  # noqa: E402
-    PROJECT_DIR,
-    TFTGEdgeBagDataset,
-    TwoPercentProgressBar,
-    _atomic_torch_save,
-    _atomic_write_json,
-    _cache_digest,
-    binding_score_cache_path,
-    fit_shared_input_scaler,
-    make_balanced_scaler_dataset,
-    make_sample_balanced_sampler,
-    validate_input_scaler,
-)
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:64,garbage_collection_threshold:0.6"
+
+import numpy as np
+from scipy import sparse
+import torch
+from torch.utils.data import ConcatDataset, DataLoader, Sampler, Subset, Dataset
+from tqdm import tqdm
+from batch_samplers import SampleBalancedSampler
+
 from build_tf_to_tg_celltype_data import (  # noqa: E402
     BINDING_MANIFEST,
     SAMPLE_CACHE_VERSION,
@@ -49,11 +44,15 @@ from build_tf_to_tg_celltype_data import (  # noqa: E402
     is_sample_cache_complete,
     load_cached_source,
     sample_cache_location,
+    _atomic_torch_save,
+    _atomic_write_json,
+    _cache_digest,
+    binding_score_cache_path,
 )
 
 import pytorch_lightning as pl  # noqa: E402
 from pytorch_lightning.callbacks import (  # noqa: E402
-    EarlyStopping, LearningRateMonitor, ModelCheckpoint,
+    EarlyStopping, LearningRateMonitor, ModelCheckpoint, TQDMProgressBar
 )
 from pytorch_lightning.loggers import CSVLogger, WandbLogger  # noqa: E402
 from models.tf_to_tg_celltype import LitTFTGRegulationModel  # noqa: E402
@@ -175,6 +174,315 @@ def parse_args(argv=None):
         if latest_wandb_run.exists():
             args.wandb_run_id = latest_wandb_run.resolve().name.rsplit("-", 1)[-1]
     return args, source_specs
+
+
+class TwoPercentProgressBar(TQDMProgressBar):
+    """Refresh each phase at most 50 times, plus its final completion update."""
+
+    def _should_update(self, current, total):
+        if not self.is_enabled:
+            return False
+        if not math.isfinite(total):
+            return False
+        interval = max(1, math.ceil(total / 50))
+        return current % interval == 0 or current == total
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        bar = self.train_progress_bar
+        current = batch_idx + 1
+        if bar is not None and self._should_update(current, bar.total):
+            # Lightning normally refreshes once for the count and again for metrics.
+            bar.set_postfix(self.get_metrics(trainer, pl_module), refresh=False)
+            bar.n = current
+            bar.refresh()
+            
+
+class TFTGEdgeBagDataset(Dataset):
+    def __init__(
+        self,
+        inputs,  # Labeled edge DataFrame
+        *,
+        tf_embeddings_tensor,
+        tf_mask_tensor,
+        atac_peak_tensor,
+        atac_mat,
+        rna_mat,
+        cell_pools,
+        max_peaks_per_tg=25,
+        resample_max_cells_per_pair=64,
+        resample_cells=True,
+        binding_scores=None,   # [len(inputs), P], precomputed; skips peak_sequences
+        seed=42,
+    ):
+        self.inputs = inputs.reset_index(drop=True).copy()
+
+        self.tf_embeddings_tensor = tf_embeddings_tensor
+        self.tf_mask_tensor = tf_mask_tensor
+        self.atac_peak_tensor = atac_peak_tensor
+
+        # Keep sparse matrices sparse
+        self.atac_mat = atac_mat.tocsr() if sparse.issparse(atac_mat) else atac_mat
+        self.rna_mat = rna_mat.tocsr() if sparse.issparse(rna_mat) else rna_mat
+
+        self.cell_pools = {k: np.asarray(v, dtype=np.int64) for k, v in cell_pools.items()}
+        self.C = int(resample_max_cells_per_pair)
+        self.P = int(max_peaks_per_tg)
+        self.resample_cells = resample_cells
+        self.seed = int(seed)
+        self._rng = None
+        self.binding_scores = binding_scores
+        
+        if binding_scores is not None and len(binding_scores) != len(self.inputs):
+            raise ValueError(
+                f"binding_scores has {len(binding_scores)} rows but inputs has "
+                f"{len(self.inputs)}. These must be built from the same frame."
+            )
+
+        if self.C <= 0 or self.P <= 0:
+            raise ValueError("Cell and peak limits must be positive.")
+
+        if self.rna_mat.shape[0] != self.atac_mat.shape[0]:
+            raise ValueError("RNA and ATAC must have aligned cell rows.")
+        
+        for key, pool in self.cell_pools.items():
+            if pool.ndim != 1 or len(pool) == 0:
+                raise ValueError(f"cell pool {key} must be a nonempty 1D array.")
+            if len(np.unique(pool)) != len(pool):
+                raise ValueError(f"cell pool {key} contains duplicate positions.")
+            if pool.min() < 0 or pool.max() >= self.rna_mat.shape[0]:
+                raise ValueError(f"cell pool {key} has out-of-range positions.")
+
+        missing = {
+            (s, c) for s, c in zip(self.inputs.sample_id, self.inputs.cell_type)
+        } - set(self.cell_pools)
+        if missing:
+            raise ValueError(f"No cell pool for {sorted(missing)[:5]}")
+
+        if self.atac_peak_tensor.shape[0] != self.atac_mat.shape[1]:
+            raise ValueError(
+                "Peak sequences and ATAC columns must use the same peak order."
+            )
+
+    def __len__(self):
+        return len(self.inputs)
+
+    @staticmethod
+    def _gather(matrix, rows, cols):
+        """Gather a cells × features slice as a float tensor."""
+        if torch.is_tensor(matrix):
+            rows = torch.as_tensor(rows, dtype=torch.long, device=matrix.device)
+            cols = torch.as_tensor(cols, dtype=torch.long, device=matrix.device)
+            return matrix.index_select(0, rows).index_select(1, cols).float()
+
+        if sparse.issparse(matrix):
+            block = matrix[rows][:, cols].toarray()
+        else:
+            # One cells x features gather. matrix[rows][:, cols] first copies every
+            # column of the selected rows: on a dense 147k-peak ATAC matrix that is
+            # ~75 MB per edge (float64) to keep 25 values.
+            block = matrix[np.ix_(rows, cols)]
+
+        return torch.as_tensor(np.asarray(block), dtype=torch.float32)
+
+    def __getitem__(self, idx):
+        row = self.inputs.iloc[idx]
+        tf_idx = int(row.tf_embedding_idx)
+
+        # These lists must already be sorted/capped together during preparation.
+        # PyArrow-backed parquet columns can expose read-only NumPy views. PyTorch
+        # warns when torch.from_numpy shares those buffers, even though these tensors
+        # are only copied into padded outputs below. Own writable arrays explicitly.
+        peak_cols = np.array(row.peak_atac_cols, dtype=np.int64, copy=True)
+        distances = np.array(row.peak_distances, dtype=np.float32, copy=True)
+
+        n_peaks = len(peak_cols)
+        if len(distances) != n_peaks or not 0 <= n_peaks <= self.P:
+            raise ValueError(f"Invalid peak bag for edge {idx}.")
+
+        if np.any(peak_cols < 0) or np.any(peak_cols >= self.atac_mat.shape[1]):
+            raise ValueError(f"Invalid ATAC column for edge {idx}.")
+
+        # Training: fresh draws. Validation/test: fixed draw for each edge.
+        if self.resample_cells:
+            if self._rng is None:
+                self._rng = np.random.default_rng(
+                    np.random.SeedSequence([self.seed, torch.initial_seed()])
+                )
+            rng = self._rng
+        else:
+            rng = np.random.default_rng(
+                np.random.SeedSequence([self.seed, int(idx)])
+            )
+
+        pool = self.cell_pools[(row.sample_id, row.cell_type)]
+        n_cells = min(self.C, len(pool))
+        cell_rows = rng.choice(pool, size=n_cells, replace=False)
+
+        # Fixed-size cell bag.
+        cell_indices = torch.full((self.C,), -1, dtype=torch.long)
+        cell_indices[:n_cells] = torch.from_numpy(cell_rows)
+
+        cell_mask = torch.zeros(self.C, dtype=torch.bool)
+        cell_mask[:n_cells] = True
+
+        # Fixed-size peak bag.
+        peak_indices = torch.full((self.P,), -1, dtype=torch.long)
+        peak_indices[:n_peaks] = torch.from_numpy(peak_cols)
+
+        peak_mask = torch.zeros(self.P, dtype=torch.bool)
+        peak_mask[:n_peaks] = True
+
+        peak_distance = torch.zeros(self.P, dtype=torch.float32)
+        peak_distance[:n_peaks] = torch.from_numpy(distances)
+
+        # Only gather real sequences; never index padding with -1.
+        # These remain zero-filled when no candidate peaks exist.
+        peak_sequences = None if self.binding_scores is not None else torch.zeros(
+            (self.P, *self.atac_peak_tensor.shape[1:]),
+            dtype=torch.float32,
+        )
+        peak_accessibility = torch.zeros(self.C, self.P)
+
+        if n_peaks > 0:
+            if peak_sequences is not None:
+                peak_sequences[:n_peaks] = self.atac_peak_tensor[
+                    torch.from_numpy(peak_cols)
+                ].float()
+
+            peak_accessibility[:n_cells, :n_peaks] = self._gather(
+                self.atac_mat, cell_rows, peak_cols
+            )
+
+        tf_expression = torch.zeros(self.C)
+        tf_expression[:n_cells] = self._gather(
+            self.rna_mat, cell_rows, [int(row.tf_rna_col)]
+        ).flatten()
+
+        tg_expression = torch.zeros(self.C)
+        tg_expression[:n_cells] = self._gather(
+            self.rna_mat, cell_rows, [int(row.tg_rna_col)]
+        ).flatten()
+
+        item = {
+            "sample_id": row.sample_id,
+            "cell_type": row.cell_type,
+            "tf_name": row.tf_name,
+            "tg_id": row.tg_id,
+            "label": torch.tensor(float(row.label)),
+            "tf_idx": torch.tensor(tf_idx, dtype=torch.long),
+            "cell_indices": cell_indices,
+            "cell_mask": cell_mask,
+            "peak_indices": peak_indices,
+            "peak_distance": peak_distance,
+            "peak_mask": peak_mask,
+            "peak_accessibility": peak_accessibility,
+            "tf_expression": tf_expression,
+            "tg_expression": tg_expression,
+        }
+        
+        if self.binding_scores is not None:
+            item["binding_score"] = self.binding_scores[idx]
+        else:
+            item["peak_sequences"] = peak_sequences
+            item["tf_embedding"] = self.tf_embeddings_tensor[tf_idx].float()
+            item["tf_mask"] = self.tf_mask_tensor[tf_idx].bool()
+
+        return item
+
+
+def make_balanced_scaler_dataset(train_datasets, edges_per_sample, seed):
+    """Draw the same number of unique, deterministic train edges from each sample."""
+    if not train_datasets:
+        raise ValueError("At least one training dataset is required to fit scaling")
+    if edges_per_sample <= 0:
+        raise ValueError("edges_per_sample must be positive")
+
+    sample_size = min(edges_per_sample, *(len(dataset) for dataset in train_datasets))
+    logging.info(
+        "Fitting shared scaling with %s unique training edges from each of %d samples",
+        f"{sample_size:,}",
+        len(train_datasets),
+    )
+    rng = np.random.default_rng(seed)
+    subsets = []
+    for dataset in train_datasets:
+        if len(dataset) == 0:
+            raise ValueError("Cannot fit scaling from an empty training dataset")
+        indices = rng.choice(
+            len(dataset),
+            size=sample_size,
+            replace=False,
+        )
+        subsets.append(Subset(dataset, indices.tolist()))
+    return ConcatDataset(subsets)
+
+
+@torch.no_grad()
+def fit_shared_input_scaler(loader, full_tqdm=False):
+    """Fit global moments from real entries in depth-normalized/log1p train inputs."""
+    miniters = 1 if full_tqdm else max(1, math.ceil(len(loader) / 50))
+    totals = {
+        name: {"sum": 0.0, "sum_sq": 0.0, "count": 0}
+        for name in ("tf_expression", "tg_expression", "peak_accessibility")
+    }
+
+    def update(name, values):
+        values = values.double()
+        totals[name]["sum"] += values.sum().item()
+        totals[name]["sum_sq"] += values.square().sum().item()
+        totals[name]["count"] += values.numel()
+
+    progress = tqdm(
+        loader,
+        desc="Fitting shared input scaling",
+        miniters=miniters,
+        maxinterval=float("inf"),
+    )
+    for batch in progress:
+        cell_mask = batch["cell_mask"].bool()
+        peak_mask = batch["peak_mask"].bool()
+        update("tf_expression", batch["tf_expression"][cell_mask])
+        update("tg_expression", batch["tg_expression"][cell_mask])
+        accessibility_mask = cell_mask[:, :, None] & peak_mask[:, None, :]
+        update(
+            "peak_accessibility",
+            batch["peak_accessibility"][accessibility_mask],
+        )
+
+    scaler = {}
+    for name, values in totals.items():
+        if values["count"] == 0:
+            raise ValueError(f"No real values were available for {name} scaling")
+        mean = values["sum"] / values["count"]
+        variance = max(values["sum_sq"] / values["count"] - mean ** 2, 1e-12)
+        scaler[name] = {
+            "mean": float(mean),
+            "std": float(math.sqrt(variance)),
+            "count": int(values["count"]),
+        }
+    return scaler
+
+
+def validate_input_scaler(scaler):
+    expected = {"tf_expression", "tg_expression", "peak_accessibility"}
+    if set(scaler) != expected:
+        raise ValueError(f"Input scaler keys are {set(scaler)}; expected {expected}")
+    for name, values in scaler.items():
+        if not {"mean", "std", "count"}.issubset(values):
+            raise ValueError(f"Input scaler entry {name} is incomplete")
+        if (not math.isfinite(float(values["mean"]))
+                or not math.isfinite(float(values["std"]))
+                or float(values["std"]) <= 0
+                or int(values["count"]) <= 0):
+            raise ValueError(f"Input scaler entry {name} is invalid: {values}")
+    return scaler
+
+
+def make_sample_balanced_sampler(datasets, seed, edges_per_sample=None):
+    """Give every source sample equal expected probability during joint training."""
+    if len(datasets) < 2:
+        return None
+    return SampleBalancedSampler(datasets, seed, edges_per_sample)
 
 
 def link_sample_cache(cache_dir, tissue, sample_name, sample_dir):
