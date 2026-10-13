@@ -21,25 +21,24 @@ set -eo pipefail
 CELL_TYPE="GSE246464_HSC"
 
 PROJECT_DIR="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
-HERE="${PROJECT_DIR}/TETHER"
 GT_DIR="${PROJECT_DIR}/data/ground_truth_files/cell_type_specific"
 MAP="${GT_DIR}/${CELL_TYPE}_cell_type_map.tsv"
 
-cd "$HERE"
+cd "$PROJECT_DIR/TETHER"
 
 source activate my_env
 
-export PYTHONPATH="$HERE:${PYTHONPATH:-}"
+export PYTHONPATH="$PROJECT_DIR/TETHER:${PYTHONPATH:-}"
 # sort spills to TMPDIR; node-local /tmp is too small for multi-million-peak BEDs.
-export TMPDIR="$HERE/.sorttmp"
+export TMPDIR="$PROJECT_DIR/.sorttmp"
 
 mkdir -p "$TMPDIR"
 
-python3 -u "$HERE/download_ground_truth.py" --organism mm10 \
+python3 -u "$PROJECT_DIR/TETHER/scripts/generate_celltype_ground_truth/download_ground_truth.py" --organism mm10 \
     --map "$MAP" \
     --out_dir "$GT_DIR"
 
-python3 -u "$HERE/scripts/build_celltype_ground_truth.py" --organism mm10 \
+python3 -u "$PROJECT_DIR/TETHER/scripts/generate_celltype_ground_truth/build_celltype_ground_truth.py" --organism mm10 \
     --map "$MAP" \
     --gt_dir "$GT_DIR" \
     --out_dir "$GT_DIR" \
@@ -48,6 +47,6 @@ python3 -u "$HERE/scripts/build_celltype_ground_truth.py" --organism mm10 \
     --report_tag "mm10_${CELL_TYPE}" \
     --max_tss_dist 100000
 
-python3 -u "$HERE/verify_ground_truth.py" --organism mm10 \
+python3 -u "$PROJECT_DIR/TETHER/scripts/generate_celltype_ground_truth/verify_ground_truth.py" --organism mm10 \
     --map "$MAP" \
     --gt_dir "${GT_DIR}/mm10/${CELL_TYPE}"
