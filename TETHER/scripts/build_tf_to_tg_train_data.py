@@ -98,134 +98,6 @@ def create_train_val_test_splits(
 
     return gt_train_df, gt_val_df, gt_test_df
 
-def load_nmp_trajectory_tfs(grn_coef_file: Path) -> set[str]:
-    """TFs the paper's NMP-trajectory GRN considered as candidate regulators.
-
-    `global_chip_GRN_coef.txt.gz` is the TF->gene regression table from
-    Argelaguet et al. 2022, fitted on the metacells of the NMP -> {spinal cord,
-    somitic mesoderm} trajectory. Every TF appearing in it survived in silico
-    ChIP-seq binding, the 50 kb peak-to-gene window, and the variance filters, so
-    it is the broadest defensible definition of "implicated in NMP differentiation".
-    Taking all of them -- not just the ones with significant betas -- keeps any TF
-    the paper evaluated on that trajectory out of training.
-    """
-    if not grn_coef_file.exists():
-        raise FileNotFoundError(
-            f"NMP GRN coefficient file not found: {grn_coef_file}. "
-            "It ships with the Argelaguet et al. 2022 download under "
-            "results/rna_atac/gene_regulatory_networks/metacells/trajectories/nmp/."
-        )
-
-    grn_df = pd.read_csv(grn_coef_file, sep="\t", usecols=["tf"])
-    nmp_tfs = set(grn_df["tf"].astype(str).str.upper().unique())
-
-    logging.info(f"Loaded {len(nmp_tfs)} NMP-trajectory TFs from {grn_coef_file.name}")
-    return nmp_tfs
-
-
-def split_ground_truth_by_tf(
-    ground_truth_df: pd.DataFrame,
-    nmp_tfs: set[str],
-    val_frac: float = 0.15,
-    seed: int = 123,
-    min_positives_per_tf: int = 0,
-):
-    """Split edges by their TF, holding out the NMP-differentiation TFs for test.
-
-    Unlike the chromosome split, which partitions on the *target gene* and lets every
-    TF appear in all three splits, this partitions on the *TF*: a TF's edges land
-    entirely in one split. Train and validation TFs are disjoint from the test TFs, so
-    the model is scored on regulators whose target preferences it has never seen.
-
-    Target genes are deliberately *not* held out -- the same TG can appear in train and
-    test under different TFs. That is the intended generalisation question here
-    ("does this unseen TF regulate this gene?"), and holding out genes as well would
-    shrink the evaluation set without making the TF question any cleaner.
-    """
-    all_tfs = set(ground_truth_df["Source"].unique())
-
-    test_tfs = sorted(all_tfs & nmp_tfs)
-    train_pool = sorted(all_tfs - nmp_tfs)
-
-    # Drop TFs with too few ground-truth edges to learn from or to score.
-    #
-    # Counted in GROUND-TRUTH edges, not cached positives, because the cache does not exist
-    # yet at this point. The empirical conversion on this dataset is ~0.268 cached positives
-    # per ground-truth edge (pct_true_edges sampling), so a threshold of 200 leaves roughly
-    # 50 positives per TF.
-    #
-    # Why it matters: at the old setting the training pool contained BAZ2A and TAF1 with ZERO
-    # cached positives, KDM5B with 2 and ETV2 with 3. Those contribute nothing learnable, and
-    # under --per_tf_pos_weight they attract the largest weights of all (w = n_neg/n_pos, cap
-    # 50). In validation they are worse than useless: an AUROC built on one positive is that
-    # edge's percentile rank, yet it carries the same 1/N weight in the macro average as a TF
-    # with 3,962 positives. ETV2 alone swung 0.833 -> 0.505 between two runs and accounted for
-    # about half the apparent macro difference.
-    #
-    # Applied to the train/val pool only. The test TFs are fixed by biology -- they are the
-    # NMP-trajectory regulators the whole experiment is about -- and dropping any of them
-    # would silently change the benchmark and break comparison with runs already scored.
-    # Thin test TFs are reported below so they can be excluded at REPORTING time instead,
-    # which leaves the split itself stable.
-    if min_positives_per_tf > 0:
-        counts = ground_truth_df.groupby("Source").size()
-        thin_pool = [tf for tf in train_pool if counts.get(tf, 0) < min_positives_per_tf]
-        train_pool = [tf for tf in train_pool if counts.get(tf, 0) >= min_positives_per_tf]
-        logging.info(
-            f"--min_positives_per_tf {min_positives_per_tf}: dropped {len(thin_pool)} of "
-            f"{len(thin_pool) + len(train_pool)} train/val-pool TFs "
-            f"({', '.join(f'{tf}:{counts.get(tf, 0)}' for tf in sorted(thin_pool)[:12])}"
-            f"{', ...' if len(thin_pool) > 12 else ''})"
-        )
-        thin_test = [tf for tf in test_tfs if counts.get(tf, 0) < min_positives_per_tf]
-        if thin_test:
-            logging.warning(
-                f"{len(thin_test)} TEST TFs also fall below the threshold and were KEPT on "
-                f"purpose (the test split is fixed by biology): "
-                f"{', '.join(f'{tf}:{counts.get(tf, 0)}' for tf in sorted(thin_test))}. "
-                "Consider excluding them when reporting macro metrics."
-            )
-        if len(train_pool) < 2:
-            raise ValueError(
-                f"min_positives_per_tf={min_positives_per_tf} left only {len(train_pool)} "
-                "pool TFs; lower the threshold."
-            )
-
-    if not test_tfs:
-        raise ValueError(
-            "No ground-truth TFs overlap the NMP TF list. Check that TF names are "
-            "upper-cased on both sides."
-        )
-    if len(train_pool) < 2:
-        raise ValueError(
-            f"Only {len(train_pool)} non-NMP TFs available; not enough to train and validate."
-        )
-
-    # Deterministic TF-level validation holdout carved out of the training TFs, so
-    # validation also measures generalisation to unseen TFs rather than unseen edges.
-    rng = np.random.default_rng(seed)
-    n_val = max(1, round(len(train_pool) * val_frac))
-    val_tfs = sorted(rng.choice(train_pool, size=n_val, replace=False).tolist())
-    train_tfs = sorted(set(train_pool) - set(val_tfs))
-
-    gt_train_df = ground_truth_df[ground_truth_df["Source"].isin(train_tfs)].copy()
-    gt_val_df = ground_truth_df[ground_truth_df["Source"].isin(val_tfs)].copy()
-    gt_test_df = ground_truth_df[ground_truth_df["Source"].isin(test_tfs)].copy()
-
-    logging.info("Splitting ground truth by transcription factor:")
-    logging.info(f"  - Train: {len(train_tfs):3d} TFs, {len(gt_train_df):,} interactions")
-    logging.info(f"  - Val:   {len(val_tfs):3d} TFs, {len(gt_val_df):,} interactions")
-    logging.info(f"  - Test:  {len(test_tfs):3d} TFs, {len(gt_test_df):,} interactions (NMP differentiation)")
-    logging.info(f"  - Test TFs: {', '.join(test_tfs)}")
-
-    # Belt and braces: the whole point of this split is that no TF crosses it.
-    assert not (set(train_tfs) & set(test_tfs)), "Train/test TF leakage"
-    assert not (set(val_tfs) & set(test_tfs)), "Val/test TF leakage"
-    assert not (set(train_tfs) & set(val_tfs)), "Train/val TF leakage"
-
-    tf_split = {"train": train_tfs, "val": val_tfs, "test": test_tfs}
-    return gt_train_df, gt_val_df, gt_test_df, tf_split
-
 
 def create_true_false_edges_from_full_universe(
     edge_df: pd.DataFrame,
@@ -370,57 +242,14 @@ def main():
     parser.add_argument("--peak_flank_size", type=int, default=128)  # must match 02a
     parser.add_argument("--num_cpu", type=int, default=8)
     parser.add_argument(
-        "--split_mode",
-        choices=["chromosome", "tf"],
-        default="chromosome",
-        help=(
-            "How to partition train/val/test. 'chromosome' (default) splits on the target "
-            "gene's chromosome. 'tf' splits on the transcription factor, holding out the TFs "
-            "implicated in NMP differentiation for test."
-        ),
-    )
-    parser.add_argument(
-        "--nmp_grn_coef_file",
-        type=Path,
-        default=(
-            config.DATA_DIR / "dropbox_data" / "extracted" / "results" / "rna_atac"
-            / "gene_regulatory_networks" / "metacells" / "trajectories" / "nmp"
-            / "global_chip_GRN_coef.txt.gz"
-        ),
-        help="TF->gene coefficient table defining the NMP-trajectory TFs (--split_mode tf only)",
-    )
-    parser.add_argument(
-        "--val_tf_frac",
-        type=float,
-        default=0.15,
-        help="Fraction of non-NMP TFs held out for validation (--split_mode tf only)",
-    )
-    parser.add_argument(
         "--min_positives_per_tf",
         type=int,
         default=0,
         help=(
             "Drop train/val-pool TFs with fewer than this many ground-truth edges (0 = off). "
-            "~0.268 cached positives per ground-truth edge on this dataset, so 200 leaves "
-            "roughly 50 positives per TF. Test TFs are never dropped -- they are fixed by "
-            "biology -- but thin ones are logged."
         ),
     )
     parser.add_argument("--force_reload", action="store_true")
-    parser.add_argument(
-        "--build_resample_matrices_only",
-        action="store_true",
-        help=(
-            "Build and cache atac_mat.pt/rna_mat.pt (the full peak x cell and gene x cell "
-            "pseudobulk matrices) and then exit, skipping ground-truth-edge-bag construction. "
-            "TFTGEdgeBagDataset requires these two files unconditionally now (it gathers "
-            "peak_accessibility/tf_expression/tg_expression from them at read time) -- "
-            "--resample_cells_per_epoch additionally redraws fresh cell columns from them "
-            "every epoch. Use this to backfill them onto a cache that already has everything "
-            "else, without repeating the slow one-hot peak encoding or edge-bag build. "
-            "Ignored (superseded by the full build) if combined with --force_reload."
-        ),
-    )
     args = parser.parse_args()
     
     logging.info(f" === Species: {config.species}, Cell Type: {config.cell_type}, Sample: {config.sample_name} ===\n")
@@ -496,7 +325,6 @@ def main():
     if (
         all(f.exists() for f in required_cache_files)
         and not args.force_reload
-        and not args.build_resample_matrices_only
     ):
         if _manifest_is_current_format():
             logging.info("All required cache files already exist. Skipping construction (use --force_reload to override).")
@@ -601,45 +429,29 @@ def main():
 
     # Create a map of TG name to index for TGs present in the ground truth (and RNA pseudobulk)
     tg_id_to_idx = {tg: idx for idx, tg in enumerate(merged_ground_truth_df["Target"].unique())}
-        
-    tf_split = None
 
-    if args.split_mode == "tf":
-        # Hold out the TFs the paper implicated in NMP -> {spinal cord, somitic mesoderm}
-        # differentiation, and train on every other TF across all cell types. Splitting on
-        # the TF rather than the target chromosome keeps the whole genome available for
-        # training while still evaluating on regulators the model has never seen.
-        nmp_tfs = load_nmp_trajectory_tfs(args.nmp_grn_coef_file)
-        gt_train_df, gt_val_df, gt_test_df, tf_split = split_ground_truth_by_tf(
-            merged_ground_truth_df,
-            nmp_tfs=nmp_tfs,
-            val_frac=args.val_tf_frac,
-            min_positives_per_tf=args.min_positives_per_tf,
-            seed=123,
+    if config.species == "mm10":
+        train_chroms = [str(i) for i in range(1, 16)]
+        val_chroms = [ str(i) for i in range(16, 18)]
+        test_chroms = [str(i) for i in range(18, 20)]
+    elif config.species == "hg38":
+        train_chroms = [str(i) for i in range(1, 18)]
+        val_chroms = [str(i) for i in range(18, 20)]
+        test_chroms = [str(i) for i in range(20, 23)]
+
+    # Split genes into train/val/test based on chromosome using the GTF reference file
+    train_genes, val_genes, test_genes = split_genes_by_chromosome(
+        gene_ref_file,
+        train_chroms=train_chroms,
+        val_chroms=val_chroms,
+        test_chroms=test_chroms
         )
-    else:
-        if config.species == "mm10":
-            train_chroms = [str(i) for i in range(1, 16)]
-            val_chroms = [ str(i) for i in range(16, 18)]
-            test_chroms = [str(i) for i in range(18, 20)]
-        elif config.species == "hg38":
-            train_chroms = [str(i) for i in range(1, 18)]
-            val_chroms = [str(i) for i in range(18, 20)]
-            test_chroms = [str(i) for i in range(20, 23)]
 
-        # Split genes into train/val/test based on chromosome using the GTF reference file
-        train_genes, val_genes, test_genes = split_genes_by_chromosome(
-            gene_ref_file,
-            train_chroms=train_chroms,
-            val_chroms=val_chroms,
-            test_chroms=test_chroms
-            )
-
-        # Subset the ground truth to create train/val/test splits based on the target gene chromosome splits
-        # (Only keeps TFs and TGs present in the ground truth and RNA pseudobulk, and only keeps TFs with embeddings)
-        gt_train_df, gt_val_df, gt_test_df = create_train_val_test_splits(
-            merged_ground_truth_df, train_genes, val_genes, test_genes
-        )
+    # Subset the ground truth to create train/val/test splits based on the target gene chromosome splits
+    # (Only keeps TFs and TGs present in the ground truth and RNA pseudobulk, and only keeps TFs with embeddings)
+    gt_train_df, gt_val_df, gt_test_df = create_train_val_test_splits(
+        merged_ground_truth_df, train_genes, val_genes, test_genes
+    )
     logging.info(f"After subsetting to TFs with embeddings and TGs in RNA pseudobulk:")
     logging.info(f"  - Train interactions: {len(gt_train_df)} (TFs: {gt_train_df['Source'].nunique()}, TGs: {gt_train_df['Target'].nunique()})")
     logging.info(f"  - Val interactions: {len(gt_val_df)} (TFs: {gt_val_df['Source'].nunique()}, TGs: {gt_val_df['Target'].nunique()})")
@@ -749,13 +561,6 @@ def main():
         torch.save(torch.as_tensor(atac_mat, dtype=torch.float32), atac_mat_cache_path)
         torch.save(torch.as_tensor(rna_mat, dtype=torch.float32), rna_mat_cache_path)
 
-    if args.build_resample_matrices_only:
-        logging.info(
-            "--build_resample_matrices_only set: atac_mat.pt/rna_mat.pt written, "
-            "skipping edge-bag construction."
-        )
-        return
-
     def _sample_df(df: pd.DataFrame, n: int | None, seed: int) -> pd.DataFrame:
         if n is None or len(df) <= n:
             return df
@@ -853,12 +658,8 @@ def main():
         "flank_size": peak_flank_size,
         "peak_dtype": "uint8",
         "max_peaks_real": max_peaks_real,
-        "split_mode": args.split_mode,
     }
-    if tf_split is not None:
-        # Persist the exact TF partition -- evaluation needs to know which TFs were held
-        # out, and it is not recoverable from the tensors alone.
-        metadata["tf_split"] = tf_split
+
     with open(metadata_file, "w") as f:
         json.dump(metadata, f, indent=4)
 
@@ -869,10 +670,6 @@ def main():
         # peak_indices/peak_distance/peak_mask are stored once per TG, not per edge.
         # train_tf_to_tg_model.py asserts this before trusting a cache.
         "tftg_format_version": 2,
-        "split_mode": args.split_mode,
-        "n_train_tfs": len(tf_split["train"]) if tf_split else None,
-        "n_val_tfs": len(tf_split["val"]) if tf_split else None,
-        "n_test_tfs": len(tf_split["test"]) if tf_split else None,
         "max_peaks_per_tg": max_peaks_per_tg,
         "max_cells_per_pair": max_cells_per_pair,
         "flank_size": peak_flank_size,

@@ -1122,7 +1122,7 @@ def prepare_data(args):
     true_false_ratio = args.true_false_ratio
     peak_flank_size = args.peak_flank_size
     num_cpu = args.num_workers or 1
-    barcodes = args.barcodes or None
+    barcodes = getattr(args, "barcodes", None)
     if species == "mm10":
         valid_chroms = {f"chr{i}" for i in range(1, 20)}
     
