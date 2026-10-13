@@ -30,7 +30,7 @@ import numpy as np
 import torch
 from plotly.offline import get_plotlyjs
 
-PROJECT_DIR = Path(__file__).resolve().parents[1]
+PROJECT_DIR = Path(__file__).resolve().parents[2]
 sys.path.append(str(PROJECT_DIR))
 
 import models.tf_to_tg_celltype as tf_to_tg_module

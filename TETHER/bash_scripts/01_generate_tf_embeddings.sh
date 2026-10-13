@@ -68,7 +68,7 @@ for species in "${SPECIES_LIST[@]}"; do
     source activate my_env
 
     # Download TF protein sequences from ChIP-Atlas and save as FASTA files
-    python ${PROJECT_DIR}/download_organism_chipatlas.py \
+    python ${PROJECT_DIR}/scripts/generate_tf_embeddings/download_organism_chipatlas.py \
         --species ${species} \
         --entrez_email ${entrez_email} \
         --num_workers 32
@@ -149,7 +149,7 @@ PY
 
     echo ""
     echo "Extracting raw ${species} ProstT5 embeddings (2048-d per residue)..."
-    python ${PROJECT_DIR}/scripts/extract_tf_embeddings.py \
+    python ${PROJECT_DIR}/scripts/generate_tf_embeddings/extract_tf_embeddings.py \
         --stage raw \
         --aa_dir "${FASTA_DIR}" \
         --di_fasta "${DI_FASTA}" \
@@ -171,7 +171,7 @@ echo ""
 echo "=============================================================="
 echo "  Fitting the shared ${D_MODEL}-d projection across: ${SPECIES_LIST[*]}"
 echo "=============================================================="
-python ${PROJECT_DIR}/scripts/extract_tf_embeddings.py \
+python ${PROJECT_DIR}/scripts/generate_tf_embeddings/extract_tf_embeddings.py \
     --stage fit \
     --raw_dir "${RAW_DIRS[@]}" \
     --projection "${PROJECTION}" \
@@ -185,7 +185,7 @@ python ${PROJECT_DIR}/scripts/extract_tf_embeddings.py \
 for species in "${SPECIES_LIST[@]}"; do
     echo ""
     echo "Projecting ${species} embeddings to ${D_MODEL}-d..."
-    python ${PROJECT_DIR}/scripts/extract_tf_embeddings.py \
+    python ${PROJECT_DIR}/scripts/generate_tf_embeddings/extract_tf_embeddings.py \
         --stage project \
         --raw_dir "${DATA_DIR}/tf_data/${species}/tf_embeddings_raw" \
         --projection "${PROJECTION}" \
@@ -205,7 +205,7 @@ echo ""
 echo "=============================================================="
 echo "  Validating embeddings"
 echo "=============================================================="
-python ${PROJECT_DIR}/scripts/validate_tf_embeddings.py \
+python ${PROJECT_DIR}/scripts/generate_tf_embeddings/validate_tf_embeddings.py \
     --embedding_dir "${VALIDATE_DIRS[@]}" \
     --strict
 

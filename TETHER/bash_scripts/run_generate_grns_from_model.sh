@@ -21,6 +21,8 @@ set -eo pipefail
 
 PROJECT_DIR=/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/TETHER
 
+cd "$PROJECT_DIR"
+
 conda activate my_env
 
 EXPERIMENT_LIST=(
