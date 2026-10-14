@@ -33,7 +33,7 @@ logging.basicConfig(
 )
 
 def edge_lengths_for(subset_idx, edge_tf_idx_tensor, tf_mask_tensor):
-    """Real protein length behind each edge of a split, in that split's own order."""
+    """Lengths of the TF protein sequences for each TF-DNA edge in a data split"""
     tf_lengths = tf_mask_tensor.sum(dim=1).long()
     return tf_lengths[edge_tf_idx_tensor[subset_idx]].numpy()
 

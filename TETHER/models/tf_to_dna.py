@@ -41,25 +41,25 @@ class TFPeakBindingModel(nn.Module):
         )
 
         # Peak DNA sequence encoder:
-        # [B, 4, 256] -> [B, 32, hidden_dim]
+        # [B, 4, 128] -> [B, 32, hidden_dim]
         self.peak_encoder = nn.Sequential(
             # First Conv layer to capture local motifs 
             # (sets of 15 nucleotides, roughly the size of a TF binding motif)
-            # [B, 4, 256] -> [B, 64, 64]
+            # [B, 4, 128] -> [B, 64, 32]
             nn.Conv1d(4, 64, kernel_size=15, padding=7),
             nn.BatchNorm1d(64),
             nn.GELU(),
-            nn.MaxPool1d(4),  # 256 -> 64
+            nn.MaxPool1d(4),  # 128 -> 32
 
-            # Second Conv layer to reduce dimensionality
-            # [B, 64, 64] -> [B, 128, 32]
+            # Second Conv layer
+            # [B, 64, 32] -> [B, 128, 8]
             nn.Conv1d(64, 128, kernel_size=9, padding=4),
             nn.BatchNorm1d(128),
             nn.GELU(),
-            nn.MaxPool1d(4),  # 128 -> 32
+            nn.MaxPool1d(4),  # 32 -> 8
 
             # Third Conv layer to get to final hidden_dim
-            # [B, 128, 32] -> [B, hidden_dim, 32]
+            # [B, 128, 8] -> [B, hidden_dim, 8]
             nn.Conv1d(128, hidden_dim, kernel_size=5, padding=2),
             nn.BatchNorm1d(hidden_dim),
             nn.GELU(),
@@ -172,6 +172,8 @@ class LitTFPeakBindingModel(pl.LightningModule):
 
         self.model = model
         
+        # Moves the TF embeddings and masks to the device and keeps them there.
+        # Reduces the overhead of moving them to the device for each batch.
         self.register_buffer(
             "tf_embeddings_tensor",
             tf_embeddings_tensor.float(),
@@ -188,8 +190,8 @@ class LitTFPeakBindingModel(pl.LightningModule):
         self.weight_decay = weight_decay
         self.logit_clamp = logit_clamp
         self.enable_timing_sync = enable_timing_sync
+        self.TF_CROP_LADDER = TF_CROP_LADDER
 
-        # Save hyperparameters except the raw nn.Module object
         self.save_hyperparameters(
             ignore=[
                 "model",
@@ -251,37 +253,36 @@ class LitTFPeakBindingModel(pl.LightningModule):
             labels,
         )
 
-    # Crop widths are quantized to a ladder rather than taken as the exact batch maximum.
-    # cudnn.benchmark is enabled during training, so every distinct input shape triggers a
-    # fresh autotune pass
-    TF_CROP_LADDER = TF_CROP_LADDER
-
     def _crop_width(self, tf_mask_batch) -> int:
-        """Ladder rung at or above the longest real protein in this batch."""
+        """
+        Crop the TF embedding padding to the TF_CROP_LADDER rung that just above the longest TF in the batch
+        
+        cudnn.benchmark is enabled during training and the trained model is compiled, so every 
+        distinct input shape triggers a new autotune pass or compilation. By sorting the TFs by length
+        and cropping to a set number of sizes, we can balance the tradeoff between the size of the padding
+        and the number of times the model needs to be recompiled.
+        """
         longest = int(tf_mask_batch.sum(dim=1).max())
         table_width = self.tf_mask_tensor.shape[1]
-        return min(
-            next((rung for rung in self.TF_CROP_LADDER if rung >= longest), table_width),
-            table_width,
-        )
+        
+        # Select the next largest rung in the ladder that is greater than or equal to the longest TF in the batch
+        larger_rungs = next((rung for rung in self.TF_CROP_LADDER if rung >= longest), table_width)
+        next_largest_rung = min(larger_rungs, table_width)
+        
+        return next_largest_rung
 
     def _shared_step(self, batch, stage: str):
         tf_idx = batch["tf_idx"].long()
         labels = batch["label"].float()
 
-        # Drop trailing positions that are padding for every TF in this batch. Masks are
-        # strict prefixes and the embeddings are zero past the mask, so the dropped columns
-        # contribute nothing to the masked cross-attention or to masked_mean_pool -- this is
-        # exact, not an approximation. Same argument as TFTGRegulationModel's crop.
-        #
-        # The table is sliced BEFORE the gather: slicing gives a view, so only [B, crop, D]
-        # is ever materialised. Gathering first would allocate the full padded width and
-        # throw most of it away.
+        # Get the size of the padding crop for the TF embeddings and mask
         tf_mask = self.tf_mask_tensor[tf_idx]
         crop = self._crop_width(tf_mask)
 
+        # Slice the TF embeddings and mask to the cropped width, and select the batch indices
         tf_embedding = self.tf_embeddings_tensor[:, :crop][tf_idx]
         tf_mask = tf_mask[:, :crop]
+        
         peak_embedding = batch["peak_embedding"].float()
 
         forward_start = None
@@ -289,6 +290,7 @@ class LitTFPeakBindingModel(pl.LightningModule):
             self._sync_if_cuda()
             forward_start = time.perf_counter()
 
+        # Calculate TF-DNA binding for the batch
         logits = self(
             tf_embedding=tf_embedding,
             tf_mask=tf_mask,
@@ -303,6 +305,7 @@ class LitTFPeakBindingModel(pl.LightningModule):
         if self.logit_clamp is not None:
             logits = logits.clamp(min=-self.logit_clamp, max=self.logit_clamp)
 
+        # Calculate loss
         loss = self._loss(logits, labels)
 
         if stage == "val":
