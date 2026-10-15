@@ -35,6 +35,7 @@ TETHER/cell_type_specific_model_variant
 *.lamin
 *.png
 *.csv
+*.svg
 *.graphml
 *.meme
 *.pt
