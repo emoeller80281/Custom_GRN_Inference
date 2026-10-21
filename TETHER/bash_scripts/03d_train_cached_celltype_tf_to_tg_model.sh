@@ -74,5 +74,4 @@ srun python -u scripts/train_cached_tf_to_tg_celltype_model.py \
     --run_name "long_training" \
     --precision 32-true \
     --wandb_project celltype-TF-TG \
-    --resume_from_checkpoint /gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/TETHER/checkpoints/celltype_tf_tg/celltype_long_training_3903193_20261009_051308_763826/checkpoints/last.ckpt \
     "$@"

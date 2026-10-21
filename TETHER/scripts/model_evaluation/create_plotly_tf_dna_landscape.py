@@ -20,8 +20,13 @@ The page reuses the slicing code of create_plotly_prediction_landscape.py: check
 controls to plot as a 3D surface, and set the other three with sliders. A dropdown picks
 the TF. Two flat planes show the TF's mean probability on real bound and unbound peaks.
 
+By default only the TFs whose motif clearly moves the model are predicted: one_copy_effect
+(one consensus copy minus background) of at least --min-effect in the summary of an earlier
+--tfs all run. --tfs picks other TFs, and --tfs all predicts every TF with a CIS-BP motif and
+writes that summary (plotly_tf_dna_landscape_<species>_all_tfs_summary.tsv).
+
 Run on a dense GPU node (about 4 s per TF on an A100; all mm10 TFs take about 25 min):
-    srun --partition=dense --gres=gpu:1 --cpus-per-task=4 --mem=32G --time=02:00:00 \
+    srun --partition=dense --gres=gpu:1 --cpus-per-task=4 --mem=32G --time=01:00:00 \
         python TETHER/scripts/model_evaluation/create_plotly_tf_dna_landscape.py --species mm10
 """
 import argparse
@@ -72,9 +77,12 @@ def parse_args():
                         help="Default: the species TF-DNA checkpoint in config.py.")
     parser.add_argument("--output", type=Path, default=None,
                         help="Default: new_plots/prediction_landscapes/"
-                             "plotly_tf_dna_landscape_<species>.html")
+                             "plotly_tf_dna_landscape_<species>[_all_tfs].html")
     parser.add_argument("--tfs", nargs="+", default=None,
-                        help="TF names to include. Default: every TF with a CIS-BP motif.")
+                        help="TF names to include, or 'all' for every TF with a CIS-BP motif. "
+                             "Default: TFs with one_copy_effect >= --min-effect in the all-TF summary.")
+    parser.add_argument("--min-effect", type=float, default=0.2,
+                        help="Smallest one_copy_effect a TF needs to be in the default TF set.")
     parser.add_argument("--include-inferred-motifs", action="store_true",
                         help="Give TFs with no direct CIS-BP motif an inferred one (TF_Status 'I', "
                              "copied from a TF with a similar DNA-binding domain).")
@@ -104,8 +112,22 @@ def parse_args():
         parser.error("--n-positions must be at least 2")
     if not all(0.0 <= gc <= 1.0 for gc in args.gc_values):
         parser.error("--gc-values must be between 0 and 1")
+    default_output = DEFAULT_OUTPUT_DIR / f"plotly_tf_dna_landscape_{args.species}.html"
+    all_tfs_output = default_output.with_name(default_output.stem + "_all_tfs.html")
+    if args.tfs is None:
+        summary_path = all_tfs_output.with_name(all_tfs_output.stem + "_summary.tsv")
+        if not summary_path.exists():
+            parser.error(f"{summary_path} not found. Run with --tfs all first, or pass --tfs.")
+        summary = pd.read_csv(summary_path, sep="\t")
+        args.tfs = summary.loc[summary["one_copy_effect"] >= args.min_effect, "tf_name"].tolist()
+        if not args.tfs:
+            parser.error(f"No TF in {summary_path.name} has one_copy_effect >= {args.min_effect}")
+        logging.info(f"{len(args.tfs)} TFs with one_copy_effect >= {args.min_effect} in {summary_path.name}")
+    elif [name.lower() for name in args.tfs] == ["all"]:
+        args.tfs = None
+        default_output = all_tfs_output
     args.checkpoint = args.checkpoint or DEFAULT_CHECKPOINTS[args.species]
-    args.output = args.output or DEFAULT_OUTPUT_DIR / f"plotly_tf_dna_landscape_{args.species}.html"
+    args.output = args.output or default_output
     return args
 
 
@@ -626,6 +648,9 @@ function render() {
         "Binding probability: " + fmtP(v) +
         (diff ? "<br>" + diffLabel + ": " + signed(diff[j][i]) : "")));
 
+    // No hovertemplate: on 3D surfaces Plotly fills %{text} from text[x][y], the transpose of
+    // z[y][x], which mirrored the labels and showed "-" where the slice is not square. Plain
+    // hovertext is read as hovertext[y][x].
     const traces = [{
         type: "surface",
         x: gx,
@@ -638,8 +663,8 @@ function render() {
         reversescale: reversescale,
         colorbar: {title: {text: colorTitle}},
         contours: {z: {show: contourBox.checked, usecolormap: true, project: {z: true}}},
-        text: hover,
-        hovertemplate: "%{text}<extra></extra>",
+        hovertext: hover,
+        hoverinfo: "text",
     }];
     if (refBox.checked) {
         if (tf.ref_bound !== null) traces.push(levelPlane(tf.ref_bound, "Real bound peaks", "#d62728", gx, gy));
