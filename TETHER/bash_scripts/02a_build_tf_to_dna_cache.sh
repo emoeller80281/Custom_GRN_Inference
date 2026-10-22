@@ -19,7 +19,10 @@ source activate my_env
 echo "[INFO] Building TF-to-DNA datasets..."
 
 python3 ${PROJECT_DIR}/scripts/build_tf_to_dna_train_data.py \
-    --pct_true_edges 1 \
-    --true_false_ratio 5.00 \
+    --min_true_edges_per_tf 500 \
+    --max_true_edges_per_tf 20000 \
+    --true_false_ratio 1.0 \
+    --false_edge_sampling by_source_tf \
+    --max_tf_length 2048 \
     --peak_flank_size 128 \
     --force_reload

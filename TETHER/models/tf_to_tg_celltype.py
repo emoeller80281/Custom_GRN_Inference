@@ -517,7 +517,7 @@ class LitTFTGRegulationModel(pl.LightningModule):
             self.logger.log_metrics(charts, step=self.global_step)
 
     @staticmethod
-    def _sample_curve(x, y, max_points=100):
+    def _sample_curve(x, y, max_points=20):
         if len(x) <= max_points:
             return x, y
         indices = np.linspace(0, len(x) - 1, max_points).astype(int)

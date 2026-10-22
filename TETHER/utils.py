@@ -23,6 +23,7 @@ CHKPT_DIR = PROJECT_DIR / "checkpoints"
 sys.path.append(str(PROJECT_DIR))
 
 import models.tf_to_dna as tf_to_dna_module
+from scripts.train_tf_to_dna_model import TFPeakEdgeDataset
 
 import logging
 import warnings
@@ -633,13 +634,21 @@ def sample_unobserved_edge_codes_fast(
     return sampled_codes
 
 
+def record_gene_symbol(record):
+    """Gene symbol of a GenBank protein record, from the /gene qualifier of its CDS feature."""
+    for feature in record.features:
+        if feature.type in ("CDS", "gene", "Protein") and "gene" in feature.qualifiers:
+            return feature.qualifiers["gene"][0]
+    return None
+
+
 def download_gene_protein_fastas(
     gene_names,
     organism,
     output_dir,
     email,
     api_key=None,
-    retmax=25,
+    retmax=100,
     delay=0.5,
     max_tries=3,
     sleep_between_tries=15,
@@ -706,6 +715,27 @@ def download_gene_protein_fastas(
 
             if not records:
                 logging.info(f"[{i}/{len(gene_names)}] Could not parse records for {gene_name}")
+                saved_files[gene_name] = None
+                time.sleep(delay)
+                continue
+
+            # [Gene Name] also matches other genes' aliases, and the ranking below prefers the
+            # longest protein, so an alias hit could win: Elf1 got Sptbn1 (alias "Elf"), Vdr got
+            # Cyp27b1, Pdx1 got Pdhx. Keep only the records of the gene itself. Fall back to an
+            # alias hit only when every record belongs to one gene (a renamed symbol, e.g.
+            # Arntl -> Bmal1).
+            by_gene = {}
+            for record in records:
+                by_gene.setdefault(record_gene_symbol(record), []).append(record)
+            exact = [r for g, rs in by_gene.items() if g and g.lower() == gene_name.lower() for r in rs]
+            if exact:
+                records = exact
+            elif len(by_gene) == 1:
+                logging.info(f"[{i}/{len(gene_names)}] {gene_name}: no record under that symbol; "
+                             f"using {next(iter(by_gene))} (renamed or alias)")
+            else:
+                logging.info(f"[{i}/{len(gene_names)}] {gene_name}: no record under that symbol and hits "
+                             f"from several genes ({', '.join(sorted(map(str, by_gene)))}); skipped")
                 saved_files[gene_name] = None
                 time.sleep(delay)
                 continue
@@ -967,6 +997,7 @@ def env_int(keys, default=0):
                 pass
     return default
 
+
 def get_rank_info():
     """Return rank information for both torchrun/Lightning and Slurm-launched jobs."""
     world_size = env_int(["WORLD_SIZE", "SLURM_NTASKS"], 1)
@@ -1055,3 +1086,235 @@ def load_tf_dna_model(
         lit_tf_dna_model.model = torch.compile(lit_tf_dna_model.model)
         
     return lit_tf_dna_model
+
+def load_tf_dna_data(tf_dna_input_cache_dir: Path) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
+    """
+    Loads the TF-DNA dataset from the specified cache directory.
+    
+    Parameters
+    ----------
+    tf_dna_input_cache_dir : Path
+        Path to the directory containing the cached TF-DNA dataset files.
+        
+    Returns
+    -------
+    tuple of torch.Tensor
+        A tuple containing the following tensors:
+        - edge_tf_idx_tensor: Tensor containing the edge indices for transcription factors.
+        - edge_peak_idx_tensor: Tensor containing the edge indices for peaks.
+        - edge_labels_tensor: Tensor containing the labels for the edges.
+        - tf_embeddings_tensor: Tensor containing the TF embeddings.
+        - tf_mask_tensor: Tensor containing the masks for the TF embeddings.
+        - one_hot_peaks: Tensor containing the one-hot encoded peak sequences.
+    """
+    # Load the edge indices for the TF-DNA dataset
+    edge_tf_idx_tensor: torch.Tensor = torch.load(tf_dna_input_cache_dir / "edge_tf_idx.pt", weights_only=True)
+    edge_peak_idx_tensor: torch.Tensor = torch.load(tf_dna_input_cache_dir / "edge_peak_idx.pt", weights_only=True)
+    edge_labels_tensor: torch.Tensor = torch.load(tf_dna_input_cache_dir / "edge_labels.pt", weights_only=True)
+
+    # Load the TF embeddings and masks
+    tf_embeddings_tensor: torch.Tensor = torch.load(tf_dna_input_cache_dir / "tf_embeddings.pt", weights_only=True)
+    tf_mask_tensor: torch.Tensor = torch.load(tf_dna_input_cache_dir / "tf_masks.pt", weights_only=True)
+
+    # Load the one-hot encoded peak tensor
+    one_hot_peaks: torch.Tensor = torch.load(tf_dna_input_cache_dir / "peak_onehot_array.pt", weights_only=True)
+
+    return (
+        edge_tf_idx_tensor,
+        edge_peak_idx_tensor,
+        edge_labels_tensor,
+        tf_embeddings_tensor,
+        tf_mask_tensor,
+        one_hot_peaks,
+    )
+    
+def load_tf_dna_training_data(
+    tf_dna_input_cache_dir: Path,
+    batch_size: int = 64,
+):    
+    
+    # Name to ID dictionaries
+    tf_name_to_idx_df = pd.read_csv(tf_dna_input_cache_dir / "tf_name_to_idx.csv")
+    peak_id_to_idx_df = pd.read_csv(tf_dna_input_cache_dir / "peak_id_to_idx.csv")
+
+    # Load cached data
+    tf_dna_data = load_tf_dna_data(tf_dna_input_cache_dir)
+
+    # Unpack all returned tensors
+    edge_tf_idx_tensor, edge_peak_idx_tensor, edge_labels_tensor, \
+        tf_embeddings_tensor, tf_mask_tensor, peak_tensor = tf_dna_data
+    
+    # Load train/val/test splits
+    train_idx: torch.Tensor = torch.load(tf_dna_input_cache_dir / "train_idx.pt", weights_only=True)
+    val_idx: torch.Tensor = torch.load(tf_dna_input_cache_dir / "val_idx.pt", weights_only=True)
+    test_idx: torch.Tensor = torch.load(tf_dna_input_cache_dir / "test_idx.pt", weights_only=True)
+
+    # PyTorch Dataset for TF-DNA edges
+    edge_dataset = TFPeakEdgeDataset(
+        edge_tf_idx=edge_tf_idx_tensor,
+        edge_peak_idx=edge_peak_idx_tensor,
+        edge_labels=edge_labels_tensor,
+        peak_tensor=peak_tensor,
+    )
+    
+    # Subset to only the train, val, and test sets
+    train_dataset = Subset(edge_dataset, train_idx.tolist())
+    val_dataset = Subset(edge_dataset, val_idx.tolist())
+    test_dataset = Subset(edge_dataset, test_idx.tolist())
+
+    # Create dataloaders for each split
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=8,
+        pin_memory=True,
+        persistent_workers=True,
+        prefetch_factor=4,
+    )
+
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=4,
+        pin_memory=True,
+        persistent_workers=True,
+        prefetch_factor=4,
+    )
+
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=4,
+        pin_memory=True,
+        persistent_workers=True,
+        prefetch_factor=4,
+    )
+    
+    return {
+        "train_loader": train_loader,
+        "val_loader": val_loader,
+        "test_loader": test_loader,
+        "tf_embeddings_tensor": tf_embeddings_tensor,
+        "tf_mask_tensor": tf_mask_tensor,
+        "peak_tensor": peak_tensor,
+        "edge_dataset": edge_dataset,
+        "tf_name_to_idx_df": tf_name_to_idx_df,
+        "peak_name_to_idx_df": peak_id_to_idx_df,
+    }
+
+
+def create_tf_peak_index_to_name_mappings(training_data):
+    #series to dict
+    tf_name_to_idx_dict = training_data["tf_name_to_idx_df"].set_index("tf_name")["tf_idx"].to_dict()
+    peak_name_to_idx_dict = training_data["peak_name_to_idx_df"].set_index("peak_id")["peak_idx"].to_dict()
+
+    tf_idx_to_name = {idx: name for name, idx in tf_name_to_idx_dict.items()}
+    peak_idx_to_name = {idx: name for name, idx in peak_name_to_idx_dict.items()}
+    return tf_idx_to_name, peak_idx_to_name
+
+def get_peak_sequence(peak_idx: int, peak_tensor: torch.Tensor) -> str:
+    """
+    Returns the DNA sequence for a given peak index from the one-hot encoded peak tensor.
+    
+    Parameters
+    ----------
+    peak_idx : int
+        The index of the peak for which to retrieve the DNA sequence.
+    peak_tensor : torch.Tensor
+        The one-hot encoded tensor containing the DNA sequences for all peaks.
+        
+    Returns
+    -------
+    str
+        The DNA sequence corresponding to the specified peak index.
+    
+    """
+    peak_onehot = peak_tensor[peak_idx]
+    nuc_ids = torch.argmax(peak_onehot, dim=-1)
+    peak_nuc_key = ["A", "C", "G", "T"]
+    return "".join([peak_nuc_key[nuc_id] for nuc_id in nuc_ids])
+
+def generate_tf_dna_binding_predictions(cell_type, tf_dna_model_path):
+    training_data = load_tf_dna_training_data(
+        cell_type=cell_type,
+        batch_size=512,
+    )
+
+    tf_embeddings_tensor = training_data["tf_embeddings_tensor"]
+    tf_mask_tensor = training_data["tf_mask_tensor"]
+
+    tf_dna_model = load_tf_dna_model(
+        tf_dna_model_path=tf_dna_model_path,
+        tf_embeddings_tensor=tf_embeddings_tensor,
+        tf_mask_tensor=tf_mask_tensor,
+        compile_model=False
+    )
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = tf_dna_model.model
+    model = model.to(device)
+
+    model.eval()
+
+    tf_indices_list = []
+    peak_indices_list = []
+    all_scores = []
+    all_labels = []
+
+    tf_idx_to_name, peak_idx_to_name = create_tf_peak_index_to_name_mappings(training_data)
+
+    test_loader = training_data["test_loader"]
+
+    # print(f"Evaluating on {dataset_split_type} set")
+    with torch.inference_mode():
+        for batch in tqdm(test_loader, desc="Evaluating", ncols=100):
+            
+            tf_idx = batch["tf_idx"].long()
+            peak_idx = batch["peak_idx"].long()
+            labels = batch["label"]
+
+            tf_embedding = tf_embeddings_tensor[tf_idx].to(device, non_blocking=True)
+            tf_mask = tf_mask_tensor[tf_idx].to(device, non_blocking=True)
+
+            peak_embedding = batch["peak_embedding"].float().to(device, non_blocking=True)
+
+            binding_logits = model.forward(
+                tf_embedding=tf_embedding,
+                tf_mask=tf_mask,
+                peak_embedding=peak_embedding,
+            )
+
+            scores = torch.sigmoid(binding_logits)
+
+            all_scores.append(scores.detach().cpu().numpy().ravel())
+            all_labels.append(labels.numpy().ravel())
+            
+            tf_indices_list.append(tf_idx.numpy().ravel())
+            peak_indices_list.append(peak_idx.numpy().ravel())
+
+    all_tf_indices = np.concatenate(tf_indices_list)
+    all_peak_indices = np.concatenate(peak_indices_list)
+    all_scores_flat = np.concatenate(all_scores)
+    all_labels_flat = np.concatenate(all_labels)
+
+    tf_names = [tf_idx_to_name[idx] for idx in all_tf_indices]
+    peak_names = [peak_idx_to_name[idx] for idx in all_peak_indices]
+
+    prediction_df = pd.DataFrame({
+        "TF": tf_names,
+        "DNA": peak_names,
+        "Score": all_scores_flat,
+        "Label": all_labels_flat
+    })
+    
+    return prediction_df, all_scores_flat, all_labels_flat

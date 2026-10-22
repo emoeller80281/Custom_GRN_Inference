@@ -21,6 +21,157 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
 )
 
+def sample_items_excluding(n_items, excluded, k, rng):
+    """k distinct item codes drawn uniformly from range(n_items), none of them in `excluded`."""
+    if k > n_items - len(excluded):
+        raise ValueError(f"Cannot draw {k:,} items: only {n_items - len(excluded):,} are not excluded.")
+    picked = np.empty(0, dtype=np.int64)
+    while len(picked) < k:
+        draw = rng.integers(0, n_items, size=int((k - len(picked)) * 1.1) + 16)
+        draw = draw[~np.isin(draw, excluded)]
+        picked = np.unique(np.concatenate([picked, draw]))
+    return rng.permutation(picked)[:k]
+
+
+def in_sorted(values, sorted_arr):
+    """Boolean mask: which of `values` occur in the sorted array."""
+    if len(sorted_arr) == 0:
+        return np.zeros(len(values), dtype=bool)
+    pos = np.minimum(np.searchsorted(sorted_arr, values), len(sorted_arr) - 1)
+    return sorted_arr[pos] == values
+
+
+def sample_items_by_source_tf(target, k, observed_item, block, rng):
+    """k distinct item codes spread evenly over the observed items of every TF except `target`.
+
+    The k draws are split as evenly as possible over the source TFs (the remainder goes to
+    random ones), and each source TF's share is drawn uniformly from its own observed items.
+    Items observed for `target` are never drawn. A source TF with too few eligible items gives
+    all it has, and the shortfall is split again over the remaining source TFs.
+    """
+    excluded = observed_item[block[target]:block[target + 1]]       # sorted
+    sources = np.array([s for s in range(len(block) - 1) if s != target and block[s + 1] > block[s]])
+    picked = np.empty(0, dtype=np.int64)
+    exhausted = set()
+    while len(picked) < k:
+        live = sources[~np.isin(sources, list(exhausted))]
+        if len(live) == 0:
+            raise ValueError(f"Cannot draw {k:,} items: only {len(picked):,} are eligible.")
+        need = k - len(picked)
+        quota = np.full(len(live), need // len(live))
+        quota[rng.choice(len(live), need % len(live), replace=False)] += 1
+        draws = []
+        for s, q in zip(live, quota):
+            if q == 0:
+                continue
+            items = observed_item[block[s]:block[s + 1]]
+            cand = items[rng.integers(0, len(items), size=2 * q + 8)]
+            cand = pd.unique(cand[~in_sorted(cand, excluded)])
+            if len(cand) < q:                                          # small source TF
+                cand = rng.permutation(items[~in_sorted(items, excluded)])
+                if len(cand) <= q:
+                    exhausted.add(s)
+            draws.append(cand[:q])
+        new = pd.unique(np.concatenate(draws))                         # a peak can have several TFs
+        picked = np.concatenate([picked, new[~np.isin(new, picked)]])
+    return rng.permutation(picked)
+
+
+def create_per_tf_balanced_edges(
+    edge_df: pd.DataFrame,
+    tf_names: list,
+    tf_col: str = "source_id",
+    item_col: str = "peak_id",
+    min_true_edges_per_tf: int = 500,
+    max_true_edges_per_tf: int | None = 20_000,
+    true_false_ratio: float = 1.0,
+    false_edge_sampling: str = "by_source_tf",
+    tf_lengths: dict[str, int] | None = None,
+    max_tf_length: int | None = None,
+    seed: int = 123,
+):
+    """True and false TF-peak edges with the same true:false ratio for every TF.
+
+    A TF's true edges are its observed peaks, or a random max_true_edges_per_tf of them when it
+    has more. Its false edges are round(n_true * true_false_ratio) peaks of other TFs, never a
+    peak observed for that TF. TFs with fewer than min_true_edges_per_tf observed peaks, or a
+    protein longer than max_tf_length (from tf_lengths), get no edges; their peaks can still be
+    drawn as false edges of other TFs. false_edge_sampling picks how the false peaks are drawn:
+
+      "by_source_tf"  evenly over the other TFs, then uniformly within each TF's peaks
+      "uniform"       uniformly over all observed peaks of all TFs
+
+    utils.create_true_false_edges samples the false edges over all TF x peak pairs at once, so
+    every TF gets about the same number of them. On mm10 that left the bound fraction per TF
+    between 0.0004 and 0.97, and the model learned it from the TF embedding without reading
+    the DNA. A fixed ratio per TF removes that shortcut.
+
+    With "uniform", Ctcf (41M of 155M mm10 peaks) and Spi1 gave ~26% and ~10% of every TF's
+    false peaks, and the model learned "CTCF or PU.1 motif means unbound" for nearly every TF
+    (one inserted CTCF consensus lowered other TFs by a median 4.6 log-odds). Drawing evenly
+    over source TFs keeps any one TF's peaks from dominating the negatives.
+
+    Returns (true_edges, false_edges, tf_counts): sets of (tf, item) tuples, and one row per
+    TF with its length, observed, true and false edge counts, and why it was excluded.
+    """
+    if max_tf_length is not None and tf_lengths is None:
+        raise ValueError("max_tf_length needs tf_lengths")
+    df_all = edge_df[[tf_col, item_col]]
+    df_all = df_all[df_all[tf_col].isin(tf_names)].dropna(subset=[tf_col, item_col])
+
+    # Same integer coding as utils.create_true_false_edges: code = tf * n_items + item.
+    tf_codes, candidate_tfs = pd.factorize(df_all[tf_col], sort=False)
+    item_codes, candidate_items = pd.factorize(df_all[item_col], sort=False)
+    candidate_tfs = np.asarray(candidate_tfs, dtype=object)
+    candidate_items = np.asarray(candidate_items, dtype=object)
+    n_items = len(candidate_items)
+
+    # Sorted unique codes keep each TF's items in one sorted block.
+    observed_codes = np.unique(tf_codes.astype(np.int64) * n_items + item_codes.astype(np.int64))
+    observed_tf = observed_codes // n_items
+    observed_item = observed_codes % n_items
+    block = np.searchsorted(observed_tf, np.arange(len(candidate_tfs) + 1))
+
+    rng = np.random.default_rng(seed)
+    true_edges, false_edges, rows = set(), set(), []
+    for t, tf in enumerate(candidate_tfs):
+        items = observed_item[block[t]:block[t + 1]]
+        length = tf_lengths.get(tf) if tf_lengths is not None else None
+        n_true = n_false = 0
+        excluded = ""
+        if len(items) < min_true_edges_per_tf:
+            excluded = f"fewer than {min_true_edges_per_tf} peaks"
+        elif max_tf_length is not None and (length or 0) > max_tf_length:
+            excluded = f"longer than {max_tf_length} residues"
+        if not excluded:
+            true_items = items
+            if max_true_edges_per_tf is not None and len(items) > max_true_edges_per_tf:
+                true_items = rng.choice(items, size=max_true_edges_per_tf, replace=False)
+            n_false_wanted = int(round(len(true_items) * true_false_ratio))
+            if false_edge_sampling == "by_source_tf":
+                false_items = sample_items_by_source_tf(t, n_false_wanted, observed_item, block, rng)
+            elif false_edge_sampling == "uniform":
+                false_items = sample_items_excluding(n_items, items, n_false_wanted, rng)
+            else:
+                raise ValueError(f"Unknown false_edge_sampling: {false_edge_sampling!r}")
+            true_edges.update(zip([tf] * len(true_items), candidate_items[true_items]))
+            false_edges.update(zip([tf] * len(false_items), candidate_items[false_items]))
+            n_true, n_false = len(true_items), len(false_items)
+        rows.append({"tf_name": tf, "tf_length": length, "n_observed": len(items),
+                     "n_true": n_true, "n_false": n_false, "excluded": excluded})
+
+    tf_counts = pd.DataFrame(rows).sort_values("n_observed", ascending=False, ignore_index=True)
+    kept = tf_counts["excluded"] == ""
+    logging.info(
+        f"    {kept.sum()} of {len(tf_counts)} TFs get edges; "
+        f"{(tf_counts.loc[kept, 'n_observed'] > (max_true_edges_per_tf or np.inf)).sum()} capped at "
+        f"{max_true_edges_per_tf} true edges; false edges drawn {false_edge_sampling}"
+    )
+    for reason, group in tf_counts[~kept].groupby("excluded"):
+        logging.info(f"    Excluded, {reason}: {', '.join(group['tf_name'])}")
+    return true_edges, false_edges, tf_counts
+
+
 def create_labeled_tf_peak_dataset(
     true_interactions: set[tuple[str, str]],
     false_interactions: set[tuple[str, str]],
@@ -123,8 +274,19 @@ def load_ordered_tf_embeddings(
 
 def main():
     argparser = argparse.ArgumentParser(description="Build TF-to-DNA training data")
-    argparser.add_argument("--pct_true_edges", type=float, default=0.25)
-    argparser.add_argument("--true_false_ratio", type=float, default=0.25)
+    argparser.add_argument("--min_true_edges_per_tf", type=int, default=500,
+                           help="TFs with fewer observed ChIP-Atlas peaks get no training edges.")
+    argparser.add_argument("--max_true_edges_per_tf", type=int, default=20_000,
+                           help="Cap on true edges per TF (e.g. Ctcf, Spi1). 0 means no cap.")
+    argparser.add_argument("--true_false_ratio", type=float, default=1.0,
+                           help="False edges per true edge, the same for every TF.")
+    argparser.add_argument("--false_edge_sampling", choices=["by_source_tf", "uniform"], default="by_source_tf",
+                           help="Draw false peaks evenly over the other TFs, or uniformly over all peaks "
+                                "(the 2026-10-21 cache; Ctcf and Spi1 peaks then dominate the negatives).")
+    argparser.add_argument("--max_tf_length", type=int, default=2048,
+                           help="TFs with longer protein sequences get no training edges; their peaks can "
+                                "still be false edges of other TFs. Matches the top TF_CROP_LADDER rung in "
+                                "models/tf_to_dna.py; longer TFs pad batches to the full table width. 0 means no limit.")
     argparser.add_argument("--force_reload", action="store_true")
     argparser.add_argument("--peak_flank_size", type=int, default=128)
     args = argparser.parse_args()
@@ -217,6 +379,32 @@ def main():
 
     tf_names = list(tf_name_to_idx.keys())
 
+    # Before the edges, which need the TF lengths for --max_tf_length.
+    logging.info("Creating or loading ordered TF embeddings...")
+    tf_cache_files = [tf_embedding_cache_path, tf_mask_cache_path, tf_dna_tf_lengths_cache_path]
+    if all(f.exists() for f in tf_cache_files) and not args.force_reload:
+        logging.info(f"    Loading ordered TF embeddings and masks from cache...")
+        tf_embeddings_tensor = torch.load(tf_embedding_cache_path, weights_only=True)
+        tf_mask_tensor = torch.load(tf_mask_cache_path, weights_only=True)
+        tf_lengths_tensor = torch.load(tf_dna_tf_lengths_cache_path, weights_only=True)
+    else:
+        logging.info("    Ordering TF embeddings to match the TF name to index map...")
+        tf_data = load_ordered_tf_embeddings(
+            embedding_dir=embedding_dir,
+            tf_name_to_idx=tf_name_to_idx,
+        )
+
+        tf_embeddings_tensor = tf_data["embeddings"]
+        tf_mask_tensor = tf_data["mask"]
+        tf_lengths_tensor = tf_data["lengths"]
+
+        logging.info("    Saving TF embeddings and masks to cache...")
+        torch.save(tf_embeddings_tensor, tf_embedding_cache_path)
+        torch.save(tf_mask_tensor, tf_mask_cache_path)
+        torch.save(tf_lengths_tensor, tf_dna_tf_lengths_cache_path)
+    logging.info(f"    Done. Created/Loaded TF embeddings with shape {tf_embeddings_tensor.shape} and mask with shape {tf_mask_tensor.shape}.")
+    tf_lengths = {tf: int(tf_lengths_tensor[idx]) for tf, idx in tf_name_to_idx.items()}
+
     # ------------------------------------------------------------
     # Load or create labeled TF-peak edge dataset + compact peak map
     # ------------------------------------------------------------
@@ -256,14 +444,21 @@ def main():
             peak_id: idx for idx, peak_id in enumerate(full_peak_ids)
         }
 
-        true_interactions, false_interactions = utils.create_true_false_edges(
+        # Every TF stays in tf_name_to_idx (the TF-TG model shares that table); TFs below
+        # min_true_edges_per_tf or above max_tf_length only lose their training edges.
+        true_interactions, false_interactions, tf_edge_counts = create_per_tf_balanced_edges(
             edge_df=true_edge_df,
             tf_names=tf_names,
             tf_col="source_id",
             item_col="peak_id",
-            pct_true_edges=args.pct_true_edges,
+            min_true_edges_per_tf=args.min_true_edges_per_tf,
+            max_true_edges_per_tf=args.max_true_edges_per_tf or None,
             true_false_ratio=args.true_false_ratio,
+            false_edge_sampling=args.false_edge_sampling,
+            tf_lengths=tf_lengths,
+            max_tf_length=args.max_tf_length or None,
         )
+        tf_edge_counts.to_csv(config.tf_dna_input_cache_dir / "tf_edge_counts.csv", index=False)
 
         logging.info(
             f"    Creating labeled dataset with "
@@ -323,30 +518,6 @@ def main():
         f"and {len(used_peak_ids):,} compact peaks."
     )
 
-    logging.info("Creating or loading ordered TF embeddings...")
-    tf_cache_files = [tf_embedding_cache_path, tf_mask_cache_path, tf_dna_tf_lengths_cache_path]
-    if all(f.exists() for f in tf_cache_files) and not args.force_reload:
-        logging.info(f"    Loading ordered TF embeddings and masks from cache...")
-        tf_embeddings_tensor = torch.load(tf_embedding_cache_path, weights_only=True)
-        tf_mask_tensor = torch.load(tf_mask_cache_path, weights_only=True)
-        tf_lengths_tensor = torch.load(tf_dna_tf_lengths_cache_path, weights_only=True)
-    else:
-        logging.info("    Ordering TF embeddings to match the TF name to index map...")
-        tf_data = load_ordered_tf_embeddings(
-            embedding_dir=embedding_dir,
-            tf_name_to_idx=tf_name_to_idx,
-        )
-
-        tf_embeddings_tensor = tf_data["embeddings"]
-        tf_mask_tensor = tf_data["mask"]
-        tf_lengths_tensor = tf_data["lengths"]
-
-        logging.info("    Saving TF embeddings and masks to cache...")
-        torch.save(tf_embeddings_tensor, tf_embedding_cache_path)
-        torch.save(tf_mask_tensor, tf_mask_cache_path)
-        torch.save(tf_lengths_tensor, tf_dna_tf_lengths_cache_path)
-    logging.info(f"    Done. Created/Loaded TF embeddings with shape {tf_embeddings_tensor.shape} and mask with shape {tf_mask_tensor.shape}.")
-        
     logging.info("Creating or loading peak one-hot encodings...")
     chrom_sizes = utils.load_chrom_sizes(chrom_sizes_path)
 

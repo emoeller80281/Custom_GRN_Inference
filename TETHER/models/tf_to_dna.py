@@ -40,26 +40,17 @@ class TFPeakBindingModel(nn.Module):
             nn.Linear(hidden_dim, hidden_dim),
         )
 
-        # Peak DNA sequence encoder:
-        # [B, 4, 128] -> [B, 32, hidden_dim]
         self.peak_encoder = nn.Sequential(
-            # First Conv layer to capture local motifs 
-            # (sets of 15 nucleotides, roughly the size of a TF binding motif)
-            # [B, 4, 128] -> [B, 64, 32]
             nn.Conv1d(4, 64, kernel_size=15, padding=7),
             nn.BatchNorm1d(64),
             nn.GELU(),
-            nn.MaxPool1d(4),  # 128 -> 32
+            nn.MaxPool1d(4),
 
-            # Second Conv layer
-            # [B, 64, 32] -> [B, 128, 8]
             nn.Conv1d(64, 128, kernel_size=9, padding=4),
             nn.BatchNorm1d(128),
             nn.GELU(),
-            nn.MaxPool1d(4),  # 32 -> 8
+            nn.MaxPool1d(4),
 
-            # Third Conv layer to get to final hidden_dim
-            # [B, 128, 8] -> [B, hidden_dim, 8]
             nn.Conv1d(128, hidden_dim, kernel_size=5, padding=2),
             nn.BatchNorm1d(hidden_dim),
             nn.GELU(),

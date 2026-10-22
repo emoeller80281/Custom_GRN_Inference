@@ -823,7 +823,7 @@ def build_page(results, grids, window, summary, args):
         "end moves inward.<br>"
         "<b>Real-peak levels:</b> mean probability on sampled ChIP-Atlas bound and unbound peaks "
         "of this TF. Some were training peaks.<br>"
-        f"<b>Checkpoint:</b> {args.checkpoint.name}"
+        f"<b>Checkpoint:</b> {args.checkpoint.parent.name}/{args.checkpoint.name}"
     )
 
     # Plotly's library goes in last, so the other placeholders are never searched for inside it.
