@@ -1376,3 +1376,48 @@ def load_cisbp_motifs(motif_dir, tf_names, include_inferred, min_ic=0.25, min_le
     return motifs
 
 
+
+
+def insert_motifs_into_dna_sequence(seq: np.ndarray, motif: np.ndarray, num_insertions: int):
+    """
+    Insert a specified motif into a DNA sequence at random positions.
+
+    Parameters:
+    seq (np.ndarray): The original DNA sequence represented as a numpy array.
+    motif (np.ndarray): The motif to be inserted, represented as a numpy array.
+    num_insertions (int): The number of times the motif should be inserted.
+
+    Returns:
+    np.ndarray: The modified DNA sequence with the motif inserted.
+    """
+    occupied_positions = np.zeros_like(seq, dtype=bool)
+    start_positions = []
+
+    for _ in range(num_insertions):
+        # Positions where the motif would not go past the sequence length
+        start_options = np.arange(0, len(seq) - len(motif) + 1)
+
+        # Remove positions that are already occupied
+        start_options = np.setdiff1d(start_options, np.where(occupied_positions == True))
+
+        # Remove positions that would cause collision with existing motifs
+        for start_position in start_positions:
+            if start_position > 0:
+                collide_w_occupied = np.arange(start_position - len(motif) + 1, start_position)
+                start_options = np.setdiff1d(start_options, collide_w_occupied)
+
+        # Break if there are no more available positions to insert the motif
+        if len(start_options) == 0:
+            print(f"No room for motif with length {len(motif)}")
+            break
+        
+        # Choose a random possible starting location for the motif insertion
+        rand_start_loc = np.random.choice(start_options)
+        start_positions.append(rand_start_loc)
+        
+        motif_positions = np.arange(rand_start_loc, rand_start_loc + len(motif))
+        occupied_positions[motif_positions] = True
+
+        seq[motif_positions] = motif
+
+    return seq, occupied_positions
