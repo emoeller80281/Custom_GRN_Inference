@@ -16,6 +16,10 @@ import time
 # while also not padding every TF to the largest one in the dataset.
 TF_CROP_LADDER = (512, 1024, 2048)
 
+# Training is not compiled, so it can use a fine ladder: 128-residue rungs make ~12% of the TF
+# positions padding instead of ~32%. The scores do not depend on the crop (padding is masked).
+TRAIN_TF_CROP_LADDER = tuple(range(128, 2049, 128))
+
 
 class TFPeakBindingModel(nn.Module):
     def __init__(
@@ -158,6 +162,7 @@ class LitTFPeakBindingModel(pl.LightningModule):
         pos_weight: float | None = None,
         logit_clamp: float | None = 20.0,
         enable_timing_sync: bool = False,
+        tf_crop_ladder: tuple = TF_CROP_LADDER,
     ):
         super().__init__()
 
@@ -181,7 +186,7 @@ class LitTFPeakBindingModel(pl.LightningModule):
         self.weight_decay = weight_decay
         self.logit_clamp = logit_clamp
         self.enable_timing_sync = enable_timing_sync
-        self.TF_CROP_LADDER = TF_CROP_LADDER
+        self.TF_CROP_LADDER = tuple(tf_crop_ladder)
 
         self.save_hyperparameters(
             ignore=[

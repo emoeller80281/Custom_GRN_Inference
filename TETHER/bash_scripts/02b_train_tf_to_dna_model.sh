@@ -5,10 +5,10 @@
 #SBATCH --time=72:00:00
 #SBATCH -p dense
 #SBATCH -N 1
-#SBATCH --gres=gpu:a100:1
-#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:a100:4
+#SBATCH --ntasks-per-node=4
 #SBATCH -c 12
-#SBATCH --mem=128G
+#SBATCH --mem=256G
 #SBATCH --signal=SIGUSR1@90
 
 set -eo pipefail
@@ -92,7 +92,8 @@ export PYTHONFAULTHANDLER=1
 echo "[INFO] Starting TF-to-DNA model training..."
 srun python3 ${PROJECT_DIR}/scripts/train_tf_to_dna_model.py \
     --epochs 50 \
-    --batch_size 256 \
+    --batch_size 512 \
+    --lr 3e-4 \
     --model_dim 128 \
     --num_layers 4 \
     --num_gpus $NPROC_PER_NODE \

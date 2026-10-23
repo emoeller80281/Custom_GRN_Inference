@@ -12,6 +12,10 @@ class LengthGroupedBatchSampler(Sampler):
     
     Each batch is padded to its longest sample, so grouping by length reduces the amount of
     padding for a given batch on average.
+
+    With align_replicas=True and num_replicas > 1, the ranks get batches of about the same
+    length in each step. A DDP step waits for the slowest rank, so without this a rank with a
+    short-TF batch idles while another rank runs a long-TF batch.
     """
 
     def __init__(
@@ -23,6 +27,7 @@ class LengthGroupedBatchSampler(Sampler):
         num_replicas: int = 1,
         rank: int = 0,
         megabatch_multiplier: int = 64,
+        align_replicas: bool = False,
     ):
         self.lengths = np.asarray(lengths) # TF sequence lengths for each TF-DNA edge
         self.batch_size = int(batch_size)
@@ -30,6 +35,7 @@ class LengthGroupedBatchSampler(Sampler):
         self.seed = int(seed)
         self.num_replicas = max(1, int(num_replicas))
         self.rank = int(rank)
+        self.align_replicas = bool(align_replicas)
         self.megabatch = self.batch_size * int(megabatch_multiplier)
         self.epoch = 0
 
@@ -55,6 +61,17 @@ class LengthGroupedBatchSampler(Sampler):
             # Split the sorted chunk into batches of batch_size, and append to the list of batches
             for b in range(0, len(chunk), self.batch_size):
                 batches.append(chunk[b : b + self.batch_size].tolist())
+
+        # Distributed training with aligned ranks: sort the batches by their longest TF so each run
+        # of num_replicas neighbours (one step) has about the same crop width, then shuffle whole
+        # steps so the epoch still mixes short and long TFs
+        if self.num_replicas > 1 and self.align_replicas:
+            batches.sort(key=lambda batch: self.lengths[batch].max())
+            usable = (len(batches) // self.num_replicas) * self.num_replicas
+            steps = [batches[i : i + self.num_replicas] for i in range(0, usable, self.num_replicas)]
+            if self.shuffle:
+                rng.shuffle(steps)
+            return [step[self.rank] for step in steps]
 
         # Shuffle the order of the sorted batches, so that the model sees different batches each epoch
         if self.shuffle:

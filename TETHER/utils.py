@@ -1087,6 +1087,7 @@ def load_tf_dna_model(
         
     return lit_tf_dna_model
 
+
 def load_tf_dna_data(tf_dna_input_cache_dir: Path) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -1134,6 +1135,7 @@ def load_tf_dna_data(tf_dna_input_cache_dir: Path) -> tuple[
         tf_mask_tensor,
         one_hot_peaks,
     )
+    
     
 def load_tf_dna_training_data(
     tf_dna_input_cache_dir: Path,
@@ -1222,6 +1224,7 @@ def create_tf_peak_index_to_name_mappings(training_data):
     peak_idx_to_name = {idx: name for name, idx in peak_name_to_idx_dict.items()}
     return tf_idx_to_name, peak_idx_to_name
 
+
 def get_peak_sequence(peak_idx: int, peak_tensor: torch.Tensor) -> str:
     """
     Returns the DNA sequence for a given peak index from the one-hot encoded peak tensor.
@@ -1244,9 +1247,10 @@ def get_peak_sequence(peak_idx: int, peak_tensor: torch.Tensor) -> str:
     peak_nuc_key = ["A", "C", "G", "T"]
     return "".join([peak_nuc_key[nuc_id] for nuc_id in nuc_ids])
 
-def generate_tf_dna_binding_predictions(cell_type, tf_dna_model_path):
+
+def generate_tf_dna_binding_predictions(tf_dna_input_cache_dir, tf_dna_model_path):
     training_data = load_tf_dna_training_data(
-        cell_type=cell_type,
+        tf_dna_input_cache_dir=tf_dna_input_cache_dir,
         batch_size=512,
     )
 
@@ -1277,7 +1281,7 @@ def generate_tf_dna_binding_predictions(cell_type, tf_dna_model_path):
 
     # print(f"Evaluating on {dataset_split_type} set")
     with torch.inference_mode():
-        for batch in tqdm(test_loader, desc="Evaluating", ncols=100):
+        for batch in tqdm(test_loader, desc="Evaluating"):
             
             tf_idx = batch["tf_idx"].long()
             peak_idx = batch["peak_idx"].long()
@@ -1318,3 +1322,57 @@ def generate_tf_dna_binding_predictions(cell_type, tf_dna_model_path):
     })
     
     return prediction_df, all_scores_flat, all_labels_flat
+
+
+def information_content(pwm):
+    """Per-column information content in bits (0 = uniform, 2 = a fixed base)."""
+    p = np.clip(pwm, 1e-9, None)
+    return 2.0 + (p * np.log2(p)).sum(axis=1)
+
+
+def trim_pwm(pwm, min_ic):
+    """Drop uninformative leading and trailing columns."""
+    keep = np.flatnonzero(information_content(pwm) >= min_ic)
+    return pwm if len(keep) == 0 else pwm[keep[0]:keep[-1] + 1]
+
+
+def load_cisbp_motifs(motif_dir, tf_names, include_inferred, min_ic=0.25, min_len=4):
+    """One PWM per TF: the motif with the highest total information content after trimming.
+
+    Same selection as load_cisbp_motifs in analyze_tf_embeddings.ipynb. Direct motifs
+    (TF_Status "D") come first; inferred motifs only fill TFs that have no direct one.
+    Returns {upper-case TF name: dict(pwm, motif_id, motif_type, family, status)}.
+    """
+    info = pd.read_csv(motif_dir / "TF_Information_all_motifs.txt", sep="\t", low_memory=False)
+    info["TF_Name"] = info["TF_Name"].str.upper()
+    info = info[info["Motif_ID"].notna() & (info["Motif_ID"] != ".")]
+    info = info[info["TF_Name"].isin({name.upper() for name in tf_names})]
+
+    motifs = {}
+    for status in ("D", "I") if include_inferred else ("D",):
+        for tf_name, rows in info[info["TF_Status"] == status].groupby("TF_Name"):
+            if tf_name in motifs:
+                continue
+            best = None
+            for row in rows.drop_duplicates("Motif_ID").itertuples():
+                path = motif_dir / "pwms_all_motifs" / f"{row.Motif_ID}.txt"
+                if not path.exists():
+                    continue
+                table = pd.read_csv(path, sep="\t", index_col=0)
+                if table.columns.tolist() != list("ACGT") or len(table) < min_len:
+                    continue
+                pwm = table.to_numpy(dtype=float)
+                pwm = pwm / np.clip(pwm.sum(axis=1, keepdims=True), 1e-9, None)
+                pwm = trim_pwm(pwm, min_ic)
+                total_ic = information_content(pwm).sum()
+                if len(pwm) >= min_len and (best is None or total_ic > best["total_ic"]):
+                    best = {
+                        "pwm": pwm, "total_ic": total_ic, "motif_id": row.Motif_ID,
+                        "motif_type": str(row.Motif_Type), "family": str(row.Family_Name),
+                        "status": status,
+                    }
+            if best is not None:
+                motifs[tf_name] = best
+    return motifs
+
+

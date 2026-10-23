@@ -25,14 +25,23 @@ cd "$PROJECT_DIR"
 
 conda activate my_env
 
+# No liver, mESC, brain, skin, kidney, HSC. Entries can be glob patterns, because a run
+# name ends in its start time. Retrained 2026-10-22 with TF-DNA model mm10_3925194_epoch_21.
 EXPERIMENT_LIST=(
-    "celltype_joint_3899206_20261002_125300_917425"
-    "celltype_joint_3899207_20261002_125401_578199"
-    "celltype_joint_3899208_20261002_125401_578203"
-    "celltype_joint_3899209_20261002_125401_578193"
-    "celltype_joint_3899210_20261002_125501_478329"
-    "celltype_joint_3899211_20261002_143015_907548"
+    "celltype_joint_3926071_*"
+    "celltype_joint_3926072_*"
+    "celltype_joint_3926073_*"
+    "celltype_joint_3926074_*"
+    "celltype_joint_3926075_*"
+    "celltype_joint_3926076_*"
 )
+# 2026-10-02 models (TF-DNA model mm10_3831017_epoch_12):
+#   celltype_joint_3899206_20261002_125300_917425
+#   celltype_joint_3899207_20261002_125401_578199
+#   celltype_joint_3899208_20261002_125401_578203
+#   celltype_joint_3899209_20261002_125401_578193
+#   celltype_joint_3899210_20261002_125501_478329
+#   celltype_joint_3899211_20261002_143015_907548
 
 # ==========================================
 #        EXPERIMENT SELECTION
@@ -46,6 +55,12 @@ if [ ${TASK_ID} -ge ${#EXPERIMENT_LIST[@]} ]; then
 fi
 
 RUN_DIR="${EXPERIMENT_LIST[$TASK_ID]}"
+MATCHES=( "${PROJECT_DIR}"/checkpoints/celltype_tf_tg/${RUN_DIR} )
+if [ ${#MATCHES[@]} -ne 1 ] || [ ! -d "${MATCHES[0]}" ]; then
+    echo "ERROR: ${RUN_DIR} matches ${#MATCHES[@]} entries, expected one run directory: ${MATCHES[*]}"
+    exit 1
+fi
+RUN_DIR=$(basename "${MATCHES[0]}")
 
 echo "Host: $(hostname)  Job: ${SLURM_JOB_ID:-local}  Run: ${RUN_DIR}"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true

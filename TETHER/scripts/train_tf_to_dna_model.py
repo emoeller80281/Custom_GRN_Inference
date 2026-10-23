@@ -73,6 +73,7 @@ if __name__ == "__main__":
     argparser.add_argument("--num_nodes", type=int, default=1, help="Number of nodes to use for training")
     argparser.add_argument("--model_dim", type=int, default=128, help="Dimension of the model")
     argparser.add_argument("--batch_size", type=int, default=64, help="Batch size for training")
+    argparser.add_argument("--lr", type=float, default=1e-4, help="AdamW learning rate (1e-4 suits a global batch of 256; scale by sqrt of the batch ratio)")
     argparser.add_argument("--seed", type=int, default=123, help="Seed for length-grouped batch shuffling")
     argparser.add_argument("--num_layers", type=int, default=4, help="Number of layers in the model")
     argparser.add_argument("--job_id", type=str, required=True, help="SLURM job ID for this training run")
@@ -85,6 +86,7 @@ if __name__ == "__main__":
     num_nodes = args.num_nodes
     model_dim = args.model_dim
     batch_size = args.batch_size
+    lr = args.lr
     seed = args.seed
     num_layers = args.num_layers
     job_id = args.job_id
@@ -166,15 +168,15 @@ if __name__ == "__main__":
 
     train_sampler = LengthGroupedBatchSampler(
         edge_lengths_for(train_idx, edge_tf_idx_tensor, tf_mask_tensor),
-        batch_size=batch_size, shuffle=True, seed=seed, **ddp_kwargs,
+        batch_size=batch_size, shuffle=True, seed=seed, align_replicas=True, **ddp_kwargs,
     )
     val_sampler = LengthGroupedBatchSampler(
         edge_lengths_for(val_idx, edge_tf_idx_tensor, tf_mask_tensor),
-        batch_size=batch_size, shuffle=False, **ddp_kwargs,
+        batch_size=batch_size, shuffle=False, align_replicas=True, **ddp_kwargs,
     )
     test_sampler = LengthGroupedBatchSampler(
         edge_lengths_for(test_idx, edge_tf_idx_tensor, tf_mask_tensor),
-        batch_size=batch_size, shuffle=False, **ddp_kwargs,
+        batch_size=batch_size, shuffle=False, align_replicas=True, **ddp_kwargs,
     )
 
     # Create dataloaders for each split
@@ -219,10 +221,13 @@ if __name__ == "__main__":
         model=base_model,
         tf_embeddings_tensor=tf_embeddings_tensor,
         tf_mask_tensor=tf_mask_tensor,
-        lr=1e-4,
+        lr=lr,
         weight_decay=1e-4,
         pos_weight=None,
-        enable_timing_sync=True,
+        # No CUDA syncs for the timing logs (~3% faster); the logged phase times are then
+        # CPU launch times, not GPU times
+        enable_timing_sync=False,
+        tf_crop_ladder=tf_to_dna_module.TRAIN_TF_CROP_LADDER,
     )
 
 
@@ -233,6 +238,16 @@ if __name__ == "__main__":
         mode="max",
         save_top_k=3,
         save_last=True,
+        auto_insert_metric_name=False,
+    )
+
+    # Keeps every epoch as epoch_<N>.ckpt (~20 MB each). The top-k callback above deletes epochs
+    # that drop out of the top 3 and only writes last.ckpt alongside a top-k save.
+    every_epoch_callback = ModelCheckpoint(
+        dirpath=output_dir,
+        filename="epoch_{epoch}",
+        save_top_k=-1,
+        every_n_epochs=1,
         auto_insert_metric_name=False,
     )
 
@@ -254,6 +269,7 @@ if __name__ == "__main__":
         "sample_name": config.sample_name,
         "epochs": epochs,
         "batch_size": batch_size,
+        "lr": lr,
         "num_batches": len(train_loader),
         "model_dim": model_dim,
         "num_layers": num_layers,
@@ -280,6 +296,7 @@ if __name__ == "__main__":
         callbacks=[
             TQDMProgressBar(refresh_rate=50),
             checkpoint_callback,
+            every_epoch_callback,
             early_stopping_callback,
             lr_monitor,
         ],

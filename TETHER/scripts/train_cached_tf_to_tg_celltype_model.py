@@ -157,8 +157,9 @@ def parse_args(argv=None):
         # A SLURM requeue reruns this script under the same job ID. Lightning saves
         # hpc_ckpt_N.ckpt in the previous attempt's output directory and resumes only
         # when default_root_dir points there, so reuse it instead of a new timestamp.
+        # Match this job ID only: any other run directory is a different model.
         previous = sorted(
-            (PROJECT_DIR / "checkpoints/celltype_tf_tg").glob(f"{run_prefix}_*"),
+            (PROJECT_DIR / "checkpoints/celltype_tf_tg").glob(f"{run_prefix}_{args.slurm_id}_*"),
             key=lambda path: path.stat().st_mtime,
         )
         if previous:
@@ -167,7 +168,9 @@ def parse_args(argv=None):
     
     run_prefix_full = f"{run_prefix}_{args.slurm_id}_{stamp}"
     args.output_dir = args.output_dir or PROJECT_DIR / "checkpoints/celltype_tf_tg" / run_prefix_full
-    
+    # Without --run_name, name the W&B run after its directory (W&B otherwise picks a random name)
+    args.run_name = args.run_name or args.output_dir.name
+
     if args.wandb_run_id is None:
         # Continue the same W&B run after a requeue. Run directories end in "-<run id>".
         latest_wandb_run = args.output_dir / "wandb" / "latest-run"

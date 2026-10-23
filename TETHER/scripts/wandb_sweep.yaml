@@ -1,11 +1,9 @@
 program: scripts/wandb_sweep.py
 project: celltype-TF-TG
-name: celltype_tf_tg_sweep
+name: celltype_tf_tg_sweep_tfdna_3925194_ep21
 method: bayes
 metric:
-  # Best epoch's value, written by wandb_sweep.py. Alternatives: val/auroc_best,
-  # val/auprc_best, val/macro_celltype_auprc_best.
-  name: val/macro_celltype_auroc_best
+  name: val/auroc_best
   goal: maximize
 # Every parameter becomes a flag of scripts/train_cached_tf_to_tg_celltype_model.py.
 # Lists repeat the flag; true/false become --flag / --no-flag.
@@ -45,21 +43,26 @@ parameters:
   # Pinning it keeps the cache key fixed while max_cells_per_pair is swept.
   min_cells_per_slice:
     value: 50
+  # TF-DNA model that made the cached binding scores (03c array 3926014, 2026-10-22)
+  tf_dna_checkpoint:
+    value: /gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/TETHER/checkpoints/new_tf_dna_models/mm10_3925194_epoch_21.ckpt
 
   # ---- Fixed: training run ----
   epochs:
-    value: 10
+    value: 15
   accelerator:
     value: gpu
   precision:
     value: 32-true
+  batch_size:
+    value: 256
+  lr:
+    value: 1.0e-4
 
   # ---- Swept ----
   # At most 50 (min_cells_per_slice), so every bag is a real subsample.
   max_cells_per_pair:
-    values: [8, 16, 25, 32, 50]
-  batch_size:
-    values: [128, 256, 512]
+    values: [16, 32, 64]
   d_model:
     values: [64, 128, 256]
   # Every d_model above is divisible by every num_heads value.
@@ -67,19 +70,7 @@ parameters:
     values: [2, 4, 8]
   # 1 = the current model. Each extra layer is cross-attention + feed-forward.
   num_cross_attn_layers:
-    values: [1, 2, 3, 4]
-  dropout:
-    distribution: uniform
-    min: 0.0
-    max: 0.4
-  lr:
-    distribution: log_uniform_values
-    min: 1.0e-5
-    max: 1.0e-3
-  weight_decay:
-    distribution: log_uniform_values
-    min: 1.0e-6
-    max: 1.0e-2
+    values: [1, 2, 3]
   pooling_temperature:
     distribution: log_uniform_values
     min: 0.25
