@@ -5,7 +5,7 @@
 #SBATCH --time=12:00:00
 #SBATCH --partition=dense
 #SBATCH --nodes=1
-#SBATCH --gres=gpu:v100:1
+#SBATCH --gres=gpu:1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=128G
@@ -14,7 +14,7 @@
 # Predicts the GRN of each stability subsample with the model that held out its tissue.
 # GRNs that already exist are skipped.
 # Submit from the repository root (which contains LOGS):
-#   sbatch TETHER/stability_analysis/run_generate_stability_subsample_grns.sh [extra args]
+#   sbatch TETHER/scripts/stability_analysis/run_generate_stability_subsample_grns.sh [extra args]
 # Extra arguments go to generate_stability_subsample_grns.py, for example:
 #   --checkpoint epoch-009.ckpt  --overwrite
 set -eo pipefail
@@ -35,7 +35,7 @@ TISSUE="${TISSUE_LIST[$TASK_ID]}"
 echo "Host: $(hostname)  Job: ${SLURM_JOB_ID:-local}  Tissue: ${TISSUE}"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
 
-python "${PROJECT_DIR}/stability_analysis/generate_stability_subsample_grns.py" \
+python "${PROJECT_DIR}/scripts/stability_analysis/generate_stability_subsample_grns.py" \
     --tissue "${TISSUE}" \
     --num_workers "${SLURM_CPUS_PER_TASK:-8}" \
     "$@"

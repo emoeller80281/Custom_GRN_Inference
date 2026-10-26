@@ -42,21 +42,22 @@ from generate_grns_from_model import (  # noqa: E402
 SUBSAMPLE_FILE = Path(
     "/gpfs/Labs/Uzun/DATA/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER/subsample_cell_dict.json"
 )
-OUTPUT_DIR = PROJECT_DIR / "testing_results" / "stability_results" / "celltype_holdout_models"
+# The GRNs of the earlier models (jobs 3899206-3899211, TF-DNA mm10_3831017_epoch_12)
+# are in celltype_holdout_models.
+OUTPUT_DIR = (
+    PROJECT_DIR / "testing_results" / "stability_results" / "celltype_holdout_models_tf_dna_3925194"
+)
 
-# Tissue in subsample_cell_dict.json -> run directory of the model that held it out
+# Tissue in subsample_cell_dict.json -> run directory of the model that held it out.
+# These runs use TF-DNA checkpoints/new_tf_dna_models/mm10_3925194_epoch_21.ckpt.
 MODEL_RUNS = {
-    "Liver": "celltype_joint_3899206_20261002_125300_917425",   # no_liver
-    "Embryo": "celltype_joint_3899207_20261002_125401_578199",  # no_mesc
-    "Brain": "celltype_joint_3899208_20261002_125401_578203",   # no_brain
-    "Skin": "celltype_joint_3899209_20261002_125401_578193",    # no_skin
-    "Kidney": "celltype_joint_3899210_20261002_125501_478329",  # no_kidney
-    "HSC": "celltype_joint_3899211_20261002_143015_907548",     # no_hsc
+    "Liver": "celltype_joint_3926071_20261022_211905_753626",   # no_liver
+    "Embryo": "celltype_joint_3926072_20261022_211905_753629",  # no_mesc
+    "Brain": "celltype_joint_3926073_20261022_211905_757179",   # no_brain
+    "Skin": "celltype_joint_3926074_20261022_211905_757180",    # no_skin
+    "Kidney": "celltype_joint_3926075_20261022_211905_757182",  # no_kidney
+    "HSC": "celltype_joint_3926076_20261022_211905_757180",     # no_hsc
 }
-
-# The caches were built before data/processed/10x_E18_mouse_brain/brain was
-# renamed to E18_brain, so their sample name differs from the data directory.
-CACHE_SAMPLE_NAMES = {("10x_E18_mouse_brain", "E18_brain"): "brain"}
 
 
 def parse_args():
@@ -130,7 +131,7 @@ def main():
     dataset = subsample_info["dataset"]
     data_sample = subsample_info["sample_name"]
     cell_type = subsample_info["cell_type"]
-    cache_sample = CACHE_SAMPLE_NAMES.get((dataset, data_sample), data_sample)
+    cache_sample = data_sample
     subsamples = subsample_info["subsamples"]
 
     out_dir = args.output_dir / args.tissue

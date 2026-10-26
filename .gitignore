@@ -17,6 +17,7 @@ TETHER/cached_data_full_pos
 jupyter_urls/
 jupyter_dense*.sh
 data/tf_data
+data/CUT&RUN_data
 data/qc_scan
 data/cell_label_reference_datasets
 data/sample_input_data
@@ -30,10 +31,12 @@ TETHER/checkpoints
 checkpoint.pt
 .pybiomart
 TETHER/new_model_debugging
+TETHER/new_testing_results
 TETHER/cell_type_specific_model_variant
 *wandb/
 *.lamin
 *.png
+*.pdf
 *.csv
 *.svg
 *.graphml
