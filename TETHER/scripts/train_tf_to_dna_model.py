@@ -79,6 +79,12 @@ if __name__ == "__main__":
     argparser.add_argument("--job_id", type=str, required=True, help="SLURM job ID for this training run")
     argparser.add_argument("--checkpoint_path", type=str, required=False, help="Path to a model checkpoint to resume training from")
     argparser.add_argument("--force_reload", action="store_true", help="Whether to force reload cached data instead of using existing cache files")
+    argparser.add_argument("--cache_dir", type=Path, default=None, help="TF-DNA cache to train on (default config.tf_dna_input_cache_dir); see build_tf_to_dna_train_data.py --cache_dir")
+    argparser.add_argument("--weight_decay", type=float, default=1e-4, help="AdamW weight decay on weight matrices (biases and norm scales get none)")
+    argparser.add_argument("--lr_schedule", choices=["plateau", "cosine"], default="plateau", help="ReduceLROnPlateau x0.1 on val/loss, or warmup + cosine decay over --epochs")
+    argparser.add_argument("--warmup_epochs", type=float, default=1.0, help="Linear warmup length for --lr_schedule cosine")
+    argparser.add_argument("--rc_augment", action="store_true", help="Reverse-complement a random half of each training batch; val scores average both strands")
+    argparser.add_argument("--early_stopping_patience", type=int, default=10, help="Epochs without a val/loss improvement before stopping")
     args = argparser.parse_args()
     
     epochs = args.epochs
@@ -97,20 +103,23 @@ if __name__ == "__main__":
     
     run_name = f"tf_dna_{config.species}_{job_id}"
         
+    cache_dir = args.cache_dir or config.tf_dna_input_cache_dir
+    in_cache = lambda path: cache_dir / path.name
+
     # Shared cache files for both TF-to-TG and TF-to-DNA training
-    tf_name_to_idx_cache_path = config.tf_name_to_idx_cache_path
-    tf_embedding_cache_path = config.tf_embedding_cache_path
-    tf_mask_cache_path = config.tf_mask_cache_path
-    
+    tf_name_to_idx_cache_path = in_cache(config.tf_name_to_idx_cache_path)
+    tf_embedding_cache_path = in_cache(config.tf_embedding_cache_path)
+    tf_mask_cache_path = in_cache(config.tf_mask_cache_path)
+
     # TF-DNA training specific cache files
-    tf_dna_edge_tf_idx_cache_path = config.tf_dna_edge_tf_idx_cache_path
-    tf_dna_edge_peak_idx_cache_path = config.tf_dna_edge_peak_idx_cache_path
-    tf_dna_edge_labels_cache_path = config.tf_dna_edge_labels_cache_path
-    tf_dna_tf_lengths_cache_path = config.tf_dna_tf_lengths_cache_path
-    tf_dna_peak_onehot_cache_path = config.tf_dna_peak_onehot_cache_path
-    tf_dna_train_idx_cache_path = config.tf_dna_train_idx_cache_path
-    tf_dna_val_idx_cache_path = config.tf_dna_val_idx_cache_path
-    tf_dna_test_idx_cache_path = config.tf_dna_test_idx_cache_path
+    tf_dna_edge_tf_idx_cache_path = in_cache(config.tf_dna_edge_tf_idx_cache_path)
+    tf_dna_edge_peak_idx_cache_path = in_cache(config.tf_dna_edge_peak_idx_cache_path)
+    tf_dna_edge_labels_cache_path = in_cache(config.tf_dna_edge_labels_cache_path)
+    tf_dna_tf_lengths_cache_path = in_cache(config.tf_dna_tf_lengths_cache_path)
+    tf_dna_peak_onehot_cache_path = in_cache(config.tf_dna_peak_onehot_cache_path)
+    tf_dna_train_idx_cache_path = in_cache(config.tf_dna_train_idx_cache_path)
+    tf_dna_val_idx_cache_path = in_cache(config.tf_dna_val_idx_cache_path)
+    tf_dna_test_idx_cache_path = in_cache(config.tf_dna_test_idx_cache_path)
     
     cache_files = [
         tf_name_to_idx_cache_path,
@@ -222,19 +231,23 @@ if __name__ == "__main__":
         tf_embeddings_tensor=tf_embeddings_tensor,
         tf_mask_tensor=tf_mask_tensor,
         lr=lr,
-        weight_decay=1e-4,
+        weight_decay=args.weight_decay,
         pos_weight=None,
         # No CUDA syncs for the timing logs (~3% faster); the logged phase times are then
         # CPU launch times, not GPU times
         enable_timing_sync=False,
         tf_crop_ladder=tf_to_dna_module.TRAIN_TF_CROP_LADDER,
+        rc_augment=args.rc_augment,
+        lr_schedule=args.lr_schedule,
+        warmup_epochs=args.warmup_epochs,
     )
 
 
+    # Per-TF AUROC: pooled AUROC also rewards scoring whole TFs high or low
     checkpoint_callback = ModelCheckpoint(
         dirpath=output_dir,
-        filename="epoch={epoch:02d}-val_auroc={val/auroc:.4f}-val_loss={val/loss:.4f}",
-        monitor="val/auroc",
+        filename="epoch={epoch:02d}-val_per_tf_auroc={val/per_tf_auroc:.4f}-val_loss={val/loss:.4f}",
+        monitor="val/per_tf_auroc",
         mode="max",
         save_top_k=3,
         save_last=True,
@@ -254,7 +267,7 @@ if __name__ == "__main__":
     early_stopping_callback = EarlyStopping(
         monitor="val/loss",
         mode="min",
-        patience=10,
+        patience=args.early_stopping_patience,
     )
 
     lr_monitor = LearningRateMonitor(logging_interval="epoch")
@@ -277,6 +290,8 @@ if __name__ == "__main__":
         "num_nodes": num_nodes,
         "job_id": job_id,
         "run_name": run_name,
+        "cache_dir": str(cache_dir),
+        "early_stopping_patience": args.early_stopping_patience,
     })
     
     # world_size / global_rank were resolved above, before the samplers were built.

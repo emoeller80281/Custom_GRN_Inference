@@ -1,4 +1,8 @@
+import math
+
+import numpy as np
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import pytorch_lightning as pl
 
@@ -19,6 +23,11 @@ TF_CROP_LADDER = (512, 1024, 2048)
 # Training is not compiled, so it can use a fine ladder: 128-residue rungs make ~12% of the TF
 # positions padding instead of ~32%. The scores do not depend on the crop (padding is masked).
 TRAIN_TF_CROP_LADDER = tuple(range(128, 2049, 128))
+
+
+def reverse_complement_onehot(peak_embedding):
+    """Reverse complement of [B, L, 4] one-hot DNA in A, C, G, T order: flip the positions and the bases."""
+    return peak_embedding.flip(dims=[1, 2])
 
 
 class TFPeakBindingModel(nn.Module):
@@ -163,7 +172,18 @@ class LitTFPeakBindingModel(pl.LightningModule):
         logit_clamp: float | None = 20.0,
         enable_timing_sync: bool = False,
         tf_crop_ladder: tuple = TF_CROP_LADDER,
+        rc_augment: bool = False,
+        lr_schedule: str = "plateau",
+        warmup_epochs: float = 1.0,
+        min_lr_ratio: float = 0.01,
     ):
+        """
+        rc_augment: train on the reverse complement of a random half of each batch, and score
+            val edges as the mean logit of both strands. Inference code that calls the model
+            directly scores one strand only.
+        lr_schedule: "plateau" (ReduceLROnPlateau on val/loss, x0.1) or "cosine" (linear warmup
+            for warmup_epochs, then cosine decay to min_lr_ratio * lr at max_epochs, per step).
+        """
         super().__init__()
 
         self.model = model
@@ -187,6 +207,12 @@ class LitTFPeakBindingModel(pl.LightningModule):
         self.logit_clamp = logit_clamp
         self.enable_timing_sync = enable_timing_sync
         self.TF_CROP_LADDER = tuple(tf_crop_ladder)
+        self.rc_augment = rc_augment
+        if lr_schedule not in ("plateau", "cosine"):
+            raise ValueError(f"Unknown lr_schedule: {lr_schedule!r}")
+        self.lr_schedule = lr_schedule
+        self.warmup_epochs = warmup_epochs
+        self.min_lr_ratio = min_lr_ratio
 
         self.save_hyperparameters(
             ignore=[
@@ -204,6 +230,7 @@ class LitTFPeakBindingModel(pl.LightningModule):
 
         self.val_probs = []
         self.val_targets = []
+        self.val_tf_idx = []
         self._prev_batch_end_time = None
         self._step_start_time = None
         self._backward_start_time = None
@@ -281,6 +308,11 @@ class LitTFPeakBindingModel(pl.LightningModule):
         
         peak_embedding = batch["peak_embedding"].float()
 
+        # Reverse-complement augmentation: a TF binds its motif on either strand
+        if self.rc_augment and stage == "train":
+            flip = torch.rand(peak_embedding.shape[0], device=peak_embedding.device) < 0.5
+            peak_embedding = torch.where(flip[:, None, None], reverse_complement_onehot(peak_embedding), peak_embedding)
+
         forward_start = None
         if stage == "train":
             self._sync_if_cuda()
@@ -292,6 +324,12 @@ class LitTFPeakBindingModel(pl.LightningModule):
             tf_mask=tf_mask,
             peak_embedding=peak_embedding,
         )
+        if self.rc_augment and stage == "val":
+            logits = 0.5 * (logits + self(
+                tf_embedding=tf_embedding,
+                tf_mask=tf_mask,
+                peak_embedding=reverse_complement_onehot(peak_embedding),
+            ))
 
         if forward_start is not None:
             self._sync_if_cuda()
@@ -305,11 +343,12 @@ class LitTFPeakBindingModel(pl.LightningModule):
         loss = self._loss(logits, labels)
 
         if stage == "val":
-            probs = torch.sigmoid(logits).detach().cpu()
+            probs = torch.sigmoid(logits).detach().float().cpu()
             targets = labels.detach().cpu().int()
 
             self.val_probs.append(probs)
             self.val_targets.append(targets)
+            self.val_tf_idx.append(tf_idx.detach().cpu())
 
             self.log(
                 "val/loss",
@@ -407,6 +446,21 @@ class LitTFPeakBindingModel(pl.LightningModule):
     def on_validation_epoch_start(self):
         self.val_probs.clear()
         self.val_targets.clear()
+        self.val_tf_idx.clear()
+
+    @staticmethod
+    def per_tf_auroc(tf_idx, targets, probs, min_per_class: int = 20):
+        """Median AUROC over TFs with at least min_per_class bound and unbound edges."""
+        aurocs = []
+        order = np.argsort(tf_idx, kind="stable")
+        tf_sorted = tf_idx[order]
+        bounds = np.flatnonzero(np.diff(tf_sorted)) + 1
+        for rows in np.split(order, bounds):
+            y = targets[rows]
+            n_pos = int(y.sum())
+            if n_pos >= min_per_class and len(y) - n_pos >= min_per_class:
+                aurocs.append(roc_auc_score(y, probs[rows]))
+        return float(np.median(aurocs)) if aurocs else float("nan")
 
     def on_validation_epoch_end(self):
         if not self.val_probs:
@@ -414,17 +468,30 @@ class LitTFPeakBindingModel(pl.LightningModule):
 
         probs = torch.cat(self.val_probs, dim=0).view(-1)
         targets = torch.cat(self.val_targets, dim=0).view(-1).int()
+        tf_idx = torch.cat(self.val_tf_idx, dim=0).view(-1)
 
         self.val_probs.clear()
         self.val_targets.clear()
-        
+        self.val_tf_idx.clear()
+
+        # Each rank holds only its own shard of the val edges, so gather all of them before
+        # the metrics (without this the logged AUROC came from rank 0's quarter only)
+        if dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1:
+            gathered = [None] * dist.get_world_size()
+            dist.all_gather_object(gathered, (probs.numpy(), targets.numpy(), tf_idx.numpy()))
+            probs = torch.from_numpy(np.concatenate([g[0] for g in gathered]))
+            targets = torch.from_numpy(np.concatenate([g[1] for g in gathered]))
+            tf_idx = torch.from_numpy(np.concatenate([g[2] for g in gathered]))
+
         val_auroc = roc_auc_score(targets, probs)
         val_auprc = average_precision_score(targets, probs)
         val_acc = accuracy_score(targets, probs >= 0.5)
+        val_per_tf_auroc = self.per_tf_auroc(tf_idx.numpy(), targets.numpy(), probs.numpy())
 
         self.log("val/auroc", val_auroc, prog_bar=True, logger=True, sync_dist=False)
         self.log("val/auprc", val_auprc, prog_bar=True, logger=True, sync_dist=False)
         self.log("val/acc", val_acc, prog_bar=False, logger=True, sync_dist=False)
+        self.log("val/per_tf_auroc", val_per_tf_auroc, prog_bar=True, logger=True, sync_dist=False)
 
         if self.trainer.is_global_zero:
             try:
@@ -446,12 +513,33 @@ class LitTFPeakBindingModel(pl.LightningModule):
             torch.cuda.reset_peak_memory_stats()
 
     def configure_optimizers(self):
+        # No weight decay on biases and norm scales (1-D parameters)
+        params = [p for p in self.parameters() if p.requires_grad]
         optimizer = torch.optim.AdamW(
-            self.parameters(),
+            [
+                {"params": [p for p in params if p.ndim >= 2], "weight_decay": self.weight_decay},
+                {"params": [p for p in params if p.ndim < 2], "weight_decay": 0.0},
+            ],
             lr=self.lr,
-            weight_decay=self.weight_decay,
         )
-        
+
+        if self.lr_schedule == "cosine":
+            total_steps = max(1, int(self.trainer.estimated_stepping_batches))
+            warmup_steps = int(total_steps * self.warmup_epochs / max(1, self.trainer.max_epochs))
+            min_ratio = self.min_lr_ratio
+
+            def lr_factor(step):
+                if step < warmup_steps:
+                    return (step + 1) / warmup_steps
+                progress = min(1.0, (step - warmup_steps) / max(1, total_steps - warmup_steps))
+                return min_ratio + (1 - min_ratio) * 0.5 * (1 + math.cos(math.pi * progress))
+
+            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_factor)
+            return {
+                "optimizer": optimizer,
+                "lr_scheduler": {"scheduler": scheduler, "interval": "step", "frequency": 1},
+            }
+
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, 
             mode='min', 

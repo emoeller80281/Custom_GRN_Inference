@@ -6,6 +6,8 @@ from pathlib import Path
 import logging
 import argparse
 
+import pyarrow as pa
+import pyarrow.compute as pc
 import torch
 from torch.nn.utils.rnn import pad_sequence
 
@@ -41,16 +43,22 @@ def in_sorted(values, sorted_arr):
     return sorted_arr[pos] == values
 
 
-def sample_items_by_source_tf(target, k, observed_item, block, rng):
+def sample_items_by_source_tf(target, k, observed_item, block, rng, pool_item=None, pool_block=None, reject=None):
     """k distinct item codes spread evenly over the observed items of every TF except `target`.
 
     The k draws are split as evenly as possible over the source TFs (the remainder goes to
     random ones), and each source TF's share is drawn uniformly from its own observed items.
     Items observed for `target` are never drawn. A source TF with too few eligible items gives
     all it has, and the shortfall is split again over the remaining source TFs.
+
+    pool_item/pool_block replace each source TF's observed items as the pool to draw from (e.g.
+    one item per merged binding site); `observed_item`/`block` still give the exclusions.
+    reject(cand) -> bool mask drops more candidates (e.g. peaks overlapping the target's own peaks).
     """
+    if pool_item is None:
+        pool_item, pool_block = observed_item, block
     excluded = observed_item[block[target]:block[target + 1]]       # sorted
-    sources = np.array([s for s in range(len(block) - 1) if s != target and block[s + 1] > block[s]])
+    sources = np.array([s for s in range(len(pool_block) - 1) if s != target and pool_block[s + 1] > pool_block[s]])
     picked = np.empty(0, dtype=np.int64)
     exhausted = set()
     while len(picked) < k:
@@ -64,17 +72,80 @@ def sample_items_by_source_tf(target, k, observed_item, block, rng):
         for s, q in zip(live, quota):
             if q == 0:
                 continue
-            items = observed_item[block[s]:block[s + 1]]
-            cand = items[rng.integers(0, len(items), size=2 * q + 8)]
-            cand = pd.unique(cand[~in_sorted(cand, excluded)])
+            items = pool_item[pool_block[s]:pool_block[s + 1]]
+            if reject is None:
+                cand = items[rng.integers(0, len(items), size=2 * q + 8)]
+                cand = pd.unique(cand[~in_sorted(cand, excluded)])
+            else:
+                # Most of a source TF's sites can overlap the target's peaks (e.g. Ctcf), so draw
+                # a few rounds before falling back to scanning the whole pool
+                cand = np.empty(0, dtype=np.int64)
+                for _ in range(4):
+                    draw = items[rng.integers(0, len(items), size=4 * (q - len(cand)) + 16)]
+                    draw = draw[~in_sorted(draw, excluded)]
+                    cand = pd.unique(np.concatenate([cand, draw[~reject(draw)]]))
+                    if len(cand) >= q:
+                        break
             if len(cand) < q:                                          # small source TF
-                cand = rng.permutation(items[~in_sorted(items, excluded)])
+                cand = items[~in_sorted(items, excluded)]
+                if reject is not None:
+                    cand = cand[~reject(cand)]
+                cand = rng.permutation(cand)
                 if len(cand) <= q:
                     exhausted.add(s)
             draws.append(cand[:q])
         new = pd.unique(np.concatenate(draws))                         # a peak can have several TFs
         picked = np.concatenate([picked, new[~np.isin(new, picked)]])
     return rng.permutation(picked)
+
+
+def peak_genome_coords(peak_ids):
+    """Start and end of each "chrN:start-end" peak ID on one genome-wide axis.
+
+    Chromosomes are laid end to end with 1 Mb gaps (and 1 Mb before the first), so a window
+    around a peak never reaches a neighbouring chromosome and coordinates compare with < and >.
+    """
+    # large_string: the mm10 peak IDs pass 2 GB, where a plain string array splits into chunks
+    ids = pa.array(peak_ids, type=pa.large_string())
+    if isinstance(ids, pa.ChunkedArray):
+        ids = ids.combine_chunks()
+    parts = pc.extract_regex(ids, r"^(?P<chrom>[^:]+):(?P<start>\d+)-(?P<end>\d+)$")
+    if parts.null_count:
+        raise ValueError(f"{parts.null_count:,} peak IDs are not chrom:start-end")
+    chrom = pc.dictionary_encode(parts.field("chrom")).indices.to_numpy().astype(np.int64)
+    start = pc.cast(parts.field("start"), pa.int64()).to_numpy()
+    end = pc.cast(parts.field("end"), pa.int64()).to_numpy()
+    chrom_len = np.zeros(chrom.max() + 1, dtype=np.int64)
+    np.maximum.at(chrom_len, chrom, end)
+    offset = 1_000_000 + np.concatenate([[0], np.cumsum(chrom_len + 1_000_000)[:-1]])
+    return offset[chrom] + start, offset[chrom] + end
+
+
+def merge_tf_intervals(tf, start, end, tf_stride):
+    """Union of each TF's peaks, as sorted disjoint intervals on a TF-offset axis (tf * tf_stride + pos)."""
+    s = tf * tf_stride + start
+    e = tf * tf_stride + end
+    order = np.argsort(s, kind="stable")
+    s, e = s[order], e[order]
+    reach = np.maximum.accumulate(e)
+    first = np.flatnonzero(np.concatenate([[True], s[1:] > reach[:-1]]))
+    return s[first], np.maximum.reduceat(e, first)
+
+
+def cluster_tf_sites(tf, center, max_gap, tf_stride):
+    """Group each TF's peaks into binding sites: sorted centres closer than max_gap bp chain together.
+
+    ChIP-Atlas lists every experiment's peaks separately, so one site bound in many experiments
+    appears many times with slightly different coordinates. Returns the index of one peak per site
+    (the middle one by centre), the site sizes, and the bp span of each site.
+    """
+    key = tf * tf_stride + center
+    order = np.argsort(key, kind="stable")
+    key = key[order]
+    first = np.flatnonzero(np.concatenate([[True], np.diff(key) > max_gap]))
+    sizes = np.diff(np.concatenate([first, [len(key)]]))
+    spans = key[first + sizes - 1] - key[first]
+    return order[first + sizes // 2], sizes, spans
 
 
 def create_per_tf_balanced_edges(
@@ -88,6 +159,8 @@ def create_per_tf_balanced_edges(
     false_edge_sampling: str = "by_source_tf",
     tf_lengths: dict[str, int] | None = None,
     max_tf_length: int | None = None,
+    site_merge_distance: int | None = None,
+    false_overlap_flank: int | None = None,
     seed: int = 123,
 ):
     """True and false TF-peak edges with the same true:false ratio for every TF.
@@ -111,11 +184,24 @@ def create_per_tf_balanced_edges(
     (one inserted CTCF consensus lowered other TFs by a median 4.6 log-odds). Drawing evenly
     over source TFs keeps any one TF's peaks from dominating the negatives.
 
+    ChIP-Atlas peak IDs are per-experiment coordinates, so the exact-ID exclusion above misses
+    other TFs' peaks at sites the TF also binds: on the 2026-10-22 mm10 cache 34% of val false
+    edges had their window centre inside a peak of the same TF, and 28% of true edges had
+    another true edge of the same TF within 50 bp. Two options fix this (by_source_tf only):
+
+      site_merge_distance  merge each TF's peaks into binding sites (centres chained within this
+                           many bp) and use one peak per site, as true edges and as the pool other
+                           TFs draw false edges from
+      false_overlap_flank  never draw a false peak whose centre +/- this many bp overlaps any
+                           peak of the TF (use the model's window half-width)
+
     Returns (true_edges, false_edges, tf_counts): sets of (tf, item) tuples, and one row per
     TF with its length, observed, true and false edge counts, and why it was excluded.
     """
     if max_tf_length is not None and tf_lengths is None:
         raise ValueError("max_tf_length needs tf_lengths")
+    if (site_merge_distance or false_overlap_flank) and false_edge_sampling != "by_source_tf":
+        raise ValueError("site_merge_distance and false_overlap_flank need false_edge_sampling='by_source_tf'")
     df_all = edge_df[[tf_col, item_col]]
     df_all = df_all[df_all[tf_col].isin(tf_names)].dropna(subset=[tf_col, item_col])
 
@@ -132,24 +218,56 @@ def create_per_tf_balanced_edges(
     observed_item = observed_codes % n_items
     block = np.searchsorted(observed_tf, np.arange(len(candidate_tfs) + 1))
 
+    # Optional genome coordinates for site merging and overlap-aware false edges
+    pool_item, pool_block, reject_for = None, None, None
+    if site_merge_distance or false_overlap_flank:
+        item_start, item_end = peak_genome_coords(candidate_items)
+        item_center = (item_start + item_end) // 2
+        tf_stride = int(item_end.max()) + 2_000_000                   # keeps each TF's axis separate
+    if site_merge_distance:
+        rep, site_sizes, site_spans = cluster_tf_sites(observed_tf, item_center[observed_item], site_merge_distance, tf_stride)
+        site_order = np.lexsort((observed_item[rep], observed_tf[rep]))  # by TF, then item code
+        pool_item = observed_item[rep][site_order]
+        pool_block = np.searchsorted(observed_tf[rep][site_order], np.arange(len(candidate_tfs) + 1))
+        logging.info(
+            f"    Merged {len(observed_item):,} TF-peak pairs into {len(rep):,} sites "
+            f"(centres within {site_merge_distance} bp); site size median {np.median(site_sizes):.0f}, "
+            f"p99 {np.quantile(site_sizes, 0.99):.0f}; site span p50/p90/p99 "
+            f"{np.quantile(site_spans, 0.5):.0f}/{np.quantile(site_spans, 0.9):.0f}/{np.quantile(site_spans, 0.99):.0f} bp"
+        )
+    if false_overlap_flank:
+        union_start, union_end = merge_tf_intervals(observed_tf, item_start[observed_item], item_end[observed_item], tf_stride)
+
+        def reject_for(t):
+            def reject(cand):
+                lo = t * tf_stride + item_center[cand] - false_overlap_flank
+                hi = t * tf_stride + item_center[cand] + false_overlap_flank
+                i = np.searchsorted(union_start, hi, side="left") - 1
+                return (i >= 0) & (union_end[np.maximum(i, 0)] > lo)
+            return reject
+
     rng = np.random.default_rng(seed)
     true_edges, false_edges, rows = set(), set(), []
     for t, tf in enumerate(candidate_tfs):
         items = observed_item[block[t]:block[t + 1]]
+        sites = items if pool_item is None else pool_item[pool_block[t]:pool_block[t + 1]]
         length = tf_lengths.get(tf) if tf_lengths is not None else None
         n_true = n_false = 0
         excluded = ""
-        if len(items) < min_true_edges_per_tf:
-            excluded = f"fewer than {min_true_edges_per_tf} peaks"
+        if len(sites) < min_true_edges_per_tf:
+            excluded = f"fewer than {min_true_edges_per_tf} peaks" if pool_item is None else f"fewer than {min_true_edges_per_tf} sites"
         elif max_tf_length is not None and (length or 0) > max_tf_length:
             excluded = f"longer than {max_tf_length} residues"
         if not excluded:
-            true_items = items
-            if max_true_edges_per_tf is not None and len(items) > max_true_edges_per_tf:
-                true_items = rng.choice(items, size=max_true_edges_per_tf, replace=False)
+            true_items = sites
+            if max_true_edges_per_tf is not None and len(sites) > max_true_edges_per_tf:
+                true_items = rng.choice(sites, size=max_true_edges_per_tf, replace=False)
             n_false_wanted = int(round(len(true_items) * true_false_ratio))
             if false_edge_sampling == "by_source_tf":
-                false_items = sample_items_by_source_tf(t, n_false_wanted, observed_item, block, rng)
+                false_items = sample_items_by_source_tf(
+                    t, n_false_wanted, observed_item, block, rng, pool_item=pool_item, pool_block=pool_block,
+                    reject=reject_for(t) if reject_for is not None else None,
+                )
             elif false_edge_sampling == "uniform":
                 false_items = sample_items_excluding(n_items, items, n_false_wanted, rng)
             else:
@@ -157,15 +275,16 @@ def create_per_tf_balanced_edges(
             true_edges.update(zip([tf] * len(true_items), candidate_items[true_items]))
             false_edges.update(zip([tf] * len(false_items), candidate_items[false_items]))
             n_true, n_false = len(true_items), len(false_items)
-        rows.append({"tf_name": tf, "tf_length": length, "n_observed": len(items),
+        rows.append({"tf_name": tf, "tf_length": length, "n_observed": len(items), "n_sites": len(sites),
                      "n_true": n_true, "n_false": n_false, "excluded": excluded})
 
     tf_counts = pd.DataFrame(rows).sort_values("n_observed", ascending=False, ignore_index=True)
     kept = tf_counts["excluded"] == ""
     logging.info(
         f"    {kept.sum()} of {len(tf_counts)} TFs get edges; "
-        f"{(tf_counts.loc[kept, 'n_observed'] > (max_true_edges_per_tf or np.inf)).sum()} capped at "
+        f"{(tf_counts.loc[kept, 'n_sites'] > (max_true_edges_per_tf or np.inf)).sum()} capped at "
         f"{max_true_edges_per_tf} true edges; false edges drawn {false_edge_sampling}"
+        + (f", none within {false_overlap_flank} bp of the TF's own peaks" if false_overlap_flank else "")
     )
     for reason, group in tf_counts[~kept].groupby("excluded"):
         logging.info(f"    Excluded, {reason}: {', '.join(group['tf_name'])}")
@@ -287,34 +406,44 @@ def main():
                            help="TFs with longer protein sequences get no training edges; their peaks can "
                                 "still be false edges of other TFs. Matches the top TF_CROP_LADDER rung in "
                                 "models/tf_to_dna.py; longer TFs pad batches to the full table width. 0 means no limit.")
+    argparser.add_argument("--site_merge_distance", type=int, default=0,
+                           help="Merge each TF's peaks whose centres chain within this many bp into one binding "
+                                "site (one true edge per site). 0 keeps every peak, as in the 2026-10-22 cache.")
+    argparser.add_argument("--false_overlap_flank", type=int, default=0,
+                           help="Never draw a false peak whose centre +/- this many bp overlaps any peak of the "
+                                "same TF (use --peak_flank_size). 0 only excludes exact peak-ID matches.")
+    argparser.add_argument("--cache_dir", type=Path, default=None,
+                           help="Write the cache here instead of config.tf_dna_input_cache_dir, e.g. to keep the "
+                                "current cache for comparison. File names are the same.")
     argparser.add_argument("--force_reload", action="store_true")
     argparser.add_argument("--peak_flank_size", type=int, default=128)
     args = argparser.parse_args()
-    
+
     species = config.species
 
     genome_fasta_path = config.genome_fasta_path
     chrom_sizes_path = config.chrom_sizes_path
     embedding_dir = config.embedding_dir
-    
-    if not config.tf_dna_input_cache_dir.exists():
-        config.tf_dna_input_cache_dir.mkdir(parents=True, exist_ok=True)
-        
+
+    cache_dir = args.cache_dir or config.tf_dna_input_cache_dir
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    in_cache = lambda path: cache_dir / path.name
+
     # Shared cache files for both TF-to-TG and TF-to-DNA training
-    tf_name_to_idx_cache_path = config.tf_name_to_idx_cache_path
-    tf_embedding_cache_path = config.tf_embedding_cache_path
-    tf_mask_cache_path = config.tf_mask_cache_path
-    
+    tf_name_to_idx_cache_path = in_cache(config.tf_name_to_idx_cache_path)
+    tf_embedding_cache_path = in_cache(config.tf_embedding_cache_path)
+    tf_mask_cache_path = in_cache(config.tf_mask_cache_path)
+
     # TF-DNA training specific cache files
-    tf_dna_peak_id_to_idx_cache_path = config.tf_dna_peak_id_to_idx_cache_path
-    tf_dna_edge_tf_idx_cache_path = config.tf_dna_edge_tf_idx_cache_path
-    tf_dna_edge_peak_idx_cache_path = config.tf_dna_edge_peak_idx_cache_path
-    tf_dna_edge_labels_cache_path = config.tf_dna_edge_labels_cache_path
-    tf_dna_tf_lengths_cache_path = config.tf_dna_tf_lengths_cache_path
-    tf_dna_peak_onehot_cache_path = config.tf_dna_peak_onehot_cache_path
-    tf_dna_train_idx_cache_path = config.tf_dna_train_idx_cache_path
-    tf_dna_val_idx_cache_path = config.tf_dna_val_idx_cache_path
-    tf_dna_test_idx_cache_path = config.tf_dna_test_idx_cache_path
+    tf_dna_peak_id_to_idx_cache_path = in_cache(config.tf_dna_peak_id_to_idx_cache_path)
+    tf_dna_edge_tf_idx_cache_path = in_cache(config.tf_dna_edge_tf_idx_cache_path)
+    tf_dna_edge_peak_idx_cache_path = in_cache(config.tf_dna_edge_peak_idx_cache_path)
+    tf_dna_edge_labels_cache_path = in_cache(config.tf_dna_edge_labels_cache_path)
+    tf_dna_tf_lengths_cache_path = in_cache(config.tf_dna_tf_lengths_cache_path)
+    tf_dna_peak_onehot_cache_path = in_cache(config.tf_dna_peak_onehot_cache_path)
+    tf_dna_train_idx_cache_path = in_cache(config.tf_dna_train_idx_cache_path)
+    tf_dna_val_idx_cache_path = in_cache(config.tf_dna_val_idx_cache_path)
+    tf_dna_test_idx_cache_path = in_cache(config.tf_dna_test_idx_cache_path)
     
     # Check if all TF-to-DNA training cache files already exist before doing any expensive processing, unless --force_reload is specified
     all_required_files = [
@@ -457,8 +586,10 @@ def main():
             false_edge_sampling=args.false_edge_sampling,
             tf_lengths=tf_lengths,
             max_tf_length=args.max_tf_length or None,
+            site_merge_distance=args.site_merge_distance or None,
+            false_overlap_flank=args.false_overlap_flank or None,
         )
-        tf_edge_counts.to_csv(config.tf_dna_input_cache_dir / "tf_edge_counts.csv", index=False)
+        tf_edge_counts.to_csv(cache_dir / "tf_edge_counts.csv", index=False)
 
         logging.info(
             f"    Creating labeled dataset with "

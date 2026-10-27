@@ -18,6 +18,8 @@ source activate my_env
 
 echo "[INFO] Building TF-to-DNA datasets..."
 
+# Extra arguments to sbatch are passed on, e.g.
+#   sbatch 02a_build_tf_to_dna_cache.sh --site_merge_distance 64 --false_overlap_flank 128 --cache_dir <dir>
 python3 ${PROJECT_DIR}/scripts/build_tf_to_dna_train_data.py \
     --min_true_edges_per_tf 500 \
     --max_true_edges_per_tf 20000 \
@@ -25,4 +27,5 @@ python3 ${PROJECT_DIR}/scripts/build_tf_to_dna_train_data.py \
     --false_edge_sampling by_source_tf \
     --max_tf_length 2048 \
     --peak_flank_size 128 \
-    --force_reload
+    --force_reload \
+    "$@"

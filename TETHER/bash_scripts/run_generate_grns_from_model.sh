@@ -26,15 +26,18 @@ cd "$PROJECT_DIR"
 conda activate my_env
 
 # No liver, mESC, brain, skin, kidney, HSC. Entries can be glob patterns, because a run
-# name ends in its start time. Retrained 2026-10-22 with TF-DNA model mm10_3925194_epoch_21.
+# name ends in its start time. Retrained 2026-10-27 with TF-DNA model mm10_3928135_epoch_19
+# (overlap-filtered negatives, merged positives, RC augmentation, cosine LR).
 EXPERIMENT_LIST=(
-    "celltype_joint_3926071_*"
-    "celltype_joint_3926072_*"
-    "celltype_joint_3926073_*"
-    "celltype_joint_3926074_*"
-    "celltype_joint_3926075_*"
-    "celltype_joint_3926076_*"
+    "celltype_joint_3928252_*"
+    "celltype_joint_3928253_*"
+    "celltype_joint_3928254_*"
+    "celltype_joint_3928255_*"
+    "celltype_joint_3928256_*"
+    "celltype_joint_3928257_*"
 )
+# 2026-10-22 models (TF-DNA model mm10_3925194_epoch_21):
+#   celltype_joint_3926071_* ... celltype_joint_3926076_* (same order)
 # 2026-10-02 models (TF-DNA model mm10_3831017_epoch_12):
 #   celltype_joint_3899206_20261002_125300_917425
 #   celltype_joint_3899207_20261002_125401_578199

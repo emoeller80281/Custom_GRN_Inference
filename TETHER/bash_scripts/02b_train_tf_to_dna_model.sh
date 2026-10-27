@@ -90,6 +90,8 @@ export PYTHONFAULTHANDLER=1
 #     --true_false_ratio 0.25
 
 echo "[INFO] Starting TF-to-DNA model training..."
+# Extra arguments to sbatch are passed on and override the ones below (argparse keeps the last), e.g.
+#   sbatch 02b_train_tf_to_dna_model.sh --cache_dir <dir> --rc_augment --epochs 20
 srun python3 ${PROJECT_DIR}/scripts/train_tf_to_dna_model.py \
     --epochs 50 \
     --batch_size 512 \
@@ -99,5 +101,6 @@ srun python3 ${PROJECT_DIR}/scripts/train_tf_to_dna_model.py \
     --num_gpus $NPROC_PER_NODE \
     --num_nodes $SLURM_JOB_NUM_NODES \
     --job_id $SLURM_JOB_ID \
+    "$@"
     # --checkpoint_path "${PROJECT_DIR}/checkpoints/tf_peak_binding/epoch=01-val_auroc=0.9287-val_loss=0.3160.ckpt"
 
