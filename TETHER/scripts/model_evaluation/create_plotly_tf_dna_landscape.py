@@ -2,19 +2,25 @@
 
 The TF-DNA model takes a TF protein embedding and a one-hot DNA window, so it has no
 numeric inputs to put on a grid. This script makes numeric controls by building synthetic
-windows: random background DNA with a set GC fraction, plus copies of the TF's CIS-BP
+windows: genome-like background DNA near a set GC fraction, plus copies of the TF's CIS-BP
 consensus motif. Five controls make a 5D grid for each TF:
 
     copies       number of motif copies (0 = background only)
     mismatches   consensus bases replaced by the least likely base, in every copy
     position     center of the block of copies, in bp from the window center
-    gc           GC fraction of the random background
+    gc           GC fraction of the background
     orientation  motif on the forward or reverse strand
 
-Each grid point is the mean binding probability over --n-backgrounds random backgrounds.
+The backgrounds come from bash_scripts/generate_homer_background_sequences.sh: homer2
+background -model fits a Markov chain (each base depends on the previous 3) to random
+genome windows and generates new sequences, so 4-mer content (incl. CpG depletion) is
+like the genome but real TF sites are not copied. For each GC value, --n-backgrounds
+sequences are picked from those within --gc-tolerance of it. The genome has almost no
+256 bp windows above 0.65 GC, so the GC grid stops at 0.6.
+
+Each grid point is the mean binding probability over the --n-backgrounds backgrounds.
 The same backgrounds are used at every grid point and for every TF, so two surfaces
-differ only by the motif. The backgrounds draw each base independently, so CpG and other
-dinucleotide frequencies are not like genomic DNA.
+differ only by the motif.
 
 The page reuses the slicing code of create_plotly_prediction_landscape.py: check two
 controls to plot as a 3D surface, and set the other three with sliders. A dropdown picks
@@ -52,6 +58,7 @@ from create_plotly_prediction_landscape import JS_CORE
 DEFAULT_CHECKPOINTS = {"mm10": config.mm10_tf_dna_path, "hg38": config.hg38_tf_dna_path}
 DEFAULT_OUTPUT_DIR = PROJECT_DIR / "new_plots" / "prediction_landscapes"
 MOTIF_ROOT = config.DATA_DIR / "databases" / "motif_information"
+HOMER_BACKGROUND_ROOT = config.DATA_DIR / "genome_data" / "homer_background"
 
 # Axis order of the prediction grid: (name, display label, decimals, tick labels).
 FEATURES = [
@@ -87,7 +94,12 @@ def parse_args():
                         help="Give TFs with no direct CIS-BP motif an inferred one (TF_Status 'I', "
                              "copied from a TF with a similar DNA-binding domain).")
     parser.add_argument("--n-backgrounds", type=int, default=8,
-                        help="Random backgrounds averaged at each grid point.")
+                        help="Background sequences averaged at each grid point.")
+    parser.add_argument("--background-fasta", type=Path, default=None,
+                        help="homer2 background FASTA to draw backgrounds from. Default: "
+                             "data/genome_data/homer_background/<species>/<species>_<window>bp.bg.sequences.fasta")
+    parser.add_argument("--gc-tolerance", type=float, default=0.02,
+                        help="Largest difference between a background's GC fraction and its grid GC value.")
     parser.add_argument("--max-copies", type=int, default=4)
     parser.add_argument("--max-mismatches", type=int, default=4)
     parser.add_argument("--n-positions", type=int, default=17,
@@ -96,10 +108,13 @@ def parse_args():
     parser.add_argument("--edge-margin", type=int, default=16,
                         help="Closest the motif center gets to either end of the window (bp).")
     parser.add_argument("--gc-values", type=float, nargs="+",
-                        default=[0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8])
+                        default=[0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6])
     parser.add_argument("--copy-gap", type=int, default=5, help="bp between motif copies.")
     parser.add_argument("--n-reference-peaks", type=int, default=200,
                         help="Real bound and unbound peaks per TF for the reference planes; 0 skips them.")
+    parser.add_argument("--cache-dir", type=Path, default=None,
+                        help="TF-DNA cache for the TF table, embeddings and reference peaks, e.g. the cache "
+                             "the checkpoint was trained on. Default: the species cache in config.py.")
     parser.add_argument("--token-budget", type=int, default=1_000_000,
                         help="Batch size x TF length per forward pass. Lower it if the GPU runs out of memory.")
     parser.add_argument("--seed", type=int, default=0)
@@ -112,6 +127,8 @@ def parse_args():
         parser.error("--n-positions must be at least 2")
     if not all(0.0 <= gc <= 1.0 for gc in args.gc_values):
         parser.error("--gc-values must be between 0 and 1")
+    if args.gc_tolerance <= 0:
+        parser.error("--gc-tolerance must be greater than 0")
     default_output = DEFAULT_OUTPUT_DIR / f"plotly_tf_dna_landscape_{args.species}.html"
     all_tfs_output = default_output.with_name(default_output.stem + "_all_tfs.html")
     if args.tfs is None:
@@ -198,12 +215,53 @@ def make_grids(args, window):
     }
 
 
-def make_backgrounds(gc_values, n_backgrounds, window, rng):
-    """Random background bases [n_gc, n_backgrounds, window], one-hot order A, C, G, T = 0-3."""
+def read_fasta_sequences(path):
+    """Upper-case sequences of a FASTA file, in file order."""
+    seqs, parts = [], []
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith(">"):
+                if parts:
+                    seqs.append("".join(parts).upper())
+                parts = []
+            elif line:
+                parts.append(line)
+    if parts:
+        seqs.append("".join(parts).upper())
+    return seqs
+
+
+def load_backgrounds(fasta_path, gc_values, n_backgrounds, window, gc_tolerance, rng):
+    """Background bases [n_gc, n_backgrounds, window] from a homer2 background FASTA.
+
+    For each GC value, n_backgrounds sequences are picked at random from those whose GC
+    fraction is within gc_tolerance of it. One-hot order A, C, G, T = 0-3.
+    """
+    seqs = read_fasta_sequences(fasta_path)
+    lengths = {len(seq) for seq in seqs}
+    if lengths != {window}:
+        raise SystemExit(f"{fasta_path.name} has sequence lengths {sorted(lengths)}, "
+                         f"but the model window is {window} bp")
+    lookup = np.full(256, 255, dtype=np.uint8)
+    for i, base in enumerate(b"ACGT"):
+        lookup[base] = i
+    bases = lookup[np.frombuffer("".join(seqs).encode("ascii"), dtype=np.uint8)].reshape(len(seqs), window)
+    if (bases == 255).any():
+        raise SystemExit(f"{fasta_path.name} has bases other than A, C, G and T")
+    seq_gc = np.isin(bases, (1, 2)).mean(axis=1)
+
     backgrounds = np.empty((len(gc_values), n_backgrounds, window), dtype=np.uint8)
     for gi, gc in enumerate(gc_values):
-        p = [(1 - gc) / 2, gc / 2, gc / 2, (1 - gc) / 2]
-        backgrounds[gi] = rng.choice(4, size=(n_backgrounds, window), p=p)
+        candidates = np.flatnonzero(np.abs(seq_gc - gc) <= gc_tolerance)
+        if len(candidates) < n_backgrounds:
+            raise SystemExit(f"Only {len(candidates)} sequences in {fasta_path.name} have GC within "
+                             f"{gc_tolerance} of {gc} ({n_backgrounds} needed). Their GC ranges from "
+                             f"{seq_gc.min():.2f} to {seq_gc.max():.2f}; change --gc-values.")
+        picks = rng.choice(candidates, size=n_backgrounds, replace=False)
+        backgrounds[gi] = bases[picks]
+        logging.info(f"  GC {gc:.2f}: {n_backgrounds} of {len(candidates)} sequences, "
+                     f"mean GC {seq_gc[picks].mean():.3f}")
     return backgrounds
 
 
@@ -314,7 +372,7 @@ def sample_reference_peaks(cache_dir, tf_indices, n_peaks, rng):
 def compute_landscapes(args):
     """Predict the 5D grid for every TF. Returns (results, grids, window)."""
     device = torch.device(args.device)
-    cache_dir = config.tf_dna_cache_dir(args.species)
+    cache_dir = args.cache_dir or config.tf_dna_cache_dir(args.species)
     rng = np.random.default_rng(args.seed)
 
     tf_name_to_idx = (pd.read_csv(cache_dir / config.tf_name_to_idx_cache_path.name)
@@ -350,7 +408,14 @@ def compute_landscapes(args):
     if not tfs:
         raise SystemExit("No TFs to plot.")
 
-    backgrounds = make_backgrounds(grids["gc"], args.n_backgrounds, window, rng)
+    args.background_fasta = (args.background_fasta or HOMER_BACKGROUND_ROOT / args.species
+                             / f"{args.species}_{window}bp.bg.sequences.fasta")
+    if not args.background_fasta.exists():
+        raise SystemExit(f"{args.background_fasta} not found. Make it with "
+                         f"bash_scripts/generate_homer_background_sequences.sh {args.species}")
+    logging.info(f"Picking backgrounds from {args.background_fasta}")
+    backgrounds = load_backgrounds(args.background_fasta, grids["gc"], args.n_backgrounds, window,
+                                   args.gc_tolerance, rng)
     reference = {}
     if args.n_reference_peaks > 0:
         logging.info("Sampling real bound and unbound peaks")
@@ -814,7 +879,8 @@ def build_page(results, grids, window, summary, args):
     }
 
     notes = (
-        f"<b>Windows:</b> {window} bp of random background (bases drawn independently at the set GC), "
+        f"<b>Windows:</b> {window} bp of {args.species}-like background (synthetic sequences from homer2 "
+        f"background with the genome's 4-mer content, GC within {args.gc_tolerance} of the set GC), "
         f"plus copies of the TF's CIS-BP consensus, {args.copy_gap} bp apart. Each point is the mean "
         f"over {args.n_backgrounds} backgrounds, the same for every point and every TF.<br>"
         "<b>Mismatches:</b> that many consensus columns, chosen at random per background, take the "

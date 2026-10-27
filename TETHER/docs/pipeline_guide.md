@@ -125,7 +125,9 @@ cp TETHER/checkpoints/tf_dna_mm10_<job>/epoch_<N>.ckpt \
 
 ```bash
 # Motif-insertion landscape: new_plots/prediction_landscapes/
-sbatch TETHER/bash_scripts/run_tf_dna_landscape.sh --checkpoint <checkpoint>
+# --cache-dir: the cache the checkpoint was trained on (reference peaks); default config.py cache
+sbatch TETHER/bash_scripts/run_tf_dna_landscape.sh --species mm10 --tfs all \
+    --checkpoint <checkpoint> --cache-dir <cache dir> --output <name>_all_tfs.html
 
 # CUT&RUN peaks (NANOG, CTCF): first set tf_dna_model_path in tf_dna_vs_cut&run.ipynb
 sbatch TETHER/bash_scripts/run_tf_dna_cutrun_evaluation.sh
