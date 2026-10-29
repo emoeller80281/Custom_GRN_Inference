@@ -202,14 +202,17 @@ def load_run_config(model_checkpoint: Path):
         return json.load(handle)
 
 
-def load_celltype_ground_truth(gt_file_index, celltype):
+def load_celltype_ground_truth(gt_file_index, tissue, celltype):
     celltype_file_name = celltype.replace(" ", "_")
 
+    # Several tissues have a GT file with the same cell type name (e.g. Fibroblasts in
+    # kidney, mouse_liver and 10x_E18_mouse_brain) and different edges, so look up the
+    # file in the sample's own tissue folder.
     gt_filename = f"{celltype_file_name}_ground_truth.parquet"
-    gt_path = gt_file_index.get(gt_filename)
+    gt_path = gt_file_index.get((tissue, gt_filename))
 
     if gt_path is None:
-        print(f"No ground truth found for {celltype}")
+        print(f"No ground truth found for {tissue} / {celltype}")
         return None
 
     # Load and prepare this cell type's GT once.
@@ -331,6 +334,9 @@ def generate_hash_key(sample_celltype_df, other_method_names, model_run_dict):
         "other_methods": sorted(set(map(str, other_method_names))),
         # The cache holds one labeled GRN per model and one for the mean over the models.
         "model_grn_keys": "per_model_and_mean",
+        # GT files are looked up in the sample's tissue folder (caches before this used
+        # one file per cell type name for every tissue).
+        "gt_index": "per_tissue",
     }
 
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
@@ -347,17 +353,18 @@ def read_sample_genes(data_path):
     return {(n.decode() if isinstance(n, bytes) else str(n)).upper() for n in names}
 
 
-def label_one_celltype(sample_name, celltype, sample_genes, model_grns,
+def label_one_celltype(sample_name, tissue, celltype, sample_genes, model_grns,
                        gt_file_index, other_method_grn_dir, other_method_names,
                        other_method_sample):
     """Load, filter, and label every method's GRN for one (sample, cell type).
 
+    tissue is the sample's folder in data/processed, which is also its GT folder.
     other_method_sample is the sample name in the other-method GRN file names,
     or None when the other methods were not run on this sample.
     """
     messages, celltype_results = [], {}
 
-    celltype_gt = load_celltype_ground_truth(gt_file_index, celltype)
+    celltype_gt = load_celltype_ground_truth(gt_file_index, tissue, celltype)
     if celltype_gt is None:
         messages.append(f"{sample_name} / {celltype}: no ground truth found")
         return sample_name, celltype, None, celltype_results, messages
@@ -552,7 +559,11 @@ def label_method_grns(model_run_dict, sample_sources, uid_of, species, results_d
     logging.info(f"Other methods: {other_method_names}")
 
     species_gt_dir = DATA_DIR / "ground_truth_files" / "cell_type_specific" / species
-    gt_file_index = {path.name: path for path in species_gt_dir.rglob("*_ground_truth.parquet")}
+    # Keyed by (tissue folder, file name): cell type names repeat across tissues.
+    gt_file_index = {
+        (path.relative_to(species_gt_dir).parts[0], path.name): path
+        for path in species_gt_dir.rglob("*_ground_truth.parquet")
+    }
 
     hash_key = generate_hash_key(sample_celltype_df, other_method_names, model_run_dict)
 
@@ -591,7 +602,8 @@ def label_method_grns(model_run_dict, sample_sources, uid_of, species, results_d
 
     outputs = Parallel(n_jobs=min(len(model_slices), n_jobs), backend="loky", verbose=5)(
         delayed(label_one_celltype)(
-            sample_name, celltype, sample_genes_dict[sample_name], model_grns,
+            sample_name, sample_sources[sample_name]["tissue"], celltype,
+            sample_genes_dict[sample_name], model_grns,
             gt_file_index, other_method_grn_dir, other_method_names,
             OTHER_METHOD_SAMPLE.get(sample_name, sample_sources[sample_name]["sample"]),
         )
