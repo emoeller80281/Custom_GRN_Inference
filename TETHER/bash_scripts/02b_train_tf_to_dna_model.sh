@@ -90,8 +90,11 @@ export PYTHONFAULTHANDLER=1
 #     --true_false_ratio 0.25
 
 echo "[INFO] Starting TF-to-DNA model training..."
-# Extra arguments to sbatch are passed on and override the ones below (argparse keeps the last), e.g.
+# Extra arguments to sbatch are passed on and override the ones below (argparse keeps the last).
+# --cache_dir is required, and its path must contain the species. The species is mm10 unless the
+# job sets it, e.g.
 #   sbatch 02b_train_tf_to_dna_model.sh --cache_dir <dir> --rc_augment --epochs 20
+#   sbatch --export=ALL,species=hg38 02b_train_tf_to_dna_model.sh --cache_dir <dir>
 srun python3 ${PROJECT_DIR}/scripts/train_tf_to_dna_model.py \
     --epochs 50 \
     --batch_size 512 \

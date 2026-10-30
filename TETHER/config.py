@@ -26,33 +26,55 @@ cell_type_to_species = {
     "K562": "hg38",
 }
 
+# Dataset used when a job sets only the species. TF-DNA jobs need the species and no sample.
+default_dataset_for_species = {
+    "mm10": ("mESC", "E7.5_rep1"),
+    "hg38": ("K562", "sample_1"),
+}
+
 # --- Environment overrides ---------------------------------------------------------
 # Batch jobs set the dataset here instead of editing the block above
 #
-# Species follows the cell type unless it is pinned explicitly, so overriding the cell
-# type alone can never leave the pair inconsistent.
+# Species follows a known cell type unless it is pinned explicitly, so overriding the cell
+# type alone can never leave the pair inconsistent. A cell type that is not in
+# cell_type_to_species needs an explicit species, because a default could be the wrong genome.
 _env_cell_type = os.environ.get("cell_type")
 _env_sample_name = os.environ.get("sample_name")
 _env_species = os.environ.get("species")
 
-if _env_cell_type:
-    cell_type = _env_cell_type
-if _env_sample_name:
-    sample_name = _env_sample_name
 if _env_species:
     species = _env_species
-elif _env_cell_type:
-    species = cell_type_to_species.get(cell_type, species)
+    assert species in default_dataset_for_species, \
+        f"Invalid species: {species}. Select from: {sorted(default_dataset_for_species)}"
+    if not _env_cell_type:
+        cell_type, sample_name = default_dataset_for_species[species]
+if _env_cell_type:
+    cell_type = _env_cell_type
+    if not _env_species:
+        assert cell_type in cell_type_to_species, \
+            f"Unknown cell type {cell_type!r}: set species as well, or add it to cell_type_to_species."
+        species = cell_type_to_species[cell_type]
+if _env_sample_name:
+    sample_name = _env_sample_name
 
 dataset_source = "environment" if (_env_cell_type or _env_sample_name or _env_species) else "config.py"
 
-assert cell_type in {"Macrophage", "mESC", "K562", "iPSC", "mouse_liver", "mouse_hepatocytes"}, \
-    f"Invalid cell type: {cell_type}. Select from: 'Macrophage', 'mESC', 'K562', 'iPSC', 'mouse_liver', 'mouse_hepatocytes'"
-assert species in {"mm10", "hg38"}, \
-    f"Invalid species: {species}. Select from: 'mm10', 'hg38'"
-
-assert cell_type_to_species[cell_type] == species, \
+assert cell_type_to_species.get(cell_type, species) == species, \
     f"cell_type {cell_type!r} belongs to {cell_type_to_species[cell_type]}, but species is set to {species!r}."
+
+
+def check_cache_dir_species(cache_dir: Path) -> None:
+    """Stop if a TF-DNA cache directory is not under this job's species.
+
+    The TF-DNA scripts take the species from the environment, and it defaults to mm10. Without
+    this check, a job for another species that forgets to set it reads the mm10 ChIP-Atlas data,
+    and writes it over the given cache.
+    """
+    if species not in Path(cache_dir).parts:
+        raise ValueError(
+            f"--cache_dir {cache_dir} is not under a {species!r} folder, but this job's species is "
+            f"{species!r}. Set the species with sbatch --export=ALL,species=<species>, or correct the path."
+        )
 
 
 def describe_dataset() -> str:

@@ -113,17 +113,17 @@ def closest_tss(peaks_bed: Path, tss_sorted: Path, tmp: Path) -> pd.DataFrame:
     return df
 
 
-def build_cell_type(cell_type: str, rows: pd.DataFrame, gt_dir: Path, tss_sorted: Path,
-                    emb_tfs: set, max_dist: int, tmp: Path) -> tuple:
+def build_cell_type(cell_type: str, rows: pd.DataFrame, gt_dir: Path, organism: str,
+                    tss_sorted: Path, emb_tfs: set, max_dist: int, tmp: Path) -> tuple:
     """Return (edges_df, per-source breadth records) for one dataset cell type."""
     edges, records = [], []
 
     for r in rows.itertuples():
         if r.source == "chipatlas":
             fname = f"Oth.{r.source_class}.05.AllAg.{r.source_term}.bed".replace("/", "_")
-            bed = gt_dir / "chipatlas" / fname
+            bed = gt_dir / "chipatlas" / organism / fname
         else:
-            bed = gt_dir / "remap" / f"{r.source_term}.bed"
+            bed = gt_dir / "remap" / organism / f"{r.source_term}.bed"
 
         rec = {"cell_type": cell_type, "source": r.source, "source_term": r.source_term,
                "proxy_tier": r.proxy_tier, "resolution": r.resolution,
@@ -264,7 +264,7 @@ def main() -> None:
     all_records = []
     for cell_type, rows in cell_type_gt_map.groupby("dataset_cell_type", sort=True):
         logging.info("%s  (%d source(s))", cell_type, len(rows))
-        edges, records = build_cell_type(cell_type, rows, args.gt_dir, tss_sorted,
+        edges, records = build_cell_type(cell_type, rows, args.gt_dir, args.organism, tss_sorted,
                                          emb_tfs, args.max_tss_dist, tmp)
         all_records.extend(records)
         dest = out_dir / f"{cell_type.replace(' ', '_')}_ground_truth.parquet"

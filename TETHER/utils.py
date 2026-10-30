@@ -682,39 +682,43 @@ def download_gene_protein_fastas(
         logging.info("All gene FASTA files already exist. No downloads needed.")
         return {gene: available_files[gene] for gene in gene_names}
     
+    def search_protein_records(search_term):
+        with Entrez.esearch(
+            db="protein",
+            term=search_term,
+            retmax=retmax,
+        ) as search_handle:
+            protein_ids = Entrez.read(search_handle).get("IdList", [])
+
+        if not protein_ids:
+            return []
+
+        with Entrez.efetch(
+            db="protein",
+            id=protein_ids,
+            rettype="gb",
+            retmode="text",
+        ) as fetch_handle:
+            return list(SeqIO.parse(fetch_handle, "genbank"))
+
     for i, gene_name in enumerate(gene_names, start=1):
-        search_term = (
-            f'{gene_name}[Gene Name] '
-            f'AND {organism}[Organism] '
-            f'AND srcdb_refseq[PROP]'
-        )
+        gene_query = f'{gene_name}[Gene Name] AND {organism}[Organism]'
 
         try:
-            with Entrez.esearch(
-                db="protein",
-                term=search_term,
-                retmax=retmax,
-            ) as search_handle:
-                search_results = Entrez.read(search_handle)
-
-            protein_ids = search_results.get("IdList", [])
-
-            if not protein_ids:
-                logging.info(f"[{i}/{len(gene_names)}] No records found for {gene_name}")
-                saved_files[gene_name] = None
-                time.sleep(delay)
-                continue
-
-            with Entrez.efetch(
-                db="protein",
-                id=protein_ids,
-                rettype="gb",
-                retmode="text",
-            ) as fetch_handle:
-                records = list(SeqIO.parse(fetch_handle, "genbank"))
+            # RefSeq Select is the one representative protein of a gene. In the full search,
+            # retmax can cut off every NP_ record of a gene with many XP_ records: MGA has 123
+            # records and no NP_ in the first 100. A Select hit of another gene is an alias
+            # match, so it does not count here.
+            records = [
+                record
+                for record in search_protein_records(f'{gene_query} AND "refseq select"[filter]')
+                if (record_gene_symbol(record) or "").lower() == gene_name.lower()
+            ]
+            if not records:
+                records = search_protein_records(f'{gene_query} AND srcdb_refseq[PROP]')
 
             if not records:
-                logging.info(f"[{i}/{len(gene_names)}] Could not parse records for {gene_name}")
+                logging.info(f"[{i}/{len(gene_names)}] No records found for {gene_name}")
                 saved_files[gene_name] = None
                 time.sleep(delay)
                 continue
@@ -775,6 +779,8 @@ def download_gene_protein_fastas(
                 f"[{i}/{len(gene_names)}] Saved {gene_name}: "
                 f"{best_record.id} ({len(best_record.seq)} aa)"
             )
+            if best_record.id.startswith("XP_"):
+                logging.warning(f"{gene_name}: only a predicted protein was found ({best_record.id})")
 
         except Exception as e:
             logging.info(f"[{i}/{len(gene_names)}] Failed for {gene_name}: {e}")

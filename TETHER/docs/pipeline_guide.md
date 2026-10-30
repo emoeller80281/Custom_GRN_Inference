@@ -69,8 +69,10 @@ sbatch --mem=370G TETHER/bash_scripts/02a_build_tf_to_dna_cache.sh \
 - `--false_overlap_flank 128` rejects a negative when its 256 bp window overlaps any ChIP-Atlas
   peak of the same TF. Without it, about one third of the negatives are bound sites.
 - Both options default to 0 (off), which rebuilds the 2026-10-22 cache.
-- Always pass `--cache_dir`. Without it, the build overwrites `cached_data/mm10/tf_dna_cache`, and
-  the TF-TG cache build (step 5) reads its TF table and TF embeddings from that folder.
+- `--cache_dir` is required, and its path must contain the job's species. The species is `mm10`
+  unless the job sets it (`sbatch --export=ALL,species=hg38 ...`). The TF-TG cache build (step 5)
+  reads its TF table and TF embeddings from `cached_data/<species>/tf_dna_cache`, so do not overwrite
+  that folder unless the TF table stays the same.
 - The launcher always passes `--force_reload`. The last build peaked at 214 GB, so request 370 GB.
 
 Check the log, `LOGS/build_tf_dna_cache/build_tf_dna_cache_<job>.err`:

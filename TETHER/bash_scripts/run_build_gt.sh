@@ -11,13 +11,14 @@
 #
 # Peaks -> per-slice TF-TG edges for one dataset's cell type map, then the provenance check.
 # Everything is written under data/ground_truth_files/cell_type_specific/ (GT_DIR):
-#   chipatlas/, remap/                  peak sets, shared by every dataset's map
-#   mm10/<CELL_TYPE>/                   <slice>_ground_truth.parquet
-#   reports/gt_breadth_mm10_<CELL_TYPE>.tsv
+#   chipatlas/<ORGANISM>/, remap/<ORGANISM>/  peak sets, shared by the organism's dataset maps
+#   <ORGANISM>/<CELL_TYPE>/             <slice>_ground_truth.parquet
+#   reports/gt_breadth_<ORGANISM>_<CELL_TYPE>.tsv
 # CELL_TYPE is the dataset prefix of <CELL_TYPE>_cell_type_map.tsv in GT_DIR.
 
 set -eo pipefail
 
+ORGANISM="mm10"
 CELL_TYPE="GSE246464_HSC"
 
 PROJECT_DIR="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
@@ -34,19 +35,19 @@ export TMPDIR="$PROJECT_DIR/.sorttmp"
 
 mkdir -p "$TMPDIR"
 
-python3 -u "$PROJECT_DIR/TETHER/scripts/generate_celltype_ground_truth/download_ground_truth.py" --organism mm10 \
+python3 -u "$PROJECT_DIR/TETHER/scripts/generate_celltype_ground_truth/download_ground_truth.py" --organism "$ORGANISM" \
     --map "$MAP" \
     --out_dir "$GT_DIR"
 
-python3 -u "$PROJECT_DIR/TETHER/scripts/generate_celltype_ground_truth/build_celltype_ground_truth.py" --organism mm10 \
+python3 -u "$PROJECT_DIR/TETHER/scripts/generate_celltype_ground_truth/build_celltype_ground_truth.py" --organism "$ORGANISM" \
     --map "$MAP" \
     --gt_dir "$GT_DIR" \
     --out_dir "$GT_DIR" \
     --dataset "$CELL_TYPE" \
     --reports "${GT_DIR}/reports" \
-    --report_tag "mm10_${CELL_TYPE}" \
+    --report_tag "${ORGANISM}_${CELL_TYPE}" \
     --max_tss_dist 100000
 
-python3 -u "$PROJECT_DIR/TETHER/scripts/generate_celltype_ground_truth/verify_ground_truth.py" --organism mm10 \
+python3 -u "$PROJECT_DIR/TETHER/scripts/generate_celltype_ground_truth/verify_ground_truth.py" --organism "$ORGANISM" \
     --map "$MAP" \
-    --gt_dir "${GT_DIR}/mm10/${CELL_TYPE}"
+    --gt_dir "${GT_DIR}/${ORGANISM}/${CELL_TYPE}"

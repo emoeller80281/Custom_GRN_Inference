@@ -79,7 +79,7 @@ if __name__ == "__main__":
     argparser.add_argument("--job_id", type=str, required=True, help="SLURM job ID for this training run")
     argparser.add_argument("--checkpoint_path", type=str, required=False, help="Path to a model checkpoint to resume training from")
     argparser.add_argument("--force_reload", action="store_true", help="Whether to force reload cached data instead of using existing cache files")
-    argparser.add_argument("--cache_dir", type=Path, default=None, help="TF-DNA cache to train on (default config.tf_dna_input_cache_dir); see build_tf_to_dna_train_data.py --cache_dir")
+    argparser.add_argument("--cache_dir", type=Path, required=True, help="TF-DNA cache to train on, under cached_data/<species>/; see build_tf_to_dna_train_data.py --cache_dir")
     argparser.add_argument("--weight_decay", type=float, default=1e-4, help="AdamW weight decay on weight matrices (biases and norm scales get none)")
     argparser.add_argument("--lr_schedule", choices=["plateau", "cosine"], default="plateau", help="ReduceLROnPlateau x0.1 on val/loss, or warmup + cosine decay over --epochs")
     argparser.add_argument("--warmup_epochs", type=float, default=1.0, help="Linear warmup length for --lr_schedule cosine")
@@ -98,12 +98,14 @@ if __name__ == "__main__":
     job_id = args.job_id
     checkpoint_path = args.checkpoint_path
     force_reload = args.force_reload
-    
+
+    cache_dir = args.cache_dir
+    config.check_cache_dir_species(cache_dir)
+
     output_dir = PROJECT_DIR / "checkpoints" / f"tf_dna_{config.species}_{job_id}"
-    
+
     run_name = f"tf_dna_{config.species}_{job_id}"
-        
-    cache_dir = args.cache_dir or config.tf_dna_input_cache_dir
+
     in_cache = lambda path: cache_dir / path.name
 
     # Shared cache files for both TF-to-TG and TF-to-DNA training

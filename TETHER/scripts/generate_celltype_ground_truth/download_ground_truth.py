@@ -1,7 +1,9 @@
 """Fetch the per-cell-type ChIP-seq peak sets named in a <dataset>_cell_type_map.tsv.
 
-Output goes to data/ground_truth_files/cell_type_specific/{chipatlas,remap}/, which is the
---gt_dir that scripts/build_celltype_ground_truth.py reads. Files already there are reused.
+Output goes to data/ground_truth_files/cell_type_specific/{chipatlas,remap}/<organism>/, under
+the --gt_dir that scripts/build_celltype_ground_truth.py reads. Files already there are reused.
+The organism is in the path because both genomes use the same term names and chromosome names,
+so a BED of the wrong organism would build without an error.
 
 Two sources, two very different access patterns:
 
@@ -48,11 +50,11 @@ HERE = Path(__file__).resolve().parent
 PROJECT_DIR = HERE.parents[2]
 DATA_DIR = PROJECT_DIR / "data"
 
-# ChIP-Atlas BEDs already downloaded for earlier work; reuse instead of refetching.
 SHARED_GT_DIR = DATA_DIR / "ground_truth_files"
 REMAP_ALL_BED = SHARED_GT_DIR / "remap" / "remap2022_all_macs2_{organism}_v1_0.bed.gz"
 
-# Per-cell-type peak sets land in chipatlas/ and remap/ under here, next to the maps.
+# Per-cell-type peak sets land in chipatlas/<organism>/ and remap/<organism>/ under here,
+# next to the maps.
 CELL_TYPE_GT_DIR = SHARED_GT_DIR / "cell_type_specific"
 
 CHIPATLAS_URL = (
@@ -94,15 +96,6 @@ def fetch_chipatlas(rows: pd.DataFrame, organism: str, out_dir: Path, force: boo
         fname = f"Oth.{r.source_class}.05.AllAg.{r.source_term}.bed"
         dest = out_dir / fname.replace("/", "_")
         tmp = dest.with_name(f"{dest.name}.{TMP_TAG}.partial")
-
-        # An earlier notebook already pulled some of these into data/ground_truth_files/.
-        shared = SHARED_GT_DIR / fname
-        if not dest.exists() and shared.exists() and not force:
-            shutil.copy(shared, tmp)
-            tmp.replace(dest)
-            logging.info("  reused %s from ground_truth_files/", fname)
-            got[r.source_term] = dest
-            continue
 
         if dest.exists() and not force:
             got[r.source_term] = dest
@@ -207,10 +200,10 @@ def main() -> None:
 
     logging.info("\nChIP-Atlas:")
     ca = fetch_chipatlas(rows[rows["source"] == "chipatlas"], args.organism,
-                         args.out_dir / "chipatlas", args.force)
+                         args.out_dir / "chipatlas" / args.organism, args.force)
     logging.info("\nReMap:")
     rm = fetch_remap(rows[rows["source"] == "remap"], args.organism,
-                     args.out_dir / "remap", args.force)
+                     args.out_dir / "remap" / args.organism, args.force)
 
     n_ca = (rows["source"] == "chipatlas").sum()
     n_rm = rows[rows["source"] == "remap"]["source_term"].nunique()

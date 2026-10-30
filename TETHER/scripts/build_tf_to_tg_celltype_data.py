@@ -944,6 +944,11 @@ def prepare_data(args):
         peak.split(":", 1)[0] in valid_chroms
         for peak in atac_sample.var_names
     ])
+    if not keep_peaks.any():
+        raise ValueError(
+            f"{tissue}:{sample_name}: no peak is on a {species} autosome. Peak names must be "
+            f"chrom:start-end, and the first is {atac_sample.var_names[0]!r}."
+        )
 
     atac_sample = atac_sample[:, keep_peaks].copy()
 

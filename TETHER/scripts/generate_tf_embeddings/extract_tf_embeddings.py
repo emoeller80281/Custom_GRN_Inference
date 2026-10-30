@@ -129,8 +129,8 @@ def embedding_features(tokenizer, model, seq_1d, seq_3di, device):
     return emb.cpu()
 
 
-def extract_np_accession(text):
-    match = re.search(r"(NP_\d+\.\d+)", text)
+def extract_refseq_accession(text):
+    match = re.search(r"([NX]P_\d+\.\d+)", text)
     return match.group(1) if match else None
 
 
@@ -182,12 +182,12 @@ def run_raw_stage(args):
     else:
         model.half()
 
-    # Load 3Di sequences into a dictionary keyed by accession number (e.g. NP_123456.1)
+    # Load 3Di sequences into a dictionary keyed by accession number (e.g. NP_123456.1 or XP_123456.1)
     logging.info(f"Loading 3Di sequences from {args.di_fasta}")
     di_dict = {}
     for rec in SeqIO.parse(args.di_fasta, "fasta"):
         header = f"{rec.id} {rec.description}"
-        acc = extract_np_accession(header) or rec.id.split()[0]
+        acc = extract_refseq_accession(header) or rec.id.split()[0]
         di_dict[acc] = str(rec.seq)
 
     n_done = n_skipped = n_missing = 0
@@ -207,9 +207,9 @@ def run_raw_stage(args):
         # Load the AA sequence for this TF
         aa_rec = next(SeqIO.parse(aa_dir / fname, "fasta"))
 
-        # Extract the NP accession number for the TF so it can be matched to the 3Di sequence
+        # Extract the RefSeq accession number for the TF so it can be matched to the 3Di sequence
         aa_header = f"{aa_rec.id} {aa_rec.description}"
-        acc = extract_np_accession(aa_header) or tf_id
+        acc = extract_refseq_accession(aa_header) or tf_id
 
         if acc not in di_dict:
             logging.warning(f"No 3Di for {tf_id} (acc: {acc}), skipping")

@@ -114,6 +114,11 @@ def load_multiome_data(run_config, tissue, sample_name):
     keep_peaks = np.array([
         peak.split(":", 1)[0] in valid_chroms for peak in atac.var_names
     ])
+    if not keep_peaks.any():
+        raise ValueError(
+            f"{tissue}:{sample_name}: no peak is on a {run_config['species']} autosome. Peak names "
+            f"must be chrom:start-end, and the first is {atac.var_names[0]!r}."
+        )
     atac = atac[:, keep_peaks].copy()
     rna.var_names = rna.var_names.str.upper()
 

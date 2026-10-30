@@ -93,7 +93,7 @@ def accessions(paths):
         with open(path) as handle:
             for line in handle:
                 if line.startswith(">"):
-                    match = re.search(r"(NP_\d+\.\d+)", line)
+                    match = re.search(r"([NX]P_\d+\.\d+)", line)
                     found.add(match.group(1) if match else line[1:].split()[0])
     return found
 

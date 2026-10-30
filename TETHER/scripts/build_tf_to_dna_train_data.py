@@ -412,9 +412,9 @@ def main():
     argparser.add_argument("--false_overlap_flank", type=int, default=0,
                            help="Never draw a false peak whose centre +/- this many bp overlaps any peak of the "
                                 "same TF (use --peak_flank_size). 0 only excludes exact peak-ID matches.")
-    argparser.add_argument("--cache_dir", type=Path, default=None,
-                           help="Write the cache here instead of config.tf_dna_input_cache_dir, e.g. to keep the "
-                                "current cache for comparison. File names are the same.")
+    argparser.add_argument("--cache_dir", type=Path, required=True,
+                           help="Write the cache here, under cached_data/<species>/. The TF-TG cache build reads "
+                                "its TF table and TF embeddings from cached_data/<species>/tf_dna_cache.")
     argparser.add_argument("--force_reload", action="store_true")
     argparser.add_argument("--peak_flank_size", type=int, default=128)
     args = argparser.parse_args()
@@ -425,7 +425,8 @@ def main():
     chrom_sizes_path = config.chrom_sizes_path
     embedding_dir = config.embedding_dir
 
-    cache_dir = args.cache_dir or config.tf_dna_input_cache_dir
+    cache_dir = args.cache_dir
+    config.check_cache_dir_species(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
     in_cache = lambda path: cache_dir / path.name
 

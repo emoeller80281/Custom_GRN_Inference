@@ -18,8 +18,10 @@ source activate my_env
 
 echo "[INFO] Building TF-to-DNA datasets..."
 
-# Extra arguments to sbatch are passed on, e.g.
+# Extra arguments to sbatch are passed on. --cache_dir is required, and its path must contain the
+# species. The species is mm10 unless the job sets it (hg38 needs more memory than this default):
 #   sbatch 02a_build_tf_to_dna_cache.sh --site_merge_distance 64 --false_overlap_flank 128 --cache_dir <dir>
+#   sbatch -p memory --mem=600G --export=ALL,species=hg38 02a_build_tf_to_dna_cache.sh --cache_dir <dir>
 python3 ${PROJECT_DIR}/scripts/build_tf_to_dna_train_data.py \
     --min_true_edges_per_tf 500 \
     --max_true_edges_per_tf 20000 \
