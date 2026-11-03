@@ -19,8 +19,13 @@ stages yet. The gates apply to mouse and human data, with the human conditions i
   another organ.
 - **Detected TF:** a TF with a nonzero RNA value in at least 5% of the cells of the slice.
 - **Donor:** one person who gave cells or tissue.
-- **TF table:** `TETHER/cached_data/<species>/tf_dna_cache/tf_name_to_idx.csv`. Each species has its
-  own table.
+- **TF table:** the `tf_name_to_idx.csv` of the species' current TF-DNA model cache. Each species has its
+  own table:
+  - hg38: `TETHER/cached_data/hg38/tf_dna_cache_site_merged_overlap_filtered/tf_name_to_idx.csv` (1,047 TFs,
+    model `hg38_3930720`). The older `hg38/tf_dna_cache/` table (983 TFs) belongs to the previous model.
+  - mm10: `TETHER/cached_data/mm10/tf_dna_cache/tf_name_to_idx.csv`.
+
+  `TF_DNA_CACHE_DIRNAMES` in `TETHER/config.py` names these caches.
 
 ## Rules for every appraisal
 

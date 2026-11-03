@@ -37,6 +37,8 @@ import torch
 from torch.utils.data import Sampler
 from tqdm import tqdm
 
+import config  # TF-DNA cache of each species' current model: config.tf_dna_cache_dir()
+
 SAMPLE_CACHE_VERSION = 1
 BINDING_MANIFEST = "binding_manifest.json"
 
@@ -459,10 +461,6 @@ def finalize_data_args(parser, args):
     return source_specs
 
 
-def tf_dna_cache_dir(species):
-    return PROJECT_DIR / "cached_data" / species / "tf_dna_cache"
-
-
 def gene_reference_path(args):
     """The same annotation prepare_data reads."""
     if args.gene_ref_file is not None:
@@ -744,7 +742,7 @@ def build_sample_cache_manifest(args, tissue, sample_name):
     ground_truth_files = sorted(ground_truth_dir.glob("*_ground_truth.parquet"))
     if not ground_truth_files:
         raise FileNotFoundError(f"No ground-truth parquet files found in {ground_truth_dir}")
-    tf_cache = tf_dna_cache_dir(args.species)
+    tf_cache = config.tf_dna_cache_dir(args.species)
 
     return {
         "cache_version": SAMPLE_CACHE_VERSION,
@@ -902,7 +900,7 @@ def prepare_data(args):
     assert input_data_dir.exists(), f"Input data directory does not exist: {input_data_dir}"
 
     training_cache_dir = args.output_dir / "prepared"
-    tf_dna_input_cache_dir = PROJECT_DIR / "cached_data" / species / "tf_dna_cache"
+    tf_dna_input_cache_dir = config.tf_dna_cache_dir(species)
     tf_tg_input_cache_dir = training_cache_dir / sample_name
 
     tf_tg_input_cache_dir.mkdir(parents=True, exist_ok=True)
@@ -1411,7 +1409,7 @@ def load_binding_model(args, device):
     """Load the frozen TF-DNA model plus the TF embeddings and masks it reads."""
     from models.tf_to_dna import TFPeakBindingModel, LitTFPeakBindingModel
 
-    tf_cache = tf_dna_cache_dir(args.species)
+    tf_cache = config.tf_dna_cache_dir(args.species)
     embeddings = torch.load(tf_cache / "tf_embeddings.pt", map_location="cpu", weights_only=True)
     masks = torch.load(tf_cache / "tf_masks.pt", map_location="cpu", weights_only=True)
 

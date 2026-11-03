@@ -55,7 +55,11 @@ from experiment_filter import listed_by_term, load_excluded, select_rows, term_k
 
 PROJECT_DIR = HERE.parents[2]
 DATA_DIR = PROJECT_DIR / "data"
-TF_IDX = PROJECT_DIR / "TETHER" / "cached_data" / "{organism}" / "tf_dna_cache" / "tf_name_to_idx.csv"
+# TF table of the current TF-DNA model of each genome: only TFs in it keep edges. hg38 moved to the
+# site-merged, overlap-filtered cache (1,047 TFs, 2026-10-30; model hg38_3930720); mm10's current model
+# uses tf_dna_cache/ (2026-10-22). Change a genome here when its model changes; --tf_table overrides.
+TF_DNA_CACHE = {"hg38": "tf_dna_cache_site_merged_overlap_filtered", "mm10": "tf_dna_cache"}
+TF_IDX = PROJECT_DIR / "TETHER" / "cached_data" / "{organism}" / "{cache}" / "tf_name_to_idx.csv"
 
 # Matches MAX_PEAK_DISTANCE in build_peak_to_gene_dist.py, so the label side and the input
 # side of the model use the same peak-to-gene radius.
@@ -103,11 +107,12 @@ AWK_REMAP = AWK_EXCLUDE_BEGIN + r'''
 
 
 def load_embedding_tfs(organism: str, tf_table: Path = None) -> set:
-    path = tf_table or Path(str(TF_IDX).format(organism=organism))
+    path = tf_table or Path(str(TF_IDX).format(organism=organism,
+                                                cache=TF_DNA_CACHE.get(organism, "tf_dna_cache")))
     if not path.exists():
         raise SystemExit(f"Missing frozen TF embedding table: {path}")
     tfs = pd.read_csv(path)["tf_name"]
-    logging.info("Frozen embedding table: %d TFs (%s)", len(tfs), path.name)
+    logging.info("Frozen embedding table: %d TFs (%s/%s)", len(tfs), path.parent.name, path.name)
     return set(tfs.str.upper())
 
 
@@ -274,8 +279,8 @@ def main() -> None:
                          "experiments' peaks from every source and also uses rows disabled only "
                          "because of them (see experiment_filter.py)")
     ap.add_argument("--tf_table", type=Path, default=None,
-                    help="tf_name_to_idx.csv of the TF-DNA model (default: "
-                         "TETHER/cached_data/<organism>/tf_dna_cache/tf_name_to_idx.csv)")
+                    help="tf_name_to_idx.csv of the TF-DNA model (default: TF_DNA_CACHE[organism]: "
+                         "hg38 tf_dna_cache_site_merged_overlap_filtered/, mm10 tf_dna_cache/)")
     ap.add_argument("--cell_types", nargs="*", default=None)
     ap.add_argument("--report_tag", default=None,
                     help="breadth report name, gt_breadth_<tag>.tsv (default: the organism). "

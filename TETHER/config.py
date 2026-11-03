@@ -98,6 +98,11 @@ def species_cache_dir(species_name: str) -> Path:
 
 
 TF_DNA_CACHE_DIRNAME = "tf_dna_cache"
+# TF-DNA cache of each species' current TF-DNA model: its TF table (tf_name_to_idx.csv), TF embeddings and
+# masks are what TF-TG training and inference index with tf_idx, so they must be the model's own.
+# hg38: hg38_3930720_epoch_18 was trained on the site-merged, overlap-filtered cache (1,047 TFs, 2026-10-30);
+# the older hg38 tf_dna_cache/ (983 TFs) belongs to the previous model. mm10 uses tf_dna_cache/.
+TF_DNA_CACHE_DIRNAMES = {"mm10": TF_DNA_CACHE_DIRNAME, "hg38": "tf_dna_cache_site_merged_overlap_filtered"}
 
 
 def tf_dna_cache_dir(species_name: str) -> Path:
@@ -107,7 +112,7 @@ def tf_dna_cache_dir(species_name: str) -> Path:
     depend only on the genome, never on the cell type. Keeping it per cell type meant
     byte-identical 30 GB copies under iPSC_cache and K562_cache.
     """
-    return species_cache_dir(species_name) / TF_DNA_CACHE_DIRNAME
+    return species_cache_dir(species_name) / TF_DNA_CACHE_DIRNAMES.get(species_name, TF_DNA_CACHE_DIRNAME)
 
 
 def tf_dna_cache_dir_for_cell_type(cell_type_name: str) -> Path:
@@ -149,7 +154,7 @@ elif species == "hg38":
 sample_input_data_dir = DATA_DIR / "sample_input_data" / cell_type / sample_name
 
 training_cache_dir = PROJECT_DIR / "cached_data" / species / f"{cell_type}_tf_tg_cache"
-tf_dna_input_cache_dir = PROJECT_DIR / "cached_data" / species / "tf_dna_cache"
+tf_dna_input_cache_dir = tf_dna_cache_dir(species)
 tf_tg_input_cache_dir = training_cache_dir / sample_name
 
 # Shared by TF-to-DNA and TF-to-TG training. These are species-level: the TF set comes from
