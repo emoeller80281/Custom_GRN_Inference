@@ -14,7 +14,10 @@
 #   chipatlas/<ORGANISM>/, remap/<ORGANISM>/  peak sets, shared by the organism's dataset maps
 #   <ORGANISM>/<CELL_TYPE>/             <slice>_ground_truth.parquet
 #   reports/gt_breadth_<ORGANISM>_<CELL_TYPE>.tsv
-# CELL_TYPE is the dataset prefix of <CELL_TYPE>_cell_type_map.tsv in GT_DIR.
+# CELL_TYPE is the dataset prefix of <CELL_TYPE>_cell_type_map.tsv in GT_DIR/<ORGANISM>_cell_type_maps/.
+# If GT_DIR/<ORGANISM>_cell_type_maps/<ORGANISM>_excluded_experiments.tsv exists (hg38 has one, mm10
+# does not), the per-experiment filter is on: the listed experiments are dropped from every source,
+# and rows disabled only because of them are fetched and used (experiment_filter.py).
 
 set -eo pipefail
 
@@ -23,7 +26,13 @@ CELL_TYPE="GSE246464_HSC"
 
 PROJECT_DIR="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
 GT_DIR="${PROJECT_DIR}/data/ground_truth_files/cell_type_specific"
-MAP="${GT_DIR}/${CELL_TYPE}_cell_type_map.tsv"
+MAP="${GT_DIR}/${ORGANISM}_cell_type_maps/${CELL_TYPE}_cell_type_map.tsv"
+EXCL="${GT_DIR}/${ORGANISM}_cell_type_maps/${ORGANISM}_excluded_experiments.tsv"
+FILTER=()
+if [[ -f "$EXCL" ]]; then
+    FILTER=(--excluded_experiments "$EXCL")
+    echo "Per-experiment filter: $EXCL"
+fi
 
 cd "$PROJECT_DIR/TETHER"
 
@@ -37,7 +46,8 @@ mkdir -p "$TMPDIR"
 
 python3 -u "$PROJECT_DIR/TETHER/scripts/generate_celltype_ground_truth/download_ground_truth.py" --organism "$ORGANISM" \
     --map "$MAP" \
-    --out_dir "$GT_DIR"
+    --out_dir "$GT_DIR" \
+    "${FILTER[@]}"
 
 python3 -u "$PROJECT_DIR/TETHER/scripts/generate_celltype_ground_truth/build_celltype_ground_truth.py" --organism "$ORGANISM" \
     --map "$MAP" \
@@ -46,7 +56,8 @@ python3 -u "$PROJECT_DIR/TETHER/scripts/generate_celltype_ground_truth/build_cel
     --dataset "$CELL_TYPE" \
     --reports "${GT_DIR}/reports" \
     --report_tag "${ORGANISM}_${CELL_TYPE}" \
-    --max_tss_dist 100000
+    --max_tss_dist 100000 \
+    "${FILTER[@]}"
 
 python3 -u "$PROJECT_DIR/TETHER/scripts/generate_celltype_ground_truth/verify_ground_truth.py" --organism "$ORGANISM" \
     --map "$MAP" \

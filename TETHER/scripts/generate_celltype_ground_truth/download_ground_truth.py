@@ -26,12 +26,16 @@ datasets and 0.
 
 Only rows with default_enabled=1 are fetched unless --include_optin is passed. Rows whose
 note starts with EXCLUDED are never fetched -- they are in the map so the provenance check
-can name the decision rather than stay silent about it.
+can name the decision rather than stay silent about it. With --excluded_experiments (the
+per-experiment filter, see experiment_filter.py), rows disabled only because of listed
+experiments are fetched too, because build_celltype_ground_truth.py will use them.
 
 Usage:
     python3 download_ground_truth.py --organism mm10 \
-        --map ../data/ground_truth_files/cell_type_specific/GSE209610_kidney_controls_cell_type_map.tsv
+        --map ../data/ground_truth_files/cell_type_specific/mm10_cell_type_maps/GSE209610_kidney_controls_cell_type_map.tsv
     python3 download_ground_truth.py --organism mm10 --map <map> --include_optin
+    python3 download_ground_truth.py --organism hg38 --map <hg38 map> \
+        --excluded_experiments <out_dir>/hg38_cell_type_maps/hg38_excluded_experiments.tsv
 """
 
 import argparse
@@ -47,6 +51,9 @@ import pandas as pd
 import requests
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+from experiment_filter import load_excluded, select_rows  # noqa: E402
+
 PROJECT_DIR = HERE.parents[2]
 DATA_DIR = PROJECT_DIR / "data"
 
@@ -68,7 +75,8 @@ CHIPATLAS_URL = (
 TMP_TAG = f"{socket.gethostname()}.{os.getpid()}"
 
 
-def read_map(map_path: Path, organism: str, include_optin: bool) -> pd.DataFrame:
+def read_map(map_path: Path, organism: str, include_optin: bool,
+             excluded_experiments: Path = None) -> pd.DataFrame:
     """Load cell_type_map.tsv, dropping comment lines, and select the rows to fetch."""
     df = pd.read_csv(map_path, sep="\t", comment="#", dtype=str)
     df["proxy_tier"] = df["proxy_tier"].astype(int)
@@ -76,16 +84,16 @@ def read_map(map_path: Path, organism: str, include_optin: bool) -> pd.DataFrame
     df = df[df["organism"] == organism].copy()
 
     excluded = df["note"].str.startswith("EXCLUDED")
-    wanted = df["default_enabled"] == 1
-    if include_optin:
-        wanted = wanted | (~excluded)
+    listed = load_excluded(excluded_experiments) if excluded_experiments else None
+    wanted = select_rows(df, include_optin, listed)
 
     logging.info(
-        "cell_type_map: %d rows for %s -- %d to fetch, %d opt-in, %d excluded by decision",
-        len(df), organism, wanted.sum(), ((df["default_enabled"] == 0) & ~excluded).sum(),
-        excluded.sum(),
+        "cell_type_map: %d rows for %s -- %d to fetch (%d only because of the per-experiment "
+        "filter), %d opt-in, %d excluded by decision",
+        len(df), organism, len(wanted), int(wanted["enabled_by_filter"].sum()),
+        ((df["default_enabled"] == 0) & ~excluded).sum(), excluded.sum(),
     )
-    return df[wanted].copy()
+    return wanted
 
 
 def fetch_chipatlas(rows: pd.DataFrame, organism: str, out_dir: Path, force: bool) -> dict:
@@ -133,6 +141,10 @@ def fetch_remap(rows: pd.DataFrame, organism: str, out_dir: Path, force: bool) -
         return {b: out_dir / f"{b}.bed" for b in biotypes}
 
     src = Path(str(REMAP_ALL_BED).format(organism=organism))
+    ucsc = src.with_name(src.name.replace(".bed.gz", ".ucsc.bed.gz"))
+    if not src.exists() and ucsc.exists():
+        logging.info("  ReMap's own file is absent; using the UCSC rebuild %s", ucsc.name)
+        src = ucsc
     if not src.exists():
         raise FileNotFoundError(
             f"ReMap all-peaks BED not found at {src}. Download it first:\n"
@@ -187,16 +199,19 @@ def main() -> None:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--organism", default="mm10")
     ap.add_argument("--map", type=Path, required=True,
-                    help="a <dataset>_cell_type_map.tsv, e.g. in " + str(CELL_TYPE_GT_DIR))
+                    help="a <dataset>_cell_type_map.tsv, e.g. in "
+                         + str(CELL_TYPE_GT_DIR / "<organism>_cell_type_maps"))
     ap.add_argument("--out_dir", type=Path, default=CELL_TYPE_GT_DIR)
     ap.add_argument("--include_optin", action="store_true",
                     help="also fetch default_enabled=0 rows that are not EXCLUDED")
+    ap.add_argument("--excluded_experiments", type=Path, default=None,
+                    help="per-experiment filter list; also fetch the rows it re-enables")
     ap.add_argument("--force", action="store_true")
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
 
-    rows = read_map(args.map, args.organism, args.include_optin)
+    rows = read_map(args.map, args.organism, args.include_optin, args.excluded_experiments)
 
     logging.info("\nChIP-Atlas:")
     ca = fetch_chipatlas(rows[rows["source"] == "chipatlas"], args.organism,

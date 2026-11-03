@@ -123,7 +123,7 @@ def cell_type_cache_dir(cell_type_name: str, species_name: str | None = None) ->
 
 # TF-DNA model checkpoints for the different cell types
 mm10_tf_dna_path = CHKPT_DIR / "new_tf_dna_models" / "mm10_3831017_epoch_12.ckpt"
-hg38_tf_dna_path = CHKPT_DIR / "new_tf_dna_models" / "hg38_3831693_epoch_9.ckpt"
+hg38_tf_dna_path = CHKPT_DIR / "new_tf_dna_models" / "hg38_3930720_epoch_18.ckpt"
 
 tf_dna_model_checkpoints = {
     "mESC": mm10_tf_dna_path,

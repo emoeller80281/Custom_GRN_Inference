@@ -56,6 +56,19 @@ def _optional_file_identity(path):
     return _file_identity(path) if path.is_file() else None
 
 
+def cell_type_map_dir(data_dir, species):
+    """ground_truth_files/cell_type_specific/<species>_cell_type_maps/ -- the dataset
+    cell type maps and the <tissue>_label_map.tsv files.
+
+    A missing label map is valid (identity mapping), so a wrong folder would otherwise
+    only show as missing slices. Stop here instead.
+    """
+    map_dir = Path(data_dir) / "ground_truth_files" / "cell_type_specific" / f"{species}_cell_type_maps"
+    if not map_dir.is_dir():
+        raise FileNotFoundError(f"Cell type map directory not found: {map_dir}")
+    return map_dir
+
+
 def _atomic_write_json(path, value):
     path = Path(path)
     temporary_path = path.with_name(f"{path.name}.tmp-{os.getpid()}")
@@ -764,7 +777,7 @@ def build_sample_cache_manifest(args, tissue, sample_name):
                 data_dir / "processed" / tissue / sample_name / "multiome_processed.h5mu"
             ),
             "label_map": _optional_file_identity(
-                ground_truth_root / f"{tissue}_label_map.tsv"
+                cell_type_map_dir(data_dir, args.species) / f"{tissue}_label_map.tsv"
             ),
             "ground_truth": [_file_identity(path) for path in ground_truth_files],
         },
@@ -1104,7 +1117,7 @@ def prepare_data(args):
     # A label map only exists where several annotated cell types pool into one ground
     # truth slice (mESC groups 37 types into 21). Where it is absent, as for liver, the
     # mapping is the identity: each annotated cell type is its own slice.
-    label_map_path = cell_type_specific_gt_dir / f"{tissue}_label_map.tsv"
+    label_map_path = cell_type_map_dir(DATA_DIR, species) / f"{tissue}_label_map.tsv"
     if label_map_path.exists():
         label_map = pd.read_csv(label_map_path, sep="\t", comment="#")
         slice_members = label_map.groupby("celltype_group")["celltype"].apply(list).to_dict()

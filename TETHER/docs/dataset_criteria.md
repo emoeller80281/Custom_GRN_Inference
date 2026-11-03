@@ -18,7 +18,6 @@ stages yet. The gates apply to mouse and human data, with the human conditions i
   cell type. Tier 2 is the same lineage. Tier 3 is a distant derivative, a cell line, a tumor or
   another organ.
 - **Detected TF:** a TF with a nonzero RNA value in at least 5% of the cells of the slice.
-- **Scoreable slice:** a slice that passes every gate in [Stage C](#stage-c-slice-gates).
 - **Donor:** one person who gave cells or tissue.
 - **TF table:** `TETHER/cached_data/<species>/tf_dna_cache/tf_name_to_idx.csv`. Each species has its
   own table.
@@ -27,8 +26,7 @@ stages yet. The gates apply to mouse and human data, with the human conditions i
 
 1. Finish the appraisal before you run any model on the dataset. Model performance is never a
    selection criterion, because selecting on it makes the comparison with other methods invalid.
-2. Do the stages in order. Stages A and B need no download. They reject most unsuitable datasets
-   at no compute cost.
+2. Do the stages in order. Stages A and B need no download. They reject most unsuitable datasets at no compute cost.
 3. Do not change a threshold for one dataset. If a threshold changes, apply the new value to all
    datasets and record the change.
 4. Save a record for each appraised dataset, including rejected ones (see
@@ -53,63 +51,44 @@ Each threshold has one of three sources. No threshold was tuned against model pe
 
 ## Stage A: Study gates (no download)
 
-| ID | Gate | Pass condition | If it fails | Why |
-|---|---|---|---|---|
-| A1 | Paired assay | RNA and ATAC come from the same cell, with the same barcode | Reject | The model joins RNA and ATAC per cell for each bag. Computationally integrated data has no true pairing. |
-| A2 | Assay type | 10x Multiome | Restricted: independent test only, not training | Assay changes depth and peak shape (see [Reference values](#reference-values)). Both SHARE-seq samples fail the depth gates. |
-| A3 | Organism and reference | Mouse with counts on mm10, or human with counts on GRCh38 (hg38), or FASTQ files to realign. One library holds one organism, so a mixed-species (barnyard) library fails. | Reject | Each species' TF-DNA model scores that genome's sequence, and its ground truth uses that genome's TSS positions. Realign other assemblies (hg19, mm9). Do not lift over their peaks. |
-| A4 | Raw counts | Per-cell raw counts for both modalities, with peak coordinates. A fragment file is preferred. | Reject | Normalized, scaled or corrected matrices cannot give the common input scale (C-gates below). |
-| A5 | Biological state | Unperturbed cells: no knockout, drug, disease or stimulation. Human: tissue from donors with no reported disease of that organ. | Reject. Restricted for human tumor-adjacent tissue: independent test only, not training. | Perturbation changes regulation, and the ChIP labels do not describe that state. The control arm of such a study is eligible if its controls received no active treatment. |
-| A6 | Genetic background | Mouse: inbred C57BL/6. Human: the study identifies the donor of each library, and no donor has a reported abnormal karyotype. | Reject | Other mouse strains and F1 hybrids have variants that change read mapping and the sequence at a peak. The TF-DNA model still reads the reference. Human donors also have these variants, and no study can avoid them, so the requirement is to know the donor (D6). |
-| A7 | Replicates | At least 2 independent libraries per condition, from different animals or litters (mouse) or different donors (human) | Restricted: independent test only, not training | Technical replicates of one library do not count. Donors in one pooled library count only if the data identifies them. |
-| A8 | Age | One age or stage per library. An aged mouse sample needs a young control from the same study. Human: fetal, child and adult donors are separate conditions. Adult donors can form one condition if each donor's age is recorded. | Reject | Without the control, age and batch are the same variable. Donor age cannot be fixed by design, so a human study must allow stratification by age. |
-| A9 | Independence | No library is already in the project, in any form | Reject | Compare GSM IDs. Then compare barcodes after the download (D3). Re-analyses and atlases often reuse public libraries. |
-| A10 | Sample identity | The study states what the cells are, and the data confirms it in C1 | Reject | The samples filed as `mESC` are gastrulation embryos, not cultured ESCs, and that was found only by annotation. |
-| A11 | Data access | The terms of a controlled-access deposit (dbGaP, EGA) permit this use, and approval is in place before the download | Reject until approved | Most human FASTQ files are controlled. Record the access terms, and keep controlled data out of shared folders and public results. |
+| ID  | Gate                   | Pass condition | If it fails | Why |
+| --- | ---------------------- | -------------- | ----------- | --- |
+| A1  | Paired assay           | RNA and ATAC come from the same cell, with the same barcode | Reject | The model joins RNA and ATAC per cell for each bag. Computationally integrated data has no true pairing. |
+| A2  | Assay type             | 10x Multiome | Restricted: independent test only, not training | Assay changes depth and peak shape (see [Reference values](#reference-values)). Both SHARE-seq samples fail the depth gates. |
+| A3  | Organism and reference | Mouse with counts on mm10, or human with counts on GRCh38 (hg38), or FASTQ files to realign. One library holds one organism, so a mixed-species (barnyard) library fails. | Reject | Each species' TF-DNA model scores that genome's sequence, and its ground truth uses that genome's TSS positions. Realign other assemblies (hg19, mm9). Do not lift over their peaks. |
+| A4  | Raw counts             | Per-cell raw counts for both modalities, with peak coordinates. A fragment file is preferred. | Reject | Normalized, scaled or corrected matrices cannot give the common input scale. |
+| A5  | Biological state       | Unperturbed cells: no knockout, drug, disease or stimulation. Human: tissue from donors with no reported disease of that organ. | Reject. Restricted for human tumor-adjacent tissue: independent test only, not training. | Perturbation changes regulation, and the ChIP labels do not describe that state. The control arm of such a study is eligible if its controls received no active treatment. |
+| A6  | Genetic background     | Mouse: inbred C57BL/6. Human: the study identifies the donor of each library, and no donor has a reported abnormal karyotype. | Reject | Other mouse strains and F1 hybrids have variants that change read mapping and the sequence at a peak. The TF-DNA model still reads the reference. Human donors also have these variants, and no study can avoid them, so the requirement is to know the donor. |
+| A7  | Age                    | One age or stage per library. An aged mouse sample needs a young control from the same study. Human: fetal, child and adult donors are separate conditions. Adult donors can form one condition if each donor's age is recorded. | Reject | Without the control, age and batch are the same variable. Donor age cannot be fixed by design, so a human study must allow stratification by age. |
+| A8  | Independence           | No library is already in the project, in any form | Reject | Compare GSM IDs. Then compare barcodes after the download. Re-analyses and atlases often reuse public libraries. |
+| A9  | Sample identity        | The study states what the cells are. | Reject | The samples filed as `mESC` are gastrulation embryos, not cultured ESCs, and that was found only by annotation. |
+| A10 | Data access            | The terms of a controlled-access deposit (dbGaP, EGA) permit this use, and approval is in place before the download | Reject until approved | Most human FASTQ files are controlled. Record the access terms, and keep controlled data out of shared folders and public results. |
 
 ### Cell lines and cultures
 
 A cultured sample passes only if its karyotype is normal and the ChIP comes from the same culture
-conditions. Aneuploid and tumor lines are rejected for training, because copy number changes RNA
-and accessibility together. This effect has no relation to regulation. This rule includes the human
-lines that hold most human ChIP, such as K-562, Hep G2 and MCF-7.
+conditions. Aneuploid and tumor lines are rejected for training, because copy number changes RNA and accessibility together. This effect has no relation to regulation. This rule includes the human lines that hold most human ChIP, such as K-562, Hep G2 and MCF-7.
 
 ### Human datasets
 
-Human datasets use the same gates and the same thresholds as mouse datasets (rule 3). These rules
-also apply:
-
-1. **One species per model.** Do not pool human and mouse data in one TF-DNA or TF-TG model.
-2. **Holdout scheme.** Leave out one tissue at a time, as for mouse. Human training needs at least 3
-   accepted tissues with different labels (D1 and D2). With fewer, the models have no test on unseen
-   labels. Each donor stays on one side of every holdout (D6).
-3. **TF table.** Do not build ground truth for training yet. The hg38 table on disk has 983 TFs and
-   dates from 2026-09-21. It is stale, because the embeddings changed on 2026-10-22 and 2026-10-30.
-   Until it is rebuilt, do stages A and B against `data/tf_data/hg38/tf_embeddings/` (1,047 TFs).
-   After the rebuild, the table is frozen, as for mouse.
-4. **TF-DNA model.** The hg38 checkpoint `hg38_3831693` is stale as well. Train a new model on the
-   rebuilt cache before you build TF-TG caches.
+Human datasets use the same gates and the same thresholds as mouse datasets (rule 3). Do not pool human and mouse data in one TF-DNA or TF-TG model.
 
 #### Human ChIP coverage
 
-Human ChIP is mostly in cell lines, which are tier 3 unless the dataset is that line. Gates B1 and S4
+Human ChIP is mostly in cell lines, which are tier 3 unless the dataset is that line. The gates
 will therefore remove most primary-tissue slices. Do not change a tier or a threshold to keep them.
 
 Number of TFs per ChIP-Atlas term, before filtering to the TF table (from
 `chip_atlas_human_num_tfs_by_celltype.tsv`, 2026-09-03):
 
-| Group | Terms and TF counts |
-|---|---|
+| Group                       | Terms and TF counts |
+| --------------------------- | ------------------- |
 | Tumor and transformed lines | Hep G2 665, K-562 565, 293 419, MCF-7 262, LoVo 244, HeLa 199, HCT 116 185, GM12878 177, A549 131 |
-| Pluripotent cells | hESC H1 96, iPS cells 76, hESC H9 60, hESC HUES64 36 |
-| Stem-cell derived | iPSC derived neural cells 26, iPSC derived cardiac cells 19 |
-| Blood | CD4+ T cells 48, B cells 26, Macrophages 25, Erythroblasts 24, CD34+ 22, Monocytes 15, CD34 Hematopoietic stem cells 15, T cells 12, Dendritic Cells 11 |
-| Skin and vessels | HUVEC 41, Keratinocytes 38, Dermal fibroblast 23 |
-| Other primary | Adipocytes 11, Bronchial epithelial cells 9, Hepatocytes 5, Pancreatic islets 5, Kidney Cortex 5, Brain 3 |
-
-Blood is the tissue most likely to pass B1, because several of its cell types have at least 10 TFs.
-Skin and stem-cell differentiation are the next candidates. Do stage B before you rely on these counts:
-they include forced expression and mislabeled terms (B2 to B4).
+| Pluripotent cells           | hESC H1 96, iPS cells 76, hESC H9 60, hESC HUES64 36 |
+| Stem-cell derived           | iPSC derived neural cells 26, iPSC derived cardiac cells 19 |
+| Blood                       | CD4+ T cells 48, B cells 26, Macrophages 25, Erythroblasts 24, CD34+ 22, Monocytes 15, CD34 Hematopoietic stem cells 15, T cells 12, Dendritic Cells 11 |
+| Skin and vessels            | HUVEC 41, Keratinocytes 38, Dermal fibroblast 23 |
+| Other primary               | Adipocytes 11, Bronchial epithelial cells 9, Hepatocytes 5, Pancreatic islets 5, Kidney Cortex 5, Brain 3 |
 
 ## Stage B: Ground truth gates (no download)
 
@@ -117,145 +96,14 @@ Labels are the largest source of noise that we can control. Complete these gates
 download the data. Write `data/ground_truth_files/cell_type_specific/<dataset>_cell_type_map.tsv`
 from the cell types that the paper reports.
 
-| ID | Gate | Pass condition | If it fails | Why |
-|---|---|---|---|---|
-| B1 | Expected coverage | At least 3 expected cell types each have a tier 1 or 2 source with at least 10 TFs in the frozen TF table | Reject | The model must separate cell types. Most kidney slices have 1 to 6 TFs. |
-| B2 | Native binding | No enabled source term has forced expression of a TF | Disable the term | Overexpressed TF binding is not the binding of that cell. Examples: most mouse ReMap `fibroblast` TFs are overexpressed. In human ChIP-Atlas `293`, at least 26% of TF experiments have a tag or overexpression word in the title. |
-| B3 | Correct antigen | The experiment titles agree with the antigen, for each enabled term | Disable the term | Examples: `Bld/B_cells` "Cebpb" files are anti-cJUN. One `Lung_endothelial_cells` "Nr3c1" file is the IgG control. |
-| B4 | Correct cell type | The term contains only the stated cell type | Disable the term, or use opt-in | Examples: ChIP-Atlas `Neu/Cerebellar_Cortex` holds cerebral cortex experiments, and `CD34+` pools several populations. |
-| B5 | Whole tissue | Whole-tissue terms stay disabled, also for a TF that is restricted to one cell type | Keep as opt-in | The builder takes all antigens in a term, so the binding of all cell types goes to one slice. |
-| B6 | Context match | ChIP stage and treatment are near the sample state, or the difference is in the `note` column | Lower the tier | A stimulated or induced ChIP does not describe resting cells. |
-| B7 | No substitute | A cell type without a source has no slice | Do not substitute a source | Example: no mouse IC, TAL or thin-limb ChIP exists. A borrowed source gives labels that do not separate cell types (D2). |
-| B8 | Explicit exclusions | A term that a name search would select, but that is wrong, has an `EXCLUDED` row | Add the row | An omission is invisible. `verify_ground_truth.py` fails on an `EXCLUDED` source only if the row exists. |
-
-How to check B2 to B4:
-
-- Read the experiment titles in ChIP-Atlas `experimentList.tab` (columns 9 to 12).
-- The builder has no per-(term, TF) filter. If one bad file is in a term, you must disable the whole
-  term or add that filter.
-- TFs outside the species' frozen TF table drop out (mm10: 443 TFs; for hg38, see
-  [Human datasets](#human-datasets)). A new dataset does not justify a change to a frozen table,
-  because every model of that species would have to be rebuilt.
-
-Know the limit of these gates. Two ChIP experiments for one TF in the same slice share a target
-Jaccard of only 0.27 to 0.32 (measured 2026-09-11). Most of the disagreement between cell types is
-already present within one cell type. Prefer TFs with at least 2 independent experiments, and do
-not expect label selection to remove this noise.
-
-## Stage C: Data gates (after standard preprocessing)
-
-Download the data and run the standard preprocessing first. Use the same steps as the current
-samples, so that a measured difference comes from the data and not from the processing.
-
-### Preprocessing rules
-
-- Start from raw counts. Keep them in `layers["counts"]`.
-- Both modalities: `normalize_total` to 1e4, then `log1p`, stored as sparse float32 in `X`. Do not
-  scale. The model uses these values as they are. [preprocessing_detailed.md](preprocessing_detailed.md)
-  still says "scaled", which is the older convention.
-- Keep the same filter floors for all samples: `Min Cells per Gene` 3 and `Min Cells per Peak` 1.
-  Choose only the upper limits per sample, from its distribution. Current settings are not uniform:
-  `E8.5_rep1` uses 20 and a 20% mitochondrial limit, and the other mESC samples use 3 and 40%.
-- Add the thresholds to `data/qc_filtering_settings.tsv`.
-- Peaks: use the Cell Ranger ARC peak set, or re-call peaks from fragments with one method. Do not
-  use a fixed-width peak set from a deposit.
-- Peak names must be `chrom:start-end`. Some deposits use `chr1-10112-10254`, and the macrophage raw
-  files are an example. Convert these names. The cache builder stops if no peak name matches.
-- Find mitochondrial genes without regard to case (`mt-` in mouse, `MT-` in human).
-- Annotate each peak with `nearest_gene` from `<species>_gene_tss.bed`, and each cell with `celltype`.
-  The older K562, iPSC and macrophage notebooks do not write `nearest_gene`.
-- Do the same doublet step for all samples.
-
-### Stage C: Sample gates
-
-| ID | Gate | Pass condition | Source | Why |
-|---|---|---|---|---|
-| C1 | Sample identity | Marker genes confirm the cell types that the study reports | Measured | Confirms A10. |
-| C2 | Pairing | At least 95% of barcodes are in both modalities, and the RNA and ATAC cluster ARI is at least 0.2 (shuffled control near 0) | Judgment | A wrong pairing removes the signal without an error. Skin: 0.37, against 0.00 when shuffled. |
-| C3 | Input scale | `expm1(X) / counts` is constant within each cell, in both modalities. `X` has no negative values. | Measured | A mismatched scale gave AUROC 0.530 where rank-mapping the inputs gave 0.675. All 17 samples now have sparse, non-negative `X`. |
-| C4 | RNA depth | Median of at least 800 detected genes per cell | Judgment | Low depth removes TFs from the input. Skin has 480. |
-| C5 | ATAC density | At least 2% of the matrix is nonzero | Judgment | Skin has 0.98% and SHARE-seq brain has 0.76%. All 10x samples have at least 3.27%. |
-| C6 | Peak coverage | The median peak is open in at least 1% of cells, which is 0.25 open cells per 25-cell bag | Measured | Skin has 0.10 open cells per bag, and it has the lowest stability: top-10% Jaccard 0.49. |
-| C7 | Label origin | Labels come from marker scores or from published labels joined by barcode. They must not come from a map of cluster numbers. | Measured | A liver re-run renumbered the clusters: 4,564 hepatocyte-marker cells became Endothelial. Skin had the same drift. |
-| C8 | Unlabeled cells | At most 10% of cells have no label | Judgment | Skin has 29%, because its map drifted from the clusters. |
-| C9 | Gene names | Review the upper-case collision warning from the cache builder. List the TFs of the TF table that are absent from the RNA matrix, and check each for a renamed symbol. | Measured | Skin had both `PISD` and `Pisd`. Annotation versions can rename a gene: NCBI lists human `ARNTL` under `BMAL1`. A renamed TF drops out with no error. |
-
-After any re-run of preprocessing, compare the `celltype` counts with the previous file before you
-build caches. No pipeline step checks the labels.
-
-### Stage C: Slice gates
-
-Calculate these after you filter the ground truth to TFs in the frozen table and genes in the sample.
-
-| ID | Gate | Pass condition | Source | Why |
-|---|---|---|---|---|
-| S1 | Cells | At least 100 cells | Code: 50 (`2 × max_cells_per_pair`). Judgment: 100 | At 50 cells, two bags use all of the cells. |
-| S2 | TF breadth | At least 10 detected TFs | Code: 5 TFs. Judgment: 10 detected | Per-TF metrics over few TFs are noisy, and a TF with no mRNA in the slice is a poor positive label. Kidney `B cells` has 44 TFs, but only 16 to 27 are detected. |
-| S3 | Label density | Positive edges are at most 60% of the TF × TG box | Code | Negatives come only from that box. A density above 0.33 cannot supply 1:2 positives to negatives. Report the density. |
-| S4 | Source quality | At most 50% of edges are tier 3 | Judgment | The labels must describe this cell type. Kidney `Endothelial` is 100% tier 3. |
-| S5 | TF balance | One TF holds at most 50% of the edges | Judgment | Otherwise the slice measures one TF. Example: `Gut` has 84% from one TF. |
-
-### Stage C: Dataset gates
-
-| ID | Gate | Pass condition | If it fails | Why |
-|---|---|---|---|---|
-| C10 | Distinct slices | At least 3 scoreable slices with different labels (D2) | Reject. Restricted if the dataset is one purified population with at least 20 detected TFs: use it for training and for TF-level evaluation, but not for cell-type specificity claims. | The project's claim is cell-type-specific regulation. |
-| C11 | Large slice | At least one slice has 1,000 cells or more | Exclude from stability analysis only | Stability needs repeated subsamples. Current subsamples use 290 to 9,060 cells. |
-
-## Stage D: Label and sample overlap checks
-
-Do these checks before you add the dataset to a training run.
-
-| ID | Check | Action |
-|---|---|---|
-| D1 | Labels shared with other tissues | Hash the edge set of each new ground truth file and compare it with all existing files of the same species. Treat an edge Jaccard above 0.5 as the same labels (Judgment). Add these slices to the holdout list. |
-| D2 | Labels shared within the dataset | Slices with the same labels cannot test cell-type specificity. Merge them in `<tissue>_label_map.tsv`, or keep only the slice with the best source. |
-| D3 | Duplicate libraries | Compare barcodes and count totals with all existing samples. `GSE246464_HSC` and `GSE246464_HSC_10x_raw` show that a second copy can exist under another name. |
-| D4 | Study overlap | Record the study of each library. If one study supplies both training and held-out tissues, do not call the result "unseen study". SHARE-seq brain and skin are this case. |
-| D5 | Folder and sample names | `data/processed/<tissue>/` and `data/ground_truth_files/cell_type_specific/<species>/<tissue>/` must have the same name, because evaluation finds the ground truth by tissue folder. Give each human sample a name that no mouse sample has, because `compare_grn_methods.py` scans all tissues and renames samples when names collide. |
-| D6 | Donor overlap (human) | Compare donor IDs across all libraries and studies, because atlases often reuse donors. Keep each donor on one side of every holdout. If a donor gave more than one tissue, that donor's libraries of the other tissues also leave training when one of those tissues is held out. |
-
-### Why D1 is necessary
-
-`--auto_holdout_celltypes` compares cell type **names**. Eleven groups of current ground truth files
-have identical edges under the same or different names. For example, these files are identical:
-
-- `Skin_endothelial` and `Lung_endothelial` (`GSE140203_shareseq`)
-- `Endothelial` (`kidney`, `mouse_liver`, `10x_E18_mouse_brain`)
-
-The run configs of the no-kidney and no-liver models hold out `Endothelial` but list
-`Skin_endothelial` for training. The no-skin model holds out no cell type, so it trains on
-`Endothelial` and is tested on `Skin_endothelial`. These models therefore see their test labels in
-training for these slices. Until the holdout compares label content, pass each such slice with
-`--holdout_celltype`.
-
-Slices with identical labels within one tissue:
-
-| Tissue | Slices |
-|---|---|
-| `kidney` | `Distal_tubule`, `Thick_ascending_limb` |
-| `kidney` | `Collecting_duct_IC`, `Collecting_duct_PC` |
-| `GSE140203_shareseq` | `Hair_follicle_stem_cells`, `Hair_matrix_TACs`, `Outer_root_sheath` |
-| `GSE140203_shareseq` | `OPCs`, `Oligodendrocytes` |
-| `GSE140203_shareseq` | `Skin_endothelial`, `Lung_endothelial` |
-
-## Selection priority
-
-Apply this ranking only to datasets that pass all gates. Rank from highest to lowest:
-
-1. **New label content.** The dataset adds scoreable slices with labels that no current tissue has.
-   More libraries of a current tissue add cell states but no labels, because all samples of a tissue
-   share one ground truth file.
-2. **A second independent study of a current tissue.** Today, tissue and study are almost the same
-   variable, so a tissue holdout is also a study holdout. A second 10x study with the same cell
-   types separates the two effects.
-3. **Matched validation.** The same study or cell state has ChIP-seq, CUT&RUN or a perturbation
-   result that can give tier 1 labels or an independent test.
-4. **More depth.** Higher C4 to C6 values reduce noise from bag sampling.
-
-Keep tissue weight in view: mESC already supplies 6 of the 17 mouse samples and 126 of the 182
-sample × slice rows. A new library of a large tissue also moves the shared input scaler toward that
-tissue. Count tissue weight within one species.
+| ID  | Gate                | Pass condition | If it fails | Why |
+| --- | ------------------- | -------------- | ----------- | --- |
+| B1  | Native binding      | No enabled source term has forced expression of a TF | Disable the term | Overexpressed TF binding is not the binding of that cell. Examples: most mouse ReMap `fibroblast` TFs are overexpressed. In human ChIP-Atlas `293`, at least 26% of TF experiments have a tag or overexpression word in the title. |
+| B2  | Correct antigen     | The experiment titles agree with the antigen, for each enabled term | Disable the term | Examples: `Bld/B_cells` "Cebpb" files are anti-cJUN. One `Lung_endothelial_cells` "Nr3c1" file is the IgG control. |
+| B3  | Whole tissue        | Whole-tissue terms stay disabled, also for a TF that is restricted to one cell type | Keep as opt-in | The builder takes all antigens in a term, so the binding of all cell types goes to one slice. |
+| B4  | Context match       | ChIP stage and treatment are near the sample state, or the difference is in the `note` column | Lower the tier | A stimulated or induced ChIP does not describe resting cells. |
+| B5  | No substitute       | A cell type without a source has no slice | Do not substitute a source | Example: no mouse IC, TAL or thin-limb ChIP exists. A borrowed source gives labels that do not separate cell types. |
+| B6  | Explicit exclusions | A term that a name search would select, but that is wrong, has an `EXCLUDED` row | Add the row | An omission is invisible. `verify_ground_truth.py` fails on an `EXCLUDED` source only if the row exists. |
 
 ## Metadata to record
 
@@ -276,84 +124,6 @@ stratify by them later.
 Do not use a deposit whose RNA counts exclude intronic reads unless you can recount it. Multiome
 RNA comes from nuclei, so an exon-only matrix has a different gene profile.
 
-## Reference values
-
-Values on `X` after preprocessing, for mouse datasets. Ranges cover the libraries of each dataset.
-Human datasets use the same C and S thresholds. Compare human values with this table, and record any
-systematic difference.
-
-| Dataset | Assay | Libraries | Cells per library | Median genes per cell | ATAC nonzero % | Median peak open % | Open cells per 25-cell bag | Median peak width (bp) |
-|---|---|---:|---:|---:|---:|---:|---:|---:|
-| mESC E7.5–E8.5 | 10x | 6 | 3,654–8,199 | 2,846–5,014 | 4.4–7.6 | 2.1–3.6 | 0.53–0.89 | 863–867 |
-| Kidney | 10x | 3 | 5,423–9,666 | 927–1,919 | 3.3–7.0 | 1.6–3.7 | 0.41–0.92 | 866–876 |
-| E18 brain | 10x | 1 | 3,998 | 3,280 | 5.3 | 2.3 | 0.58 | 875 |
-| HSC | 10x | 4 | 1,214–3,658 | 2,632–2,939 | 10.2–14.4 | 5.1–8.4 | 1.26–2.10 | 880–883 |
-| Liver (6 mice) | 10x | 1 file | 19,691 | 3,268 | 6.1 | 2.4 | 0.59 | 875 |
-| Skin | SHARE-seq | 1 | 32,416 | 480 | 0.98 | 0.40 | 0.10 | 300 |
-| Brain | SHARE-seq | 1 | 2,139 | 1,632 | 0.76 | 0.47 | 0.12 | 499 |
-
-The TF-DNA model reads 256 bp at the peak center. This window covers almost all of a 300 bp peak
-but less than a third of an 870 bp peak, which is one more reason to keep one peak method.
-
-## Current samples under these gates
-
-This table tests the thresholds. It covers the measured gates only. Strain, sex, sample handling and
-chemistry (A6, A8 and the metadata table) were not audited, and neither were the source terms of the
-current maps (B2 to B6). The table does not by itself remove any current sample.
-
-| Dataset | Sample × slice rows | Pass code gates | Pass slice gates | Distinct scoreable slices | Result |
-|---|---:|---:|---:|---:|---|
-| mESC | 126 | 70 | 26 | 7 | Accept |
-| Liver | 6 | 5 | 3 | 3 | Accept |
-| HSC | 4 | 4 | 4 | 1 | Restricted (one purified population) |
-| E18 brain | 6 | 4 | 2 | 2 | Reject (C10, also has one library) |
-| Kidney | 24 | 12 | 2 | 1 | Reject (C10) |
-| SHARE-seq skin and brain | 16 | 11 | 0 | 0 | Reject (C4–C6, C8, C10) |
-
-The S2 gate has the largest effect: 118 of the 182 rows have fewer than 10 detected TFs. This
-reflects the available ChIP, not only sample quality.
-
-### Human raw data already in the project
-
-This table is a first reading of stage A only. It is not a full appraisal, because none of these
-datasets has been through stages B to D.
-
-| Dataset | Stage A reading |
-|---|---|
-| K562 | Reject for training: aneuploid tumor line. It also fails A3 (barnyard library) and A7 (one library). Its features file has no peak rows. |
-| Macrophage | Only the arms with no oxLDL can pass A5, and the appraisal must identify them. The ground truth had 24 TFs on 2026-09-02, with 14 after filtering. It is one cell type, so C10 is the likely limit. |
-| iPSC | The CG arms fail A5 (knock-in). The WT arms have one replicate per day, so they are Restricted under A7. Check karyotype and culture conditions. |
-
-No human dataset is ready for training today, so the human holdout scheme needs new datasets.
-
-## After acceptance
-
-Follow [pipeline_guide.md](pipeline_guide.md). That guide covers mm10. For hg38, set the species in
-each step (`sbatch --export=ALL,species=hg38` for 02a and 02b, `--species hg38` after that). These
-items also change when a dataset is added:
-
-- Add the sample to `DATASETS` in `03c_build_celltype_data.sh`, and update `--array`. That file lists
-  mouse samples. Human samples need their own launcher, because `--dataset` adds to the list and does
-  not replace it.
-- Set `ORGANISM` and `CELL_TYPE` in `run_build_gt.sh` and run it. It also runs [verify_ground_truth.py](../scripts/generate_celltype_ground_truth/verify_ground_truth.py).
-- Read the slice report that the cache builder prints. Compare it with this appraisal.
-- Add the sample to the holdout commands (step 6), with the slices from D1.
-- Run CellOracle, FigR, LINGER, Pando and SCENIC+ on the same preprocessed file. If a method fails,
-  record the failure. Do not drop the dataset to hide it.
-- Retrain all holdout models. The input scaler comes from all training samples, so every model
-  changes. Compare old and new models only on the same evaluation set.
-
-## Reporting rules
-
-- Report per-TF AUROC next to pooled AUROC. In July GRNs, per-TF AUROC fell from about 0.57 to about
-  0.50 after removal of each TG's mean score, so check this control too.
-- Split the metrics into TFs that the TF-TG model saw in training and TFs that it did not see.
-- Give the shuffled-score baseline for each metric.
-- Stratify the metrics by tier.
-- Say "unseen cell type", not "unseen TF", unless the TF is also absent from TF-DNA training. The
-  TF-DNA model trains on ChIP-Atlas peaks of all cell types, and many of the same experiments
-  supply the TF-TG labels.
-
 ## Appraisal record
 
 Save one copy per dataset in `TETHER/docs/dataset_appraisals/<dataset>.md`.
@@ -367,27 +137,12 @@ Save one copy per dataset in `TETHER/docs/dataset_appraisals/<dataset>.md`.
 - Verdict: Accept | Restricted (use: ) | Reject (gates: )
 
 ## Stage A
-A1:   A2:   A3:   A4:   A5:   A6:   A7:   A8:   A9:   A10:   A11:
+A1:   A2:   A3:   A4:   A5:   A6:   A7:   A8:   A9:   A10:
 
 ## Stage B
 Map file:
 Expected slices with at least 10 tier 1 or 2 TFs:
 Terms disabled or excluded, with reason:
-
-## Stage C
-| Library | Cells | Median genes | ATAC nonzero % | Median peak open % | Unlabeled % | ARI | C3 |
-|---|---|---|---|---|---|---|---|
-
-| Library | Slice | Cells | Detected TFs | Density | Tier 3 % | Top TF % | Scoreable |
-|---|---|---|---|---|---|---|---|
-
-C10:   C11:
-
-## Stage D
-Shared labels (D1, D2):
-Duplicate check (D3):
-Study overlap (D4):
-Donor overlap, human only (D6):
 
 ## Metadata
 (table from "Metadata to record")

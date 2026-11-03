@@ -21,6 +21,13 @@ Pipeline per (cell_type, source_term):
      than `window` because these peak sets run to millions of rows and an all-pairs window
      over a 100 kb radius does not finish.
 
+Per-experiment filter (--excluded_experiments, see experiment_filter.py): the listed ChIP-Atlas
+experiments (SRX, the ID= field of col4) and ReMap datasets (the whole col4 name) are dropped in
+the same awk pass, from every source. Rows disabled only because of listed experiments are then
+used too; a rescued row whose BED contains none of its listed IDs is not used, because then the
+filter would have removed nothing. The breadth report records, per source, the peaks and
+experiments dropped and whether the row is in only because of the filter.
+
 The TSS annotation is mm10_gene_tss.bed (238,516 transcript entries), NOT gene_tss.bed
 (25,120 gene entries) -- build_peak_to_gene_dist.py:13-25 records that using the wrong one
 changes the answer completely.
@@ -28,6 +35,8 @@ changes the answer completely.
 Usage:
     python3 build_celltype_ground_truth.py --organism mm10
     python3 build_celltype_ground_truth.py --organism mm10 --max_tss_dist 1000000
+    python3 build_celltype_ground_truth.py --organism hg38 --map <hg38 map> \
+        --excluded_experiments <gt_dir>/hg38_cell_type_maps/hg38_excluded_experiments.tsv
 """
 
 import argparse
@@ -41,6 +50,9 @@ from pathlib import Path
 import pandas as pd
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+from experiment_filter import listed_by_term, load_excluded, select_rows, term_key  # noqa: E402
+
 PROJECT_DIR = HERE.parents[2]
 DATA_DIR = PROJECT_DIR / "data"
 TF_IDX = PROJECT_DIR / "TETHER" / "cached_data" / "{organism}" / "tf_dna_cache" / "tf_name_to_idx.csv"
@@ -49,34 +61,49 @@ TF_IDX = PROJECT_DIR / "TETHER" / "cached_data" / "{organism}" / "tf_dna_cache" 
 # side of the model use the same peak-to-gene radius.
 DEFAULT_MAX_TSS_DIST = 100_000
 
-# ChIP-Atlas: col4 is "ID=SRX...;Name=Tox3%20(@%20Hepatocytes);Title=...". Take the Name
-# value and cut it at the "%20(@" that introduces the cell type.
-AWK_CHIPATLAS = r'''
+# Both awk programs take -v exfile=<one listed ID per line> (empty: no filter) and
+# -v stats=<file>: a peak whose experiment ID is listed is skipped, and stats gets one
+# "ID<TAB>peaks dropped" line per listed experiment that was present.
+AWK_EXCLUDE_BEGIN = r'''
+  BEGIN { if (exfile != "") while ((getline line < exfile) > 0) ex[line] = 1 }
+'''
+AWK_EXCLUDE_END = r'''
+  END { if (stats != "") { printf "" > stats; for (k in hit) print k "\t" hit[k] > stats } }
+'''
+
+# ChIP-Atlas: col4 is "ID=SRX...;Name=Tox3%20(@%20Hepatocytes);Title=...". The ID value is the
+# experiment; take the Name value and cut it at the "%20(@" that introduces the cell type.
+AWK_CHIPATLAS = AWK_EXCLUDE_BEGIN + r'''
   /^track/ || /^browser/ || /^#/ { next }
   {
     n = split($4, parts, ";");
-    tf = "";
+    id = ""; tf = "";
     for (i = 1; i <= n; i++) {
-      if (substr(parts[i], 1, 5) == "Name=") {
+      if (substr(parts[i], 1, 3) == "ID=") id = substr(parts[i], 4);
+      else if (substr(parts[i], 1, 5) == "Name=") {
         tf = substr(parts[i], 6);
         p = index(tf, "%20(@");
         if (p > 0) tf = substr(tf, 1, p - 1);
         break;
       }
     }
+    if (id in ex) { hit[id]++; next }
     if (tf != "") print $1 "\t" $2 "\t" $3 "\t" tf;
   }
-'''
+''' + AWK_EXCLUDE_END
 
-# ReMap: col4 is "GSE.TF.biotype[_condition]".
-AWK_REMAP = r'''
+# ReMap: col4 is "GSE.TF.biotype[_condition]", and the whole name is the dataset ID.
+AWK_REMAP = AWK_EXCLUDE_BEGIN + r'''
   /^track/ || /^browser/ || /^#/ { next }
-  { n = split($4, a, "."); if (n >= 2) print $1 "\t" $2 "\t" $3 "\t" a[2]; }
-'''
+  {
+    if ($4 in ex) { hit[$4]++; next }
+    n = split($4, a, "."); if (n >= 2) print $1 "\t" $2 "\t" $3 "\t" a[2];
+  }
+''' + AWK_EXCLUDE_END
 
 
-def load_embedding_tfs(organism: str) -> set:
-    path = Path(str(TF_IDX).format(organism=organism))
+def load_embedding_tfs(organism: str, tf_table: Path = None) -> set:
+    path = tf_table or Path(str(TF_IDX).format(organism=organism))
     if not path.exists():
         raise SystemExit(f"Missing frozen TF embedding table: {path}")
     tfs = pd.read_csv(path)["tf_name"]
@@ -84,13 +111,25 @@ def load_embedding_tfs(organism: str) -> set:
     return set(tfs.str.upper())
 
 
-def reduce_bed(bed_path: Path, source: str, out_path: Path) -> int:
-    """Stream a ChIP BED down to chrom/start/end/TF. Returns the row count written."""
+def reduce_bed(bed_path: Path, source: str, out_path: Path, exfile: Path = None) -> tuple:
+    """Stream a ChIP BED down to chrom/start/end/TF, skipping listed experiments.
+
+    Returns (rows written, {listed ID: peaks dropped}).
+    """
     awk = AWK_CHIPATLAS if source == "chipatlas" else AWK_REMAP
-    cmd = f"awk -F'\\t' '{awk}' {bed_path} > {out_path}"
+    stats = out_path.with_name(out_path.name + ".excluded")
+    cmd = (f"awk -F'\\t' -v exfile={exfile or ''} -v stats={stats} '{awk}' "
+           f"{bed_path} > {out_path}")
     subprocess.run(cmd, shell=True, check=True, executable="/bin/bash")
-    return int(subprocess.run(f"wc -l < {out_path}", shell=True, capture_output=True,
-                              text=True, check=True).stdout.strip())
+    n = int(subprocess.run(f"wc -l < {out_path}", shell=True, capture_output=True,
+                           text=True, check=True).stdout.strip())
+    dropped = {}
+    if stats.exists():
+        for line in stats.read_text().splitlines():
+            k, v = line.split("\t")
+            dropped[k] = int(v)
+        stats.unlink()
+    return n, dropped
 
 
 def closest_tss(peaks_bed: Path, tss_sorted: Path, tmp: Path) -> pd.DataFrame:
@@ -114,8 +153,10 @@ def closest_tss(peaks_bed: Path, tss_sorted: Path, tmp: Path) -> pd.DataFrame:
 
 
 def build_cell_type(cell_type: str, rows: pd.DataFrame, gt_dir: Path, organism: str,
-                    tss_sorted: Path, emb_tfs: set, max_dist: int, tmp: Path) -> tuple:
+                    tss_sorted: Path, emb_tfs: set, max_dist: int, tmp: Path,
+                    exfile: Path = None, listed: dict = None) -> tuple:
     """Return (edges_df, per-source breadth records) for one dataset cell type."""
+    listed = listed or {}
     edges, records = [], []
 
     for r in rows.itertuples():
@@ -128,7 +169,10 @@ def build_cell_type(cell_type: str, rows: pd.DataFrame, gt_dir: Path, organism: 
         rec = {"cell_type": cell_type, "source": r.source, "source_term": r.source_term,
                "proxy_tier": r.proxy_tier, "resolution": r.resolution,
                "n_peaks": 0, "n_tfs_raw": 0, "n_tfs_usable": 0,
-               "n_tfs_dropped_no_embedding": 0, "n_edges": 0, "status": "ok"}
+               "n_tfs_dropped_no_embedding": 0, "n_edges": 0, "status": "ok",
+               "enabled_by_filter": bool(getattr(r, "enabled_by_filter", False)),
+               "n_experiments_listed": len(listed.get(term_key(r.source, r.source_class, r.source_term), ())),
+               "n_experiments_excluded": 0, "n_peaks_excluded": 0}
 
         if not bed.exists():
             rec["status"] = "source_file_missing"
@@ -138,8 +182,22 @@ def build_cell_type(cell_type: str, rows: pd.DataFrame, gt_dir: Path, organism: 
 
         reduced = tmp / f"{cell_type.replace(' ', '_')}__{r.source}__" \
                         f"{r.source_term.replace('/', '_')}.bed"
-        n_peaks = reduce_bed(bed, r.source, reduced)
+        n_peaks, dropped = reduce_bed(bed, r.source, reduced, exfile)
         rec["n_peaks"] = n_peaks
+        rec["n_experiments_excluded"] = len(dropped)
+        rec["n_peaks_excluded"] = sum(dropped.values())
+        if dropped:
+            logging.info("    %-34s filter dropped %d experiment(s), %s peaks", r.source_term,
+                         len(dropped), f"{rec['n_peaks_excluded']:,}")
+        if rec["enabled_by_filter"] and not dropped:
+            # The row is only in because the filter cleans it; if none of its listed IDs are in
+            # the BED, nothing was cleaned, so the reason it was disabled still holds.
+            rec["status"] = "filter_matched_nothing"
+            records.append(rec)
+            logging.warning("    %-34s enabled by the filter, but none of its %d listed IDs are "
+                            "in the BED: NOT USED", r.source_term, rec["n_experiments_listed"])
+            reduced.unlink(missing_ok=True)
+            continue
         if n_peaks == 0:
             rec["status"] = "no_peaks_parsed"
             records.append(rec)
@@ -211,6 +269,13 @@ def main() -> None:
     ap.add_argument("--tss_bed", type=Path, default=None)
     ap.add_argument("--max_tss_dist", type=int, default=DEFAULT_MAX_TSS_DIST)
     ap.add_argument("--include_optin", action="store_true")
+    ap.add_argument("--excluded_experiments", type=Path, default=None,
+                    help="per-experiment filter: <organism>_excluded_experiments.tsv. Drops the listed "
+                         "experiments' peaks from every source and also uses rows disabled only "
+                         "because of them (see experiment_filter.py)")
+    ap.add_argument("--tf_table", type=Path, default=None,
+                    help="tf_name_to_idx.csv of the TF-DNA model (default: "
+                         "TETHER/cached_data/<organism>/tf_dna_cache/tf_name_to_idx.csv)")
     ap.add_argument("--cell_types", nargs="*", default=None)
     ap.add_argument("--report_tag", default=None,
                     help="breadth report name, gt_breadth_<tag>.tsv (default: the organism). "
@@ -235,17 +300,24 @@ def main() -> None:
     # Filter the map to the organism
     cell_type_gt_map = cell_type_gt_map[cell_type_gt_map["organism"] == args.organism]
     
-    # Exclude any sources where the note starts with "EXCLUDED" unless --include_optin is specified
-    excluded = cell_type_gt_map["note"].str.startswith("EXCLUDED")
-    keep = (cell_type_gt_map["default_enabled"] == 1) | (args.include_optin & ~excluded)
-    cell_type_gt_map = cell_type_gt_map[keep]
+    # Enabled rows, plus opt-in rows with --include_optin, plus (with the per-experiment filter)
+    # rows disabled only because of listed experiments. EXCLUDED rows are never used.
+    excluded_list, exfile, listed = None, None, {}
+    if args.excluded_experiments:
+        excluded_list = load_excluded(args.excluded_experiments)
+        listed = listed_by_term(excluded_list)
+    cell_type_gt_map = select_rows(cell_type_gt_map, args.include_optin, excluded_list)
+    if excluded_list is not None:
+        logging.info("Per-experiment filter: %d listed experiments (%s); %d row(s) used only "
+                     "because of it", len(excluded_list), args.excluded_experiments.name,
+                     int(cell_type_gt_map["enabled_by_filter"].sum()))
     
     # Optional: filter to a specific list of cell types if provided
     if args.cell_types:
         cell_type_gt_map = cell_type_gt_map[cell_type_gt_map["dataset_cell_type"].isin(args.cell_types)]
 
     # Load the frozen TF embedding table
-    emb_tfs = load_embedding_tfs(args.organism)
+    emb_tfs = load_embedding_tfs(args.organism, args.tf_table)
 
     out_dir = args.out_dir / args.organism
     if args.dataset:
@@ -254,6 +326,9 @@ def main() -> None:
     args.reports.mkdir(parents=True, exist_ok=True)
 
     tmp = Path(tempfile.mkdtemp(prefix="gtbuild_", dir=out_dir))
+    if excluded_list is not None:
+        exfile = tmp / "excluded_ids.txt"
+        exfile.write_text("\n".join(excluded_list["srx"]) + "\n")
     tss_sorted = tmp / "tss.sorted.bed"
     subprocess.run(f"sort -k1,1 -k2,2n {tss} > {tss_sorted}", shell=True, check=True,
                    executable="/bin/bash")
@@ -265,7 +340,7 @@ def main() -> None:
     for cell_type, rows in cell_type_gt_map.groupby("dataset_cell_type", sort=True):
         logging.info("%s  (%d source(s))", cell_type, len(rows))
         edges, records = build_cell_type(cell_type, rows, args.gt_dir, args.organism, tss_sorted,
-                                         emb_tfs, args.max_tss_dist, tmp)
+                                         emb_tfs, args.max_tss_dist, tmp, exfile, listed)
         all_records.extend(records)
         dest = out_dir / f"{cell_type.replace(' ', '_')}_ground_truth.parquet"
         edges.to_parquet(dest, index=False)
