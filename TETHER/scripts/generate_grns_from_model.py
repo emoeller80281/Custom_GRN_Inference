@@ -100,7 +100,7 @@ def load_multiome_data(run_config, tissue, sample_name):
     """
     data_dir = Path(run_config["data_dir"])
     mdata = mu.read(
-        data_dir / "processed" / tissue
+        data_dir / "processed" / run_config["species"] / tissue
         / sample_name / "multiome_processed.h5mu"
     )
     rna = mdata.mod["rna"]

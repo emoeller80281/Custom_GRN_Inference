@@ -19,6 +19,8 @@
 # To start as soon as every cache job succeeds:
 #   sbatch --dependency=afterok:<03c array job ID> TETHER/bash_scripts/03d_train_cached_celltype_tf_to_tg_model.sh
 # Extra CLI arguments override the defaults below.
+# SPECIES selects the datasets (default mm10), and must match the 03c run that built the caches:
+#   sbatch --export=ALL,SPECIES=hg38 TETHER/bash_scripts/03d_train_cached_celltype_tf_to_tg_model.sh
 #
 # --species, --max_cells_per_pair, --max_peaks_per_tg and the other preprocessing
 # settings must match 03c. The job stops early and lists the expected cache paths
@@ -39,25 +41,49 @@ export MKL_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
 
+SPECIES="${SPECIES:-mm10}"
+EXTRA_ARGS=()
+if [ "$SPECIES" = "hg38" ]; then
+DATASETS=(
+    "ENCODE_adrenal:adrenal_adult_ENCDO221IPH"
+    "ENCODE_bile_duct:bile_duct_adult_ENCDO575WHY"
+    "ENCODE_colon:colon_adult_ENCDO856ZOJ"
+)
+# Must match 03c: the TF-DNA checkpoint is part of the sample cache key.
+EXTRA_ARGS=(--tf_dna_checkpoint "$PROJECT_DIR/checkpoints/tf_dna_hg38_3930720/epoch_18.ckpt")
+elif [ "$SPECIES" = "mm10" ]; then
+DATASETS=(
+    "mESC:E7.5_rep1"
+    "mESC:E7.5_rep2"
+    "mESC:E8.0_rep1"
+    "mESC:E8.0_rep2"
+    "mESC:E8.5_rep1"
+    "mESC:E8.5_rep2"
+    "kidney:Ctrl_4weeks_1"
+    "kidney:Ctrl_4weeks_2"
+    "kidney:Ctrl_6months_1"
+    "GSE140203_shareseq:skin_late_anagen"
+    "GSE140203_shareseq:shareseq_brain"
+    "10x_E18_mouse_brain:E18_brain"
+    "GSE246464_HSC:young_rep1"
+    "GSE246464_HSC:young_rep2"
+    "GSE246464_HSC:old_rep1"
+    "GSE246464_HSC:old_rep2"
+    "mouse_liver:liver_sample"
+)
+else
+    echo "ERROR: SPECIES must be mm10 or hg38, not ${SPECIES}" >&2
+    exit 1
+fi
+DATASET_ARGS=()
+for dataset in "${DATASETS[@]}"; do
+    DATASET_ARGS+=(--dataset "$dataset")
+done
+
 srun python -u scripts/train_cached_tf_to_tg_celltype_model.py \
-    --species mm10 \
-    --dataset mESC:E7.5_rep1 \
-    --dataset mESC:E7.5_rep2 \
-    --dataset mESC:E8.0_rep1 \
-    --dataset mESC:E8.0_rep2 \
-    --dataset mESC:E8.5_rep1 \
-    --dataset mESC:E8.5_rep2 \
-    --dataset kidney:Ctrl_4weeks_1 \
-    --dataset kidney:Ctrl_4weeks_2 \
-    --dataset kidney:Ctrl_6months_1 \
-    --dataset GSE140203_shareseq:skin_late_anagen \
-    --dataset GSE140203_shareseq:shareseq_brain \
-    --dataset 10x_E18_mouse_brain:E18_brain \
-    --dataset GSE246464_HSC:young_rep1 \
-    --dataset GSE246464_HSC:young_rep2 \
-    --dataset GSE246464_HSC:old_rep1 \
-    --dataset GSE246464_HSC:old_rep2 \
-    --dataset mouse_liver:liver_sample \
+    --species "$SPECIES" \
+    "${DATASET_ARGS[@]}" \
+    "${EXTRA_ARGS[@]}" \
     --max_cells_per_pair 50 \
     --max_peaks_per_tg 50 \
     --epochs 250 \

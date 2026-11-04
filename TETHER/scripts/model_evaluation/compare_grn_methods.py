@@ -481,7 +481,7 @@ def mean_over_models(grn):
     )["Score"].mean()
 
 
-def find_samples(data_dir):
+def find_samples(data_dir, species):
     """
     Map each processed sample to a unique ID. A sample keeps its own name unless another
     tissue has a sample with the same name; then it becomes <tissue>__<sample>, as in
@@ -489,7 +489,7 @@ def find_samples(data_dir):
     """
     found = [
         (tissue_dir.name, path.parent.name, path)
-        for tissue_dir in (data_dir / "processed").iterdir()
+        for tissue_dir in (data_dir / "processed" / species).iterdir()
         if tissue_dir.name not in UNUSED_TISSUE_DIRS
         for path in tissue_dir.rglob("*/multiome_processed.h5mu")
     ]
@@ -1475,7 +1475,7 @@ def main():
     rank_lollipop_dir = args.plot_dir / "rank_plots" / "rank_lollipop_plots"
 
     # ---------------- Label the GRNs ----------------
-    sample_sources, uid_of = find_samples(DATA_DIR)
+    sample_sources, uid_of = find_samples(DATA_DIR, args.species)
     method_grn_dict, celltype_gt_dict, hash_key = label_method_grns(
         model_run_dict, sample_sources, uid_of, args.species, args.results_dir,
         args.other_method_grn_dir, args.n_jobs, force_relabel=args.force_relabel,

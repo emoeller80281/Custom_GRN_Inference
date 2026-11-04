@@ -772,7 +772,7 @@ def build_sample_cache_manifest(args, tissue, sample_name):
         },
         "source": {
             "multiome": _file_identity(
-                data_dir / "processed" / tissue / sample_name / "multiome_processed.h5mu"
+                data_dir / "processed" / args.species / tissue / sample_name / "multiome_processed.h5mu"
             ),
             "label_map": _optional_file_identity(
                 cell_type_map_dir(data_dir, args.species) / f"{tissue}_label_map.tsv"
@@ -896,7 +896,7 @@ def prepare_data(args):
     assert genome_fasta_path.exists(), f"Genome FASTA file not found: {genome_fasta_path}"
     assert chrom_sizes_path.exists(), f"Chromosome sizes file not found: {chrom_sizes_path}"
 
-    input_data_dir = DATA_DIR / "processed" / tissue / sample_name
+    input_data_dir = DATA_DIR / "processed" / species / tissue / sample_name
     assert input_data_dir.exists(), f"Input data directory does not exist: {input_data_dir}"
 
     training_cache_dir = args.output_dir / "prepared"

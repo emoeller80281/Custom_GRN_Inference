@@ -16,6 +16,9 @@
 #   sbatch TETHER/bash_scripts/03c_build_celltype_data.sh
 # Rebuild only some samples by index, for example: sbatch --array=3,7 ...
 # Keep --array in sync with the length of DATASETS.
+# SPECIES selects the dataset list (default mm10). For hg38:
+#   sbatch --export=ALL,SPECIES=hg38 --array=0-2 TETHER/bash_scripts/03c_build_celltype_data.sh
+# Samples are read from data/processed/<species>/<tissue>/<sample>/multiome_processed.h5mu.
 #
 # The preprocessing settings below select the cache. They must match the ones in
 # 03d_train_cached_celltype_tf_to_tg_model.sh, or training cannot find the caches.
@@ -31,6 +34,17 @@ export MKL_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
 
+SPECIES="${SPECIES:-mm10}"
+EXTRA_ARGS=()
+if [ "$SPECIES" = "hg38" ]; then
+DATASETS=(
+    "ENCODE_adrenal:adrenal_adult_ENCDO221IPH"
+    "ENCODE_bile_duct:bile_duct_adult_ENCDO575WHY"
+    "ENCODE_colon:colon_adult_ENCDO856ZOJ"
+)
+# TF-DNA model of the current hg38 TF cache (tf_dna_cache_site_merged_overlap_filtered)
+EXTRA_ARGS=(--tf_dna_checkpoint "$PROJECT_DIR/checkpoints/tf_dna_hg38_3930720/epoch_18.ckpt")
+else
 DATASETS=(
     "mESC:E7.5_rep1"
     "mESC:E7.5_rep2"
@@ -50,6 +64,7 @@ DATASETS=(
     "GSE246464_HSC:old_rep2"
     "mouse_liver:liver_sample"
 )
+fi
 
 TASK_ID=${SLURM_ARRAY_TASK_ID:-0}
 if [ "$TASK_ID" -ge "${#DATASETS[@]}" ]; then
@@ -60,10 +75,11 @@ DATASET="${DATASETS[$TASK_ID]}"
 echo "[INFO] Array task ${TASK_ID}: ${DATASET} on $(hostname)"
 
 srun python -u scripts/build_tf_to_tg_celltype_data.py \
-    --species mm10 \
+    --species "$SPECIES" \
     --dataset "$DATASET" \
     --max_cells_per_pair 50 \
     --max_peaks_per_tg 50 \
     --binding_chunk_size 512 \
     --num_workers "${SLURM_CPUS_PER_TASK:-4}" \
+    "${EXTRA_ARGS[@]}" \
     "$@"
