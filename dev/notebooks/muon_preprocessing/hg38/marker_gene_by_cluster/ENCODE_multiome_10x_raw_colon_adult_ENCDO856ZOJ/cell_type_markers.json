@@ -1,0 +1,246 @@
+{
+  "Epithelial (general)": [
+    "EPCAM",
+    "CDH1",
+    "KRT8",
+    "KRT18",
+    "KRT19",
+    "CLDN4",
+    "ELF3",
+    "CDX2",
+    "VIL1"
+  ],
+  "Colonocyte (upper crypt)": [
+    "KRT20",
+    "CEACAM5",
+    "CEACAM6",
+    "SELENBP1",
+    "LGALS4",
+    "MS4A12",
+    "SLC26A2",
+    "CA7"
+  ],
+  "Colonocyte (lower crypt)": [
+    "LGR5",
+    "RNF43",
+    "EPHB2",
+    "RGMB",
+    "PCNA",
+    "MCM5",
+    "MCM2"
+  ],
+  "BEST4+ colonocyte": [
+    "BEST4",
+    "OTOP2",
+    "OTOP3",
+    "SPIB",
+    "CA7",
+    "GUCA2B"
+  ],
+  "Endothelial": [
+    "PECAM1",
+    "VWF",
+    "CDH5",
+    "FLT1",
+    "PTPRB",
+    "EGFL7",
+    "KDR",
+    "ERG",
+    "EMCN",
+    "TIE1"
+  ],
+  "Pericyte/smooth muscle": [
+    "RGS5",
+    "ACTA2",
+    "MYH11",
+    "TAGLN",
+    "PDGFRB",
+    "NOTCH3",
+    "CARMN",
+    "KCNQ5",
+    "DLC1",
+    "GUCY1A2",
+    "PRKG1",
+    "ABCC9"
+  ],
+  "Fibroblast": [
+    "COL1A1",
+    "COL1A2",
+    "COL3A1",
+    "DCN",
+    "LUM",
+    "PDGFRA",
+    "FBN1",
+    "COL6A3",
+    "MMP2",
+    "ABCA8",
+    "FBLN1"
+  ],
+  "T cell": [
+    "CD3D",
+    "CD3E",
+    "CD3G",
+    "CD2",
+    "TRAC",
+    "TRBC1",
+    "TRBC2",
+    "BCL11B",
+    "IL7R",
+    "CD247",
+    "SKAP1",
+    "THEMIS",
+    "CD96",
+    "ITK",
+    "CAMK4"
+  ],
+  "NK cell": [
+    "NKG7",
+    "GNLY",
+    "KLRD1",
+    "KLRF1",
+    "NCAM1",
+    "PRF1",
+    "GZMB",
+    "TYROBP",
+    "KLRC1",
+    "SH2D1B"
+  ],
+  "B cell": [
+    "MS4A1",
+    "CD79A",
+    "CD79B",
+    "BANK1",
+    "PAX5",
+    "AFF3",
+    "BLK",
+    "FCRL1",
+    "IGHM",
+    "CD22"
+  ],
+  "Plasma cell": [
+    "JCHAIN",
+    "MZB1",
+    "SDC1",
+    "PRDM1",
+    "TNFRSF17",
+    "IGHG1",
+    "IGHA1",
+    "IGKC",
+    "IGLC2",
+    "IGLC3"
+  ],
+  "Monocyte": [
+    "CD14",
+    "LYZ",
+    "S100A8",
+    "S100A9",
+    "VCAN",
+    "FCN1",
+    "CSF3R",
+    "CD36",
+    "LRP1"
+  ],
+  "Macrophage": [
+    "MARCO",
+    "MRC1",
+    "CD163",
+    "C1QA",
+    "C1QB",
+    "C1QC",
+    "MSR1",
+    "F13A1",
+    "CSF1R",
+    "APOE",
+    "MS4A6A",
+    "DOCK2"
+  ],
+  "Dendritic cell": [
+    "CLEC9A",
+    "CLEC10A",
+    "BATF3",
+    "CD83",
+    "CIITA",
+    "CCR7"
+  ],
+  "Mast cell": [
+    "TPSAB1",
+    "TPSB2",
+    "CPA3",
+    "KIT",
+    "HPGDS",
+    "HDC"
+  ],
+  "Colonocyte": [
+    "CA1",
+    "CA2",
+    "SLC26A3",
+    "CEACAM7",
+    "AQP8",
+    "GUCA2A",
+    "GUCA2B"
+  ],
+  "Goblet cell": [
+    "MUC2",
+    "TFF3",
+    "FCGBP",
+    "ZG16",
+    "CLCA1",
+    "SPINK4",
+    "REG4",
+    "SPDEF",
+    "ATOH1",
+    "MUC12",
+    "MUC13",
+    "BEST2"
+  ],
+  "Intestinal stem/TA cell": [
+    "LGR5",
+    "OLFM4",
+    "ASCL2",
+    "SMOC2"
+  ],
+  "Enteroendocrine cell": [
+    "CHGA",
+    "CHGB",
+    "PYY",
+    "GCG"
+  ],
+  "Tuft cell": [
+    "POU2F3",
+    "TRPM5",
+    "DCLK1",
+    "LRMP",
+    "PTGS1",
+    "HPGDS",
+    "AVIL"
+  ],
+  "Smooth muscle": [
+    "DES",
+    "ACTG2",
+    "MYH11",
+    "CNN1",
+    "SYNPO2",
+    "LMOD1",
+    "ACTA2"
+  ],
+  "Enteric glia/neuron": [
+    "PLP1",
+    "S100B",
+    "SOX10",
+    "PHOX2B",
+    "ELAVL4",
+    "CDH19"
+  ],
+  "Cycling cells": [
+    "MKI67",
+    "TOP2A",
+    "CENPF",
+    "ASPM",
+    "NUSAP1",
+    "DIAPH3",
+    "SMC4",
+    "TPX2",
+    "RRM2",
+    "KNL1"
+  ]
+}

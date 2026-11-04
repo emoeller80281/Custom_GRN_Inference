@@ -21,8 +21,9 @@
 
 set -eo pipefail
 
-ORGANISM="mm10"
-CELL_TYPE="GSE246464_HSC"
+# Override with sbatch --export=ALL,ORGANISM=hg38,CELL_TYPE=ENCODE_adrenal
+ORGANISM="${ORGANISM:-mm10}"
+CELL_TYPE="${CELL_TYPE:-GSE246464_HSC}"
 
 PROJECT_DIR="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
 GT_DIR="${PROJECT_DIR}/data/ground_truth_files/cell_type_specific"

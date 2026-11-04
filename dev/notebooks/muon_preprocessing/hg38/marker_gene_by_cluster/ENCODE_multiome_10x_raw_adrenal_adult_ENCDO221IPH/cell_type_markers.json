@@ -1,0 +1,191 @@
+{
+  "Endothelial": [
+    "PECAM1",
+    "VWF",
+    "CDH5",
+    "FLT1",
+    "PTPRB",
+    "EGFL7",
+    "KDR",
+    "ERG",
+    "EMCN",
+    "TIE1"
+  ],
+  "Pericyte/smooth muscle": [
+    "RGS5",
+    "ACTA2",
+    "MYH11",
+    "TAGLN",
+    "PDGFRB",
+    "NOTCH3",
+    "CARMN",
+    "KCNQ5",
+    "DLC1",
+    "GUCY1A2",
+    "PRKG1",
+    "ABCC9"
+  ],
+  "Fibroblast": [
+    "COL1A1",
+    "COL1A2",
+    "COL3A1",
+    "DCN",
+    "LUM",
+    "PDGFRA",
+    "FBN1",
+    "COL6A3",
+    "MMP2",
+    "ABCA8",
+    "FBLN1"
+  ],
+  "T cell": [
+    "CD3D",
+    "CD3E",
+    "CD3G",
+    "CD2",
+    "TRAC",
+    "TRBC1",
+    "TRBC2",
+    "BCL11B",
+    "IL7R",
+    "CD247",
+    "SKAP1",
+    "THEMIS",
+    "CD96",
+    "ITK",
+    "CAMK4"
+  ],
+  "NK cell": [
+    "NKG7",
+    "GNLY",
+    "KLRD1",
+    "NCAM1",
+    "TYROBP",
+    "SH2D1B"
+  ],
+  "B cell": [
+    "MS4A1",
+    "CD79A",
+    "CD79B",
+    "BANK1",
+    "PAX5",
+    "AFF3",
+    "BLK",
+    "FCRL1",
+    "IGHM",
+    "CD22"
+  ],
+  "Plasma cell": [
+    "JCHAIN",
+    "MZB1",
+    "SDC1",
+    "PRDM1",
+    "IGHA1",
+    "IGKC",
+    "IGLC2",
+    "IGLC3"
+  ],
+  "Monocyte": [
+    "CD14",
+    "LYZ",
+    "S100A8",
+    "S100A9",
+    "VCAN",
+    "FCN1",
+    "CSF3R",
+    "CD36",
+    "LRP1"
+  ],
+  "Macrophage": [
+    "MARCO",
+    "MRC1",
+    "CD163",
+    "C1QA",
+    "C1QB",
+    "C1QC",
+    "MSR1",
+    "F13A1",
+    "CSF1R",
+    "APOE",
+    "MS4A6A",
+    "DOCK2"
+  ],
+  "Dendritic cell": [
+    "CLEC9A",
+    "FCER1A",
+    "CLEC10A",
+    "BATF3",
+    "CD83",
+    "CIITA",
+    "CCR7"
+  ],
+  "Mast cell": [
+    "TPSB2",
+    "CPA3",
+    "KIT",
+    "HPGDS",
+    "HDC"
+  ],
+  "Adrenal cortex (fasciculata)": [
+    "STAR",
+    "CYP11A1",
+    "CYP11B1",
+    "CYP17A1",
+    "CYP21A2",
+    "NR5A1",
+    "MC2R"
+  ],
+  "Adrenal cortex (glomerulosa)": [
+    "CYP11B2",
+    "DACH1",
+    "VSNL1"
+  ],
+  "Chromaffin cell": [
+    "CHGA",
+    "TH",
+    "DBH",
+    "PNMT",
+    "CHGB",
+    "PHOX2B"
+  ],
+  "Adipocyte": [
+    "PLIN1",
+    "ADIPOQ",
+    "GPAM",
+    "PLIN4"
+  ],
+  "Cycling cells": [
+    "MKI67",
+    "TOP2A",
+    "CENPF",
+    "ASPM",
+    "NUSAP1",
+    "DIAPH3",
+    "SMC4",
+    "TPX2",
+    "RRM2",
+    "KNL1"
+  ],
+  "Ventricular cardiomyocyte": [
+    "RYR2",
+    "MYO18B",
+    "TTN",
+    "OBSCN",
+    "PRELID2"
+  ],
+  "Atrial cardiomyocyte": [
+    "NPPA",
+    "MYL4",
+    "MYH6"
+  ],
+  "Mesothelial": [
+    "KRT19",
+    "UPK3B"
+  ],
+  "Neural cell": [
+    "CDH19",
+    "NRXN1",
+    "NCAM2",
+    "PLP1"
+  ]
+}
