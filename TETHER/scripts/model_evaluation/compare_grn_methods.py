@@ -186,6 +186,10 @@ sample_tissue_map = {
     "old_rep1": "HSC",
     "old_rep2": "HSC",
     "liver_sample": "Liver",
+    # hg38 ENCODE samples
+    "adrenal_adult_ENCDO221IPH": "Adrenal",
+    "bile_duct_adult_ENCDO575WHY": "Bile duct",
+    "colon_adult_ENCDO856ZOJ": "Colon",
 }
 
 # Heatmap rows: grouped by which TF-TG model scored them, or sorted by mean metric
