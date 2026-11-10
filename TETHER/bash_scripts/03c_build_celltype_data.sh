@@ -17,7 +17,8 @@
 # Rebuild only some samples by index, for example: sbatch --array=3,7 ...
 # Keep --array in sync with the length of DATASETS.
 # SPECIES selects the dataset list (default mm10). For hg38:
-#   sbatch --export=ALL,SPECIES=hg38 --array=0-2 TETHER/bash_scripts/03c_build_celltype_data.sh
+#   sbatch --export=ALL,SPECIES=hg38 --array=0-11%9 TETHER/bash_scripts/03c_build_celltype_data.sh
+# (12 hg38 samples; the --array=0-16%9 directive above is for the 17 mm10 samples.)
 # Samples are read from data/processed/<species>/<tissue>/<sample>/multiome_processed.h5mu.
 #
 # The preprocessing settings below select the cache. They must match the ones in
@@ -41,6 +42,15 @@ DATASETS=(
     "ENCODE_adrenal:adrenal_adult_ENCDO221IPH"
     "ENCODE_bile_duct:bile_duct_adult_ENCDO575WHY"
     "ENCODE_colon:colon_adult_ENCDO856ZOJ"
+    "ENCODE_fallopian_tube:fallopian_tube_adult_ENCDO411EVD"
+    "ENCODE_heart:heart_lv_adult_ENCDO575WHY"
+    "ENCODE_lung:lung_adult_ENCDO528BHB"
+    "ENCODE_pancreas:pancreas_adult_ENCDO221IPH"
+    "GSE194122_bone_marrow:s1d1"
+    "GSE207335_epidermis:S1"
+    "GSE240061_muscle_pre_exercise:Ex-1_Pre_tr1"
+    "GSE277326_retina_macula_rpe:Retina_donor1"
+    "GSE319044_lung_spleen_immune:Spleen-SMO-04"
 )
 # TF-DNA model of the current hg38 TF cache (tf_dna_cache_site_merged_overlap_filtered)
 EXTRA_ARGS=(--tf_dna_checkpoint "$PROJECT_DIR/checkpoints/tf_dna_hg38_3930720/epoch_18.ckpt")

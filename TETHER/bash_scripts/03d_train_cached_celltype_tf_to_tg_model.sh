@@ -48,6 +48,15 @@ DATASETS=(
     "ENCODE_adrenal:adrenal_adult_ENCDO221IPH"
     "ENCODE_bile_duct:bile_duct_adult_ENCDO575WHY"
     "ENCODE_colon:colon_adult_ENCDO856ZOJ"
+    "ENCODE_fallopian_tube:fallopian_tube_adult_ENCDO411EVD"
+    "ENCODE_heart:heart_lv_adult_ENCDO575WHY"
+    "ENCODE_lung:lung_adult_ENCDO528BHB"
+    "ENCODE_pancreas:pancreas_adult_ENCDO221IPH"
+    "GSE194122_bone_marrow:s1d1"
+    "GSE207335_epidermis:S1"
+    "GSE240061_muscle_pre_exercise:Ex-1_Pre_tr1"
+    "GSE277326_retina_macula_rpe:Retina_donor1"
+    "GSE319044_lung_spleen_immune:Spleen-SMO-04"
 )
 # Must match 03c: the TF-DNA checkpoint is part of the sample cache key.
 EXTRA_ARGS=(--tf_dna_checkpoint "$PROJECT_DIR/checkpoints/tf_dna_hg38_3930720/epoch_18.ckpt")

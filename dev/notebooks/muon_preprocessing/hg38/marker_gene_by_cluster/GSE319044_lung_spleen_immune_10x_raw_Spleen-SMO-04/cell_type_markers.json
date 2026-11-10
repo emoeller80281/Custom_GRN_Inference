@@ -1,0 +1,106 @@
+{
+  "T cell": [
+    "CD3D",
+    "CD3E",
+    "CD3G",
+    "CD2",
+    "TRAC",
+    "TRBC1",
+    "TRBC2",
+    "BCL11B",
+    "IL7R",
+    "CD247",
+    "SKAP1",
+    "THEMIS",
+    "CD96",
+    "ITK",
+    "CAMK4"
+  ],
+  "NK cell": [
+    "NKG7",
+    "GNLY",
+    "KLRD1",
+    "KLRF1",
+    "PRF1"
+  ],
+  "B cell": [
+    "MS4A1",
+    "CD79A",
+    "CD79B",
+    "BANK1",
+    "PAX5",
+    "AFF3",
+    "BLK",
+    "FCRL1",
+    "IGHM",
+    "CD22"
+  ],
+  "Plasma cell": [
+    "JCHAIN",
+    "MZB1",
+    "PRDM1",
+    "IGHG1",
+    "IGHA1",
+    "IGKC",
+    "IGLC2",
+    "IGLC3"
+  ],
+  "Monocyte": [],
+  "Macrophage": [
+    "MSR1",
+    "DOCK2"
+  ],
+  "Dendritic cell": [
+    "CD1C",
+    "CD83",
+    "CIITA",
+    "CCR7"
+  ],
+  "Mast cell": [],
+  "CD8/cytotoxic T": [
+    "CD8A",
+    "CD8B",
+    "GZMK",
+    "CCL5",
+    "CST7",
+    "GZMA"
+  ],
+  "Treg": [
+    "IL2RA",
+    "CTLA4",
+    "TIGIT",
+    "IKZF2"
+  ],
+  "pDC": [
+    "LILRA4",
+    "SLC15A4",
+    "PLD4",
+    "TCF4",
+    "IRF7"
+  ],
+  "Erythroid": [
+    "TFRC"
+  ],
+  "HSPC": [
+    "SPINK2",
+    "HLF",
+    "HOPX"
+  ],
+  "Myeloid progenitor": [],
+  "Megakaryocyte": [
+    "ITGA2B"
+  ],
+  "Endothelial": [
+    "PECAM1",
+    "FLT1"
+  ],
+  "Fibroblast": [
+    "COL1A1"
+  ],
+  "Cycling cells": [
+    "CENPF",
+    "NUSAP1",
+    "SMC4",
+    "KNL1"
+  ]
+}

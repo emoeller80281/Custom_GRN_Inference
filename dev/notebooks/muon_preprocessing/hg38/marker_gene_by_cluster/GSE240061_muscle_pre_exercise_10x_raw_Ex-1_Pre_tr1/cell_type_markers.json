@@ -1,0 +1,136 @@
+{
+  "Endothelial": [
+    "PECAM1",
+    "VWF",
+    "CDH5",
+    "FLT1",
+    "PTPRB",
+    "EGFL7",
+    "KDR",
+    "ERG",
+    "EMCN",
+    "TIE1"
+  ],
+  "Pericyte/smooth muscle": [
+    "RGS5",
+    "ACTA2",
+    "MYH11",
+    "TAGLN",
+    "PDGFRB",
+    "NOTCH3",
+    "CARMN",
+    "KCNQ5",
+    "DLC1",
+    "GUCY1A2",
+    "PRKG1",
+    "ABCC9"
+  ],
+  "T cell": [
+    "CD3G",
+    "CD247",
+    "SKAP1",
+    "CD96",
+    "ITK",
+    "CAMK4"
+  ],
+  "NK cell": [
+    "NKG7",
+    "GNLY",
+    "KLRD1",
+    "KLRF1",
+    "NCAM1",
+    "PRF1",
+    "GZMB",
+    "TYROBP",
+    "SH2D1B"
+  ],
+  "B cell": [
+    "BANK1",
+    "PAX5",
+    "AFF3"
+  ],
+  "Plasma cell": [
+    "PRDM1"
+  ],
+  "Monocyte": [
+    "CD14",
+    "LYZ",
+    "VCAN",
+    "CD36",
+    "LRP1"
+  ],
+  "Macrophage": [
+    "MARCO",
+    "MRC1",
+    "CD163",
+    "C1QA",
+    "C1QB",
+    "C1QC",
+    "MSR1",
+    "F13A1",
+    "CSF1R",
+    "APOE",
+    "MS4A6A",
+    "DOCK2"
+  ],
+  "Dendritic cell": [
+    "CLEC10A",
+    "CIITA"
+  ],
+  "Mast cell": [
+    "HPGDS"
+  ],
+  "Type I (slow) fiber": [
+    "MYH7",
+    "TNNT1",
+    "TNNC1",
+    "TNNI1",
+    "ATP2A2",
+    "MYL3",
+    "MYH7B",
+    "LGR5",
+    "ANKRD2"
+  ],
+  "Type II (fast) fiber": [
+    "MYH1",
+    "MYH2",
+    "ACTN3",
+    "TNNT3",
+    "TNNI2",
+    "ATP2A1",
+    "MYLK2",
+    "SORBS2",
+    "TNNC2"
+  ],
+  "Satellite cell": [
+    "PAX7",
+    "CALCR",
+    "GREM1",
+    "DCC",
+    "NCAM1",
+    "MYF5"
+  ],
+  "FAP": [
+    "PDGFRA",
+    "DCN",
+    "LUM",
+    "COL1A2",
+    "FBN1",
+    "COL3A1",
+    "COL6A3",
+    "ABCA8",
+    "FBLN1",
+    "COL1A1"
+  ],
+  "Myotendinous junction": [],
+  "Neuromuscular junction": [
+    "CHRNE",
+    "CHRNA1",
+    "MUSK"
+  ],
+  "Cycling cells": [
+    "NUSAP1",
+    "SMC4",
+    "TPX2"
+  ]
+}

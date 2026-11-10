@@ -1,0 +1,194 @@
+{
+  "Endothelial": [
+    "PECAM1",
+    "VWF",
+    "FLT1",
+    "PTPRB",
+    "EGFL7",
+    "KDR",
+    "ERG"
+  ],
+  "Pericyte/smooth muscle": [
+    "RGS5",
+    "ACTA2",
+    "MYH11",
+    "TAGLN",
+    "PDGFRB",
+    "KCNQ5",
+    "DLC1",
+    "GUCY1A2",
+    "PRKG1",
+    "ABCC9"
+  ],
+  "Fibroblast": [
+    "COL1A1",
+    "COL1A2",
+    "DCN",
+    "LUM",
+    "PDGFRA",
+    "FBN1",
+    "COL6A3",
+    "MMP2",
+    "ABCA8"
+  ],
+  "T cell": [
+    "TRAC",
+    "CD247",
+    "SKAP1",
+    "CD96",
+    "CAMK4"
+  ],
+  "NK cell": [
+    "KLRD1",
+    "NCAM1",
+    "TYROBP",
+    "KLRC1"
+  ],
+  "B cell": [
+    "BANK1",
+    "PAX5",
+    "AFF3"
+  ],
+  "Plasma cell": [
+    "PRDM1"
+  ],
+  "Monocyte": [
+    "CD14",
+    "CD36",
+    "LRP1"
+  ],
+  "Macrophage": [
+    "MRC1",
+    "CD163",
+    "C1QB",
+    "MSR1",
+    "F13A1",
+    "CSF1R",
+    "APOE",
+    "MS4A6A",
+    "DOCK2"
+  ],
+  "Dendritic cell": [
+    "CD83",
+    "CIITA"
+  ],
+  "Mast cell": [
+    "KIT",
+    "HDC"
+  ],
+  "Rod photoreceptor": [
+    "RHO",
+    "NRL",
+    "PDE6A",
+    "SAG",
+    "NR2E3",
+    "PDE6B",
+    "GNAT1",
+    "ROM1",
+    "CNGA1",
+    "PDE6G"
+  ],
+  "Cone photoreceptor": [
+    "ARR3",
+    "OPN1LW",
+    "GNAT2",
+    "PDE6H"
+  ],
+  "Bipolar cell": [
+    "VSX2",
+    "GRM6",
+    "PRKCA",
+    "TRPM1",
+    "GRIK1",
+    "CACNA1S",
+    "ISL1",
+    "NEBL",
+    "CA10"
+  ],
+  "Amacrine cell": [
+    "GAD1",
+    "SLC6A9",
+    "TFAP2A",
+    "TFAP2B",
+    "GAD2"
+  ],
+  "Horizontal cell": [
+    "LHX1",
+    "ONECUT2",
+    "ONECUT1",
+    "ONECUT3"
+  ],
+  "Retinal ganglion cell": [
+    "RBPMS",
+    "SNCG",
+    "NEFM"
+  ],
+  "Muller glia": [
+    "RLBP1",
+    "WIF1",
+    "CRYM",
+    "GPM6A",
+    "CLU",
+    "DKK3",
+    "SLC1A3"
+  ],
+  "Astrocyte": [
+    "GFAP",
+    "AQP4",
+    "PAX2"
+  ],
+  "Microglia": [
+    "P2RY12",
+    "CSF1R",
+    "APBB1IP",
+    "DOCK8"
+  ],
+  "RPE": [
+    "BEST1",
+    "LRAT",
+    "RGR",
+    "TTR",
+    "RLBP1",
+    "TYR",
+    "SLC4A4",
+    "SLC23A2"
+  ],
+  "Ciliary body epithelium": [
+    "CPAMD8",
+    "COL9A1"
+  ],
+  "Retinal neuron (other)": [
+    "NRXN1",
+    "DLGAP1",
+    "GRIA4",
+    "CNTNAP2",
+    "FAM155A",
+    "ADGRB3",
+    "GRIP1",
+    "SNAP25",
+    "SYT1",
+    "RIMS2"
+  ],
+  "Melanocyte": [
+    "MLANA",
+    "DCT",
+    "TYR",
+    "PMEL",
+    "TYRP1",
+    "MITF"
+  ],
+  "Schwann cell": [
+    "PLP1",
+    "S100B",
+    "MPZ",
+    "NRXN1"
+  ],
+  "Cycling cells": [
+    "CENPF",
+    "NUSAP1",
+    "DIAPH3",
+    "SMC4",
+    "TPX2",
+    "KNL1"
+  ]
+}

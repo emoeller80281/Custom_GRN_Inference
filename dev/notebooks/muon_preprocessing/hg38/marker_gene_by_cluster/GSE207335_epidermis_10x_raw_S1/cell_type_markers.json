@@ -1,0 +1,165 @@
+{
+  "Endothelial": [
+    "PECAM1",
+    "VWF",
+    "FLT1",
+    "PTPRB",
+    "ERG",
+    "EMCN",
+    "TIE1"
+  ],
+  "Pericyte/smooth muscle": [
+    "RGS5",
+    "ACTA2",
+    "MYH11",
+    "TAGLN",
+    "NOTCH3",
+    "KCNQ5",
+    "DLC1",
+    "GUCY1A2",
+    "PRKG1",
+    "ABCC9"
+  ],
+  "Fibroblast": [
+    "COL1A1",
+    "DCN",
+    "FBN1",
+    "COL6A3",
+    "ABCA8",
+    "FBLN1"
+  ],
+  "T cell": [
+    "CD3E",
+    "CD3G",
+    "CD2",
+    "TRAC",
+    "TRBC1",
+    "TRBC2",
+    "BCL11B",
+    "IL7R",
+    "CD247",
+    "SKAP1",
+    "THEMIS",
+    "CD96",
+    "ITK",
+    "CAMK4"
+  ],
+  "NK cell": [
+    "GNLY",
+    "KLRD1",
+    "NCAM1",
+    "TYROBP"
+  ],
+  "B cell": [
+    "CD79A",
+    "BANK1",
+    "PAX5",
+    "AFF3"
+  ],
+  "Plasma cell": [
+    "SDC1",
+    "PRDM1"
+  ],
+  "Monocyte": [
+    "CD14",
+    "LYZ",
+    "S100A8",
+    "S100A9",
+    "VCAN",
+    "FCN1",
+    "CD36",
+    "LRP1"
+  ],
+  "Macrophage": [
+    "MARCO",
+    "F13A1",
+    "CSF1R",
+    "APOE",
+    "DOCK2"
+  ],
+  "Dendritic cell": [
+    "FCER1A",
+    "XCR1",
+    "BATF3",
+    "CD83",
+    "CIITA"
+  ],
+  "Mast cell": [
+    "KIT",
+    "HPGDS"
+  ],
+  "Basal keratinocyte": [
+    "KRT5",
+    "KRT14",
+    "KRT15",
+    "COL17A1",
+    "TP63",
+    "DST",
+    "ITGB4",
+    "CXCL14",
+    "ITGA6"
+  ],
+  "Suprabasal keratinocyte": [
+    "KRT1",
+    "KRT10",
+    "DSG1",
+    "DSC1",
+    "KRT2",
+    "LOR",
+    "FLG",
+    "SBSN",
+    "KRTDAP",
+    "DMKN"
+  ],
+  "Hair follicle": [
+    "SOX9",
+    "KRT6A",
+    "TCHH"
+  ],
+  "Gland (sweat/sebaceous)": [
+    "MUCL1",
+    "KRT7",
+    "KRT19",
+    "SLC12A2"
+  ],
+  "Melanocyte": [
+    "MLANA",
+    "DCT",
+    "TYR",
+    "PMEL",
+    "TYRP1",
+    "MITF"
+  ],
+  "Lymphatic endothelial": [
+    "PROX1",
+    "PDPN",
+    "TFPI"
+  ],
+  "Schwann cell": [
+    "PLP1",
+    "S100B",
+    "MPZ",
+    "NRXN1",
+    "SOX10",
+    "CDH19"
+  ],
+  "Langerhans cell": [
+    "CD207",
+    "CD1A"
+  ],
+  "Adipocyte": [
+    "GPAM"
+  ],
+  "Cycling cells": [
+    "MKI67",
+    "TOP2A",
+    "CENPF",
+    "ASPM",
+    "NUSAP1",
+    "DIAPH3",
+    "SMC4",
+    "TPX2",
+    "RRM2",
+    "KNL1"
+  ]
+}
