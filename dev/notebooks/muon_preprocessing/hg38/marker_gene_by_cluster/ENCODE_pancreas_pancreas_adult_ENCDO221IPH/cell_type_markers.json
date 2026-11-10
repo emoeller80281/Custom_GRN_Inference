@@ -1,0 +1,156 @@
+{
+  "Endothelial": [
+    "PECAM1",
+    "VWF",
+    "CDH5",
+    "FLT1",
+    "PTPRB",
+    "EGFL7",
+    "KDR",
+    "ERG",
+    "EMCN",
+    "TIE1"
+  ],
+  "Pericyte/smooth muscle": [
+    "RGS5",
+    "ACTA2",
+    "MYH11",
+    "TAGLN",
+    "PDGFRB",
+    "NOTCH3",
+    "CARMN",
+    "KCNQ5",
+    "DLC1",
+    "GUCY1A2",
+    "PRKG1",
+    "ABCC9"
+  ],
+  "Fibroblast": [
+    "COL1A1",
+    "COL1A2",
+    "COL3A1",
+    "DCN",
+    "LUM",
+    "PDGFRA",
+    "FBN1",
+    "COL6A3",
+    "MMP2",
+    "ABCA8",
+    "FBLN1"
+  ],
+  "T cell": [
+    "CD3E",
+    "CD3G",
+    "CD2",
+    "BCL11B",
+    "IL7R",
+    "CD247",
+    "SKAP1",
+    "THEMIS",
+    "CD96",
+    "ITK",
+    "CAMK4"
+  ],
+  "NK cell": [
+    "KLRD1",
+    "KLRF1",
+    "NCAM1",
+    "TYROBP",
+    "KLRC1",
+    "SH2D1B"
+  ],
+  "B cell": [
+    "BANK1",
+    "PAX5",
+    "AFF3",
+    "BLK",
+    "CD22"
+  ],
+  "Plasma cell": [
+    "JCHAIN",
+    "SDC1",
+    "PRDM1",
+    "IGHA1",
+    "IGKC",
+    "IGLC3"
+  ],
+  "Monocyte": [
+    "CD14",
+    "LYZ",
+    "S100A8",
+    "S100A9",
+    "VCAN",
+    "CSF3R",
+    "CD36",
+    "LRP1"
+  ],
+  "Macrophage": [
+    "MARCO",
+    "MRC1",
+    "CD163",
+    "C1QA",
+    "C1QB",
+    "C1QC",
+    "MSR1",
+    "F13A1",
+    "CSF1R",
+    "APOE",
+    "MS4A6A",
+    "DOCK2"
+  ],
+  "Dendritic cell": [
+    "BATF3",
+    "CD83",
+    "CIITA"
+  ],
+  "Mast cell": [
+    "CPA3",
+    "KIT",
+    "HPGDS",
+    "HDC"
+  ],
+  "Acinar cell": [
+    "PRSS1",
+    "CPA1",
+    "CELA3A",
+    "CTRB1",
+    "PNLIP",
+    "CPB1",
+    "REG1A"
+  ],
+  "Ductal cell": [
+    "KRT19",
+    "CFTR",
+    "SOX9",
+    "KRT7",
+    "SLC4A4"
+  ],
+  "Alpha cell": [
+    "GCG",
+    "IRX2",
+    "ARX",
+    "TTR"
+  ],
+  "Beta cell": [
+    "INS",
+    "IAPP",
+    "MAFA",
+    "NKX6-1"
+  ],
+  "Delta cell": [
+    "SST",
+    "HHEX"
+  ],
+  "PP cell": [
+    "PPY"
+  ],
+  "Cycling cells": [
+    "TOP2A",
+    "CENPF",
+    "ASPM",
+    "DIAPH3",
+    "SMC4",
+    "TPX2",
+    "KNL1"
+  ]
+}
