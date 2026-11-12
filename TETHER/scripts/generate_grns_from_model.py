@@ -45,7 +45,9 @@ from scripts.build_tf_to_tg_celltype_data import (
     BINDING_MANIFEST,
     load_binding_model,
     load_or_precompute_binding_scores,
-    binding_score_cache_path
+    binding_score_cache_path,
+    gene_tss_bed_path,
+    peak_nearest_tss_genes,
 )
 
 from models.tf_to_tg_celltype import LitTFTGRegulationModel
@@ -167,10 +169,18 @@ def load_source(run_config, tissue, sample_name):
             f"{tissue}:{sample_name}: {atac.n_vars:,} ATAC peaks but "
             f"{atac_peak_tensor.shape[0]:,} cached peak sequences"
         )
+    peak_nearest_gene = None
+    if run_config.get("own_peaks", "off") != "off":
+        # Runs trained with --own_peaks flag or only need each peak's nearest-TSS gene.
+        peak_nearest_gene = peak_nearest_tss_genes(
+            atac.var_names.to_numpy(),
+            gene_tss_bed_path(run_config["data_dir"], run_config["species"]),
+        )
     return {
         "tissue": tissue,
         "sample_name": sample_name,
         "source_dir": source_dir,
+        "peak_nearest_gene": peak_nearest_gene,
         "rna_names": rna.var_names.to_numpy(),
         "rna_mat": rna.X,
         "atac_mat": atac.X,
@@ -305,6 +315,8 @@ def predict(model, edges, binding_scores, source, run_config, args, device, desc
         resample_cells=False,
         binding_scores=binding_scores,
         seed=run_config["seed"],
+        peak_nearest_gene=source.get("peak_nearest_gene"),
+        own_peaks=run_config.get("own_peaks", "off"),
     )
     num_workers = run_config["num_workers"] if args.num_workers is None else args.num_workers
     loader = DataLoader(

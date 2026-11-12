@@ -47,7 +47,10 @@ from scripts.build_tf_to_tg_celltype_data import (  # noqa: E402
     _atomic_torch_save,
     _atomic_write_json,
     _cache_digest,
+    _file_identity,
     binding_score_cache_path,
+    gene_tss_bed_path,
+    peak_nearest_tss_genes,
 )
 
 import pytorch_lightning as pl  # noqa: E402
@@ -114,14 +117,33 @@ def parse_args(argv=None):
     parser.add_argument("--pos_weight", type=float, default=1.)
     parser.add_argument("--early_stopping_patience", type=int, default=15)
     parser.add_argument(
-        "--lr_schedule", choices=["plateau", "cosine"], default="cosine",
-        help="Linear warmup + per-step cosine decay to 1%% of --lr at --epochs, as in the TF-DNA "
-             "model (default), or ReduceLROnPlateau x0.1 on val/loss",
+        "--lr_schedule", choices=["plateau_cosine", "cosine", "plateau"], default="plateau_cosine",
+        help="plateau_cosine (default): linear warmup, constant --lr until val/loss has not "
+             "improved by more than --decay_min_delta for --decay_patience epochs, then per-step "
+             "cosine decay to 1%% of --lr over --decay_epochs epochs, after which training stops "
+             "(--epochs stays the upper limit). cosine: linear warmup + per-step cosine decay to "
+             "1%% of --lr at --epochs, as in the TF-DNA model. plateau: ReduceLROnPlateau x0.1 "
+             "on val/loss",
     )
     parser.add_argument("--warmup_epochs", type=float, default=1.0,
-                        help="Linear warmup length for --lr_schedule cosine")
+                        help="Linear warmup length for --lr_schedule cosine and plateau_cosine")
+    parser.add_argument("--decay_patience", type=int, default=5,
+                        help="Epochs without a val/loss improvement before the cosine decay "
+                             "starts (--lr_schedule plateau_cosine only)")
+    parser.add_argument("--decay_epochs", type=int, default=20,
+                        help="Length of the cosine decay in epochs (--lr_schedule plateau_cosine only)")
+    parser.add_argument("--decay_min_delta", type=float, default=1e-4,
+                        help="Smallest val/loss decrease that counts as an improvement "
+                             "(--lr_schedule plateau_cosine only)")
     parser.add_argument("--plateau_patience", type=int, default=4,
                         help="Epochs without a val/loss improvement before x0.1 (--lr_schedule plateau only)")
+    parser.add_argument(
+        "--own_peaks", choices=["off", "flag", "only"], default="off",
+        help="Own peaks of a TG are bag peaks whose nearest TSS (bedtools closest -t first on "
+             "<species>_gene_tss.bed, the ground-truth rule) belongs to that TG. flag: add a "
+             "fifth per-peak feature, 1 for own peaks. only: keep only own peaks in the bag "
+             "(edges with none get an empty bag). off (default): the four-feature model",
+    )
     parser.add_argument("--accumulate_grad_batches", type=int, default=1)
     parser.add_argument("--gradient_clip_val", type=float, default=1.)
     parser.add_argument("--precision", choices=["32-true", "16-mixed", "bf16-mixed"], default="32-true")
@@ -157,8 +179,10 @@ def parse_args(argv=None):
         parser.error("lr, pooling_temperature, and pos_weight must be positive")
     if not 0 <= args.dropout < 1 or args.weight_decay < 0 or args.gradient_clip_val < 0:
         parser.error("dropout must be in [0, 1); weight decay and gradient clipping must be nonnegative")
-    if args.lr_schedule == "cosine" and not 0 <= args.warmup_epochs < args.epochs:
-        parser.error("--warmup_epochs must be in [0, --epochs) for --lr_schedule cosine")
+    if args.lr_schedule in ("cosine", "plateau_cosine") and not 0 <= args.warmup_epochs < args.epochs:
+        parser.error(f"--warmup_epochs must be in [0, --epochs) for --lr_schedule {args.lr_schedule}")
+    if args.decay_patience <= 0 or args.decay_epochs <= 0 or args.decay_min_delta < 0:
+        parser.error("--decay_patience and --decay_epochs must be positive, --decay_min_delta nonnegative")
 
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     run_name = args.run_name if args.run_name is not None else "joint" if len(source_specs) > 1 else source_specs[0][1]
@@ -226,6 +250,8 @@ class TFTGEdgeBagDataset(Dataset):
         resample_cells=True,
         binding_scores=None,   # [len(inputs), P], precomputed; skips peak_sequences
         seed=42,
+        peak_nearest_gene=None,  # [n ATAC peaks] nearest-TSS gene, for own_peaks
+        own_peaks="off",
     ):
         self.inputs = inputs.reset_index(drop=True).copy()
 
@@ -244,7 +270,15 @@ class TFTGEdgeBagDataset(Dataset):
         self.seed = int(seed)
         self._rng = None
         self.binding_scores = binding_scores
-        
+        if own_peaks not in ("off", "flag", "only"):
+            raise ValueError(f"own_peaks must be off, flag or only, not {own_peaks!r}")
+        self.own_peaks = own_peaks
+        self.peak_nearest_gene = None
+        if own_peaks != "off":
+            if peak_nearest_gene is None or len(peak_nearest_gene) != atac_mat.shape[1]:
+                raise ValueError("own_peaks needs one nearest-TSS gene per ATAC column")
+            self.peak_nearest_gene = np.asarray(peak_nearest_gene, dtype=object)
+
         if binding_scores is not None and len(binding_scores) != len(self.inputs):
             raise ValueError(
                 f"binding_scores has {len(binding_scores)} rows but inputs has "
@@ -343,7 +377,16 @@ class TFTGEdgeBagDataset(Dataset):
         peak_indices[:n_peaks] = torch.from_numpy(peak_cols)
 
         peak_mask = torch.zeros(self.P, dtype=torch.bool)
-        peak_mask[:n_peaks] = True
+        peak_own = None
+        if self.own_peaks == "off":
+            peak_mask[:n_peaks] = True
+        else:
+            own = self.peak_nearest_gene[peak_cols] == row.tg_id
+            peak_own = torch.zeros(self.P, dtype=torch.bool)
+            peak_own[:n_peaks] = torch.from_numpy(own)
+            # "only" drops the other peaks from the bag; their binding scores and
+            # accessibility are masked in the model.
+            peak_mask[:n_peaks] = peak_own[:n_peaks] if self.own_peaks == "only" else True
 
         peak_distance = torch.zeros(self.P, dtype=torch.float32)
         peak_distance[:n_peaks] = torch.from_numpy(distances)
@@ -393,6 +436,8 @@ class TFTGEdgeBagDataset(Dataset):
             "tg_expression": tg_expression,
         }
         
+        if self.own_peaks == "flag":
+            item["peak_own"] = peak_own
         if self.binding_scores is not None:
             item["binding_score"] = self.binding_scores[idx]
         else:
@@ -598,6 +643,10 @@ def main(argv=None, extra_callbacks=()):
             "seed": args.seed,
         },
     }
+    if args.own_peaks == "only":
+        # A smaller bag changes the accessibility scaler. "flag" keeps every peak, so it
+        # shares the run cache of the four-feature model.
+        cache_manifest["own_peaks"] = "only"
     cache_key = _cache_digest(cache_manifest)
     if args.cache_dir is None:
         args.cache_dir = (
@@ -630,6 +679,23 @@ def main(argv=None, extra_callbacks=()):
         load_cached_source(args, tissue, sample_name, directory, manifest)
         for (tissue, sample_name), (directory, manifest) in locations.items()
     ]
+    if args.own_peaks != "off":
+        tss_bed = gene_tss_bed_path(args.data_dir, args.species)
+        config["own_peaks_tss_bed"] = _file_identity(tss_bed)
+        for source in prepared_sources:
+            source["peak_nearest_gene"] = peak_nearest_tss_genes(source["peak_names"], tss_bed)
+            source_key = f"{source['tissue']}__{source['sample_name']}"
+            for split_name, frame in source["splits"].items():
+                own = np.array([
+                    int((source["peak_nearest_gene"][np.asarray(cols, dtype=np.int64)] == tg).sum())
+                    for cols, tg in zip(frame["peak_atac_cols"], frame["tg_id"])
+                ])
+                stats = {
+                    "edges_with_own_peak": float((own > 0).mean()) if len(own) else float("nan"),
+                    "mean_own_peaks": float(own.mean()) if len(own) else float("nan"),
+                }
+                config[f"{source_key}_{split_name}_own_peaks"] = stats
+                logging.info("%s %s own peaks: %s", source_key, split_name, stats)
 
     available_train_celltypes = {
         cell_type
@@ -701,6 +767,8 @@ def main(argv=None, extra_callbacks=()):
                 resample_max_cells_per_pair=args.max_cells_per_pair,
                 binding_scores=scores,
                 seed=args.seed,
+                peak_nearest_gene=source.get("peak_nearest_gene"),
+                own_peaks=args.own_peaks,
             )
             dataset_parts[split_name].append(TFTGEdgeBagDataset(
                 frame,
@@ -798,7 +866,8 @@ def main(argv=None, extra_callbacks=()):
     module = LitTFTGRegulationModel(**{key: getattr(args, key) for key in (
         "d_model", "num_heads", "num_cross_attn_layers", "dropout", "lr", "weight_decay",
         "pooling_temperature", "pos_weight", "plateau_patience", "lr_schedule",
-        "warmup_epochs")},
+        "warmup_epochs", "decay_patience", "decay_epochs", "decay_min_delta")},
+        own_peak_flag=args.own_peaks == "flag",
         **scaler_hparams)
 
     if args.wandb_mode == "disabled":

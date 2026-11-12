@@ -20,6 +20,8 @@ Pipeline per (cell_type, source_term):
   4. bedtools closest -d -t first assigns each peak its single nearest TSS. `closest` rather
      than `window` because these peak sets run to millions of rows and an all-pairs window
      over a 100 kb radius does not finish.
+  5. `distances` lists, per edge, the TSS distance of each binding site of the TF that is
+     assigned to the target, pooled over all of the edge's sources (binding_site_distances).
 
 Per-experiment filter (--excluded_experiments, see experiment_filter.py): the listed ChIP-Atlas
 experiments (SRX, the ID= field of col4) and ReMap datasets (the whole col4 name) are dropped in
@@ -64,6 +66,11 @@ TF_IDX = PROJECT_DIR / "TETHER" / "cached_data" / "{organism}" / "{cache}" / "tf
 # Matches MAX_PEAK_DISTANCE in build_peak_to_gene_dist.py, so the label side and the input
 # side of the model use the same peak-to-gene radius.
 DEFAULT_MAX_TSS_DIST = 100_000
+
+# distances: sorted list, one value per binding site of the edge, in bp from the site to the
+# target's nearest TSS as bedtools closest -d gives it (site edge to TSS, 0 when they overlap).
+EDGE_COLUMNS = ["Source", "Target", "cell_type", "source", "source_term", "proxy_tier",
+                "distances"]
 
 # Both awk programs take -v exfile=<one listed ID per line> (empty: no filter) and
 # -v stats=<file>: a peak whose experiment ID is listed is skipped, and stats gets one
@@ -138,7 +145,7 @@ def reduce_bed(bed_path: Path, source: str, out_path: Path, exfile: Path = None)
 
 
 def closest_tss(peaks_bed: Path, tss_sorted: Path, tmp: Path) -> pd.DataFrame:
-    """bedtools closest -d, one nearest TSS per peak. Returns tf/target/dist."""
+    """bedtools closest -d, one nearest TSS per peak. Returns chrom/start/end/tf/target/dist."""
     srt = tmp / (peaks_bed.stem + ".sorted.bed")
     out = tmp / (peaks_bed.stem + ".closest.bed")
     subprocess.run(f"sort -k1,1 -k2,2n {peaks_bed} > {srt}", shell=True, check=True,
@@ -148,13 +155,39 @@ def closest_tss(peaks_bed: Path, tss_sorted: Path, tmp: Path) -> pd.DataFrame:
         shell=True, check=True, executable="/bin/bash",
     )
     df = pd.read_csv(
-        out, sep="\t", header=None, usecols=[3, 7, 8],
-        names=["tf", "target", "dist"],
-        dtype={3: str, 7: str}, na_filter=False,
+        out, sep="\t", header=None, usecols=[0, 1, 2, 3, 7, 8],
+        names=["chrom", "start", "end", "tf", "target", "dist"],
+        dtype={"chrom": str, "tf": str, "target": str}, na_filter=False,
     )
     srt.unlink(missing_ok=True)
     out.unlink(missing_ok=True)
     return df
+
+
+def binding_site_distances(peaks: pd.DataFrame) -> pd.DataFrame:
+    """Per edge, the sorted TSS distance of each of its binding sites.
+
+    A binding site is a run of overlapping peaks of the edge's TF that are assigned to the edge's
+    target. The same site is called once per experiment and again by ChIP-Atlas and ReMap, so a
+    list with one value per peak would count one site many times. Overlapping and book-ended
+    peaks are one site, as in bedtools merge. A site's distance is the smallest distance of its
+    peaks, which is the distance from the merged interval to the TSS.
+    """
+    key = ["Source", "Target", "chrom"]
+    p = peaks.astype({c: "category" for c in key})
+    p = p.sort_values(key + ["start"], kind="stable", ignore_index=True)
+    group = p.groupby(key, observed=True, sort=False).ngroup()
+    # Furthest end of the earlier peaks in the same group. A peak that starts after it overlaps
+    # none of them, so it starts a new site.
+    reach = p.groupby(group, sort=False)["end"].cummax().shift()
+    p["site"] = ((group != group.shift()) | (p["start"] > reach)).cumsum()
+    sites = p.groupby("site", sort=False).agg(Source=("Source", "first"),
+                                              Target=("Target", "first"),
+                                              distances=("dist", "min"))
+    out = (sites.sort_values("distances", kind="stable")
+                .groupby(["Source", "Target"], observed=True, sort=False)["distances"]
+                .agg(list).reset_index())
+    return out.astype({"Source": str, "Target": str})
 
 
 def build_cell_type(cell_type: str, rows: pd.DataFrame, gt_dir: Path, organism: str,
@@ -162,7 +195,7 @@ def build_cell_type(cell_type: str, rows: pd.DataFrame, gt_dir: Path, organism: 
                     exfile: Path = None, listed: dict = None) -> tuple:
     """Return (edges_df, per-source breadth records) for one dataset cell type."""
     listed = listed or {}
-    edges, records = [], []
+    edges, peaks, records = [], [], []
 
     for r in rows.itertuples():
         if r.source == "chipatlas":
@@ -222,15 +255,13 @@ def build_cell_type(cell_type: str, rows: pd.DataFrame, gt_dir: Path, organism: 
         rec["n_tfs_dropped_no_embedding"] = len(raw_tfs) - hits["tf"].str.upper().nunique()
 
         # Filter to peaks within the max distance of a valid target gene
-        hits["dist"] = pd.to_numeric(hits["dist"], errors="coerce")
-        hits = hits[(hits["dist"] >= 0) & (hits["dist"] <= max_dist)]
-        hits = hits[hits["target"] != "."]
+        dist = pd.to_numeric(hits["dist"], errors="coerce")
+        hits = hits[(dist >= 0) & (dist <= max_dist) & (hits["target"] != ".")]
+        hits = hits.assign(Source=hits["tf"].str.upper(), Target=hits["target"].str.upper(),
+                           dist=dist.loc[hits.index].astype("int64"))
 
         # Build the edge list
-        edge_df = pd.DataFrame({
-            "Source": hits["tf"].str.upper(),
-            "Target": hits["target"].str.upper(),
-        }).drop_duplicates()
+        edge_df = hits[["Source", "Target"]].drop_duplicates()
 
         rec["n_tfs_usable"] = edge_df["Source"].nunique()
         rec["n_edges"] = len(edge_df)
@@ -245,18 +276,23 @@ def build_cell_type(cell_type: str, rows: pd.DataFrame, gt_dir: Path, organism: 
             edge_df["source_term"] = r.source_term
             edge_df["proxy_tier"] = r.proxy_tier
             edges.append(edge_df)
+            peaks.append(hits[["Source", "Target", "chrom", "start", "end", "dist"]])
 
     if not edges:
-        return pd.DataFrame(columns=["Source", "Target", "cell_type", "source",
-                                     "source_term", "proxy_tier"]), records
+        return pd.DataFrame(columns=EDGE_COLUMNS), records
 
     all_edges = pd.concat(edges, ignore_index=True)
-    
+
     # One row per (Source, Target). When several sources give the same edge, keep the best
     # (lowest) tier, so an edge is never reported as looser evidence than it actually has.
-    all_edges = all_edges.sort_values("proxy_tier").drop_duplicates(subset=["Source", "Target"],
-                                                          keep="first")
-    return all_edges.reset_index(drop=True), records
+    # Stable sort: within a tier, the source listed first in the map is kept.
+    all_edges = all_edges.sort_values("proxy_tier", kind="stable").drop_duplicates(
+        subset=["Source", "Target"], keep="first")
+
+    # Binding sites from every source that gives the edge, not only the source kept above.
+    sites = binding_site_distances(pd.concat(peaks, ignore_index=True))
+    all_edges = all_edges.merge(sites, on=["Source", "Target"], how="left")
+    return all_edges[EDGE_COLUMNS], records
 
 
 def main() -> None:

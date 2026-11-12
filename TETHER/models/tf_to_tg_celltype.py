@@ -6,12 +6,94 @@ import torch
 import torch.nn as nn
 import pytorch_lightning as pl
 import numpy as np
+import pandas as pd
+from pytorch_lightning.utilities.rank_zero import rank_zero_info
 from sklearn.metrics import (
     average_precision_score,
     precision_recall_curve,
     roc_auc_score,
     roc_curve,
 )
+
+
+def within_group_auroc(labels, scores, keys, min_each=10):
+    """AUROC over positive-negative pairs that share a group.
+
+    keys: arrays that together define the group, e.g. (sample, cell type, TF).
+    Returns (pair-weighted AUROC over all groups with both classes, mean AUROC of the groups
+    with at least min_each positives and min_each negatives, number of groups in the mean).
+    Ties count one half, as in roc_auc_score.
+    """
+    frame = pd.DataFrame({f"k{i}": np.asarray(k) for i, k in enumerate(keys)})
+    group = frame.groupby(list(frame.columns), sort=False).ngroup().to_numpy()
+    if len(group) == 0:
+        return float("nan"), float("nan"), 0
+    is_pos = np.asarray(labels, dtype=bool)
+    # Rank of each score inside its group; ties share the average rank.
+    ranks = pd.Series(np.asarray(scores, dtype=np.float64)).groupby(group).rank(method="average")
+    n_groups = group.max() + 1
+    pos = np.bincount(group, weights=is_pos, minlength=n_groups)
+    neg = np.bincount(group, minlength=n_groups) - pos
+    rank_pos = np.bincount(group, weights=ranks.to_numpy() * is_pos, minlength=n_groups)
+    u = rank_pos - pos * (pos + 1) / 2
+    both = (pos > 0) & (neg > 0)
+    if not both.any():
+        return float("nan"), float("nan"), 0
+    pair_weighted = float(u[both].sum() / (pos[both] * neg[both]).sum())
+    big = (pos >= min_each) & (neg >= min_each)
+    macro = float(np.mean(u[big] / (pos[big] * neg[big]))) if big.any() else float("nan")
+    return pair_weighted, macro, int(big.sum())
+
+
+class PlateauTriggeredCosine:
+    """Learning-rate factor per optimizer step for lr_schedule="plateau_cosine".
+
+    1. Linear warmup over warmup_steps.
+    2. Constant factor 1.0 until val/loss has not improved by more than min_delta for
+       `patience` validations in a row. update() records each validation.
+    3. Cosine decay from 1.0 to min_ratio over decay_steps, starting at the step of the
+       validation that triggered it. finished() is then true at the end of the decay.
+
+    All state is plain attributes, so LambdaLR.state_dict() saves it in the checkpoint.
+    """
+
+    def __init__(self, warmup_steps, decay_steps, min_ratio, patience, min_delta):
+        self.warmup_steps = int(warmup_steps)
+        self.decay_steps = max(1, int(decay_steps))
+        self.min_ratio = float(min_ratio)
+        self.patience = int(patience)
+        self.min_delta = float(min_delta)
+        self.best = None
+        self.bad_epochs = 0
+        self.decay_start = None
+
+    def __call__(self, step):
+        if step < self.warmup_steps:
+            return (step + 1) / self.warmup_steps
+        if self.decay_start is None:
+            return 1.0
+        progress = min(1.0, (step - self.decay_start) / self.decay_steps)
+        return self.min_ratio + (1 - self.min_ratio) * 0.5 * (1 + math.cos(math.pi * progress))
+
+    def update(self, val_loss, step):
+        """Record one validation. Return True if this call starts the decay."""
+        if self.decay_start is not None:
+            return False
+        if math.isfinite(val_loss) and (self.best is None or val_loss < self.best - self.min_delta):
+            self.best = val_loss
+            self.bad_epochs = 0
+            return False
+        if step < self.warmup_steps:
+            return False  # the LR is still rising; do not count this epoch
+        self.bad_epochs += 1
+        if self.bad_epochs >= self.patience:
+            self.decay_start = int(step)
+            return True
+        return False
+
+    def finished(self, step):
+        return self.decay_start is not None and step >= self.decay_start + self.decay_steps
+
 
 class CrossAttentionBlock(nn.Module):
     """Refine the per-cell peak context with one more pass over the peak tokens."""
@@ -59,6 +141,7 @@ class SimpleTFTGRegulationModel(nn.Module):
         tg_expression_std=1.0,
         peak_accessibility_mean=0.0,
         peak_accessibility_std=1.0,
+        own_peak_flag=False,
     ):
         super().__init__()
 
@@ -87,9 +170,13 @@ class SimpleTFTGRegulationModel(nn.Module):
         for name, value in scaler_values.items():
             self.register_buffer(name, torch.tensor(float(value)), persistent=False)
 
-        # Binding, accessibility, scaled distance, distance weight.
+        # Binding, accessibility, scaled distance, distance weight, and with
+        # own_peak_flag a fifth feature: 1 if the peak's nearest TSS is this TG (the
+        # ground-truth rule gives a ChIP site to its nearest TSS only), else 0.
+        self.own_peak_flag = bool(own_peak_flag)
+        self.n_peak_features = 5 if self.own_peak_flag else 4
         self.peak_feature_proj = nn.Sequential(
-            nn.Linear(4, d_model),
+            nn.Linear(self.n_peak_features, d_model),
             nn.SiLU(),
             nn.Dropout(dropout),
             nn.Linear(d_model, d_model),
@@ -206,18 +293,24 @@ class SimpleTFTGRegulationModel(nn.Module):
         )
 
         # 3. Build one token per peak for each sampled cell.
-        peak_features = torch.stack(
-            [
-                binding[:, None, :].expand(B, C, P),
-                accessibility,
-                distance_scaled[:, None, :].expand(B, C, P),
-                distance_weight[:, None, :].expand(B, C, P),
-            ],
-            dim=-1,
-        )                                               # [B, C, P, 4]
+        per_peak = [
+            binding[:, None, :].expand(B, C, P),
+            accessibility,
+            distance_scaled[:, None, :].expand(B, C, P),
+            distance_weight[:, None, :].expand(B, C, P),
+        ]
+        if self.own_peak_flag:
+            if "peak_own" not in batch:
+                raise ValueError(
+                    "This model uses the own-peak flag; build the dataset with "
+                    "peak_nearest_gene and own_peaks='flag'"
+                )
+            own = batch["peak_own"].float().masked_fill(~peak_mask, 0)
+            per_peak.append(own[:, None, :].expand(B, C, P))
+        peak_features = torch.stack(per_peak, dim=-1)  # [B, C, P, F]
 
         peak_tokens = self.peak_feature_proj(
-            peak_features.reshape(B * C, P, 4)
+            peak_features.reshape(B * C, P, self.n_peak_features)
         )                                               # [B*C, P, d_model]
 
         # 4. Expression-conditioned query.
@@ -293,9 +386,12 @@ class LitTFTGRegulationModel(pl.LightningModule):
     Metrics are exact over the epoch on the single device used by the launcher.
     Checkpoints contain the downstream model; TF-DNA provenance is in run_config.json.
 
-    lr_schedule: "plateau" (ReduceLROnPlateau on val/loss, x0.1 after plateau_patience epochs) or
+    lr_schedule: "plateau" (ReduceLROnPlateau on val/loss, x0.1 after plateau_patience epochs),
         "cosine" (linear warmup for warmup_epochs, then cosine decay to min_lr_ratio * lr at
-        max_epochs, per optimizer step), the schedule of LitTFPeakBindingModel in tf_to_dna.py.
+        max_epochs, per optimizer step), the schedule of LitTFPeakBindingModel in tf_to_dna.py,
+        or "plateau_cosine" (linear warmup, constant lr until val/loss has not improved by more
+        than decay_min_delta for decay_patience epochs, then cosine decay to min_lr_ratio * lr
+        over decay_epochs epochs, after which training stops; see PlateauTriggeredCosine).
         The default stays "plateau" so that checkpoints saved before the option load unchanged.
     """
 
@@ -306,9 +402,11 @@ class LitTFTGRegulationModel(pl.LightningModule):
                  tg_expression_std=1.0, peak_accessibility_mean=0.0,
                  peak_accessibility_std=1.0, enable_timing_sync=False,
                  num_cross_attn_layers=1, lr_schedule="plateau",
-                 warmup_epochs=1.0, min_lr_ratio=0.01):
+                 warmup_epochs=1.0, min_lr_ratio=0.01,
+                 decay_patience=5, decay_epochs=20, decay_min_delta=1e-4,
+                 own_peak_flag=False):
         super().__init__()
-        if lr_schedule not in ("plateau", "cosine"):
+        if lr_schedule not in ("plateau", "cosine", "plateau_cosine"):
             raise ValueError(f"Unknown lr_schedule: {lr_schedule!r}")
         self.save_hyperparameters()
         self.model = SimpleTFTGRegulationModel(
@@ -319,9 +417,15 @@ class LitTFTGRegulationModel(pl.LightningModule):
             tg_expression_mean=tg_expression_mean,
             tg_expression_std=tg_expression_std,
             peak_accessibility_mean=peak_accessibility_mean,
-            peak_accessibility_std=peak_accessibility_std)
+            peak_accessibility_std=peak_accessibility_std,
+            own_peak_flag=own_peak_flag)
         self.register_buffer("pos_weight", torch.tensor(float(pos_weight)))
         self._predictions = {"val": [], "test": []}
+        # Edge-weighted val/loss sum for the plateau_cosine trigger. Lightning's own epoch
+        # mean of val/loss reaches callback_metrics only after on_validation_epoch_end.
+        self._val_loss_sum = 0.0
+        self._val_loss_count = 0
+        self._lr_factor = None
         self._celltype_metric_history = {"val": {}, "test": {}}
         self._hidden_wandb_metrics = set()
         self._prev_batch_end_time = None
@@ -371,13 +475,17 @@ class LitTFTGRegulationModel(pl.LightningModule):
             raise FloatingPointError(f"Non-finite {stage} loss")
         self.log(f"{stage}/loss", loss, on_step=stage == "train",
                  on_epoch=True, prog_bar=True, batch_size=len(labels))
+        if stage == "val":
+            self._val_loss_sum = self._val_loss_sum + loss.detach().double() * len(labels)
+            self._val_loss_count += len(labels)
         probs = logits.detach().float().sigmoid()
         self.log(f"{stage}/acc", ((probs >= .5) == labels.bool()).float().mean(),
                  on_step=False, on_epoch=True, batch_size=len(labels))
         if stage != "train":
             self._predictions[stage].append((
                 probs.cpu(), labels.int().cpu(),
-                list(batch["sample_id"]), list(batch["cell_type"])))
+                list(batch["sample_id"]), list(batch["cell_type"]),
+                list(batch["tf_name"]), list(batch["tg_id"])))
         return loss
 
     def training_step(self, batch, batch_idx):
@@ -464,6 +572,8 @@ class LitTFTGRegulationModel(pl.LightningModule):
 
     def on_validation_epoch_start(self):
         self._predictions["val"].clear()
+        self._val_loss_sum = 0.0
+        self._val_loss_count = 0
 
     def on_test_epoch_start(self):
         self._predictions["test"].clear()
@@ -586,7 +696,18 @@ class LitTFTGRegulationModel(pl.LightningModule):
         labels = torch.cat([b[1] for b in batches]).numpy()
         samples = np.asarray([s for b in batches for s in b[2]])
         slices = np.asarray([s for b in batches for s in b[3]])
+        tfs = np.asarray([s for b in batches for s in b[4]])
+        tgs = np.asarray([s for b in batches for s in b[5]])
         batches.clear()
+        # Ranking inside one (sample, cell type, TF) or one (sample, cell type, TG): the
+        # pooled AUROC also rewards ranking TFs or TGs by their positive rate.
+        for name, key in (("tf", tfs), ("tg", tgs)):
+            pair_weighted, macro_auc, n_groups = within_group_auroc(
+                labels, probs, (samples, slices, key))
+            if np.isfinite(pair_weighted):
+                self.log(f"{stage}/within_{name}_auroc", pair_weighted)
+            if n_groups:
+                self.log(f"{stage}/macro_{name}_auroc", macro_auc)
         unique_samples = np.unique(samples)
         groups = [(None, None, np.ones(len(labels), dtype=bool))]
         if len(unique_samples) == 1:
@@ -677,6 +798,32 @@ class LitTFTGRegulationModel(pl.LightningModule):
 
     def on_validation_epoch_end(self):
         self._epoch_metrics("val")
+        self._update_plateau_cosine()
+
+    def _update_plateau_cosine(self):
+        """Feed this epoch's val/loss to the plateau_cosine schedule.
+
+        Runs before ModelCheckpoint saves (on_validation_end), so every checkpoint holds the
+        schedule state that includes this epoch.
+        """
+        factor, trainer = self._lr_factor, self.trainer
+        if (factor is None or trainer.sanity_checking or trainer.state.fn != "fit"
+                or self._val_loss_count == 0):
+            return
+        val_loss = float(self._val_loss_sum / self._val_loss_count)
+        step = trainer.global_step
+        if factor.update(val_loss, step):
+            rank_zero_info(
+                f"plateau_cosine: val/loss has not improved by more than "
+                f"{factor.min_delta:g} for {factor.patience} epochs (best {factor.best:.5f}). "
+                f"Cosine decay starts after epoch {self.current_epoch} (step {step:,}) and runs "
+                f"{factor.decay_steps:,} steps ({self.hparams.decay_epochs} epochs)."
+            )
+        self.log("lr_schedule/decay_active", float(factor.decay_start is not None))
+        self.log("lr_schedule/epochs_without_improvement", float(factor.bad_epochs))
+        if factor.finished(step):
+            rank_zero_info(f"plateau_cosine: decay complete at step {step:,}; training stops.")
+            trainer.should_stop = True
 
     def on_test_epoch_end(self):
         self._epoch_metrics("test")
@@ -684,6 +831,21 @@ class LitTFTGRegulationModel(pl.LightningModule):
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.hparams.lr,
                                       weight_decay=self.hparams.weight_decay)
+        if self.hparams.lr_schedule == "plateau_cosine":
+            max_epochs = max(1, self.trainer.max_epochs)
+            steps_per_epoch = max(1, math.ceil(self.trainer.estimated_stepping_batches / max_epochs))
+            self._lr_factor = PlateauTriggeredCosine(
+                warmup_steps=round(steps_per_epoch * self.hparams.warmup_epochs),
+                decay_steps=steps_per_epoch * self.hparams.decay_epochs,
+                min_ratio=self.hparams.min_lr_ratio,
+                patience=self.hparams.decay_patience,
+                min_delta=self.hparams.decay_min_delta,
+            )
+            # LambdaLR saves the attributes of a callable object in its state_dict, so a
+            # requeued run resumes in the same phase (hold or decay).
+            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, self._lr_factor)
+            return {"optimizer": optimizer, "lr_scheduler": {
+                "scheduler": scheduler, "interval": "step", "frequency": 1}}
         if self.hparams.lr_schedule == "cosine":
             # Same schedule as LitTFPeakBindingModel.configure_optimizers (tf_to_dna.py).
             total_steps = max(1, int(self.trainer.estimated_stepping_batches))

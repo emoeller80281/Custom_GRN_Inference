@@ -20,6 +20,7 @@ import argparse
 import copy
 import json
 import logging
+import random
 import sys
 import time
 import hashlib
@@ -419,6 +420,16 @@ def add_data_args(parser):
     parser.add_argument("--true_false_ratio", type=float, default=2.)
     parser.add_argument("--balance_tf", action="store_true")
     parser.add_argument("--balance_tg", action="store_true")
+    parser.add_argument(
+        "--degree_matching", choices=["multi_pass", "single_pass"], default="multi_pass",
+        help="Rectangle sampler for --balance_tf --balance_tg: multi_pass (TF-first partner "
+             "choice, repeated passes; default) or single_pass (the sampler before 2026-11-12)",
+    )
+    parser.add_argument(
+        "--min_true_per_tf", type=int, default=0,
+        help="Drop a TF from a slice (all splits) if it has fewer True edges than this in the "
+             "slice's train split; sampling is repeated until every kept TF reaches it. 0 = off",
+    )
     parser.add_argument("--min_cells_per_slice", type=int)
     parser.add_argument("--min_tfs_per_slice", type=int, default=5)
     parser.add_argument("--max_gt_density", type=float, default=.60)
@@ -437,6 +448,8 @@ def finalize_data_args(parser, args):
     if args.min_tfs_per_slice <= 0 or (
             args.min_cells_per_slice is not None and args.min_cells_per_slice <= 0):
         parser.error("Slice cell and TF thresholds must be positive")
+    if args.min_true_per_tf < 0:
+        parser.error("--min_true_per_tf must be nonnegative")
 
     malformed = [value for value in args.dataset
                  if value.count(":") != 1 or not all(value.split(":"))]
@@ -471,6 +484,54 @@ def gene_reference_path(args):
     )
     return args.data_dir / "genome_data/genome_annotation" / args.species / file_name
 
+
+def gene_tss_bed_path(data_dir, species):
+    """TSS annotation of the ground-truth builder (build_celltype_ground_truth.py default)."""
+    return Path(data_dir) / "genome_data/genome_annotation" / species / f"{species}_gene_tss.bed"
+
+
+def peak_nearest_tss_genes(peak_names, tss_bed):
+    """Nearest-TSS gene of every ATAC peak, by the ground-truth rule.
+
+    The ground truth gives each ChIP site to its nearest TSS only (bedtools closest -d
+    -t first on the same TSS file). A bag peak is an "own" peak of a TG when its
+    nearest TSS belongs to that TG. Returns upper-case gene names in peak column order;
+    "" for a peak with no TSS on its chromosome. Needs bedtools on PATH.
+    """
+    import shutil
+    import subprocess
+    import tempfile
+
+    tss_bed = Path(tss_bed)
+    if not tss_bed.is_file():
+        raise FileNotFoundError(f"TSS annotation not found: {tss_bed}")
+    if shutil.which("bedtools") is None:
+        raise RuntimeError("bedtools is not on PATH (activate my_env)")
+    peak_names = np.asarray(peak_names).astype(str)
+    coords = pd.Series(peak_names).str.extract(r"^(chr[^:]+):(\d+)-(\d+)$")
+    if coords.isna().any().any():
+        raise ValueError(f"Peak names must be chrom:start-end; first is {peak_names[0]!r}")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        pd.DataFrame({
+            "chrom": coords[0], "start": coords[1].astype(np.int64),
+            "end": coords[2].astype(np.int64), "col": np.arange(len(peak_names)),
+        }).to_csv(tmp / "peaks.bed", sep="\t", header=False, index=False)
+        # Same sort command as build_celltype_ground_truth.py: with -t first, the TSS
+        # order decides ties between TSSs at the same distance.
+        subprocess.run(
+            f"sort -k1,1 -k2,2n {tss_bed} > {tmp}/tss.bed && "
+            f"sort -k1,1 -k2,2n {tmp}/peaks.bed > {tmp}/peaks.sorted.bed && "
+            f"bedtools closest -a {tmp}/peaks.sorted.bed -b {tmp}/tss.bed -d -t first "
+            f"| cut -f4,8 > {tmp}/nearest.tsv",
+            shell=True, check=True, executable="/bin/bash",
+        )
+        nearest = pd.read_csv(tmp / "nearest.tsv", sep="\t", header=None,
+                              names=["col", "gene"], dtype={"gene": str}, na_filter=False)
+    genes = np.full(len(peak_names), "", dtype=object)
+    found = nearest["gene"].ne(".").to_numpy()
+    genes[nearest["col"].to_numpy()[found]] = nearest["gene"].str.upper().to_numpy()[found]
+    return genes
 
 
 def create_degree_matched_edges(edge_df, tf_col="Source", item_col="Target",
@@ -641,17 +702,126 @@ def create_axis_matched_edges(edge_df, tf_col="Source", item_col="Target",
     return true_edges, false_edges
 
 
+def create_degree_matched_edges_multipass(edge_df, tf_col="Source", item_col="Target",
+                                          seed=123, max_partners=32, max_passes=20,
+                                          min_pass_gain=0.002):
+    """Degree-matched rectangles as in create_degree_matched_edges, with two changes.
+
+    1. Partner choice: a TF is drawn uniformly from the TFs that still have unused GT
+       edges, then one of its unused edges. The single-pass version draws a uniform GT
+       edge, so partners come mostly from the TFs with the most targets -- the TF-TG
+       form of the uniform False-site draw that the TF-DNA cache replaced on 2026-10-22.
+    2. Passes: the unused edges are tried again until a pass adds less than
+       min_pass_gain of the GT edges, or after max_passes. An edge whose TF or TG has
+       no unused non-edge left can never close a rectangle, so it is retired on sight.
+
+    Rectangles, balance and the one-use rule are unchanged: every accepted rectangle
+    gives each of t1, t2, g1, g2 one positive and one negative. Iteration order comes
+    from sorted lists, not set order, so the result depends only on the seed.
+    """
+    rng = random.Random(seed)
+
+    df = (edge_df[[tf_col, item_col]].dropna().astype(str)
+          .drop_duplicates().sort_values([tf_col, item_col]).reset_index(drop=True))
+    edges = list(zip(df[tf_col], df[item_col]))
+    gt = set(edges)
+    n_gt = len(edges)
+    tfs = sorted(df[tf_col].unique())
+    tgs = sorted(df[item_col].unique())
+
+    # Non-edges still free to become negatives, per TF and per TG.
+    tf_degree = df[tf_col].value_counts()
+    tg_degree = df[item_col].value_counts()
+    neg_left_tf = {t: len(tgs) - int(tf_degree[t]) for t in tfs}
+    neg_left_tg = {g: len(tfs) - int(tg_degree[g]) for g in tgs}
+
+    # Unused GT edges per TF, with O(1) random pick and removal.
+    avail = {t: [] for t in tfs}
+    where = {}
+    for t, g in edges:
+        where[(t, g)] = len(avail[t])
+        avail[t].append(g)
+    active = list(tfs)
+    active_pos = {t: i for i, t in enumerate(active)}
+
+    def retire(t, g):
+        targets = avail[t]
+        i = where.pop((t, g))
+        last = targets.pop()
+        if i < len(targets):
+            targets[i] = last
+            where[(t, last)] = i
+        if not targets:
+            j = active_pos.pop(t)
+            last_tf = active.pop()
+            if j < len(active):
+                active[j] = last_tf
+                active_pos[last_tf] = j
+
+    true_edges, false_edges = set(), set()
+    passes = 0
+    for passes in range(1, max_passes + 1):
+        order = sorted(where)
+        rng.shuffle(order)
+        added = 0
+        for t1, g1 in order:
+            if (t1, g1) not in where:
+                continue
+            if neg_left_tf[t1] == 0 or neg_left_tg[g1] == 0:
+                retire(t1, g1)
+                continue
+            for _ in range(max_partners):
+                if len(active) < 2:
+                    break
+                t2 = active[rng.randrange(len(active))]
+                if t2 == t1:
+                    continue
+                g2 = avail[t2][rng.randrange(len(avail[t2]))]
+                if g2 == g1:
+                    continue
+                if neg_left_tf[t2] == 0 or neg_left_tg[g2] == 0:
+                    retire(t2, g2)
+                    continue
+                if (t1, g2) in gt or (t2, g1) in gt:
+                    continue
+                if (t1, g2) in false_edges or (t2, g1) in false_edges:
+                    continue
+                true_edges |= {(t1, g1), (t2, g2)}
+                false_edges |= {(t1, g2), (t2, g1)}
+                retire(t1, g1)
+                retire(t2, g2)
+                for t in (t1, t2):
+                    neg_left_tf[t] -= 1
+                for g in (g1, g2):
+                    neg_left_tg[g] -= 1
+                added += 2
+                break
+        if added < min_pass_gain * n_gt or not where:
+            break
+
+    logging.info(
+        f"Degree-matched sampling (multi-pass, {passes} passes): {len(true_edges):,} positive, "
+        f"{len(false_edges):,} negative ({len(true_edges) / max(n_gt, 1):.1%} of the GT used)"
+    )
+    return true_edges, false_edges
+
+
 def create_balanced_edges(edge_df, *, balance_tf, balance_tg,
                           tf_col="Source", item_col="Target",
-                          pct_true_edges=1.0, true_false_ratio=1.0, seed=123):
+                          pct_true_edges=1.0, true_false_ratio=1.0, seed=123,
+                          degree_matching="multi_pass"):
     """Dispatch to the sampler matching the requested balance.
 
     both  -> rectangles: exact on TF and TG, at the cost of using a subset of the GT
+             (degree_matching: "multi_pass" = create_degree_matched_edges_multipass,
+             "single_pass" = create_degree_matched_edges, the sampler before 2026-11-12)
     tg    -> per-TG negatives; TF marginal is left skewed and usually worse
     tf    -> per-TF negatives; TG marginal is left skewed
     none  -> uniform over the TF x TG box; both identities predict the label
     """
     if balance_tf and balance_tg:
+        if degree_matching == "multi_pass":
+            return create_degree_matched_edges_multipass(edge_df, tf_col, item_col, seed=seed)
         return create_degree_matched_edges(edge_df, tf_col, item_col, seed=seed)
     if balance_tf or balance_tg:
         return create_axis_matched_edges(
@@ -714,6 +884,7 @@ def _create_labeled_df(
     balance_tg: bool = True,
     pct_true_edges: float = 1.0,
     true_false_ratio: float = 1.0,
+    degree_matching: str = "multi_pass",
 ):
     gt_df = gt_df[
         gt_df["Source"].isin(tf_name_to_idx.keys()) &
@@ -723,6 +894,7 @@ def _create_labeled_df(
     true_edges, false_edges = create_balanced_edges(
         gt_df, balance_tf=balance_tf, balance_tg=balance_tg,
         pct_true_edges=pct_true_edges, true_false_ratio=true_false_ratio, seed=seed,
+        degree_matching=degree_matching,
     )
 
     return create_labeled_tf_tg_dataset(
@@ -744,23 +916,33 @@ def build_sample_cache_manifest(args, tissue, sample_name):
         raise FileNotFoundError(f"No ground-truth parquet files found in {ground_truth_dir}")
     tf_cache = config.tf_dna_cache_dir(args.species)
 
+    settings = {
+        "seed": args.seed,
+        # prepare_data uses max_cells_per_pair only for this default, so the cell
+        # bag size can change between training runs without a rebuild.
+        "min_cells_per_slice": args.min_cells_per_slice or 2 * args.max_cells_per_pair,
+        "max_peaks_per_tg": args.max_peaks_per_tg,
+        "peak_flank_size": args.peak_flank_size,
+        "true_false_ratio": args.true_false_ratio,
+        "balance_tf": args.balance_tf,
+        "balance_tg": args.balance_tg,
+        "min_tfs_per_slice": args.min_tfs_per_slice,
+        "max_gt_density": args.max_gt_density,
+    }
+    # Added 2026-11-12. Recorded only when they change the edges, so every cache built
+    # before them keeps its key: unbalanced caches ignore degree_matching, and
+    # single_pass / min_true_per_tf 0 are the earlier behaviour.
+    if (args.balance_tf and args.balance_tg
+            and getattr(args, "degree_matching", "single_pass") != "single_pass"):
+        settings["degree_matching"] = args.degree_matching
+    if getattr(args, "min_true_per_tf", 0):
+        settings["min_true_per_tf"] = args.min_true_per_tf
+
     return {
         "cache_version": SAMPLE_CACHE_VERSION,
         "species": args.species,
         "dataset": f"{tissue}:{sample_name}",
-        "settings": {
-            "seed": args.seed,
-            # prepare_data uses max_cells_per_pair only for this default, so the cell
-            # bag size can change between training runs without a rebuild.
-            "min_cells_per_slice": args.min_cells_per_slice or 2 * args.max_cells_per_pair,
-            "max_peaks_per_tg": args.max_peaks_per_tg,
-            "peak_flank_size": args.peak_flank_size,
-            "true_false_ratio": args.true_false_ratio,
-            "balance_tf": args.balance_tf,
-            "balance_tg": args.balance_tg,
-            "min_tfs_per_slice": args.min_tfs_per_slice,
-            "max_gt_density": args.max_gt_density,
-        },
+        "settings": settings,
         "references": {
             "gene_reference": _file_identity(gene_reference_path(args)),
             "genome_fasta": _file_identity(reference_dir / f"{args.species}.fa"),
@@ -1067,7 +1249,7 @@ def prepare_data(args):
                 )
                 return (
                     splits, cell_pools, atac_mat, rna_mat, atac_peak_tensor,
-                    tf_embedding_cache_path, tf_mask_cache_path,
+                    tf_embedding_cache_path, tf_mask_cache_path, dataset_peaks,
                 )
             logging.info(
                 "%s:%s prepared cache manifest changed; rebuilding",
@@ -1283,34 +1465,73 @@ def prepare_data(args):
     cell_pools = {}
     labeled_frames = {"train": [], "val": [], "test": []}
 
+    min_true_per_tf = getattr(args, "min_true_per_tf", 0)
+
+    def label_split(split_gt):
+        return _create_labeled_df(
+            split_gt, seed=args.seed,
+            tf_name_to_idx=tf_name_to_idx,
+            tg_id_to_idx=tg_rna_col_map,
+            balance_tf=balance_tf,
+            balance_tg=balance_tg,
+            true_false_ratio=true_false_ratio,
+            degree_matching=getattr(args, "degree_matching", "single_pass"),
+        )
+
     for slice_name in usable:
         info = slice_info[slice_name]
+
+        # Split by chromosome FIRST, then balance inside each split. A rectangle spans
+        # two target genes; built before the split it gets cut across train and val and
+        # neither side stays degree-matched.
+        split_gts = {
+            split_name: info["gt"][info["gt"]["Target"].isin(set(genes))]
+            for split_name, genes in [("train", train_genes), ("val", val_genes), ("test", test_genes)]
+        }
+
+        # --min_true_per_tf: a TF with fewer True train edges than the minimum leaves the
+        # slice in every split. Dropping a TF changes the rectangles of the others, so the
+        # train split is sampled again until every kept TF reaches the minimum.
+        dropped_tfs = set()
+        slice_tfs = set(info["gt"]["Source"])
+        frames = {}
+        while True:
+            train_gt = split_gts["train"][~split_gts["train"]["Source"].isin(dropped_tfs)]
+            frames["train"] = label_split(train_gt) if not train_gt.empty else None
+            if not min_true_per_tf:
+                break
+            frame = frames["train"]
+            true_counts = (frame.loc[frame["label"], "tf_name"].value_counts()
+                           if frame is not None else pd.Series(dtype=int))
+            low = {tf for tf in slice_tfs - dropped_tfs
+                   if true_counts.get(tf, 0) < min_true_per_tf}
+            if not low:
+                break
+            dropped_tfs |= low
+        kept_tfs = slice_tfs - dropped_tfs
+        if dropped_tfs:
+            logging.info(
+                f"{slice_name}: dropped {len(dropped_tfs)} of {len(slice_tfs)} TFs with fewer "
+                f"than {min_true_per_tf} True train edges: {', '.join(sorted(dropped_tfs))}"
+            )
+        if len(kept_tfs) < MIN_TFS_PER_SLICE:
+            logging.warning(
+                f"{slice_name}: {len(kept_tfs)} TFs left after --min_true_per_tf "
+                f"(< --min_tfs_per_slice {MIN_TFS_PER_SLICE}); slice skipped"
+            )
+            continue
+
+        for split_name in ("val", "test"):
+            split_gt = split_gts[split_name][~split_gts[split_name]["Source"].isin(dropped_tfs)]
+            frames[split_name] = label_split(split_gt) if not split_gt.empty else None
 
         # The cell pool is the union of every annotated type mapped to this slice.
         cell_pools[(sample_name, slice_name)] = np.flatnonzero(
             rna_sample.obs["celltype"].isin(info["members"]).fillna(False).to_numpy()
         )
-
-        # Split by chromosome FIRST, then balance inside each split. A rectangle spans
-        # two target genes; built before the split it gets cut across train and val and
-        # neither side stays degree-matched.
-        for split_name, genes in [("train", train_genes), ("val", val_genes), ("test", test_genes)]:
-            split_gt = info["gt"][info["gt"]["Target"].isin(set(genes))]
-            if split_gt.empty:
+        for split_name, frame in frames.items():
+            if frame is None or frame.empty:
                 continue
-
-            frame = _create_labeled_df(
-                split_gt, seed=args.seed,
-                tf_name_to_idx=tf_name_to_idx,
-                tg_id_to_idx=tg_rna_col_map,
-                balance_tf=balance_tf,
-                balance_tg=balance_tg,
-                true_false_ratio=true_false_ratio,
-            )
-
-            if frame.empty:
-                continue
-
             frame["sample_id"] = sample_name
             frame["cell_type"] = slice_name
             labeled_frames[split_name].append(frame)
@@ -1362,7 +1583,8 @@ def prepare_data(args):
         "%s:%s saved prepared inputs to %s",
         tissue, sample_name, args.output_dir,
     )
-    return splits, cell_pools, atac_mat, rna_mat, atac_peak_tensor, tf_embedding_cache_path, tf_mask_cache_path
+    return (splits, cell_pools, atac_mat, rna_mat, atac_peak_tensor, tf_embedding_cache_path,
+            tf_mask_cache_path, dataset_peaks)
 
 
 def prepare_source(args, tissue, sample_name, directory, manifest):
@@ -1373,7 +1595,8 @@ def prepare_source(args, tissue, sample_name, directory, manifest):
     source_args.output_dir = Path(directory)
     source_args.prepared_cache_manifest = manifest
     source_args.output_dir.mkdir(parents=True, exist_ok=True)
-    splits, pools, atac, rna, peaks, embedding_path, mask_path = prepare_data(source_args)
+    (splits, pools, atac, rna, peaks, embedding_path, mask_path,
+     peak_names) = prepare_data(source_args)
     return {
         "tissue": tissue,
         "sample_name": sample_name,
@@ -1383,6 +1606,7 @@ def prepare_source(args, tissue, sample_name, directory, manifest):
         "atac": atac,
         "rna": rna,
         "peaks": peaks,
+        "peak_names": np.asarray(peak_names, dtype=str),  # ATAC column order
         "embedding_path": embedding_path,
         "mask_path": mask_path,
     }
