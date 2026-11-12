@@ -55,7 +55,8 @@ DATASETS=(
     "GSE194122_bone_marrow:s1d1"
     "GSE207335_epidermis:S1"
     "GSE240061_muscle_pre_exercise:Ex-1_Pre_tr1"
-    "GSE277326_retina_macula_rpe:Retina_donor1"
+    # GSE277326_retina_macula_rpe:Retina_donor1 is left out (2026-11-10): no slice passes the cache
+    # filters (rods: density 0.66 > --max_gt_density 0.60), and the cache build then stops.
     "GSE319044_lung_spleen_immune:Spleen-SMO-04"
 )
 # Must match 03c: the TF-DNA checkpoint is part of the sample cache key.
@@ -84,6 +85,14 @@ else
     echo "ERROR: SPECIES must be mm10 or hg38, not ${SPECIES}" >&2
     exit 1
 fi
+# DATASETS_OVERRIDE (space-separated "dataset:sample" entries) replaces the list above, e.g. for a
+# control run on a subset. Set it in the submitting shell and keep ALL in --export:
+#   DATASETS_OVERRIDE="ENCODE_adrenal:adrenal_adult_ENCDO221IPH ENCODE_colon:colon_adult_ENCDO856ZOJ" \
+#       sbatch --export=ALL,SPECIES=hg38 TETHER/bash_scripts/03d_train_cached_celltype_tf_to_tg_model.sh
+if [ -n "${DATASETS_OVERRIDE:-}" ]; then
+    read -r -a DATASETS <<< "$DATASETS_OVERRIDE"
+    echo "DATASETS_OVERRIDE: ${DATASETS[*]}"
+fi
 DATASET_ARGS=()
 for dataset in "${DATASETS[@]}"; do
     DATASET_ARGS+=(--dataset "$dataset")
@@ -95,8 +104,8 @@ srun python -u scripts/train_cached_tf_to_tg_celltype_model.py \
     "${EXTRA_ARGS[@]}" \
     --max_cells_per_pair 50 \
     --max_peaks_per_tg 50 \
-    --epochs 250 \
-    --early_stopping_patience 250 \
+    --epochs 100 \
+    --early_stopping_patience 100 \
     --plateau_patience 15 \
     --lr 6.67e-5 \
     --dropout 0.01 \
@@ -104,7 +113,7 @@ srun python -u scripts/train_cached_tf_to_tg_celltype_model.py \
     --d_model 64 \
     --num_cross_attn_layers 2 \
     --accelerator gpu \
-    --batch_size 128 \
+    --batch_size 256 \
     --num_workers "${SLURM_CPUS_PER_TASK:-4}" \
     --run_name "long_training" \
     --precision 32-true \

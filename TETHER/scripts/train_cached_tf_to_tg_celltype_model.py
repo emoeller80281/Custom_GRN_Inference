@@ -113,7 +113,15 @@ def parse_args(argv=None):
     parser.add_argument("--pooling_temperature", type=float, default=1.)
     parser.add_argument("--pos_weight", type=float, default=1.)
     parser.add_argument("--early_stopping_patience", type=int, default=15)
-    parser.add_argument("--plateau_patience", type=int, default=4)
+    parser.add_argument(
+        "--lr_schedule", choices=["plateau", "cosine"], default="cosine",
+        help="Linear warmup + per-step cosine decay to 1%% of --lr at --epochs, as in the TF-DNA "
+             "model (default), or ReduceLROnPlateau x0.1 on val/loss",
+    )
+    parser.add_argument("--warmup_epochs", type=float, default=1.0,
+                        help="Linear warmup length for --lr_schedule cosine")
+    parser.add_argument("--plateau_patience", type=int, default=4,
+                        help="Epochs without a val/loss improvement before x0.1 (--lr_schedule plateau only)")
     parser.add_argument("--accumulate_grad_batches", type=int, default=1)
     parser.add_argument("--gradient_clip_val", type=float, default=1.)
     parser.add_argument("--precision", choices=["32-true", "16-mixed", "bf16-mixed"], default="32-true")
@@ -149,6 +157,8 @@ def parse_args(argv=None):
         parser.error("lr, pooling_temperature, and pos_weight must be positive")
     if not 0 <= args.dropout < 1 or args.weight_decay < 0 or args.gradient_clip_val < 0:
         parser.error("dropout must be in [0, 1); weight decay and gradient clipping must be nonnegative")
+    if args.lr_schedule == "cosine" and not 0 <= args.warmup_epochs < args.epochs:
+        parser.error("--warmup_epochs must be in [0, --epochs) for --lr_schedule cosine")
 
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     run_name = args.run_name if args.run_name is not None else "joint" if len(source_specs) > 1 else source_specs[0][1]
@@ -787,7 +797,8 @@ def main(argv=None, extra_callbacks=()):
     }
     module = LitTFTGRegulationModel(**{key: getattr(args, key) for key in (
         "d_model", "num_heads", "num_cross_attn_layers", "dropout", "lr", "weight_decay",
-        "pooling_temperature", "pos_weight", "plateau_patience")},
+        "pooling_temperature", "pos_weight", "plateau_patience", "lr_schedule",
+        "warmup_epochs")},
         **scaler_hparams)
 
     if args.wandb_mode == "disabled":

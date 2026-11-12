@@ -1,4 +1,5 @@
 """Cell-type edge-bag model from test_build_celltype_tf_tg_data.ipynb."""
+import math
 import time
 
 import torch
@@ -291,6 +292,11 @@ class LitTFTGRegulationModel(pl.LightningModule):
 
     Metrics are exact over the epoch on the single device used by the launcher.
     Checkpoints contain the downstream model; TF-DNA provenance is in run_config.json.
+
+    lr_schedule: "plateau" (ReduceLROnPlateau on val/loss, x0.1 after plateau_patience epochs) or
+        "cosine" (linear warmup for warmup_epochs, then cosine decay to min_lr_ratio * lr at
+        max_epochs, per optimizer step), the schedule of LitTFPeakBindingModel in tf_to_dna.py.
+        The default stays "plateau" so that checkpoints saved before the option load unchanged.
     """
 
     def __init__(self, d_model=128, num_heads=4, dropout=0.1, lr=1e-4,
@@ -299,8 +305,11 @@ class LitTFTGRegulationModel(pl.LightningModule):
                  tf_expression_std=1.0, tg_expression_mean=0.0,
                  tg_expression_std=1.0, peak_accessibility_mean=0.0,
                  peak_accessibility_std=1.0, enable_timing_sync=False,
-                 num_cross_attn_layers=1):
+                 num_cross_attn_layers=1, lr_schedule="plateau",
+                 warmup_epochs=1.0, min_lr_ratio=0.01):
         super().__init__()
+        if lr_schedule not in ("plateau", "cosine"):
+            raise ValueError(f"Unknown lr_schedule: {lr_schedule!r}")
         self.save_hyperparameters()
         self.model = SimpleTFTGRegulationModel(
             d_model=d_model, num_heads=num_heads, dropout=dropout,
@@ -675,6 +684,21 @@ class LitTFTGRegulationModel(pl.LightningModule):
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.hparams.lr,
                                       weight_decay=self.hparams.weight_decay)
+        if self.hparams.lr_schedule == "cosine":
+            # Same schedule as LitTFPeakBindingModel.configure_optimizers (tf_to_dna.py).
+            total_steps = max(1, int(self.trainer.estimated_stepping_batches))
+            warmup_steps = int(total_steps * self.hparams.warmup_epochs / max(1, self.trainer.max_epochs))
+            min_ratio = self.hparams.min_lr_ratio
+
+            def lr_factor(step):
+                if step < warmup_steps:
+                    return (step + 1) / warmup_steps
+                progress = min(1.0, (step - warmup_steps) / max(1, total_steps - warmup_steps))
+                return min_ratio + (1 - min_ratio) * 0.5 * (1 + math.cos(math.pi * progress))
+
+            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_factor)
+            return {"optimizer": optimizer, "lr_scheduler": {
+                "scheduler": scheduler, "interval": "step", "frequency": 1}}
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, mode="min", factor=.1, patience=self.hparams.plateau_patience, cooldown=2)
         return {"optimizer": optimizer, "lr_scheduler": {
