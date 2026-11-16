@@ -430,6 +430,17 @@ def add_data_args(parser):
         help="Drop a TF from a slice (all splits) if it has fewer True edges than this in the "
              "slice's train split; sampling is repeated until every kept TF reaches it. 0 = off",
     )
+    parser.add_argument(
+        "--min_sites_per_true_edge", type=int, default=1,
+        help="A GT edge is True only with at least this many merged binding sites (len of the GT "
+             "`distances` column). Weaker GT edges are left out of both classes: never True, never "
+             "sampled as False. 1 (default) uses every GT edge. Slice selection still uses the full GT",
+    )
+    parser.add_argument(
+        "--keep_single_site_at_tss", action="store_true",
+        help="With --min_sites_per_true_edge > 1, also keep edges whose nearest site overlaps the "
+             "TSS (min distance 0) as True",
+    )
     parser.add_argument("--min_cells_per_slice", type=int)
     parser.add_argument("--min_tfs_per_slice", type=int, default=5)
     parser.add_argument("--max_gt_density", type=float, default=.60)
@@ -450,6 +461,12 @@ def finalize_data_args(parser, args):
         parser.error("Slice cell and TF thresholds must be positive")
     if args.min_true_per_tf < 0:
         parser.error("--min_true_per_tf must be nonnegative")
+    if args.min_sites_per_true_edge < 1:
+        parser.error("--min_sites_per_true_edge must be at least 1")
+    if args.keep_single_site_at_tss and args.min_sites_per_true_edge < 2:
+        parser.error("--keep_single_site_at_tss needs --min_sites_per_true_edge >= 2")
+    if args.min_sites_per_true_edge > 1 and args.balance_tf != args.balance_tg:
+        parser.error("--min_sites_per_true_edge supports both or neither of --balance_tf/--balance_tg")
 
     malformed = [value for value in args.dataset
                  if value.count(":") != 1 or not all(value.split(":"))]
@@ -600,6 +617,7 @@ def create_true_false_edges_from_full_universe(
     pct_true_edges: float | None = 1.0,
     true_false_ratio: float = 1.0,
     seed: int = 123,
+    exclude_df: pd.DataFrame | None = None,
 ):
     df_all = edge_df[[tf_col, item_col]].copy()
 
@@ -629,9 +647,13 @@ def create_true_false_edges_from_full_universe(
 
     full_universe["_pair"] = list(zip(full_universe[tf_col], full_universe[item_col]))
     full_universe["_in_gt"] = full_universe["_pair"].isin(gt_pairs)
+    excluded = set()
+    if exclude_df is not None and not exclude_df.empty:
+        excluded = set(zip(exclude_df[tf_col].astype(str), exclude_df[item_col].astype(str)))
+    full_universe["_excluded"] = full_universe["_pair"].isin(excluded) & ~full_universe["_in_gt"]
 
     true_df = full_universe[full_universe["_in_gt"]].copy()
-    false_df = full_universe[~full_universe["_in_gt"]].copy()
+    false_df = full_universe[~full_universe["_in_gt"] & ~full_universe["_excluded"]].copy()
 
     if pct_true_edges is not None:
         if not (0 < pct_true_edges <= 1):
@@ -704,7 +726,7 @@ def create_axis_matched_edges(edge_df, tf_col="Source", item_col="Target",
 
 def create_degree_matched_edges_multipass(edge_df, tf_col="Source", item_col="Target",
                                           seed=123, max_partners=32, max_passes=20,
-                                          min_pass_gain=0.002):
+                                          min_pass_gain=0.002, exclude_df=None):
     """Degree-matched rectangles as in create_degree_matched_edges, with two changes.
 
     1. Partner choice: a TF is drawn uniformly from the TFs that still have unused GT
@@ -718,6 +740,9 @@ def create_degree_matched_edges_multipass(edge_df, tf_col="Source", item_col="Ta
     Rectangles, balance and the one-use rule are unchanged: every accepted rectangle
     gives each of t1, t2, g1, g2 one positive and one negative. Iteration order comes
     from sorted lists, not set order, so the result depends only on the seed.
+
+    exclude_df: pairs that may not become negatives either (weak GT edges). Without it
+    the result is unchanged.
     """
     rng = random.Random(seed)
 
@@ -729,9 +754,16 @@ def create_degree_matched_edges_multipass(edge_df, tf_col="Source", item_col="Ta
     tfs = sorted(df[tf_col].unique())
     tgs = sorted(df[item_col].unique())
 
-    # Non-edges still free to become negatives, per TF and per TG.
-    tf_degree = df[tf_col].value_counts()
-    tg_degree = df[item_col].value_counts()
+    # Non-edges still free to become negatives, per TF and per TG. Excluded pairs inside
+    # the box count as edges here and in the checks below.
+    blocked_df = df
+    if exclude_df is not None and not exclude_df.empty:
+        ex = exclude_df[[tf_col, item_col]].dropna().astype(str)
+        ex = ex[ex[tf_col].isin(set(tfs)) & ex[item_col].isin(set(tgs))]
+        blocked_df = pd.concat([df, ex], ignore_index=True).drop_duplicates()
+        gt = gt | set(zip(ex[tf_col], ex[item_col]))
+    tf_degree = blocked_df[tf_col].value_counts()
+    tg_degree = blocked_df[item_col].value_counts()
     neg_left_tf = {t: len(tgs) - int(tf_degree[t]) for t in tfs}
     neg_left_tg = {g: len(tfs) - int(tg_degree[g]) for g in tgs}
 
@@ -809,7 +841,7 @@ def create_degree_matched_edges_multipass(edge_df, tf_col="Source", item_col="Ta
 def create_balanced_edges(edge_df, *, balance_tf, balance_tg,
                           tf_col="Source", item_col="Target",
                           pct_true_edges=1.0, true_false_ratio=1.0, seed=123,
-                          degree_matching="multi_pass"):
+                          degree_matching="multi_pass", exclude_df=None):
     """Dispatch to the sampler matching the requested balance.
 
     both  -> rectangles: exact on TF and TG, at the cost of using a subset of the GT
@@ -818,10 +850,18 @@ def create_balanced_edges(edge_df, *, balance_tf, balance_tg,
     tg    -> per-TG negatives; TF marginal is left skewed and usually worse
     tf    -> per-TF negatives; TG marginal is left skewed
     none  -> uniform over the TF x TG box; both identities predict the label
+
+    exclude_df: (TF, TG) pairs that are neither True nor False (weak GT edges under
+    --min_sites_per_true_edge). Supported by the multi-pass rectangles and the uniform box.
     """
+    has_exclusions = exclude_df is not None and not exclude_df.empty
+    if has_exclusions and not ((balance_tf and balance_tg and degree_matching == "multi_pass")
+                               or not (balance_tf or balance_tg)):
+        raise ValueError("exclude_df needs multi_pass rectangles or the unbalanced box")
     if balance_tf and balance_tg:
         if degree_matching == "multi_pass":
-            return create_degree_matched_edges_multipass(edge_df, tf_col, item_col, seed=seed)
+            return create_degree_matched_edges_multipass(edge_df, tf_col, item_col, seed=seed,
+                                                         exclude_df=exclude_df)
         return create_degree_matched_edges(edge_df, tf_col, item_col, seed=seed)
     if balance_tf or balance_tg:
         return create_axis_matched_edges(
@@ -832,7 +872,7 @@ def create_balanced_edges(edge_df, *, balance_tf, balance_tg,
     return create_true_false_edges_from_full_universe(
         edge_df, tf_col, item_col,
         pct_true_edges=pct_true_edges,
-        true_false_ratio=true_false_ratio, seed=seed,
+        true_false_ratio=true_false_ratio, seed=seed, exclude_df=exclude_df,
     )
 
 
@@ -885,6 +925,7 @@ def _create_labeled_df(
     pct_true_edges: float = 1.0,
     true_false_ratio: float = 1.0,
     degree_matching: str = "multi_pass",
+    exclude_df: pd.DataFrame | None = None,
 ):
     gt_df = gt_df[
         gt_df["Source"].isin(tf_name_to_idx.keys()) &
@@ -894,7 +935,7 @@ def _create_labeled_df(
     true_edges, false_edges = create_balanced_edges(
         gt_df, balance_tf=balance_tf, balance_tg=balance_tg,
         pct_true_edges=pct_true_edges, true_false_ratio=true_false_ratio, seed=seed,
-        degree_matching=degree_matching,
+        degree_matching=degree_matching, exclude_df=exclude_df,
     )
 
     return create_labeled_tf_tg_dataset(
@@ -937,6 +978,11 @@ def build_sample_cache_manifest(args, tissue, sample_name):
         settings["degree_matching"] = args.degree_matching
     if getattr(args, "min_true_per_tf", 0):
         settings["min_true_per_tf"] = args.min_true_per_tf
+    # Added 2026-11-12; recorded only when set, so earlier cache keys are unchanged.
+    if getattr(args, "min_sites_per_true_edge", 1) > 1:
+        settings["min_sites_per_true_edge"] = args.min_sites_per_true_edge
+        if args.keep_single_site_at_tss:
+            settings["keep_single_site_at_tss"] = True
 
     return {
         "cache_version": SAMPLE_CACHE_VERSION,
@@ -1336,6 +1382,23 @@ def prepare_data(args):
         n_tfs, n_tgs = gt["Source"].nunique(), gt["Target"].nunique()
         density = len(gt) / max(n_tfs * n_tgs, 1)
 
+        # --min_sites_per_true_edge: weak GT edges become neither True nor False. The slice
+        # filters above still see the full GT, so the same slices are used as without it.
+        gt_excluded = gt.iloc[:0]
+        min_sites = getattr(args, "min_sites_per_true_edge", 1)
+        if min_sites > 1:
+            if "distances" not in gt.columns:
+                raise ValueError(f"{gt_path.name} has no `distances` column; rebuild the GT")
+            n_sites = gt["distances"].map(len).to_numpy()
+            strong = n_sites >= min_sites
+            if args.keep_single_site_at_tss:
+                at_tss = gt["distances"].map(lambda d: len(d) > 0 and min(d) == 0).to_numpy()
+                strong |= at_tss
+            gt_excluded = gt.loc[~strong, ["Source", "Target"]]
+            gt = gt.loc[strong]
+            logging.info(f"{slice_name}: {int(strong.sum()):,} GT edges kept as True candidates, "
+                         f"{int((~strong).sum()):,} left out of both classes")
+
         if n_cells < MIN_CELLS_PER_SLICE:
             reason = "too few cells"
         elif n_tfs < MIN_TFS_PER_SLICE:
@@ -1346,6 +1409,7 @@ def prepare_data(args):
             reason = None
 
         slice_info[slice_name] = dict(members=present, n_cells=n_cells, gt=gt,
+                                      gt_excluded=gt_excluded,
                                       n_tfs=n_tfs, n_tgs=n_tgs, density=density,
                                       skip_reason=reason)
 
@@ -1467,9 +1531,9 @@ def prepare_data(args):
 
     min_true_per_tf = getattr(args, "min_true_per_tf", 0)
 
-    def label_split(split_gt):
+    def label_split(split_gt, exclude_gt=None):
         return _create_labeled_df(
-            split_gt, seed=args.seed,
+            split_gt, seed=args.seed, exclude_df=exclude_gt,
             tf_name_to_idx=tf_name_to_idx,
             tg_id_to_idx=tg_rna_col_map,
             balance_tf=balance_tf,
@@ -1488,6 +1552,10 @@ def prepare_data(args):
             split_name: info["gt"][info["gt"]["Target"].isin(set(genes))]
             for split_name, genes in [("train", train_genes), ("val", val_genes), ("test", test_genes)]
         }
+        split_excluded = {
+            split_name: info["gt_excluded"][info["gt_excluded"]["Target"].isin(set(genes))]
+            for split_name, genes in [("train", train_genes), ("val", val_genes), ("test", test_genes)]
+        }
 
         # --min_true_per_tf: a TF with fewer True train edges than the minimum leaves the
         # slice in every split. Dropping a TF changes the rectangles of the others, so the
@@ -1497,7 +1565,8 @@ def prepare_data(args):
         frames = {}
         while True:
             train_gt = split_gts["train"][~split_gts["train"]["Source"].isin(dropped_tfs)]
-            frames["train"] = label_split(train_gt) if not train_gt.empty else None
+            frames["train"] = (label_split(train_gt, split_excluded["train"])
+                               if not train_gt.empty else None)
             if not min_true_per_tf:
                 break
             frame = frames["train"]
@@ -1523,7 +1592,8 @@ def prepare_data(args):
 
         for split_name in ("val", "test"):
             split_gt = split_gts[split_name][~split_gts[split_name]["Source"].isin(dropped_tfs)]
-            frames[split_name] = label_split(split_gt) if not split_gt.empty else None
+            frames[split_name] = (label_split(split_gt, split_excluded[split_name])
+                                  if not split_gt.empty else None)
 
         # The cell pool is the union of every annotated type mapped to this slice.
         cell_pools[(sample_name, slice_name)] = np.flatnonzero(

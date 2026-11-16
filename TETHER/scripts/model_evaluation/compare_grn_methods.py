@@ -190,6 +190,16 @@ sample_tissue_map = {
     "adrenal_adult_ENCDO221IPH": "Adrenal",
     "bile_duct_adult_ENCDO575WHY": "Bile duct",
     "colon_adult_ENCDO856ZOJ": "Colon",
+    "fallopian_tube_adult_ENCDO411EVD": "Fallopian tube",
+    "heart_lv_adult_ENCDO575WHY": "Heart LV",
+    "lung_adult_ENCDO528BHB": "Lung",
+    "pancreas_adult_ENCDO221IPH": "Pancreas",
+    # other hg38 samples
+    "s1d1": "Bone marrow",
+    "S1": "Epidermis",
+    "Ex-1_Pre_tr1": "Skeletal muscle",
+    "Spleen-SMO-04": "Spleen",
+    "Retina_donor1": "Retina",
 }
 
 # Heatmap rows: grouped by which TF-TG model scored them, or sorted by mean metric
@@ -523,10 +533,14 @@ def resolve_runs(run_specs):
 
 
 def label_method_grns(model_run_dict, sample_sources, uid_of, species, results_dir,
-                      other_method_grn_dir, n_jobs, force_relabel=False):
+                      other_method_grn_dir, n_jobs, force_relabel=False, exclude_celltypes=(),
+                      exclude_samples=()):
     """
     Labeled GRN of every model and method per (sample, cell type), and the cell-type
     ground truths, cached under results_dir. Returns (method_grn_dict, celltype_gt_dict, hash_key).
+    Cell types in exclude_celltypes are removed from every sample, and samples in
+    exclude_samples (unique sample IDs) are removed entirely, for the models and the other
+    methods. They are then also absent from the run hash.
     """
     # Load and concatenate the self-trained and cross-trained GRNs for each model
     model_self_grn_list = []
@@ -546,6 +560,26 @@ def label_method_grns(model_run_dict, sample_sources, uid_of, species, results_d
 
     self_trained_grn["EvalType"] = SELF_MODEL_METHOD
     evaluation_grn["EvalType"] = CROSS_MODEL_METHOD
+
+    # The other methods are labeled only for the (sample, cell type) pairs of the model GRNs,
+    # so removing a cell type here removes it for every method.
+    if exclude_celltypes:
+        exclude_celltypes = set(exclude_celltypes)
+        n_before = len(self_trained_grn) + len(evaluation_grn)
+        self_trained_grn = self_trained_grn[~self_trained_grn["CellType"].isin(exclude_celltypes)]
+        evaluation_grn = evaluation_grn[~evaluation_grn["CellType"].isin(exclude_celltypes)]
+        n_removed = n_before - len(self_trained_grn) - len(evaluation_grn)
+        logging.info(f"Excluded cell types {sorted(exclude_celltypes)}: {n_removed:,} model edges removed")
+    if exclude_samples:
+        exclude_samples = set(exclude_samples)
+        unknown = exclude_samples - set(sample_sources)
+        if unknown:
+            raise ValueError(f"--exclude_samples: no processed sample named {sorted(unknown)}")
+        n_before = len(self_trained_grn) + len(evaluation_grn)
+        self_trained_grn = self_trained_grn[~self_trained_grn["SampleID"].isin(exclude_samples)]
+        evaluation_grn = evaluation_grn[~evaluation_grn["SampleID"].isin(exclude_samples)]
+        n_removed = n_before - len(self_trained_grn) - len(evaluation_grn)
+        logging.info(f"Excluded samples {sorted(exclude_samples)}: {n_removed:,} model edges removed")
 
     # Combine the self-trained and cross-trained GRNs into a single DataFrame
     sample_celltype_df = pd.concat([
@@ -719,6 +753,7 @@ def compute_metrics(
     ptf_alpha: float = 0.05,
     random_state: int = 42,
     return_curve_data: bool = False,
+    min_auroc_edges_per_class: int = 10,
 ):
     """
     Calculate ranking and top-edge GRN metrics for one method, sample, and
@@ -736,6 +771,9 @@ def compute_metrics(
     Ranking metrics
     ---------------
     AUROC : predicted edges only, with positives and negatives sampled 1:1.
+        NaN when either class has fewer than ``min_auroc_edges_per_class``
+        predicted edges: with 1 or 2 edges per class AUROC can only be
+        0, 0.25, 0.5, 0.75 or 1.
     AUPRC : the complete universe U, with unpredicted pairs scored 0, all
         positives, and 10x as many sampled negatives. Uses the PRROC integral.
     Random AUPRC : the same, with uniform random scores over U.
@@ -804,6 +842,9 @@ def compute_metrics(
         roc_labels, roc_scores = labels[balanced_idx], scores[balanced_idx]
         auroc = roc_auc_score(roc_labels, roc_scores)
         random_auroc = roc_auc_score(roc_labels, rng.random(len(balanced_idx)))
+        # Set to NaN after the draws, so the rng stream and every other metric are unchanged.
+        if n_balanced < min_auroc_edges_per_class:
+            auroc = random_auroc = np.nan
     else:
         auroc = random_auroc = np.nan
 
@@ -935,7 +976,8 @@ def compute_metrics(
     return metrics_df
 
 
-def compute_all_metrics(method_grn_dict, celltype_gt_dict, test_genes, top_fraction=0.1):
+def compute_all_metrics(method_grn_dict, celltype_gt_dict, test_genes, top_fraction=0.1,
+                        min_auroc_edges_per_class=10):
     """
     Metrics of every (model, sample, cell type, method), and the compute_random_baseline_metrics
     inputs of the combined comparison (mean model and other methods).
@@ -982,6 +1024,7 @@ def compute_all_metrics(method_grn_dict, celltype_gt_dict, test_genes, top_fract
                     celltype_gt=method_gt,
                     universe=method_universe,
                     top_fraction=top_fraction,
+                    min_auroc_edges_per_class=min_auroc_edges_per_class,
                 )
                 metrics_df["universe"] = "test_chromosomes" if use_test_chroms else "all_chromosomes"
                 metrics_df["model_name"] = model_name
@@ -997,6 +1040,7 @@ def compute_all_metrics(method_grn_dict, celltype_gt_dict, test_genes, top_fract
                         celltype_gt=method_gt,
                         universe=method_universe,
                         top_fraction=top_fraction,
+                        min_auroc_edges_per_class=min_auroc_edges_per_class,
                     ))
 
     # One row per (model, sample, cell type, method). model_name is MEAN_MODEL for the
@@ -1454,10 +1498,19 @@ def parse_args():
     parser.add_argument("--top_fraction", type=float, default=0.1,
                         help="Top-edge set A for the early metrics: this fraction of each method's edges")
     parser.add_argument("--n_random_shuffles", type=int, default=N_RANDOM_SHUFFLES)
+    parser.add_argument("--min_auroc_edges", type=int, default=10,
+                        help="AUROC is NaN when a method has fewer than this many true or false "
+                             "predicted edges in a (sample, cell type); 0 keeps every AUROC")
     parser.add_argument("--n_jobs", type=int, default=len(os.sched_getaffinity(0)))
     parser.add_argument("--force_relabel", action="store_true",
                         help="Relabel the GRNs even when the cache for this run hash exists "
                              "(needed after regenerating GRNs under the same run names)")
+    parser.add_argument("--exclude_celltypes", nargs="+", default=[], metavar="CELL_TYPE",
+                        help="Cell types to leave out of the comparison in every sample "
+                             "(e.g. Macrophages)")
+    parser.add_argument("--exclude_samples", nargs="+", default=[], metavar="SAMPLE",
+                        help="Samples to leave out of the comparison, by sample name "
+                             "(e.g. lung_adult_ENCDO528BHB)")
     return parser.parse_args()
 
 
@@ -1483,6 +1536,7 @@ def main():
     method_grn_dict, celltype_gt_dict, hash_key = label_method_grns(
         model_run_dict, sample_sources, uid_of, args.species, args.results_dir,
         args.other_method_grn_dir, args.n_jobs, force_relabel=args.force_relabel,
+        exclude_celltypes=args.exclude_celltypes, exclude_samples=args.exclude_samples,
     )
     logging.info(f"Run hash: {hash_key}")
 
@@ -1500,6 +1554,7 @@ def main():
 
     all_model_metrics_df, random_baseline_jobs = compute_all_metrics(
         method_grn_dict, celltype_gt_dict, test_genes, top_fraction=args.top_fraction,
+        min_auroc_edges_per_class=args.min_auroc_edges,
     )
 
     # Combined comparison: the mean-score model and the other methods
@@ -1628,8 +1683,12 @@ def main():
     (args.results_dir / f"method_comparison_{hash_key}.json").write_text(json.dumps({
         "model_runs": model_run_dict,
         "species": args.species,
+        "other_method_grn_dir": str(args.other_method_grn_dir),
+        "exclude_celltypes": sorted(args.exclude_celltypes),
+        "exclude_samples": sorted(args.exclude_samples),
         "top_fraction": args.top_fraction,
         "n_random_shuffles": args.n_random_shuffles,
+        "min_auroc_edges": args.min_auroc_edges,
         "plot_dir": str(args.plot_dir),
         "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
     }, indent=2))
