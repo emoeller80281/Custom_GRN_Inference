@@ -142,6 +142,7 @@ class SimpleTFTGRegulationModel(nn.Module):
         peak_accessibility_mean=0.0,
         peak_accessibility_std=1.0,
         own_peak_flag=False,
+        tad_peak_flag=False,
     ):
         super().__init__()
 
@@ -173,8 +174,11 @@ class SimpleTFTGRegulationModel(nn.Module):
         # Binding, accessibility, scaled distance, distance weight, and with
         # own_peak_flag a fifth feature: 1 if the peak's nearest TSS is this TG (the
         # ground-truth rule gives a ChIP site to its nearest TSS only), else 0.
+        # tad_peak_flag adds one more: 1 if the peak's TAD holds a TSS of this TG. It comes
+        # after the own-peak flag when both are on.
         self.own_peak_flag = bool(own_peak_flag)
-        self.n_peak_features = 5 if self.own_peak_flag else 4
+        self.tad_peak_flag = bool(tad_peak_flag)
+        self.n_peak_features = 4 + int(self.own_peak_flag) + int(self.tad_peak_flag)
         self.peak_feature_proj = nn.Sequential(
             nn.Linear(self.n_peak_features, d_model),
             nn.SiLU(),
@@ -307,6 +311,11 @@ class SimpleTFTGRegulationModel(nn.Module):
                 )
             own = batch["peak_own"].float().masked_fill(~peak_mask, 0)
             per_peak.append(own[:, None, :].expand(B, C, P))
+        if self.tad_peak_flag:
+            if "peak_tad" not in batch:
+                raise ValueError("This model uses the same-TAD flag; build the dataset with tad_flag=True")
+            tad = batch["peak_tad"].float().masked_fill(~peak_mask, 0)
+            per_peak.append(tad[:, None, :].expand(B, C, P))
         peak_features = torch.stack(per_peak, dim=-1)  # [B, C, P, F]
 
         peak_tokens = self.peak_feature_proj(
@@ -404,7 +413,7 @@ class LitTFTGRegulationModel(pl.LightningModule):
                  num_cross_attn_layers=1, lr_schedule="plateau",
                  warmup_epochs=1.0, min_lr_ratio=0.01,
                  decay_patience=5, decay_epochs=20, decay_min_delta=1e-4,
-                 own_peak_flag=False):
+                 own_peak_flag=False, tad_peak_flag=False):
         super().__init__()
         if lr_schedule not in ("plateau", "cosine", "plateau_cosine"):
             raise ValueError(f"Unknown lr_schedule: {lr_schedule!r}")
@@ -418,7 +427,7 @@ class LitTFTGRegulationModel(pl.LightningModule):
             tg_expression_std=tg_expression_std,
             peak_accessibility_mean=peak_accessibility_mean,
             peak_accessibility_std=peak_accessibility_std,
-            own_peak_flag=own_peak_flag)
+            own_peak_flag=own_peak_flag, tad_peak_flag=tad_peak_flag)
         self.register_buffer("pos_weight", torch.tensor(float(pos_weight)))
         self._predictions = {"val": [], "test": []}
         # Edge-weighted val/loss sum for the plateau_cosine trigger. Lightning's own epoch

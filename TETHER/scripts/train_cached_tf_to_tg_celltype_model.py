@@ -51,6 +51,8 @@ from scripts.build_tf_to_tg_celltype_data import (  # noqa: E402
     binding_score_cache_path,
     gene_tss_bed_path,
     peak_nearest_tss_genes,
+    peak_same_tad_tables,
+    tad_bed_path,
 )
 
 import pytorch_lightning as pl  # noqa: E402
@@ -144,7 +146,27 @@ def parse_args(argv=None):
              "fifth per-peak feature, 1 for own peaks. only: keep only own peaks in the bag "
              "(edges with none get an empty bag). off (default): the four-feature model",
     )
+    parser.add_argument(
+        "--own_peak_rule", choices=["nearest_tss", "same_tad"], default="nearest_tss",
+        help="Which bag peaks --own_peaks marks. nearest_tss (default): the peak's nearest TSS "
+             "belongs to the TG. same_tad: the TAD of the peak midpoint holds at least one TSS "
+             "of the TG (same TSS file; TADs from --tad_bed). A peak in no TAD is never own.",
+    )
+    parser.add_argument(
+        "--tad_flag", action="store_true",
+        help="Add a per-peak feature, 1 when the TAD of the peak midpoint holds at least one TSS "
+             "of the TG (same rule as --own_peak_rule same_tad). Independent of --own_peaks: with "
+             "--own_peaks flag it comes after the own-peak flag.",
+    )
+    parser.add_argument("--tad_bed", type=Path, default=None,
+                        help="TADs for --own_peak_rule same_tad (default: "
+                             "<data_dir>/genome_data/genome_annotation/<species>/<species>_TADs.bed)")
     parser.add_argument("--accumulate_grad_batches", type=int, default=1)
+    parser.add_argument(
+        "--pin_memory", action=argparse.BooleanOptionalAction, default=True,
+        help="Pin DataLoader batches on GPU runs (default). --no-pin_memory turns it off; the "
+             "max_peaks 10 run segfaulted three times with the pin-memory thread receiving a batch.",
+    )
     parser.add_argument("--gradient_clip_val", type=float, default=1.)
     parser.add_argument("--precision", choices=["32-true", "16-mixed", "bf16-mixed"], default="32-true")
     parser.add_argument("--accelerator", choices=["auto", "cpu", "gpu"], default="auto")
@@ -183,6 +205,12 @@ def parse_args(argv=None):
         parser.error(f"--warmup_epochs must be in [0, --epochs) for --lr_schedule {args.lr_schedule}")
     if args.decay_patience <= 0 or args.decay_epochs <= 0 or args.decay_min_delta < 0:
         parser.error("--decay_patience and --decay_epochs must be positive, --decay_min_delta nonnegative")
+    if args.own_peak_rule != "nearest_tss" and args.own_peaks == "off":
+        parser.error("--own_peak_rule needs --own_peaks flag or only")
+    if args.own_peak_rule == "same_tad" or args.tad_flag:
+        tad_bed = args.tad_bed or tad_bed_path(args.data_dir, args.species)
+        if not Path(tad_bed).is_file():
+            parser.error(f"TAD file not found: {tad_bed}")
 
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     run_name = args.run_name if args.run_name is not None else "joint" if len(source_specs) > 1 else source_specs[0][1]
@@ -234,6 +262,9 @@ class TwoPercentProgressBar(TQDMProgressBar):
             bar.refresh()
             
 
+_NO_TADS = np.empty(0, dtype=np.int64)
+
+
 class TFTGEdgeBagDataset(Dataset):
     def __init__(
         self,
@@ -252,6 +283,10 @@ class TFTGEdgeBagDataset(Dataset):
         seed=42,
         peak_nearest_gene=None,  # [n ATAC peaks] nearest-TSS gene, for own_peaks
         own_peaks="off",
+        peak_tad=None,   # [n ATAC peaks] TAD index (-1: none), for own_peak_rule same_tad
+        tg_tads=None,    # TG -> TAD indices holding one of its TSSs, with peak_tad
+        own_peak_rule="nearest_tss",
+        tad_flag=False,  # add item["peak_tad"]: peak's TAD holds a TSS of the TG
     ):
         self.inputs = inputs.reset_index(drop=True).copy()
 
@@ -274,7 +309,17 @@ class TFTGEdgeBagDataset(Dataset):
             raise ValueError(f"own_peaks must be off, flag or only, not {own_peaks!r}")
         self.own_peaks = own_peaks
         self.peak_nearest_gene = None
-        if own_peaks != "off":
+        self.peak_tad, self.tg_tads = None, None
+        if own_peak_rule not in ("nearest_tss", "same_tad"):
+            raise ValueError(f"own_peak_rule must be nearest_tss or same_tad, not {own_peak_rule!r}")
+        self.own_peak_rule = own_peak_rule
+        self.tad_flag = bool(tad_flag)
+        if (own_peaks != "off" and own_peak_rule == "same_tad") or self.tad_flag:
+            if peak_tad is None or len(peak_tad) != atac_mat.shape[1] or tg_tads is None:
+                raise ValueError("same-TAD peaks need one TAD index per ATAC column and tg_tads")
+            self.peak_tad = np.asarray(peak_tad, dtype=np.int64)
+            self.tg_tads = tg_tads
+        if own_peaks != "off" and own_peak_rule == "nearest_tss":
             if peak_nearest_gene is None or len(peak_nearest_gene) != atac_mat.shape[1]:
                 raise ValueError("own_peaks needs one nearest-TSS gene per ATAC column")
             self.peak_nearest_gene = np.asarray(peak_nearest_gene, dtype=object)
@@ -381,7 +426,10 @@ class TFTGEdgeBagDataset(Dataset):
         if self.own_peaks == "off":
             peak_mask[:n_peaks] = True
         else:
-            own = self.peak_nearest_gene[peak_cols] == row.tg_id
+            if self.own_peak_rule == "same_tad":
+                own = np.isin(self.peak_tad[peak_cols], self.tg_tads.get(row.tg_id, _NO_TADS))
+            else:
+                own = self.peak_nearest_gene[peak_cols] == row.tg_id
             peak_own = torch.zeros(self.P, dtype=torch.bool)
             peak_own[:n_peaks] = torch.from_numpy(own)
             # "only" drops the other peaks from the bag; their binding scores and
@@ -438,6 +486,11 @@ class TFTGEdgeBagDataset(Dataset):
         
         if self.own_peaks == "flag":
             item["peak_own"] = peak_own
+        if self.tad_flag:
+            peak_tad = torch.zeros(self.P, dtype=torch.bool)
+            peak_tad[:n_peaks] = torch.from_numpy(
+                np.isin(self.peak_tad[peak_cols], self.tg_tads.get(row.tg_id, _NO_TADS)))
+            item["peak_tad"] = peak_tad
         if self.binding_scores is not None:
             item["binding_score"] = self.binding_scores[idx]
         else:
@@ -647,6 +700,8 @@ def main(argv=None, extra_callbacks=()):
         # A smaller bag changes the accessibility scaler. "flag" keeps every peak, so it
         # shares the run cache of the four-feature model.
         cache_manifest["own_peaks"] = "only"
+        if args.own_peak_rule != "nearest_tss":
+            cache_manifest["own_peak_rule"] = args.own_peak_rule
     cache_key = _cache_digest(cache_manifest)
     if args.cache_dir is None:
         args.cache_dir = (
@@ -679,23 +734,45 @@ def main(argv=None, extra_callbacks=()):
         load_cached_source(args, tissue, sample_name, directory, manifest)
         for (tissue, sample_name), (directory, manifest) in locations.items()
     ]
-    if args.own_peaks != "off":
+    use_tad = args.tad_flag or (args.own_peaks != "off" and args.own_peak_rule == "same_tad")
+    if args.own_peaks != "off" or args.tad_flag:
         tss_bed = gene_tss_bed_path(args.data_dir, args.species)
         config["own_peaks_tss_bed"] = _file_identity(tss_bed)
+        if use_tad:
+            tad_bed = args.tad_bed or tad_bed_path(args.data_dir, args.species)
+            config["own_peaks_tad_bed"] = _file_identity(tad_bed)
         for source in prepared_sources:
-            source["peak_nearest_gene"] = peak_nearest_tss_genes(source["peak_names"], tss_bed)
+            if use_tad:
+                source["peak_tad"], source["tg_tads"] = peak_same_tad_tables(
+                    source["peak_names"], tss_bed, tad_bed)
+
+            def n_tad(cols, tg, source=source):
+                return int(np.isin(source["peak_tad"][cols],
+                                   source["tg_tads"].get(tg, _NO_TADS)).sum())
+            if args.own_peaks == "off":
+                n_own = None
+            elif args.own_peak_rule == "same_tad":
+                n_own = n_tad
+            else:
+                source["peak_nearest_gene"] = peak_nearest_tss_genes(source["peak_names"], tss_bed)
+
+                def n_own(cols, tg, source=source):
+                    return int((source["peak_nearest_gene"][cols] == tg).sum())
             source_key = f"{source['tissue']}__{source['sample_name']}"
             for split_name, frame in source["splits"].items():
-                own = np.array([
-                    int((source["peak_nearest_gene"][np.asarray(cols, dtype=np.int64)] == tg).sum())
-                    for cols, tg in zip(frame["peak_atac_cols"], frame["tg_id"])
-                ])
-                stats = {
-                    "edges_with_own_peak": float((own > 0).mean()) if len(own) else float("nan"),
-                    "mean_own_peaks": float(own.mean()) if len(own) else float("nan"),
-                }
-                config[f"{source_key}_{split_name}_own_peaks"] = stats
-                logging.info("%s %s own peaks: %s", source_key, split_name, stats)
+                for label, count in (("own_peaks", n_own), ("tad_peaks", n_tad if args.tad_flag else None)):
+                    if count is None:
+                        continue
+                    n = np.array([
+                        count(np.asarray(cols, dtype=np.int64)[:args.max_peaks_per_tg], tg)
+                        for cols, tg in zip(frame["peak_atac_cols"], frame["tg_id"])
+                    ])
+                    stats = {
+                        f"edges_with_{label[:-1]}": float((n > 0).mean()) if len(n) else float("nan"),
+                        f"mean_{label}": float(n.mean()) if len(n) else float("nan"),
+                    }
+                    config[f"{source_key}_{split_name}_{label}"] = stats
+                    logging.info("%s %s %s: %s", source_key, split_name, label, stats)
 
     available_train_celltypes = {
         cell_type
@@ -769,6 +846,10 @@ def main(argv=None, extra_callbacks=()):
                 seed=args.seed,
                 peak_nearest_gene=source.get("peak_nearest_gene"),
                 own_peaks=args.own_peaks,
+                peak_tad=source.get("peak_tad"),
+                tg_tads=source.get("tg_tads"),
+                own_peak_rule=args.own_peak_rule,
+                tad_flag=args.tad_flag,
             )
             dataset_parts[split_name].append(TFTGEdgeBagDataset(
                 frame,
@@ -853,7 +934,7 @@ def main(argv=None, extra_callbacks=()):
             shuffle=split_name == "train" and sampler is None,
             num_workers=args.num_workers,
             persistent_workers=args.num_workers > 0,
-            pin_memory=use_cuda,
+            pin_memory=use_cuda and args.pin_memory,
             prefetch_factor=4 if args.num_workers > 0 else None,
             drop_last=False,
         )
@@ -868,6 +949,7 @@ def main(argv=None, extra_callbacks=()):
         "pooling_temperature", "pos_weight", "plateau_patience", "lr_schedule",
         "warmup_epochs", "decay_patience", "decay_epochs", "decay_min_delta")},
         own_peak_flag=args.own_peaks == "flag",
+        tad_peak_flag=args.tad_flag,
         **scaler_hparams)
 
     if args.wandb_mode == "disabled":
