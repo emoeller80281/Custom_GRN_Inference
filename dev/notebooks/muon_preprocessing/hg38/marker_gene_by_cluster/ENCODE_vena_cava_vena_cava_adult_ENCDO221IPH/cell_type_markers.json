@@ -1,0 +1,159 @@
+{
+  "Endothelial": [
+    "PECAM1",
+    "CDH5",
+    "VWF",
+    "CLDN5",
+    "ERG",
+    "PTPRB",
+    "EGFL7",
+    "TIE1"
+  ],
+  "Lymphatic endothelial": [
+    "PROX1",
+    "PDPN",
+    "FLT4",
+    "CCL21",
+    "LYVE1",
+    "MMRN1"
+  ],
+  "Smooth muscle": [
+    "MYH11",
+    "CNN1",
+    "TAGLN",
+    "LMOD1",
+    "ACTA2",
+    "MYLK",
+    "ACTG2",
+    "DES"
+  ],
+  "Pericyte": [
+    "RGS5",
+    "ABCC9",
+    "KCNJ8",
+    "PDGFRB",
+    "NOTCH3",
+    "CSPG4"
+  ],
+  "Fibroblast": [
+    "DCN",
+    "LUM",
+    "PDGFRA",
+    "COL1A1",
+    "COL1A2",
+    "COL3A1",
+    "COL6A3",
+    "FBN1",
+    "FBLN1",
+    "C1R"
+  ],
+  "Adipocyte": [
+    "ADIPOQ",
+    "PLIN1",
+    "PLIN4",
+    "GPAM",
+    "ACACB",
+    "PPARG"
+  ],
+  "Atrial cardiomyocyte": [
+    "ACTC1",
+    "MYL4",
+    "NPPA"
+  ],
+  "Schwann cell": [
+    "PLP1",
+    "MPZ",
+    "SCN7A",
+    "NRXN1",
+    "CDH19"
+  ],
+  "Autonomic neuron": [
+    "SNAP25",
+    "SYT1",
+    "UCHL1"
+  ],
+  "T cell": [
+    "CD3E",
+    "CD3G",
+    "TRAC",
+    "TRBC1",
+    "TRBC2",
+    "CD2",
+    "BCL11B",
+    "SKAP1",
+    "THEMIS",
+    "ITK"
+  ],
+  "NK cell": [
+    "KLRD1",
+    "GNLY",
+    "NKG7",
+    "PRF1",
+    "NCAM1",
+    "SH2D1B"
+  ],
+  "B cell": [
+    "MS4A1",
+    "CD79B",
+    "BANK1",
+    "PAX5",
+    "CD22",
+    "FCRL1",
+    "BLK"
+  ],
+  "Plasma cell": [
+    "PRDM1",
+    "XBP1"
+  ],
+  "Monocyte": [
+    "CD14",
+    "FCN1",
+    "VCAN",
+    "LYZ",
+    "S100A8",
+    "S100A9"
+  ],
+  "Macrophage": [
+    "C1QA",
+    "C1QB",
+    "C1QC",
+    "CD163",
+    "MRC1",
+    "CSF1R",
+    "MSR1",
+    "F13A1",
+    "APOE",
+    "MARCO"
+  ],
+  "Dendritic cell (cDC1)": [
+    "CADM1",
+    "BATF3"
+  ],
+  "Dendritic cell (cDC2)": [
+    "CLEC10A"
+  ],
+  "Neutrophil": [
+    "CSF3R",
+    "FPR1"
+  ],
+  "Mast cell": [
+    "TPSAB1",
+    "TPSB2",
+    "CPA3",
+    "KIT",
+    "HPGDS",
+    "HDC"
+  ],
+  "Cycling cells": [
+    "MKI67",
+    "TOP2A",
+    "CENPF",
+    "ASPM",
+    "NUSAP1",
+    "DIAPH3",
+    "SMC4",
+    "TPX2",
+    "RRM2",
+    "KNL1"
+  ]
+}

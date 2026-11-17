@@ -168,6 +168,10 @@ BASELINE_SIMILARITY_TOLERANCE = 0.075
 RANDOM_BASELINE_STYLE = {"color": "0.35", "linestyle": (0, (4, 2)), "linewidth": 1.5}
 RANDOM_BASELINE_HANDLE = Line2D([0], [0], label="Random baseline", **RANDOM_BASELINE_STYLE)
 
+# Early metrics that the boxplots show as lift over the random baseline (metric / baseline)
+# when a baseline is given. The random baseline is then 1 on these panels.
+LIFT_METRICS = ("precision", "f1", "recall", "fpr")
+
 sample_tissue_map = {
     "E7.5_rep1": "Embryo",
     "E7.5_rep2": "Embryo",
@@ -1185,6 +1189,19 @@ def _style_xticklabels(ax, originals, method_color_dict,
             tick.set_fontweight("normal")
 
 
+def lift_over_baseline(metric_df, baseline_df, metric):
+    """
+    One row per (method, sample, cell type) with the metric column replaced by
+    metric / random baseline. Pairs with a zero baseline have no lift and are dropped.
+    """
+    keys = ["method_name", "sample_name", "cell_type"]
+    merged = metric_df[keys + [metric]].merge(
+        baseline_df[keys + [metric]], on=keys, suffixes=("", "_baseline"),
+    )
+    merged[metric] = (merged[metric] / merged[f"{metric}_baseline"]).replace([np.inf, -np.inf], np.nan)
+    return merged[keys + [metric]].dropna(subset=[metric])
+
+
 def plot_selected_box_and_whisker_plots(
     full_metric_df,
     method_color_dict,
@@ -1195,8 +1212,8 @@ def plot_selected_box_and_whisker_plots(
 ):
     selected_columns = ["auroc", "auprc", "precision", "f1", "recall", "fpr"]
 
-    # Fixed y-limits of some panels. The other panels scale to their data.
-    fixed_ylims = {"f1": (0, 0.6), "recall": (0, 0.4), "fpr": (0, 0.2)}
+    # Fixed y-limits of the ROC and PRC panels. The early-metric panels scale to their data.
+    fixed_ylims = {"auroc": (0, 0.9), "auprc": (0, 0.8)}
 
     fig, axes = plt.subplots(2, 3, figsize=(16, 10))
 
@@ -1204,6 +1221,9 @@ def plot_selected_box_and_whisker_plots(
         plot_df = full_metric_df.dropna(
             subset=["method_name", selected_column]
         )
+        show_lift = baseline_df is not None and selected_column in LIFT_METRICS
+        if show_lift:
+            plot_df = lift_over_baseline(plot_df, baseline_df, selected_column)
 
         medians = (
             plot_df.groupby("method_name", observed=True)[selected_column]
@@ -1221,7 +1241,9 @@ def plot_selected_box_and_whisker_plots(
             )
             continue
 
-        if baseline_df is not None:
+        if show_lift:
+            ax.axhline(1.0, zorder=4, **RANDOM_BASELINE_STYLE)
+        elif baseline_df is not None:
             draw_random_baselines(ax, baseline_df, selected_column, method_order)
 
         sns.boxplot(
@@ -1270,11 +1292,12 @@ def plot_selected_box_and_whisker_plots(
             ].max()
             upper_whiskers.append(upper_whisker)
 
-            annotation = (
-                f"{medians.loc[method]:.3f}"
-                if show_values_above_boxes
-                else str(ranks.loc[method])
-            )
+            if not show_values_above_boxes:
+                annotation = str(ranks.loc[method])
+            elif show_lift:
+                annotation = f"{medians.loc[method]:.2f}×"
+            else:
+                annotation = f"{medians.loc[method]:.3f}"
 
             ax.annotate(
                 annotation,
@@ -1297,6 +1320,8 @@ def plot_selected_box_and_whisker_plots(
         )
 
         label = boxplot_metric_labels[selected_column]
+        if show_lift:
+            label += " Lift"
         title = f"{label} by Method"
 
         if title_suffix_str:
@@ -1309,6 +1334,9 @@ def plot_selected_box_and_whisker_plots(
 
         if selected_column in fixed_ylims:
             ax.set_ylim(*fixed_ylims[selected_column])
+        elif show_lift:
+            # Lift has no upper bound: scale to the whiskers, and keep the baseline (1) in view.
+            ax.set_ylim(0, max(max(upper_whiskers), 1.0) * 1.15)
         else:
             ymax = plot_df[selected_column].max()
             ax.set_ylim(
