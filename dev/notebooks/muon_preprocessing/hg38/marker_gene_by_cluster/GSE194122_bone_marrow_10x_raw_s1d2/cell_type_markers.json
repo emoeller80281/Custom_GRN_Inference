@@ -1,0 +1,160 @@
+{
+  "T cell": [
+    "CD3D",
+    "CD3E",
+    "CD3G",
+    "CD2",
+    "TRAC",
+    "TRBC1",
+    "TRBC2",
+    "BCL11B",
+    "IL7R",
+    "CD247",
+    "SKAP1",
+    "THEMIS",
+    "CD96",
+    "ITK",
+    "CAMK4"
+  ],
+  "NK cell": [
+    "NKG7",
+    "GNLY",
+    "KLRD1",
+    "KLRF1",
+    "NCAM1",
+    "PRF1",
+    "GZMB",
+    "TYROBP",
+    "KLRC1",
+    "SH2D1B"
+  ],
+  "B cell": [
+    "MS4A1",
+    "CD79B",
+    "BANK1",
+    "PAX5",
+    "AFF3",
+    "BLK",
+    "FCRL1",
+    "IGHM",
+    "CD22"
+  ],
+  "Plasma cell": [
+    "JCHAIN",
+    "MZB1",
+    "PRDM1",
+    "IGHG1",
+    "IGHA1",
+    "IGKC",
+    "IGLC2",
+    "IGLC3"
+  ],
+  "Monocyte": [
+    "CD14",
+    "LYZ",
+    "S100A8",
+    "S100A9",
+    "VCAN",
+    "FCN1",
+    "CSF3R",
+    "CD36",
+    "LRP1"
+  ],
+  "Macrophage": [
+    "MRC1",
+    "CD163",
+    "MSR1",
+    "F13A1",
+    "CSF1R",
+    "MS4A6A",
+    "DOCK2"
+  ],
+  "Dendritic cell": [
+    "CD83",
+    "CIITA",
+    "CCR7"
+  ],
+  "Mast cell": [
+    "KIT"
+  ],
+  "CD8/cytotoxic T": [
+    "CD8A",
+    "CD8B",
+    "GZMK",
+    "GZMH",
+    "CCL5",
+    "CST7",
+    "GZMA"
+  ],
+  "Treg": [
+    "IL2RA",
+    "CTLA4",
+    "TIGIT",
+    "IKZF2"
+  ],
+  "pDC": [
+    "LILRA4",
+    "CLEC4C",
+    "SLC15A4",
+    "PLD4",
+    "TCF4",
+    "IRF7"
+  ],
+  "Erythroid": [
+    "HBB",
+    "HBA1",
+    "HBA2",
+    "GYPA",
+    "ALAS2",
+    "KLF1",
+    "TFRC",
+    "SLC4A1",
+    "HBD",
+    "EPB42"
+  ],
+  "HSPC": [
+    "CD34",
+    "SPINK2",
+    "CRHBP",
+    "HLF",
+    "PROM1",
+    "MEIS1",
+    "HOPX"
+  ],
+  "Myeloid progenitor": [
+    "ELANE",
+    "MPO",
+    "AZU1",
+    "PRTN3"
+  ],
+  "Megakaryocyte": [
+    "ITGA2B",
+    "PBX1"
+  ],
+  "Endothelial": [
+    "PECAM1",
+    "FLT1",
+    "EGFL7",
+    "ERG",
+    "EMCN"
+  ],
+  "Fibroblast": [
+    "FBN1"
+  ],
+  "Lung epithelium": [
+    "AGER",
+    "EPCAM"
+  ],
+  "Cycling cells": [
+    "MKI67",
+    "TOP2A",
+    "CENPF",
+    "ASPM",
+    "NUSAP1",
+    "DIAPH3",
+    "SMC4",
+    "TPX2",
+    "RRM2",
+    "KNL1"
+  ]
+}

@@ -9,16 +9,18 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=128G
-#SBATCH --array=0-16%9
+#SBATCH --array=0-21%9
 
 # Builds one sample cache (prepared edges + TF-DNA binding scores) per array task.
 # Submit from the repository root (which contains LOGS):
 #   sbatch TETHER/bash_scripts/03c_build_celltype_data.sh
 # Rebuild only some samples by index, for example: sbatch --array=3,7 ...
 # Keep --array in sync with the length of DATASETS.
-# SPECIES selects the dataset list (default mm10). For hg38:
-#   sbatch --export=ALL,SPECIES=hg38 --array=0-10%9 TETHER/bash_scripts/03c_build_celltype_data.sh
-# (11 hg38 samples; the --array=0-16%9 directive above is for the 17 mm10 samples.)
+# SPECIES selects the dataset list (default mm10). The --array=0-21%9 directive above is for the
+# 22 hg38 samples:
+#   sbatch --export=ALL,SPECIES=hg38 TETHER/bash_scripts/03c_build_celltype_data.sh
+# For the 17 mm10 samples, override it:
+#   sbatch --array=0-16%9 TETHER/bash_scripts/03c_build_celltype_data.sh
 # Samples are read from data/processed/<species>/<tissue>/<sample>/multiome_processed.h5mu.
 #
 # The preprocessing settings below select the cache. They must match the ones in
@@ -39,19 +41,31 @@ SPECIES="${SPECIES:-mm10}"
 EXTRA_ARGS=()
 if [ "$SPECIES" = "hg38" ]; then
 DATASETS=(
+    # Third hg38 test (2026-11-17): two samples per tissue; bile duct and vena cava have one.
     "ENCODE_adrenal:adrenal_adult_ENCDO221IPH"
+    "ENCODE_adrenal:adrenal_adult_ENCDO856ZOJ"
     "ENCODE_bile_duct:bile_duct_adult_ENCDO575WHY"
     "ENCODE_colon:colon_adult_ENCDO856ZOJ"
+    "ENCODE_colon:colon_adult_ENCDO186XRB"
     "ENCODE_fallopian_tube:fallopian_tube_adult_ENCDO411EVD"
+    "ENCODE_fallopian_tube:fallopian_tube_adult_ENCDO856ZOJ"
     "ENCODE_heart:heart_lv_adult_ENCDO575WHY"
+    "ENCODE_heart:heart_lv_adult_ENCDO411EVD"
     "ENCODE_lung:lung_adult_ENCDO528BHB"
+    "ENCODE_lung:lung_child_ENCDO575EGL"
     "ENCODE_pancreas:pancreas_adult_ENCDO221IPH"
+    "ENCODE_pancreas:pancreas_child_ENCDO575EGL"
+    "ENCODE_vena_cava:vena_cava_adult_ENCDO221IPH"
     "GSE194122_bone_marrow:s1d1"
+    "GSE194122_bone_marrow:s1d2"
     "GSE207335_epidermis:S1"
+    "GSE207335_epidermis:S2"
     "GSE240061_muscle_pre_exercise:Ex-1_Pre_tr1"
-    # GSE277326_retina_macula_rpe:Retina_donor1 is left out (2026-11-10): no slice passes the cache
-    # filters (rods: density 0.66 > --max_gt_density 0.60), and the cache build then stops.
+    "GSE240061_muscle_pre_exercise:Ex-1_Pre_tr2"
+    # GSE277326_retina_macula_rpe (Retina_donor1, Retina_donor2) is left out: no slice passes the cache
+    # filters (rods: density 0.66 and 0.75 > --max_gt_density 0.60), and the cache build then stops.
     "GSE319044_lung_spleen_immune:Spleen-SMO-04"
+    "GSE319044_lung_spleen_immune:Spleen-SMO-1"
 )
 # TF-DNA model of the current hg38 TF cache (tf_dna_cache_site_merged_overlap_filtered)
 EXTRA_ARGS=(--tf_dna_checkpoint "$PROJECT_DIR/checkpoints/tf_dna_hg38_3930720/epoch_18.ckpt")
