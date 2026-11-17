@@ -18,12 +18,6 @@
 # If GT_DIR/<ORGANISM>_cell_type_maps/<ORGANISM>_excluded_experiments.tsv exists (hg38 has one, mm10
 # does not), the per-experiment filter is on: the listed experiments are dropped from every source,
 # and rows disabled only because of them are fetched and used (experiment_filter.py).
-#
-# Optional overrides (defaults keep the standard build):
-#   MAP_DIR=<dir>        read <CELL_TYPE>_cell_type_map.tsv from here (excluded list stays in the standard dir)
-#   OUT_DIR=<dir>        write <ORGANISM>/<CELL_TYPE>/ and reports/ here instead of GT_DIR (peak sets still from GT_DIR)
-#   TAD_BED=<file>       TAD rule: nearest TSS inside the peak's TAD (build_celltype_ground_truth.py --tad_bed)
-#   SKIP_DOWNLOAD=1      do not run download_ground_truth.py (peak sets already present)
 
 set -eo pipefail
 
@@ -33,15 +27,7 @@ CELL_TYPE="${CELL_TYPE:-GSE246464_HSC}"
 
 PROJECT_DIR="/gpfs/Labs/Uzun/SCRIPTS/PROJECTS/2024.SINGLE_CELL_GRN_INFERENCE.MOELLER"
 GT_DIR="${PROJECT_DIR}/data/ground_truth_files/cell_type_specific"
-MAP_DIR="${MAP_DIR:-${GT_DIR}/${ORGANISM}_cell_type_maps}"
-OUT_DIR="${OUT_DIR:-${GT_DIR}}"
-MAP="${MAP_DIR}/${CELL_TYPE}_cell_type_map.tsv"
-TAD=()
-if [[ -n "${TAD_BED:-}" ]]; then
-    TAD=(--tad_bed "$TAD_BED")
-    echo "TAD rule: $TAD_BED"
-fi
-echo "Map: $MAP  |  output: $OUT_DIR"
+MAP="${GT_DIR}/${ORGANISM}_cell_type_maps/${CELL_TYPE}_cell_type_map.tsv"
 EXCL="${GT_DIR}/${ORGANISM}_cell_type_maps/${ORGANISM}_excluded_experiments.tsv"
 FILTER=()
 if [[ -f "$EXCL" ]]; then
@@ -59,23 +45,21 @@ export TMPDIR="$PROJECT_DIR/.sorttmp"
 
 mkdir -p "$TMPDIR"
 
-if [[ "${SKIP_DOWNLOAD:-0}" != 1 ]]; then
 python3 -u "$PROJECT_DIR/TETHER/scripts/generate_celltype_ground_truth/download_ground_truth.py" --organism "$ORGANISM" \
     --map "$MAP" \
     --out_dir "$GT_DIR" \
     "${FILTER[@]}"
-fi
 
 python3 -u "$PROJECT_DIR/TETHER/scripts/generate_celltype_ground_truth/build_celltype_ground_truth.py" --organism "$ORGANISM" \
     --map "$MAP" \
     --gt_dir "$GT_DIR" \
-    --out_dir "$OUT_DIR" \
+    --out_dir "$GT_DIR" \
     --dataset "$CELL_TYPE" \
-    --reports "${OUT_DIR}/reports" \
+    --reports "${GT_DIR}/reports" \
     --report_tag "${ORGANISM}_${CELL_TYPE}" \
     --max_tss_dist 100000 \
-    "${FILTER[@]}" "${TAD[@]}"
+    "${FILTER[@]}"
 
 python3 -u "$PROJECT_DIR/TETHER/scripts/generate_celltype_ground_truth/verify_ground_truth.py" --organism "$ORGANISM" \
     --map "$MAP" \
-    --gt_dir "${OUT_DIR}/${ORGANISM}/${CELL_TYPE}"
+    --gt_dir "${GT_DIR}/${ORGANISM}/${CELL_TYPE}"

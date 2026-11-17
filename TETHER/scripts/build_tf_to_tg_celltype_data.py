@@ -404,12 +404,6 @@ def add_data_args(parser):
         help="Repeat for several samples, for example --dataset mESC:E7.5_rep1",
     )
     parser.add_argument("--data_dir", type=Path, default=PROJECT_DIR.parent / "data")
-    parser.add_argument(
-        "--gt_root", type=Path, default=None,
-        help="Ground-truth root holding <species>/<tissue>/*_ground_truth.parquet (default: "
-             "<data_dir>/ground_truth_files/cell_type_specific). Label maps are always read "
-             "from the default root. The GT file paths are part of the cache key.",
-    )
     parser.add_argument("--gene_ref_file", type=Path,
                         help="Override the species-specific gene annotation")
     parser.add_argument("--tf_dna_checkpoint", type=Path,
@@ -506,98 +500,6 @@ def gene_reference_path(args):
         else "Homo_sapiens.GRCh38.113.gtf.gz"
     )
     return args.data_dir / "genome_data/genome_annotation" / args.species / file_name
-
-
-def gt_root_path(args):
-    """Root of the per-tissue ground-truth parquet files (--gt_root or the standard one)."""
-    default = Path(args.data_dir) / "ground_truth_files" / "cell_type_specific"
-    return Path(args.gt_root) if getattr(args, "gt_root", None) else default
-
-
-def gene_tss_bed_path(data_dir, species):
-    """TSS annotation of the ground-truth builder (build_celltype_ground_truth.py default)."""
-    return Path(data_dir) / "genome_data/genome_annotation" / species / f"{species}_gene_tss.bed"
-
-
-def peak_nearest_tss_genes(peak_names, tss_bed):
-    """Nearest-TSS gene of every ATAC peak, by the ground-truth rule.
-
-    The ground truth gives each ChIP site to its nearest TSS only (bedtools closest -d
-    -t first on the same TSS file). A bag peak is an "own" peak of a TG when its
-    nearest TSS belongs to that TG. Returns upper-case gene names in peak column order;
-    "" for a peak with no TSS on its chromosome. Needs bedtools on PATH.
-    """
-    import shutil
-    import subprocess
-    import tempfile
-
-    tss_bed = Path(tss_bed)
-    if not tss_bed.is_file():
-        raise FileNotFoundError(f"TSS annotation not found: {tss_bed}")
-    if shutil.which("bedtools") is None:
-        raise RuntimeError("bedtools is not on PATH (activate my_env)")
-    peak_names = np.asarray(peak_names).astype(str)
-    coords = pd.Series(peak_names).str.extract(r"^(chr[^:]+):(\d+)-(\d+)$")
-    if coords.isna().any().any():
-        raise ValueError(f"Peak names must be chrom:start-end; first is {peak_names[0]!r}")
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmp = Path(tmpdir)
-        pd.DataFrame({
-            "chrom": coords[0], "start": coords[1].astype(np.int64),
-            "end": coords[2].astype(np.int64), "col": np.arange(len(peak_names)),
-        }).to_csv(tmp / "peaks.bed", sep="\t", header=False, index=False)
-        # Same sort command as build_celltype_ground_truth.py: with -t first, the TSS
-        # order decides ties between TSSs at the same distance.
-        subprocess.run(
-            f"sort -k1,1 -k2,2n {tss_bed} > {tmp}/tss.bed && "
-            f"sort -k1,1 -k2,2n {tmp}/peaks.bed > {tmp}/peaks.sorted.bed && "
-            f"bedtools closest -a {tmp}/peaks.sorted.bed -b {tmp}/tss.bed -d -t first "
-            f"| cut -f4,8 > {tmp}/nearest.tsv",
-            shell=True, check=True, executable="/bin/bash",
-        )
-        nearest = pd.read_csv(tmp / "nearest.tsv", sep="\t", header=None,
-                              names=["col", "gene"], dtype={"gene": str}, na_filter=False)
-    genes = np.full(len(peak_names), "", dtype=object)
-    found = nearest["gene"].ne(".").to_numpy()
-    genes[nearest["col"].to_numpy()[found]] = nearest["gene"].str.upper().to_numpy()[found]
-    return genes
-
-
-def tad_bed_path(data_dir, species):
-    """TAD intervals of the species (whitespace-separated chrom start end)."""
-    return Path(data_dir) / "genome_data/genome_annotation" / species / f"{species}_TADs.bed"
-
-
-def peak_same_tad_tables(peak_names, tss_bed, tad_bed):
-    """Tables for the same-TAD own-peak rule.
-
-    Same TAD assignment as build_celltype_ground_truth.py --tad_bed: a peak is in the TAD
-    of its midpoint, a TSS in the TAD of its position. A bag peak counts as an own peak of
-    a TG when its TAD holds at least one TSS of that TG (any transcript in tss_bed).
-    Returns (peak_tad: int64 [n peaks], -1 for a peak in no TAD;
-             gene_tads: upper-case gene -> int64 array of TADs holding one of its TSSs).
-    """
-    from scripts.generate_celltype_ground_truth.build_celltype_ground_truth import (
-        load_tads, tad_of,
-    )
-    tads = load_tads(Path(tad_bed))
-    index = {t: i for i, t in enumerate(tads["tad"])}
-    peak_names = np.asarray(peak_names).astype(str)
-    coords = pd.Series(peak_names).str.extract(r"^(chr[^:]+):(\d+)-(\d+)$")
-    if coords.isna().any().any():
-        raise ValueError(f"Peak names must be chrom:start-end; first is {peak_names[0]!r}")
-    mid = (coords[1].astype(np.int64) + coords[2].astype(np.int64)).to_numpy() // 2
-    peak_tad = np.array([index.get(t, -1) for t in tad_of(coords[0].to_numpy(), mid, tads)],
-                        dtype=np.int64)
-    tss = pd.read_csv(tss_bed, sep="\t", header=None, usecols=[0, 1, 3],
-                      names=["chrom", "pos", "gene"], dtype={"chrom": str, "gene": str},
-                      na_filter=False)
-    tss["tad"] = [index.get(t, -1) for t in tad_of(tss["chrom"].to_numpy(),
-                                                   tss["pos"].to_numpy(), tads)]
-    tss = tss[tss["tad"] >= 0]
-    gene_tads = {g: np.unique(v.to_numpy()) for g, v in
-                 tss.assign(gene=tss["gene"].str.upper()).groupby("gene")["tad"]}
-    return peak_tad, gene_tads
 
 
 def create_degree_matched_edges(edge_df, tf_col="Source", item_col="Target",
@@ -999,7 +901,7 @@ def build_sample_cache_manifest(args, tissue, sample_name):
     """Describe every input that can change one sample's edges or binding scores."""
     data_dir = args.data_dir
     reference_dir = data_dir / "genome_data/reference_genome" / args.species
-    ground_truth_root = gt_root_path(args)
+    ground_truth_root = data_dir / "ground_truth_files/cell_type_specific"
     ground_truth_dir = ground_truth_root / args.species / tissue
     ground_truth_files = sorted(ground_truth_dir.glob("*_ground_truth.parquet"))
     if not ground_truth_files:
@@ -1191,7 +1093,7 @@ def prepare_data(args):
     cell_pools_cache_path = args.output_dir / "cell_pools.npz"
 
 
-    cell_type_specific_gt_dir = gt_root_path(args)
+    cell_type_specific_gt_dir = DATA_DIR / "ground_truth_files" / "cell_type_specific"
 
     # -----------------------------------
     # DATA LOADING
@@ -1344,7 +1246,7 @@ def prepare_data(args):
                 )
                 return (
                     splits, cell_pools, atac_mat, rna_mat, atac_peak_tensor,
-                    tf_embedding_cache_path, tf_mask_cache_path, dataset_peaks,
+                    tf_embedding_cache_path, tf_mask_cache_path,
                 )
             logging.info(
                 "%s:%s prepared cache manifest changed; rebuilding",
@@ -1702,8 +1604,7 @@ def prepare_data(args):
         "%s:%s saved prepared inputs to %s",
         tissue, sample_name, args.output_dir,
     )
-    return (splits, cell_pools, atac_mat, rna_mat, atac_peak_tensor, tf_embedding_cache_path,
-            tf_mask_cache_path, dataset_peaks)
+    return splits, cell_pools, atac_mat, rna_mat, atac_peak_tensor, tf_embedding_cache_path, tf_mask_cache_path
 
 
 def prepare_source(args, tissue, sample_name, directory, manifest):
@@ -1714,8 +1615,7 @@ def prepare_source(args, tissue, sample_name, directory, manifest):
     source_args.output_dir = Path(directory)
     source_args.prepared_cache_manifest = manifest
     source_args.output_dir.mkdir(parents=True, exist_ok=True)
-    (splits, pools, atac, rna, peaks, embedding_path, mask_path,
-     peak_names) = prepare_data(source_args)
+    splits, pools, atac, rna, peaks, embedding_path, mask_path = prepare_data(source_args)
     return {
         "tissue": tissue,
         "sample_name": sample_name,
@@ -1725,7 +1625,6 @@ def prepare_source(args, tissue, sample_name, directory, manifest):
         "atac": atac,
         "rna": rna,
         "peaks": peaks,
-        "peak_names": np.asarray(peak_names, dtype=str),  # ATAC column order
         "embedding_path": embedding_path,
         "mask_path": mask_path,
     }

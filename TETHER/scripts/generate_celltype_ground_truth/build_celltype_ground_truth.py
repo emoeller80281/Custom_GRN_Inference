@@ -19,8 +19,7 @@ Pipeline per (cell_type, source_term):
      tf_alias.tsv, which defaults to dropping them rather than guessing a paralog.
   4. bedtools closest -d -t first assigns each peak its single nearest TSS. `closest` rather
      than `window` because these peak sets run to millions of rows and an all-pairs window
-     over a 100 kb radius does not finish. With --tad_bed, the search is limited to TSSs in
-     the TAD of the peak midpoint (the TAD id replaces the chrom on both sides).
+     over a 100 kb radius does not finish.
   5. `distances` lists, per edge, the TSS distance of each binding site of the TF that is
      assigned to the target, pooled over all of the edge's sources (binding_site_distances).
 
@@ -50,7 +49,6 @@ import sys
 import tempfile
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
 HERE = Path(__file__).resolve().parent
@@ -146,97 +144,24 @@ def reduce_bed(bed_path: Path, source: str, out_path: Path, exfile: Path = None)
     return n, dropped
 
 
-def load_tads(tad_bed: Path) -> pd.DataFrame:
-    """TAD intervals (chrom, start, end; whitespace-separated) with an id "<chrom>__<row>"."""
-    tads = pd.read_csv(tad_bed, sep=r"\s+", header=None, usecols=[0, 1, 2],
-                       names=["chrom", "start", "end"], dtype={"chrom": str}, comment="#")
-    tads["tad"] = tads["chrom"] + "__" + tads.index.astype(str)
-    return tads
-
-
-def tad_of(chrom, pos, tads: pd.DataFrame) -> np.ndarray:
-    """TAD id of each point (chrom, pos); "" for a point in no TAD."""
-    chrom, pos = np.asarray(chrom), np.asarray(pos)
-    out = np.full(len(pos), "", dtype=object)
-    for c, t in tads.groupby("chrom", sort=False):
-        idx = np.flatnonzero(chrom == c)
-        if idx.size == 0:
-            continue
-        t = t.sort_values("start")
-        starts, ends, ids = t["start"].to_numpy(), t["end"].to_numpy(), t["tad"].to_numpy()
-        i = np.searchsorted(starts, pos[idx], side="right") - 1
-        ok = (i >= 0) & (pos[idx] < ends[i.clip(0)])
-        out[idx[ok]] = ids[i[ok]]
-    return out
-
-
-def tss_by_tad(tss_sorted: Path, tads: pd.DataFrame, tmp: Path) -> Path:
-    """The TSS file with each chrom replaced by the TSS's TAD id; TSSs in no TAD are dropped."""
-    tss = pd.read_csv(tss_sorted, sep="\t", header=None, dtype={0: str}, na_filter=False)
-    tss[0] = tad_of(tss[0].to_numpy(), tss[1].to_numpy(), tads)
-    logging.info("TAD rule: %s of %s TSS entries are in a TAD", f"{(tss[0] != '').sum():,}",
-                 f"{len(tss):,}")
-    unsorted, out = tmp / "tss.tad.unsorted.bed", tmp / "tss.tad.sorted.bed"
-    tss[tss[0] != ""].to_csv(unsorted, sep="\t", header=False, index=False)
-    # Same sort command as for the genome-wide file: with -t first, the TSS order decides ties.
-    subprocess.run(f"sort -k1,1 -k2,2n {unsorted} > {out}", shell=True, check=True,
-                   executable="/bin/bash")
-    unsorted.unlink()
-    # bedtools closest stops when a TAD has TSSs but no query peaks, unless it gets a genome
-    # file. List every TAD id in the same sort order as the BED files.
-    genome = tmp / "tads.genome"
-    tads.groupby("tad")["end"].max().reset_index().to_csv(
-        tmp / "tads.genome.unsorted", sep="\t", header=False, index=False)
-    subprocess.run(f"sort -k1,1 {tmp}/tads.genome.unsorted > {genome}", shell=True, check=True,
-                   executable="/bin/bash")
-    (tmp / "tads.genome.unsorted").unlink()
-    return out
-
-
-def closest_tss(peaks_bed: Path, tss_sorted: Path, tmp: Path, tads: pd.DataFrame = None) -> tuple:
-    """bedtools closest -d, one nearest TSS per peak.
-
-    Returns (chrom/start/end/tf/target/dist frame, peaks outside every TAD).
-    With tads, tss_sorted must be the tss_by_tad() file: each peak gets its chrom replaced by
-    the TAD of its midpoint, so bedtools only searches TSSs in the same TAD. Peaks in no TAD
-    are dropped; a peak whose TAD has no TSS gets target "." like a peak on a TSS-free chrom.
-    """
+def closest_tss(peaks_bed: Path, tss_sorted: Path, tmp: Path) -> pd.DataFrame:
+    """bedtools closest -d, one nearest TSS per peak. Returns chrom/start/end/tf/target/dist."""
     srt = tmp / (peaks_bed.stem + ".sorted.bed")
     out = tmp / (peaks_bed.stem + ".closest.bed")
-    n_outside = 0
-    genome = ""
-    if tads is None:
-        src, cols = peaks_bed, [0, 1, 2, 3, 7, 8]
-    else:
-        p = pd.read_csv(peaks_bed, sep="\t", header=None, names=["chrom", "start", "end", "tf"],
-                        dtype={"chrom": str, "tf": str}, na_filter=False)
-        p.insert(0, "tad", tad_of(p["chrom"].to_numpy(),
-                                  ((p["start"] + p["end"]) // 2).to_numpy(), tads))
-        n_outside = int((p["tad"] == "").sum())
-        src = tmp / (peaks_bed.stem + ".tad.bed")
-        # tad, start, end, tf, chrom: the real chrom rides along as column 5
-        p.loc[p["tad"] != "", ["tad", "start", "end", "tf", "chrom"]].to_csv(
-            src, sep="\t", header=False, index=False)
-        del p
-        cols = [4, 1, 2, 3, 8, 9]
-        genome = f"-g {tss_sorted.parent / 'tads.genome'}"
-    subprocess.run(f"sort -k1,1 -k2,2n {src} > {srt}", shell=True, check=True,
+    subprocess.run(f"sort -k1,1 -k2,2n {peaks_bed} > {srt}", shell=True, check=True,
                    executable="/bin/bash")
     subprocess.run(
-        f"bedtools closest -a {srt} -b {tss_sorted} -d -t first {genome} > {out}",
+        f"bedtools closest -a {srt} -b {tss_sorted} -d -t first > {out}",
         shell=True, check=True, executable="/bin/bash",
     )
     df = pd.read_csv(
-        out, sep="\t", header=None, usecols=cols,
-        names=["start", "end", "tf", "chrom", "target", "dist"] if tads is not None
-        else ["chrom", "start", "end", "tf", "target", "dist"],
+        out, sep="\t", header=None, usecols=[0, 1, 2, 3, 7, 8],
+        names=["chrom", "start", "end", "tf", "target", "dist"],
         dtype={"chrom": str, "tf": str, "target": str}, na_filter=False,
-    )[["chrom", "start", "end", "tf", "target", "dist"]]
-    if tads is not None:
-        src.unlink(missing_ok=True)
+    )
     srt.unlink(missing_ok=True)
     out.unlink(missing_ok=True)
-    return df, n_outside
+    return df
 
 
 def binding_site_distances(peaks: pd.DataFrame) -> pd.DataFrame:
@@ -267,7 +192,7 @@ def binding_site_distances(peaks: pd.DataFrame) -> pd.DataFrame:
 
 def build_cell_type(cell_type: str, rows: pd.DataFrame, gt_dir: Path, organism: str,
                     tss_sorted: Path, emb_tfs: set, max_dist: int, tmp: Path,
-                    exfile: Path = None, listed: dict = None, tads: pd.DataFrame = None) -> tuple:
+                    exfile: Path = None, listed: dict = None) -> tuple:
     """Return (edges_df, per-source breadth records) for one dataset cell type."""
     listed = listed or {}
     edges, peaks, records = [], [], []
@@ -285,7 +210,7 @@ def build_cell_type(cell_type: str, rows: pd.DataFrame, gt_dir: Path, organism: 
                "n_tfs_dropped_no_embedding": 0, "n_edges": 0, "status": "ok",
                "enabled_by_filter": bool(getattr(r, "enabled_by_filter", False)),
                "n_experiments_listed": len(listed.get(term_key(r.source, r.source_class, r.source_term), ())),
-               "n_experiments_excluded": 0, "n_peaks_excluded": 0, "n_peaks_outside_tad": 0}
+               "n_experiments_excluded": 0, "n_peaks_excluded": 0}
 
         if not bed.exists():
             rec["status"] = "source_file_missing"
@@ -318,7 +243,7 @@ def build_cell_type(cell_type: str, rows: pd.DataFrame, gt_dir: Path, organism: 
             reduced.unlink(missing_ok=True)
             continue
 
-        hits, rec["n_peaks_outside_tad"] = closest_tss(reduced, tss_sorted, tmp, tads)
+        hits = closest_tss(reduced, tss_sorted, tmp)
         reduced.unlink(missing_ok=True)
 
         # Normalize gene names to uppercase
@@ -384,11 +309,6 @@ def main() -> None:
     ap.add_argument("--reports", type=Path, default=HERE / "reports")
     ap.add_argument("--tss_bed", type=Path, default=None)
     ap.add_argument("--max_tss_dist", type=int, default=DEFAULT_MAX_TSS_DIST)
-    ap.add_argument("--tad_bed", type=Path, default=None,
-                    help="TAD rule: give each peak the nearest TSS inside the TAD of the peak "
-                         "midpoint (chrom start end per line). Peaks in no TAD give no edge, and "
-                         "genes with no TSS in a TAD get no edge. --max_tss_dist still applies. "
-                         "Default: nearest TSS genome-wide.")
     ap.add_argument("--include_optin", action="store_true")
     ap.add_argument("--excluded_experiments", type=Path, default=None,
                     help="per-experiment filter: <organism>_excluded_experiments.tsv. Drops the listed "
@@ -455,20 +375,13 @@ def main() -> None:
                    executable="/bin/bash")
     logging.info("TSS annotation: %s  |  max TSS distance: %s bp\n",
                  tss.name, f"{args.max_tss_dist:,}")
-    tads = None
-    if args.tad_bed:
-        if not args.tad_bed.exists():
-            raise SystemExit(f"Missing TAD file: {args.tad_bed}")
-        tads = load_tads(args.tad_bed)
-        logging.info("TAD rule on: %s (%d TADs)", args.tad_bed, len(tads))
-        tss_sorted = tss_by_tad(tss_sorted, tads, tmp)
 
     # For each cell type, build the TF-TG edges and write them to a parquet file.
     all_records = []
     for cell_type, rows in cell_type_gt_map.groupby("dataset_cell_type", sort=True):
         logging.info("%s  (%d source(s))", cell_type, len(rows))
         edges, records = build_cell_type(cell_type, rows, args.gt_dir, args.organism, tss_sorted,
-                                         emb_tfs, args.max_tss_dist, tmp, exfile, listed, tads)
+                                         emb_tfs, args.max_tss_dist, tmp, exfile, listed)
         all_records.extend(records)
         dest = out_dir / f"{cell_type.replace(' ', '_')}_ground_truth.parquet"
         edges.to_parquet(dest, index=False)
