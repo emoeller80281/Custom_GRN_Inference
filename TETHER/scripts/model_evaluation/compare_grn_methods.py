@@ -192,17 +192,28 @@ sample_tissue_map = {
     "liver_sample": "Liver",
     # hg38 ENCODE samples
     "adrenal_adult_ENCDO221IPH": "Adrenal",
+    "adrenal_adult_ENCDO856ZOJ": "Adrenal",
     "bile_duct_adult_ENCDO575WHY": "Bile duct",
     "colon_adult_ENCDO856ZOJ": "Colon",
+    "colon_adult_ENCDO186XRB": "Colon",
     "fallopian_tube_adult_ENCDO411EVD": "Fallopian tube",
+    "fallopian_tube_adult_ENCDO856ZOJ": "Fallopian tube",
     "heart_lv_adult_ENCDO575WHY": "Heart LV",
+    "heart_lv_adult_ENCDO411EVD": "Heart LV",
     "lung_adult_ENCDO528BHB": "Lung",
+    "lung_child_ENCDO575EGL": "Lung",
     "pancreas_adult_ENCDO221IPH": "Pancreas",
+    "pancreas_child_ENCDO575EGL": "Pancreas",
+    "vena_cava_adult_ENCDO221IPH": "Vena cava",
     # other hg38 samples
     "s1d1": "Bone marrow",
+    "s1d2": "Bone marrow",
     "S1": "Epidermis",
+    "S2": "Epidermis",
     "Ex-1_Pre_tr1": "Skeletal muscle",
+    "Ex-1_Pre_tr2": "Skeletal muscle",
     "Spleen-SMO-04": "Spleen",
+    "Spleen-SMO-1": "Spleen",
     "Retina_donor1": "Retina",
 }
 
