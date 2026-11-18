@@ -55,6 +55,7 @@ from pytorch_lightning.callbacks import (  # noqa: E402
     EarlyStopping, LearningRateMonitor, ModelCheckpoint, TQDMProgressBar
 )
 from pytorch_lightning.loggers import CSVLogger, WandbLogger  # noqa: E402
+from pytorch_lightning.strategies import DDPStrategy  # noqa: E402
 from models.tf_to_tg_celltype import LitTFTGRegulationModel  # noqa: E402
 
 
@@ -88,7 +89,8 @@ def parse_args(argv=None):
     parser.add_argument("--run_name", type=str)
     parser.add_argument("--slurm_id", default=os.environ.get("SLURM_JOB_ID", "local"))
     parser.add_argument("--epochs", type=int, default=250)
-    parser.add_argument("--batch_size", type=int, default=64)
+    parser.add_argument("--batch_size", type=int, default=64,
+                        help="Edges per GPU per step; the global batch is batch_size x --devices")
     parser.add_argument("--resample_cells", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument(
         "--balance_samples", action=argparse.BooleanOptionalAction, default=True,
@@ -138,6 +140,11 @@ def parse_args(argv=None):
     parser.add_argument("--gradient_clip_val", type=float, default=1.)
     parser.add_argument("--precision", choices=["32-true", "16-mixed", "bf16-mixed"], default="32-true")
     parser.add_argument("--accelerator", choices=["auto", "cpu", "gpu"], default="auto")
+    parser.add_argument(
+        "--devices", type=int, default=1,
+        help="GPUs on one node. Above 1, runs DDP: launch with srun and --ntasks-per-node equal "
+             "to --devices (03d does this), and set TETHER_RUN_STAMP so all ranks share one run directory",
+    )
     parser.add_argument("--wandb_project", default="TETHER-celltype-TF-TG")
     parser.add_argument("--wandb_entity")
     parser.add_argument("--wandb_run_id", help="Reuse with --resume_from_checkpoint to resume W&B")
@@ -174,7 +181,12 @@ def parse_args(argv=None):
     if args.decay_patience <= 0 or args.decay_epochs <= 0 or args.decay_min_delta < 0:
         parser.error("--decay_patience and --decay_epochs must be positive, --decay_min_delta nonnegative")
 
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    # Every DDP rank runs this script; they must agree on the run directory, so the launcher
+    # sets one stamp for all of them (03d exports TETHER_RUN_STAMP before srun).
+    stamp = os.environ.get("TETHER_RUN_STAMP") or datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    if args.devices > 1 and "TETHER_RUN_STAMP" not in os.environ and args.output_dir is None:
+        parser.error("--devices > 1 needs TETHER_RUN_STAMP (or --output_dir), so that all ranks "
+                     "write to one run directory")
     run_name = args.run_name if args.run_name is not None else "joint" if len(source_specs) > 1 else source_specs[0][1]
     run_prefix = f"celltype_{run_name}"
     if args.output_dir is None and args.run_name is None and args.slurm_id != "local":
@@ -505,6 +517,47 @@ def validate_input_scaler(scaler):
     return scaler
 
 
+class RankShardSampler(Sampler):
+    """One DDP rank's share of a base sampler's draw.
+
+    Every rank builds the same base sampler with the same seed, so all ranks draw the same
+    index list each epoch; rank r keeps positions r, r + world_size, ... The tail is cut so
+    all ranks have the same number of edges (DDP needs the same number of steps).
+    """
+
+    def __init__(self, base, rank, world_size):
+        self.base, self.rank, self.world_size = base, rank, world_size
+
+    def __len__(self):
+        return len(self.base) // self.world_size
+
+    def __iter__(self):
+        indices = list(self.base)[:len(self) * self.world_size]
+        return iter(indices[self.rank::self.world_size])
+
+    def set_epoch(self, epoch):
+        if hasattr(self.base, "set_epoch"):
+            self.base.set_epoch(epoch)
+
+
+class ContiguousShardSampler(Sampler):
+    """Rank r's contiguous block of range(n), without padding (val/test under DDP).
+
+    Blocks differ in length by at most one edge. Concatenating the ranks' predictions in rank
+    order gives the single-GPU order, so epoch metrics are computed on exactly the same edges.
+    """
+
+    def __init__(self, n, rank, world_size):
+        bounds = np.linspace(0, n, world_size + 1).round().astype(int)
+        self.start, self.stop = int(bounds[rank]), int(bounds[rank + 1])
+
+    def __len__(self):
+        return self.stop - self.start
+
+    def __iter__(self):
+        return iter(range(self.start, self.stop))
+
+
 def make_sample_balanced_sampler(datasets, seed, edges_per_sample=None):
     """Give every source sample equal expected probability during joint training."""
     if len(datasets) < 2:
@@ -527,10 +580,19 @@ def main(argv=None, extra_callbacks=()):
     """argv and extra_callbacks let wandb_sweep.py run this in-process."""
     args, source_specs = parse_args(argv)
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    # DDP: one process per GPU, started by srun (SLURM_NTASKS = --devices on one node).
+    world_size = int(os.environ.get("SLURM_NTASKS", os.environ.get("WORLD_SIZE", "1")))
+    global_rank = int(os.environ.get("SLURM_PROCID", os.environ.get("RANK", "0")))
+    if world_size != args.devices:
+        raise ValueError(
+            f"--devices {args.devices} but {world_size} process(es) were started: launch one "
+            "process per GPU (srun with --ntasks-per-node equal to --devices, on one node)")
+    if args.devices > 1 and int(os.environ.get("SLURM_NNODES", "1")) != 1:
+        raise ValueError("--devices > 1 supports one node")
 
-    if int(os.environ.get("WORLD_SIZE", "1")) > 1 or int(os.environ.get("SLURM_NTASKS", "1")) > 1:
-        raise ValueError("This launcher supports one process and one GPU per run")
+    # Ranks 1+ run the same data loading; keep their INFO messages out of the log.
+    logging.basicConfig(level=logging.INFO if global_rank == 0 else logging.WARNING,
+                        format="%(asctime)s %(levelname)s %(message)s")
 
     pl.seed_everything(args.seed, workers=True)
 
@@ -789,9 +851,24 @@ def main(argv=None, extra_callbacks=()):
         )
         if args.balance_samples else None
     )
+    if args.devices > 1:
+        # Own samplers instead of Lightning's DistributedSampler, which pads val/test with
+        # repeated edges: train ranks get equal-length shards of one shared draw; val/test
+        # ranks get contiguous unpadded shards, gathered back in order for the metrics.
+        shard_args = dict(rank=global_rank, world_size=world_size)
+        if train_sampler is None:
+            train_sampler = torch.utils.data.DistributedSampler(
+                datasets["train"], num_replicas=world_size, rank=global_rank,
+                shuffle=True, seed=args.seed, drop_last=True)
+        else:
+            train_sampler = RankShardSampler(train_sampler, **shard_args)
+        logging.info("DDP on %d GPUs: %s edges per GPU per step, global batch %s",
+                     world_size, f"{args.batch_size:,}", f"{args.batch_size * world_size:,}")
     loaders = {}
     for split_name, dataset in datasets.items():
         sampler = train_sampler if split_name == "train" else None
+        if split_name != "train" and args.devices > 1:
+            sampler = ContiguousShardSampler(len(dataset), **shard_args)
         loaders[split_name] = DataLoader(
             dataset,
             batch_size=args.batch_size,
@@ -843,9 +920,17 @@ def main(argv=None, extra_callbacks=()):
         auto_insert_metric_name=False, monitor="val/loss", mode="min",
         save_top_k=3, save_last=True)
 
+    distributed = {}
+    if args.devices > 1:
+        # broadcast_buffers=False: the model's buffers are constants, and a buffer broadcast in
+        # every forward would be a collective in validation, where ranks run unequal batch counts.
+        # The samplers above already shard the data, so Lightning must not add its own.
+        distributed = dict(strategy=DDPStrategy(broadcast_buffers=False),
+                           use_distributed_sampler=False)
     trainer = pl.Trainer(
         accelerator=args.accelerator,
-        devices=1,
+        devices=args.devices,
+        **distributed,
         max_epochs=args.epochs,
         precision=args.precision,
         logger=logger,
@@ -877,15 +962,17 @@ def main(argv=None, extra_callbacks=()):
                 key: float(value)
                 for key, value in (untrained_results[0] if untrained_results else {}).items()
             }
-            (args.output_dir / "untrained_val_metrics.json").write_text(
-                json.dumps(untrained_metrics, indent=2)
-            )
+            if trainer.is_global_zero:
+                (args.output_dir / "untrained_val_metrics.json").write_text(
+                    json.dumps(untrained_metrics, indent=2)
+                )
 
         trainer.fit(module, loaders["train"], loaders["val"],
                     ckpt_path=str(args.resume_from_checkpoint) if args.resume_from_checkpoint else None)
         if "test" in loaders and not args.fast_dev_run:
             metrics = trainer.test(module, loaders["test"], ckpt_path="best")
-            (args.output_dir / "test_metrics.json").write_text(json.dumps(metrics, indent=2))
+            if trainer.is_global_zero:
+                (args.output_dir / "test_metrics.json").write_text(json.dumps(metrics, indent=2))
         logging.info("Best checkpoint: %s", checkpoint.best_model_path)
     finally:
         if isinstance(logger, WandbLogger):

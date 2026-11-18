@@ -3,6 +3,7 @@ import math
 import time
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import pytorch_lightning as pl
 import numpy as np
@@ -372,7 +373,10 @@ class SimpleTFTGRegulationModel(nn.Module):
 class LitTFTGRegulationModel(pl.LightningModule):
     """Lightning training for precomputed binding scores and cell-type bags.
 
-    Metrics are exact over the epoch on the single device used by the launcher.
+    Metrics are exact over the epoch. With DDP (several GPUs), each rank validates its own
+    contiguous, unpadded shard of the val/test edges; val/loss and val/acc are reduced across
+    ranks, and the AUROC/AUPRC metrics are computed on the predictions of all ranks, gathered
+    in rank order, so they equal the single-GPU values.
     Checkpoints contain the downstream model; TF-DNA provenance is in run_config.json.
 
     lr_schedule: "plateau" (ReduceLROnPlateau on val/loss, x0.1 after plateau_patience epochs),
@@ -460,14 +464,17 @@ class LitTFTGRegulationModel(pl.LightningModule):
             logits.float(), labels, pos_weight=self.pos_weight)
         if not torch.isfinite(loss):
             raise FloatingPointError(f"Non-finite {stage} loss")
+        # val/test: reduce the edge-weighted epoch means across DDP ranks, so that checkpointing,
+        # early stopping and ReduceLROnPlateau see the loss over all val edges. No effect on one GPU.
+        sync = stage != "train"
         self.log(f"{stage}/loss", loss, on_step=stage == "train",
-                 on_epoch=True, prog_bar=True, batch_size=len(labels))
+                 on_epoch=True, prog_bar=True, batch_size=len(labels), sync_dist=sync)
         if stage == "val":
             self._val_loss_sum = self._val_loss_sum + loss.detach().double() * len(labels)
             self._val_loss_count += len(labels)
         probs = logits.detach().float().sigmoid()
         self.log(f"{stage}/acc", ((probs >= .5) == labels.bool()).float().mean(),
-                 on_step=False, on_epoch=True, batch_size=len(labels))
+                 on_step=False, on_epoch=True, batch_size=len(labels), sync_dist=sync)
         if stage != "train":
             self._predictions[stage].append((
                 probs.cpu(), labels.int().cpu(),
@@ -675,17 +682,35 @@ class LitTFTGRegulationModel(pl.LightningModule):
         if charts:
             self.logger.log_metrics(charts, step=self.global_step)
 
+    @staticmethod
+    def _distributed():
+        return dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1
+
     def _epoch_metrics(self, stage):
         batches = self._predictions[stage]
-        if not batches:
-            return
-        probs = torch.cat([b[0] for b in batches]).numpy()
-        labels = torch.cat([b[1] for b in batches]).numpy()
-        samples = np.asarray([s for b in batches for s in b[2]])
-        slices = np.asarray([s for b in batches for s in b[3]])
-        tfs = np.asarray([s for b in batches for s in b[4]])
-        tgs = np.asarray([s for b in batches for s in b[5]])
+        if batches:
+            local = (
+                torch.cat([b[0] for b in batches]).numpy(),
+                torch.cat([b[1] for b in batches]).numpy(),
+                np.asarray([s for b in batches for s in b[2]]),
+                np.asarray([s for b in batches for s in b[3]]),
+                np.asarray([s for b in batches for s in b[4]]),
+                np.asarray([s for b in batches for s in b[5]]),
+            )
+        else:
+            local = None
         batches.clear()
+        if self._distributed():
+            # Every rank must reach this collective, also a rank without batches. Ranks hold
+            # contiguous shards (ContiguousShardSampler), so rank order restores edge order.
+            gathered = [None] * dist.get_world_size()
+            dist.all_gather_object(gathered, local)
+            parts = [part for part in gathered if part is not None]
+            local = (tuple(np.concatenate([part[i] for part in parts]) for i in range(6))
+                     if parts else None)
+        if local is None:
+            return
+        probs, labels, samples, slices, tfs, tgs = local
         # Ranking inside one (sample, cell type, TF) or one (sample, cell type, TG): the
         # pooled AUROC also rewards ranking TFs or TGs by their positive rate.
         for name, key in (("tf", tfs), ("tg", tgs)):
@@ -794,10 +819,18 @@ class LitTFTGRegulationModel(pl.LightningModule):
         schedule state that includes this epoch.
         """
         factor, trainer = self._lr_factor, self.trainer
-        if (factor is None or trainer.sanity_checking or trainer.state.fn != "fit"
-                or self._val_loss_count == 0):
+        if factor is None or trainer.sanity_checking or trainer.state.fn != "fit":
             return
-        val_loss = float(self._val_loss_sum / self._val_loss_count)
+        loss_sum, loss_count = float(self._val_loss_sum), float(self._val_loss_count)
+        if self._distributed():
+            # Same val/loss on every rank, so every rank takes the same schedule decision
+            # (different learning rates would make the DDP replicas drift apart).
+            totals = torch.tensor([loss_sum, loss_count], dtype=torch.float64, device=self.device)
+            dist.all_reduce(totals)
+            loss_sum, loss_count = totals.tolist()
+        if loss_count == 0:
+            return
+        val_loss = loss_sum / loss_count
         step = trainer.global_step
         if factor.update(val_loss, step):
             rank_zero_info(

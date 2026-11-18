@@ -5,10 +5,13 @@
 #SBATCH --time=32:00:00
 #SBATCH --partition=dense
 #SBATCH --nodes=1
-#SBATCH --gres=gpu:a100:1
-#SBATCH --ntasks-per-node=1
+# DDP on the 4 A100s of one dense node: one task per GPU (Lightning reads the srun tasks).
+# For one GPU: sbatch --gres=gpu:a100:1 --ntasks-per-node=1 --mem=128G ...
+#SBATCH --gres=gpu:a100:4
+#SBATCH --ntasks-per-node=4
 #SBATCH --cpus-per-task=24
-#SBATCH --mem=128G
+# Every rank loads all sample caches; the 1-GPU run needed < 128 GB.
+#SBATCH --mem=768G
 #SBATCH --signal=SIGUSR1@90
 # A requeued job reuses the same log files; append so the earlier attempt is kept.
 #SBATCH --open-mode=append
@@ -110,7 +113,17 @@ for dataset in "${DATASETS[@]}"; do
     DATASET_ARGS+=(--dataset "$dataset")
 done
 
+# One GPU per srun task. All ranks must share one run directory: give them one time stamp.
+NGPU="${SLURM_NTASKS:-1}"
+export TETHER_RUN_STAMP="${TETHER_RUN_STAMP:-$(date +%Y%m%d_%H%M%S_%6N)}"
+# --batch_size is per GPU; keep the global batch at GLOBAL_BATCH edges per optimizer step.
+GLOBAL_BATCH=256
+if (( GLOBAL_BATCH % NGPU )); then
+    echo "ERROR: GLOBAL_BATCH ${GLOBAL_BATCH} is not divisible by ${NGPU} GPUs" >&2
+    exit 1
+fi
 srun python -u scripts/train_cached_tf_to_tg_celltype_model.py \
+    --devices "$NGPU" \
     --species "$SPECIES" \
     "${DATASET_ARGS[@]}" \
     "${EXTRA_ARGS[@]}" \
@@ -125,7 +138,7 @@ srun python -u scripts/train_cached_tf_to_tg_celltype_model.py \
     --d_model 64 \
     --num_cross_attn_layers 2 \
     --accelerator gpu \
-    --batch_size 256 \
+    --batch_size $((GLOBAL_BATCH / NGPU)) \
     --num_workers "${SLURM_CPUS_PER_TASK:-4}" \
     --run_name "long_training" \
     --precision 32-true \
