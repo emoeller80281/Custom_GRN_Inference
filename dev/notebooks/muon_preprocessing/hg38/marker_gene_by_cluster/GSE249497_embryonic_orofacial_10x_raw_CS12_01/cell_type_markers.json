@@ -1,0 +1,156 @@
+{
+  "Cranial mesenchyme": [
+    "TWIST1",
+    "TWIST2",
+    "PRRX1",
+    "ALX1",
+    "ALX4",
+    "MSX1",
+    "MSX2",
+    "DLX1",
+    "DLX2",
+    "DLX5"
+  ],
+  "Chondrogenic/skeletal": [
+    "COL2A1",
+    "ACAN",
+    "COL9A1",
+    "SOX5",
+    "SOX6",
+    "SOX9",
+    "COL11A1",
+    "RUNX2",
+    "MATN4"
+  ],
+  "Fibroblast-like mesenchyme": [
+    "COL1A1",
+    "COL1A2",
+    "COL3A1",
+    "LUM",
+    "DCN",
+    "POSTN",
+    "FBN2"
+  ],
+  "Neural crest/glia": [
+    "SOX10",
+    "FOXD3",
+    "PLP1",
+    "ERBB3",
+    "MPZ",
+    "FABP7",
+    "CDH19"
+  ],
+  "Neural progenitor": [
+    "PAX6",
+    "SOX2",
+    "NES",
+    "HES5",
+    "FABP7",
+    "SOX1",
+    "ASCL1",
+    "DLK1",
+    "ZIC1",
+    "RFX4"
+  ],
+  "Neuron": [
+    "ELAVL3",
+    "ELAVL4",
+    "STMN2",
+    "DCX",
+    "TUBB3",
+    "ISL1",
+    "NEUROD1",
+    "POU4F1",
+    "GAP43",
+    "RBFOX1"
+  ],
+  "Surface epithelium": [
+    "EPCAM",
+    "CDH1",
+    "KRT8",
+    "KRT18",
+    "KRT19",
+    "TP63",
+    "PITX2",
+    "PERP",
+    "GRHL2"
+  ],
+  "Endoderm/pharyngeal epithelium": [
+    "FOXA1",
+    "FOXA2",
+    "NKX2-3",
+    "SOX21",
+    "PAX1"
+  ],
+  "Muscle progenitor": [
+    "TBX1",
+    "PAX3",
+    "PAX7",
+    "ACTC1",
+    "MYH3",
+    "TTN"
+  ],
+  "Endothelial": [
+    "PECAM1",
+    "VWF",
+    "CDH5",
+    "FLT1",
+    "PTPRB",
+    "EGFL7",
+    "KDR",
+    "ERG",
+    "EMCN",
+    "TIE1"
+  ],
+  "Pericyte/smooth muscle": [
+    "RGS5",
+    "ACTA2",
+    "MYH11",
+    "TAGLN",
+    "PDGFRB",
+    "NOTCH3",
+    "CARMN",
+    "KCNQ5",
+    "DLC1",
+    "GUCY1A2",
+    "PRKG1",
+    "ABCC9"
+  ],
+  "Erythroid": [
+    "HBZ",
+    "HBE1",
+    "HBG1",
+    "HBG2",
+    "HBA1",
+    "HBA2",
+    "ALAS2",
+    "GYPA"
+  ],
+  "Macrophage": [
+    "CD68",
+    "CSF1R",
+    "PTPRC",
+    "LYZ",
+    "MS4A6A",
+    "DOCK2"
+  ],
+  "Cardiac": [
+    "TNNT2",
+    "MYH6",
+    "MYL7",
+    "NKX2-5",
+    "ACTN2"
+  ],
+  "Cycling cells": [
+    "MKI67",
+    "TOP2A",
+    "CENPF",
+    "ASPM",
+    "NUSAP1",
+    "DIAPH3",
+    "SMC4",
+    "TPX2",
+    "RRM2",
+    "KNL1"
+  ]
+}

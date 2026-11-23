@@ -1,0 +1,138 @@
+{
+  "Endothelial": [
+    "PECAM1",
+    "VWF",
+    "CDH5",
+    "FLT1",
+    "PTPRB",
+    "EGFL7",
+    "KDR",
+    "ERG",
+    "EMCN",
+    "TIE1"
+  ],
+  "Pericyte/smooth muscle": [
+    "RGS5",
+    "ACTA2",
+    "MYH11",
+    "TAGLN",
+    "PDGFRB",
+    "NOTCH3",
+    "CARMN",
+    "KCNQ5",
+    "DLC1",
+    "GUCY1A2",
+    "PRKG1",
+    "ABCC9"
+  ],
+  "Fibroblast": [
+    "COL1A1",
+    "COL1A2",
+    "COL3A1",
+    "DCN",
+    "LUM",
+    "PDGFRA",
+    "FBN1",
+    "COL6A3",
+    "MMP2",
+    "ABCA8",
+    "FBLN1"
+  ],
+  "T cell": [
+    "CD2",
+    "TRAC",
+    "BCL11B",
+    "IL7R",
+    "CD247",
+    "SKAP1",
+    "CD96",
+    "ITK",
+    "CAMK4"
+  ],
+  "NK cell": [
+    "NKG7",
+    "KLRD1",
+    "NCAM1",
+    "TYROBP"
+  ],
+  "B cell": [
+    "BANK1",
+    "AFF3",
+    "BLK"
+  ],
+  "Plasma cell": [
+    "PRDM1",
+    "IGKC"
+  ],
+  "Monocyte": [
+    "CD14",
+    "LYZ",
+    "S100A8",
+    "S100A9",
+    "VCAN",
+    "FCN1",
+    "CSF3R",
+    "CD36",
+    "LRP1"
+  ],
+  "Macrophage": [
+    "MARCO",
+    "MRC1",
+    "CD163",
+    "C1QA",
+    "C1QB",
+    "C1QC",
+    "MSR1",
+    "F13A1",
+    "CSF1R",
+    "APOE",
+    "MS4A6A",
+    "DOCK2"
+  ],
+  "Dendritic cell": [
+    "BATF3",
+    "CD83",
+    "CIITA"
+  ],
+  "Mast cell": [
+    "HPGDS"
+  ],
+  "Ventricular cardiomyocyte": [
+    "MYH7",
+    "MYL2",
+    "MYL3",
+    "FHL2",
+    "PRELID2",
+    "RYR2",
+    "TNNT2",
+    "TTN",
+    "MB",
+    "CORIN"
+  ],
+  "Atrial cardiomyocyte": [
+    "MYH6",
+    "NPPA",
+    "MYL7",
+    "MYL4",
+    "HAMP",
+    "ALDH1A2"
+  ],
+  "Neural cell": [
+    "NRXN1",
+    "CDH19",
+    "NCAM2"
+  ],
+  "Adipocyte": [
+    "GPAM",
+    "PLIN4"
+  ],
+  "Mesothelial": [],
+  "Cycling cells": [
+    "ASPM",
+    "NUSAP1",
+    "DIAPH3",
+    "SMC4",
+    "RRM2",
+    "KNL1"
+  ]
+}

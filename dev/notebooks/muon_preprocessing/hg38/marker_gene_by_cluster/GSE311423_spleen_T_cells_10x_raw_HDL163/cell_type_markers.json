@@ -1,0 +1,88 @@
+{
+  "T cell": [
+    "CD3D",
+    "CD3E",
+    "CD4",
+    "IL7R",
+    "CCR7",
+    "LEF1",
+    "TCF7",
+    "CAMK4",
+    "BCL11B"
+  ],
+  "CD8/cytotoxic T": [
+    "CD3D",
+    "CD8A",
+    "CD8B",
+    "GZMK",
+    "GZMH",
+    "CCL5",
+    "CST7",
+    "GZMA"
+  ],
+  "Treg": [
+    "FOXP3",
+    "IL2RA",
+    "CTLA4",
+    "TIGIT",
+    "IKZF2"
+  ],
+  "NK cell": [
+    "NKG7",
+    "GNLY",
+    "KLRD1",
+    "KLRF1",
+    "NCAM1",
+    "PRF1",
+    "GZMB",
+    "SH2D1B"
+  ],
+  "B cell": [
+    "MS4A1",
+    "CD79A",
+    "CD79B",
+    "BANK1",
+    "PAX5",
+    "AFF3",
+    "FCRL1"
+  ],
+  "Plasma cell": [
+    "JCHAIN",
+    "MZB1",
+    "SDC1",
+    "PRDM1",
+    "TNFRSF17",
+    "IGHG1",
+    "IGHA1",
+    "IGKC"
+  ],
+  "Monocyte": [
+    "LYZ"
+  ],
+  "Macrophage": [
+    "MRC1",
+    "CSF1R",
+    "VCAM1"
+  ],
+  "Dendritic cell": [
+    "CLEC9A",
+    "XCR1",
+    "LAMP3",
+    "CCR7"
+  ],
+  "pDC": [
+    "TCF4",
+    "IRF7"
+  ],
+  "Mast cell": [
+    "KIT",
+    "HPGDS"
+  ],
+  "Cycling cells": [
+    "MKI67",
+    "TOP2A",
+    "CENPF",
+    "NUSAP1",
+    "TPX2"
+  ]
+}

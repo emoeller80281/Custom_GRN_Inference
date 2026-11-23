@@ -1,0 +1,203 @@
+{
+  "Endothelial": [
+    "PECAM1",
+    "VWF",
+    "CDH5",
+    "FLT1",
+    "PTPRB",
+    "EGFL7",
+    "KDR",
+    "ERG",
+    "EMCN",
+    "TIE1"
+  ],
+  "Pericyte/smooth muscle": [
+    "RGS5",
+    "ACTA2",
+    "MYH11",
+    "TAGLN",
+    "PDGFRB",
+    "NOTCH3",
+    "CARMN",
+    "KCNQ5",
+    "DLC1",
+    "GUCY1A2",
+    "PRKG1",
+    "ABCC9"
+  ],
+  "Fibroblast": [
+    "COL1A1",
+    "COL1A2",
+    "COL3A1",
+    "DCN",
+    "LUM",
+    "PDGFRA",
+    "FBN1",
+    "COL6A3",
+    "MMP2",
+    "ABCA8",
+    "FBLN1"
+  ],
+  "T cell": [
+    "BCL11B",
+    "IL7R",
+    "CD247",
+    "SKAP1",
+    "THEMIS",
+    "CD96",
+    "ITK",
+    "CAMK4"
+  ],
+  "NK cell": [
+    "GNLY",
+    "KLRD1",
+    "KLRF1",
+    "NCAM1",
+    "TYROBP",
+    "SH2D1B"
+  ],
+  "B cell": [
+    "CD79A",
+    "CD79B",
+    "BANK1",
+    "PAX5",
+    "AFF3",
+    "CD22"
+  ],
+  "Plasma cell": [
+    "MZB1",
+    "SDC1",
+    "PRDM1"
+  ],
+  "Monocyte": [
+    "CD14",
+    "LYZ",
+    "S100A8",
+    "S100A9",
+    "VCAN",
+    "FCN1",
+    "CSF3R",
+    "CD36",
+    "LRP1"
+  ],
+  "Macrophage": [
+    "MRC1",
+    "CD163",
+    "C1QA",
+    "C1QB",
+    "C1QC",
+    "MSR1",
+    "F13A1",
+    "CSF1R",
+    "APOE",
+    "MS4A6A",
+    "DOCK2"
+  ],
+  "Dendritic cell": [
+    "CLEC9A",
+    "CLEC10A",
+    "BATF3",
+    "CD83",
+    "CIITA",
+    "CCR7"
+  ],
+  "Mast cell": [
+    "TPSAB1",
+    "TPSB2",
+    "CPA3",
+    "KIT",
+    "HPGDS"
+  ],
+  "Chondrocyte": [
+    "COL2A1",
+    "ACAN",
+    "COL9A1",
+    "COL9A2",
+    "COL9A3",
+    "MATN1",
+    "MATN4",
+    "COL11A1",
+    "SOX9",
+    "HAPLN1"
+  ],
+  "Hypertrophic chondrocyte": [
+    "COL10A1",
+    "IHH",
+    "PTH1R",
+    "MEF2C",
+    "PANX3",
+    "SPP1"
+  ],
+  "Osteoblast": [
+    "RUNX2",
+    "SP7",
+    "BGLAP",
+    "IBSP",
+    "COL1A1",
+    "ALPL",
+    "DMP1",
+    "BMP3"
+  ],
+  "Perichondrium/mesenchyme": [
+    "TWIST1",
+    "TWIST2",
+    "PRRX1",
+    "TNN",
+    "POSTN",
+    "OGN",
+    "ASPN",
+    "FN1",
+    "COL12A1",
+    "MFAP5"
+  ],
+  "Tenocyte": [
+    "SCX",
+    "TNMD",
+    "MKX",
+    "THBS4",
+    "FMOD"
+  ],
+  "Skeletal muscle": [
+    "ACTA1",
+    "MYH3",
+    "MYH8",
+    "TTN",
+    "NEB",
+    "TNNT1",
+    "TNNT3",
+    "MYOG"
+  ],
+  "Schwann/neural": [
+    "PLP1",
+    "S100B",
+    "MPZ",
+    "NRXN1",
+    "SOX10"
+  ],
+  "Erythroid": [
+    "HBB",
+    "HBA1",
+    "HBA2",
+    "HBG1",
+    "HBG2",
+    "ALAS2"
+  ],
+  "Osteoclast": [
+    "CTSK",
+    "ACP5",
+    "MMP9",
+    "CALCR"
+  ],
+  "Cycling cells": [
+    "MKI67",
+    "TOP2A",
+    "CENPF",
+    "ASPM",
+    "NUSAP1",
+    "DIAPH3",
+    "SMC4",
+    "TPX2",
+    "RRM2",
+    "KNL1"
+  ]
+}

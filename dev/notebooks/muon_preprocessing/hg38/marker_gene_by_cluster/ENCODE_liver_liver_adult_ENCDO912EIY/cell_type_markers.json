@@ -1,0 +1,130 @@
+{
+  "Hepatocyte": [
+    "ALB",
+    "APOA1",
+    "APOC3",
+    "APOB",
+    "SERPINA1",
+    "HP",
+    "TF",
+    "FGB",
+    "CYP2E1",
+    "CYP3A4"
+  ],
+  "Cholangiocyte": [
+    "KRT7",
+    "KRT19",
+    "ANXA4",
+    "SOX9",
+    "EPCAM",
+    "SPP1",
+    "CFTR",
+    "BICC1"
+  ],
+  "Endothelial": [
+    "PTPRB",
+    "FLT1",
+    "STAB2",
+    "CLEC4G",
+    "FCN2",
+    "CLEC1B",
+    "PECAM1",
+    "VWF",
+    "EMCN"
+  ],
+  "Hepatic stellate cell": [
+    "RELN",
+    "LRAT",
+    "COLEC11",
+    "HGF",
+    "DCN",
+    "CYGB",
+    "PDGFRB"
+  ],
+  "Pericyte/smooth muscle": [
+    "ACTA2",
+    "MYH11",
+    "TAGLN",
+    "RGS5",
+    "NOTCH3",
+    "CARMN",
+    "PRKG1"
+  ],
+  "Macrophage": [
+    "CD163",
+    "MARCO",
+    "VSIG4",
+    "C1QA",
+    "C1QB",
+    "CD5L",
+    "MS4A6A",
+    "DOCK2",
+    "CSF1R"
+  ],
+  "Monocyte": [
+    "CD14",
+    "LYZ",
+    "S100A8",
+    "S100A9",
+    "VCAN",
+    "FCN1"
+  ],
+  "T cell": [
+    "CD3E",
+    "CD2",
+    "TRAC",
+    "TRBC1",
+    "TRBC2",
+    "BCL11B",
+    "IL7R",
+    "CD247",
+    "SKAP1",
+    "THEMIS",
+    "CD96",
+    "ITK",
+    "CAMK4"
+  ],
+  "NK cell": [
+    "NKG7",
+    "GNLY",
+    "KLRD1",
+    "KLRF1",
+    "NCAM1",
+    "PRF1",
+    "GZMB",
+    "TYROBP",
+    "KLRC1"
+  ],
+  "B cell": [
+    "CD79B",
+    "BANK1",
+    "PAX5",
+    "AFF3",
+    "BLK",
+    "IGHM",
+    "CD22"
+  ],
+  "Plasma cell": [
+    "JCHAIN",
+    "MZB1",
+    "SDC1",
+    "PRDM1",
+    "IGHG1",
+    "IGHA1",
+    "IGKC",
+    "IGLC2",
+    "IGLC3"
+  ],
+  "Cycling cells": [
+    "MKI67",
+    "TOP2A",
+    "CENPF",
+    "ASPM",
+    "NUSAP1",
+    "DIAPH3",
+    "SMC4",
+    "TPX2",
+    "RRM2",
+    "KNL1"
+  ]
+}

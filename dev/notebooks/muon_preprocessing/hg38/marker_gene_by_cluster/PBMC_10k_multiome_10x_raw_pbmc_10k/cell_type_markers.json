@@ -1,0 +1,113 @@
+{
+  "T cell": [
+    "CD3D",
+    "CD3E",
+    "CD4",
+    "IL7R",
+    "CCR7",
+    "LEF1",
+    "TCF7",
+    "CAMK4",
+    "BCL11B",
+    "MAL"
+  ],
+  "CD8/cytotoxic T": [
+    "CD8A",
+    "CD8B",
+    "GZMK",
+    "GZMH",
+    "CCL5",
+    "CST7"
+  ],
+  "Treg": [
+    "FOXP3",
+    "IL2RA",
+    "CTLA4",
+    "IKZF2"
+  ],
+  "NK cell": [
+    "GNLY",
+    "NKG7",
+    "KLRD1",
+    "KLRF1",
+    "NCAM1",
+    "PRF1",
+    "GZMB",
+    "SH2D1B"
+  ],
+  "B cell": [
+    "MS4A1",
+    "CD79A",
+    "CD79B",
+    "BANK1",
+    "PAX5",
+    "IGHM",
+    "IGHD",
+    "TCL1A"
+  ],
+  "Plasma cell": [
+    "JCHAIN",
+    "MZB1",
+    "PRDM1",
+    "TNFRSF17",
+    "XBP1"
+  ],
+  "Monocyte": [
+    "CD14",
+    "LYZ",
+    "S100A8",
+    "S100A9",
+    "VCAN",
+    "FCN1",
+    "CSF3R"
+  ],
+  "CD16 monocyte": [
+    "FCGR3A",
+    "MS4A7",
+    "CDKN1C",
+    "LST1",
+    "CX3CR1"
+  ],
+  "Dendritic cell": [
+    "CLEC9A",
+    "CD1C",
+    "FCER1A",
+    "CLEC10A"
+  ],
+  "pDC": [
+    "LILRA4",
+    "CLEC4C",
+    "PLD4",
+    "TCF4",
+    "IRF7"
+  ],
+  "HSPC": [
+    "CD34",
+    "PROM1",
+    "SPINK2",
+    "CRHBP"
+  ],
+  "Platelet": [
+    "PPBP",
+    "PF4",
+    "ITGA2B",
+    "GP9",
+    "TUBB1"
+  ],
+  "Erythroid": [
+    "HBA1",
+    "ALAS2"
+  ],
+  "Cycling cells": [
+    "MKI67",
+    "TOP2A",
+    "CENPF",
+    "ASPM",
+    "NUSAP1",
+    "DIAPH3",
+    "SMC4",
+    "TPX2",
+    "RRM2",
+    "KNL1"
+  ]
+}

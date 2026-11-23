@@ -1,0 +1,173 @@
+{
+  "Endothelial": [
+    "PECAM1",
+    "VWF",
+    "FLT1",
+    "PTPRB",
+    "EGFL7",
+    "ERG",
+    "EMCN",
+    "TIE1"
+  ],
+  "Pericyte/smooth muscle": [
+    "RGS5",
+    "ACTA2",
+    "MYH11",
+    "TAGLN",
+    "PDGFRB",
+    "NOTCH3",
+    "CARMN",
+    "KCNQ5",
+    "DLC1",
+    "GUCY1A2",
+    "PRKG1",
+    "ABCC9"
+  ],
+  "Fibroblast": [
+    "COL1A1",
+    "COL1A2",
+    "COL3A1",
+    "DCN",
+    "LUM",
+    "PDGFRA",
+    "FBN1",
+    "COL6A3",
+    "MMP2",
+    "ABCA8",
+    "FBLN1"
+  ],
+  "T cell": [
+    "BCL11B",
+    "IL7R",
+    "CD247",
+    "SKAP1",
+    "THEMIS",
+    "CD96",
+    "ITK",
+    "CAMK4"
+  ],
+  "NK cell": [
+    "KLRD1",
+    "NCAM1",
+    "SH2D1B"
+  ],
+  "B cell": [
+    "CD79A",
+    "BANK1",
+    "PAX5",
+    "AFF3",
+    "BLK",
+    "CD22"
+  ],
+  "Plasma cell": [
+    "SDC1",
+    "PRDM1"
+  ],
+  "Monocyte": [
+    "CD14",
+    "VCAN",
+    "CD36",
+    "LRP1"
+  ],
+  "Macrophage": [
+    "MRC1",
+    "MSR1",
+    "F13A1",
+    "CSF1R",
+    "APOE",
+    "DOCK2"
+  ],
+  "Dendritic cell": [
+    "BATF3",
+    "CD83",
+    "CIITA",
+    "CCR7"
+  ],
+  "Mast cell": [
+    "KIT"
+  ],
+  "Chondrocyte": [
+    "COL2A1",
+    "ACAN",
+    "COL9A1",
+    "COL9A2",
+    "COL9A3",
+    "MATN1",
+    "MATN4",
+    "COL11A1",
+    "SOX9",
+    "HAPLN1"
+  ],
+  "Hypertrophic chondrocyte": [
+    "COL10A1",
+    "IHH",
+    "PTH1R",
+    "MEF2C",
+    "PANX3",
+    "SPP1"
+  ],
+  "Osteoblast": [
+    "RUNX2",
+    "SP7",
+    "BGLAP",
+    "IBSP",
+    "COL1A1",
+    "ALPL",
+    "DMP1",
+    "BMP3"
+  ],
+  "Perichondrium/mesenchyme": [
+    "TWIST1",
+    "TWIST2",
+    "PRRX1",
+    "TNN",
+    "POSTN",
+    "OGN",
+    "ASPN",
+    "FN1",
+    "COL12A1"
+  ],
+  "Tenocyte": [
+    "SCX",
+    "TNMD",
+    "MKX",
+    "THBS4",
+    "FMOD"
+  ],
+  "Skeletal muscle": [
+    "ACTA1",
+    "MYH3",
+    "TTN",
+    "NEB",
+    "TNNT1",
+    "TNNT3"
+  ],
+  "Schwann/neural": [
+    "S100B",
+    "MPZ",
+    "NRXN1"
+  ],
+  "Erythroid": [
+    "HBA1",
+    "HBA2",
+    "HBG1",
+    "HBG2",
+    "ALAS2"
+  ],
+  "Osteoclast": [
+    "CTSK",
+    "CALCR"
+  ],
+  "Cycling cells": [
+    "MKI67",
+    "TOP2A",
+    "CENPF",
+    "ASPM",
+    "NUSAP1",
+    "DIAPH3",
+    "SMC4",
+    "TPX2",
+    "RRM2",
+    "KNL1"
+  ]
+}
